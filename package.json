@@ -1,0 +1,45 @@
+{
+  "name": "hunch",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "migrate": "pnpm --filter @hunch/db migrate",
+    "infra:up": "docker compose --env-file .env -f ops/docker-compose.yml up -d",
+    "infra:down": "docker compose --env-file .env -f ops/docker-compose.yml down",
+    "logs": "docker compose -f ops/docker-compose.yml logs -f --tail=200"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5",
+    "turbo": "^2.5.6",
+    "typescript": "^5.9.2"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "packageManager": "pnpm@10.15.1",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "fast-json-stable-stringify": "^2.1.0",
+    "p-queue": "^8.1.1",
+    "p-retry": "^7.0.0",
+    "pg": "8.16.3",
+    "redis": "^5.8.2",
+    "undici": "^7.16.0",
+    "uuid": "^13.0.0",
+    "ws": "^8.18.3",
+    "zod": "4.1.5"
+  }
+}

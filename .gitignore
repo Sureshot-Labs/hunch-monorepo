@@ -1,0 +1,25 @@
+# Node
+node_modules/
+dist/
+build/
+.nyc_output/
+coverage/
+
+# Env
+.env
+.env.*.local
+*.env.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Editor junk
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
