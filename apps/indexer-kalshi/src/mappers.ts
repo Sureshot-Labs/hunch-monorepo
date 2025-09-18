@@ -64,6 +64,8 @@ export function mapEventRow(venueId: number, e: z.infer<typeof KalshiEvent>) {
   };
 }
 
+const pos = (x: number | null) => (x != null ? Math.max(0, x) : null);
+
 export function mapMarketRow(
   venueId: number,
   eventUuid: string,
@@ -85,8 +87,8 @@ export function mapMarketRow(
     order_min_size: 1,
     neg_risk: null,
     neg_risk_market_id: null,
-    liquidity: n(m.liquidity),
-    volume_total: n((m as any).volume), // <-- set it
+    liquidity: pos(n(m.liquidity)),
+    volume_total: n((m as any).volume),
     volume24hr: n(m.volume_24h),
     clob_token_yes: `kalshi:${m.ticker}:YES`,
     clob_token_no: `kalshi:${m.ticker}:NO`,

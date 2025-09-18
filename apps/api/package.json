@@ -1,0 +1,17 @@
+{
+  "name": "api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "@types/node": "^20.11.30"
+  }
+}
