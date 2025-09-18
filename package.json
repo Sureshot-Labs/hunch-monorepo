@@ -11,7 +11,8 @@
     "migrate": "pnpm --filter @hunch/db migrate",
     "infra:up": "docker compose --env-file .env -f ops/docker-compose.yml up -d",
     "infra:down": "docker compose --env-file .env -f ops/docker-compose.yml down",
-    "logs": "docker compose -f ops/docker-compose.yml logs -f --tail=200"
+    "logs": "docker compose -f ops/docker-compose.yml logs -f --tail=200",
+    "run-db": "docker exec -it hunch-postgres psql -U hunch -d hunch"
   },
   "devDependencies": {
     "@types/node": "^24.3.1",
