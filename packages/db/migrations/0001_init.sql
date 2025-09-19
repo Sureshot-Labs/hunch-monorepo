@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS venues(
 );
 
 INSERT INTO venues(name) VALUES ('polymarket') ON CONFLICT DO NOTHING;
+INSERT INTO venues(name) VALUES ('kalshi') ON CONFLICT DO NOTHING;
+
 
 -- Events from Gamma API (event_id is venue's native id)
 CREATE TABLE IF NOT EXISTS events (
