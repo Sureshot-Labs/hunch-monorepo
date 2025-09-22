@@ -52,45 +52,45 @@ services:
     volumes:
       - redis_data:/data
 
-  opensearch:
-    image: opensearchproject/opensearch:2.12.0
-    container_name: hunch-opensearch
-    networks:
-      - hunch-net
-    restart: unless-stopped
-    environment:
-      - discovery.type=single-node
-      - plugins.security.disabled=true
-      - DISABLE_INSTALL_DEMO_CONFIGURATION=true
-      - plugins.security.ssl.http.enabled=false
-      - plugins.security.ssl.transport.enabled=false
-      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=StrongDemoPass123!
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    ports:
-      - "${OPENSEARCH_PORT:-9200}:9200"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:9200 > /dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-    volumes:
-      - os_data:/usr/share/opensearch/data
+  # opensearch:
+  #   image: opensearchproject/opensearch:2.12.0
+  #   container_name: hunch-opensearch
+  #   networks:
+  #     - hunch-net
+  #   restart: unless-stopped
+  #   environment:
+  #     - discovery.type=single-node
+  #     - plugins.security.disabled=true
+  #     - DISABLE_INSTALL_DEMO_CONFIGURATION=true
+  #     - plugins.security.ssl.http.enabled=false
+  #     - plugins.security.ssl.transport.enabled=false
+  #     - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+  #     - OPENSEARCH_INITIAL_ADMIN_PASSWORD=StrongDemoPass123!
+  #   ulimits:
+  #     memlock:
+  #       soft: -1
+  #       hard: -1
+  #   ports:
+  #     - "${OPENSEARCH_PORT:-9200}:9200"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -fs http://localhost:9200 > /dev/null"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 30
+  #   volumes:
+  #     - os_data:/usr/share/opensearch/data
 
-  opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:2.12.0
-    container_name: hunch-os-dashboards
-    networks:
-      - hunch-net
-    restart: unless-stopped
-    environment:
-      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
-      OPENSEARCH_SSL_VERIFICATIONMODE: none
-    ports:
-      - "${OS_DASH_PORT:-5601}:5601"
-    depends_on:
-      opensearch:
-        condition: service_started
+  # opensearch-dashboards:
+  #   image: opensearchproject/opensearch-dashboards:2.12.0
+  #   container_name: hunch-os-dashboards
+  #   networks:
+  #     - hunch-net
+  #   restart: unless-stopped
+  #   environment:
+  #     OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+  #     OPENSEARCH_SSL_VERIFICATIONMODE: none
+  #   ports:
+  #     - "${OS_DASH_PORT:-5601}:5601"
+  #   depends_on:
+  #     opensearch:
+  #       condition: service_started
