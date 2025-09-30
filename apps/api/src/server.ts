@@ -124,12 +124,14 @@ app.get("/feed", async (req, reply) => {
   );
   const offset = Math.max(parseInt(q.offset ?? "") || 0, 0);
   const minVol = q.min_volume24hr != null ? Number(q.min_volume24hr) : 1e-9;
+  const minLiquidity = q.min_liquidity != null ? Number(q.min_liquidity) : 0;
   const venue = q.venue?.toLowerCase();
   const category = q.category;
+  const sort = q.sort ?? "totalvol";
 
-  const cacheKey = `feed:v4:${limit}:${offset}:${minVol}:${venue ?? ""}:${
-    category ?? ""
-  }`;
+  const cacheKey = `feed:v5:${limit}:${offset}:${minVol}:${minLiquidity}:${
+    venue ?? ""
+  }:${category ?? ""}:${sort}`;
   const r = await getRedis();
 
   // serve from cache if present, with proper ETag/304 handling
@@ -170,14 +172,34 @@ app.get("/feed", async (req, reply) => {
     eventWhere.push(`e.category = $${paramIdx++}`);
   }
 
+  // Sorting logic
+  let eventOrder = "e.start_time desc nulls last, e.id";
+  if (sort === "totalvol") eventOrder = "e.volume_total desc nulls last, e.id";
+  else if (sort === "liquidity")
+    eventOrder = "e.liquidity desc nulls last, e.id";
+  else if (sort === "newest") eventOrder = "e.start_time desc nulls last, e.id";
+  else if (sort === "endingsoon")
+    eventOrder = "e.end_time asc nulls last, e.id";
+
+  // Aggregate volume/liquidity for events
   const eventSql = `
-    select e.id
+    select
+      e.id,
+      sum(coalesce(m.volume24hr, 0)) as total_volume,
+      sum(coalesce(m.liquidity, 0)) as total_liquidity,
+      e.start_time,
+      e.end_time
     from events e
+    join markets m on m.event_id = e.id
     ${venue ? "join venues v on v.id = e.venue_id" : ""}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
-    order by e.start_time desc nulls last, e.id
+    group by e.id, e.start_time, e.end_time
+    having sum(coalesce(m.volume24hr, 0)) >= $${paramIdx++}
+      and sum(coalesce(m.liquidity, 0)) >= $${paramIdx++}
+    order by ${eventOrder}
     limit ${limit} offset ${offset}
   `;
+  eventParams.push(minVol, minLiquidity);
 
   const { rows: eventRows } = await pool.query(eventSql, eventParams);
   const eventIds = eventRows.map((r) => r.id);
@@ -196,13 +218,25 @@ app.get("/feed", async (req, reply) => {
     return reply.send(body);
   }
 
-  // 2. Fetch all markets for those events, with volume filter
-  const marketParams: any[] = [minVol, eventIds];
+  // 2. Fetch all markets for those events, with volume/liquidity filter
+  const marketParams: any[] = [minVol, minLiquidity, eventIds];
   const marketWhere: string[] = [
     "coalesce(m.volume24hr, 0) >= $1",
+    "coalesce(m.liquidity, 0) >= $2",
     "m.enable_orderbook = true",
-    `m.event_id = ANY($2::uuid[])`,
+    `m.event_id = ANY($3::uuid[])`,
   ];
+
+  let marketOrder =
+    "e.start_time desc nulls last, m.volume24hr desc nulls last, m.market_id";
+  if (sort === "totalvol")
+    marketOrder = "m.volume24hr desc nulls last, m.market_id";
+  else if (sort === "liquidity")
+    marketOrder = "m.liquidity desc nulls last, m.market_id";
+  else if (sort === "newest")
+    marketOrder = "e.start_time desc nulls last, m.market_id";
+  else if (sort === "endingsoon")
+    marketOrder = "e.end_time asc nulls last, m.market_id";
 
   const marketSql = `
     select
@@ -211,6 +245,8 @@ app.get("/feed", async (req, reply) => {
       e.category,
       e.start_time,
       e.end_time,
+      e.liquidity as event_liquidity,
+      e.volume_total as event_volume,
       m.id as market_uuid,
       v.name as venue,
       m.market_id,
@@ -239,7 +275,7 @@ app.get("/feed", async (req, reply) => {
       order by bt.token_id, bt.ts desc
     ) ln on ln.token_id = m.clob_token_no
     where ${marketWhere.join(" and ")}
-    order by e.start_time desc nulls last, m.volume24hr desc nulls last, m.market_id
+    order by ${marketOrder}
   `;
 
   const { rows } = await pool.query(marketSql, marketParams);
@@ -255,6 +291,9 @@ app.get("/feed", async (req, reply) => {
         category: r.category,
         startTime: r.start_time,
         endTime: r.end_time,
+        eventLiquidity:
+          r.event_liquidity != null ? Number(r.event_liquidity) : 0,
+        eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
         markets: [],
       };
     }
@@ -285,6 +324,8 @@ app.get("/feed", async (req, reply) => {
         category: null,
         startTime: null,
         endTime: null,
+        eventLiquidity: 0,
+        eventVolume: 0,
         markets: [],
       }
   );
