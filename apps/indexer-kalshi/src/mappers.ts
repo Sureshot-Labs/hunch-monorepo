@@ -77,7 +77,7 @@ export function mapMarketRow(
     event_id: eventUuid,
     venue_id: venueId,
     market_id: m.ticker,
-    title: m.title ?? m.ticker,
+    title: m.yes_sub_title ?? m.no_sub_title ?? m.title,
     enable_orderbook: true,
     accepting_orders: ["open", "active", "trading"].includes(
       (m.status ?? "open").toLowerCase()
