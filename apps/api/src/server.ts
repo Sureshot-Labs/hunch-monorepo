@@ -127,11 +127,12 @@ app.get("/feed", async (req, reply) => {
   const minLiquidity = q.min_liquidity != null ? Number(q.min_liquidity) : 0;
   const venue = q.venue?.toLowerCase();
   const category = q.category;
-  const sort = q.sort ?? "totalvol";
+  const filter = q.filter; // only use if present
+  const sort = q.sort; // only use if present
 
-  const cacheKey = `feed:v5:${limit}:${offset}:${minVol}:${minLiquidity}:${
+  const cacheKey = `feed:v6:${limit}:${offset}:${minVol}:${minLiquidity}:${
     venue ?? ""
-  }:${category ?? ""}:${sort}`;
+  }:${category ?? ""}:${filter ?? ""}:${sort ?? ""}`;
   const r = await getRedis();
 
   // serve from cache if present, with proper ETag/304 handling
@@ -172,14 +173,21 @@ app.get("/feed", async (req, reply) => {
     eventWhere.push(`e.category = $${paramIdx++}`);
   }
 
-  // Sorting logic
-  let eventOrder = "e.start_time desc nulls last, e.id";
+  // Filtering logic (filter param)
+  if (filter === "newest") {
+    eventWhere.push(`e.start_time >= now() - interval '7 days'`);
+  } else if (filter === "endingsoon") {
+    eventWhere.push(`e.end_time <= now() + interval '7 days'`);
+  }
+  // if filter is not present, do not apply any filter
+
+  // Sorting logic (sort param)
+  let eventOrder = "";
   if (sort === "totalvol") eventOrder = "e.volume_total desc nulls last, e.id";
   else if (sort === "liquidity")
     eventOrder = "e.liquidity desc nulls last, e.id";
-  else if (sort === "newest") eventOrder = "e.start_time desc nulls last, e.id";
-  else if (sort === "endingsoon")
-    eventOrder = "e.end_time asc nulls last, e.id";
+  else if (sort == null) eventOrder = ""; // no sort if not present
+  else eventOrder = "e.start_time desc nulls last, e.id"; // fallback
 
   // Aggregate volume/liquidity for events
   const eventSql = `
@@ -196,7 +204,7 @@ app.get("/feed", async (req, reply) => {
     group by e.id, e.start_time, e.end_time
     having sum(coalesce(m.volume24hr, 0)) >= $${paramIdx++}
       and sum(coalesce(m.liquidity, 0)) >= $${paramIdx++}
-    order by ${eventOrder}
+    ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${limit} offset ${offset}
   `;
   eventParams.push(minVol, minLiquidity);
@@ -227,16 +235,14 @@ app.get("/feed", async (req, reply) => {
     `m.event_id = ANY($3::uuid[])`,
   ];
 
-  let marketOrder =
-    "e.start_time desc nulls last, m.volume24hr desc nulls last, m.market_id";
+  // Sorting for markets: use same sort as for events, or none
+  let marketOrder = "";
   if (sort === "totalvol")
     marketOrder = "m.volume24hr desc nulls last, m.market_id";
   else if (sort === "liquidity")
     marketOrder = "m.liquidity desc nulls last, m.market_id";
-  else if (sort === "newest")
-    marketOrder = "e.start_time desc nulls last, m.market_id";
-  else if (sort === "endingsoon")
-    marketOrder = "e.end_time asc nulls last, m.market_id";
+  else if (sort == null) marketOrder = ""; // no sort if not present
+  else marketOrder = "e.start_time desc nulls last, m.market_id"; // fallback
 
   const marketSql = `
     select
@@ -275,7 +281,7 @@ app.get("/feed", async (req, reply) => {
       order by bt.token_id, bt.ts desc
     ) ln on ln.token_id = m.clob_token_no
     where ${marketWhere.join(" and ")}
-    order by ${marketOrder}
+    ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
   const { rows } = await pool.query(marketSql, marketParams);
