@@ -1,5 +1,7 @@
 import { v4 as uuid } from "uuid";
 import type { TEvent, TMarket } from "./types";
+import { generateEventIdempotencyKey, generateMarketIdempotencyKey, generateTokenIdempotencyKey } from "@hunch/shared";
+import { parseUTCDate, parseDateRange } from "@hunch/shared";
 
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;
@@ -9,6 +11,18 @@ const n = (v: unknown): number | null => {
 
 export function mapEventRow(venueId: number, e: TEvent) {
   const id = uuid();
+  
+  // Parse dates with UTC normalization
+  const { start, end } = parseDateRange(e.startDate, e.endDate);
+  
+  // Generate idempotency key for this event
+  // Using event ID + startDate as the deterministic identifier
+  const idempotencyKey = generateEventIdempotencyKey(
+    'polymarket',
+    e.id,
+    e.startDate || Date.now()
+  );
+  
   return {
     id,
     venue_id: venueId,
@@ -18,12 +32,13 @@ export function mapEventRow(venueId: number, e: TEvent) {
     slug: e.slug ?? null,
     active: e.active ?? true,
     closed: e.closed ?? false,
-    start_time: e.startDate ? new Date(e.startDate) : null,
-    end_time: e.endDate ? new Date(e.endDate) : null,
+    start_time: start,
+    end_time: end,
     liquidity: n(e.liquidity),
     volume_total: n(e.volume),
     volume24hr: n(e.volume24hr),
     raw: e,
+    idempotency_key: idempotencyKey,
   };
 }
 
@@ -33,6 +48,13 @@ export function mapMarketRow(venueId: number, eventUuid: string, m: TMarket) {
   const liquidity = n(m.liquidityNum ?? m.liquidity);
   const volume_total = n(m.volumeNum ?? m.volume);
   const [yes, no] = m.clobTokenIds ?? [];
+
+  // Generate idempotency key for this market
+  const idempotencyKey = generateMarketIdempotencyKey(
+    'polymarket',
+    m.id,
+    (m as any).startDate || Date.now()
+  );
 
   return {
     id,
@@ -53,6 +75,7 @@ export function mapMarketRow(venueId: number, eventUuid: string, m: TMarket) {
     clob_token_yes: yes ?? null,
     clob_token_no: no ?? null,
     raw: m,
+    idempotency_key: idempotencyKey,
   };
 }
 

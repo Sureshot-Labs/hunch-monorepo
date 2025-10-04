@@ -112,8 +112,8 @@ export class KalshiMapper extends BaseMapper<KalshiEvent, KalshiMarket, KalshiPr
     // Calculate order book data (would come from separate API call)
     const bestBid = 0; // Placeholder - would come from order book
     const bestAsk = 0; // Placeholder - would come from order book
-    const spread = this.calculateSpread(bestBid, bestAsk);
-    const midPrice = this.calculateMidPrice(bestBid, bestAsk);
+    const spread = this.calculateSpread(bestBid ?? null, bestAsk ?? null);
+    const midPrice = this.calculateMidPrice(bestBid ?? null, bestAsk ?? null);
 
     const unifiedMarket: UnifiedMarket = {
       id: marketId,
@@ -163,8 +163,8 @@ export class KalshiMapper extends BaseMapper<KalshiEvent, KalshiMarket, KalshiPr
     const bestBid = yesLevels.length > 0 ? this.normalizeKalshiPrice(yesLevels[0][0]) : undefined;
     const bestAsk = noLevels.length > 0 ? this.normalizeKalshiPrice(noLevels[0][0]) : undefined;
     
-    const spread = this.calculateSpread(bestBid, bestAsk);
-    const midPrice = this.calculateMidPrice(bestBid, bestAsk);
+    const spread = this.calculateSpread(bestBid ?? null, bestAsk ?? null);
+    const midPrice = this.calculateMidPrice(bestBid ?? null, bestAsk ?? null);
 
     // Use current prices or mid price as close price
     const yesPrice = this.normalizeKalshiPrice(venuePriceData.yes_price);

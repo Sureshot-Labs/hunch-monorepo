@@ -7,7 +7,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   
   // Monitoring service configuration
-  MONITORING_PORT: z.coerce.number().default(3007),
+  MONITORING_PORT: z.coerce.number().default(3008),
   MONITORING_METRICS_PORT: z.coerce.number().default(9090),
   MONITORING_METRICS_PATH: z.string().default('/metrics'),
   

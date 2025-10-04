@@ -1,12 +1,37 @@
 import { globby } from "globby";
 import { promises as fs } from "fs";
+import fsSync from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { env } from "../../config"; // Adjusted import path to fix module resolution
 import crypto from "node:crypto";
 import { Pool, PoolClient } from "pg";
+import { config as dotenv } from "dotenv";
 
-const pool = new Pool({ connectionString: env.DATABASE_URL });
+// Load .env from repository root
+function loadRootEnv() {
+  let dir = process.cwd();
+  while (true) {
+    const candidate = path.join(dir, ".env");
+    if (fsSync.existsSync(candidate)) {
+      dotenv({ path: candidate, override: true });
+      return;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+
+loadRootEnv();
+
+// Get DATABASE_URL from environment
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error("❌ DATABASE_URL environment variable is required");
+  process.exit(1);
+}
+
+const pool = new Pool({ connectionString: DATABASE_URL });
 
 function sha256(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -76,13 +101,33 @@ async function runSingleMigration(
   const noTx = sql.includes("/* no-transaction */");
 
   try {
-    if (!noTx) await client.query("BEGIN");
-    await client.query(sql);
-    await client.query(
-      `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
-      [filename, checksum]
-    );
-    if (!noTx) await client.query("COMMIT");
+    if (!noTx) {
+      // Run in transaction
+      await client.query("BEGIN");
+      await client.query(sql);
+      await client.query(
+        `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
+        [filename, checksum]
+      );
+      await client.query("COMMIT");
+    } else {
+      // Run without transaction using docker exec psql (for continuous aggregates, etc.)
+      const { execSync } = await import('child_process');
+      
+      // Execute the SQL file using docker exec psql
+      execSync(`docker exec -i hunch-postgres psql -U hunch -d hunch -v ON_ERROR_STOP=1 < "${filePath}"`, {
+        stdio: 'inherit',
+        shell: '/bin/bash',
+      });
+      
+      // Record migration in a separate transaction
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
+        [filename, checksum]
+      );
+      await client.query("COMMIT");
+    }
     console.log(`✅ applied ${filename}`);
   } catch (err) {
     if (!noTx) await client.query("ROLLBACK");

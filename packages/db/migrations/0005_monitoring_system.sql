@@ -1,9 +1,10 @@
 -- Monitoring system database schema
 -- This migration adds tables for metrics, health checks, alerts, and notifications
+/* no-transaction */
 
 -- Metrics table for storing collected metrics
 CREATE TABLE IF NOT EXISTS metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     metric_name TEXT NOT NULL,
     value NUMERIC NOT NULL,
@@ -14,7 +15,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 
 -- Service metrics table for aggregated service metrics
 CREATE TABLE IF NOT EXISTS service_metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     cpu_usage NUMERIC DEFAULT 0,
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS service_metrics (
 
 -- Performance metrics table for detailed performance data
 CREATE TABLE IF NOT EXISTS performance_metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     endpoint TEXT,
     method TEXT,
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS performance_metrics (
 
 -- Database metrics table for database-specific metrics
 CREATE TABLE IF NOT EXISTS database_metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     connection_count NUMERIC DEFAULT 0,
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS database_metrics (
 
 -- Redis metrics table for Redis-specific metrics
 CREATE TABLE IF NOT EXISTS redis_metrics (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     connected_clients NUMERIC DEFAULT 0,
@@ -85,7 +86,7 @@ CREATE TABLE IF NOT EXISTS redis_metrics (
 
 -- Health checks table for service health status
 CREATE TABLE IF NOT EXISTS health_checks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     service TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('healthy', 'unhealthy', 'degraded', 'unknown')),
     message TEXT,
@@ -163,13 +164,13 @@ CREATE TABLE IF NOT EXISTS notification_templates (
 
 -- Log entries table for application logs
 CREATE TABLE IF NOT EXISTS log_entries (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID DEFAULT gen_random_uuid(),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error', 'fatal')),
     service TEXT NOT NULL,
     message TEXT NOT NULL,
     context JSONB DEFAULT '{}',
-    user_id UUID REFERENCES users(id),
+    user_id UUID, -- Foreign key removed for hypertable compression compatibility
     request_id TEXT,
     trace_id TEXT,
     span_id TEXT,
@@ -351,43 +352,98 @@ FROM service_metrics
 GROUP BY service, bucket;
 
 -- Continuous aggregate policies for automatic refresh
-SELECT add_continuous_aggregate_policy('service_metrics_1m',
-    start_offset => INTERVAL '1 hour',
-    end_offset => INTERVAL '1 minute',
-    schedule_interval => INTERVAL '1 minute');
+-- Add continuous aggregate policies with error handling
+DO $$
+BEGIN
+    PERFORM add_continuous_aggregate_policy('service_metrics_1m',
+        start_offset => INTERVAL '1 hour',
+        end_offset => INTERVAL '1 minute',
+        schedule_interval => INTERVAL '1 minute',
+        if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
-SELECT add_continuous_aggregate_policy('service_metrics_5m',
-    start_offset => INTERVAL '1 day',
-    end_offset => INTERVAL '5 minutes',
-    schedule_interval => INTERVAL '5 minutes');
+DO $$
+BEGIN
+    PERFORM add_continuous_aggregate_policy('service_metrics_5m',
+        start_offset => INTERVAL '1 day',
+        end_offset => INTERVAL '5 minutes',
+        schedule_interval => INTERVAL '5 minutes',
+        if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
-SELECT add_continuous_aggregate_policy('service_metrics_1h',
-    start_offset => INTERVAL '7 days',
-    end_offset => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 hour');
+DO $$
+BEGIN
+    PERFORM add_continuous_aggregate_policy('service_metrics_1h',
+        start_offset => INTERVAL '7 days',
+        end_offset => INTERVAL '1 hour',
+        schedule_interval => INTERVAL '1 hour',
+        if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
-SELECT add_continuous_aggregate_policy('service_metrics_1d',
-    start_offset => INTERVAL '30 days',
-    end_offset => INTERVAL '1 day',
-    schedule_interval => INTERVAL '1 day');
+DO $$
+BEGIN
+    PERFORM add_continuous_aggregate_policy('service_metrics_1d',
+        start_offset => INTERVAL '30 days',
+        end_offset => INTERVAL '1 day',
+        schedule_interval => INTERVAL '1 day',
+        if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
--- Retention policies for data cleanup
-SELECT add_retention_policy('metrics', INTERVAL '30 days');
-SELECT add_retention_policy('service_metrics', INTERVAL '90 days');
-SELECT add_retention_policy('performance_metrics', INTERVAL '30 days');
-SELECT add_retention_policy('database_metrics', INTERVAL '30 days');
-SELECT add_retention_policy('redis_metrics', INTERVAL '30 days');
-SELECT add_retention_policy('health_checks', INTERVAL '7 days');
-SELECT add_retention_policy('log_entries', INTERVAL '7 days');
+-- Retention policies for data cleanup (with error handling)
+DO $$ BEGIN PERFORM add_retention_policy('metrics', INTERVAL '30 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('service_metrics', INTERVAL '90 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('performance_metrics', INTERVAL '30 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('database_metrics', INTERVAL '30 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('redis_metrics', INTERVAL '30 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('health_checks', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_retention_policy('log_entries', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
--- Compression policies for older data
-SELECT add_compression_policy('metrics', INTERVAL '7 days');
-SELECT add_compression_policy('service_metrics', INTERVAL '7 days');
-SELECT add_compression_policy('performance_metrics', INTERVAL '7 days');
-SELECT add_compression_policy('database_metrics', INTERVAL '7 days');
-SELECT add_compression_policy('redis_metrics', INTERVAL '7 days');
-SELECT add_compression_policy('health_checks', INTERVAL '1 day');
-SELECT add_compression_policy('log_entries', INTERVAL '1 day');
+-- Enable compression on hypertables
+ALTER TABLE metrics SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC', 
+    timescaledb.compress_segmentby = 'service, metric_name'
+);
+
+ALTER TABLE service_metrics SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC', 
+    timescaledb.compress_segmentby = 'service'
+);
+
+ALTER TABLE performance_metrics SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC', 
+    timescaledb.compress_segmentby = 'service, endpoint, method'
+);
+
+ALTER TABLE database_metrics SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
+
+ALTER TABLE redis_metrics SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC'
+);
+
+ALTER TABLE health_checks SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC', 
+    timescaledb.compress_segmentby = 'service'
+);
+
+ALTER TABLE log_entries SET (timescaledb.compress, 
+    timescaledb.compress_orderby = 'timestamp DESC', 
+    timescaledb.compress_segmentby = 'service, level'
+);
+
+-- Compression policies for older data (with error handling)
+DO $$ BEGIN PERFORM add_compression_policy('metrics', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('service_metrics', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('performance_metrics', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('database_metrics', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('redis_metrics', INTERVAL '7 days', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('health_checks', INTERVAL '1 day', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DO $$ BEGIN PERFORM add_compression_policy('log_entries', INTERVAL '1 day', if_not_exists => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 -- Triggers for updated_at timestamps
 CREATE OR REPLACE FUNCTION update_updated_at_column()

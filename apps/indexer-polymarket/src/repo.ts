@@ -1,4 +1,5 @@
 import { pool } from "./db";
+import { idempotentOperation } from "@hunch/shared";
 
 export async function getVenueId(name: string): Promise<number> {
   const { rows } = await pool.query("select id from venues where name=$1", [
@@ -9,6 +10,49 @@ export async function getVenueId(name: string): Promise<number> {
 }
 
 export async function upsertEvent(row: any) {
+  // If idempotency key is provided, use idempotent operation
+  if (row.idempotency_key) {
+    return idempotentOperation(pool, row.idempotency_key, async (client) => {
+      const q = `
+      insert into events(id, venue_id, event_id, title, category, slug, active, closed, start_time, end_time,
+                         liquidity, volume_total, volume24hr, raw)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      on conflict (venue_id, event_id) do update set
+        title=excluded.title,
+        category=excluded.category,
+        slug=excluded.slug,
+        active=excluded.active,
+        closed=excluded.closed,
+        start_time=excluded.start_time,
+        end_time=excluded.end_time,
+        liquidity=excluded.liquidity,
+        volume_total=excluded.volume_total,
+        volume24hr=excluded.volume24hr,
+        raw=excluded.raw,
+        updated_at=now()
+      returning id`;
+      const v = [
+        row.id,
+        row.venue_id,
+        row.event_id,
+        row.title,
+        row.category,
+        row.slug,
+        row.active,
+        row.closed,
+        row.start_time,
+        row.end_time,
+        row.liquidity,
+        row.volume_total,
+        row.volume24hr,
+        row.raw,
+      ];
+      const { rows } = await client.query(q, v);
+      return rows[0].id as string;
+    });
+  }
+
+  // Fallback to non-idempotent operation (for backwards compatibility)
   const q = `
   insert into events(id, venue_id, event_id, title, category, slug, active, closed, start_time, end_time,
                      liquidity, volume_total, volume24hr, raw)

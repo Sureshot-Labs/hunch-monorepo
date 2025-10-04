@@ -10,7 +10,7 @@ function req(name: string) {
 }
 
 export const env = {
-  port: Number(process.env.PORT ?? "3001"),
+  port: Number(process.env.API_PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "", // optional
   nodeEnv: process.env.NODE_ENV ?? "development",

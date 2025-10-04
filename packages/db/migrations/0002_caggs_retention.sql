@@ -27,12 +27,20 @@ FROM book_top
 GROUP BY token_id, bucket
 WITH NO DATA;
 
-SELECT add_continuous_aggregate_policy(
-  'book_top_1m',
-  start_offset => INTERVAL '90 days',
-  end_offset   => INTERVAL '1 minute',
-  schedule_interval => INTERVAL '1 minute'
-);
+-- Add continuous aggregate policy (skip if already exists)
+DO $$
+BEGIN
+  PERFORM add_continuous_aggregate_policy(
+    'book_top_1m',
+    start_offset => INTERVAL '90 days',
+    end_offset   => INTERVAL '1 minute',
+    schedule_interval => INTERVAL '1 minute',
+    if_not_exists => TRUE
+  );
+EXCEPTION WHEN OTHERS THEN
+  -- Policy might already exist, ignore
+  NULL;
+END $$;
 
 -- =========================
 -- 2) Trades 1m aggregates (from last_trade)
@@ -49,12 +57,19 @@ FROM last_trade
 GROUP BY token_id, bucket
 WITH NO DATA;
 
-SELECT add_continuous_aggregate_policy(
-  'last_trade_1m',
-  start_offset => INTERVAL '90 days',
-  end_offset   => INTERVAL '1 minute',
-  schedule_interval => INTERVAL '1 minute'
-);
+-- Add continuous aggregate policy (skip if already exists)
+DO $$
+BEGIN
+  PERFORM add_continuous_aggregate_policy(
+    'last_trade_1m',
+    start_offset => INTERVAL '90 days',
+    end_offset   => INTERVAL '1 minute',
+    schedule_interval => INTERVAL '1 minute',
+    if_not_exists => TRUE
+  );
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
 
 -- =========================
 -- 3) Optional OHLC (only if toolkit is installed)
@@ -80,7 +95,8 @@ BEGIN
       'last_trade_1m_ohlc',
       start_offset => INTERVAL '90 days',
       end_offset   => INTERVAL '1 minute',
-      schedule_interval => INTERVAL '1 minute'
+      schedule_interval => INTERVAL '1 minute',
+      if_not_exists => TRUE
     );
   END IF;
 END$$;
@@ -88,20 +104,62 @@ END$$;
 -- =========================
 -- 4) Retention + compression
 -- =========================
-SELECT add_retention_policy('book_top',      INTERVAL '30 days');
-SELECT add_retention_policy('last_trade',    INTERVAL '30 days');
-SELECT add_retention_policy('book_top_1m',   INTERVAL '365 days');
-SELECT add_retention_policy('last_trade_1m', INTERVAL '365 days');
+
+-- Add retention policies with error handling
+DO $$
+BEGIN
+  PERFORM add_retention_policy('book_top', INTERVAL '30 days', if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  PERFORM add_retention_policy('last_trade', INTERVAL '30 days', if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  PERFORM add_retention_policy('book_top_1m', INTERVAL '365 days', if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  PERFORM add_retention_policy('last_trade_1m', INTERVAL '365 days', if_not_exists => TRUE);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
 DO $$
 BEGIN
   IF to_regclass('public.last_trade_1m_ohlc') IS NOT NULL THEN
-    PERFORM add_retention_policy('last_trade_1m_ohlc', INTERVAL '365 days');
+    PERFORM add_retention_policy('last_trade_1m_ohlc', INTERVAL '365 days', if_not_exists => TRUE);
   END IF;
-END$$;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
-ALTER TABLE book_top  SET (timescaledb.compress, timescaledb.compress_orderby = 'ts', timescaledb.compress_segmentby = 'token_id');
-ALTER TABLE last_trade SET (timescaledb.compress, timescaledb.compress_orderby = 'ts', timescaledb.compress_segmentby = 'token_id');
+-- Enable compression (moved to migration 0003 to avoid conflicts)
+-- DO $$
+-- BEGIN
+--   ALTER TABLE book_top SET (timescaledb.compress, timescaledb.compress_orderby = 'ts', timescaledb.compress_segmentby = 'token_id');
+-- EXCEPTION WHEN OTHERS THEN NULL;
+-- END $$;
 
-SELECT add_compression_policy('book_top',  INTERVAL '7 days');
-SELECT add_compression_policy('last_trade', INTERVAL '7 days');
+-- DO $$
+-- BEGIN
+--   ALTER TABLE last_trade SET (timescaledb.compress, timescaledb.compress_orderby = 'ts', timescaledb.compress_segmentby = 'token_id');
+-- EXCEPTION WHEN OTHERS THEN NULL;
+-- END $$;
+
+-- Compression policies moved to migration 0003 to avoid conflicts
+-- DO $$
+-- BEGIN
+--   PERFORM add_compression_policy('book_top', INTERVAL '7 days', if_not_exists => TRUE);
+-- EXCEPTION WHEN OTHERS THEN NULL;
+-- END $$;
+
+-- DO $$
+-- BEGIN
+--   PERFORM add_compression_policy('last_trade', INTERVAL '7 days', if_not_exists => TRUE);
+-- EXCEPTION WHEN OTHERS THEN NULL;
+-- END $$;

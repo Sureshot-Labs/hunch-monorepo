@@ -2,10 +2,21 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import PQueue from "p-queue";
 import { env } from "./env";
+import { getRedis } from "../indexer-polymarket/src/redis"; // Assuming shared redis
+import { createExchangeRateLimiters, RateLimitError, parseRetryAfter } from "@hunch/shared/rate-limiter/distributed-rate-limiter";
 
 const pkPem = fs.readFileSync(path.resolve(env.kalshiPrivateKeyPath), "utf8");
+
+let rateLimiters: ReturnType<typeof createExchangeRateLimiters> | null = null;
+
+async function getRateLimiters() {
+  if (!rateLimiters) {
+    const redis = await getRedis();
+    rateLimiters = createExchangeRateLimiters(redis);
+  }
+  return rateLimiters;
+}
 
 function sign(method: string, pathOnly: string, tsMs: string) {
   const msg = tsMs + method.toUpperCase() + pathOnly;
@@ -21,43 +32,62 @@ function sign(method: string, pathOnly: string, tsMs: string) {
 }
 
 export class KalshiClient {
-  private qRead = new PQueue({ interval: 1000, intervalCap: env.rpsRead });
-  private qWrite = new PQueue({ interval: 1000, intervalCap: env.rpsWrite });
-
   private async signedFetch(
     method: string,
     pathOnly: string,
     init: RequestInit = {},
     write = false
   ) {
-    const ts = Date.now().toString();
-    const sig = sign(method, pathOnly, ts);
-    const headers = {
-      ...(init.headers as any),
-      "KALSHI-ACCESS-KEY": env.kalshiKeyId,
-      "KALSHI-ACCESS-TIMESTAMP": ts,
-      "KALSHI-ACCESS-SIGNATURE": sig,
-      accept: "application/json",
-    };
-    const url = new URL(pathOnly, env.kalshiBase).toString();
-
-    const run = async () => {
-      const r = await fetch(url, { ...init, method, headers });
-      if (r.status === 429) throw new Error("rate_limited");
-      if (!r.ok)
-        throw new Error(`${method} ${pathOnly} ${r.status}: ${await r.text()}`);
-      return r.json();
-    };
-
-    const q = write ? this.qWrite : this.qRead;
-    // poor man's backoff
-    for (let i = 0; i < 4; i++) {
+    const limiters = await getRateLimiters();
+    const limiter = write ? limiters.kalshiWrite : limiters.kalshiRead;
+    
+    // Wait for rate limit token with exponential backoff
+    const maxRetries = 3;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await q.add(run);
-      } catch (e: any) {
-        if (String(e.message).includes("rate_limited"))
-          await new Promise((res) => setTimeout(res, (i + 1) * 200));
-        else if (i === 3) throw e;
+        // Acquire rate limit token
+        await limiter.waitForTokens(1, 'api');
+        
+        const ts = Date.now().toString();
+        const sig = sign(method, pathOnly, ts);
+        const headers = {
+          ...(init.headers as any),
+          "KALSHI-ACCESS-KEY": env.kalshiKeyId,
+          "KALSHI-ACCESS-TIMESTAMP": ts,
+          "KALSHI-ACCESS-SIGNATURE": sig,
+          accept: "application/json",
+        };
+        const url = new URL(pathOnly, env.kalshiBase).toString();
+
+        const r = await fetch(url, { ...init, method, headers });
+        
+        // Handle rate limiting with Retry-After
+        if (r.status === 429) {
+          const retryAfterMs = parseRetryAfter(r.headers.get('Retry-After'));
+          const backoffMs = retryAfterMs || Math.min(1000 * Math.pow(2, attempt), 32000);
+          
+          if (attempt < maxRetries) {
+            console.warn(`Kalshi rate limited. Waiting ${backoffMs}ms before retry ${attempt + 1}/${maxRetries}`);
+            await new Promise((res) => setTimeout(res, backoffMs));
+            continue;
+          } else {
+            throw new RateLimitError(backoffMs, 'kalshi');
+          }
+        }
+        
+        if (!r.ok) {
+          throw new Error(`${method} ${pathOnly} ${r.status}: ${await r.text()}`);
+        }
+        
+        return r.json();
+      } catch (error) {
+        if (error instanceof RateLimitError && attempt === maxRetries) {
+          throw error;
+        }
+        if (attempt === maxRetries) {
+          throw error;
+        }
+        // Continue to next retry
       }
     }
   }

@@ -20,13 +20,15 @@
     "prom-client": "^15.1.0",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.8",
-    "axios": "^1.6.7"
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
     "@types/pg": "^8.15.5",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^6.4.14",
+    "@types/uuid": "^9.0.8",
     "tsx": "^4.19.2",
     "typescript": "^5.9.2"
   }

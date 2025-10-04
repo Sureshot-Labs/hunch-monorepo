@@ -364,6 +364,23 @@ app.get("/feed", async (req, reply) => {
 
 export async function start() {
   await getRedis().catch(() => {}); // optional
+  
+  // Register auth routes (login, register, etc.)
+  const { registerAuthRoutes } = await import('./routes/auth');
+  await registerAuthRoutes(app);
+  
+  // Register admin routes (protected)
+  const { registerAdminRoutes } = await import('./routes/admin');
+  await registerAdminRoutes(app);
+  
+  // Register admin limit management routes (protected)
+  const { registerAdminLimitRoutes } = await import('./routes/admin-limits');
+  await registerAdminLimitRoutes(app);
+  
+  // Register cursor-based feed routes
+  const { registerFeedCursorRoutes } = await import('./routes/feed-cursor');
+  await registerFeedCursorRoutes(app);
+  
   const addr = await app.listen({ port: env.port, host: "0.0.0.0" });
   app.log.info(`api listening on ${addr}`);
 }

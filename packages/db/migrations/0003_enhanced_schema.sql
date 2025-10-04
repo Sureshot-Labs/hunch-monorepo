@@ -1,5 +1,6 @@
 -- Enhanced schema for trading and price history
 -- Migration: 0003_enhanced_schema.sql
+/* no-transaction */
 
 -- =========================
 -- USER MANAGEMENT
@@ -61,8 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_markets_normalized_prices ON markets(normalized_y
 
 -- Enhanced price history table with OHLC data
 CREATE TABLE IF NOT EXISTS price_history (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    token_id TEXT NOT NULL REFERENCES tokens(token_id),
+    id UUID DEFAULT gen_random_uuid(),
+    token_id TEXT NOT NULL, -- Foreign key removed for hypertable compatibility
     timestamp TIMESTAMPTZ NOT NULL,
     
     -- OHLC Data (normalized to 0-1 range)
@@ -83,20 +84,26 @@ CREATE TABLE IF NOT EXISTS price_history (
     -- Aggregation Level
     resolution INTERVAL NOT NULL, -- '1m', '5m', '1h', '1d', etc.
     
-    created_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
     
-    UNIQUE(token_id, timestamp, resolution)
+    -- NOTE: Cannot add UNIQUE constraint here due to TimescaleDB hypertable partitioning
+    -- Will create unique index after hypertable creation
 );
 
--- Create hypertable for time-series optimization
+-- Create hypertable for time-series optimization (must be done BEFORE adding unique index)
 SELECT create_hypertable('price_history', 'timestamp', 
     chunk_time_interval => INTERVAL '1 day',
     if_not_exists => TRUE
 );
 
--- Indexes for price history
+-- Create indexes BEFORE any compression policies
 CREATE INDEX IF NOT EXISTS idx_price_history_token_time ON price_history(token_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_price_history_resolution ON price_history(resolution, timestamp DESC);
+
+-- Now create unique index that includes the partitioning column (timestamp)
+-- This works because timestamp is the partitioning column
+CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_unique 
+ON price_history (token_id, timestamp, resolution);
 
 -- =========================
 -- TRADING SYSTEM
@@ -207,8 +214,9 @@ CREATE INDEX IF NOT EXISTS idx_positions_token ON user_positions(token_id);
 -- PRICE AGGREGATIONS
 -- =========================
 
--- Materialized view for 1-minute aggregations
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1m AS
+-- Continuous aggregate for 1-minute aggregations
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1m
+WITH (timescaledb.continuous) AS
 SELECT 
     token_id,
     time_bucket('1 minute', timestamp) AS bucket,
@@ -226,8 +234,9 @@ WHERE resolution = '1 minute'
 GROUP BY token_id, bucket
 WITH NO DATA;
 
--- Materialized view for 5-minute aggregations
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_5m AS
+-- Continuous aggregate for 5-minute aggregations
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_5m
+WITH (timescaledb.continuous) AS
 SELECT 
     token_id,
     time_bucket('5 minutes', timestamp) AS bucket,
@@ -245,8 +254,9 @@ WHERE resolution = '1 minute'
 GROUP BY token_id, bucket
 WITH NO DATA;
 
--- Materialized view for 1-hour aggregations
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1h AS
+-- Continuous aggregate for 1-hour aggregations
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1h
+WITH (timescaledb.continuous) AS
 SELECT 
     token_id,
     time_bucket('1 hour', timestamp) AS bucket,
@@ -264,8 +274,9 @@ WHERE resolution = '1 minute'
 GROUP BY token_id, bucket
 WITH NO DATA;
 
--- Materialized view for 1-day aggregations
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1d AS
+-- Continuous aggregate for 1-day aggregations
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_aggregations_1d
+WITH (timescaledb.continuous) AS
 SELECT 
     token_id,
     time_bucket('1 day', timestamp) AS bucket,
@@ -323,25 +334,23 @@ SELECT add_continuous_aggregate_policy(
 -- Add retention policies for price history
 SELECT add_retention_policy('price_history', INTERVAL '90 days');
 SELECT add_retention_policy('price_aggregations_1m', INTERVAL '30 days');
-SELECT add_aggregation_policy('price_aggregations_5m', INTERVAL '90 days');
-SELECT add_aggregation_policy('price_aggregations_1h', INTERVAL '365 days');
-SELECT add_aggregation_policy('price_aggregations_1d', INTERVAL '1095 days'); -- 3 years
+SELECT add_retention_policy('price_aggregations_5m', INTERVAL '90 days');
+SELECT add_retention_policy('price_aggregations_1h', INTERVAL '365 days');
+SELECT add_retention_policy('price_aggregations_1d', INTERVAL '1095 days'); -- 3 years
 
 -- =========================
 -- COMPRESSION POLICIES
 -- =========================
 
 -- Enable compression for price history
-ALTER TABLE price_history SET (timescaledb.compress, 
-    timescaledb.compress_orderby = 'timestamp DESC', 
-    timescaledb.compress_segmentby = 'token_id'
-);
-
--- Add compression policy
-SELECT add_compression_policy('price_history', INTERVAL '7 days');
+-- Enable compression for price_history (moved to end to avoid conflicts)
+-- ALTER TABLE price_history SET (timescaledb.compress, 
+--     timescaledb.compress_orderby = 'timestamp DESC', 
+--     timescaledb.compress_segmentby = 'token_id'
+-- );
 
 -- =========================
--- FUNCTIONS AND TRIGGERS
+-- FUNCTIONS AND TRIGGERS (BEFORE COMPRESSION)
 -- =========================
 
 -- Function to update user positions
@@ -400,3 +409,31 @@ CREATE TRIGGER update_market_prices_trigger
     AFTER INSERT ON price_history
     FOR EACH ROW
     EXECUTE FUNCTION update_market_prices();
+
+-- =========================
+-- COMPRESSION POLICIES (AFTER TRIGGERS)
+-- =========================
+
+-- =========================
+-- COMPRESSION SETUP (DISABLED FOR NOW)
+-- =========================
+
+-- Compression will be added in a separate migration to avoid conflicts
+-- ALTER TABLE price_history SET (timescaledb.compress, 
+--     timescaledb.compress_orderby = 'timestamp DESC', 
+--     timescaledb.compress_segmentby = 'token_id'
+-- );
+
+-- ALTER TABLE book_top SET (timescaledb.compress, 
+--     timescaledb.compress_orderby = 'ts', 
+--     timescaledb.compress_segmentby = 'token_id'
+-- );
+
+-- ALTER TABLE last_trade SET (timescaledb.compress, 
+--     timescaledb.compress_orderby = 'ts', 
+--     timescaledb.compress_segmentby = 'token_id'
+-- );
+
+-- SELECT add_compression_policy('price_history', INTERVAL '7 days');
+-- SELECT add_compression_policy('book_top', INTERVAL '7 days');
+-- SELECT add_compression_policy('last_trade', INTERVAL '7 days');

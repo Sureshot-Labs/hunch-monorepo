@@ -7,9 +7,14 @@ import { MetricsCollector } from './services/metrics-collector';
 import { HealthChecker } from './services/health-checker';
 import { AlertManager } from './services/alert-manager';
 import { MonitoringConfig } from './types/monitoring';
+import { config } from 'dotenv';
+import { resolve } from 'path';
+
+// Load environment variables
+config({ path: resolve(process.cwd(), '../../.env'), override: true });
 
 // Environment configuration
-const config: MonitoringConfig = {
+const monitoringConfig: MonitoringConfig = {
   metrics: {
     enabled: true,
     port: parseInt(process.env.MONITORING_METRICS_PORT || '9090'),
@@ -364,7 +369,7 @@ async function startMonitoring() {
     alertManager = new AlertManager(pool, redisClient);
 
     // Start services
-    if (config.metrics.enabled) {
+    if (monitoringConfig.metrics.enabled) {
       await metricsCollector.start();
       logger.info('Metrics collector started');
     }
@@ -372,21 +377,33 @@ async function startMonitoring() {
     await healthChecker.start();
     logger.info('Health checker started');
 
-    if (config.alerts.enabled) {
+    if (monitoringConfig.alerts.enabled) {
       await alertManager.start();
       logger.info('Alert manager started');
     }
 
     // Start Fastify server
     const port = parseInt(process.env.MONITORING_PORT || '3007');
-    await fastify.listen({ port, host: '0.0.0.0' });
-    logger.info(`Monitoring service started on port ${port}`);
+    try {
+      await fastify.listen({ port, host: '0.0.0.0' });
+      logger.info(`Monitoring service started on port ${port}`);
+    } catch (listenError) {
+      logger.error('Failed to start Fastify server', { 
+        error: listenError instanceof Error ? listenError.message : listenError,
+        port,
+        stack: listenError instanceof Error ? listenError.stack : undefined
+      });
+      throw listenError;
+    }
 
     // Setup default alerts
     await setupDefaultAlerts();
 
   } catch (error) {
-    logger.error('Failed to start monitoring service', error);
+    logger.error('Failed to start monitoring service', { 
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined
+    });
     process.exit(1);
   }
 }

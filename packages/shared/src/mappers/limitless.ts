@@ -117,8 +117,8 @@ export class LimitlessMapper extends BaseMapper<LimitlessMarket, LimitlessMarket
       midPrice,
       yesTokenId: yesTokenId as any,
       noTokenId: noTokenId as any,
-      minOrderSize: undefined, // Limitless doesn't specify minimum order size
-      tickSize: undefined, // Limitless doesn't use tick sizes
+      minOrderSize: 0, // Limitless doesn't specify minimum order size
+      tickSize: 0.01, // Default tick size for Limitless
       maxOrderSize: undefined,
       rawData: {
         ...venueMarket,

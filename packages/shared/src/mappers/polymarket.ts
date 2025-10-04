@@ -113,8 +113,8 @@ export class PolymarketMapper extends BaseMapper<PolymarketEvent, PolymarketMark
     // Calculate order book data (would come from separate API call)
     const bestBid = 0; // Placeholder - would come from order book
     const bestAsk = 0; // Placeholder - would come from order book
-    const spread = this.calculateSpread(bestBid, bestAsk);
-    const midPrice = this.calculateMidPrice(bestBid, bestAsk);
+    const spread = this.calculateSpread(bestBid ?? null, bestAsk ?? null);
+    const midPrice = this.calculateMidPrice(bestBid ?? null, bestAsk ?? null);
 
     const unifiedMarket: UnifiedMarket = {
       id: marketId,
@@ -163,8 +163,8 @@ export class PolymarketMapper extends BaseMapper<PolymarketEvent, PolymarketMark
     const bestBid = bids.length > 0 ? this.normalizePrice(bids[0].price) : undefined;
     const bestAsk = asks.length > 0 ? this.normalizePrice(asks[0].price) : undefined;
     
-    const spread = this.calculateSpread(bestBid, bestAsk);
-    const midPrice = this.calculateMidPrice(bestBid, bestAsk);
+    const spread = this.calculateSpread(bestBid ?? null, bestAsk ?? null);
+    const midPrice = this.calculateMidPrice(bestBid ?? null, bestAsk ?? null);
 
     // Use last trade price or mid price as close price
     const closePrice = this.normalizePrice(venuePriceData.last_trade_price) || midPrice;

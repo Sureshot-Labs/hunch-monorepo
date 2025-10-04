@@ -168,7 +168,7 @@ async function main() {
     await priceHistoryService.start();
 
     // Start Fastify server
-    const port = parseInt(process.env.PORT || '3004');
+    const port = parseInt(process.env.PRICE_HISTORY_PORT || '3004');
     await app.listen({ port, host: '0.0.0.0' });
 
     logger.info(`Price history service started on port ${port}`);
