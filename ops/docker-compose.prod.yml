@@ -1,0 +1,355 @@
+# Production Docker Compose configuration
+version: '3.8'
+
+services:
+  # PostgreSQL with TimescaleDB
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: hunch-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hunch
+      POSTGRES_USER: hunch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf
+    ports:
+      - "5432:5432"
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hunch -d hunch"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Redis for caching and queues
+  redis:
+    image: redis:7-alpine
+    container_name: hunch-redis-prod
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # API Gateway
+  api:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.api
+    container_name: hunch-api-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      RATE_LIMIT_WINDOW: 900000
+      RATE_LIMIT_MAX: 100
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Trading Engine
+  trading-engine:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.trading-engine
+    container_name: hunch-trading-engine-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      TRADING_ENGINE_PORT: 3001
+      TRADING_ENGINE_HEALTH_PORT: 3002
+      POLYMARKET_API_KEY: ${POLYMARKET_API_KEY}
+      KALSHI_API_KEY_PATH: /app/kalshiKey.txt
+      LIMITLESS_API_KEY: ${LIMITLESS_API_KEY}
+      ENABLE_HEALTH_CHECK: true
+    volumes:
+      - ../kalshiKey.txt:/app/kalshiKey.txt:ro
+    ports:
+      - "3001:3001"
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Analytics Engine
+  analytics-engine:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.analytics-engine
+    container_name: hunch-analytics-engine-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      ANALYTICS_ENGINE_PORT: 3003
+      CACHE_TTL: 300
+      ANALYSIS_TIMEOUT: 30000
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Webhook System
+  webhook-system:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.webhook-system
+    container_name: hunch-webhook-system-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WEBHOOK_SYSTEM_PORT: 3004
+      MAX_CONCURRENT_DELIVERIES: 100
+      DELIVERY_TIMEOUT: 30000
+      RETRY_MAX_ATTEMPTS: 3
+    ports:
+      - "3004:3004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Price History Service
+  price-history:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.price-history
+    container_name: hunch-price-history-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PRICE_HISTORY_PORT: 3005
+      COLLECTION_INTERVAL: 60000
+      BATCH_SIZE: 1000
+    ports:
+      - "3005:3005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Data Ingestion Service
+  data-ingestion:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.data-ingestion
+    container_name: hunch-data-ingestion-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      DATA_INGESTION_PORT: 3006
+      QUEUE_CONCURRENCY: 10
+      BATCH_SIZE: 100
+      RATE_LIMIT_PER_MINUTE: 60
+    ports:
+      - "3006:3006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Monitoring Service
+  monitoring:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.monitoring
+    container_name: hunch-monitoring-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://hunch:${POSTGRES_PASSWORD}@postgres:5432/hunch
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      MONITORING_PORT: 3007
+      MONITORING_METRICS_PORT: 9090
+      MONITORING_ALERT_INTERVAL: 10
+      MONITORING_ALERT_COOLDOWN: 5
+      ALERT_EMAIL: ${ALERT_EMAIL}
+      ALERT_SLACK_WEBHOOK: ${ALERT_SLACK_WEBHOOK}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+    ports:
+      - "3007:3007"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: hunch-nginx-prod
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/ssl:/etc/nginx/ssl
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - trading-engine
+      - analytics-engine
+      - webhook-system
+      - price-history
+      - data-ingestion
+      - monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - hunch-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hunch-prometheus-prod
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    networks:
+      - hunch-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hunch-grafana-prod
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3001:3000"
+    networks:
+      - hunch-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  hunch-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

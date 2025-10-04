@@ -12,7 +12,9 @@ export async function fetchEventsPage(offset: number, limit: number) {
   url.searchParams.set("ascending", "false");
   url.searchParams.set("offset", String(offset));
 
+  console.log("Fetching events page", url.toString());
   const r = await fetch(url, { headers: { accept: "application/json" } });
+  console.log("Response", r.status, r.statusText);
   if (!r.ok) throw new Error(`Gamma ${r.status}`);
   const j = await r.json();
 

@@ -1,0 +1,9 @@
+# Kubernetes namespace for Hunch platform
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hunch
+  labels:
+    name: hunch
+    app: hunch-platform
+    environment: production

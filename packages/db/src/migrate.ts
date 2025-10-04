@@ -1,8 +1,8 @@
-import { env } from "@hunch/config";
 import { globby } from "globby";
 import { promises as fs } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { env } from "../../config"; // Adjusted import path to fix module resolution
 import crypto from "node:crypto";
 import { Pool, PoolClient } from "pg";
 
