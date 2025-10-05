@@ -8,10 +8,13 @@
   },
   "dependencies": {
     "fastify": "^4.28.1",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "jsonwebtoken": "^9.0.2",
+    "ethers": "^6.8.1"
   },
   "devDependencies": {
     "tsx": "^4.19.2",
-    "@types/node": "^20.11.30"
+    "@types/node": "^20.11.30",
+    "@types/jsonwebtoken": "^9.0.5"
   }
 }

@@ -33,6 +33,7 @@
   "packageManager": "pnpm@10.15.1",
   "dependencies": {
     "dotenv": "^16.6.1",
+    "ethers": "^6.15.0",
     "fast-json-stable-stringify": "^2.1.0",
     "p-queue": "^8.1.1",
     "p-retry": "^7.0.0",

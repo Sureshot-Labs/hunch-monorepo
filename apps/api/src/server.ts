@@ -4,6 +4,7 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { onReqStart, onReqEnd, getMetrics } from "./metrics.js";
+import { AuthService, createAuthMiddleware, User, UserWallet, PolymarketCredentials } from "./auth.js";
 
 // Rate limiting for external APIs
 const rateLimiters = new Map<string, { count: number; resetTime: number }>();
@@ -1354,6 +1355,538 @@ app.post("/spreads", async (request, reply) => {
     reply.code(500);
     return reply.send({ 
       error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// ============================================================================
+// PHASE 2: AUTHENTICATION & USER MANAGEMENT ENDPOINTS
+// ============================================================================
+
+/**
+ * POST /auth/nonce
+ * Generate a nonce for wallet signature verification
+ */
+app.post("/auth/nonce", async (request, reply) => {
+  const body = request.body as { walletAddress: string };
+  
+  if (!body.walletAddress) {
+    reply.code(400);
+    return reply.send({ error: "walletAddress is required" });
+  }
+  
+  // Basic wallet address validation
+  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+    reply.code(400);
+    return reply.send({ error: "Invalid wallet address format" });
+  }
+  
+  const nonce = AuthService.generateNonce();
+  const message = `Sign this message to authenticate with Hunch Trading Platform.\n\nNonce: ${nonce}\nWallet: ${body.walletAddress}`;
+  
+  // Store nonce in Redis with 5-minute expiration
+  const r = await getRedis();
+  if (r) {
+    await r.set(`nonce:${body.walletAddress}`, nonce, { EX: 300 });
+  }
+  
+  reply.header("Content-Type", "application/json; charset=utf-8");
+  return reply.send({
+    nonce,
+    message,
+    expiresIn: 300, // 5 minutes
+  });
+});
+
+/**
+ * POST /auth/verify
+ * Verify wallet signature and authenticate user
+ */
+app.post("/auth/verify", async (request, reply) => {
+  const body = request.body as {
+    walletAddress: string;
+    signature: string;
+    userData?: {
+      email?: string;
+      username?: string;
+      displayName?: string;
+      avatarUrl?: string;
+    };
+  };
+  
+  if (!body.walletAddress || !body.signature) {
+    reply.code(400);
+    return reply.send({ error: "walletAddress and signature are required" });
+  }
+  
+  // Basic wallet address validation
+  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+    reply.code(400);
+    return reply.send({ error: "Invalid wallet address format" });
+  }
+  
+  const clientIp = request.ip || 'unknown';
+  const userAgent = request.headers['user-agent'] || 'unknown';
+  
+  try {
+    // Get stored nonce
+    const r = await getRedis();
+    let nonce: string | null = null;
+    
+    if (r) {
+      nonce = await r.get(`nonce:${body.walletAddress}`);
+    }
+    
+    if (!nonce) {
+      await AuthService.recordAuthAttempt(
+        body.walletAddress,
+        'verify',
+        false,
+        clientIp,
+        userAgent,
+        'Nonce not found or expired'
+      );
+      
+      reply.code(400);
+      return reply.send({ error: "Nonce not found or expired. Please request a new nonce." });
+    }
+    
+    // Verify signature (simplified implementation)
+    const message = `Sign this message to authenticate with Hunch Trading Platform.\n\nNonce: ${nonce}\nWallet: ${body.walletAddress}`;
+    const isValidSignature = AuthService.verifyWalletSignature(
+      body.walletAddress,
+      body.signature,
+      message
+    );
+    
+    if (!isValidSignature) {
+      await AuthService.recordAuthAttempt(
+        body.walletAddress,
+        'verify',
+        false,
+        clientIp,
+        userAgent,
+        'Invalid signature'
+      );
+      
+      reply.code(401);
+      return reply.send({ error: "Invalid signature" });
+    }
+    
+    // Create or update user
+    const user = await AuthService.createOrUpdateUser(body.walletAddress, body.userData);
+    console.log('user', user);
+    
+    // Generate session token
+    const sessionToken = AuthService.generateToken(user.id, body.walletAddress);
+    console.log('sessionToken', sessionToken);
+    
+    // Create session
+    const session = await AuthService.createSession(
+      user.id,
+      sessionToken,
+      body.walletAddress,
+      clientIp,
+      userAgent
+    );
+    console.log('session', session);  
+    
+    // Clean up nonce
+    if (r) {
+      await r.del(`nonce:${body.walletAddress}`);
+    }
+    
+    // Record successful authentication
+    await AuthService.recordAuthAttempt(
+      body.walletAddress,
+      'verify',
+      true,
+      clientIp,
+      userAgent
+    );
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        isActive: user.isActive,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+      },
+      session: {
+        token: sessionToken,
+        expiresAt: session.expiresAt,
+      },
+      walletAddress: body.walletAddress,
+    });
+    
+  } catch (error) {
+    app.log.error({ error, walletAddress: body.walletAddress }, 'Authentication failed');
+    
+    await AuthService.recordAuthAttempt(
+      body.walletAddress,
+      'verify',
+      false,
+      clientIp,
+      userAgent,
+      error instanceof Error ? error.message : 'Unknown error'
+    );
+    
+    reply.code(500);
+    return reply.send({ 
+      error: 'Authentication failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /auth/logout
+ * Logout user and invalidate session
+ */
+app.post("/auth/logout", async (request, reply) => {
+  const authHeader = request.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    reply.code(401);
+    return reply.send({ error: 'Missing or invalid authorization header' });
+  }
+  
+  const token = authHeader.substring(7);
+  
+  try {
+    await AuthService.invalidateSession(token);
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({ message: 'Successfully logged out' });
+    
+  } catch (error) {
+    app.log.error({ error }, 'Logout failed');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Logout failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /auth/me
+ * Get current user information
+ */
+app.get("/auth/me", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  
+  try {
+    // Get user wallets
+    const wallets = await AuthService.getUserWallets(user.id);
+    
+    // Get Polymarket credentials
+    const polymarketCreds = await AuthService.getPolymarketCredentials(user.id, walletAddress);
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        isActive: user.isActive,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+      },
+      wallets: wallets.map(w => ({
+        id: w.id,
+        walletAddress: w.walletAddress,
+        walletType: w.walletType,
+        isPrimary: w.isPrimary,
+        isVerified: w.isVerified,
+        createdAt: w.createdAt,
+      })),
+      polymarketCredentials: polymarketCreds ? {
+        id: polymarketCreds.id,
+        walletAddress: polymarketCreds.walletAddress,
+        isActive: polymarketCreds.isActive,
+        createdAt: polymarketCreds.createdAt,
+        lastUsedAt: polymarketCreds.lastUsedAt,
+      } : null,
+      currentWallet: walletAddress,
+    });
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id }, 'Get user info failed');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to get user information',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /auth/venue-credentials
+ * Set API credentials for any venue (Polymarket, Kalshi, Limitless)
+ */
+app.post("/auth/venue-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const body = request.body as {
+    venue: 'polymarket' | 'kalshi' | 'limitless';
+    apiKey: string;
+    apiSecret: string;
+    additionalData?: any; // For venue-specific data
+  };
+  
+  if (!body.venue || !body.apiKey || !body.apiSecret) {
+    reply.code(400);
+    return reply.send({ error: "venue, apiKey and apiSecret are required" });
+  }
+  
+  if (!['polymarket', 'kalshi', 'limitless'].includes(body.venue)) {
+    reply.code(400);
+    return reply.send({ error: "venue must be one of: polymarket, kalshi, limitless" });
+  }
+  
+  try {
+    const credentials = await AuthService.createOrUpdateVenueCredentials(
+      user.id,
+      walletAddress,
+      body.venue,
+      body.apiKey,
+      body.apiSecret,
+      body.additionalData
+    );
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      message: `${body.venue} credentials updated successfully`,
+      credentials: {
+        id: credentials.id,
+        venue: credentials.venue,
+        walletAddress: credentials.walletAddress,
+        isActive: credentials.isActive,
+        createdAt: credentials.createdAt,
+        lastUsedAt: credentials.lastUsedAt,
+      },
+    });
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress, venue: body.venue }, 'Failed to update venue credentials');
+    reply.code(500);
+    return reply.send({ 
+      error: `Failed to update ${body.venue} credentials`,
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /auth/venue-credentials
+ * Get all venue credentials for user
+ */
+app.get("/auth/venue-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  
+  try {
+    const credentials = await AuthService.getAllVenueCredentials(user.id, walletAddress);
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      credentials: credentials.map(c => ({
+        id: c.id,
+        venue: c.venue,
+        walletAddress: c.walletAddress,
+        isActive: c.isActive,
+        createdAt: c.createdAt,
+        lastUsedAt: c.lastUsedAt,
+        additionalData: c.additionalData,
+      })),
+    });
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id }, 'Failed to get venue credentials');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to get venue credentials',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /auth/polymarket-credentials
+ * Set Polymarket API credentials for user (backward compatibility)
+ */
+app.post("/auth/polymarket-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const body = request.body as {
+    apiKey: string;
+    apiSecret: string;
+  };
+  
+  if (!body.apiKey || !body.apiSecret) {
+    reply.code(400);
+    return reply.send({ error: "apiKey and apiSecret are required" });
+  }
+  
+  try {
+    const credentials = await AuthService.createOrUpdatePolymarketCredentials(
+      user.id,
+      walletAddress,
+      body.apiKey,
+      body.apiSecret
+    );
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      message: 'Polymarket credentials updated successfully',
+      credentials: {
+        id: credentials.id,
+        venue: 'polymarket',
+        walletAddress: credentials.walletAddress,
+        isActive: credentials.isActive,
+        createdAt: credentials.createdAt,
+        lastUsedAt: credentials.lastUsedAt,
+      },
+    });
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to update Polymarket credentials');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to update Polymarket credentials',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /auth/wallets
+ * Get user's wallets
+ */
+app.get("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  
+  try {
+    const wallets = await AuthService.getUserWallets(user.id);
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({
+      wallets: wallets.map(w => ({
+        id: w.id,
+        walletAddress: w.walletAddress,
+        walletType: w.walletType,
+        isPrimary: w.isPrimary,
+        isVerified: w.isVerified,
+        createdAt: w.createdAt,
+        updatedAt: w.updatedAt,
+      })),
+    });
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id }, 'Failed to get user wallets');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to get user wallets',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /auth/wallets
+ * Add a new wallet to user account
+ */
+app.post("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const body = request.body as {
+    walletAddress: string;
+    walletType?: string;
+    verificationSignature?: string;
+  };
+  
+  if (!body.walletAddress) {
+    reply.code(400);
+    return reply.send({ error: "walletAddress is required" });
+  }
+  
+  // Basic wallet address validation
+  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+    reply.code(400);
+    return reply.send({ error: "Invalid wallet address format" });
+  }
+  
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      // Check if wallet already exists
+      const existingWallet = await client.query(
+        'SELECT id FROM user_wallets WHERE wallet_address = $1',
+        [body.walletAddress]
+      );
+      
+      if (existingWallet.rows.length > 0) {
+        reply.code(409);
+        return reply.send({ error: "Wallet address already exists" });
+      }
+      
+      // Add new wallet
+      const result = await client.query(
+        `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature) 
+         VALUES ($1, $2, $3, false, $4, $5) 
+         RETURNING id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at`,
+        [
+          user.id,
+          body.walletAddress,
+          body.walletType || 'ethereum',
+          !!body.verificationSignature,
+          body.verificationSignature || null,
+        ]
+      );
+      
+      await client.query('COMMIT');
+      
+      const newWallet = result.rows[0];
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: 'Wallet added successfully',
+        wallet: {
+          id: newWallet.id,
+          walletAddress: newWallet.wallet_address,
+          walletType: newWallet.wallet_type,
+          isPrimary: newWallet.is_primary,
+          isVerified: newWallet.is_verified,
+          createdAt: newWallet.created_at,
+          updatedAt: newWallet.updated_at,
+        },
+      });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress: body.walletAddress }, 'Failed to add wallet');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to add wallet',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
