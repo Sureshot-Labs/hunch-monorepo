@@ -5,6 +5,8 @@ import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { onReqStart, onReqEnd, getMetrics } from "./metrics.js";
 import { AuthService, createAuthMiddleware, User, UserWallet, PolymarketCredentials } from "./auth.js";
+import { VenueOrderManagerFactory } from "./venue-order-manager-factory.js";
+import { PlaceOrderRequest, OrderStatus } from "./order-types.js";
 
 // Rate limiting for external APIs
 const rateLimiters = new Map<string, { count: number; resetTime: number }>();
@@ -1887,6 +1889,442 @@ app.post("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request
     reply.code(500);
     return reply.send({ 
       error: 'Failed to add wallet',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// ============================================================================
+// ORDER MANAGEMENT ENDPOINTS
+// ============================================================================
+
+/**
+ * POST /orders
+ * Place a new order
+ */
+app.post("/orders", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const body = request.body as PlaceOrderRequest & { 
+    venue: 'polymarket' | 'kalshi' | 'limitless';
+    l1Signature?: string;
+    l1Timestamp?: string;
+    l1Nonce?: string;
+  };
+  
+  // Validate required fields
+  if (!body.venue) {
+    reply.code(400);
+    return reply.send({ error: "venue is required" });
+  }
+  
+  if (!body.tokenId) {
+    reply.code(400);
+    return reply.send({ error: "tokenId is required" });
+  }
+  
+  if (!body.side || !['BUY', 'SELL'].includes(body.side)) {
+    reply.code(400);
+    return reply.send({ error: "Valid side (BUY/SELL) is required" });
+  }
+  
+  if (!body.orderType || !['GTC', 'GTD', 'FAK', 'FOK'].includes(body.orderType)) {
+    reply.code(400);
+    return reply.send({ error: "Valid order type (GTC/GTD/FAK/FOK) is required" });
+  }
+  
+  if (!body.price || body.price <= 0) {
+    reply.code(400);
+    return reply.send({ error: "Valid price is required" });
+  }
+  
+  if (!body.size || body.size <= 0) {
+    reply.code(400);
+    return reply.send({ error: "Valid size is required" });
+  }
+  
+  try {
+    const result = await VenueOrderManagerFactory.placeOrder(
+      body.venue,
+      user.id,
+      walletAddress,
+      {
+        tokenId: body.tokenId,
+        side: body.side,
+        orderType: body.orderType,
+        price: body.price,
+        size: body.size,
+        expiresAt: body.expiresAt,
+        l1Signature: body.l1Signature,
+        l1Timestamp: body.l1Timestamp,
+        l1Nonce: body.l1Nonce,
+      }
+    );
+    
+    if (result.success) {
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: 'Order placed successfully',
+        orderId: result.orderId,
+        venueOrderId: result.venueOrderId,
+        status: result.status,
+      });
+    } else {
+      reply.code(400);
+      return reply.send({
+        error: result.errorMessage || 'Failed to place order',
+        rawError: result.rawError,
+      });
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress, body }, 'Failed to place order');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to place order',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /orders
+ * Get active orders for the user
+ */
+app.get("/orders", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
+  
+  try {
+    if (query.venue) {
+      // Get orders for specific venue
+      const result = await VenueOrderManagerFactory.getActiveOrders(
+        query.venue,
+        user.id,
+        walletAddress
+      );
+      
+      if (result.success) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          orders: result.orders,
+          venue: query.venue,
+        });
+      } else {
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || 'Failed to fetch orders',
+        });
+      }
+    } else {
+      // Get orders for all venues
+      const allOrders = [];
+      
+      for (const venue of ['polymarket', 'kalshi', 'limitless'] as const) {
+        try {
+          const result = await VenueOrderManagerFactory.getActiveOrders(
+            venue,
+            user.id,
+            walletAddress
+          );
+          
+          if (result.success) {
+            allOrders.push(...result.orders);
+          }
+        } catch (error) {
+          app.log.warn({ error, venue, userId: user.id }, `Failed to fetch orders for ${venue}`);
+        }
+      }
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        orders: allOrders,
+      });
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to fetch orders');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch orders',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /orders/:id
+ * Get specific order details
+ */
+app.get("/orders/:id", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const params = request.params as { id: string };
+  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
+  
+  try {
+    // First try to get order from database to determine venue
+    const client = await pool.connect();
+    try {
+      const orderResult = await client.query(
+        'SELECT venue FROM orders WHERE id = $1 AND user_id = $2',
+        [params.id, user.id]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: 'Order not found' });
+      }
+      
+      const venue = orderResult.rows[0].venue as 'polymarket' | 'kalshi' | 'limitless';
+      
+      const result = await VenueOrderManagerFactory.getOrder(
+        venue,
+        user.id,
+        walletAddress,
+        params.id
+      );
+      
+      if (result.success) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          order: result.order,
+        });
+      } else {
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || 'Failed to fetch order',
+        });
+      }
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress, orderId: params.id }, 'Failed to fetch order');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch order',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * DELETE /orders/:id
+ * Cancel an order
+ */
+app.delete("/orders/:id", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const params = request.params as { id: string };
+  
+  try {
+    // First get order from database to determine venue
+    const client = await pool.connect();
+    try {
+      const orderResult = await client.query(
+        'SELECT venue FROM orders WHERE id = $1 AND user_id = $2',
+        [params.id, user.id]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: 'Order not found' });
+      }
+      
+      const venue = orderResult.rows[0].venue as 'polymarket' | 'kalshi' | 'limitless';
+      
+      const result = await VenueOrderManagerFactory.cancelOrder(
+        venue,
+        user.id,
+        walletAddress,
+        params.id
+      );
+      
+      if (result.success) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: 'Order cancelled successfully',
+        });
+      } else {
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || 'Failed to cancel order',
+          rawError: result.rawError,
+        });
+      }
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress, orderId: params.id }, 'Failed to cancel order');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to cancel order',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /orders/history
+ * Get order history for the user
+ */
+app.get("/orders/history", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const query = request.query as { 
+    venue?: 'polymarket' | 'kalshi' | 'limitless';
+    status?: OrderStatus;
+    limit?: number;
+    offset?: number;
+  };
+  
+  try {
+    const client = await pool.connect();
+    try {
+      let whereClause = 'WHERE user_id = $1';
+      const params: any[] = [user.id];
+      let paramCount = 1;
+      
+      if (query.venue) {
+        paramCount++;
+        whereClause += ` AND venue = $${paramCount}`;
+        params.push(query.venue);
+      }
+      
+      if (query.status) {
+        paramCount++;
+        whereClause += ` AND status = $${paramCount}`;
+        params.push(query.status);
+      }
+      
+      const limit = Math.min(query.limit || 50, 100); // Max 100 orders
+      const offset = query.offset || 0;
+      
+      const result = await client.query(`
+        SELECT 
+          id, user_id, venue, venue_order_id, token_id, side, order_type,
+          price, size, status, filled_size, average_fill_price,
+          expires_at, created_at, updated_at, filled_at, cancelled_at,
+          error_message, raw_error
+        FROM orders 
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
+      `, [...params, limit, offset]);
+      
+      const orders = result.rows.map(row => ({
+        id: row.id,
+        userId: row.user_id,
+        venue: row.venue,
+        venueOrderId: row.venue_order_id,
+        tokenId: row.token_id,
+        side: row.side,
+        orderType: row.order_type,
+        price: parseFloat(row.price),
+        size: parseFloat(row.size),
+        status: row.status,
+        filledSize: parseFloat(row.filled_size || '0'),
+        averageFillPrice: row.average_fill_price ? parseFloat(row.average_fill_price) : null,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        filledAt: row.filled_at,
+        cancelledAt: row.cancelled_at,
+        errorMessage: row.error_message,
+        rawError: row.raw_error,
+      }));
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        orders,
+        pagination: {
+          limit,
+          offset,
+          hasMore: orders.length === limit,
+        },
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id }, 'Failed to fetch order history');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch order history',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /positions
+ * Get user positions
+ */
+app.get("/positions", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const walletAddress = (request as any).walletAddress as string;
+  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
+  
+  try {
+    if (query.venue) {
+      // Get positions for specific venue
+      const result = await VenueOrderManagerFactory.getPositions(
+        query.venue,
+        user.id,
+        walletAddress
+      );
+      
+      if (result.success) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          positions: result.positions,
+          venue: query.venue,
+        });
+      } else {
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || 'Failed to fetch positions',
+        });
+      }
+    } else {
+      // Get positions for all venues
+      const allPositions = [];
+      
+      for (const venue of ['polymarket', 'kalshi', 'limitless'] as const) {
+        try {
+          const result = await VenueOrderManagerFactory.getPositions(
+            venue,
+            user.id,
+            walletAddress
+          );
+          
+          if (result.success) {
+            allPositions.push(...result.positions);
+          }
+        } catch (error) {
+          app.log.warn({ error, venue, userId: user.id }, `Failed to fetch positions for ${venue}`);
+        }
+      }
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        positions: allPositions,
+      });
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to fetch positions');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch positions',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }
