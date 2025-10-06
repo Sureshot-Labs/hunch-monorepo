@@ -29,14 +29,11 @@ export class VenueOrderManagerFactory {
     venue: 'polymarket' | 'kalshi' | 'limitless',
     userId: string,
     walletAddress: string,
-    request: PlaceOrderRequest & {
-      l1Signature?: string;
-      l1Timestamp?: string;
-      l1Nonce?: string;
-    }
+    headers: any,
+    request: PlaceOrderRequest 
   ): Promise<PlaceOrderResponse> {
     const manager = this.getManager(venue);
-    return manager.placeOrder(userId, walletAddress, request);
+    return manager.placeOrder(userId, walletAddress, headers, request);
   }
 
   static async cancelOrder(

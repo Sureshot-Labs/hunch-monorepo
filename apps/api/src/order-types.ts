@@ -139,7 +139,7 @@ export interface VenueOrderManager {
   venue: 'polymarket' | 'kalshi' | 'limitless';
   
   // Order operations
-  placeOrder(userId: string, walletAddress: string, request: PlaceOrderRequest & {
+  placeOrder(userId: string, walletAddress: string, headers: any, request: PlaceOrderRequest & {
     l1Signature?: string;
     l1Timestamp?: string;
     l1Nonce?: string;

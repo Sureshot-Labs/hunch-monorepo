@@ -1955,6 +1955,7 @@ app.post("/orders", { preHandler: createAuthMiddleware() }, async (request, repl
       body.venue,
       user.id,
       walletAddress,
+      request.headers,
       {
         tokenId: body.tokenId,
         side: body.side,

@@ -26,7 +26,7 @@ export class PolymarketOrderManager implements VenueOrderManager {
   private readonly clobEndpoint = 'https://clob.polymarket.com';
   private readonly chainId = 137; // Polygon
 
-  async placeOrder(userId: string, walletAddress: string, request: PlaceOrderRequest & { 
+  async placeOrder(userId: string, walletAddress: string, headers: any, request: PlaceOrderRequest & { 
     l1Signature?: string;
     l1Timestamp?: string;
     l1Nonce?: string;
@@ -40,59 +40,20 @@ export class PolymarketOrderManager implements VenueOrderManager {
           errorMessage: validation.error,
         };
       }
-
-      // Validate L1 authentication parameters
-      if (!request.l1Signature || !request.l1Timestamp || !request.l1Nonce) {
-        return {
-          success: false,
-          errorMessage: 'L1 authentication parameters missing. Please sign the order with your wallet.',
-        };
-      }
-
-      // Verify L1 signature
-      const signatureValid = await this.verifyL1Signature(
-        walletAddress,
-        request.l1Signature,
-        request.l1Timestamp,
-        request.l1Nonce
-      );
-
-      if (!signatureValid) {
-        return {
-          success: false,
-          errorMessage: 'Invalid signature. Please try signing again.',
-        };
-      }
-
-      // Get user's Polymarket credentials
-      const credentials = await AuthService.getVenueCredentials(userId, 'polymarket',walletAddress);
-      if (!credentials) {
-        return {
-          success: false,
-          errorMessage: 'Polymarket credentials not found. Please connect your Polymarket account.',
-        };
-      }
-
+      console.log('request me',request);
       // Create the order structure
       const order = await this.createOrderStructure(request, walletAddress);
-      console.log('order', order);
-      
-      // Generate HMAC signature for L2 authentication
-      const message = `${request.l1Timestamp}POST/order${JSON.stringify(order)}`;
-      const hmacSignature = crypto.createHmac("sha256", credentials.apiSecret)
-                                  .update(message)
-                                  .digest("hex");
-      
+      console.log('order', order);      
+  
+      const timestamp = Math.floor(Date.now() / 1000).toString();
       // Submit to Polymarket with L1 and L2 headers
       const response = await this.submitOrderToPolymarket(
         order, 
         walletAddress, 
-        request.l1Signature,
-        request.l1Timestamp,
-        request.l1Nonce,
-        hmacSignature,
-        credentials.apiKey,
-        credentials.additionalData?.passphrase || ''
+        headers.hmacSignature,
+        timestamp,
+        headers.apiKey,
+        headers.passphrase
       );
       
       if (response.success) {
@@ -329,9 +290,8 @@ export class PolymarketOrderManager implements VenueOrderManager {
     const salt = Math.floor(Math.random() * 1000000000);
     
     // Calculate expiration time (24 hours from now by default)
-    const expiration = request.expiresAt 
-      ? Math.floor(request.expiresAt.getTime() / 1000)
-      : Math.floor(Date.now() / 1000) + 86400; // 24 hours default
+    let expiration = Math.floor(Date.now() / 1000) + 86400; // 24 hours default
+    
     
     // Calculate maker and taker amounts based on side
     // For BUY orders: maker pays USDC, taker pays tokens
@@ -342,7 +302,7 @@ export class PolymarketOrderManager implements VenueOrderManager {
     const takerAmount = request.side === 'BUY' 
       ? request.size.toString() 
       : (request.price * request.size).toString();
-    
+ 
     const order: PolymarketOrder = {
       salt,
       maker: walletAddress,
@@ -352,23 +312,21 @@ export class PolymarketOrderManager implements VenueOrderManager {
       makerAmount,
       takerAmount,
       expiration: expiration.toString(),
-      nonce: '0', // This should be fetched from Polymarket's API
+      nonce: request.l1Nonce || '', // This should be fetched from Polymarket's API
       feeRateBps: '0', // This should be fetched from Polymarket's API
       side: request.side === 'BUY' ? 0 : 1,
-      signatureType: 2, // Browser wallet signature type
-      signature: '', // This will be set when the order is signed
+      signatureType: 0, // Browser wallet signature type
+      signature: request.l1Signature || '', // This will be set when the order is signed
     };
-
+console.log('order', order);
     return order;
   }
 
   private async submitOrderToPolymarket(
     order: PolymarketOrder, 
     walletAddress: string, 
-    l1Signature: string,
-    l1Timestamp: string,
-    l1Nonce: string,
     hmacSignature: string,
+    timestamp: string,
     polymarketApiKey: string,
     polymarketPassphrase: string
   ): Promise<PolymarketOrderResponse> {
@@ -378,9 +336,9 @@ export class PolymarketOrderManager implements VenueOrderManager {
         'Content-Type': 'application/json',
         'POLY_ADDRESS': walletAddress,
         'POLY_SIGNATURE': hmacSignature, // L2 HMAC signature
-        'POLY_TIMESTAMP': l1Timestamp,
+        'POLY_TIMESTAMP': timestamp,
         'POLY_API_KEY': polymarketApiKey,
-        'POLY_PASSPHRASE': polymarketPassphrase,
+        'POLY_PASSPHRASE': polymarketPassphrase
       },
       body: JSON.stringify({
         order,

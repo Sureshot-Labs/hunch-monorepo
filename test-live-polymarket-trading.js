@@ -161,7 +161,7 @@ async function generatePolymarketApiKeys() {
   
   const wallet = new ethers.Wallet(TEST_CONFIG.privateKey);
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = '112';
+  const nonce = '125';
 
   // Create L1 authentication signature for API key generation
   const domain = {
@@ -343,7 +343,7 @@ async function placeMinimumOrder(market) {
   // Create L1 authentication signature for order placement
   const wallet = new ethers.Wallet(TEST_CONFIG.privateKey);
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = '113';
+  const nonce = '126';
 
   const domain = {
     name: "ClobAuthDomain",
@@ -404,7 +404,7 @@ async function placeMinimumOrder(market) {
     'POLY_SIGNATURE': hmacSignature,
     'POLY_TIMESTAMP': timestamp,
     'POLY_API_KEY': polymarketApiKey,
-    'POLY_PASSPHRASE': polymarketPassphrase,
+    'POLY_PASSPHRASE': polymarketPassphrase
   });
   console.log('response', response);
 
