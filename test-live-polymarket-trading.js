@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 import { ethers } from 'ethers';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -160,7 +161,7 @@ async function generatePolymarketApiKeys() {
   
   const wallet = new ethers.Wallet(TEST_CONFIG.privateKey);
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = '17';
+  const nonce = '112';
 
   // Create L1 authentication signature for API key generation
   const domain = {
@@ -186,6 +187,7 @@ async function generatePolymarketApiKeys() {
   };
 
   const l1Signature = await wallet.signTypedData(domain, types, value);
+  console.log('l1Signature', l1Signature);
   console.log('📝 Creating L1 signature for API key generation...');
   console.log('   Signature:', l1Signature.substring(0, 20) + '...');
   console.log('   Timestamp:', timestamp);
@@ -341,7 +343,7 @@ async function placeMinimumOrder(market) {
   // Create L1 authentication signature for order placement
   const wallet = new ethers.Wallet(TEST_CONFIG.privateKey);
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = '18';
+  const nonce = '113';
 
   const domain = {
     name: "ClobAuthDomain",
@@ -383,13 +385,23 @@ async function placeMinimumOrder(market) {
   console.log('🚀 Placing order...');
   console.log("polymarketApiKey", polymarketApiKey);
   console.log("polymarketPassphrase", polymarketPassphrase);
+  
+  // Generate HMAC signature for L2 authentication
+  const message = `${timestamp}POST/order${JSON.stringify(orderData)}`;
+  const hmacSignature = crypto.createHmac("sha256", polymarketApiSecret)
+                            .update(message)
+                            .digest("hex");
+  
   console.log("TEST_CONFIG.publicKey", TEST_CONFIG.publicKey);
   console.log("timestamp", timestamp);
   console.log("nonce", nonce);
   console.log("l1Signature", l1Signature);
+  console.log("hmacSignature", hmacSignature);
+  
   const response = await makeRequest('POST', '/orders', orderData, {
+    'Authorization': `Bearer ${authToken}`,
     'POLY_ADDRESS': TEST_CONFIG.publicKey,
-    'POLY_SIGNATURE': l1Signature,
+    'POLY_SIGNATURE': hmacSignature,
     'POLY_TIMESTAMP': timestamp,
     'POLY_API_KEY': polymarketApiKey,
     'POLY_PASSPHRASE': polymarketPassphrase,

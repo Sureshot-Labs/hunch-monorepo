@@ -2,6 +2,7 @@
 // Handles all Polymarket-specific order operations
 
 import { ethers } from 'ethers';
+import crypto from 'crypto';
 import { 
   VenueOrderManager, 
   PlaceOrderRequest, 
@@ -63,16 +64,35 @@ export class PolymarketOrderManager implements VenueOrderManager {
         };
       }
 
+      // Get user's Polymarket credentials
+      const credentials = await AuthService.getVenueCredentials(userId, 'polymarket',walletAddress);
+      if (!credentials) {
+        return {
+          success: false,
+          errorMessage: 'Polymarket credentials not found. Please connect your Polymarket account.',
+        };
+      }
+
       // Create the order structure
       const order = await this.createOrderStructure(request, walletAddress);
+      console.log('order', order);
       
-      // Submit to Polymarket with L1 headers
+      // Generate HMAC signature for L2 authentication
+      const message = `${request.l1Timestamp}POST/order${JSON.stringify(order)}`;
+      const hmacSignature = crypto.createHmac("sha256", credentials.apiSecret)
+                                  .update(message)
+                                  .digest("hex");
+      
+      // Submit to Polymarket with L1 and L2 headers
       const response = await this.submitOrderToPolymarket(
         order, 
         walletAddress, 
-        request.l1Signature, 
-        request.l1Timestamp, 
-        request.l1Nonce
+        request.l1Signature,
+        request.l1Timestamp,
+        request.l1Nonce,
+        hmacSignature,
+        credentials.apiKey,
+        credentials.additionalData?.passphrase || ''
       );
       
       if (response.success) {
@@ -345,18 +365,22 @@ export class PolymarketOrderManager implements VenueOrderManager {
   private async submitOrderToPolymarket(
     order: PolymarketOrder, 
     walletAddress: string, 
-    signature: string, 
-    timestamp: string, 
-    nonce: string
+    l1Signature: string,
+    l1Timestamp: string,
+    l1Nonce: string,
+    hmacSignature: string,
+    polymarketApiKey: string,
+    polymarketPassphrase: string
   ): Promise<PolymarketOrderResponse> {
     const response = await fetch(`${this.clobEndpoint}/order`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'POLY_ADDRESS': walletAddress,
-        'POLY_SIGNATURE': signature,
-        'POLY_TIMESTAMP': timestamp,
-        'POLY_NONCE': nonce,
+        'POLY_SIGNATURE': hmacSignature, // L2 HMAC signature
+        'POLY_TIMESTAMP': l1Timestamp,
+        'POLY_API_KEY': polymarketApiKey,
+        'POLY_PASSPHRASE': polymarketPassphrase,
       },
       body: JSON.stringify({
         order,

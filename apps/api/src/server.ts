@@ -1912,6 +1912,13 @@ app.post("/orders", { preHandler: createAuthMiddleware() }, async (request, repl
     l1Nonce?: string;
   };
   
+  // Extract L1 authentication headers from request headers
+  const l1Headers = {
+    l1Signature: request.headers['poly_signature'] as string,
+    l1Timestamp: request.headers['poly_timestamp'] as string,
+    l1Nonce: request.headers['poly_nonce'] as string,
+  };
+  
   // Validate required fields
   if (!body.venue) {
     reply.code(400);
@@ -1955,9 +1962,9 @@ app.post("/orders", { preHandler: createAuthMiddleware() }, async (request, repl
         price: body.price,
         size: body.size,
         expiresAt: body.expiresAt,
-        l1Signature: body.l1Signature,
-        l1Timestamp: body.l1Timestamp,
-        l1Nonce: body.l1Nonce,
+        l1Signature: l1Headers.l1Signature || body.l1Signature,
+        l1Timestamp: l1Headers.l1Timestamp || body.l1Timestamp,
+        l1Nonce: l1Headers.l1Nonce || body.l1Nonce,
       }
     );
     
