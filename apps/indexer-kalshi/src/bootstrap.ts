@@ -4,42 +4,52 @@ import { env } from "./env";
 import { fetchAllEventsWithNestedMarkets } from "./marketClient";
 import {
   getVenueId,
-  upsertEvent,
-  upsertMarket,
   upsertToken,
   writeBookTop,
 } from "../../indexer-polymarket/src/repo";
-import { mapEventRow, mapMarketRow, mapTokens } from "./mappers";
+import { mapTokens } from "./mappers";
+import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
+import { v4 as uuid } from "uuid";
 
 export async function bootstrapKalshi() {
   await ensureRedis();
   const venueId = await getVenueId("kalshi");
   console.log("Bootstrapping Kalshi…", venueId);
 
-  const events = await fetchAllEventsWithNestedMarkets(
-    env.bootstrapLimit,
-    "open"
-  );
-  console.log(`Fetched ${events.length} events (with nested markets)`);
+  const events = await fetchAllEventsWithNestedMarkets("open");
+  console.log(`[Bootstrap] Starting to process ${events.length} events...`);
 
   const topTickers: string[] = [];
+  let processedEvents = 0;
+  let processedMarkets = 0;
 
   for (const e of events) {
-    const eventUuid = await upsertEvent(mapEventRow(venueId, e));
+    // Store event in Kalshi-specific table
+    await upsertKalshiEvent(e);
+    processedEvents++;
 
     for (const m of e.markets ?? []) {
-      const { id: marketUuid, clob_token_yes: yesTok } = await upsertMarket(
-        mapMarketRow(venueId, eventUuid, m)
-      );
+      // Store market in Kalshi-specific table
+      await upsertKalshiMarket(m);
+      processedMarkets++;
 
+      // Still need to store tokens in the shared tokens table for orderbook functionality
+      const marketUuid = uuid();
       for (const t of mapTokens(marketUuid, m.ticker)) {
         await upsertToken(t);
       }
-      if (yesTok) topTickers.push(m.ticker);
+      topTickers.push(m.ticker);
+    }
+
+    // Log progress every 50 events
+    if (processedEvents % 50 === 0) {
+      console.log(`[Bootstrap] Processed ${processedEvents}/${events.length} events, ${processedMarkets} markets`);
     }
   }
+
+  console.log(`[Bootstrap] Database storage complete: ${processedEvents} events, ${processedMarkets} markets`);
 
   const snapTickers = topTickers.slice(0, env.topBookSnapshot);
   const q = new PQueue({ interval: 10_000, intervalCap: 180 }); // ~18 rps

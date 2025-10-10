@@ -1,5 +1,5 @@
-import { bootstrapLimitless } from "./bootstrap";
-import { log } from "../../indexer-polymarket/src/log";
+import { bootstrapLimitless } from "./bootstrap.js";
+import { log } from "./log.js";
 
 async function main() {
   // 1) Initial bootstrap: get the list of markets/token IDs and prep any caches.

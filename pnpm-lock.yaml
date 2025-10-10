@@ -94,15 +94,31 @@ importers:
       bottleneck:
         specifier: ^2.19.5
         version: 2.19.5
+      p-queue:
+        specifier: ^8.0.1
+        version: 8.1.1
       pino:
         specifier: ^9.9.4
         version: 9.9.4
+      uuid:
+        specifier: ^10.0.0
+        version: 10.0.0
       ws:
         specifier: ^8.18.0
         version: 8.18.3
       zod:
         specifier: ^3.23.8
         version: 3.25.76
+    devDependencies:
+      '@types/uuid':
+        specifier: ^10.0.0
+        version: 10.0.0
+      tsx:
+        specifier: ^4.7.0
+        version: 4.20.5
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.2
 
   apps/indexer-limitless:
     dependencies:
@@ -471,6 +487,9 @@ packages:
 
   '@types/pg@8.15.5':
     resolution: {integrity: sha512-LF7lF6zWEKxuT3/OR8wAZGzkg4ENGXFNyiV/JeOt9z5B+0ZVwbql9McqX5c/WStFq1GaGso7H1AzP/qSzmlCKQ==}
+
+  '@types/uuid@10.0.0':
+    resolution: {integrity: sha512-7gqG38EyHgyP1S+7+xomFtL+ZNHcKv6DwNaCZmJmo1vgMugyF3TCnXVg4t1uk89mLNwnLtnY3TpOpCOyp1/xHQ==}
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
@@ -1029,6 +1048,10 @@ packages:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
 
+  uuid@10.0.0:
+    resolution: {integrity: sha512-8XkAphELsDnEGrDxUOHB3RGvXz6TeuYSGEZBOjtTtPm2lwhGBjLgOzLHB63IUWfBpNucQjND6d3AOudO+H3RWQ==}
+    hasBin: true
+
   uuid@13.0.0:
     resolution: {integrity: sha512-XQegIaBTVUjSHliKqcnFqYypAd4S+WCYt5NIeRs6w/UAry7z8Y9j5ZwRRL4kzq9U3sD6v+85er9FvkEaBpji2w==}
     hasBin: true
@@ -1262,6 +1285,8 @@ snapshots:
       '@types/node': 24.3.1
       pg-protocol: 1.10.3
       pg-types: 2.2.0
+
+  '@types/uuid@10.0.0': {}
 
   '@types/ws@8.18.1':
     dependencies:
@@ -1826,6 +1851,8 @@ snapshots:
   undici@7.16.0: {}
 
   unicorn-magic@0.3.0: {}
+
+  uuid@10.0.0: {}
 
   uuid@13.0.0: {}
 

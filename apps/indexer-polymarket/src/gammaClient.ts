@@ -21,18 +21,29 @@ export async function fetchEventsPage(offset: number, limit: number) {
   return { events };
 }
 
-export async function fetchAllEvents(max: number) {
+export async function fetchAllEvents() {
   const out: GammaEvent[] = [];
   let offset = 0;
-  const page = 50;
+  const page = 500; // Increased page size for efficiency
 
-  while (out.length < max) {
+  console.log("Fetching all Polymarket events...");
+  
+  while (true) {
     const { events } = await fetchEventsPage(offset, page);
-    console.log(events.length, "events at offset", offset);
-    if (!events.length) break;
+    console.log(`${events.length} events at offset ${offset}`);
+    
+    if (!events.length) {
+      console.log("No more events found, stopping pagination");
+      break;
+    }
+    
     out.push(...events);
     offset += events.length;
-    await new Promise((res) => setTimeout(res, 150));
+    
+    // Small delay to be respectful to the API
+    await new Promise((res) => setTimeout(res, 100));
   }
-  return out.slice(0, max);
+  
+  console.log(`Total events fetched: ${out.length}`);
+  return out;
 }

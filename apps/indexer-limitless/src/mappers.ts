@@ -1,30 +1,132 @@
 import { v4 as uuid } from "uuid";
-import type { TLimitlessMarket } from "./types";
+import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
+import type { LimitlessEventRow, LimitlessMarketRow } from "./limitless-repo.js";
 
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
-function parseVolume(m: TLimitlessMarket): number | null {
-  if (m.volumeFormatted && !Number.isNaN(Number(m.volumeFormatted)))
-    return Number(m.volumeFormatted);
-  if (m.volume != null && Number.isFinite(Number(m.volume))) {
-    const d = m.collateralToken?.decimals ?? 6;
-    return Number(m.volume) / Math.pow(10, d);
+function parseVolume(volume?: string | number | null, volumeFormatted?: string | null, decimals = 6): number | null {
+  if (volumeFormatted && !Number.isNaN(Number(volumeFormatted)))
+    return Number(volumeFormatted);
+  if (volume != null && Number.isFinite(Number(volume))) {
+    return Number(volume) / Math.pow(10, decimals);
   }
   return null;
 }
 
-const n = (v: unknown): number | null => {
-  if (v === null || v === undefined) return null;
-  const x = typeof v === "string" ? parseFloat(v) : (v as number);
-  return Number.isFinite(x as number) ? (x as number) : null;
+const parseDate = (dateStr?: string | null): Date | null => {
+  if (!dateStr) return null;
+  const date = new Date(dateStr);
+  return isNaN(date.getTime()) ? null : date;
 };
 
-export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
-  // Limitless market -> our event
-  const id = uuid();
-  const endTs =
-    lm.expirationTimestamp != null ? Number(lm.expirationTimestamp) : NaN;
+export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
+  const volumeTotal = parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals);
+  
+  return {
+    id: String(lm.id),
+    slug: lm.slug || null,
+    title: lm.title,
+    description: lm.description || null,
+    tags: lm.tags || [],
+    status: lm.status,
+    expired: lm.expired,
+    creator_name: lm.creator?.name || null,
+    creator_image_uri: lm.creator?.imageURI || null,
+    creator_link: lm.creator?.link || null,
+    logo: lm.logo || null,
+    categories: lm.categories || [],
+    market_type: lm.marketType,
+    proxy_title: lm.proxyTitle || null,
+    condition_id: lm.conditionId || null,
+    is_rewardable: lm.isRewardable || false,
+    priority_index: lm.priorityIndex || 0,
+    expiration_date: lm.expirationDate || null,
+    expiration_timestamp: lm.expirationTimestamp || null,
+    volume: lm.volume || null,
+    volume_formatted: lm.volumeFormatted || null,
+    volume_total: volumeTotal,
+    trends_rank: lm.trends?.hourly?.rank || null,
+    trends_value: lm.trends?.hourly?.value || null,
+    metadata_fee: lm.metadata?.fee || false,
+    metadata_is_bannered: lm.metadata?.isBannered || false,
+    metadata_is_poly_arbitrage: lm.metadata?.isPolyArbitrage || false,
+    metadata_should_market_make: lm.metadata?.shouldMarketMake || false,
+    settings_c: lm.settings?.c || null,
+    settings_min_size: lm.settings?.minSize || null,
+    settings_max_spread: lm.settings?.maxSpread || null,
+    settings_daily_reward: lm.settings?.dailyReward || null,
+    settings_rewards_epoch: lm.settings?.rewardsEpoch || null,
+    collateral_token_symbol: lm.collateralToken?.symbol || null,
+    collateral_token_address: lm.collateralToken?.address || null,
+    collateral_token_decimals: lm.collateralToken?.decimals || 6,
+    neg_risk_request_id: lm.negRiskRequestId || null,
+    neg_risk_market_id: lm.negRiskMarketId || null,
+    winning_outcome_index: lm.winningOutcomeIndex || null,
+    og_image_uri: lm.ogImageURI || null,
+    daily_reward: lm.dailyReward || null,
+    outcome_tokens: lm.outcomeTokens || [],
+    trade_type: lm.tradeType,
+    created_at: parseDate(lm.createdAt),
+    updated_at: parseDate(lm.updatedAt),
+    raw: lm,
+  };
+}
 
-  // pick a single category string; you can get ambitious later
+export function mapLimitlessMarketRow(eventId: string, market: TLimitlessMarketItem): LimitlessMarketRow {
+  const volumeTotal = parseVolume(market.volume, market.volumeFormatted, market.collateralToken?.decimals);
+  
+  return {
+    id: String(market.id),
+    event_id: eventId,
+    slug: market.slug || null,
+    title: market.title,
+    description: market.description || null,
+    tags: market.tags || [],
+    status: market.status,
+    expired: market.expired,
+    creator_name: market.creator?.name || null,
+    creator_image_uri: market.creator?.imageURI || null,
+    creator_link: market.creator?.link || null,
+    logo: market.logo || null,
+    categories: market.categories || [],
+    market_type: market.marketType,
+    proxy_title: market.proxyTitle || null,
+    condition_id: market.conditionId || null,
+    is_rewardable: market.isRewardable || false,
+    priority_index: market.priorityIndex || 0,
+    expiration_date: market.expirationDate || null,
+    expiration_timestamp: market.expirationTimestamp || null,
+    volume: market.volume || null,
+    volume_formatted: market.volumeFormatted || null,
+    volume_total: volumeTotal,
+    prices: market.prices || [],
+    tokens_no: market.tokens?.no || null,
+    tokens_yes: market.tokens?.yes || null,
+    metadata_fee: market.metadata?.fee || false,
+    metadata_is_bannered: market.metadata?.isBannered || false,
+    metadata_is_poly_arbitrage: market.metadata?.isPolyArbitrage || false,
+    metadata_should_market_make: market.metadata?.shouldMarketMake || false,
+    settings_c: market.settings?.c || null,
+    settings_min_size: market.settings?.minSize || null,
+    settings_max_spread: market.settings?.maxSpread || null,
+    settings_daily_reward: market.settings?.dailyReward || null,
+    settings_rewards_epoch: market.settings?.rewardsEpoch || null,
+    collateral_token_symbol: market.collateralToken?.symbol || null,
+    collateral_token_address: market.collateralToken?.address || null,
+    collateral_token_decimals: market.collateralToken?.decimals || 6,
+    neg_risk_request_id: market.negRiskRequestId || null,
+    winning_outcome_index: market.winningOutcomeIndex || null,
+    trade_type: market.tradeType,
+    created_at: parseDate(market.createdAt),
+    updated_at: parseDate(market.updatedAt),
+    raw: market,
+  };
+}
+
+// Legacy functions for backward compatibility with existing code
+export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
+  // This is kept for backward compatibility but not used in new implementation
+  const id = uuid();
+  const endTs = lm.expirationTimestamp != null ? Number(lm.expirationTimestamp) : NaN;
   const category = lm.categories?.[0] ?? null;
 
   return {
@@ -38,9 +140,9 @@ export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
     closed: (lm.expired ?? false) || (lm.status ?? "") === "RESOLVED",
     start_time: null,
     end_time: Number.isFinite(endTs) ? new Date(endTs) : null,
-    liquidity: null, // not exposed in the sample; set later if API adds it
-    volume_total: parseVolume(lm),
-    volume24hr: null, // API not exposing it (yet)
+    liquidity: null,
+    volume_total: parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals),
+    volume24hr: null,
     raw: lm,
   };
 }
@@ -50,13 +152,12 @@ export function mapMarketRow(
   eventUuid: string,
   lm: TLimitlessMarket
 ) {
-  // One binary market per event. We synthesize token IDs from address/conditionId.
+  // This is kept for backward compatibility but not used in new implementation
   const id = uuid();
-  const addr = (lm.address ?? lm.conditionId ?? String(lm.id)).toLowerCase();
+  const addr = (lm.conditionId ?? String(lm.id)).toLowerCase();
   const yesToken = `${addr}:YES`;
   const noToken = `${addr}:NO`;
 
-  // prices array is [yes%, no%], convert to 0..1 decimals
   const yesP = lm.prices?.[0] != null ? Number(lm.prices[0]) / 100 : null;
   const noP = lm.prices?.[1] != null ? Number(lm.prices[1]) / 100 : null;
 
@@ -64,9 +165,9 @@ export function mapMarketRow(
     id,
     event_id: eventUuid,
     venue_id: venueId,
-    market_id: String(lm.id), // unique per venue
+    market_id: String(lm.id),
     title: lm.title,
-    enable_orderbook: false, // no CLOB; don’t pretend
+    enable_orderbook: false,
     accepting_orders:
       (lm.status ?? "ACTIVE") === "FUNDED" ||
       (lm.status ?? "ACTIVE") === "ACTIVE",
@@ -76,7 +177,7 @@ export function mapMarketRow(
     neg_risk: null,
     neg_risk_market_id: null,
     liquidity: null,
-    volume_total: parseVolume(lm),
+    volume_total: parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals),
     volume24hr: null,
     clob_token_yes: yesToken,
     clob_token_no: noToken,

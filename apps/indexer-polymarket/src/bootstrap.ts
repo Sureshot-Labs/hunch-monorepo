@@ -9,7 +9,9 @@ import {
   upsertToken,
   writeBookTop,
 } from "./repo";
-import { mapEventRow, mapMarketRow, mapTokens } from "./mappers";
+import { upsertPolymarketEvent, upsertPolymarketMarket } from "./polymarket-repo";
+import { mapEventRow, mapMarketRow, mapTokens, mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers";
+import { PolymarketEvent } from "./types";
 import { log } from "./log";
 import PQueue from "p-queue";
 
@@ -21,37 +23,50 @@ function chunk<T>(arr: T[], n: number): T[][] {
 
 export async function bootstrapPolymarket() {
   await ensureRedis();
-  const venueId = await getVenueId("polymarket");
   log.info("Bootstrapping Polymarket…");
 
-  const events = await fetchAllEvents(env.bootstrapLimit);
+  const events = await fetchAllEvents();
 
   const topTokenIds: string[] = [];
 
+  // Parse and validate events as Polymarket events
   for (const e of events) {
-    const eRow = mapEventRow(venueId, e);
-    const eventUuid = await upsertEvent(eRow);
+    try {
+      // Validate and parse event as Polymarket event
+      const polyEvent = PolymarketEvent.parse(e);
+      
+      // Map and upsert to polymarket_events table
+      const eRow = mapPolymarketEventRow(polyEvent);
+      const eventId = await upsertPolymarketEvent(eRow);
 
-    for (const m of e.markets) {
-      const mRow = mapMarketRow(venueId, eventUuid, m);
-      const {
-        id: marketUuid,
-        clob_token_yes: yes,
-        clob_token_no: no,
-      } = await upsertMarket(mRow);
+      // Process markets
+      for (const m of polyEvent.markets) {
+        // Map and upsert to polymarket_markets table
+        const mRow = mapPolymarketMarketRow(eventId, m);
+        const result = await upsertPolymarketMarket(mRow);
+        
+        // Extract token IDs from clob_token_ids (can be array or JSON string)
+        let tokenIds: string[] = [];
+        if (m.clobTokenIds) {
+          if (Array.isArray(m.clobTokenIds)) {
+            tokenIds = m.clobTokenIds;
+          } else {
+            try {
+              tokenIds = JSON.parse(m.clobTokenIds);
+            } catch {
+              // If parsing fails, handle gracefully
+              tokenIds = [];
+            }
+          }
+        }
 
-      if (mRow.enable_orderbook && mRow.accepting_orders) {
-        if (yes) topTokenIds.push(yes);
-        if (no) topTokenIds.push(no);
+        // Add to top tokens if market is accepting orders
+        if (mRow.enable_order_book && mRow.accepting_orders && tokenIds.length > 0) {
+          topTokenIds.push(...tokenIds);
+        }
       }
-
-      for (const t of mapTokens(
-        marketUuid,
-        yes ?? undefined,
-        no ?? undefined
-      )) {
-        await upsertToken(t);
-      }
+    } catch (err) {
+      log.warn(`Failed to process event ${e.id}:`, err);
     }
   }
 

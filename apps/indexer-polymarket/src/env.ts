@@ -27,7 +27,7 @@ export const env = {
   wsUrl:
     process.env.POLYMARKET_WS ??
     "wss://ws-subscriptions-clob.polymarket.com/ws/market",
-  bootstrapLimit: Number(process.env.INDEXER_BOOTSTRAP_LIMIT ?? "200"),
+  // bootstrapLimit removed - now fetching all events
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

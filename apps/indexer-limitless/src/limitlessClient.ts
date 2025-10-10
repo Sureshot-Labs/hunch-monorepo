@@ -1,5 +1,5 @@
-import { env } from "./env";
-import { LimitlessActiveResponse, TLimitlessMarket } from "./types";
+import { env } from "./env.js";
+import { LimitlessActiveResponse, TLimitlessMarket } from "./types.js";
 
 async function getJson(url: string) {
   const r = await fetch(url, { headers: { accept: "application/json" } });

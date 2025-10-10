@@ -5,40 +5,123 @@ const numish = z
   .union([z.number(), z.string()])
   .transform((v) => (typeof v === "string" ? (v.trim() ? Number(v) : NaN) : v));
 
-export const LimitlessMarket = z
-  .object({
-    id: z.number(),
-    address: z.string().optional().nullable(),
-    conditionId: z.string().optional().nullable(),
-    title: z.string(),
-    description: z.string().optional().nullable(),
-    collateralToken: z
-      .object({
-        address: z.string().optional().nullable(),
-        decimals: z.number().optional().default(6),
-        symbol: z.string().optional().nullable(),
-      })
-      .optional()
-      .default({ decimals: 6 }),
-    creator: z
-      .object({
-        name: z.string().optional().nullable(),
-        imageURI: z.string().optional().nullable(),
-        link: z.string().optional().nullable(),
-      })
-      .optional()
-      .nullable(),
-    prices: z.array(numish).optional().default([]), // [yes%, no%]
-    categories: z.array(z.string()).optional().default([]),
-    tags: z.array(z.string()).optional().default([]),
-    status: z.string().optional().default("ACTIVE"),
-    expired: z.boolean().optional().default(false),
-    expirationDate: z.string().optional().nullable(),
-    expirationTimestamp: numish.optional().nullable(),
-    volume: numish.optional().nullable(), // often integer in micro units
-    volumeFormatted: z.string().optional().nullable(), // "164.109293"
-  })
-  .passthrough();
+// Collateral token schema
+const CollateralToken = z.object({
+  symbol: z.string(),
+  address: z.string(),
+  decimals: z.number().default(6),
+});
+
+// Creator schema
+const Creator = z.object({
+  name: z.string(),
+  imageURI: z.string(),
+  link: z.string(),
+});
+
+// Trends schema
+const Trends = z.object({
+  hourly: z.object({
+    rank: z.number(),
+    value: z.number(),
+  }),
+}).optional();
+
+// Metadata schema
+const Metadata = z.object({
+  fee: z.boolean().optional(),
+  isBannered: z.boolean().optional(),
+  isPolyArbitrage: z.boolean().optional(),
+  shouldMarketMake: z.boolean().optional(),
+});
+
+// Settings schema
+const Settings = z.object({
+  c: z.string(),
+  minSize: z.string(),
+  maxSpread: z.number(),
+  dailyReward: z.string(),
+  rewardsEpoch: z.string(),
+});
+
+// Tokens schema
+const Tokens = z.object({
+  no: z.string(),
+  yes: z.string(),
+});
+
+// Individual market schema (for group markets)
+const LimitlessMarketItem = z.object({
+  id: z.number(),
+  logo: z.string().nullable().optional(),
+  slug: z.string(),
+  tags: z.array(z.string()),
+  title: z.string(),
+  prices: z.array(numish),
+  status: z.string(),
+  tokens: Tokens,
+  volume: z.string(),
+  creator: Creator,
+  expired: z.boolean(),
+  metadata: Metadata,
+  settings: Settings,
+  createdAt: z.string(),
+  tradeType: z.string(),
+  updatedAt: z.string(),
+  categories: z.array(z.string()),
+  marketType: z.string(),
+  proxyTitle: z.string().nullable().optional(),
+  conditionId: z.string(),
+  description: z.string(),
+  isRewardable: z.boolean(),
+  priorityIndex: z.number(),
+  expirationDate: z.string(),
+  collateralToken: CollateralToken,
+  volumeFormatted: z.string(),
+  negRiskRequestId: z.string().nullable().optional(),
+  expirationTimestamp: z.number(),
+  winningOutcomeIndex: z.number().nullable().optional(),
+});
+
+// Main market schema (can be single or group)
+export const LimitlessMarket = z.object({
+  id: z.number(),
+  logo: z.string().nullable().optional(),
+  slug: z.string(),
+  tags: z.array(z.string()),
+  title: z.string(),
+  prices: z.array(numish).optional(), // Only for single markets
+  status: z.string(),
+  tokens: Tokens.optional(), // Only for single markets
+  trends: Trends,
+  volume: z.string(),
+  creator: Creator,
+  expired: z.boolean(),
+  metadata: Metadata,
+  settings: Settings.optional(), // Only for single markets
+  createdAt: z.string(),
+  tradeType: z.string(),
+  updatedAt: z.string(),
+  categories: z.array(z.string()),
+  marketType: z.string(), // 'single' or 'group'
+  proxyTitle: z.string().nullable().optional(),
+  conditionId: z.string().optional(),
+  description: z.string().optional(),
+  isRewardable: z.boolean().optional(),
+  priorityIndex: z.number().optional(),
+  expirationDate: z.string().optional(),
+  collateralToken: CollateralToken.optional(),
+  volumeFormatted: z.string(),
+  negRiskRequestId: z.string().nullable().optional(),
+  expirationTimestamp: z.number().optional(),
+  winningOutcomeIndex: z.number().nullable().optional(),
+  // Group market specific fields
+  markets: z.array(LimitlessMarketItem).optional(), // Only for group markets
+  ogImageURI: z.string().nullable().optional(),
+  dailyReward: z.string().optional(),
+  outcomeTokens: z.array(z.string()).optional(),
+  negRiskMarketId: z.string().optional(),
+});
 
 export const LimitlessActiveResponse = z
   .object({
@@ -49,3 +132,4 @@ export const LimitlessActiveResponse = z
   .passthrough();
 
 export type TLimitlessMarket = z.infer<typeof LimitlessMarket>;
+export type TLimitlessMarketItem = z.infer<typeof LimitlessMarketItem>;

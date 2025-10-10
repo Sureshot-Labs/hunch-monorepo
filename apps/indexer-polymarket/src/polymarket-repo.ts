@@ -1,0 +1,188 @@
+import { pool } from "./db";
+
+// Upsert Polymarket event to polymarket_events table
+export async function upsertPolymarketEvent(row: any) {
+  const q = `
+  INSERT INTO polymarket_events(
+    id, ticker, slug, title, description, resolution_source, 
+    start_date, creation_date, end_date, image, icon, 
+    active, closed, archived, new, featured, restricted, 
+    liquidity, volume, open_interest, created_by, created_at, updated_at, 
+    competitive, volume24hr, volume1wk, volume1mo, volume1yr, 
+    enable_order_book, liquidity_clob, neg_risk, comment_count, raw
+  )
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+  ON CONFLICT (id) DO UPDATE SET
+    ticker=EXCLUDED.ticker,
+    slug=EXCLUDED.slug,
+    title=EXCLUDED.title,
+    description=EXCLUDED.description,
+    resolution_source=EXCLUDED.resolution_source,
+    start_date=EXCLUDED.start_date,
+    creation_date=EXCLUDED.creation_date,
+    end_date=EXCLUDED.end_date,
+    image=EXCLUDED.image,
+    icon=EXCLUDED.icon,
+    active=EXCLUDED.active,
+    closed=EXCLUDED.closed,
+    archived=EXCLUDED.archived,
+    new=EXCLUDED.new,
+    featured=EXCLUDED.featured,
+    restricted=EXCLUDED.restricted,
+    liquidity=EXCLUDED.liquidity,
+    volume=EXCLUDED.volume,
+    open_interest=EXCLUDED.open_interest,
+    created_by=EXCLUDED.created_by,
+    created_at=EXCLUDED.created_at,
+    updated_at=EXCLUDED.updated_at,
+    competitive=EXCLUDED.competitive,
+    volume24hr=EXCLUDED.volume24hr,
+    volume1wk=EXCLUDED.volume1wk,
+    volume1mo=EXCLUDED.volume1mo,
+    volume1yr=EXCLUDED.volume1yr,
+    enable_order_book=EXCLUDED.enable_order_book,
+    liquidity_clob=EXCLUDED.liquidity_clob,
+    neg_risk=EXCLUDED.neg_risk,
+    comment_count=EXCLUDED.comment_count,
+    raw=EXCLUDED.raw,
+    updated_at_db=now()
+  RETURNING id`;
+
+  const { rows } = await pool.query(q, [
+    row.id, row.ticker, row.slug, row.title, row.description, row.resolution_source,
+    row.start_date, row.creation_date, row.end_date, row.image, row.icon,
+    row.active, row.closed, row.archived, row.new, row.featured, row.restricted,
+    row.liquidity, row.volume, row.open_interest, row.created_by, row.created_at, row.updated_at,
+    row.competitive, row.volume24hr, row.volume1wk, row.volume1mo, row.volume1yr,
+    row.enable_order_book, row.liquidity_clob, row.neg_risk, row.comment_count, row.raw
+  ]);
+  return rows[0].id as string;
+}
+
+// Upsert Polymarket market to polymarket_markets table
+export async function upsertPolymarketMarket(row: any) {
+  const q = `
+  INSERT INTO polymarket_markets(
+    id, event_id, question, condition_id, slug, resolution_source, end_date, liquidity, start_date,
+    image, icon, description, outcomes, outcome_prices, volume, active, closed, market_maker_address,
+    created_at, updated_at, new, featured, submitted_by, archived, resolved_by, restricted,
+    group_item_title, group_item_threshold, question_id, enable_order_book, order_price_min_tick_size,
+    order_min_size, volume_num, liquidity_num, end_date_iso, start_date_iso, has_reviewed_dates,
+    volume24hr, volume1wk, volume1mo, volume1yr, clob_token_ids, uma_bond, uma_reward,
+    volume24hr_clob, volume1wk_clob, volume1mo_clob, volume1yr_clob, volume_clob, liquidity_clob,
+    custom_liveness, accepting_orders, neg_risk, neg_risk_request_id, ready, funded,
+    accepting_orders_timestamp, cyom, competitive, pager_duty_notification_enabled, approved,
+    rewards_min_size, rewards_max_spread, spread, one_day_price_change, one_hour_price_change,
+    one_week_price_change, one_month_price_change, last_trade_price, best_bid, best_ask,
+    automatically_active, clear_book_on_start, series_color, show_gmp_series, show_gmp_outcome,
+    manual_activation, neg_risk_other, uma_resolution_statuses, pending_deployment, deploying,
+    deploying_timestamp, rfq_enabled, holding_rewards_enabled, fees_enabled, raw
+  )
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86)
+  ON CONFLICT (id) DO UPDATE SET
+    question=EXCLUDED.question,
+    condition_id=EXCLUDED.condition_id,
+    slug=EXCLUDED.slug,
+    resolution_source=EXCLUDED.resolution_source,
+    end_date=EXCLUDED.end_date,
+    liquidity=EXCLUDED.liquidity,
+    start_date=EXCLUDED.start_date,
+    image=EXCLUDED.image,
+    icon=EXCLUDED.icon,
+    description=EXCLUDED.description,
+    outcomes=EXCLUDED.outcomes,
+    outcome_prices=EXCLUDED.outcome_prices,
+    volume=EXCLUDED.volume,
+    active=EXCLUDED.active,
+    closed=EXCLUDED.closed,
+    market_maker_address=EXCLUDED.market_maker_address,
+    created_at=EXCLUDED.created_at,
+    updated_at=EXCLUDED.updated_at,
+    new=EXCLUDED.new,
+    featured=EXCLUDED.featured,
+    submitted_by=EXCLUDED.submitted_by,
+    archived=EXCLUDED.archived,
+    resolved_by=EXCLUDED.resolved_by,
+    restricted=EXCLUDED.restricted,
+    group_item_title=EXCLUDED.group_item_title,
+    group_item_threshold=EXCLUDED.group_item_threshold,
+    question_id=EXCLUDED.question_id,
+    enable_order_book=EXCLUDED.enable_order_book,
+    order_price_min_tick_size=EXCLUDED.order_price_min_tick_size,
+    order_min_size=EXCLUDED.order_min_size,
+    volume_num=EXCLUDED.volume_num,
+    liquidity_num=EXCLUDED.liquidity_num,
+    end_date_iso=EXCLUDED.end_date_iso,
+    start_date_iso=EXCLUDED.start_date_iso,
+    has_reviewed_dates=EXCLUDED.has_reviewed_dates,
+    volume24hr=EXCLUDED.volume24hr,
+    volume1wk=EXCLUDED.volume1wk,
+    volume1mo=EXCLUDED.volume1mo,
+    volume1yr=EXCLUDED.volume1yr,
+    clob_token_ids=EXCLUDED.clob_token_ids,
+    uma_bond=EXCLUDED.uma_bond,
+    uma_reward=EXCLUDED.uma_reward,
+    volume24hr_clob=EXCLUDED.volume24hr_clob,
+    volume1wk_clob=EXCLUDED.volume1wk_clob,
+    volume1mo_clob=EXCLUDED.volume1mo_clob,
+    volume1yr_clob=EXCLUDED.volume1yr_clob,
+    volume_clob=EXCLUDED.volume_clob,
+    liquidity_clob=EXCLUDED.liquidity_clob,
+    custom_liveness=EXCLUDED.custom_liveness,
+    accepting_orders=EXCLUDED.accepting_orders,
+    neg_risk=EXCLUDED.neg_risk,
+    neg_risk_request_id=EXCLUDED.neg_risk_request_id,
+    ready=EXCLUDED.ready,
+    funded=EXCLUDED.funded,
+    accepting_orders_timestamp=EXCLUDED.accepting_orders_timestamp,
+    cyom=EXCLUDED.cyom,
+    competitive=EXCLUDED.competitive,
+    pager_duty_notification_enabled=EXCLUDED.pager_duty_notification_enabled,
+    approved=EXCLUDED.approved,
+    rewards_min_size=EXCLUDED.rewards_min_size,
+    rewards_max_spread=EXCLUDED.rewards_max_spread,
+    spread=EXCLUDED.spread,
+    one_day_price_change=EXCLUDED.one_day_price_change,
+    one_hour_price_change=EXCLUDED.one_hour_price_change,
+    one_week_price_change=EXCLUDED.one_week_price_change,
+    one_month_price_change=EXCLUDED.one_month_price_change,
+    last_trade_price=EXCLUDED.last_trade_price,
+    best_bid=EXCLUDED.best_bid,
+    best_ask=EXCLUDED.best_ask,
+    automatically_active=EXCLUDED.automatically_active,
+    clear_book_on_start=EXCLUDED.clear_book_on_start,
+    series_color=EXCLUDED.series_color,
+    show_gmp_series=EXCLUDED.show_gmp_series,
+    show_gmp_outcome=EXCLUDED.show_gmp_outcome,
+    manual_activation=EXCLUDED.manual_activation,
+    neg_risk_other=EXCLUDED.neg_risk_other,
+    uma_resolution_statuses=EXCLUDED.uma_resolution_statuses,
+    pending_deployment=EXCLUDED.pending_deployment,
+    deploying=EXCLUDED.deploying,
+    deploying_timestamp=EXCLUDED.deploying_timestamp,
+    rfq_enabled=EXCLUDED.rfq_enabled,
+    holding_rewards_enabled=EXCLUDED.holding_rewards_enabled,
+    fees_enabled=EXCLUDED.fees_enabled,
+    raw=EXCLUDED.raw,
+    updated_at_db=now()
+  RETURNING id, clob_token_ids`;
+
+  const { rows } = await pool.query(q, [
+    row.id, row.event_id, row.question, row.condition_id, row.slug, row.resolution_source, row.end_date, row.liquidity, row.start_date,
+    row.image, row.icon, row.description, row.outcomes, row.outcome_prices, row.volume, row.active, row.closed, row.market_maker_address,
+    row.created_at, row.updated_at, row.new, row.featured, row.submitted_by, row.archived, row.resolved_by, row.restricted,
+    row.group_item_title, row.group_item_threshold, row.question_id, row.enable_order_book, row.order_price_min_tick_size,
+    row.order_min_size, row.volume_num, row.liquidity_num, row.end_date_iso, row.start_date_iso, row.has_reviewed_dates,
+    row.volume24hr, row.volume1wk, row.volume1mo, row.volume1yr, row.clob_token_ids, row.uma_bond, row.uma_reward,
+    row.volume24hr_clob, row.volume1wk_clob, row.volume1mo_clob, row.volume1yr_clob, row.volume_clob, row.liquidity_clob,
+    row.custom_liveness, row.accepting_orders, row.neg_risk, row.neg_risk_request_id, row.ready, row.funded,
+    row.accepting_orders_timestamp, row.cyom, row.competitive, row.pager_duty_notification_enabled, row.approved,
+    row.rewards_min_size, row.rewards_max_spread, row.spread, row.one_day_price_change, row.one_hour_price_change,
+    row.one_week_price_change, row.one_month_price_change, row.last_trade_price, row.best_bid, row.best_ask,
+    row.automatically_active, row.clear_book_on_start, row.series_color, row.show_gmp_series, row.show_gmp_outcome,
+    row.manual_activation, row.neg_risk_other, row.uma_resolution_statuses, row.pending_deployment, row.deploying,
+    row.deploying_timestamp, row.rfq_enabled, row.holding_rewards_enabled, row.fees_enabled, row.raw
+  ]);
+  return rows[0] as { id: string; clob_token_ids: string | null };
+}
+
