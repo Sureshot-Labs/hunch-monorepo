@@ -6,7 +6,7 @@
   "main": "src/migrate.ts",
   "scripts": {
     "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
-    "typecheck": "tsc -p packages/db/tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@hunch/config": "workspace:*",

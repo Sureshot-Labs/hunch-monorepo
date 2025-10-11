@@ -24,3 +24,6 @@ logs/
 .vscode/*
 !.vscode/extensions.json
 kalshi_private_key.txt
+
+# Turborepo
+.turbo/
