@@ -10,7 +10,9 @@ import {
   writeBookTop,
 } from "./repo";
 import { upsertPolymarketEvent, upsertPolymarketMarket } from "./polymarket-repo";
-import { mapEventRow, mapMarketRow, mapTokens, mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers";
+import { mapEventRow, mapMarketRow, mapTokens, mapPolymarketEventRow, mapPolymarketMarketRow, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
+import { upsertUnifiedEvent, upsertUnifiedMarket } from "../../../packages/db/src/unified-repo";
+import { pool } from "./db";
 import { PolymarketEvent } from "./types";
 import { log } from "./log";
 import PQueue from "p-queue";
@@ -39,11 +41,19 @@ export async function bootstrapPolymarket() {
       const eRow = mapPolymarketEventRow(polyEvent);
       const eventId = await upsertPolymarketEvent(eRow);
 
+      // Map and upsert to unified_events table
+      const unifiedEventRow = mapToUnifiedEvent(polyEvent);
+      await upsertUnifiedEvent(pool, unifiedEventRow);
+
       // Process markets
       for (const m of polyEvent.markets) {
         // Map and upsert to polymarket_markets table
         const mRow = mapPolymarketMarketRow(eventId, m);
         const result = await upsertPolymarketMarket(mRow);
+
+        // Map and upsert to unified_markets table
+        const unifiedMarketRow = mapToUnifiedMarket(m, eventId);
+        await upsertUnifiedMarket(pool, unifiedMarketRow);
         
         // Extract token IDs from clob_token_ids (can be array or JSON string)
         let tokenIds: string[] = [];

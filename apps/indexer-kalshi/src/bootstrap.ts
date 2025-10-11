@@ -7,8 +7,10 @@ import {
   upsertToken,
   writeBookTop,
 } from "../../indexer-polymarket/src/repo";
-import { mapTokens } from "./mappers";
+import { mapTokens, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
 import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo";
+import { upsertUnifiedEvent, upsertUnifiedMarket } from "../../../packages/db/src/unified-repo";
+import { pool } from "../../indexer-polymarket/src/db";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
@@ -30,10 +32,18 @@ export async function bootstrapKalshi() {
     await upsertKalshiEvent(e);
     processedEvents++;
 
+    // Map and upsert to unified_events table
+    const unifiedEventRow = mapToUnifiedEvent(e);
+    await upsertUnifiedEvent(pool, unifiedEventRow);
+
     for (const m of e.markets ?? []) {
       // Store market in Kalshi-specific table
       await upsertKalshiMarket(m);
       processedMarkets++;
+
+      // Map and upsert to unified_markets table
+      const unifiedMarketRow = mapToUnifiedMarket(m, e.event_ticker);
+      await upsertUnifiedMarket(pool, unifiedMarketRow);
 
       // Still need to store tokens in the shared tokens table for orderbook functionality
       const marketUuid = uuid();

@@ -1,6 +1,7 @@
 import { v4 as uuid } from "uuid";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 import type { LimitlessEventRow, LimitlessMarketRow } from "./limitless-repo.js";
+import type { UnifiedEventRow, UnifiedMarketRow } from "../../../packages/db/src/unified-repo";
 
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
 function parseVolume(volume?: string | number | null, volumeFormatted?: string | null, decimals = 6): number | null {
@@ -193,4 +194,77 @@ export function mapTokens(marketUuid: string, yes: string, no: string) {
     { token_id: yes, market_id: marketUuid, side: "YES" as const },
     { token_id: no, market_id: marketUuid, side: "NO" as const },
   ];
+}
+
+// Unified table mappers for Limitless
+export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
+  // Map Limitless status to unified status
+  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
+  if (lm.expired) status = 'CLOSED';
+  else if (lm.status === 'RESOLVED') status = 'SETTLED';
+
+  const volumeTotal = parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ?? undefined;
+  const expirationDate = lm.expirationTimestamp ? new Date(Number(lm.expirationTimestamp)) : undefined;
+
+  return {
+    id: `limitless:${lm.id}`,
+    venue: 'limitless',
+    venue_event_id: String(lm.id),
+    title: lm.title,
+    description: lm.description,
+    category: lm.categories?.[0], // First category
+    status,
+    start_date: parseDate(lm.createdAt) || undefined,
+    end_date: expirationDate,
+    volume_total: volumeTotal,
+    volume_24h: undefined, // Limitless doesn't provide 24h volume
+    liquidity: undefined, // Limitless doesn't provide liquidity
+    created_at: parseDate(lm.createdAt) || undefined,
+    updated_at: parseDate(lm.updatedAt) || undefined,
+  };
+}
+
+export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string): UnifiedMarketRow {
+  // Map Limitless status to unified status
+  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
+  if (market.expired) status = 'CLOSED';
+  else if (market.status === 'RESOLVED') status = 'SETTLED';
+
+  const volumeTotal = market.volumeFormatted ? parseFloat(market.volumeFormatted) : undefined;
+  const expirationDate = market.expirationTimestamp ? new Date(Number(market.expirationTimestamp)) : undefined;
+
+  // Extract prices from prices array (convert percentage to decimal)
+  let bestBid: number | undefined;
+  let bestAsk: number | undefined;
+  let lastPrice: number | undefined;
+
+  if (market.prices && market.prices.length >= 2) {
+    bestBid = market.prices[0] / 100; // Convert percentage to decimal
+    bestAsk = market.prices[1] / 100; // Convert percentage to decimal
+    lastPrice = market.prices[0] / 100; // Convert percentage to decimal
+  }
+
+  return {
+    id: `limitless:${market.id}`,
+    venue: 'limitless',
+    venue_market_id: String(market.id),
+    event_id: `limitless:${eventId}`,
+    title: market.title,
+    description: market.description,
+    category: market.categories?.[0], // First category
+    status,
+    market_type: market.marketType,
+    open_time: parseDate(market.createdAt) || undefined,
+    close_time: expirationDate,
+    expiration_time: expirationDate,
+    best_bid: bestBid,
+    best_ask: bestAsk,
+    last_price: lastPrice,
+    volume_total: volumeTotal,
+    volume_24h: undefined, // Limitless doesn't provide 24h volume
+    liquidity: undefined, // Limitless doesn't provide liquidity
+    outcomes: JSON.stringify(['YES', 'NO']), // Limitless markets are binary
+    created_at: parseDate(market.createdAt) || undefined,
+    updated_at: parseDate(market.updatedAt) || undefined,
+  };
 }

@@ -1,5 +1,6 @@
 import { v4 as uuid } from "uuid";
 import type { TEvent, TMarket, TPolymarketEvent, TPolymarketMarket } from "./types";
+import type { UnifiedEventRow, UnifiedMarketRow } from "../../../packages/db/src/unified-repo";
 
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;
@@ -196,5 +197,61 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     holding_rewards_enabled: m.holdingRewardsEnabled ?? false,
     fees_enabled: m.feesEnabled ?? false,
     raw: m,
+  };
+}
+
+// Unified table mappers for Polymarket
+export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
+  // Map Polymarket status to unified status
+  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
+  if (e.archived) status = 'ARCHIVED';
+  else if (e.closed) status = 'CLOSED';
+
+  return {
+    id: `polymarket:${e.id}`,
+    venue: 'polymarket',
+    venue_event_id: e.id,
+    title: e.title,
+    description: e.description ?? undefined,
+    category: undefined, // Polymarket doesn't have categories at event level
+    status,
+    start_date: e.startDate ? new Date(e.startDate) : undefined,
+    end_date: e.endDate ? new Date(e.endDate) : undefined,
+    volume_total: n(e.volume)?? undefined,
+    volume_24h: n(e.volume24hr)?? undefined,
+    liquidity: n(e.liquidity)?? undefined,
+    created_at: e.createdAt ? new Date(e.createdAt) : undefined,
+    updated_at: e.updatedAt ? new Date(e.updatedAt) : undefined,
+  };
+}
+
+export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): UnifiedMarketRow {
+  // Map Polymarket status to unified status
+  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
+  if (m.archived) status = 'ARCHIVED';
+  else if (m.closed) status = 'CLOSED';
+
+  return {
+    id: `polymarket:${m.id}`,
+    venue: 'polymarket',
+    venue_market_id: m.id,
+    event_id: `polymarket:${eventId}`,
+    title: m.question,
+    description: m.description?? undefined,
+    category: undefined, // Polymarket doesn't have categories at market level
+    status,
+    market_type: 'binary', // Polymarket markets are binary
+    open_time: m.startDate ? new Date(m.startDate) : undefined,
+    close_time: m.endDate ? new Date(m.endDate) : undefined,
+    expiration_time: m.endDate ? new Date(m.endDate) : undefined,
+    best_bid: n(m.bestBid)?? undefined,
+    best_ask: n(m.bestAsk)?? undefined,
+    last_price: n(m.lastTradePrice)?? undefined,
+    volume_total: n(m.volume)?? undefined,
+    volume_24h: n(m.volume24hr)?? undefined,
+    liquidity: n(m.liquidity)?? undefined,
+    outcomes: m.outcomes?? undefined, // Already JSON string
+    created_at: m.createdAt ? new Date(m.createdAt) : undefined,
+    updated_at: m.updatedAt ? new Date(m.updatedAt) : undefined,
   };
 }
