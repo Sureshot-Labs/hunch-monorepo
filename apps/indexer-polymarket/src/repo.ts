@@ -103,13 +103,21 @@ export async function upsertToken(token: {
   market_id: string;
   side: "YES" | "NO";
 }) {
+  // Determine venue from token ID format
+  let venue = 'polymarket'; // default
+  if (token.token_id.startsWith('kalshi:')) {
+    venue = 'kalshi';
+  } else if (token.token_id.startsWith('limitless:')) {
+    venue = 'limitless';
+  }
+  
   await pool.query(
     `
-    insert into tokens(token_id, market_id, side)
-    values ($1,$2,$3)
+    insert into unified_tokens(token_id, venue, market_id, side)
+    values ($1,$2,$3,$4)
     on conflict (token_id) do nothing
   `,
-    [token.token_id, token.market_id, token.side]
+    [token.token_id, venue, token.market_id, token.side]
   );
 }
 
@@ -123,12 +131,21 @@ export async function writeBookTop(
     bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
   const spread =
     bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
+  
+  // Determine venue from token ID format
+  let venue = 'polymarket'; // default
+  if (tokenId.startsWith('kalshi:')) {
+    venue = 'kalshi';
+  } else if (tokenId.startsWith('limitless:')) {
+    venue = 'limitless';
+  }
+  
   await pool.query(
     `
-    insert into book_top(token_id, ts, best_bid, best_ask, mid, spread)
-    values ($1,$2,$3,$4,$5,$6)
+    insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
+    values ($1,$2,$3,$4,$5,$6,$7)
     on conflict do nothing
   `,
-    [tokenId, ts.toISOString(), bestBid, bestAsk, mid, spread]
+    [tokenId, venue, ts.toISOString(), bestBid, bestAsk, mid, spread]
   );
 }

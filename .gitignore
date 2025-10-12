@@ -23,7 +23,7 @@ logs/
 .idea/
 .vscode/*
 !.vscode/extensions.json
-kalshi_private_key.txt
+test-hunch.txt
 
 # Turborepo
 .turbo/
