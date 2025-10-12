@@ -231,6 +231,16 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
   if (m.archived) status = 'ARCHIVED';
   else if (m.closed) status = 'CLOSED';
 
+  // Handle clob_token_ids - convert to JSON string if it's an array
+  let clobTokenIds: string | undefined = undefined;
+  if (m.clobTokenIds) {
+    if (Array.isArray(m.clobTokenIds)) {
+      clobTokenIds = JSON.stringify(m.clobTokenIds);
+    } else {
+      clobTokenIds = m.clobTokenIds;
+    }
+  }
+
   return {
     id: `polymarket:${m.id}`,
     venue: 'polymarket',
@@ -251,6 +261,7 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
     volume_24h: n(m.volume24hr)?? undefined,
     liquidity: n(m.liquidity)?? undefined,
     outcomes: m.outcomes?? undefined, // Already JSON string
+    clob_token_ids: clobTokenIds,
     created_at: m.createdAt ? new Date(m.createdAt) : undefined,
     updated_at: m.updatedAt ? new Date(m.updatedAt) : undefined,
   };

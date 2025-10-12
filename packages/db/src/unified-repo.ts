@@ -38,6 +38,9 @@ export interface UnifiedMarketRow {
   volume_24h?: number;
   liquidity?: number;
   outcomes?: string; // JSON string
+  token_yes?: string; // Token ID for YES outcome (used by Limitless, Kalshi)
+  token_no?: string; // Token ID for NO outcome (used by Limitless, Kalshi)
+  clob_token_ids?: string; // JSON array of token IDs (used by Polymarket)
   created_at?: Date;
   updated_at?: Date;
 }
@@ -102,9 +105,10 @@ export async function upsertUnifiedMarket(
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, liquidity, outcomes,
+      token_yes, token_no, clob_token_ids,
       created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -124,6 +128,9 @@ export async function upsertUnifiedMarket(
       volume_24h = EXCLUDED.volume_24h,
       liquidity = EXCLUDED.liquidity,
       outcomes = EXCLUDED.outcomes,
+      token_yes = EXCLUDED.token_yes,
+      token_no = EXCLUDED.token_no,
+      clob_token_ids = EXCLUDED.clob_token_ids,
       created_at = EXCLUDED.created_at,
       updated_at = EXCLUDED.updated_at,
       updated_at_db = now()
@@ -150,6 +157,9 @@ export async function upsertUnifiedMarket(
     marketRow.volume_24h,
     marketRow.liquidity,
     marketRow.outcomes,
+    marketRow.token_yes,
+    marketRow.token_no,
+    marketRow.clob_token_ids,
     marketRow.created_at,
     marketRow.updated_at,
   ];

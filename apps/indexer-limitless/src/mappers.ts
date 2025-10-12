@@ -264,6 +264,8 @@ export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string
     volume_24h: undefined, // Limitless doesn't provide 24h volume
     liquidity: undefined, // Limitless doesn't provide liquidity
     outcomes: JSON.stringify(['YES', 'NO']), // Limitless markets are binary
+    token_yes: `limitless:${market.id}:YES`,
+    token_no: `limitless:${market.id}:NO`,
     created_at: parseDate(market.createdAt) || undefined,
     updated_at: parseDate(market.updatedAt) || undefined,
   };
