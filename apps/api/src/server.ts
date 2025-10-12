@@ -109,7 +109,7 @@ class PolymarketRateLimiter {
             market: request.key,
             interval: 'max'
           });
-          result = await this.makeRequest('/prices-history', params);
+          result = await this.makeRequest('/price-history', params);
         }
         
         request.resolve(result);
@@ -312,7 +312,10 @@ class PolymarketClient {
     }
     
     // Create new request promise for max data
-    const requestPromise = polymarketRateLimiter.queueRequest(tokenId, {});
+    const requestPromise = polymarketRateLimiter.queueRequest(tokenId, { 
+      endpoint: '/price-history',
+      params: new URLSearchParams({ market: tokenId, interval: 'max' })
+    });
     
     // Store the promise for deduplication (using max data key)
     this.pendingRequests.set(maxDataKey, requestPromise);
@@ -546,7 +549,7 @@ app.get("/feed", async (req, reply) => {
   const filter = q.filter; // only use if present
   const sort = q.sort; // only use if present
 
-  const cacheKey = `feed:v6:${limit}:${offset}:${minVol}:${minLiquidity}:${
+  const cacheKey = `feed:v7:${limit}:${offset}:${minVol}:${minLiquidity}:${
     venue ?? ""
   }:${category ?? ""}:${filter ?? ""}:${sort ?? ""}`;
   const r = await getRedis();
@@ -582,7 +585,7 @@ app.get("/feed", async (req, reply) => {
 
   if (venue) {
     eventParams.push(venue);
-    eventWhere.push(`lower(v.name) = $${paramIdx++}`);
+    eventWhere.push(`lower(e.venue) = $${paramIdx++}`);
   }
   if (category) {
     eventParams.push(category);
@@ -591,9 +594,9 @@ app.get("/feed", async (req, reply) => {
 
   // Filtering logic (filter param)
   if (filter === "newest") {
-    eventWhere.push(`e.start_time >= now() - interval '7 days'`);
+    eventWhere.push(`e.start_date >= now() - interval '7 days'`);
   } else if (filter === "endingsoon") {
-    eventWhere.push(`e.end_time <= now() + interval '7 days'`);
+    eventWhere.push(`e.end_date <= now() + interval '7 days'`);
   }
   // if filter is not present, do not apply any filter
 
@@ -603,22 +606,21 @@ app.get("/feed", async (req, reply) => {
   else if (sort === "liquidity")
     eventOrder = "e.liquidity desc nulls last, e.id";
   else if (sort == null) eventOrder = ""; // no sort if not present
-  else eventOrder = "e.start_time desc nulls last, e.id"; // fallback
+  else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
 
   // Aggregate volume/liquidity for events
   const eventSql = `
     select
       e.id,
-      sum(coalesce(m.volume24hr, 0)) as total_volume,
+      sum(coalesce(m.volume_24h, 0)) as total_volume,
       sum(coalesce(m.liquidity, 0)) as total_liquidity,
-      e.start_time,
-      e.end_time
-    from events e
-    join markets m on m.event_id = e.id
-    ${venue ? "join venues v on v.id = e.venue_id" : ""}
+      e.start_date,
+      e.end_date
+    from unified_events e
+    join unified_markets m on m.event_id = e.id
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
-    group by e.id, e.start_time, e.end_time
-    having sum(coalesce(m.volume24hr, 0)) >= $${paramIdx++}
+    group by e.id, e.start_date, e.end_date
+    having sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++}
       and sum(coalesce(m.liquidity, 0)) >= $${paramIdx++}
     ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${limit} offset ${offset}
@@ -645,57 +647,45 @@ app.get("/feed", async (req, reply) => {
   // 2. Fetch all markets for those events, with volume/liquidity filter
   const marketParams: any[] = [minVol, minLiquidity, eventIds];
   const marketWhere: string[] = [
-    "coalesce(m.volume24hr, 0) >= $1",
+    "coalesce(m.volume_24h, 0) >= $1",
     "coalesce(m.liquidity, 0) >= $2",
-    "m.enable_orderbook = true",
-    `m.event_id = ANY($3::uuid[])`,
+    "m.status = 'ACTIVE'",
+    `m.event_id = ANY($3::text[])`,
   ];
 
   // Sorting for markets: use same sort as for events, or none
   let marketOrder = "";
   if (sort === "totalvol")
-    marketOrder = "m.volume24hr desc nulls last, m.market_id";
+    marketOrder = "m.volume_24h desc nulls last, m.venue_market_id";
   else if (sort === "liquidity")
-    marketOrder = "m.liquidity desc nulls last, m.market_id";
+    marketOrder = "m.liquidity desc nulls last, m.venue_market_id";
   else if (sort == null) marketOrder = ""; // no sort if not present
-  else marketOrder = "e.start_time desc nulls last, m.market_id"; // fallback
+  else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
 
   const marketSql = `
     select
       e.id as event_id,
       e.title as event_title,
       e.category,
-      e.start_time,
-      e.end_time,
+      e.start_date,
+      e.end_date,
       e.liquidity as event_liquidity,
       e.volume_total as event_volume,
       m.id as market_uuid,
-      v.name as venue,
-      m.market_id,
+      m.venue,
+      m.venue_market_id,
       m.title as market_title,
-      m.volume24hr,
+      m.volume_24h,
       m.liquidity,
-      m.accepting_orders,
-      m.clob_token_yes,
-      m.clob_token_no,
-      ly.best_bid as yes_bid, ly.best_ask as yes_ask,
-      ln.best_bid as no_bid,  ln.best_ask as no_ask,
-      greatest(coalesce(ly.ts, '-infinity'), coalesce(ln.ts, '-infinity')) as last_update
-    from events e
-    join markets m on m.event_id = e.id
-    join venues v on v.id = m.venue_id
-    left join (
-      select distinct on (bt.token_id)
-        bt.token_id, bt.best_bid, bt.best_ask, bt.ts
-      from book_top bt
-      order by bt.token_id, bt.ts desc
-    ) ly on ly.token_id = m.clob_token_yes
-    left join (
-      select distinct on (bt.token_id)
-        bt.token_id, bt.best_bid, bt.best_ask, bt.ts
-      from book_top bt
-      order by bt.token_id, bt.ts desc
-    ) ln on ln.token_id = m.clob_token_no
+      m.best_bid,
+      m.best_ask,
+      m.last_price,
+      m.token_yes,
+      m.token_no,
+      m.clob_token_ids,
+      m.updated_at as last_update
+    from unified_events e
+    join unified_markets m on m.event_id = e.id
     where ${marketWhere.join(" and ")}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
@@ -711,27 +701,46 @@ app.get("/feed", async (req, reply) => {
         eventId: eid,
         eventTitle: r.event_title,
         category: r.category,
-        startTime: r.start_time,
-        endTime: r.end_time,
+        startTime: r.start_date,
+        endTime: r.end_date,
         eventLiquidity:
           r.event_liquidity != null ? Number(r.event_liquidity) : 0,
         eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
         markets: [],
       };
     }
+    // Parse token IDs based on venue
+    let tokens = { yes: null, no: null };
+    if (r.venue === 'polymarket' && r.clob_token_ids) {
+      try {
+        const tokenIds = JSON.parse(r.clob_token_ids);
+        tokens = {
+          yes: tokenIds[0] || null,
+          no: tokenIds[1] || null
+        };
+      } catch (error) {
+        // Invalid JSON, keep tokens as null
+      }
+    } else if (r.venue === 'limitless' || r.venue === 'kalshi') {
+      tokens = {
+        yes: r.token_yes,
+        no: r.token_no
+      };
+    }
+
     eventMap[eid].markets.push({
       venue: r.venue,
-      marketId: r.market_id,
+      marketId: r.venue_market_id,
       marketTitle: r.market_title,
-      volume24h: r.volume24hr != null ? Number(r.volume24hr) : 0,
+      volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
       liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
-      acceptingOrders: r.accepting_orders,
-      tokens: { yes: r.clob_token_yes, no: r.clob_token_no },
+      acceptingOrders: true, // Always true for active markets in unified table
+      tokens,
       top: {
-        yesBid: r.yes_bid != null ? Number(r.yes_bid) : null,
-        yesAsk: r.yes_ask != null ? Number(r.yes_ask) : null,
-        noBid: r.no_bid != null ? Number(r.no_bid) : null,
-        noAsk: r.no_ask != null ? Number(r.no_ask) : null,
+        yesBid: r.best_bid != null ? Number(r.best_bid) : null,
+        yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
+        noBid: r.best_bid != null ? Number(1 - r.best_bid) : null, // Calculate no bid from yes bid
+        noAsk: r.best_ask != null ? Number(1 - r.best_ask) : null, // Calculate no ask from yes ask
       },
       lastUpdate: r.last_update,
     });
@@ -776,6 +785,171 @@ app.get("/feed", async (req, reply) => {
   );
   reply.header("Content-Type", "application/json; charset=utf-8");
   return reply.send(body);
+});
+
+/**
+ * GET /markets/:marketId
+ * Get detailed information for a specific market
+ */
+app.get("/markets/:marketId", async (request, reply) => {
+  const { marketId } = request.params as { marketId: string };
+  
+  if (!marketId) {
+    reply.code(400);
+    return reply.send({ error: "marketId parameter is required" });
+  }
+  
+  // Check client rate limiting
+  const clientIp = request.ip || 'unknown';
+  const rateLimitKey = `market:${clientIp}`;
+  const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
+  
+  if (!canProceed) {
+    reply.code(429);
+    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+  }
+  
+  // Create cache key
+  const cacheKey = `market:${marketId}`;
+  const r = await getRedis();
+  
+  // Check cache first (30-second cache for market data)
+  if (r) {
+    const cachedData = await r.get(cacheKey);
+    if (cachedData) {
+      reply.header("x-cache", "hit");
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      return reply.send(cachedData);
+    }
+  }
+  
+  try {
+    // Query for market details with event information
+    const marketSql = `
+      SELECT
+        e.id as event_id,
+        e.title as event_title,
+        e.description as event_description,
+        e.category,
+        e.start_date,
+        e.end_date,
+        e.liquidity as event_liquidity,
+        e.volume_total as event_volume,
+        m.id as market_id,
+        m.venue,
+        m.venue_market_id,
+        m.title as market_title,
+        m.description as market_description,
+        m.market_type,
+        m.open_time,
+        m.close_time,
+        m.expiration_time,
+        m.volume_24h,
+        m.liquidity,
+        m.best_bid,
+        m.best_ask,
+        m.last_price,
+        m.outcomes,
+        m.token_yes,
+        m.token_no,
+        m.clob_token_ids,
+        m.created_at,
+        m.updated_at
+      FROM unified_events e
+      JOIN unified_markets m ON m.event_id = e.id
+      WHERE m.id = $1 OR m.venue_market_id = $1
+    `;
+    
+    const { rows } = await pool.query(marketSql, [marketId]);
+    
+    if (rows.length === 0) {
+      reply.code(404);
+      return reply.send({ error: "Market not found" });
+    }
+    
+    const market = rows[0];
+    
+    // Parse token IDs based on venue
+    let tokens = { yes: null, no: null };
+    if (market.venue === 'polymarket' && market.clob_token_ids) {
+      try {
+        const tokenIds = JSON.parse(market.clob_token_ids);
+        tokens = {
+          yes: tokenIds[0] || null,
+          no: tokenIds[1] || null
+        };
+      } catch (error) {
+        // Invalid JSON, keep tokens as null
+      }
+    } else if (market.venue === 'limitless' || market.venue === 'kalshi') {
+      tokens = {
+        yes: market.token_yes,
+        no: market.token_no
+      };
+    }
+    
+    // Parse outcomes if available
+    let outcomes = null;
+    if (market.outcomes) {
+      try {
+        outcomes = JSON.parse(market.outcomes);
+      } catch (error) {
+        // Invalid JSON, keep outcomes as null
+      }
+    }
+    
+    const response = {
+      marketId: market.market_id,
+      venue: market.venue,
+      venueMarketId: market.venue_market_id,
+      marketTitle: market.market_title,
+      marketDescription: market.market_description,
+      marketType: market.market_type,
+      openTime: market.open_time,
+      closeTime: market.close_time,
+      expirationTime: market.expiration_time,
+      volume24h: market.volume_24h != null ? Number(market.volume_24h) : 0,
+      liquidity: market.liquidity != null ? Number(market.liquidity) : 0,
+      bestBid: market.best_bid != null ? Number(market.best_bid) : null,
+      bestAsk: market.best_ask != null ? Number(market.best_ask) : null,
+      lastPrice: market.last_price != null ? Number(market.last_price) : null,
+      outcomes,
+      tokens,
+      createdAt: market.created_at,
+      updatedAt: market.updated_at,
+      event: {
+        eventId: market.event_id,
+        eventTitle: market.event_title,
+        eventDescription: market.event_description,
+        category: market.category,
+        startTime: market.start_date,
+        endTime: market.end_date,
+        eventLiquidity: market.event_liquidity != null ? Number(market.event_liquidity) : 0,
+        eventVolume: market.event_volume != null ? Number(market.event_volume) : 0,
+      }
+    };
+    
+    const responseBody = JSON.stringify(response);
+    
+    // Cache for 30 seconds
+    if (r) {
+      await r.set(cacheKey, responseBody, { EX: 30 });
+      reply.header("x-cache", "miss");
+    }
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+    return reply.send(responseBody);
+    
+  } catch (error) {
+    app.log.error({ error, marketId }, 'Market details fetch failed');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
 });
 
 /**
