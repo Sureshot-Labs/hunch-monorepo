@@ -68,7 +68,7 @@ headers: {
 
 **Endpoint**: `GET /feed`
 
-**Description**: Get a paginated list of markets with real-time pricing data, volume, and liquidity information.
+**Description**: Get a paginated list of markets with real-time pricing data, volume, and liquidity information. Default sorting uses a trending algorithm that balances multiple factors for optimal market discovery.
 
 **Query Parameters**:
 - `limit` (optional): Number of results per page (default: 20, max: 100)
@@ -78,7 +78,16 @@ headers: {
 - `venue` (optional): Filter by venue ("polymarket", "kalshi")
 - `category` (optional): Filter by category
 - `filter` (optional): Special filters ("newest", "endingsoon")
-- `sort` (optional): Sort order ("totalvol", "liquidity", default: newest)
+- `sort` (optional): Sort order ("totalvol", "liquidity", default: trending)
+
+**Trending Algorithm (Default)**:
+The default sorting uses a weighted scoring system to identify trending markets:
+- **40%** - 24h Volume: Recent trading activity
+- **30%** - Liquidity: Market depth and ease of trading  
+- **20%** - New Events: Events created in the last 7 days get a boost
+- **10%** - Ending Soon: Events ending within 7 days get a smaller boost
+
+This creates a balanced view that highlights active, liquid markets while giving visibility to new and time-sensitive events.
 
 **Example Request**:
 ```javascript

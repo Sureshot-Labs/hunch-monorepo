@@ -531,7 +531,9 @@ app.get("/prices/stream", async (request, reply) => {
  *  - min_volume24hr?: number (default > 0)
  *  - venue?: string ("polymarket" | "kalshi" | "limitless")
  *  - category?: string (exact match)
+ *  - sort?: string ("totalvol", "liquidity", default: "trending")
  *
+ * Default sorting uses trending algorithm: 40% volume + 30% liquidity + 20% new events + 10% ending soon
  * Adds ETag + Cache-Control. Uses Redis string body as the single source of truth
  * so ETag always matches the exact bytes sent.
  */
@@ -605,8 +607,16 @@ app.get("/feed", async (req, reply) => {
   if (sort === "totalvol") eventOrder = "e.volume_total desc nulls last, e.id";
   else if (sort === "liquidity")
     eventOrder = "e.liquidity desc nulls last, e.id";
-  else if (sort == null) eventOrder = ""; // no sort if not present
-  else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
+  else if (sort == null) {
+    // Trending algorithm: combines volume, liquidity, and recency
+    eventOrder = `
+      (coalesce(e.volume_24h, 0) * 0.4 + 
+       coalesce(e.liquidity, 0) * 0.3 + 
+       case when e.start_date >= now() - interval '7 days' then 1000 else 0 end * 0.2 +
+       case when e.end_date <= now() + interval '7 days' then 500 else 0 end * 0.1
+      ) desc nulls last, e.id
+    `;
+  } else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
 
   // Aggregate volume/liquidity for events
   const eventSql = `
@@ -659,8 +669,16 @@ app.get("/feed", async (req, reply) => {
     marketOrder = "m.volume_24h desc nulls last, m.venue_market_id";
   else if (sort === "liquidity")
     marketOrder = "m.liquidity desc nulls last, m.venue_market_id";
-  else if (sort == null) marketOrder = ""; // no sort if not present
-  else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
+  else if (sort == null) {
+    // Trending algorithm for markets: combines volume, liquidity, and recency
+    marketOrder = `
+      (coalesce(m.volume_24h, 0) * 0.4 + 
+       coalesce(m.liquidity, 0) * 0.3 + 
+       case when e.start_date >= now() - interval '7 days' then 1000 else 0 end * 0.2 +
+       case when e.end_date <= now() + interval '7 days' then 500 else 0 end * 0.1
+      ) desc nulls last, m.venue_market_id
+    `;
+  } else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
 
   const marketSql = `
     select
