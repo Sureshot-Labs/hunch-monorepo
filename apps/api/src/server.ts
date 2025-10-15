@@ -529,7 +529,7 @@ app.get("/prices/stream", async (request, reply) => {
  *  - limit?: number (default env.defaultLimit, max env.maxLimit)
  *  - offset?: number (default 0)
  *  - min_volume24hr?: number (default > 0)
- *  - venue?: string ("polymarket" | "kalshi")
+ *  - venue?: string ("polymarket" | "kalshi" | "limitless")
  *  - category?: string (exact match)
  *
  * Adds ETag + Cache-Control. Uses Redis string body as the single source of truth
@@ -620,7 +620,7 @@ app.get("/feed", async (req, reply) => {
     join unified_markets m on m.event_id = e.id
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date
-    having sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++}
+    having (sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++} or sum(m.volume_24h) is null)
       and sum(coalesce(m.liquidity, 0)) >= $${paramIdx++}
     ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${limit} offset ${offset}
@@ -647,7 +647,7 @@ app.get("/feed", async (req, reply) => {
   // 2. Fetch all markets for those events, with volume/liquidity filter
   const marketParams: any[] = [minVol, minLiquidity, eventIds];
   const marketWhere: string[] = [
-    "coalesce(m.volume_24h, 0) >= $1",
+    "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
     "coalesce(m.liquidity, 0) >= $2",
     "m.status = 'ACTIVE'",
     `m.event_id = ANY($3::text[])`,
