@@ -607,7 +607,13 @@ app.get("/feed", async (req, reply) => {
   if (sort === "totalvol") eventOrder = "e.volume_total desc nulls last, e.id";
   else if (sort === "liquidity")
     eventOrder = "e.liquidity desc nulls last, e.id";
-  else if (sort == null) {
+  else if (filter === "newest") {
+    // When filtering by newest, sort by start_date descending (newest first)
+    eventOrder = "e.start_date desc nulls last, e.id";
+  } else if (filter === "endingsoon") {
+    // When filtering by ending soon, sort by end_date ascending (ending soonest first)
+    eventOrder = "e.end_date asc nulls last, e.id";
+  } else if (sort == null) {
     // Trending algorithm: combines volume, liquidity, and recency
     eventOrder = `
       (coalesce(e.volume_24h, 0) * 0.4 + 
@@ -669,7 +675,13 @@ app.get("/feed", async (req, reply) => {
     marketOrder = "m.volume_24h desc nulls last, m.venue_market_id";
   else if (sort === "liquidity")
     marketOrder = "m.liquidity desc nulls last, m.venue_market_id";
-  else if (sort == null) {
+  else if (filter === "newest") {
+    // When filtering by newest, sort by event start_date descending (newest first)
+    marketOrder = "e.start_date desc nulls last, m.venue_market_id";
+  } else if (filter === "endingsoon") {
+    // When filtering by ending soon, sort by event end_date ascending (ending soonest first)
+    marketOrder = "e.end_date asc nulls last, m.venue_market_id";
+  } else if (sort == null) {
     // Trending algorithm for markets: combines volume, liquidity, and recency
     marketOrder = `
       (coalesce(m.volume_24h, 0) * 0.4 + 

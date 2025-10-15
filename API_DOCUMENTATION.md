@@ -77,7 +77,7 @@ headers: {
 - `min_liquidity` (optional): Minimum liquidity filter (default: 0)
 - `venue` (optional): Filter by venue ("polymarket", "kalshi")
 - `category` (optional): Filter by category (exact match). Categories are extracted from market titles for Polymarket, provided by Kalshi/Limitless APIs
-- `filter` (optional): Special filters ("newest", "endingsoon")
+- `filter` (optional): Special filters ("newest", "endingsoon"). When used, automatically applies appropriate sorting (newest first for "newest", ending soonest first for "endingsoon")
 - `sort` (optional): Sort order ("totalvol", "liquidity", default: trending)
 
 **Trending Algorithm (Default)**:
@@ -115,8 +115,14 @@ GET /feed?category=Sports&min_volume24hr=1000&sort=totalvol
 // Get all markets (default trending)
 GET /feed
 
-// Get new technology markets
+// Get new technology markets (sorted by newest first)
 GET /feed?category=Technology&filter=newest
+
+// Get events ending soon (sorted by ending soonest first)
+GET /feed?filter=endingsoon
+
+// Get newest crypto markets (sorted by newest first)
+GET /feed?category=Crypto&filter=newest&limit=10
 ```
 
 **Example Response**:
