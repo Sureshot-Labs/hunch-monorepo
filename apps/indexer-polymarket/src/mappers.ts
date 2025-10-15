@@ -201,6 +201,37 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
 }
 
 // Unified table mappers for Polymarket
+// Category extraction function for Polymarket
+function extractCategoryFromTitle(title: string, description?: string | null): string | undefined {
+  const text = `${title} ${description || ''}`.toLowerCase();
+  
+  // Define category keywords
+  const categories = {
+    'Politics': ['election', 'president', 'congress', 'senate', 'vote', 'candidate', 'political', 'government', 'policy', 'democrat', 'republican', 'biden', 'trump'],
+    'Crypto': ['bitcoin', 'ethereum', 'crypto', 'blockchain', 'defi', 'nft', 'altcoin', 'dogecoin', 'solana', 'cardano', 'polygon'],
+    'Sports': ['nfl', 'nba', 'mlb', 'soccer', 'football', 'basketball', 'baseball', 'hockey', 'olympics', 'championship', 'playoff', 'super bowl'],
+    'Economics': ['gdp', 'inflation', 'recession', 'fed', 'interest rate', 'unemployment', 'market', 'economy', 'financial'],
+    'Technology': ['ai', 'artificial intelligence', 'tech', 'apple', 'google', 'microsoft', 'tesla', 'meta', 'amazon'],
+    'Entertainment': ['movie', 'film', 'oscar', 'netflix', 'disney', 'marvel', 'star wars', 'entertainment', 'celebrity'],
+    'Weather': ['hurricane', 'tornado', 'weather', 'climate', 'temperature', 'rain', 'snow', 'storm'],
+    'Health': ['covid', 'pandemic', 'vaccine', 'health', 'medical', 'disease', 'hospital'],
+  };
+
+  // Find the category with the most keyword matches
+  let bestCategory: string | undefined;
+  let maxMatches = 0;
+
+  for (const [category, keywords] of Object.entries(categories)) {
+    const matches = keywords.filter(keyword => text.includes(keyword)).length;
+    if (matches > maxMatches) {
+      maxMatches = matches;
+      bestCategory = category;
+    }
+  }
+
+  return maxMatches > 0 ? bestCategory : undefined;
+}
+
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   // Map Polymarket status to unified status
   let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
@@ -213,7 +244,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     venue_event_id: e.id,
     title: e.title,
     description: e.description ?? undefined,
-    category: undefined, // Polymarket doesn't have categories at event level
+    category: extractCategoryFromTitle(e.title, e.description), // Extract category from title/description
     status,
     start_date: e.startDate ? new Date(e.startDate) : undefined,
     end_date: e.endDate ? new Date(e.endDate) : undefined,
@@ -248,7 +279,7 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
     event_id: `polymarket:${eventId}`,
     title: m.question,
     description: m.description?? undefined,
-    category: undefined, // Polymarket doesn't have categories at market level
+    category: extractCategoryFromTitle(m.question, m.description), // Extract category from market question/description
     status,
     market_type: 'binary', // Polymarket markets are binary
     open_time: m.startDate ? new Date(m.startDate) : undefined,

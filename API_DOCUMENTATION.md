@@ -76,7 +76,7 @@ headers: {
 - `min_volume24hr` (optional): Minimum 24h volume filter (default: 0)
 - `min_liquidity` (optional): Minimum liquidity filter (default: 0)
 - `venue` (optional): Filter by venue ("polymarket", "kalshi")
-- `category` (optional): Filter by category
+- `category` (optional): Filter by category (exact match). Categories are extracted from market titles for Polymarket, provided by Kalshi/Limitless APIs
 - `filter` (optional): Special filters ("newest", "endingsoon")
 - `sort` (optional): Sort order ("totalvol", "liquidity", default: trending)
 
@@ -89,9 +89,34 @@ The default sorting uses a weighted scoring system to identify trending markets:
 
 This creates a balanced view that highlights active, liquid markets while giving visibility to new and time-sensitive events.
 
-**Example Request**:
+**Available Categories**:
+- **Politics**: Elections, government, policy, candidates
+- **Crypto**: Bitcoin, Ethereum, DeFi, NFTs, blockchain
+- **Sports**: NFL, NBA, MLB, soccer, championships
+- **Economics**: GDP, inflation, Fed rates, unemployment
+- **Technology**: AI, Apple, Google, Tesla, tech companies
+- **Entertainment**: Movies, Oscars, Netflix, celebrities
+- **Weather**: Hurricanes, climate, temperature
+- **Health**: COVID, vaccines, medical topics
+
+Categories are automatically extracted from market titles for Polymarket, while Kalshi and Limitless provide native category data.
+
+**Example Requests**:
 ```javascript
-GET /feed?limit=10&venue=polymarket&min_volume24hr=1000&sort=totalvol
+// Get trending crypto markets
+GET /feed?category=Crypto&limit=20
+
+// Get politics markets from Kalshi
+GET /feed?category=Politics&venue=kalshi
+
+// Get sports markets with high volume
+GET /feed?category=Sports&min_volume24hr=1000&sort=totalvol
+
+// Get all markets (default trending)
+GET /feed
+
+// Get new technology markets
+GET /feed?category=Technology&filter=newest
 ```
 
 **Example Response**:
