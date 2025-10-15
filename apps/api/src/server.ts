@@ -2512,6 +2512,254 @@ app.get("/positions", { preHandler: createAuthMiddleware() }, async (request, re
   }
 });
 
+/**
+ * POST /orders/store
+ * Store order data after user performs the order on frontend
+ * This API stores the orderID with walletAddress for tracking purposes
+ */
+app.post("/orders/store", async (request, reply) => {
+  const body = request.body as {
+    walletAddress: string;
+    orderID: string;
+    takingAmount?: string;
+    makingAmount?: string;
+    status?: string;
+    success?: boolean;
+    errorMsg?: string;
+    venue?: string;
+    tokenId?: string;
+    side?: string;
+    price?: number;
+    size?: number;
+  };
+  
+  // Validate required fields
+  if (!body.walletAddress) {
+    reply.code(400);
+    return reply.send({ error: "walletAddress is required" });
+  }
+  
+  if (!body.orderID) {
+    reply.code(400);
+    return reply.send({ error: "orderID is required" });
+  }
+  
+  // Basic wallet address validation
+  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+    reply.code(400);
+    return reply.send({ error: "Invalid wallet address format" });
+  }
+  
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      // Check if user exists for this wallet address
+      const userResult = await client.query(
+        `SELECT u.id FROM users u 
+         JOIN user_wallets uw ON u.id = uw.user_id 
+         WHERE uw.wallet_address = $1`,
+        [body.walletAddress]
+      );
+      
+      if (userResult.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: "User not found for this wallet address" });
+      }
+      
+      const userId = userResult.rows[0].id;
+      
+      // Check if order already exists
+      const existingOrder = await client.query(
+        'SELECT id FROM orders WHERE venue_order_id = $1 AND user_id = $2',
+        [body.orderID, userId]
+      );
+      
+      if (existingOrder.rows.length > 0) {
+        reply.code(409);
+        return reply.send({ error: "Order already exists" });
+      }
+      
+      // Insert new order record
+      const result = await client.query(
+        `INSERT INTO orders (
+          id, user_id, venue, venue_order_id, token_id, side, order_type,
+          price, size, status, filled_size, error_message, raw_error,
+          posted_at, last_update
+        ) VALUES (
+          gen_random_uuid(), $1, $2, $3, $4, $5, 'GTC', $6, $7, $8, 0, $9, $10,
+          now(), now()
+        ) RETURNING id, venue_order_id, status, posted_at`,
+        [
+          userId,
+          body.venue || 'polymarket',
+          body.orderID,
+          body.tokenId || null,
+          body.side || null,
+          body.price || null,
+          body.size || null,
+          body.status || 'live',
+          body.errorMsg || null,
+          body.success === false ? JSON.stringify(body) : null
+        ]
+      );
+      
+      await client.query('COMMIT');
+      
+      const newOrder = result.rows[0];
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: 'Order stored successfully',
+        order: {
+          id: newOrder.id,
+          orderID: newOrder.venue_order_id,
+          status: newOrder.status,
+          storedAt: newOrder.posted_at,
+        },
+      });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, walletAddress: body.walletAddress, orderID: body.orderID }, 'Failed to store order');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to store order',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /orders/user/:walletAddress
+ * Get order IDs for a specific wallet address
+ * This API fetches all order IDs associated with a wallet address
+ */
+app.get("/orders/user/:walletAddress", async (request, reply) => {
+  const { walletAddress } = request.params as { walletAddress: string };
+  const query = request.query as { 
+    limit?: number; 
+    offset?: number; 
+    status?: string;
+    venue?: string;
+  };
+  
+  // Basic wallet address validation
+  if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+    reply.code(400);
+    return reply.send({ error: "Invalid wallet address format" });
+  }
+  
+  try {
+    const client = await pool.connect();
+    try {
+      // Check if user exists for this wallet address
+      const userResult = await client.query(
+        `SELECT u.id FROM users u 
+         JOIN user_wallets uw ON u.id = uw.user_id 
+         WHERE uw.wallet_address = $1`,
+        [walletAddress]
+      );
+      
+      if (userResult.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: "User not found for this wallet address" });
+      }
+      
+      const userId = userResult.rows[0].id;
+      
+      // Build query with filters
+      let whereClause = 'WHERE user_id = $1';
+      const params: any[] = [userId];
+      let paramCount = 1;
+      
+      if (query.status) {
+        paramCount++;
+        whereClause += ` AND status = $${paramCount}`;
+        params.push(query.status);
+      }
+      
+      if (query.venue) {
+        paramCount++;
+        whereClause += ` AND venue = $${paramCount}`;
+        params.push(query.venue);
+      }
+      
+      const limit = Math.min(query.limit || 50, 100); // Max 100 orders
+      const offset = query.offset || 0;
+      
+      // Get orders
+      const result = await client.query(
+        `SELECT 
+          id, venue_order_id, venue, token_id, side, order_type,
+          price, size, status, filled_size, average_fill_price,
+          posted_at, last_update, filled_at, cancelled_at
+        FROM orders 
+        ${whereClause}
+        ORDER BY posted_at DESC
+        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
+        [...params, limit, offset]
+      );
+      
+      // Get total count for pagination
+      const countResult = await client.query(
+        `SELECT COUNT(*) as total FROM orders ${whereClause}`,
+        params
+      );
+      
+      const totalCount = parseInt(countResult.rows[0].total);
+      
+      const orders = result.rows.map(row => ({
+        id: row.id,
+        orderID: row.venue_order_id,
+        venue: row.venue,
+        tokenId: row.token_id,
+        side: row.side,
+        orderType: row.order_type,
+        price: row.price ? parseFloat(row.price) : null,
+        size: row.size ? parseFloat(row.size) : null,
+        status: row.status,
+        filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
+        averageFillPrice: row.average_fill_price ? parseFloat(row.average_fill_price) : null,
+        postedAt: row.posted_at,
+        lastUpdate: row.last_update,
+        filledAt: row.filled_at,
+        cancelledAt: row.cancelled_at,
+      }));
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        walletAddress,
+        orders,
+        pagination: {
+          total: totalCount,
+          limit,
+          offset,
+          hasMore: offset + limit < totalCount,
+        },
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, walletAddress }, 'Failed to fetch orders for wallet address');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch orders',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 export async function start() {
   await getRedis().catch(() => {}); // optional
   const addr = await app.listen({ port: env.port, host: "0.0.0.0" });
