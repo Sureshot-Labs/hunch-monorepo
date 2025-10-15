@@ -676,6 +676,7 @@ app.get("/feed", async (req, reply) => {
       m.venue_market_id,
       m.title as market_title,
       m.volume_24h,
+      m.volume_total,
       m.liquidity,
       m.best_bid,
       m.best_ask,
@@ -733,6 +734,7 @@ app.get("/feed", async (req, reply) => {
       marketId: r.venue_market_id,
       marketTitle: r.market_title,
       volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
+      volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
       liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
       acceptingOrders: true, // Always true for active markets in unified table
       tokens,

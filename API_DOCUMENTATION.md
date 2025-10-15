@@ -107,6 +107,7 @@ GET /feed?limit=10&venue=polymarket&min_volume24hr=1000&sort=totalvol
           "marketId": "market-123",
           "marketTitle": "Bitcoin $100k by 2024",
           "volume24h": 5000,
+          "volumeTotal": 15000,
           "liquidity": 25000,
           "acceptingOrders": true,
           "tokens": {
