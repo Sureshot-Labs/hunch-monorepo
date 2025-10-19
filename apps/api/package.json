@@ -10,7 +10,8 @@
     "fastify": "^4.28.1",
     "pg": "^8.16.3",
     "jsonwebtoken": "^9.0.2",
-    "ethers": "^6.8.1"
+    "ethers": "^6.8.1",
+    "@privy-io/server-auth": "^1.0.0"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

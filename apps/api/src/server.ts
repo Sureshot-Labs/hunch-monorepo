@@ -5,6 +5,7 @@ import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { onReqStart, onReqEnd, getMetrics } from "./metrics.js";
 import { AuthService, createAuthMiddleware, User, UserWallet, PolymarketCredentials } from "./auth.js";
+import { PrivyService } from "./privy-service.js";
 import { VenueOrderManagerFactory } from "./venue-order-manager-factory.js";
 import { PlaceOrderRequest, OrderStatus } from "./order-types.js";
 
@@ -1573,142 +1574,48 @@ app.post("/spreads", async (request, reply) => {
 // ============================================================================
 
 /**
- * POST /auth/nonce
- * Generate a nonce for wallet signature verification
+ * POST /auth/privy
+ * Authenticate user using Privy access token
  */
-app.post("/auth/nonce", async (request, reply) => {
-  const body = request.body as { walletAddress: string };
+app.post("/auth/privy", async (request, reply) => {
+  const body = request.body as { accessToken: string };
   
-  if (!body.walletAddress) {
+  if (!body.accessToken) {
     reply.code(400);
-    return reply.send({ error: "walletAddress is required" });
-  }
-  
-  // Basic wallet address validation
-  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
-    reply.code(400);
-    return reply.send({ error: "Invalid wallet address format" });
-  }
-  
-  const nonce = AuthService.generateNonce();
-  const message = `Sign this message to authenticate with Hunch Trading Platform.\n\nNonce: ${nonce}\nWallet: ${body.walletAddress}`;
-  
-  // Store nonce in Redis with 5-minute expiration
-  const r = await getRedis();
-  if (r) {
-    await r.set(`nonce:${body.walletAddress}`, nonce, { EX: 300 });
-  }
-  
-  reply.header("Content-Type", "application/json; charset=utf-8");
-  return reply.send({
-    nonce,
-    message,
-    expiresIn: 300, // 5 minutes
-  });
-});
-
-/**
- * POST /auth/verify
- * Verify wallet signature and authenticate user
- */
-app.post("/auth/verify", async (request, reply) => {
-  const body = request.body as {
-    walletAddress: string;
-    signature: string;
-    userData?: {
-      email?: string;
-      username?: string;
-      displayName?: string;
-      avatarUrl?: string;
-    };
-  };
-  
-  if (!body.walletAddress || !body.signature) {
-    reply.code(400);
-    return reply.send({ error: "walletAddress and signature are required" });
-  }
-  
-  // Basic wallet address validation
-  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
-    reply.code(400);
-    return reply.send({ error: "Invalid wallet address format" });
+    return reply.send({ error: "accessToken is required" });
   }
   
   const clientIp = request.ip || 'unknown';
   const userAgent = request.headers['user-agent'] || 'unknown';
   
   try {
-    // Get stored nonce
-    const r = await getRedis();
-    let nonce: string | null = null;
+    // Verify Privy access token and get user data
+    const { claims, user: privyUser, walletAddresses, primaryWalletAddress } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
     
-    if (r) {
-      nonce = await r.get(`nonce:${body.walletAddress}`);
-    }
-    
-    if (!nonce) {
-      await AuthService.recordAuthAttempt(
-        body.walletAddress,
-        'verify',
-        false,
-        clientIp,
-        userAgent,
-        'Nonce not found or expired'
-      );
-      
+    if (!primaryWalletAddress) {
       reply.code(400);
-      return reply.send({ error: "Nonce not found or expired. Please request a new nonce." });
+      return reply.send({ error: "No wallet address found in Privy user data" });
     }
     
-    // Verify signature (simplified implementation)
-    const message = `Sign this message to authenticate with Hunch Trading Platform.\n\nNonce: ${nonce}\nWallet: ${body.walletAddress}`;
-    const isValidSignature = AuthService.verifyWalletSignature(
-      body.walletAddress,
-      body.signature,
-      message
-    );
-    
-    if (!isValidSignature) {
-      await AuthService.recordAuthAttempt(
-        body.walletAddress,
-        'verify',
-        false,
-        clientIp,
-        userAgent,
-        'Invalid signature'
-      );
-      
-      reply.code(401);
-      return reply.send({ error: "Invalid signature" });
-    }
-    
-    // Create or update user
-    const user = await AuthService.createOrUpdateUser(body.walletAddress, body.userData);
-    console.log('user', user);
+    // Create or update user in our database
+    const user = await AuthService.createOrUpdateUserFromPrivy(privyUser, claims);
     
     // Generate session token
-    const sessionToken = AuthService.generateToken(user.id, body.walletAddress);
-    console.log('sessionToken', sessionToken);
+    const sessionToken = AuthService.generateToken(user.id, primaryWalletAddress);
     
     // Create session
     const session = await AuthService.createSession(
       user.id,
       sessionToken,
-      body.walletAddress,
+      primaryWalletAddress,
       clientIp,
       userAgent
     );
-    console.log('session', session);  
-    
-    // Clean up nonce
-    if (r) {
-      await r.del(`nonce:${body.walletAddress}`);
-    }
     
     // Record successful authentication
     await AuthService.recordAuthAttempt(
-      body.walletAddress,
-      'verify',
+      primaryWalletAddress,
+      'privy-auth',
       true,
       clientIp,
       userAgent
@@ -1731,22 +1638,25 @@ app.post("/auth/verify", async (request, reply) => {
         token: sessionToken,
         expiresAt: session.expiresAt,
       },
-      walletAddress: body.walletAddress,
+      walletAddresses,
+      primaryWalletAddress,
+      privyUserId: privyUser.id,
     });
     
   } catch (error) {
-    app.log.error({ error, walletAddress: body.walletAddress }, 'Authentication failed');
+    app.log.error({ error }, 'Privy authentication failed');
     
+    // Record failed authentication attempt
     await AuthService.recordAuthAttempt(
-      body.walletAddress,
-      'verify',
+      'unknown',
+      'privy-auth',
       false,
       clientIp,
       userAgent,
       error instanceof Error ? error.message : 'Unknown error'
     );
     
-    reply.code(500);
+    reply.code(401);
     return reply.send({ 
       error: 'Authentication failed',
       message: error instanceof Error ? error.message : 'Unknown error'

@@ -17,4 +17,6 @@ export const env = {
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "2"),
+  privyAppId: req("PRIVY_APP_ID"),
+  privyAppSecret: req("PRIVY_APP_SECRET"),
 };

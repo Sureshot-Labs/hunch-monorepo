@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { pool } from './db.js';
 import { env } from './env.js';
+import { PrivyService, PrivyUser, PrivyClaims } from './privy-service.js';
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
@@ -114,7 +115,111 @@ export class AuthService {
   }
 
   /**
-   * Create or update user from wallet address
+   * Create or update user from Privy authentication
+   */
+  static async createOrUpdateUserFromPrivy(privyUser: PrivyUser, privyClaims: PrivyClaims): Promise<User> {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      // Extract user data from Privy
+      const email = privyUser.email?.address;
+      const walletAddresses = PrivyService.extractWalletAddresses(privyUser);
+      const primaryWalletAddress = PrivyService.getPrimaryWalletAddress(privyUser);
+      
+      if (!primaryWalletAddress) {
+        throw new Error('No wallet address found in Privy user data');
+      }
+      
+      // Check if user exists with any of the wallet addresses
+      let userId: string;
+      const walletPlaceholders = walletAddresses.map((_, index) => `$${index + 1}`).join(',');
+      
+      const walletResult = await client.query(
+        `SELECT DISTINCT user_id FROM user_wallets WHERE wallet_address IN (${walletPlaceholders})`,
+        walletAddresses
+      );
+      
+      if (walletResult.rows.length > 0) {
+        userId = walletResult.rows[0].user_id;
+        
+        // Update user data
+        await client.query(
+          `UPDATE users SET 
+           email = $1, 
+           last_login_at = now(),
+           updated_at = now()
+           WHERE id = $2`,
+          [email || null, userId]
+        );
+        
+        // Add any new wallet addresses
+        for (const walletAddress of walletAddresses) {
+          const existingWallet = await client.query(
+            'SELECT id FROM user_wallets WHERE wallet_address = $1 AND user_id = $2',
+            [walletAddress, userId]
+          );
+          
+          if (existingWallet.rows.length === 0) {
+            await client.query(
+              `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
+               VALUES ($1, $2, 'ethereum', $3, true)`,
+              [userId, walletAddress, walletAddress === primaryWalletAddress]
+            );
+          }
+        }
+      } else {
+        // Create new user
+        const userResult = await client.query(
+          `INSERT INTO users (email, last_login_at) 
+           VALUES ($1, now()) 
+           RETURNING id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
+          [email || null]
+        );
+        
+        userId = userResult.rows[0].id;
+        
+        // Create wallet records
+        for (const walletAddress of walletAddresses) {
+          await client.query(
+            `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
+             VALUES ($1, $2, 'ethereum', $3, true)`,
+            [userId, walletAddress, walletAddress === primaryWalletAddress]
+          );
+        }
+        
+        // Create trading preferences
+        await client.query(
+          `INSERT INTO user_trading_preferences (user_id) VALUES ($1)`,
+          [userId]
+        );
+        
+        // Create trading stats
+        await client.query(
+          `INSERT INTO user_trading_stats (user_id) VALUES ($1)`,
+          [userId]
+        );
+      }
+      
+      // Get the user data
+      const userResult = await client.query(
+        'SELECT id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      await client.query('COMMIT');
+      
+      return userResult.rows[0];
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Create or update user from wallet address (legacy method - kept for backward compatibility)
    */
   static async createOrUpdateUser(walletAddress: string, userData?: {
     email?: string;
