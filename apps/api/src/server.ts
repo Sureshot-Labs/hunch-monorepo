@@ -552,7 +552,7 @@ app.get("/feed", async (req, reply) => {
   const filter = q.filter; // only use if present
   const sort = q.sort; // only use if present
 
-  const cacheKey = `feed:v7:${limit}:${offset}:${minVol}:${minLiquidity}:${
+  const cacheKey = `feed:v8:${limit}:${offset}:${minVol}:${minLiquidity}:${
     venue ?? ""
   }:${category ?? ""}:${filter ?? ""}:${sort ?? ""}`;
   const r = await getRedis();
@@ -602,6 +602,9 @@ app.get("/feed", async (req, reply) => {
     eventWhere.push(`e.end_date <= now() + interval '7 days'`);
   }
   // if filter is not present, do not apply any filter
+
+  // Always exclude expired events
+  eventWhere.push("(e.end_date IS NULL OR e.end_date > now())");
 
   // Sorting logic (sort param)
   let eventOrder = "";
@@ -668,6 +671,8 @@ app.get("/feed", async (req, reply) => {
     "coalesce(m.liquidity, 0) >= $2",
     "m.status = 'ACTIVE'",
     `m.event_id = ANY($3::text[])`,
+    // Add expiration filter: exclude markets past their expiration time
+    "(m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())",
   ];
 
   // Sorting for markets: use same sort as for events, or none

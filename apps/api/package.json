@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx src/server.ts"
+    "dev": "tsx src/server.ts",
+    "cleanup:expired": "tsx src/cleanup-expired-markets.ts"
   },
   "dependencies": {
     "fastify": "^4.28.1",
