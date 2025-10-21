@@ -154,7 +154,9 @@ export function mapToUnifiedEvent(e: z.infer<typeof KalshiEvent>): UnifiedEventR
     end_date: undefined, // NULL (timestamp of last expiring market)
     volume_total: volSum || undefined,
     volume_24h: vol24Sum || undefined,
+    open_interest: markets.reduce((s, m) => s + (n((m as any).open_interest) ?? 0), 0) || undefined,
     liquidity: liqSum || undefined,
+    slug: undefined, // Kalshi doesn't provide slug data
     created_at: undefined, // Kalshi doesn't provide event creation time
     updated_at: undefined, // Kalshi doesn't provide event update time
   };
@@ -190,10 +192,12 @@ export function mapToUnifiedMarket(m: z.infer<typeof KalshiMarket>, eventId: str
     last_price: lastPrice,
     volume_total: n((m as any).volume) ?? undefined,
     volume_24h: n(m.volume_24h) ?? undefined,
+    open_interest: n((m as any).open_interest) ?? undefined,
     liquidity: n(m.liquidity) ?? undefined,
     outcomes: JSON.stringify(['YES', 'NO']), // Kalshi markets are binary
     token_yes: `kalshi:${m.ticker}:YES`,
     token_no: `kalshi:${m.ticker}:NO`,
+    slug: undefined, // Kalshi doesn't provide slug data
     created_at: undefined, // Kalshi doesn't provide market creation time
     updated_at: undefined, // Kalshi doesn't provide market update time
   };

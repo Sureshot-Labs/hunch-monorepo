@@ -89,6 +89,17 @@ The default sorting uses a weighted scoring system to identify trending markets:
 
 This creates a balanced view that highlights active, liquid markets while giving visibility to new and time-sensitive events.
 
+**Response Fields**:
+- **eventVolume**: Total volume across all markets for an event
+- **eventLiquidity**: Total liquidity across all markets for an event  
+- **eventOpenInterest**: Total open interest/wager across all markets for an event (available for Polymarket and Kalshi)
+- **eventSlug**: URL-friendly identifier for the event (available for Polymarket and Limitless)
+- **volume24h**: 24-hour trading volume for the specific market
+- **volumeTotal**: Total trading volume for the specific market
+- **openInterest**: Open interest/wager for the specific market (available for Polymarket and Kalshi)
+- **marketSlug**: URL-friendly identifier for the market (available for Polymarket and Limitless)
+- **liquidity**: Market depth and ease of trading
+
 **Available Categories**:
 - **Politics**: Elections, government, policy, candidates
 - **Crypto**: Bitcoin, Ethereum, DeFi, NFTs, blockchain
@@ -141,13 +152,17 @@ GET /feed?category=Crypto&filter=newest&limit=10
       "endTime": "2024-12-31T23:59:59Z",
       "eventLiquidity": 50000,
       "eventVolume": 25000,
+      "eventOpenInterest": 12000,
+      "eventSlug": "bitcoin-100k-2024",
       "markets": [
         {
           "venue": "polymarket",
           "marketId": "market-123",
           "marketTitle": "Bitcoin $100k by 2024",
+          "marketSlug": "bitcoin-100k-by-2024",
           "volume24h": 5000,
           "volumeTotal": 15000,
+          "openInterest": 3000,
           "liquidity": 25000,
           "acceptingOrders": true,
           "tokens": {

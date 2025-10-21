@@ -702,12 +702,15 @@ app.get("/feed", async (req, reply) => {
       e.end_date,
       e.liquidity as event_liquidity,
       e.volume_total as event_volume,
+      e.open_interest as event_open_interest,
+      e.slug as event_slug,
       m.id as market_uuid,
       m.venue,
       m.venue_market_id,
       m.title as market_title,
       m.volume_24h,
       m.volume_total,
+      m.open_interest,
       m.liquidity,
       m.best_bid,
       m.best_ask,
@@ -715,6 +718,7 @@ app.get("/feed", async (req, reply) => {
       m.token_yes,
       m.token_no,
       m.clob_token_ids,
+      m.slug as market_slug,
       m.updated_at as last_update
     from unified_events e
     join unified_markets m on m.event_id = e.id
@@ -738,6 +742,8 @@ app.get("/feed", async (req, reply) => {
         eventLiquidity:
           r.event_liquidity != null ? Number(r.event_liquidity) : 0,
         eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
+        eventOpenInterest: r.event_open_interest != null ? Number(r.event_open_interest) : 0,
+        eventSlug: r.event_slug,
         markets: [],
       };
     }
@@ -764,8 +770,10 @@ app.get("/feed", async (req, reply) => {
       venue: r.venue,
       marketId: r.venue_market_id,
       marketTitle: r.market_title,
+      marketSlug: r.market_slug,
       volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
       volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
+      openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
       liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
       acceptingOrders: true, // Always true for active markets in unified table
       tokens,
@@ -790,6 +798,8 @@ app.get("/feed", async (req, reply) => {
         endTime: null,
         eventLiquidity: 0,
         eventVolume: 0,
+        eventOpenInterest: 0,
+        eventSlug: null,
         markets: [],
       }
   );
