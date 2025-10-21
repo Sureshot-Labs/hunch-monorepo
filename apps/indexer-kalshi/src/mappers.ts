@@ -197,6 +197,7 @@ export function mapToUnifiedMarket(m: z.infer<typeof KalshiMarket>, eventId: str
     outcomes: JSON.stringify(['YES', 'NO']), // Kalshi markets are binary
     token_yes: `kalshi:${m.ticker}:YES`,
     token_no: `kalshi:${m.ticker}:NO`,
+    condition_id: undefined, // Kalshi doesn't have condition_id
     slug: undefined, // Kalshi doesn't provide slug data
     created_at: undefined, // Kalshi doesn't provide market creation time
     updated_at: undefined, // Kalshi doesn't provide market update time

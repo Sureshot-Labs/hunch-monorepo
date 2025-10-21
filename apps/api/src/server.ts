@@ -723,6 +723,7 @@ app.get("/feed", async (req, reply) => {
       m.token_yes,
       m.token_no,
       m.clob_token_ids,
+      m.condition_id,
       m.slug as market_slug,
       m.updated_at as last_update
     from unified_events e
@@ -782,6 +783,7 @@ app.get("/feed", async (req, reply) => {
       liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
       acceptingOrders: true, // Always true for active markets in unified table
       tokens,
+      conditionId: r.condition_id || null,
       top: {
         yesBid: r.best_bid != null ? Number(r.best_bid) : null,
         yesAsk: r.best_ask != null ? Number(r.best_ask) : null,

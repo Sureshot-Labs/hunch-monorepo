@@ -296,6 +296,7 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
     liquidity: n(m.liquidity)?? undefined,
     outcomes: m.outcomes?? undefined, // Already JSON string
     clob_token_ids: clobTokenIds,
+    condition_id: m.conditionId ?? undefined,
     slug: m.slug ?? undefined,
     created_at: m.createdAt ? new Date(m.createdAt) : undefined,
     updated_at: m.updatedAt ? new Date(m.updatedAt) : undefined,

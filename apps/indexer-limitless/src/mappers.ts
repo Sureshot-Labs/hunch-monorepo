@@ -267,6 +267,7 @@ export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string
     outcomes: JSON.stringify(['YES', 'NO']), // Limitless markets are binary
     token_yes: `limitless:${market.id}:YES`,
     token_no: `limitless:${market.id}:NO`,
+    condition_id: market.conditionId ?? undefined,
     slug: market.slug || undefined,
     created_at: parseDate(market.createdAt) || undefined,
     updated_at: parseDate(market.updatedAt) || undefined,
