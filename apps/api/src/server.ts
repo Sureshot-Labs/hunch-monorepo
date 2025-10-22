@@ -905,6 +905,7 @@ app.get("/markets/:marketId", async (request, reply) => {
         m.token_no,
         m.clob_token_ids,
         m.condition_id,
+        m.slug,
         m.created_at,
         m.updated_at
       FROM unified_events e
@@ -968,6 +969,7 @@ app.get("/markets/:marketId", async (request, reply) => {
       outcomes,
       tokens,
       conditionId: market.condition_id || null,
+      marketSlug: market.slug || null,
       createdAt: market.created_at,
       updatedAt: market.updated_at,
       event: {
