@@ -904,6 +904,7 @@ app.get("/markets/:marketId", async (request, reply) => {
         m.token_yes,
         m.token_no,
         m.clob_token_ids,
+        m.condition_id,
         m.created_at,
         m.updated_at
       FROM unified_events e
@@ -966,6 +967,7 @@ app.get("/markets/:marketId", async (request, reply) => {
       lastPrice: market.last_price != null ? Number(market.last_price) : null,
       outcomes,
       tokens,
+      conditionId: market.condition_id || null,
       createdAt: market.created_at,
       updatedAt: market.updated_at,
       event: {
