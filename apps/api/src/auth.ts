@@ -5,8 +5,11 @@ import { env } from './env.js';
 import { PrivyService, PrivyUser, PrivyClaims } from './privy-service.js';
 
 // JWT secret - in production, this should be in environment variables
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required');
+}
 
 export interface User {
   id: string;
@@ -75,7 +78,7 @@ export class AuthService {
       jti: crypto.randomBytes(16).toString('hex'), // Unique token identifier
     };
     
-    return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    return jwt.sign(payload, JWT_SECRET as string, { expiresIn: JWT_EXPIRES_IN });
   }
 
   /**
@@ -83,7 +86,7 @@ export class AuthService {
    */
   static verifyToken(token: string): { userId: string; walletAddress: string } | null {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const decoded = jwt.verify(token, JWT_SECRET as string) as any;
       return {
         userId: decoded.userId,
         walletAddress: decoded.walletAddress,

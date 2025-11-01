@@ -27,3 +27,6 @@ test-hunch.txt
 
 # Turborepo
 .turbo/
+
+BRANCH_PROTECTION_CHECKLIST.md
+SECURITY_REVIEW_REPORT.md
