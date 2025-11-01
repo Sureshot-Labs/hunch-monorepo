@@ -1,7 +1,7 @@
 // apps/indexer-kalshi/src/bootstrap.ts
 import { ensureRedis, redis } from "../../indexer-polymarket/src/redis";
 import { env } from "./env";
-import { fetchAllEventsWithNestedMarkets } from "./marketClient";
+import { iterateEventsWithMarkets } from "./marketClient";
 import {
   getVenueId,
   upsertToken,
@@ -20,48 +20,49 @@ export async function bootstrapKalshi() {
   const venueId = await getVenueId("kalshi");
   console.log("Bootstrapping Kalshi…", venueId);
 
-  const events = await fetchAllEventsWithNestedMarkets("open");
-  console.log(`[Bootstrap] Starting to process ${events.length} events...`);
+  console.log(`[Bootstrap] Starting to process events...`);
 
-  const topTickers: string[] = [];
+  const topTickers = new Set<string>(); // ✅ dedup as you go
   let processedEvents = 0;
   let processedMarkets = 0;
 
-  for (const e of events) {
-    // Store event in Kalshi-specific table
-    await upsertKalshiEvent(e);
-    processedEvents++;
+  for await (const events of iterateEventsWithMarkets("open")) {
+    for (const e of events) {
+      // Store event in Kalshi-specific table
+      await upsertKalshiEvent(e);
+      processedEvents++;
 
-    // Map and upsert to unified_events table
-    const unifiedEventRow = mapToUnifiedEvent(e);
-    await upsertUnifiedEvent(pool, unifiedEventRow);
+      // Map and upsert to unified_events table
+      const unifiedEventRow = mapToUnifiedEvent(e);
+      await upsertUnifiedEvent(pool, unifiedEventRow);
 
-    for (const m of e.markets ?? []) {
-      // Store market in Kalshi-specific table
-      await upsertKalshiMarket(m);
-      processedMarkets++;
+      for (const m of e.markets ?? []) {
+        // Store market in Kalshi-specific table
+        await upsertKalshiMarket(m);
+        processedMarkets++;
 
-      // Map and upsert to unified_markets table
-      const unifiedMarketRow = mapToUnifiedMarket(m, e.event_ticker);
-      await upsertUnifiedMarket(pool, unifiedMarketRow);
+        // Map and upsert to unified_markets table
+        const unifiedMarketRow = mapToUnifiedMarket(m, e.event_ticker);
+        await upsertUnifiedMarket(pool, unifiedMarketRow);
 
-      // Still need to store tokens in the shared tokens table for orderbook functionality
-      const marketUuid = uuid();
-      for (const t of mapTokens(marketUuid, m.ticker)) {
-        await upsertToken(t);
+        // Still need to store tokens in the shared tokens table for orderbook functionality
+        const marketUuid = uuid();
+        for (const t of mapTokens(marketUuid, m.ticker)) {
+          await upsertToken(t);
+        }
+        topTickers.add(m.ticker);
       }
-      topTickers.push(m.ticker);
     }
 
     // Log progress every 50 events
     if (processedEvents % 50 === 0) {
-      console.log(`[Bootstrap] Processed ${processedEvents}/${events.length} events, ${processedMarkets} markets`);
+      console.log(`[Bootstrap] Processed ${processedEvents} events, ${processedMarkets} markets`);
     }
   }
 
   console.log(`[Bootstrap] Database storage complete: ${processedEvents} events, ${processedMarkets} markets`);
 
-  const snapTickers = topTickers.slice(0, env.topBookSnapshot);
+  const snapTickers = Array.from(topTickers).slice(0, env.topBookSnapshot);
   const q = new PQueue({ interval: 10_000, intervalCap: 180 }); // ~18 rps
   await Promise.all(
     snapTickers.map((t) =>
@@ -96,9 +97,9 @@ export async function bootstrapKalshi() {
   );
 
   console.log(
-    `Bootstrap complete: events=${events.length}, markets=${topTickers.length}, books=${snapTickers.length}`
+    `Bootstrap complete: events=${processedEvents}, markets=${topTickers.size}, books=${snapTickers.length}`
   );
 
   // WS needs tickers, not token_ids; return tickers
-  return Array.from(new Set(snapTickers));
+  return snapTickers;
 }

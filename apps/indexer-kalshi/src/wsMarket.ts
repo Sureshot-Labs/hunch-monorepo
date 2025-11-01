@@ -53,6 +53,9 @@ export function startMarketWS(tickers: string[]) {
   let ws: WebSocket | null = null;
   let pingTimer: NodeJS.Timeout | null = null;
   let lastPong = Date.now();
+  let msgCount = 0;
+  let msgCountStartTime = Date.now();
+  let msgLogTimer: NodeJS.Timeout | null = null;
 
   const connect = () => {
     const headers = signWsHeaders();
@@ -81,6 +84,21 @@ export function startMarketWS(tickers: string[]) {
           } catch {}
         }
       }, 20_000);
+
+      // reset message counters and start logging interval
+      msgCount = 0;
+      msgCountStartTime = Date.now();
+      if (msgLogTimer) clearInterval(msgLogTimer);
+      msgLogTimer = setInterval(() => {
+        const now = Date.now();
+        const elapsed = (now - msgCountStartTime) / 1000;
+        const rps = (msgCount / Math.max(1, elapsed)).toFixed(2);
+        console.log(
+          `[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`
+        );
+        msgCount = 0;
+        msgCountStartTime = now;
+      }, 10_000);
     });
 
     ws.on("pong", () => {
@@ -103,19 +121,7 @@ export function startMarketWS(tickers: string[]) {
         await writeBookTop(`kalshi:${t}:YES`, top.yesBid, top.yesAsk, ts);
         await writeBookTop(`kalshi:${t}:NO`, top.noBid, top.noAsk, ts);
 
-        let last = Date.now(),
-          count = 0;
-        setInterval(() => {
-          const now = Date.now();
-          const rps = (count / Math.max(1, (now - last) / 1000)).toFixed(2);
-          console.log(
-            `[WS] msgs=${count} in ${((now - last) / 1000) | 0}s ~ ${rps}/s`
-          );
-          count = 0;
-          last = now;
-        }, 10_000);
-        // inside message handler:
-        count++;
+        msgCount++;
       } catch (e) {
         console.warn("[WS] parse", String(e));
       }
@@ -130,6 +136,10 @@ export function startMarketWS(tickers: string[]) {
       if (pingTimer) {
         clearInterval(pingTimer);
         pingTimer = null;
+      }
+      if (msgLogTimer) {
+        clearInterval(msgLogTimer);
+        msgLogTimer = null;
       }
       setTimeout(connect, 2000);
     };
