@@ -142,6 +142,17 @@ export function mapToUnifiedEvent(e: z.infer<typeof KalshiEvent>): UnifiedEventR
     else status = 'CLOSED';
   }
 
+  // Calculate start_date: prefer event-level open_time, else min of market opens
+  const start_date = parseDate((e as any).open_time) ?? minDate(mOpens) ?? undefined;
+
+  // Calculate end_date: prefer event-level close_time → expiration_time → latest_expiration_time,
+  // else max of market closes and latest expiration times
+  const end_date = parseDate((e as any).close_time) ??
+    parseDate((e as any).expiration_time) ??
+    parseDate((e as any).latest_expiration_time) ??
+    maxDate(mCloses.concat(mLatest)) ??
+    undefined;
+
   return {
     id: `kalshi:${e.event_ticker}`,
     venue: 'kalshi',
@@ -150,8 +161,8 @@ export function mapToUnifiedEvent(e: z.infer<typeof KalshiEvent>): UnifiedEventR
     description: (e.sub_title as string | undefined) ?? undefined,
     category: (e.category as string | undefined) ?? undefined,
     status,
-    start_date: undefined, // NULL (timestamp of first created market)
-    end_date: undefined, // NULL (timestamp of last expiring market)
+    start_date,
+    end_date,
     volume_total: volSum || undefined,
     volume_24h: vol24Sum || undefined,
     open_interest: markets.reduce((s, m) => s + (n((m as any).open_interest) ?? 0), 0) || undefined,
