@@ -253,6 +253,8 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     open_interest: n(e.openInterest)?? undefined,
     liquidity: n(e.liquidity)?? undefined,
     slug: e.slug ?? undefined,
+    image: e.image ?? undefined,
+    icon: e.icon ?? undefined,
     created_at: e.createdAt ? new Date(e.createdAt) : undefined,
     updated_at: e.updatedAt ? new Date(e.updatedAt) : undefined,
   };
@@ -298,6 +300,8 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
     clob_token_ids: clobTokenIds,
     condition_id: m.conditionId ?? undefined,
     slug: m.slug ?? undefined,
+    image: m.image ?? undefined,
+    icon: m.icon ?? undefined,
     created_at: m.createdAt ? new Date(m.createdAt) : undefined,
     updated_at: m.updatedAt ? new Date(m.updatedAt) : undefined,
   };

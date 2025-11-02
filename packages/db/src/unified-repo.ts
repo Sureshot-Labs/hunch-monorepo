@@ -16,6 +16,8 @@ export interface UnifiedEventRow {
   open_interest?: number;
   liquidity?: number;
   slug?: string;
+  image?: string;
+  icon?: string;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -46,6 +48,8 @@ export interface UnifiedMarketRow {
   clob_token_ids?: string; // JSON array of token IDs (used by Polymarket)
   condition_id?: string; // Condition ID for CLOB and resolution ties
   slug?: string;
+  image?: string;
+  icon?: string;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -59,9 +63,9 @@ export async function upsertUnifiedEvent(
     INSERT INTO unified_events (
       id, venue, venue_event_id, title, description, category, status,
       start_date, end_date, volume_total, volume_24h, open_interest, liquidity, slug,
-      created_at, updated_at
+      image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
     )
     ON CONFLICT (venue, venue_event_id) 
     DO UPDATE SET
@@ -76,6 +80,8 @@ export async function upsertUnifiedEvent(
       open_interest = EXCLUDED.open_interest,
       liquidity = EXCLUDED.liquidity,
       slug = EXCLUDED.slug,
+      image = EXCLUDED.image,
+      icon = EXCLUDED.icon,
       created_at = EXCLUDED.created_at,
       updated_at = EXCLUDED.updated_at,
       updated_at_db = now()
@@ -97,6 +103,8 @@ export async function upsertUnifiedEvent(
     eventRow.open_interest,
     eventRow.liquidity,
     eventRow.slug,
+    eventRow.image,
+    eventRow.icon,
     eventRow.created_at,
     eventRow.updated_at,
   ];
@@ -115,9 +123,9 @@ export async function upsertUnifiedMarket(
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, slug,
-      created_at, updated_at
+      image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -143,6 +151,8 @@ export async function upsertUnifiedMarket(
       clob_token_ids = EXCLUDED.clob_token_ids,
       condition_id = EXCLUDED.condition_id,
       slug = EXCLUDED.slug,
+      image = EXCLUDED.image,
+      icon = EXCLUDED.icon,
       created_at = EXCLUDED.created_at,
       updated_at = EXCLUDED.updated_at,
       updated_at_db = now()
@@ -175,6 +185,8 @@ export async function upsertUnifiedMarket(
     marketRow.clob_token_ids,
     marketRow.condition_id,
     marketRow.slug,
+    marketRow.image,
+    marketRow.icon,
     marketRow.created_at,
     marketRow.updated_at,
   ];

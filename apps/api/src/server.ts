@@ -709,6 +709,8 @@ app.get("/feed", async (req, reply) => {
       e.volume_total as event_volume,
       e.open_interest as event_open_interest,
       e.slug as event_slug,
+      e.image as event_image,
+      e.icon as event_icon,
       m.id as market_uuid,
       m.venue,
       m.venue_market_id,
@@ -725,6 +727,8 @@ app.get("/feed", async (req, reply) => {
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
+      m.image as market_image,
+      m.icon as market_icon,
       m.updated_at as last_update
     from unified_events e
     join unified_markets m on m.event_id = e.id
@@ -750,6 +754,8 @@ app.get("/feed", async (req, reply) => {
         eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
         eventOpenInterest: r.event_open_interest != null ? Number(r.event_open_interest) : 0,
         eventSlug: r.event_slug,
+        image: r.event_image ?? null,
+        icon: r.event_icon ?? null,
         markets: [],
       };
     }
@@ -784,6 +790,8 @@ app.get("/feed", async (req, reply) => {
       acceptingOrders: true, // Always true for active markets in unified table
       tokens,
       conditionId: r.condition_id || null,
+      image: r.market_image ?? null,
+      icon: r.market_icon ?? null,
       top: {
         yesBid: r.best_bid != null ? Number(r.best_bid) : null,
         yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
@@ -807,6 +815,8 @@ app.get("/feed", async (req, reply) => {
         eventVolume: 0,
         eventOpenInterest: 0,
         eventSlug: null,
+        image: null,
+        icon: null,
         markets: [],
       }
   );
