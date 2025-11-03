@@ -603,7 +603,8 @@ app.get("/feed", async (req, reply) => {
   }
   // if filter is not present, do not apply any filter
 
-  // Always exclude expired events
+  // Always exclude expired, closed, settled, or archived events
+  eventWhere.push("e.status = 'ACTIVE'");
   eventWhere.push("(e.end_date IS NULL OR e.end_date > now())");
 
   // Sorting logic (sort param)
@@ -669,10 +670,13 @@ app.get("/feed", async (req, reply) => {
   const marketWhere: string[] = [
     "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
     "coalesce(m.liquidity, 0) >= $2",
+    // Only show ACTIVE markets - exclude CLOSED, SETTLED, and ARCHIVED
     "m.status = 'ACTIVE'",
     `m.event_id = ANY($3::text[])`,
-    // Add expiration filter: exclude markets past their expiration time
-    "(m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())",
+    // Critical: Exclude expired or closed markets based on time
+    // This ensures we don't show expired/closed markets even if status hasn't been updated yet
+    "(m.expiration_time IS NULL OR m.expiration_time > now())",
+    "(m.close_time IS NULL OR m.close_time > now())",
   ];
 
   // Sorting for markets: use same sort as for events, or none

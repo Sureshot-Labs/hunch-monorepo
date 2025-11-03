@@ -22,7 +22,7 @@ async function main() {
   // 2) Start streaming updates for those markets. Should handle reconnects internally.
   startMarketWS(tokenIds);
   // 3) Keep refreshing background data every 5 minutes to catch new/changed markets.
-  setInterval(periodicBootstrap, 5 * 60 * 1000);
+  setInterval(periodicBootstrap, 10 * 60 * 1000);
 }
 
 main().catch((e) => {

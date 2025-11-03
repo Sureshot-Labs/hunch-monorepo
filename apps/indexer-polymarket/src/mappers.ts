@@ -237,8 +237,19 @@ function extractCategoryFromTitle(title: string, description?: string | null): s
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   // Map Polymarket status to unified status
   let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  if (e.archived) status = 'ARCHIVED';
-  else if (e.closed) status = 'CLOSED';
+  
+  const endDate = e.endDate ? new Date(e.endDate) : null;
+  const isExpired = endDate && endDate < new Date();
+  
+  if (e.archived) {
+    status = 'ARCHIVED';
+  } else if (e.closed || (e.active && e.closed) || isExpired) {
+    // Mark as CLOSED if:
+    // 1. closed flag is true, OR
+    // 2. both active=true and closed=true (contradictory state - treat as closed), OR
+    // 3. endDate has passed (expired)
+    status = 'CLOSED';
+  }
 
   return {
     id: `polymarket:${e.id}`,
@@ -265,8 +276,19 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
 export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): UnifiedMarketRow {
   // Map Polymarket status to unified status
   let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  if (m.archived) status = 'ARCHIVED';
-  else if (m.closed) status = 'CLOSED';
+  
+  const endDate = m.endDate ? new Date(m.endDate) : null;
+  const isExpired = endDate && endDate < new Date();
+  
+  if (m.archived) {
+    status = 'ARCHIVED';
+  } else if (m.closed || (m.active && m.closed) || isExpired) {
+    // Mark as CLOSED if:
+    // 1. closed flag is true, OR
+    // 2. both active=true and closed=true (contradictory state - treat as closed), OR
+    // 3. endDate has passed (expired)
+    status = 'CLOSED';
+  }
 
   // Handle clob_token_ids - convert to JSON string if it's an array
   let clobTokenIds: string | undefined = undefined;
