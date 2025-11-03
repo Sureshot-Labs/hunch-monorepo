@@ -591,8 +591,9 @@ app.get("/feed", async (req, reply) => {
     eventWhere.push(`lower(e.venue) = $${paramIdx++}`);
   }
   if (category) {
-    eventParams.push(category);
-    eventWhere.push(`e.category = $${paramIdx++}`);
+    // Case-insensitive category matching
+    eventParams.push(category.toLowerCase());
+    eventWhere.push(`lower(e.category) = $${paramIdx++}`);
   }
 
   // Filtering logic (filter param)
