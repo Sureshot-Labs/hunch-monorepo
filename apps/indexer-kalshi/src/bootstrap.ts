@@ -20,13 +20,15 @@ export async function bootstrapKalshi() {
   const venueId = await getVenueId("kalshi");
   console.log("Bootstrapping Kalshi…", venueId);
 
-  console.log(`[Bootstrap] Starting to process events...`);
+  console.log(`[Bootstrap] Starting to process events (all statuses)...`);
 
   const topTickers = new Set<string>(); // ✅ dedup as you go
   let processedEvents = 0;
   let processedMarkets = 0;
 
-  for await (const events of iterateEventsWithMarkets("open")) {
+  // Fetch all markets regardless of status so we can update closed/settled markets in DB
+  // API supports fetching all statuses by omitting the status parameter
+  for await (const events of iterateEventsWithMarkets()) {
     for (const e of events) {
       // Store event in Kalshi-specific table
       await upsertKalshiEvent(e);
