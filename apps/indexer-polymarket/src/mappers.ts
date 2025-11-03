@@ -82,6 +82,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
     start_date: e.startDate ? new Date(e.startDate) : null,
     creation_date: e.creationDate ? new Date(e.creationDate) : null,
     end_date: e.endDate ? new Date(e.endDate) : null,
+    category: e.category ?? null,
     image: e.image,
     icon: e.icon,
     active: e.active ?? true,
@@ -118,6 +119,7 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     slug: m.slug,
     resolution_source: m.resolutionSource,
     end_date: m.endDate ? new Date(m.endDate) : null,
+    category: m.category ?? null,
     liquidity: m.liquidity,
     start_date: m.startDate ? new Date(m.startDate) : null,
     image: m.image,
@@ -244,7 +246,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     venue_event_id: e.id,
     title: e.title,
     description: e.description ?? undefined,
-    category: extractCategoryFromTitle(e.title, e.description), // Extract category from title/description
+    category: e.category ?? extractCategoryFromTitle(e.title, e.description), // Use API category if available, else extract from title/description
     status,
     start_date: e.startDate ? new Date(e.startDate) : undefined,
     end_date: e.endDate ? new Date(e.endDate) : undefined,
@@ -283,7 +285,7 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
     event_id: `polymarket:${eventId}`,
     title: m.question,
     description: m.description?? undefined,
-    category: extractCategoryFromTitle(m.question, m.description), // Extract category from market question/description
+    category: m.category ?? extractCategoryFromTitle(m.question, m.description), // Use API category if available, else extract from question/description
     status,
     market_type: 'binary', // Polymarket markets are binary
     open_time: m.startDate ? new Date(m.startDate) : undefined,

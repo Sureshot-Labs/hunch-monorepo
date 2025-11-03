@@ -1,6 +1,6 @@
 import { ensureRedis, redis } from "./redis";
 import { env } from "./env";
-import { fetchAllEvents } from "./gammaClient";
+import { iterateEvents } from "./gammaClient";
 import { getBook, postBooks, postBooksOnce } from "./clobClient";
 import {
   getVenueId,
@@ -27,61 +27,78 @@ export async function bootstrapPolymarket() {
   await ensureRedis();
   log.info("Bootstrapping Polymarket…");
 
-  const events = await fetchAllEvents();
+  const topTokenIds = new Set<string>(); // ✅ dedup as you go
+  let processedEvents = 0;
+  let processedMarkets = 0;
 
-  const topTokenIds: string[] = [];
-
-  // Parse and validate events as Polymarket events
-  for (const e of events) {
-    try {
-      // Validate and parse event as Polymarket event
-      const polyEvent = PolymarketEvent.parse(e);
-      
-      // Map and upsert to polymarket_events table
-      const eRow = mapPolymarketEventRow(polyEvent);
-      const eventId = await upsertPolymarketEvent(eRow);
-
-      // Map and upsert to unified_events table
-      const unifiedEventRow = mapToUnifiedEvent(polyEvent);
-      await upsertUnifiedEvent(pool, unifiedEventRow);
-
-      // Process markets
-      for (const m of polyEvent.markets) {
-        // Map and upsert to polymarket_markets table
-        const mRow = mapPolymarketMarketRow(eventId, m);
-        const result = await upsertPolymarketMarket(mRow);
-
-        // Map and upsert to unified_markets table
-        const unifiedMarketRow = mapToUnifiedMarket(m, eventId);
-        await upsertUnifiedMarket(pool, unifiedMarketRow);
+  // Process events page-by-page to avoid loading everything into memory
+  for await (const events of iterateEvents()) {
+    // Parse and validate events as Polymarket events
+    for (const e of events) {
+      try {
+        // Validate and parse event as Polymarket event
+        const polyEvent = PolymarketEvent.parse(e);
         
-        // Extract token IDs from clob_token_ids (can be array or JSON string)
-        let tokenIds: string[] = [];
-        if (m.clobTokenIds) {
-          if (Array.isArray(m.clobTokenIds)) {
-            tokenIds = m.clobTokenIds;
-          } else {
-            try {
-              tokenIds = JSON.parse(m.clobTokenIds);
-            } catch {
-              // If parsing fails, handle gracefully
-              tokenIds = [];
+        // Map and upsert to polymarket_events table
+        const eRow = mapPolymarketEventRow(polyEvent);
+        const eventId = await upsertPolymarketEvent(eRow);
+
+        // Map and upsert to unified_events table
+        const unifiedEventRow = mapToUnifiedEvent(polyEvent);
+        await upsertUnifiedEvent(pool, unifiedEventRow);
+
+        // Process markets
+        for (const m of polyEvent.markets) {
+          // Map and upsert to polymarket_markets table
+          const mRow = mapPolymarketMarketRow(eventId, m);
+          const result = await upsertPolymarketMarket(mRow);
+
+          // Map and upsert to unified_markets table
+          const unifiedMarketRow = mapToUnifiedMarket(m, eventId);
+          await upsertUnifiedMarket(pool, unifiedMarketRow);
+          
+          // Extract token IDs from clob_token_ids (can be array or JSON string)
+          let tokenIds: string[] = [];
+          if (m.clobTokenIds) {
+            if (Array.isArray(m.clobTokenIds)) {
+              tokenIds = m.clobTokenIds;
+            } else {
+              try {
+                tokenIds = JSON.parse(m.clobTokenIds);
+              } catch {
+                // If parsing fails, handle gracefully
+                tokenIds = [];
+              }
             }
           }
-        }
 
-        // Add to top tokens if market is accepting orders
-        if (mRow.enable_order_book && mRow.accepting_orders && tokenIds.length > 0) {
-          topTokenIds.push(...tokenIds);
+          // Add to top tokens if market is accepting orders
+          if (mRow.enable_order_book && mRow.accepting_orders && tokenIds.length > 0) {
+            // Add each token ID to Set for deduplication
+            for (const tokenId of tokenIds) {
+              topTokenIds.add(tokenId);
+            }
+          }
+          
+          processedMarkets++;
         }
+        
+        processedEvents++;
+      } catch (err) {
+        log.warn(`Failed to process event ${e.id}:`, err);
       }
-    } catch (err) {
-      log.warn(`Failed to process event ${e.id}:`, err);
+    }
+    
+    // Log progress every 50 events
+    if (processedEvents % 50 === 0) {
+      log.info(`Processed ${processedEvents} events, ${processedMarkets} markets`);
     }
   }
 
+  log.info(`Database storage complete: ${processedEvents} events, ${processedMarkets} markets`);
+
   // take initial book snapshots for top N tokens and warm Redis
-  const snapIds = topTokenIds.slice(0, env.topBookSnapshot);
+  const snapIds = Array.from(topTokenIds).slice(0, env.topBookSnapshot);
   log.info(`Snapshotting ${snapIds.length} top books`);
   const batches = chunk(snapIds, 20);
   const q = new PQueue({ interval: 10_000, intervalCap: 45 }); // safe under /books 50/10s
@@ -105,7 +122,7 @@ export async function bootstrapPolymarket() {
   );
 
   log.info(
-    `Bootstrap complete: events=${events.length}, tokensSnapshotted=${snapIds.length}`
+    `Bootstrap complete: events=${processedEvents}, markets=${processedMarkets}, tokens=${topTokenIds.size}, books=${snapIds.length}`
   );
   return snapIds;
 }

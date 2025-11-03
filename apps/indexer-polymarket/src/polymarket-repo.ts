@@ -5,13 +5,13 @@ export async function upsertPolymarketEvent(row: any) {
   const q = `
   INSERT INTO polymarket_events(
     id, ticker, slug, title, description, resolution_source, 
-    start_date, creation_date, end_date, image, icon, 
+    start_date, creation_date, end_date, category, image, icon, 
     active, closed, archived, new, featured, restricted, 
     liquidity, volume, open_interest, created_by, created_at, updated_at, 
     competitive, volume24hr, volume1wk, volume1mo, volume1yr, 
     enable_order_book, liquidity_clob, neg_risk, comment_count, raw
   )
-  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
   ON CONFLICT (id) DO UPDATE SET
     ticker=EXCLUDED.ticker,
     slug=EXCLUDED.slug,
@@ -21,6 +21,7 @@ export async function upsertPolymarketEvent(row: any) {
     start_date=EXCLUDED.start_date,
     creation_date=EXCLUDED.creation_date,
     end_date=EXCLUDED.end_date,
+    category=EXCLUDED.category,
     image=EXCLUDED.image,
     icon=EXCLUDED.icon,
     active=EXCLUDED.active,
@@ -50,7 +51,7 @@ export async function upsertPolymarketEvent(row: any) {
 
   const { rows } = await pool.query(q, [
     row.id, row.ticker, row.slug, row.title, row.description, row.resolution_source,
-    row.start_date, row.creation_date, row.end_date, row.image, row.icon,
+    row.start_date, row.creation_date, row.end_date, row.category, row.image, row.icon,
     row.active, row.closed, row.archived, row.new, row.featured, row.restricted,
     row.liquidity, row.volume, row.open_interest, row.created_by, row.created_at, row.updated_at,
     row.competitive, row.volume24hr, row.volume1wk, row.volume1mo, row.volume1yr,
@@ -63,7 +64,7 @@ export async function upsertPolymarketEvent(row: any) {
 export async function upsertPolymarketMarket(row: any) {
   const q = `
   INSERT INTO polymarket_markets(
-    id, event_id, question, condition_id, slug, resolution_source, end_date, liquidity, start_date,
+    id, event_id, question, condition_id, slug, resolution_source, end_date, category, liquidity, start_date,
     image, icon, description, outcomes, outcome_prices, volume, active, closed, market_maker_address,
     created_at, updated_at, new, featured, submitted_by, archived, resolved_by, restricted,
     group_item_title, group_item_threshold, question_id, enable_order_book, order_price_min_tick_size,
@@ -78,13 +79,14 @@ export async function upsertPolymarketMarket(row: any) {
     manual_activation, neg_risk_other, uma_resolution_statuses, pending_deployment, deploying,
     deploying_timestamp, rfq_enabled, holding_rewards_enabled, fees_enabled, raw
   )
-  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86)
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87)
   ON CONFLICT (id) DO UPDATE SET
     question=EXCLUDED.question,
     condition_id=EXCLUDED.condition_id,
     slug=EXCLUDED.slug,
     resolution_source=EXCLUDED.resolution_source,
     end_date=EXCLUDED.end_date,
+    category=EXCLUDED.category,
     liquidity=EXCLUDED.liquidity,
     start_date=EXCLUDED.start_date,
     image=EXCLUDED.image,
@@ -168,7 +170,7 @@ export async function upsertPolymarketMarket(row: any) {
   RETURNING id, clob_token_ids`;
 
   const { rows } = await pool.query(q, [
-    row.id, row.event_id, row.question, row.condition_id, row.slug, row.resolution_source, row.end_date, row.liquidity, row.start_date,
+    row.id, row.event_id, row.question, row.condition_id, row.slug, row.resolution_source, row.end_date, row.category, row.liquidity, row.start_date,
     row.image, row.icon, row.description, row.outcomes, row.outcome_prices, row.volume, row.active, row.closed, row.market_maker_address,
     row.created_at, row.updated_at, row.new, row.featured, row.submitted_by, row.archived, row.resolved_by, row.restricted,
     row.group_item_title, row.group_item_threshold, row.question_id, row.enable_order_book, row.order_price_min_tick_size,

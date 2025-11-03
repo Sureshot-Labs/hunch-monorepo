@@ -7,9 +7,7 @@ export async function fetchEventsPage(offset: number, limit: number) {
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("active", "true");
   url.searchParams.set("archived", "false");
-  url.searchParams.set("closed", "false");
   url.searchParams.set("order", "volume24hr");
-  url.searchParams.set("ascending", "false");
   url.searchParams.set("offset", String(offset));
 
   const r = await fetch(url, { headers: { accept: "application/json" } });
@@ -21,8 +19,8 @@ export async function fetchEventsPage(offset: number, limit: number) {
   return { events };
 }
 
-export async function fetchAllEvents() {
-  const out: GammaEvent[] = [];
+// Streaming generator: yields events page-by-page to avoid loading everything into memory
+export async function* iterateEvents() {
   let offset = 0;
   const page = 500; // Increased page size for efficiency
 
@@ -37,13 +35,21 @@ export async function fetchAllEvents() {
       break;
     }
     
-    out.push(...events);
+    yield events; // ✅ yield one page
+    
     offset += events.length;
     
     // Small delay to be respectful to the API
     await new Promise((res) => setTimeout(res, 100));
   }
-  
+}
+
+// Keep for backward compatibility if needed elsewhere
+export async function fetchAllEvents() {
+  const out: GammaEvent[] = [];
+  for await (const events of iterateEvents()) {
+    out.push(...events);
+  }
   console.log(`Total events fetched: ${out.length}`);
   return out;
 }

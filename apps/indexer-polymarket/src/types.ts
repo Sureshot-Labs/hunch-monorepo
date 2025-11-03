@@ -92,6 +92,7 @@ export const PolymarketMarket = z
     slug: z.string().optional().nullable(),
     resolutionSource: z.string().optional().nullable(),
     endDate: z.string().optional().nullable(),
+    category: z.string().optional().nullable(),
     liquidity: num.optional().nullable(), // Can be number or string
     startDate: z.string().optional().nullable(),
     image: z.string().optional().nullable(),
@@ -184,6 +185,7 @@ export const PolymarketEvent = z
     startDate: z.string().optional().nullable(),
     creationDate: z.string().optional().nullable(),
     endDate: z.string().optional().nullable(),
+    category: z.string().optional().nullable(),
     image: z.string().optional().nullable(),
     icon: z.string().optional().nullable(),
     active: z.boolean().optional(),

@@ -727,6 +727,7 @@ app.get("/feed", async (req, reply) => {
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
+      m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
       m.updated_at as last_update
@@ -790,6 +791,7 @@ app.get("/feed", async (req, reply) => {
       acceptingOrders: true, // Always true for active markets in unified table
       tokens,
       conditionId: r.condition_id || null,
+      category: r.market_category ?? null,
       image: r.market_image ?? null,
       icon: r.market_icon ?? null,
       top: {
@@ -891,7 +893,7 @@ app.get("/markets/:marketId", async (request, reply) => {
         e.id as event_id,
         e.title as event_title,
         e.description as event_description,
-        e.category,
+        e.category as event_category,
         e.start_date,
         e.end_date,
         e.liquidity as event_liquidity,
@@ -916,6 +918,7 @@ app.get("/markets/:marketId", async (request, reply) => {
         m.clob_token_ids,
         m.condition_id,
         m.slug,
+        m.category as market_category,
         m.created_at,
         m.updated_at
       FROM unified_events e
@@ -979,6 +982,7 @@ app.get("/markets/:marketId", async (request, reply) => {
       outcomes,
       tokens,
       conditionId: market.condition_id || null,
+      category: market.market_category || null,
       marketSlug: market.slug || null,
       createdAt: market.created_at,
       updatedAt: market.updated_at,
@@ -986,7 +990,7 @@ app.get("/markets/:marketId", async (request, reply) => {
         eventId: market.event_id,
         eventTitle: market.event_title,
         eventDescription: market.event_description,
-        category: market.category,
+        category: market.event_category,
         startTime: market.start_date,
         endTime: market.end_date,
         eventLiquidity: market.event_liquidity != null ? Number(market.event_liquidity) : 0,
