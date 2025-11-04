@@ -933,6 +933,8 @@ app.get("/markets/:marketId", async (request, reply) => {
         e.end_date,
         e.liquidity as event_liquidity,
         e.volume_total as event_volume,
+        e.image as event_image,
+        e.icon as event_icon,
         m.id as market_id,
         m.venue,
         m.venue_market_id,
@@ -954,6 +956,8 @@ app.get("/markets/:marketId", async (request, reply) => {
         m.condition_id,
         m.slug,
         m.category as market_category,
+        m.image as market_image,
+        m.icon as market_icon,
         m.created_at,
         m.updated_at
       FROM unified_events e
@@ -1019,6 +1023,8 @@ app.get("/markets/:marketId", async (request, reply) => {
       conditionId: market.condition_id || null,
       category: market.market_category || null,
       marketSlug: market.slug || null,
+      marketImage: market.market_image || null,
+      marketIcon: market.market_icon || null,
       createdAt: market.created_at,
       updatedAt: market.updated_at,
       event: {
@@ -1030,6 +1036,8 @@ app.get("/markets/:marketId", async (request, reply) => {
         endTime: market.end_date,
         eventLiquidity: market.event_liquidity != null ? Number(market.event_liquidity) : 0,
         eventVolume: market.event_volume != null ? Number(market.event_volume) : 0,
+        eventImage: market.event_image || null,
+        eventIcon: market.event_icon || null,
       }
     };
     
