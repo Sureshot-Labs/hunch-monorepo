@@ -16,7 +16,7 @@ export const env = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
-  feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "2"),
+  feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
 };

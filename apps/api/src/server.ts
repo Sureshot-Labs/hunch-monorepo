@@ -552,9 +552,16 @@ app.get("/feed", async (req, reply) => {
   const filter = q.filter; // only use if present
   const sort = q.sort; // only use if present
 
-  const cacheKey = `feed:v8:${limit}:${offset}:${minVol}:${minLiquidity}:${
+  // Normalize category to lowercase for consistent caching
+  const normalizedCategory = category ? category.toLowerCase() : "";
+  
+  // Calculate cache TTL (default 30 seconds, can be overridden via env var)
+  const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
+  
+  // Create cache key with all parameters normalized
+  const cacheKey = `feed:v9:${limit}:${offset}:${minVol}:${minLiquidity}:${
     venue ?? ""
-  }:${category ?? ""}:${filter ?? ""}:${sort ?? ""}`;
+  }:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
   const r = await getRedis();
 
   // serve from cache if present, with proper ETag/304 handling
@@ -574,12 +581,18 @@ app.get("/feed", async (req, reply) => {
       reply.header("ETag", etag);
       reply.header(
         "Cache-Control",
-        "private, max-age=2, stale-while-revalidate=30"
+        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
       );
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(cachedBody);
     }
   }
+
+  // Pre-calculate now() as a parameter to allow index usage
+  const nowTs = new Date();
+  const nowParam = nowTs.toISOString();
+  const sevenDaysAgo = new Date(nowTs.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const sevenDaysFromNow = new Date(nowTs.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   // 1. Get event IDs matching filters, with limit/offset
   const eventParams: any[] = [];
@@ -596,17 +609,20 @@ app.get("/feed", async (req, reply) => {
     eventWhere.push(`lower(e.category) = $${paramIdx++}`);
   }
 
-  // Filtering logic (filter param)
+  // Filtering logic (filter param) - use parameterized dates for index usage
   if (filter === "newest") {
-    eventWhere.push(`e.start_date >= now() - interval '7 days'`);
+    eventParams.push(sevenDaysAgo);
+    eventWhere.push(`e.start_date >= $${paramIdx++}`);
   } else if (filter === "endingsoon") {
-    eventWhere.push(`e.end_date <= now() + interval '7 days'`);
+    eventParams.push(sevenDaysFromNow);
+    eventWhere.push(`e.end_date <= $${paramIdx++}`);
   }
   // if filter is not present, do not apply any filter
 
   // Always exclude expired, closed, settled, or archived events
   eventWhere.push("e.status = 'ACTIVE'");
-  eventWhere.push("(e.end_date IS NULL OR e.end_date > now())");
+  eventParams.push(nowParam);
+  eventWhere.push(`(e.end_date IS NULL OR e.end_date > $${paramIdx++})`);
 
   // Sorting logic (sort param)
   let eventOrder = "";
@@ -621,17 +637,20 @@ app.get("/feed", async (req, reply) => {
     eventOrder = "e.end_date asc nulls last, e.id";
   } else if (sort == null) {
     // Trending algorithm: combines volume, liquidity, and recency
+    eventParams.push(sevenDaysAgo, sevenDaysFromNow);
     eventOrder = `
       (coalesce(e.volume_24h, 0) * 0.4 + 
        coalesce(e.liquidity, 0) * 0.3 + 
-       case when e.start_date >= now() - interval '7 days' then 1000 else 0 end * 0.2 +
-       case when e.end_date <= now() + interval '7 days' then 500 else 0 end * 0.1
+       case when e.start_date >= $${paramIdx++} then 1000 else 0 end * 0.2 +
+       case when e.end_date <= $${paramIdx++} then 500 else 0 end * 0.1
       ) desc nulls last, e.id
     `;
   } else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
 
   // Aggregate volume/liquidity for events
   // CRITICAL: Filter markets by ACTIVE status BEFORE joining to avoid scanning closed/settled markets
+  // Use parameterized now() for better index usage
+  eventParams.push(nowParam, nowParam);
   const eventSql = `
     select
       e.id,
@@ -642,8 +661,8 @@ app.get("/feed", async (req, reply) => {
     from unified_events e
     join unified_markets m on m.event_id = e.id
       and m.status = 'ACTIVE'
-      and (m.expiration_time IS NULL OR m.expiration_time > now())
-      and (m.close_time IS NULL OR m.close_time > now())
+      and (m.expiration_time IS NULL OR m.expiration_time > $${paramIdx++})
+      and (m.close_time IS NULL OR m.close_time > $${paramIdx++})
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date
     having (sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++} or sum(m.volume_24h) is null)
@@ -671,7 +690,8 @@ app.get("/feed", async (req, reply) => {
   }
 
   // 2. Fetch all markets for those events, with volume/liquidity filter
-  const marketParams: any[] = [minVol, minLiquidity, eventIds];
+  // Use parameterized now() for better index usage
+  const marketParams: any[] = [minVol, minLiquidity, eventIds, nowParam, nowParam];
   const marketWhere: string[] = [
     "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
     "coalesce(m.liquidity, 0) >= $2",
@@ -680,8 +700,9 @@ app.get("/feed", async (req, reply) => {
     `m.event_id = ANY($3::text[])`,
     // Critical: Exclude expired or closed markets based on time
     // This ensures we don't show expired/closed markets even if status hasn't been updated yet
-    "(m.expiration_time IS NULL OR m.expiration_time > now())",
-    "(m.close_time IS NULL OR m.close_time > now())",
+    // Use parameterized dates for index usage
+    "(m.expiration_time IS NULL OR m.expiration_time > $4)",
+    "(m.close_time IS NULL OR m.close_time > $5)",
   ];
 
   // Sorting for markets: use same sort as for events, or none
@@ -698,11 +719,15 @@ app.get("/feed", async (req, reply) => {
     marketOrder = "e.end_date asc nulls last, m.venue_market_id";
   } else if (sort == null) {
     // Trending algorithm for markets: combines volume, liquidity, and recency
+    // Use parameterized dates for index usage
+    // Parameters are already: $1=minVol, $2=minLiquidity, $3=eventIds, $4=nowParam, $5=nowParam
+    // So $6 and $7 will be the date parameters
+    marketParams.push(sevenDaysAgo, sevenDaysFromNow);
     marketOrder = `
       (coalesce(m.volume_24h, 0) * 0.4 + 
        coalesce(m.liquidity, 0) * 0.3 + 
-       case when e.start_date >= now() - interval '7 days' then 1000 else 0 end * 0.2 +
-       case when e.end_date <= now() + interval '7 days' then 500 else 0 end * 0.1
+       case when e.start_date >= $6 then 1000 else 0 end * 0.2 +
+       case when e.end_date <= $7 then 500 else 0 end * 0.1
       ) desc nulls last, m.venue_market_id
     `;
   } else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
@@ -845,14 +870,15 @@ app.get("/feed", async (req, reply) => {
   const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
 
   if (r) {
-    await r.set(cacheKey, body, { EX: env.feedTtlSec });
+    // Use longer cache TTL for better performance
+    await r.set(cacheKey, body, { EX: cacheTtl });
     reply.header("x-cache", "miss");
   }
 
   reply.header("ETag", etag);
   reply.header(
     "Cache-Control",
-    "private, max-age=2, stale-while-revalidate=30"
+    `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
   );
   reply.header("Content-Type", "application/json; charset=utf-8");
   return reply.send(body);

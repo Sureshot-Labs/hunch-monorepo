@@ -28,6 +28,21 @@ services:
       retries: 20
     volumes:
       - pg_data:/var/lib/postgresql/data
+    shm_size: 256mb
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=100
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - statement_timeout=30000
 
   redis:
     image: redis:7-alpine
