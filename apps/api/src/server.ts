@@ -631,6 +631,7 @@ app.get("/feed", async (req, reply) => {
   } else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
 
   // Aggregate volume/liquidity for events
+  // CRITICAL: Filter markets by ACTIVE status BEFORE joining to avoid scanning closed/settled markets
   const eventSql = `
     select
       e.id,
@@ -640,6 +641,9 @@ app.get("/feed", async (req, reply) => {
       e.end_date
     from unified_events e
     join unified_markets m on m.event_id = e.id
+      and m.status = 'ACTIVE'
+      and (m.expiration_time IS NULL OR m.expiration_time > now())
+      and (m.close_time IS NULL OR m.close_time > now())
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date
     having (sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++} or sum(m.volume_24h) is null)
