@@ -133,12 +133,12 @@ export function mapToUnifiedEvent(e: z.infer<typeof KalshiEvent>): UnifiedEventR
   );
   const allShut =
     statuses.length > 0 &&
-    statuses.every((s) => ["closed", "settled", "expired"].includes(s));
+    statuses.every((s) => ["closed", "settled", "finalized", "expired"].includes(s));
 
   // Determine unified status
   let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
   if (allShut) {
-    if (statuses.some(s => s === 'settled')) status = 'SETTLED';
+    if (statuses.some(s => s === 'settled' || s === 'finalized')) status = 'SETTLED';
     else status = 'CLOSED';
   }
 
@@ -177,7 +177,7 @@ export function mapToUnifiedMarket(m: z.infer<typeof KalshiMarket>, eventId: str
   // Map Kalshi status to unified status
   let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
   const marketStatus = (m.status ?? "open").toLowerCase();
-  if (marketStatus === 'settled') status = 'SETTLED';
+  if (marketStatus === 'settled' || marketStatus === 'finalized') status = 'SETTLED';
   else if (['closed', 'expired'].includes(marketStatus)) status = 'CLOSED';
 
   // Convert Kalshi prices from dollars to decimal
