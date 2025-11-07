@@ -2780,6 +2780,326 @@ app.get("/orders/user/:walletAddress", async (request, reply) => {
   }
 });
 
+// ============================================================================
+// WATCHLIST ENDPOINTS
+// ============================================================================
+
+/**
+ * POST /watchlist
+ * Add a market to user's watchlist
+ */
+app.post("/watchlist", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const body = request.body as { marketId: string };
+  
+  if (!body.marketId) {
+    reply.code(400);
+    return reply.send({ error: "marketId is required" });
+  }
+  
+  // Validate marketId format (should be venue:venue_market_id)
+  if (!body.marketId.includes(':')) {
+    reply.code(400);
+    return reply.send({ error: "Invalid marketId format. Expected format: venue:venue_market_id" });
+  }
+  
+  try {
+    const client = await pool.connect();
+    try {
+      // First, verify that the market exists in unified_markets
+      const marketCheck = await client.query(
+        'SELECT id FROM unified_markets WHERE id = $1',
+        [body.marketId]
+      );
+      
+      if (marketCheck.rows.length === 0) {
+        reply.code(400);
+        return reply.send({ error: "Market not found" });
+      }
+      
+      // Insert into watchlist
+      const result = await client.query(
+        `INSERT INTO user_watchlist (user_id, market_id) 
+         VALUES ($1, $2) 
+         RETURNING id, market_id, created_at`,
+        [user.id, body.marketId]
+      );
+      
+      reply.code(201);
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: 'Market added to watchlist successfully',
+        watchlistItem: {
+          id: result.rows[0].id,
+          marketId: result.rows[0].market_id,
+          createdAt: result.rows[0].created_at,
+        },
+      });
+      
+    } catch (error: any) {
+      // Check for unique constraint violation (duplicate)
+      if (error.code === '23505') { // PostgreSQL unique violation
+        reply.code(409);
+        return reply.send({ error: "Market already in watchlist" });
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, marketId: body.marketId }, 'Failed to add market to watchlist');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to add market to watchlist',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /watchlist
+ * Get all markets in user's watchlist
+ */
+app.get("/watchlist", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const query = request.query as {
+    limit?: number;
+    offset?: number;
+    include_inactive?: string;
+  };
+  
+  const limit = Math.min(query.limit ? parseInt(String(query.limit)) : 50, 100);
+  const offset = Math.max(query.offset ? parseInt(String(query.offset)) : 0, 0);
+  const includeInactive = query.include_inactive === 'true';
+  
+  try {
+    const client = await pool.connect();
+    try {
+      // Build WHERE clause for status filtering
+      const statusFilter = includeInactive 
+        ? '' 
+        : "AND m.status = 'ACTIVE' AND (m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())";
+      
+      // Get watchlist markets with full market and event data
+      const watchlistSql = `
+        SELECT
+          w.id as watchlist_id,
+          w.created_at as watchlist_created_at,
+          e.id as event_id,
+          e.title as event_title,
+          e.category,
+          e.start_date,
+          e.end_date,
+          e.liquidity as event_liquidity,
+          e.volume_total as event_volume,
+          e.open_interest as event_open_interest,
+          e.slug as event_slug,
+          e.image as event_image,
+          e.icon as event_icon,
+          m.id as market_uuid,
+          m.venue,
+          m.venue_market_id,
+          m.title as market_title,
+          m.volume_24h,
+          m.volume_total,
+          m.open_interest,
+          m.liquidity,
+          m.best_bid,
+          m.best_ask,
+          m.last_price,
+          m.token_yes,
+          m.token_no,
+          m.clob_token_ids,
+          m.condition_id,
+          m.slug as market_slug,
+          m.category as market_category,
+          m.image as market_image,
+          m.icon as market_icon,
+          m.status as market_status,
+          m.updated_at as last_update
+        FROM user_watchlist w
+        JOIN unified_markets m ON m.id = w.market_id
+        JOIN unified_events e ON e.id = m.event_id
+        WHERE w.user_id = $1
+        ${statusFilter}
+        ORDER BY w.created_at DESC
+        LIMIT $2 OFFSET $3
+      `;
+      
+      const { rows } = await client.query(watchlistSql, [user.id, limit, offset]);
+      
+      // Get total count for pagination
+      const countSql = `
+        SELECT COUNT(*) as total
+        FROM user_watchlist w
+        JOIN unified_markets m ON m.id = w.market_id
+        WHERE w.user_id = $1
+        ${statusFilter}
+      `;
+      const countResult = await client.query(countSql, [user.id]);
+      const totalCount = parseInt(countResult.rows[0].total);
+      
+      // Group markets under their events (similar to /feed endpoint)
+      const eventMap: Record<string, any> = {};
+      for (const r of rows) {
+        const eid = r.event_id;
+        if (!eventMap[eid]) {
+          eventMap[eid] = {
+            eventId: eid,
+            eventTitle: r.event_title,
+            category: r.category,
+            startTime: r.start_date,
+            endTime: r.end_date,
+            eventLiquidity: r.event_liquidity != null ? Number(r.event_liquidity) : 0,
+            eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
+            eventOpenInterest: r.event_open_interest != null ? Number(r.event_open_interest) : 0,
+            eventSlug: r.event_slug,
+            image: r.event_image ?? null,
+            icon: r.event_icon ?? null,
+            markets: [],
+          };
+        }
+        
+        // Parse token IDs based on venue
+        let tokens = { yes: null, no: null };
+        if (r.venue === 'polymarket' && r.clob_token_ids) {
+          try {
+            const tokenIds = JSON.parse(r.clob_token_ids);
+            tokens = {
+              yes: tokenIds[0] || null,
+              no: tokenIds[1] || null
+            };
+          } catch (error) {
+            // Invalid JSON, keep tokens as null
+          }
+        } else if (r.venue === 'limitless' || r.venue === 'kalshi') {
+          tokens = {
+            yes: r.token_yes,
+            no: r.token_no
+          };
+        }
+        
+        eventMap[eid].markets.push({
+          marketId: r.market_uuid,
+          venue: r.venue,
+          venueMarketId: r.venue_market_id,
+          marketTitle: r.market_title,
+          marketSlug: r.market_slug,
+          volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
+          volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
+          openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
+          liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
+          acceptingOrders: r.market_status === 'ACTIVE',
+          tokens,
+          conditionId: r.condition_id || null,
+          category: r.market_category ?? null,
+          image: r.market_image ?? null,
+          icon: r.market_icon ?? null,
+          status: r.market_status,
+          top: {
+            yesBid: r.best_bid != null ? Number(r.best_bid) : null,
+            yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
+            noBid: r.best_bid != null ? Number(1 - r.best_bid) : null,
+            noAsk: r.best_ask != null ? Number(1 - r.best_ask) : null,
+          },
+          lastUpdate: r.last_update,
+          watchlistId: r.watchlist_id,
+          watchlistCreatedAt: r.watchlist_created_at,
+        });
+      }
+      
+      const data = Object.values(eventMap);
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        count: data.length,
+        total: totalCount,
+        limit,
+        offset,
+        data,
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id }, 'Failed to fetch watchlist');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to fetch watchlist',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * DELETE /watchlist/:marketId
+ * Remove a market from user's watchlist
+ */
+app.delete("/watchlist/:marketId", { preHandler: createAuthMiddleware() }, async (request, reply) => {
+  const user = (request as any).user as User;
+  const { marketId } = request.params as { marketId: string };
+  
+  if (!marketId) {
+    reply.code(400);
+    return reply.send({ error: "marketId parameter is required" });
+  }
+  
+  try {
+    const client = await pool.connect();
+    try {
+      // Delete from watchlist
+      // Support both composite ID format (venue:venue_market_id) and just venue_market_id
+      // If marketId contains ':', treat it as composite ID; otherwise, match any venue with that market_id
+      let deleteQuery: string;
+      let deleteParams: any[];
+      
+      if (marketId.includes(':')) {
+        // Full composite ID provided
+        deleteQuery = `DELETE FROM user_watchlist 
+                       WHERE user_id = $1 AND market_id = $2
+                       RETURNING id, market_id`;
+        deleteParams = [user.id, marketId];
+      } else {
+        // Just venue_market_id provided, match any venue
+        deleteQuery = `DELETE FROM user_watchlist 
+                       WHERE user_id = $1 AND market_id LIKE $2
+                       RETURNING id, market_id`;
+        deleteParams = [user.id, `%:${marketId}`];
+      }
+      
+      const result = await client.query(deleteQuery, deleteParams);
+      
+      if (result.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: "Market not found in watchlist" });
+      }
+      
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: 'Market removed from watchlist successfully',
+        removedItem: {
+          id: result.rows[0].id,
+          marketId: result.rows[0].market_id,
+        },
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    app.log.error({ error, userId: user.id, marketId }, 'Failed to remove market from watchlist');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Failed to remove market from watchlist',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 export async function start() {
   await getRedis().catch(() => {}); // optional
   const addr = await app.listen({ port: env.port, host: "0.0.0.0" });
