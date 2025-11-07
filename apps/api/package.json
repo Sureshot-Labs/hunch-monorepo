@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server.ts",
-    "cleanup:expired": "tsx src/cleanup-expired-markets.ts"
+    "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
+    "delete-closed": "tsx src/delete-closed-markets.ts"
   },
   "dependencies": {
     "fastify": "^4.28.1",

@@ -117,6 +117,28 @@ export async function upsertUnifiedMarket(
   pool: Pool,
   marketRow: UnifiedMarketRow
 ): Promise<string> {
+  // Handle closed markets: skip new ones, delete existing ones
+  if (marketRow.status === 'CLOSED' || marketRow.status === 'SETTLED' || marketRow.status === 'ARCHIVED') {
+    // Check if market exists in the database
+    const existingMarket = await pool.query(
+      'SELECT id FROM unified_markets WHERE venue = $1 AND venue_market_id = $2',
+      [marketRow.venue, marketRow.venue_market_id]
+    );
+
+    if (existingMarket.rows.length === 0) {
+      // Market doesn't exist and is closed - skip storing it
+      return marketRow.id;
+    } else {
+      // Market exists and is now closed - delete it instead of updating
+      await pool.query(
+        'DELETE FROM unified_markets WHERE venue = $1 AND venue_market_id = $2',
+        [marketRow.venue, marketRow.venue_market_id]
+      );
+      return marketRow.id;
+    }
+  }
+
+  // Normal upsert for active markets
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
