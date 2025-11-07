@@ -32,6 +32,7 @@ interface DeleteStats {
   deletedMarkets: number;
   orphanedEvents: number;
   deletedEvents: number;
+  venueCounts: Record<string, number>;
 }
 
 async function getClosedMarkets(pool: Pool): Promise<ClosedMarket[]> {
@@ -80,7 +81,8 @@ async function deleteClosedMarkets(pool: Pool, options: DeleteOptions): Promise<
       closedMarkets: 0,
       deletedMarkets: 0,
       orphanedEvents: 0,
-      deletedEvents: 0
+      deletedEvents: 0,
+      venueCounts: {}
     };
   }
 
@@ -90,16 +92,27 @@ async function deleteClosedMarkets(pool: Pool, options: DeleteOptions): Promise<
     return acc;
   }, {} as Record<string, number>);
 
+  // Group by venue for reporting
+  const venueCounts = closedMarkets.reduce((acc, m) => {
+    acc[m.venue] = (acc[m.venue] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
   // Group by event for orphaned event detection
   const eventIds = [...new Set(closedMarkets.map(m => m.event_id))];
   const orphanedEvents = await getOrphanedEvents(pool, eventIds);
 
   console.log(`\n📊 Deletion Summary:`);
   console.log(`- Total closed markets: ${closedMarkets.length}`);
-  Object.entries(statusCounts).forEach(([status, count]) => {
-    console.log(`  - ${status}: ${count}`);
+  console.log(`\n  By Venue:`);
+  Object.entries(venueCounts).forEach(([venue, count]) => {
+    console.log(`    - ${venue}: ${count}`);
   });
-  console.log(`- Affected events: ${eventIds.length}`);
+  console.log(`\n  By Status:`);
+  Object.entries(statusCounts).forEach(([status, count]) => {
+    console.log(`    - ${status}: ${count}`);
+  });
+  console.log(`\n- Affected events: ${eventIds.length}`);
   console.log(`- Orphaned events: ${orphanedEvents.length}`);
 
   if (options.dryRun) {
@@ -123,7 +136,8 @@ async function deleteClosedMarkets(pool: Pool, options: DeleteOptions): Promise<
       closedMarkets: closedMarkets.length,
       deletedMarkets: 0,
       orphanedEvents: orphanedEvents.length,
-      deletedEvents: 0
+      deletedEvents: 0,
+      venueCounts
     };
   }
 
@@ -168,7 +182,8 @@ async function deleteClosedMarkets(pool: Pool, options: DeleteOptions): Promise<
     closedMarkets: closedMarkets.length,
     deletedMarkets,
     orphanedEvents: orphanedEvents.length,
-    deletedEvents
+    deletedEvents,
+    venueCounts
   };
 }
 
@@ -196,7 +211,11 @@ async function main() {
     console.log('\n📈 Final Statistics:');
     console.log(`- Closed markets found: ${stats.closedMarkets}`);
     console.log(`- Markets deleted: ${stats.deletedMarkets}`);
-    console.log(`- Orphaned events found: ${stats.orphanedEvents}`);
+    console.log(`\n  By Venue:`);
+    Object.entries(stats.venueCounts).forEach(([venue, count]) => {
+      console.log(`    - ${venue}: ${count}`);
+    });
+    console.log(`\n- Orphaned events found: ${stats.orphanedEvents}`);
     console.log(`- Events deleted: ${stats.deletedEvents}`);
 
   } catch (error) {
