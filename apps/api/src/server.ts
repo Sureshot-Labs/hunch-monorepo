@@ -1064,6 +1064,232 @@ app.get("/markets/:marketId", async (request, reply) => {
 });
 
 /**
+ * GET /events/:eventId
+ * Get detailed information for a specific event with all associated markets
+ */
+app.get("/events/:eventId", async (request, reply) => {
+  const { eventId } = request.params as { eventId: string };
+  
+  if (!eventId) {
+    reply.code(400);
+    return reply.send({ error: "eventId parameter is required" });
+  }
+  
+  // Check client rate limiting
+  const clientIp = request.ip || 'unknown';
+  const rateLimitKey = `event:${clientIp}`;
+  const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
+  
+  if (!canProceed) {
+    reply.code(429);
+    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+  }
+  
+  // Create cache key
+  const cacheKey = `event:${eventId}`;
+  const r = await getRedis();
+  
+  // Check cache first (30-second cache for event data)
+  if (r) {
+    const cachedData = await r.get(cacheKey);
+    if (cachedData) {
+      reply.header("x-cache", "hit");
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      return reply.send(cachedData);
+    }
+  }
+  
+  try {
+    // Query for event details with all associated markets
+    const eventSql = `
+      SELECT
+        e.id as event_id,
+        e.venue as event_venue,
+        e.venue_event_id,
+        e.title as event_title,
+        e.description as event_description,
+        e.category as event_category,
+        e.status as event_status,
+        e.start_date,
+        e.end_date,
+        e.volume_total as event_volume_total,
+        e.volume_24h as event_volume_24h,
+        e.liquidity as event_liquidity,
+        e.open_interest as event_open_interest,
+        e.slug as event_slug,
+        e.image as event_image,
+        e.icon as event_icon,
+        e.created_at as event_created_at,
+        e.updated_at as event_updated_at,
+        m.id as market_id,
+        m.venue as market_venue,
+        m.venue_market_id,
+        m.title as market_title,
+        m.description as market_description,
+        m.market_type,
+        m.status as market_status,
+        m.open_time,
+        m.close_time,
+        m.expiration_time,
+        m.volume_24h,
+        m.volume_total,
+        m.open_interest,
+        m.liquidity,
+        m.best_bid,
+        m.best_ask,
+        m.last_price,
+        m.outcomes,
+        m.token_yes,
+        m.token_no,
+        m.clob_token_ids,
+        m.condition_id,
+        m.slug as market_slug,
+        m.category as market_category,
+        m.image as market_image,
+        m.icon as market_icon,
+        m.created_at as market_created_at,
+        m.updated_at as market_updated_at
+      FROM unified_events e
+      LEFT JOIN unified_markets m ON m.event_id = e.id
+      WHERE e.id = $1 OR e.venue_event_id = $1
+      ORDER BY m.volume_24h DESC NULLS LAST, m.liquidity DESC NULLS LAST, m.venue_market_id
+    `;
+    
+    const { rows } = await pool.query(eventSql, [eventId]);
+    
+    if (rows.length === 0) {
+      reply.code(404);
+      return reply.send({ error: "Event not found" });
+    }
+    
+    const firstRow = rows[0];
+    
+    // Build event object
+    const event = {
+      eventId: firstRow.event_id,
+      venue: firstRow.event_venue,
+      venueEventId: firstRow.venue_event_id,
+      eventTitle: firstRow.event_title,
+      eventDescription: firstRow.event_description || null,
+      category: firstRow.event_category || null,
+      startTime: firstRow.start_date,
+      endTime: firstRow.end_date,
+      status: firstRow.event_status,
+      eventLiquidity: firstRow.event_liquidity != null ? Number(firstRow.event_liquidity) : 0,
+      eventVolume: firstRow.event_volume_total != null ? Number(firstRow.event_volume_total) : 0,
+      eventVolume24h: firstRow.event_volume_24h != null ? Number(firstRow.event_volume_24h) : 0,
+      eventOpenInterest: firstRow.event_open_interest != null ? Number(firstRow.event_open_interest) : 0,
+      eventSlug: firstRow.event_slug || null,
+      image: firstRow.event_image || null,
+      icon: firstRow.event_icon || null,
+      createdAt: firstRow.event_created_at,
+      updatedAt: firstRow.event_updated_at,
+      markets: [] as any[]
+    };
+    
+    // Process markets
+    for (const row of rows) {
+      // Skip if no market data (event exists but has no markets)
+      if (!row.market_id) {
+        continue;
+      }
+      
+      // Parse token IDs based on venue
+      let tokens = { yes: null, no: null };
+      if (row.market_venue === 'polymarket' && row.clob_token_ids) {
+        try {
+          const tokenIds = JSON.parse(row.clob_token_ids);
+          tokens = {
+            yes: tokenIds[0] || null,
+            no: tokenIds[1] || null
+          };
+        } catch (error) {
+          // Invalid JSON, keep tokens as null
+        }
+      } else if (row.market_venue === 'limitless' || row.market_venue === 'kalshi') {
+        tokens = {
+          yes: row.token_yes,
+          no: row.token_no
+        };
+      }
+      
+      // Parse outcomes if available
+      let outcomes = null;
+      if (row.outcomes) {
+        try {
+          outcomes = JSON.parse(row.outcomes);
+        } catch (error) {
+          // Invalid JSON, keep outcomes as null
+        }
+      }
+      
+      // Determine if market is accepting orders
+      const acceptingOrders = row.market_status === 'ACTIVE' && 
+        (row.expiration_time === null || new Date(row.expiration_time) > new Date()) &&
+        (row.close_time === null || new Date(row.close_time) > new Date());
+      
+      event.markets.push({
+        marketId: row.market_id,
+        venue: row.market_venue,
+        venueMarketId: row.venue_market_id,
+        marketTitle: row.market_title,
+        marketDescription: row.market_description || null,
+        marketType: row.market_type,
+        status: row.market_status,
+        volume24h: row.volume_24h != null ? Number(row.volume_24h) : 0,
+        volumeTotal: row.volume_total != null ? Number(row.volume_total) : 0,
+        openInterest: row.open_interest != null ? Number(row.open_interest) : 0,
+        liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
+        bestBid: row.best_bid != null ? Number(row.best_bid) : null,
+        bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+        lastPrice: row.last_price != null ? Number(row.last_price) : null,
+        outcomes,
+        tokens,
+        conditionId: row.condition_id || null,
+        category: row.market_category || null,
+        marketSlug: row.market_slug || null,
+        marketImage: row.market_image || null,
+        marketIcon: row.market_icon || null,
+        acceptingOrders,
+        top: {
+          yesBid: row.best_bid != null ? Number(row.best_bid) : null,
+          yesAsk: row.best_ask != null ? Number(row.best_ask) : null,
+          noBid: row.best_bid != null ? Number(1 - row.best_bid) : null,
+          noAsk: row.best_ask != null ? Number(1 - row.best_ask) : null,
+        },
+        openTime: row.open_time,
+        closeTime: row.close_time,
+        expirationTime: row.expiration_time,
+        createdAt: row.market_created_at,
+        updatedAt: row.market_updated_at,
+        lastUpdate: row.market_updated_at,
+      });
+    }
+    
+    const responseBody = JSON.stringify(event);
+    
+    // Cache for 30 seconds
+    if (r) {
+      await r.set(cacheKey, responseBody, { EX: 30 });
+      reply.header("x-cache", "miss");
+    }
+    
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+    return reply.send(responseBody);
+    
+  } catch (error) {
+    app.log.error({ error, eventId }, 'Event details fetch failed');
+    reply.code(500);
+    return reply.send({ 
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
  * GET /price-history
  * Query:
  *  - tokens: string (comma-separated token IDs - for Polymarket these are CLOB token IDs)
