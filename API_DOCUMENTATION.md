@@ -4,12 +4,14 @@
 1. [Overview](#overview)
 2. [Authentication](#authentication)
 3. [Base URL](#base-url)
-4. [Market Data Endpoints](#market-data-endpoints)
-5. [Authentication & User Management](#authentication--user-management)
-6. [Order Management](#order-management)
-7. [Error Handling](#error-handling)
-8. [Rate Limiting](#rate-limiting)
-9. [WebSocket Streaming](#websocket-streaming)
+4. [System Endpoints](#system-endpoints)
+5. [Market Data Endpoints](#market-data-endpoints)
+6. [Authentication & User Management](#authentication--user-management)
+7. [Order Management](#order-management)
+8. [Watchlist Management](#watchlist-management)
+9. [Error Handling](#error-handling)
+10. [Rate Limiting](#rate-limiting)
+11. [WebSocket Streaming](#websocket-streaming)
 
 ## Overview
 
@@ -32,14 +34,13 @@ Development: http://localhost:3000
 
 ## Authentication
 
-The API uses JWT-based authentication with wallet signatures. Most endpoints require authentication via the `Authorization` header.
+The API uses JWT-based authentication with Privy wallet integration. Most endpoints require authentication via the `Authorization` header.
 
 ### Authentication Flow
 
-1. **Generate Nonce**: Request a nonce for wallet signature
-2. **Sign Message**: Sign the message with your wallet
-3. **Verify & Login**: Submit signature to get JWT token
-4. **Use Token**: Include token in subsequent requests
+1. **Get Privy Access Token**: Authenticate with Privy to get an access token
+2. **Verify Privy Token**: Submit Privy access token to get JWT token
+3. **Use Token**: Include token in subsequent requests
 
 ### Headers
 
@@ -57,6 +58,65 @@ headers: {
   'poly_timestamp': '<timestamp>',
   'poly_nonce': '<nonce>',
   'Content-Type': 'application/json'
+}
+```
+
+---
+
+## System Endpoints
+
+### 1. Health Check
+
+**Endpoint**: `GET /health`
+
+**Description**: Check if the API is running and healthy.
+
+**Example Response**:
+```json
+{
+  "ok": true
+}
+```
+
+### 2. Metrics
+
+**Endpoint**: `GET /metrics`
+
+**Description**: Get API metrics and performance statistics.
+
+**Example Response**:
+```json
+{
+  "requests": {
+    "total": 12345,
+    "successful": 12000,
+    "failed": 345
+  },
+  "responseTime": {
+    "average": 150,
+    "p95": 300,
+    "p99": 500
+  }
+}
+```
+
+### 3. Price History Status
+
+**Endpoint**: `GET /price-history/status`
+
+**Description**: Get the current status of the Polymarket rate limiter, including queue length and processing status.
+
+**Example Response**:
+```json
+{
+  "polymarketRateLimiter": {
+    "queueLength": 5,
+    "isProcessing": true,
+    "requestCount": 45,
+    "windowStart": 1705312200000,
+    "timeUntilReset": 3500
+  },
+  "timestamp": "2024-01-15T10:30:00Z"
 }
 ```
 
@@ -381,49 +441,173 @@ GET /price/token-123?side=BUY
 }
 ```
 
----
-
-## Authentication & User Management
-
-### 1. Generate Nonce
-
-**Endpoint**: `POST /auth/nonce`
-
-**Description**: Generate a nonce for wallet signature verification.
-
-**Request Body**:
+**Example Response**:
 ```json
 {
-  "walletAddress": "0x1234567890123456789012345678901234567890"
+  "spreads": [
+    {
+      "tokenId": "token-123",
+      "bid": 0.65,
+      "ask": 0.67,
+      "spread": 0.02,
+      "spreadPercent": 3.03
+    }
+  ],
+  "timestamp": "2024-01-15T10:30:00Z"
 }
+```
+
+### 9. Get Market Details
+
+**Endpoint**: `GET /markets/:marketId`
+
+**Description**: Get detailed information for a specific market, including event information.
+
+**Path Parameters**:
+- `marketId`: The market ID (can be the unified market ID or venue-specific market ID)
+
+**Example Request**:
+```javascript
+GET /markets/polymarket:0x123...
 ```
 
 **Example Response**:
 ```json
 {
-  "nonce": "abc123def456...",
-  "message": "Sign this message to authenticate with Hunch Trading Platform.\n\nNonce: abc123def456...\nWallet: 0x1234567890123456789012345678901234567890",
-  "expiresIn": 300
+  "marketId": "polymarket:0x123...",
+  "venue": "polymarket",
+  "venueMarketId": "0x123...",
+  "marketTitle": "Will Bitcoin reach $100k by end of 2024?",
+  "marketDescription": "Market description...",
+  "marketType": "BINARY",
+  "openTime": "2024-01-01T00:00:00Z",
+  "closeTime": null,
+  "expirationTime": "2024-12-31T23:59:59Z",
+  "volume24h": 5000,
+  "liquidity": 25000,
+  "bestBid": 0.65,
+  "bestAsk": 0.67,
+  "lastPrice": 0.66,
+  "outcomes": null,
+  "tokens": {
+    "yes": "token-yes-123",
+    "no": "token-no-123"
+  },
+  "conditionId": "0x456...",
+  "category": "Crypto",
+  "marketSlug": "bitcoin-100k-by-2024",
+  "marketImage": "https://...",
+  "marketIcon": "https://...",
+  "createdAt": "2024-01-01T00:00:00Z",
+  "updatedAt": "2024-01-15T10:30:00Z",
+  "event": {
+    "eventId": "event-uuid",
+    "eventTitle": "Bitcoin Price Predictions 2024",
+    "eventDescription": "Event description...",
+    "category": "Crypto",
+    "startTime": "2024-01-01T00:00:00Z",
+    "endTime": "2024-12-31T23:59:59Z",
+    "eventLiquidity": 50000,
+    "eventVolume": 25000,
+    "eventImage": "https://...",
+    "eventIcon": "https://..."
+  }
 }
 ```
 
-### 2. Verify Signature & Login
+### 10. Get Event Details
 
-**Endpoint**: `POST /auth/verify`
+**Endpoint**: `GET /events/:eventId`
 
-**Description**: Verify wallet signature and authenticate user.
+**Description**: Get detailed information for a specific event with all associated markets.
+
+**Path Parameters**:
+- `eventId`: The event ID (can be the unified event ID or venue-specific event ID)
+
+**Example Request**:
+```javascript
+GET /events/event-uuid
+```
+
+**Example Response**:
+```json
+{
+  "eventId": "event-uuid",
+  "venue": "polymarket",
+  "venueEventId": "polymarket-event-123",
+  "eventTitle": "Bitcoin Price Predictions 2024",
+  "eventDescription": "Event description...",
+  "category": "Crypto",
+  "startTime": "2024-01-01T00:00:00Z",
+  "endTime": "2024-12-31T23:59:59Z",
+  "status": "ACTIVE",
+  "eventLiquidity": 50000,
+  "eventVolume": 25000,
+  "eventVolume24h": 5000,
+  "eventOpenInterest": 12000,
+  "eventSlug": "bitcoin-price-predictions-2024",
+  "image": "https://...",
+  "icon": "https://...",
+  "createdAt": "2024-01-01T00:00:00Z",
+  "updatedAt": "2024-01-15T10:30:00Z",
+  "markets": [
+    {
+      "marketId": "polymarket:0x123...",
+      "venue": "polymarket",
+      "venueMarketId": "0x123...",
+      "marketTitle": "Will Bitcoin reach $100k by end of 2024?",
+      "marketDescription": "Market description...",
+      "marketType": "BINARY",
+      "status": "ACTIVE",
+      "volume24h": 5000,
+      "volumeTotal": 15000,
+      "openInterest": 3000,
+      "liquidity": 25000,
+      "bestBid": 0.65,
+      "bestAsk": 0.67,
+      "lastPrice": 0.66,
+      "outcomes": null,
+      "tokens": {
+        "yes": "token-yes-123",
+        "no": "token-no-123"
+      },
+      "conditionId": "0x456...",
+      "category": "Crypto",
+      "marketSlug": "bitcoin-100k-by-2024",
+      "marketImage": "https://...",
+      "marketIcon": "https://...",
+      "acceptingOrders": true,
+      "top": {
+        "yesBid": 0.65,
+        "yesAsk": 0.67,
+        "noBid": 0.35,
+        "noAsk": 0.33
+      },
+      "openTime": "2024-01-01T00:00:00Z",
+      "closeTime": null,
+      "expirationTime": "2024-12-31T23:59:59Z",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-15T10:30:00Z",
+      "lastUpdate": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## Authentication & User Management
+
+### 1. Privy Authentication
+
+**Endpoint**: `POST /auth/privy`
+
+**Description**: Authenticate using Privy access token. This is the primary authentication method.
 
 **Request Body**:
 ```json
 {
-  "walletAddress": "0x1234567890123456789012345678901234567890",
-  "signature": "0x...",
-  "userData": {
-    "email": "user@example.com",
-    "username": "trader123",
-    "displayName": "John Trader",
-    "avatarUrl": "https://..."
-  }
+  "accessToken": "privy_access_token_here"
 }
 ```
 
@@ -445,11 +629,15 @@ GET /price/token-123?side=BUY
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
     "expiresAt": "2024-01-16T10:30:00Z"
   },
-  "walletAddress": "0x1234567890123456789012345678901234567890"
+  "walletAddresses": [
+    "0x1234567890123456789012345678901234567890"
+  ],
+  "primaryWalletAddress": "0x1234567890123456789012345678901234567890",
+  "privyUserId": "privy-user-id"
 }
 ```
 
-### 3. Get Current User
+### 2. Get Current User
 
 **Endpoint**: `GET /auth/me`
 
@@ -492,7 +680,7 @@ GET /price/token-123?side=BUY
 }
 ```
 
-### 4. Logout
+### 3. Logout
 
 **Endpoint**: `POST /auth/logout`
 
@@ -507,7 +695,7 @@ GET /price/token-123?side=BUY
 }
 ```
 
-### 5. Set Venue Credentials
+### 4. Set Venue Credentials
 
 **Endpoint**: `POST /auth/venue-credentials`
 
@@ -542,7 +730,7 @@ GET /price/token-123?side=BUY
 }
 ```
 
-### 6. Get Venue Credentials
+### 5. Get Venue Credentials
 
 **Endpoint**: `GET /auth/venue-credentials`
 
@@ -567,7 +755,38 @@ GET /price/token-123?side=BUY
 }
 ```
 
-### 7. Add Wallet
+### 6. Set Polymarket Credentials
+
+**Endpoint**: `POST /auth/polymarket-credentials`
+
+**Description**: Set Polymarket API credentials for the authenticated user.
+
+**Headers**: `Authorization: Bearer <token>`
+
+**Request Body**:
+```json
+{
+  "apiKey": "your-api-key",
+  "apiSecret": "your-api-secret"
+}
+```
+
+**Example Response**:
+```json
+{
+  "message": "Polymarket credentials updated successfully",
+  "credentials": {
+    "id": "creds-uuid",
+    "venue": "polymarket",
+    "walletAddress": "0x1234567890123456789012345678901234567890",
+    "isActive": true,
+    "createdAt": "2024-01-15T10:30:00Z",
+    "lastUsedAt": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### 7. Get User Wallets
 
 **Endpoint**: `POST /auth/wallets`
 
@@ -584,13 +803,37 @@ GET /price/token-123?side=BUY
 }
 ```
 
-### 8. Get User Wallets
+### 8. Add Wallet
 
-**Endpoint**: `GET /auth/wallets`
+**Endpoint**: `POST /auth/wallets`
 
-**Description**: Get all wallets associated with the user.
+**Description**: Add a new wallet to user account.
 
 **Headers**: `Authorization: Bearer <token>`
+
+**Request Body**:
+```json
+{
+  "walletAddress": "0x9876543210987654321098765432109876543210",
+  "walletType": "ethereum",
+  "verificationSignature": "0x..."
+}
+```
+
+**Example Response**:
+```json
+{
+  "message": "Wallet added successfully",
+  "wallet": {
+    "id": "wallet-uuid",
+    "walletAddress": "0x9876543210987654321098765432109876543210",
+    "walletType": "ethereum",
+    "isPrimary": false,
+    "isVerified": true,
+    "createdAt": "2024-01-15T10:30:00Z"
+  }
+}
+```
 
 ---
 
@@ -782,7 +1025,7 @@ GET /price/token-123?side=BUY
 **Headers**: `Authorization: Bearer <token>`
 
 **Query Parameters**:
-- `venue` (optional): Filter by venue
+- `venue` (optional): Filter by venue ("polymarket", "kalshi", "limitless")
 
 **Example Response**:
 ```json
@@ -802,9 +1045,243 @@ GET /price/token-123?side=BUY
       "createdAt": "2024-01-15T10:30:00Z",
       "updatedAt": "2024-01-15T10:30:00Z"
     }
+  ],
+  "venue": "polymarket"
+}
+```
+
+**Note**: If no `venue` parameter is provided, positions from all venues are returned.
+
+### 7. Store Order
+
+**Endpoint**: `POST /orders/store`
+
+**Description**: Store order data after user performs the order on frontend. This API stores the orderID with walletAddress for tracking purposes.
+
+**Request Body**:
+```json
+{
+  "walletAddress": "0x1234567890123456789012345678901234567890",
+  "orderID": "venue-order-123",
+  "takingAmount": "1000000000000000000",
+  "makingAmount": "650000000000000000",
+  "status": "live",
+  "success": true,
+  "errorMsg": null,
+  "venue": "polymarket",
+  "tokenId": "token-123",
+  "side": "BUY",
+  "price": 0.65,
+  "size": 100
+}
+```
+
+**Example Response**:
+```json
+{
+  "message": "Order stored successfully",
+  "order": {
+    "id": "order-uuid",
+    "orderID": "venue-order-123",
+    "status": "live",
+    "storedAt": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+### 8. Get Orders by Wallet Address
+
+**Endpoint**: `GET /orders/user/:walletAddress`
+
+**Description**: Get order IDs for a specific wallet address. This API fetches all order IDs associated with a wallet address.
+
+**Path Parameters**:
+- `walletAddress`: The wallet address (must be valid Ethereum address format)
+
+**Query Parameters**:
+- `limit` (optional): Number of results (default: 50, max: 100)
+- `offset` (optional): Pagination offset (default: 0)
+- `status` (optional): Filter by status
+- `venue` (optional): Filter by venue
+
+**Example Request**:
+```javascript
+GET /orders/user/0x1234567890123456789012345678901234567890?limit=20&venue=polymarket
+```
+
+**Example Response**:
+```json
+{
+  "orders": [
+    {
+      "id": "order-uuid",
+      "venueOrderId": "venue-order-123",
+      "venue": "polymarket",
+      "tokenId": "token-123",
+      "side": "BUY",
+      "orderType": "GTC",
+      "price": 0.65,
+      "size": 100,
+      "status": "live",
+      "filledSize": 0,
+      "averageFillPrice": null,
+      "postedAt": "2024-01-15T10:30:00Z",
+      "lastUpdate": "2024-01-15T10:30:00Z",
+      "filledAt": null,
+      "cancelledAt": null
+    }
+  ],
+  "pagination": {
+    "total": 50,
+    "limit": 20,
+    "offset": 0,
+    "hasMore": true
+  }
+}
+```
+
+---
+
+## Watchlist Management
+
+### 1. Add to Watchlist
+
+**Endpoint**: `POST /watchlist`
+
+**Description**: Add a market to the user's watchlist.
+
+**Headers**: `Authorization: Bearer <token>`
+
+**Request Body**:
+```json
+{
+  "marketId": "polymarket:0x123..."
+}
+```
+
+**Note**: The `marketId` must be in the format `venue:venue_market_id` (e.g., `polymarket:0x123...`).
+
+**Example Response**:
+```json
+{
+  "message": "Market added to watchlist successfully",
+  "watchlistItem": {
+    "id": "watchlist-uuid",
+    "marketId": "polymarket:0x123...",
+    "createdAt": "2024-01-15T10:30:00Z"
+  }
+}
+```
+
+**Error Responses**:
+- `400`: Invalid marketId format or market not found
+- `409`: Market already in watchlist
+
+### 2. Get Watchlist
+
+**Endpoint**: `GET /watchlist`
+
+**Description**: Get all markets in user's watchlist with full market and event data.
+
+**Headers**: `Authorization: Bearer <token>`
+
+**Query Parameters**:
+- `limit` (optional): Number of results per page (default: 50, max: 100)
+- `offset` (optional): Pagination offset (default: 0)
+- `include_inactive` (optional): Include inactive/closed markets (default: false, set to "true" to include)
+
+**Example Request**:
+```javascript
+GET /watchlist?limit=20&include_inactive=false
+```
+
+**Example Response**:
+```json
+{
+  "count": 10,
+  "total": 25,
+  "limit": 20,
+  "offset": 0,
+  "data": [
+    {
+      "eventId": "event-uuid",
+      "eventTitle": "Will Bitcoin reach $100k by end of 2024?",
+      "category": "Crypto",
+      "startTime": "2024-01-01T00:00:00Z",
+      "endTime": "2024-12-31T23:59:59Z",
+      "eventLiquidity": 50000,
+      "eventVolume": 25000,
+      "eventOpenInterest": 12000,
+      "eventSlug": "bitcoin-100k-2024",
+      "image": "https://...",
+      "icon": "https://...",
+      "markets": [
+        {
+          "marketId": "polymarket:0x123...",
+          "venue": "polymarket",
+          "venueMarketId": "0x123...",
+          "marketTitle": "Bitcoin $100k by 2024",
+          "marketSlug": "bitcoin-100k-by-2024",
+          "volume24h": 5000,
+          "volumeTotal": 15000,
+          "openInterest": 3000,
+          "liquidity": 25000,
+          "acceptingOrders": true,
+          "tokens": {
+            "yes": "token-yes-123",
+            "no": "token-no-123"
+          },
+          "top": {
+            "yesBid": 0.65,
+            "yesAsk": 0.67,
+            "noBid": 0.35,
+            "noAsk": 0.33
+          },
+          "lastUpdate": "2024-01-15T10:30:00Z",
+          "watchlistId": "watchlist-uuid",
+          "watchlistCreatedAt": "2024-01-15T10:30:00Z"
+        }
+      ]
+    }
   ]
 }
 ```
+
+**Note**: Markets are grouped by event, similar to the `/feed` endpoint structure. Only active markets are included by default unless `include_inactive=true` is specified.
+
+### 3. Remove from Watchlist
+
+**Endpoint**: `DELETE /watchlist/:marketId`
+
+**Description**: Remove a market from user's watchlist.
+
+**Headers**: `Authorization: Bearer <token>`
+
+**Path Parameters**:
+- `marketId`: The market ID to remove. Can be:
+  - Full composite ID: `venue:venue_market_id` (e.g., `polymarket:0x123...`)
+  - Just venue_market_id: `0x123...` (will match any venue with that market_id)
+
+**Example Request**:
+```javascript
+DELETE /watchlist/polymarket:0x123...
+// or
+DELETE /watchlist/0x123...
+```
+
+**Example Response**:
+```json
+{
+  "message": "Market removed from watchlist successfully",
+  "removedItem": {
+    "id": "watchlist-uuid",
+    "marketId": "polymarket:0x123..."
+  }
+}
+```
+
+**Error Responses**:
+- `404`: Market not found in watchlist
 
 ---
 
@@ -926,145 +1403,4 @@ X-RateLimit-Reset: 1640995200
   "message": "Client rate limit exceeded. Please try again later."
 }
 ```
-
----
-
-## Order Status Reference
-
-### Order Statuses
-- `pending`: Order is being processed
-- `submitted`: Order submitted to venue
-- `live`: Order is active on the order book
-- `matched`: Order has been matched
-- `partially_filled`: Order partially filled
-- `filled`: Order completely filled
-- `cancelled`: Order cancelled
-- `rejected`: Order rejected by venue
-- `expired`: Order expired
-- `delayed`: Order placement delayed
-- `unmatched`: Order unmatched
-
-### Position Sides
-- `LONG`: Long position (bought tokens)
-- `SHORT`: Short position (sold tokens)
-- `FLAT`: No position
-
----
-
-## SDK Examples
-
-### JavaScript/TypeScript
-
-```typescript
-class HunchAPI {
-  private baseUrl: string;
-  private token: string | null = null;
-
-  constructor(baseUrl: string = 'https://api.hunch.trading') {
-    this.baseUrl = baseUrl;
-  }
-
-  async authenticate(walletAddress: string, signature: string) {
-    // 1. Get nonce
-    const nonceResponse = await fetch(`${this.baseUrl}/auth/nonce`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ walletAddress })
-    });
-    const { nonce, message } = await nonceResponse.json();
-
-    // 2. Verify signature
-    const verifyResponse = await fetch(`${this.baseUrl}/auth/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ walletAddress, signature })
-    });
-    const { session } = await verifyResponse.json();
-    this.token = session.token;
-  }
-
-  async getFeed(params: any = {}) {
-    const query = new URLSearchParams(params).toString();
-    const response = await fetch(`${this.baseUrl}/feed?${query}`, {
-      headers: { 'Authorization': `Bearer ${this.token}` }
-    });
-    return response.json();
-  }
-
-  async placeOrder(order: any) {
-    const response = await fetch(`${this.baseUrl}/orders`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(order)
-    });
-    return response.json();
-  }
-}
-```
-
-### Python
-
-```python
-import requests
-from typing import Optional, Dict, Any
-
-class HunchAPI:
-    def __init__(self, base_url: str = "https://api.hunch.trading"):
-        self.base_url = base_url
-        self.token: Optional[str] = None
-
-    def authenticate(self, wallet_address: str, signature: str) -> Dict[str, Any]:
-        # 1. Get nonce
-        nonce_response = requests.post(
-            f"{self.base_url}/auth/nonce",
-            json={"walletAddress": wallet_address}
-        )
-        nonce_data = nonce_response.json()
-
-        # 2. Verify signature
-        verify_response = requests.post(
-            f"{self.base_url}/auth/verify",
-            json={"walletAddress": wallet_address, "signature": signature}
-        )
-        session_data = verify_response.json()
-        self.token = session_data["session"]["token"]
-        return session_data
-
-    def get_feed(self, **params) -> Dict[str, Any]:
-        response = requests.get(
-            f"{self.base_url}/feed",
-            params=params,
-            headers={"Authorization": f"Bearer {self.token}"}
-        )
-        return response.json()
-
-    def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        response = requests.post(
-            f"{self.base_url}/orders",
-            json=order,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json"
-            }
-        )
-        return response.json()
-```
-
----
-
-## Support
-
-For API support, please contact:
-- **Email**: api-support@hunch.trading
-- **Documentation**: https://docs.hunch.trading
-- **Status Page**: https://status.hunch.trading
-
----
-
-*Last updated: January 2024*
-
-
 
