@@ -36,5 +36,3 @@ pnpm dev
 
 - **[Developer Setup Guide](./DEVELOPER_SETUP.md)** - Complete setup instructions for new developers
 - **[API Documentation](./API_DOCUMENTATION.md)** - Complete API reference
-- **[Security Review](./SECURITY_REVIEW_REPORT.md)** - Security considerations
-- **[Branch Protection Checklist](./BRANCH_PROTECTION_CHECKLIST.md)** - PR guidelines
