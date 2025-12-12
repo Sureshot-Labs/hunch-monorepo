@@ -8,3 +8,5 @@ export function createRedisClient(options: { url: string }): RedisClientType {
 export async function ensureRedis(redis: RedisClientType): Promise<void> {
   if (!redis.isOpen) await redis.connect();
 }
+
+export type { RedisClientType };
