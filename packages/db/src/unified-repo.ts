@@ -220,3 +220,62 @@ export async function upsertUnifiedMarket(
   const result = await pool.query(query, values);
   return result.rows[0].id;
 }
+
+function venueFromUnifiedTokenId(tokenId: string): string {
+  if (tokenId.startsWith("kalshi:")) return "kalshi";
+  if (tokenId.startsWith("limitless:")) return "limitless";
+  return "polymarket";
+}
+
+export async function upsertUnifiedToken(
+  pool: Pool,
+  token: {
+    token_id: string;
+    market_id: string;
+    side: "YES" | "NO";
+  },
+): Promise<void> {
+  await pool.query(
+    `
+    insert into unified_tokens(token_id, venue, market_id, side)
+    values ($1,$2,$3,$4)
+    on conflict (token_id) do nothing
+  `,
+    [
+      token.token_id,
+      venueFromUnifiedTokenId(token.token_id),
+      token.market_id,
+      token.side,
+    ],
+  );
+}
+
+export async function writeUnifiedBookTop(
+  pool: Pool,
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  ts: Date,
+): Promise<void> {
+  const mid =
+    bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+  const spread =
+    bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
+
+  await pool.query(
+    `
+    insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
+    values ($1,$2,$3,$4,$5,$6,$7)
+    on conflict do nothing
+  `,
+    [
+      tokenId,
+      venueFromUnifiedTokenId(tokenId),
+      ts.toISOString(),
+      bestBid,
+      bestAsk,
+      mid,
+      spread,
+    ],
+  );
+}

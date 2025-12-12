@@ -5,8 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { env } from "./env";
-import { redis } from "../../indexer-polymarket/src/redis";
-import { writeBookTop } from "../../indexer-polymarket/src/repo";
+import { redis } from "./redis";
+import { pool } from "./db";
+import { writeUnifiedBookTop } from "@hunch/db";
 
 // derive top-of-book from ws orderbook payload
 function deriveTop(ob: { yes?: [number, number][]; no?: [number, number][] }) {
@@ -123,8 +124,20 @@ export function startMarketWS(tickers: string[]) {
 
         const top = deriveTop(m.data);
         const ts = new Date();
-        await writeBookTop(`kalshi:${t}:YES`, top.yesBid, top.yesAsk, ts);
-        await writeBookTop(`kalshi:${t}:NO`, top.noBid, top.noAsk, ts);
+        await writeUnifiedBookTop(
+          pool,
+          `kalshi:${t}:YES`,
+          top.yesBid,
+          top.yesAsk,
+          ts,
+        );
+        await writeUnifiedBookTop(
+          pool,
+          `kalshi:${t}:NO`,
+          top.noBid,
+          top.noAsk,
+          ts,
+        );
 
         msgCount++;
       } catch (e) {

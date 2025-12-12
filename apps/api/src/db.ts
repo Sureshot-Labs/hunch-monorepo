@@ -1,11 +1,11 @@
-import { Pool } from "pg";
+import { createPgPool, type Pool } from "@hunch/infra";
 import { env } from "./env.js";
 
-export const pool = new Pool({
+export const pool: Pool = createPgPool({
   connectionString: env.dbUrl,
   max: 20, // Maximum number of clients in the pool
   idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
   connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
 });
 
-pool.on("error", (e) => console.error("[pg] error", e));
+pool.on("error", (e: unknown) => console.error("[pg] error", e));

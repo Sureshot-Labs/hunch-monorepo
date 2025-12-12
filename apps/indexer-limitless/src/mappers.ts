@@ -4,10 +4,7 @@ import type {
   LimitlessEventRow,
   LimitlessMarketRow,
 } from "./limitless-repo.js";
-import type {
-  UnifiedEventRow,
-  UnifiedMarketRow,
-} from "../../../packages/db/src/unified-repo";
+import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
 function parseVolume(

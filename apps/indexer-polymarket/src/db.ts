@@ -1,19 +1,8 @@
-import { Pool } from "pg";
 import type { PoolClient } from "pg";
 import { env } from "./env";
+import { createPgPool, tx as runTx } from "@hunch/infra";
 
-export const pool = new Pool({ connectionString: env.dbUrl });
+export const pool = createPgPool({ connectionString: env.dbUrl });
 export async function tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
-  const c = await pool.connect();
-  try {
-    await c.query("begin");
-    const r = await fn(c);
-    await c.query("commit");
-    return r;
-  } catch (e) {
-    await c.query("rollback");
-    throw e;
-  } finally {
-    c.release();
-  }
+  return runTx(pool, fn);
 }

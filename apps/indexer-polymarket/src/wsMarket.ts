@@ -1,9 +1,10 @@
 import WebSocket from "ws";
 import { env } from "./env";
 import { log } from "./log";
-import { writeBookTop } from "./repo";
 import { ensureRedis, redis } from "./redis";
 import PQueue from "p-queue";
+import { writeUnifiedBookTop } from "@hunch/db";
+import { pool } from "./db";
 
 // Very light state holder
 type SubState = { subscribed: Set<string> };
@@ -136,7 +137,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
             JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts }),
           );
           await Promise.all([
-            writeBookTop(id, bb, ba, new Date(ts)),
+            writeUnifiedBookTop(pool, id, bb, ba, new Date(ts)),
             multi.exec(),
           ]);
         }

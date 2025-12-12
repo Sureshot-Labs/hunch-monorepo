@@ -1,6 +1,6 @@
 import { bootstrapKalshi } from "./bootstrap";
 import { startMarketWS } from "./wsMarket";
-import { log } from "../../indexer-polymarket/src/log";
+import { log } from "./log";
 
 let bootstrapping = false;
 

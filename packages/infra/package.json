@@ -1,5 +1,5 @@
 {
-  "name": "@hunch/db",
+  "name": "@hunch/infra",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -12,22 +12,18 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
     "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
-    "@hunch/config": "workspace:*",
-    "globby": "^14.1.0",
-    "pg": "8.16.3"
+    "pg": "8.16.3",
+    "redis": "^5.8.2"
   },
   "devDependencies": {
-    "@types/node": "^24.3.1",
-    "@types/pg": "^8.15.5",
-    "tsx": "^4.20.5",
-    "typescript": "^5.9.2"
+    "@types/node": "^24.10.2"
   }
 }

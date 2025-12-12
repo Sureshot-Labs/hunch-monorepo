@@ -10,6 +10,8 @@ import { VenueOrderManagerFactory } from "./venue-order-manager-factory.js";
 import { PlaceOrderRequest, OrderStatus } from "./order-types.js";
 import type {
   FeedEvent,
+  OrderHistoryRow,
+  OrderRow,
   PgParams,
   PolymarketRequestData,
   PriceHistoryData,
@@ -794,8 +796,11 @@ app.get("/feed", async (req, reply) => {
   `;
   eventParams.push(minVol, minLiquidity);
 
-  const { rows: eventRows } = await pool.query(eventSql, eventParams);
-  const eventIds = eventRows.map((r) => String(r.id));
+  const { rows: eventRows } = await pool.query<{ id: string }>(
+    eventSql,
+    eventParams,
+  );
+  const eventIds = eventRows.map((r) => r.id);
   if (!eventIds.length) {
     const payload = {
       count: 0,
@@ -3024,18 +3029,18 @@ app.get(
         const limit = Math.min(query.limit || 50, 100); // Max 100 orders
         const offset = query.offset || 0;
 
-        const result = await client.query(
+        const result = await client.query<OrderHistoryRow>(
           `
-        SELECT 
-          id, user_id, venue, venue_order_id, token_id, side, order_type,
-          price, size, status, filled_size, average_fill_price,
+	        SELECT 
+	          id, user_id, venue, venue_order_id, token_id, side, order_type,
+	          price, size, status, filled_size, average_fill_price,
           expires_at, created_at, updated_at, filled_at, cancelled_at,
           error_message, raw_error
         FROM orders 
         ${whereClause}
         ORDER BY created_at DESC
-        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
-      `,
+	        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
+	      `,
           [...params, limit, offset],
         );
 
@@ -3369,15 +3374,15 @@ app.get(
         const offset = query.offset || 0;
 
         // Get orders
-        const result = await client.query(
+        const result = await client.query<OrderRow>(
           `SELECT 
-          id, venue_order_id, venue, token_id, side, order_type,
-          price, size, status, filled_size, average_fill_price,
-          posted_at, last_update, filled_at, cancelled_at
+	          id, venue_order_id, venue, token_id, side, order_type,
+	          price, size, status, filled_size, average_fill_price,
+	          posted_at, last_update, filled_at, cancelled_at
         FROM orders 
         ${whereClause}
-        ORDER BY posted_at DESC
-        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
+	        ORDER BY posted_at DESC
+	        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
           [...params, limit, offset],
         );
 

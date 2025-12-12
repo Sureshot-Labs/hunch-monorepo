@@ -11,11 +11,8 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
-import {
-  upsertUnifiedEvent,
-  upsertUnifiedMarket,
-} from "../../../packages/db/src/unified-repo";
-import { pool } from "../../indexer-polymarket/src/db";
+import { upsertUnifiedEvent, upsertUnifiedMarket } from "@hunch/db";
+import { pool } from "./db.js";
 
 export async function bootstrapLimitless() {
   log.info("Bootstrapping Limitless…");

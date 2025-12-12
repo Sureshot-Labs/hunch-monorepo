@@ -5,10 +5,7 @@ import type {
   TPolymarketEvent,
   TPolymarketMarket,
 } from "./types";
-import type {
-  UnifiedEventRow,
-  UnifiedMarketRow,
-} from "../../../packages/db/src/unified-repo";
+import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;

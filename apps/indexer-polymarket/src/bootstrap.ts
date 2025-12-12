@@ -2,7 +2,6 @@ import { ensureRedis, redis } from "./redis";
 import { env } from "./env";
 import { iterateEvents } from "./gammaClient";
 import { postBooksOnce } from "./clobClient";
-import { writeBookTop } from "./repo";
 import {
   upsertPolymarketEvent,
   upsertPolymarketMarket,
@@ -16,7 +15,8 @@ import {
 import {
   upsertUnifiedEvent,
   upsertUnifiedMarket,
-} from "../../../packages/db/src/unified-repo";
+  writeUnifiedBookTop,
+} from "@hunch/db";
 import { pool } from "./db";
 import { PolymarketEvent } from "./types";
 import { log } from "./log";
@@ -124,7 +124,7 @@ export async function bootstrapPolymarket() {
             const bb = b.bids?.length ? parseFloat(b.bids[0].price) : null;
             const ba = b.asks?.length ? parseFloat(b.asks[0].price) : null;
             const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
-            await writeBookTop(b.asset_id, bb, ba, ts);
+            await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
             await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
           }
         } catch (e) {

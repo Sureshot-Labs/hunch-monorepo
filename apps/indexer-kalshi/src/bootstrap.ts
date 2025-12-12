@@ -1,26 +1,24 @@
 // apps/indexer-kalshi/src/bootstrap.ts
-import { ensureRedis, redis } from "../../indexer-polymarket/src/redis";
+import { ensureRedis, redis } from "./redis";
 import { env } from "./env";
 import { iterateEventsWithMarkets } from "./marketClient";
-import {
-  getVenueId,
-  upsertToken,
-  writeBookTop,
-} from "../../indexer-polymarket/src/repo";
 import { mapTokens, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
 import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo";
 import {
+  getVenueId,
   upsertUnifiedEvent,
   upsertUnifiedMarket,
-} from "../../../packages/db/src/unified-repo";
-import { pool } from "../../indexer-polymarket/src/db";
+  upsertUnifiedToken,
+  writeUnifiedBookTop,
+} from "@hunch/db";
+import { pool } from "./db";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
 
 export async function bootstrapKalshi() {
   await ensureRedis();
-  const venueId = await getVenueId("kalshi");
+  const venueId = await getVenueId(pool, "kalshi");
   console.log("Bootstrapping Kalshi…", venueId);
 
   console.log(`[Bootstrap] Starting to process events (all statuses)...`);
@@ -53,7 +51,7 @@ export async function bootstrapKalshi() {
         // Still need to store tokens in the shared tokens table for orderbook functionality
         const marketUuid = uuid();
         for (const t of mapTokens(marketUuid, m.ticker)) {
-          await upsertToken(t);
+          await upsertUnifiedToken(pool, t);
         }
         topTickers.add(m.ticker);
       }
@@ -80,7 +78,13 @@ export async function bootstrapKalshi() {
           const tops = await getOrderbookTop(t);
           for (const s of tops) {
             const tokenId = `kalshi:${t}:${s.side}`;
-            await writeBookTop(tokenId, s.bestBid, s.bestAsk, s.ts);
+            await writeUnifiedBookTop(
+              pool,
+              tokenId,
+              s.bestBid,
+              s.bestAsk,
+              s.ts,
+            );
             await redis.set(
               `book:${tokenId}`,
               JSON.stringify({

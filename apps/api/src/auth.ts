@@ -38,6 +38,17 @@ export interface UserWallet {
   updatedAt: Date;
 }
 
+type UserWalletRow = {
+  id: string;
+  user_id: string;
+  wallet_address: string;
+  wallet_type: string;
+  is_primary: boolean;
+  is_verified: boolean;
+  created_at: Date;
+  updated_at: Date;
+};
+
 export interface VenueCredentials {
   id: string;
   userId: string;
@@ -51,6 +62,20 @@ export interface VenueCredentials {
   updatedAt: Date;
   lastUsedAt?: Date;
 }
+
+type VenueCredentialsRow = {
+  id: string;
+  user_id: string;
+  wallet_address: string;
+  venue: "polymarket" | "kalshi" | "limitless";
+  api_key: string;
+  api_secret: string;
+  additional_data: unknown | null;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+  last_used_at: Date | null;
+};
 
 // Backward compatibility
 export type PolymarketCredentials = VenueCredentials;
@@ -386,7 +411,7 @@ export class AuthService {
    * Get user wallets
    */
   static async getUserWallets(userId: string): Promise<UserWallet[]> {
-    const result = await pool.query(
+    const result = await pool.query<UserWalletRow>(
       "SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at FROM user_wallets WHERE user_id = $1 ORDER BY is_primary DESC, created_at ASC",
       [userId],
     );
@@ -510,7 +535,7 @@ export class AuthService {
 
     query += " ORDER BY venue, last_used_at DESC NULLS LAST";
 
-    const result = await pool.query(query, params);
+    const result = await pool.query<VenueCredentialsRow>(query, params);
 
     // Map snake_case to camelCase
     return result.rows.map((row) => ({
@@ -524,7 +549,7 @@ export class AuthService {
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      lastUsedAt: row.last_used_at,
+      lastUsedAt: row.last_used_at ?? undefined,
     }));
   }
 

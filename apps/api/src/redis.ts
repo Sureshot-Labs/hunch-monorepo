@@ -1,13 +1,14 @@
-import { createClient } from "redis";
+import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { env } from "./env.js";
 
-let client: ReturnType<typeof createClient> | null = null;
+type RedisClient = ReturnType<typeof createRedisClient>;
+let client: RedisClient | null = null;
 
 export async function getRedis() {
   if (!env.redisUrl) return null;
   if (client) return client;
-  client = createClient({ url: env.redisUrl });
+  client = createRedisClient({ url: env.redisUrl });
   client.on("error", (e: unknown) => console.warn("[redis] err", String(e)));
-  await client.connect();
+  await ensureRedis(client);
   return client;
 }

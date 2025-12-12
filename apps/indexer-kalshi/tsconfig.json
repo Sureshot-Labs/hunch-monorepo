@@ -17,6 +17,6 @@
       "@hunch/*": ["../../packages/*/src"]
     }
   },
-  "include": ["src/**/*", "../indexer-polymarket/src/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

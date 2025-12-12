@@ -1,5 +1,5 @@
 // apps/indexer-kalshi/src/kalshi-repo.ts
-import { pool } from "../../indexer-polymarket/src/db";
+import { pool } from "./db";
 import type { z } from "zod";
 import { KalshiEvent, KalshiMarket } from "./types";
 

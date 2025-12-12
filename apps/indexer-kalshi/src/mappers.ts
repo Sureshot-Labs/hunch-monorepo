@@ -2,10 +2,7 @@
 import { v4 as uuid } from "uuid";
 import type { z } from "zod";
 import { KalshiEvent, KalshiMarket } from "./types";
-import type {
-  UnifiedEventRow,
-  UnifiedMarketRow,
-} from "../../../packages/db/src/unified-repo";
+import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 const n = (v: unknown): number | null => {
   if (v == null) return null;

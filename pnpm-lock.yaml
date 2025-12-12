@@ -78,6 +78,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
       '@privy-io/server-auth':
         specifier: ^1.0.0
         version: 1.32.5(bufferutil@4.0.9)(ethers@6.15.0(bufferutil@4.0.9)(utf-8-validate@5.0.10))(typescript@5.9.3)(utf-8-validate@5.0.10)(viem@2.38.3(bufferutil@4.0.9)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@3.25.76))
@@ -106,6 +109,12 @@ importers:
 
   apps/indexer-kalshi:
     dependencies:
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
       axios:
         specifier: ^1.7.2
         version: 1.12.2
@@ -140,6 +149,12 @@ importers:
 
   apps/indexer-limitless:
     dependencies:
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
       fast-json-stable-stringify:
         specifier: ^2.1.0
         version: 2.1.0
@@ -167,6 +182,12 @@ importers:
 
   apps/indexer-polymarket:
     dependencies:
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
       fast-json-stable-stringify:
         specifier: ^2.1.0
         version: 2.1.0
@@ -225,6 +246,19 @@ importers:
       typescript:
         specifier: ^5.9.2
         version: 5.9.2
+
+  packages/infra:
+    dependencies:
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
+      redis:
+        specifier: ^5.8.2
+        version: 5.8.2
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.2
+        version: 24.10.3
 
   packages/shared:
     dependencies:
