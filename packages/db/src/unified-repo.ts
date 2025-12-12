@@ -8,7 +8,7 @@ export interface UnifiedEventRow {
   title: string;
   description?: string;
   category?: string;
-  status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED';
+  status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   start_date?: Date;
   end_date?: Date;
   volume_total?: number;
@@ -30,7 +30,7 @@ export interface UnifiedMarketRow {
   title: string;
   description?: string;
   category?: string;
-  status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED';
+  status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   market_type: string;
   open_time?: Date;
   close_time?: Date;
@@ -57,7 +57,7 @@ export interface UnifiedMarketRow {
 // Repository functions for unified tables
 export async function upsertUnifiedEvent(
   pool: Pool,
-  eventRow: UnifiedEventRow
+  eventRow: UnifiedEventRow,
 ): Promise<string> {
   const query = `
     INSERT INTO unified_events (
@@ -115,14 +115,18 @@ export async function upsertUnifiedEvent(
 
 export async function upsertUnifiedMarket(
   pool: Pool,
-  marketRow: UnifiedMarketRow
+  marketRow: UnifiedMarketRow,
 ): Promise<string> {
   // Handle closed markets: skip new ones, delete existing ones
-  if (marketRow.status === 'CLOSED' || marketRow.status === 'SETTLED' || marketRow.status === 'ARCHIVED') {
+  if (
+    marketRow.status === "CLOSED" ||
+    marketRow.status === "SETTLED" ||
+    marketRow.status === "ARCHIVED"
+  ) {
     // Check if market exists in the database
     const existingMarket = await pool.query(
-      'SELECT id FROM unified_markets WHERE venue = $1 AND venue_market_id = $2',
-      [marketRow.venue, marketRow.venue_market_id]
+      "SELECT id FROM unified_markets WHERE venue = $1 AND venue_market_id = $2",
+      [marketRow.venue, marketRow.venue_market_id],
     );
 
     if (existingMarket.rows.length === 0) {
@@ -131,8 +135,8 @@ export async function upsertUnifiedMarket(
     } else {
       // Market exists and is now closed - delete it instead of updating
       await pool.query(
-        'DELETE FROM unified_markets WHERE venue = $1 AND venue_market_id = $2',
-        [marketRow.venue, marketRow.venue_market_id]
+        "DELETE FROM unified_markets WHERE venue = $1 AND venue_market_id = $2",
+        [marketRow.venue, marketRow.venue_market_id],
       );
       return marketRow.id;
     }

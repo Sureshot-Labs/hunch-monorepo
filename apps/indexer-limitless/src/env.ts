@@ -6,7 +6,7 @@ config({ path: resolve(cwd, "../../.env"), override: true });
 
 // nuke pg envs so Pool uses connectionString you provided
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
-  (k) => delete (process.env as any)[k]
+  (k) => delete process.env[k],
 );
 
 function req(name: string): string {

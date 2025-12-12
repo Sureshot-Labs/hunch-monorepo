@@ -10,11 +10,11 @@ async function getJson(url: string) {
 export async function fetchActivePage(
   page: number,
   limit: number,
-  sortBy = "newest"
+  sortBy = "newest",
 ) {
   const base = env.limitlessBase.replace(/\/+$/, "");
   const url = `${base}/markets/active?page=${page}&limit=${limit}&sortBy=${encodeURIComponent(
-    sortBy
+    sortBy,
   )}`;
   console.log("Fetching Limitless active page", page, limit, sortBy, url);
   const j = await getJson(url);

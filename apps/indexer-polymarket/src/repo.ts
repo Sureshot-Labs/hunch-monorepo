@@ -1,4 +1,8 @@
 import { pool } from "./db";
+import type { mapEventRow, mapMarketRow } from "./mappers";
+
+type EventRow = ReturnType<typeof mapEventRow>;
+type MarketRow = ReturnType<typeof mapMarketRow>;
 
 export async function getVenueId(name: string): Promise<number> {
   const { rows } = await pool.query("select id from venues where name=$1", [
@@ -8,7 +12,7 @@ export async function getVenueId(name: string): Promise<number> {
   return rows[0].id as number;
 }
 
-export async function upsertEvent(row: any) {
+export async function upsertEvent(row: EventRow) {
   const q = `
   insert into events(id, venue_id, event_id, title, category, slug, active, closed, start_time, end_time,
                      liquidity, volume_total, volume24hr, raw)
@@ -47,7 +51,7 @@ export async function upsertEvent(row: any) {
   return rows[0].id as string;
 }
 
-export async function upsertMarket(row: any) {
+export async function upsertMarket(row: MarketRow) {
   const q = `
   insert into markets(id, event_id, venue_id, market_id, title, enable_orderbook, accepting_orders,
                       condition_id, order_price_min_tick_size, order_min_size,
@@ -104,20 +108,20 @@ export async function upsertToken(token: {
   side: "YES" | "NO";
 }) {
   // Determine venue from token ID format
-  let venue = 'polymarket'; // default
-  if (token.token_id.startsWith('kalshi:')) {
-    venue = 'kalshi';
-  } else if (token.token_id.startsWith('limitless:')) {
-    venue = 'limitless';
+  let venue = "polymarket"; // default
+  if (token.token_id.startsWith("kalshi:")) {
+    venue = "kalshi";
+  } else if (token.token_id.startsWith("limitless:")) {
+    venue = "limitless";
   }
-  
+
   await pool.query(
     `
     insert into unified_tokens(token_id, venue, market_id, side)
     values ($1,$2,$3,$4)
     on conflict (token_id) do nothing
   `,
-    [token.token_id, venue, token.market_id, token.side]
+    [token.token_id, venue, token.market_id, token.side],
   );
 }
 
@@ -125,27 +129,27 @@ export async function writeBookTop(
   tokenId: string,
   bestBid: number | null,
   bestAsk: number | null,
-  ts: Date
+  ts: Date,
 ) {
   const mid =
     bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
   const spread =
     bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
-  
+
   // Determine venue from token ID format
-  let venue = 'polymarket'; // default
-  if (tokenId.startsWith('kalshi:')) {
-    venue = 'kalshi';
-  } else if (tokenId.startsWith('limitless:')) {
-    venue = 'limitless';
+  let venue = "polymarket"; // default
+  if (tokenId.startsWith("kalshi:")) {
+    venue = "kalshi";
+  } else if (tokenId.startsWith("limitless:")) {
+    venue = "limitless";
   }
-  
+
   await pool.query(
     `
     insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
     values ($1,$2,$3,$4,$5,$6,$7)
     on conflict do nothing
   `,
-    [tokenId, venue, ts.toISOString(), bestBid, bestAsk, mid, spread]
+    [tokenId, venue, ts.toISOString(), bestBid, bestAsk, mid, spread],
   );
 }

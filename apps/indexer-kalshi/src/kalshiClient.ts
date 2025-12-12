@@ -28,17 +28,15 @@ export class KalshiClient {
     method: string,
     pathOnly: string,
     init: RequestInit = {},
-    write = false
+    write = false,
   ) {
     const ts = Date.now().toString();
     const sig = sign(method, pathOnly, ts);
-    const headers = {
-      ...(init.headers as any),
-      "KALSHI-ACCESS-KEY": env.kalshiKeyId,
-      "KALSHI-ACCESS-TIMESTAMP": ts,
-      "KALSHI-ACCESS-SIGNATURE": sig,
-      accept: "application/json",
-    };
+    const headers = new Headers(init.headers);
+    headers.set("KALSHI-ACCESS-KEY", env.kalshiKeyId);
+    headers.set("KALSHI-ACCESS-TIMESTAMP", ts);
+    headers.set("KALSHI-ACCESS-SIGNATURE", sig);
+    headers.set("accept", "application/json");
     const url = new URL(pathOnly, env.kalshiBase).toString();
 
     const run = async () => {
@@ -54,26 +52,30 @@ export class KalshiClient {
     for (let i = 0; i < 4; i++) {
       try {
         return await q.add(run);
-      } catch (e: any) {
-        if (String(e.message).includes("rate_limited"))
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.includes("rate_limited"))
           await new Promise((res) => setTimeout(res, (i + 1) * 200));
         else if (i === 3) throw e;
       }
     }
   }
 
-  get(pathOnly: string, params?: Record<string, any>) {
+  get(
+    pathOnly: string,
+    params?: Record<string, string | number | boolean | null | undefined>,
+  ) {
     if (params) {
       const u = new URL(pathOnly, "http://x");
       Object.entries(params).forEach(
-        ([k, v]) => v != null && u.searchParams.set(k, String(v))
+        ([k, v]) => v != null && u.searchParams.set(k, String(v)),
       );
       pathOnly = u.pathname + (u.search || "");
     }
     return this.signedFetch("GET", pathOnly);
   }
 
-  post(pathOnly: string, body: any) {
+  post(pathOnly: string, body: unknown) {
     return this.signedFetch(
       "POST",
       pathOnly,
@@ -81,7 +83,7 @@ export class KalshiClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body ?? {}),
       },
-      true
+      true,
     );
   }
 }

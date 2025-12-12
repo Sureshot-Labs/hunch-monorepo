@@ -1,7 +1,6 @@
 import { Pool } from "pg";
 import { env } from "./env.js";
 import { log } from "./log.js";
-import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 
 const pool = new Pool({ connectionString: env.dbUrl });
 
@@ -51,7 +50,7 @@ export interface LimitlessEventRow {
   trade_type: string;
   created_at: Date | null;
   updated_at: Date | null;
-  raw: any;
+  raw: unknown;
 }
 
 export interface LimitlessMarketRow {
@@ -98,10 +97,12 @@ export interface LimitlessMarketRow {
   trade_type: string;
   created_at: Date | null;
   updated_at: Date | null;
-  raw: any;
+  raw: unknown;
 }
 
-export async function upsertLimitlessEvent(row: LimitlessEventRow): Promise<string> {
+export async function upsertLimitlessEvent(
+  row: LimitlessEventRow,
+): Promise<string> {
   const query = `
     INSERT INTO limitless_events (
       id, slug, title, description, tags, status, expired,
@@ -171,17 +172,52 @@ export async function upsertLimitlessEvent(row: LimitlessEventRow): Promise<stri
   `;
 
   const values = [
-    row.id, row.slug, row.title, row.description, row.tags, row.status, row.expired,
-    row.creator_name, row.creator_image_uri, row.creator_link, row.logo, row.categories,
-    row.market_type, row.proxy_title, row.condition_id, row.is_rewardable, row.priority_index,
-    row.expiration_date, row.expiration_timestamp, row.volume, row.volume_formatted, row.volume_total,
-    row.trends_rank, row.trends_value, row.metadata_fee, row.metadata_is_bannered,
-    row.metadata_is_poly_arbitrage, row.metadata_should_market_make,
-    row.settings_c, row.settings_min_size, row.settings_max_spread, row.settings_daily_reward,
-    row.settings_rewards_epoch, row.collateral_token_symbol, row.collateral_token_address,
-    row.collateral_token_decimals, row.neg_risk_request_id, row.neg_risk_market_id,
-    row.winning_outcome_index, row.og_image_uri, row.daily_reward, row.outcome_tokens,
-    row.trade_type, row.created_at, row.updated_at, row.raw
+    row.id,
+    row.slug,
+    row.title,
+    row.description,
+    row.tags,
+    row.status,
+    row.expired,
+    row.creator_name,
+    row.creator_image_uri,
+    row.creator_link,
+    row.logo,
+    row.categories,
+    row.market_type,
+    row.proxy_title,
+    row.condition_id,
+    row.is_rewardable,
+    row.priority_index,
+    row.expiration_date,
+    row.expiration_timestamp,
+    row.volume,
+    row.volume_formatted,
+    row.volume_total,
+    row.trends_rank,
+    row.trends_value,
+    row.metadata_fee,
+    row.metadata_is_bannered,
+    row.metadata_is_poly_arbitrage,
+    row.metadata_should_market_make,
+    row.settings_c,
+    row.settings_min_size,
+    row.settings_max_spread,
+    row.settings_daily_reward,
+    row.settings_rewards_epoch,
+    row.collateral_token_symbol,
+    row.collateral_token_address,
+    row.collateral_token_decimals,
+    row.neg_risk_request_id,
+    row.neg_risk_market_id,
+    row.winning_outcome_index,
+    row.og_image_uri,
+    row.daily_reward,
+    row.outcome_tokens,
+    row.trade_type,
+    row.created_at,
+    row.updated_at,
+    row.raw,
   ];
 
   try {
@@ -193,7 +229,9 @@ export async function upsertLimitlessEvent(row: LimitlessEventRow): Promise<stri
   }
 }
 
-export async function upsertLimitlessMarket(row: LimitlessMarketRow): Promise<string> {
+export async function upsertLimitlessMarket(
+  row: LimitlessMarketRow,
+): Promise<string> {
   const query = `
     INSERT INTO limitless_markets (
       id, event_id, slug, title, description, tags, status, expired,
@@ -260,16 +298,50 @@ export async function upsertLimitlessMarket(row: LimitlessMarketRow): Promise<st
   `;
 
   const values = [
-    row.id, row.event_id, row.slug, row.title, row.description, row.tags, row.status, row.expired,
-    row.creator_name, row.creator_image_uri, row.creator_link, row.logo, row.categories,
-    row.market_type, row.proxy_title, row.condition_id, row.is_rewardable, row.priority_index,
-    row.expiration_date, row.expiration_timestamp, row.volume, row.volume_formatted, row.volume_total,
-    row.prices, row.tokens_no, row.tokens_yes, row.metadata_fee, row.metadata_is_bannered,
-    row.metadata_is_poly_arbitrage, row.metadata_should_market_make,
-    row.settings_c, row.settings_min_size, row.settings_max_spread, row.settings_daily_reward,
-    row.settings_rewards_epoch, row.collateral_token_symbol, row.collateral_token_address,
-    row.collateral_token_decimals, row.neg_risk_request_id, row.winning_outcome_index,
-    row.trade_type, row.created_at, row.updated_at, row.raw
+    row.id,
+    row.event_id,
+    row.slug,
+    row.title,
+    row.description,
+    row.tags,
+    row.status,
+    row.expired,
+    row.creator_name,
+    row.creator_image_uri,
+    row.creator_link,
+    row.logo,
+    row.categories,
+    row.market_type,
+    row.proxy_title,
+    row.condition_id,
+    row.is_rewardable,
+    row.priority_index,
+    row.expiration_date,
+    row.expiration_timestamp,
+    row.volume,
+    row.volume_formatted,
+    row.volume_total,
+    row.prices,
+    row.tokens_no,
+    row.tokens_yes,
+    row.metadata_fee,
+    row.metadata_is_bannered,
+    row.metadata_is_poly_arbitrage,
+    row.metadata_should_market_make,
+    row.settings_c,
+    row.settings_min_size,
+    row.settings_max_spread,
+    row.settings_daily_reward,
+    row.settings_rewards_epoch,
+    row.collateral_token_symbol,
+    row.collateral_token_address,
+    row.collateral_token_decimals,
+    row.neg_risk_request_id,
+    row.winning_outcome_index,
+    row.trade_type,
+    row.created_at,
+    row.updated_at,
+    row.raw,
   ];
 
   try {

@@ -1,6 +1,14 @@
 import { v4 as uuid } from "uuid";
-import type { TEvent, TMarket, TPolymarketEvent, TPolymarketMarket } from "./types";
-import type { UnifiedEventRow, UnifiedMarketRow } from "../../../packages/db/src/unified-repo";
+import type {
+  TEvent,
+  TMarket,
+  TPolymarketEvent,
+  TPolymarketMarket,
+} from "./types";
+import type {
+  UnifiedEventRow,
+  UnifiedMarketRow,
+} from "../../../packages/db/src/unified-repo";
 
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;
@@ -47,7 +55,7 @@ export function mapMarketRow(venueId: number, eventUuid: string, m: TMarket) {
     order_price_min_tick_size: n(m.orderPriceMinTickSize),
     order_min_size: n(m.orderMinSize),
     neg_risk: m.negRisk ?? null,
-    neg_risk_market_id: (m as any).negRiskMarketID ?? null,
+    neg_risk_market_id: m.negRiskMarketID ?? null,
     liquidity,
     volume_total,
     volume24hr: n(m.volume24hr),
@@ -60,9 +68,13 @@ export function mapMarketRow(venueId: number, eventUuid: string, m: TMarket) {
 export function mapTokens(
   marketUuid: string,
   yes?: string | null,
-  no?: string | null
+  no?: string | null,
 ) {
-  const rows: any[] = [];
+  const rows: Array<{
+    token_id: string;
+    market_id: string;
+    side: "YES" | "NO";
+  }> = [];
   if (yes)
     rows.push({ token_id: yes, market_id: marketUuid, side: "YES" as const });
   if (no)
@@ -154,7 +166,9 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     volume1wk: n(m.volume1wk),
     volume1mo: n(m.volume1mo),
     volume1yr: n(m.volume1yr),
-    clob_token_ids: Array.isArray(m.clobTokenIds) ? JSON.stringify(m.clobTokenIds) : m.clobTokenIds,
+    clob_token_ids: Array.isArray(m.clobTokenIds)
+      ? JSON.stringify(m.clobTokenIds)
+      : m.clobTokenIds,
     uma_bond: m.umaBond,
     uma_reward: m.umaReward,
     volume24hr_clob: n(m.volume24hrClob),
@@ -169,7 +183,9 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     neg_risk_request_id: m.negRiskRequestID,
     ready: m.ready ?? false,
     funded: m.funded ?? false,
-    accepting_orders_timestamp: m.acceptingOrdersTimestamp ? new Date(m.acceptingOrdersTimestamp) : null,
+    accepting_orders_timestamp: m.acceptingOrdersTimestamp
+      ? new Date(m.acceptingOrdersTimestamp)
+      : null,
     cyom: m.cyom ?? false,
     competitive: n(m.competitive),
     pager_duty_notification_enabled: m.pagerDutyNotificationEnabled ?? false,
@@ -194,7 +210,9 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     uma_resolution_statuses: m.umaResolutionStatuses,
     pending_deployment: m.pendingDeployment ?? false,
     deploying: m.deploying ?? false,
-    deploying_timestamp: m.deployingTimestamp ? new Date(m.deployingTimestamp) : null,
+    deploying_timestamp: m.deployingTimestamp
+      ? new Date(m.deployingTimestamp)
+      : null,
     rfq_enabled: m.rfqEnabled ?? false,
     holding_rewards_enabled: m.holdingRewardsEnabled ?? false,
     fees_enabled: m.feesEnabled ?? false,
@@ -204,19 +222,108 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
 
 // Unified table mappers for Polymarket
 // Category extraction function for Polymarket
-function extractCategoryFromTitle(title: string, description?: string | null): string | undefined {
-  const text = `${title} ${description || ''}`.toLowerCase();
-  
+function extractCategoryFromTitle(
+  title: string,
+  description?: string | null,
+): string | undefined {
+  const text = `${title} ${description || ""}`.toLowerCase();
+
   // Define category keywords
   const categories = {
-    'Politics': ['election', 'president', 'congress', 'senate', 'vote', 'candidate', 'political', 'government', 'policy', 'democrat', 'republican', 'biden', 'trump'],
-    'Crypto': ['bitcoin', 'ethereum', 'crypto', 'blockchain', 'defi', 'nft', 'altcoin', 'dogecoin', 'solana', 'cardano', 'polygon'],
-    'Sports': ['nfl', 'nba', 'mlb', 'soccer', 'football', 'basketball', 'baseball', 'hockey', 'olympics', 'championship', 'playoff', 'super bowl'],
-    'Economics': ['gdp', 'inflation', 'recession', 'fed', 'interest rate', 'unemployment', 'market', 'economy', 'financial'],
-    'Technology': ['ai', 'artificial intelligence', 'tech', 'apple', 'google', 'microsoft', 'tesla', 'meta', 'amazon'],
-    'Entertainment': ['movie', 'film', 'oscar', 'netflix', 'disney', 'marvel', 'star wars', 'entertainment', 'celebrity'],
-    'Weather': ['hurricane', 'tornado', 'weather', 'climate', 'temperature', 'rain', 'snow', 'storm'],
-    'Health': ['covid', 'pandemic', 'vaccine', 'health', 'medical', 'disease', 'hospital'],
+    Politics: [
+      "election",
+      "president",
+      "congress",
+      "senate",
+      "vote",
+      "candidate",
+      "political",
+      "government",
+      "policy",
+      "democrat",
+      "republican",
+      "biden",
+      "trump",
+    ],
+    Crypto: [
+      "bitcoin",
+      "ethereum",
+      "crypto",
+      "blockchain",
+      "defi",
+      "nft",
+      "altcoin",
+      "dogecoin",
+      "solana",
+      "cardano",
+      "polygon",
+    ],
+    Sports: [
+      "nfl",
+      "nba",
+      "mlb",
+      "soccer",
+      "football",
+      "basketball",
+      "baseball",
+      "hockey",
+      "olympics",
+      "championship",
+      "playoff",
+      "super bowl",
+    ],
+    Economics: [
+      "gdp",
+      "inflation",
+      "recession",
+      "fed",
+      "interest rate",
+      "unemployment",
+      "market",
+      "economy",
+      "financial",
+    ],
+    Technology: [
+      "ai",
+      "artificial intelligence",
+      "tech",
+      "apple",
+      "google",
+      "microsoft",
+      "tesla",
+      "meta",
+      "amazon",
+    ],
+    Entertainment: [
+      "movie",
+      "film",
+      "oscar",
+      "netflix",
+      "disney",
+      "marvel",
+      "star wars",
+      "entertainment",
+      "celebrity",
+    ],
+    Weather: [
+      "hurricane",
+      "tornado",
+      "weather",
+      "climate",
+      "temperature",
+      "rain",
+      "snow",
+      "storm",
+    ],
+    Health: [
+      "covid",
+      "pandemic",
+      "vaccine",
+      "health",
+      "medical",
+      "disease",
+      "hospital",
+    ],
   };
 
   // Find the category with the most keyword matches
@@ -224,7 +331,7 @@ function extractCategoryFromTitle(title: string, description?: string | null): s
   let maxMatches = 0;
 
   for (const [category, keywords] of Object.entries(categories)) {
-    const matches = keywords.filter(keyword => text.includes(keyword)).length;
+    const matches = keywords.filter((keyword) => text.includes(keyword)).length;
     if (matches > maxMatches) {
       maxMatches = matches;
       bestCategory = category;
@@ -236,24 +343,24 @@ function extractCategoryFromTitle(title: string, description?: string | null): s
 
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   // Map Polymarket status to unified status
-  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  
+  let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
+
   const endDate = e.endDate ? new Date(e.endDate) : null;
   const isExpired = endDate && endDate < new Date();
-  
+
   if (e.archived) {
-    status = 'ARCHIVED';
+    status = "ARCHIVED";
   } else if (e.closed || (e.active && e.closed) || isExpired) {
     // Mark as CLOSED if:
     // 1. closed flag is true, OR
     // 2. both active=true and closed=true (contradictory state - treat as closed), OR
     // 3. endDate has passed (expired)
-    status = 'CLOSED';
+    status = "CLOSED";
   }
 
   return {
     id: `polymarket:${e.id}`,
-    venue: 'polymarket',
+    venue: "polymarket",
     venue_event_id: e.id,
     title: e.title,
     description: e.description ?? undefined,
@@ -261,10 +368,10 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     status,
     start_date: e.startDate ? new Date(e.startDate) : undefined,
     end_date: e.endDate ? new Date(e.endDate) : undefined,
-    volume_total: n(e.volume)?? undefined,
-    volume_24h: n(e.volume24hr)?? undefined,
-    open_interest: n(e.openInterest)?? undefined,
-    liquidity: n(e.liquidity)?? undefined,
+    volume_total: n(e.volume) ?? undefined,
+    volume_24h: n(e.volume24hr) ?? undefined,
+    open_interest: n(e.openInterest) ?? undefined,
+    liquidity: n(e.liquidity) ?? undefined,
     slug: e.slug ?? undefined,
     image: e.image ?? undefined,
     icon: e.icon ?? undefined,
@@ -273,21 +380,24 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   };
 }
 
-export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): UnifiedMarketRow {
+export function mapToUnifiedMarket(
+  m: TPolymarketMarket,
+  eventId: string,
+): UnifiedMarketRow {
   // Map Polymarket status to unified status
-  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  
+  let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
+
   const endDate = m.endDate ? new Date(m.endDate) : null;
   const isExpired = endDate && endDate < new Date();
-  
+
   if (m.archived) {
-    status = 'ARCHIVED';
+    status = "ARCHIVED";
   } else if (m.closed || (m.active && m.closed) || isExpired) {
     // Mark as CLOSED if:
     // 1. closed flag is true, OR
     // 2. both active=true and closed=true (contradictory state - treat as closed), OR
     // 3. endDate has passed (expired)
-    status = 'CLOSED';
+    status = "CLOSED";
   }
 
   // Handle clob_token_ids - convert to JSON string if it's an array
@@ -302,25 +412,25 @@ export function mapToUnifiedMarket(m: TPolymarketMarket, eventId: string): Unifi
 
   return {
     id: `polymarket:${m.id}`,
-    venue: 'polymarket',
+    venue: "polymarket",
     venue_market_id: m.id,
     event_id: `polymarket:${eventId}`,
     title: m.question,
-    description: m.description?? undefined,
+    description: m.description ?? undefined,
     category: m.category ?? extractCategoryFromTitle(m.question, m.description), // Use API category if available, else extract from question/description
     status,
-    market_type: 'binary', // Polymarket markets are binary
+    market_type: "binary", // Polymarket markets are binary
     open_time: m.startDate ? new Date(m.startDate) : undefined,
     close_time: m.endDate ? new Date(m.endDate) : undefined,
     expiration_time: m.endDate ? new Date(m.endDate) : undefined,
-    best_bid: n(m.bestBid)?? undefined,
-    best_ask: n(m.bestAsk)?? undefined,
-    last_price: n(m.lastTradePrice)?? undefined,
-    volume_total: n(m.volume)?? undefined,
-    volume_24h: n(m.volume24hr)?? undefined,
-    open_interest: n(m.openInterest)?? undefined,
-    liquidity: n(m.liquidity)?? undefined,
-    outcomes: m.outcomes?? undefined, // Already JSON string
+    best_bid: n(m.bestBid) ?? undefined,
+    best_ask: n(m.bestAsk) ?? undefined,
+    last_price: n(m.lastTradePrice) ?? undefined,
+    volume_total: n(m.volume) ?? undefined,
+    volume_24h: n(m.volume24hr) ?? undefined,
+    open_interest: n(m.openInterest) ?? undefined,
+    liquidity: n(m.liquidity) ?? undefined,
+    outcomes: m.outcomes ?? undefined, // Already JSON string
     clob_token_ids: clobTokenIds,
     condition_id: m.conditionId ?? undefined,
     slug: m.slug ?? undefined,

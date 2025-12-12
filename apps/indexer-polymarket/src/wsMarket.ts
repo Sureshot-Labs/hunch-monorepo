@@ -78,10 +78,14 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     const shutdown = () => {
       try {
         if (pingInterval) clearInterval(pingInterval);
-      } catch {}
+      } catch {
+        // ignore; timer may already be cleared
+      }
       try {
         ws.close();
-      } catch {}
+      } catch {
+        // ignore; socket may already be closed
+      }
       // best-effort quit so we flush buffers and free sockets
       redis.quit().catch(() => redis.disconnect());
     };
@@ -99,7 +103,9 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     pingInterval = setInterval(() => {
       try {
         ws.ping();
-      } catch {}
+      } catch {
+        // ignore; socket may already be closed
+      }
     }, 20_000);
   });
 
@@ -127,7 +133,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
           multi.set(`book:${id}`, JSON.stringify(msg), { EX: 5 });
           multi.publish(
             `prices:${id}`,
-            JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts })
+            JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts }),
           );
           await Promise.all([
             writeBookTop(id, bb, ba, new Date(ts)),
@@ -149,7 +155,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
     setTimeout(
       () => startMarketWS(Array.from(state.subscribed), attempt + 1),
-      delay
+      delay,
     );
   });
 

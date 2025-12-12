@@ -29,11 +29,11 @@ async function ensureMigrationsTable(client: PoolClient): Promise<void> {
  */
 async function acquireLock(client: PoolClient): Promise<void> {
   const { rows } = await client.query<{ pg_try_advisory_lock: boolean }>(
-    `SELECT pg_try_advisory_lock(42);`
+    `SELECT pg_try_advisory_lock(42);`,
   );
   if (!rows[0]?.pg_try_advisory_lock) {
     throw new Error(
-      "Could not acquire advisory lock. Another migration is running."
+      "Could not acquire advisory lock. Another migration is running.",
     );
   }
 }
@@ -44,14 +44,14 @@ async function releaseLock(client: PoolClient): Promise<void> {
 
 async function getAppliedMap(client: PoolClient): Promise<Map<string, string>> {
   const { rows } = await client.query<{ filename: string; checksum: string }>(
-    `SELECT filename, checksum FROM public.schema_migrations;`
+    `SELECT filename, checksum FROM public.schema_migrations;`,
   );
   return new Map(rows.map((r) => [r.filename, r.checksum]));
 }
 
 async function runSingleMigration(
   client: PoolClient,
-  filePath: string
+  filePath: string,
 ): Promise<void> {
   const sql = await fs.readFile(filePath, "utf8");
   const checksum = sha256(sql);
@@ -60,13 +60,13 @@ async function runSingleMigration(
   // detect if previously applied with same checksum
   const { rows } = await client.query<{ checksum: string }>(
     `SELECT checksum FROM public.schema_migrations WHERE filename = $1`,
-    [filename]
+    [filename],
   );
   if (rows.length) {
     if (rows[0].checksum !== checksum) {
       throw new Error(
         `Checksum mismatch for ${filename}. A past migration was edited. ` +
-          `Never edit old migrations; create a new one.`
+          `Never edit old migrations; create a new one.`,
       );
     }
     console.log(`↷ skip ${filename}`);
@@ -80,7 +80,7 @@ async function runSingleMigration(
     await client.query(sql);
     await client.query(
       `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
-      [filename, checksum]
+      [filename, checksum],
     );
     if (!noTx) await client.query("COMMIT");
     console.log(`✅ applied ${filename}`);
@@ -117,7 +117,7 @@ const migrationsDir = path.join(__dirname, "../migrations");
         const sum = sha256(sql);
         if (applied.get(name) !== sum) {
           throw new Error(
-            `Checksum mismatch for ${name}. Someone changed a past migration.`
+            `Checksum mismatch for ${name}. Someone changed a past migration.`,
           );
         }
       }
@@ -132,13 +132,16 @@ const migrationsDir = path.join(__dirname, "../migrations");
     }
 
     console.log("Migrations up to date.");
-  } catch (e: any) {
-    console.error("❌ migration failed:", e.message);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("❌ migration failed:", message);
     process.exitCode = 1;
   } finally {
     try {
       await releaseLock(client);
-    } catch {}
+    } catch {
+      // ignore; releasing lock is best-effort during shutdown
+    }
     client.release();
     await pool.end();
   }

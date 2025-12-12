@@ -6,7 +6,7 @@
     "baseUrl": ".", // <-- add this
     "paths": {
       // <-- and this
-      "@hunch/config": ["packages/config/src"],
+      "@hunch/config": ["packages/config/src/index.ts"],
       "@hunch/config/*": ["packages/config/src/*"]
     },
     "lib": ["ES2022"],

@@ -5,7 +5,7 @@ const cwd = process.cwd(); // apps/indexer-kalshi
 config({ path: resolve(cwd, "../../.env"), override: true });
 
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
-  (k) => delete (process.env as any)[k]
+  (k) => delete process.env[k],
 );
 
 function req(name: string): string {

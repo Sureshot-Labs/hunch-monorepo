@@ -11,10 +11,10 @@ export type SideBook = {
 };
 
 export async function getOrderbookTop(
-  marketTicker: string
+  marketTicker: string,
 ): Promise<SideBook[]> {
   const j = await c.get(
-    `/trade-api/v2/markets/${encodeURIComponent(marketTicker)}/orderbook`
+    `/trade-api/v2/markets/${encodeURIComponent(marketTicker)}/orderbook`,
   );
 
   // tolerate oddities gracefully

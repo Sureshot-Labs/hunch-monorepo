@@ -1,7 +1,11 @@
 import { pool } from "./db";
+import type { mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers";
+
+export type PolymarketEventRow = ReturnType<typeof mapPolymarketEventRow>;
+export type PolymarketMarketRow = ReturnType<typeof mapPolymarketMarketRow>;
 
 // Upsert Polymarket event to polymarket_events table
-export async function upsertPolymarketEvent(row: any) {
+export async function upsertPolymarketEvent(row: PolymarketEventRow) {
   const q = `
   INSERT INTO polymarket_events(
     id, ticker, slug, title, description, resolution_source, 
@@ -50,18 +54,46 @@ export async function upsertPolymarketEvent(row: any) {
   RETURNING id`;
 
   const { rows } = await pool.query(q, [
-    row.id, row.ticker, row.slug, row.title, row.description, row.resolution_source,
-    row.start_date, row.creation_date, row.end_date, row.category, row.image, row.icon,
-    row.active, row.closed, row.archived, row.new, row.featured, row.restricted,
-    row.liquidity, row.volume, row.open_interest, row.created_by, row.created_at, row.updated_at,
-    row.competitive, row.volume24hr, row.volume1wk, row.volume1mo, row.volume1yr,
-    row.enable_order_book, row.liquidity_clob, row.neg_risk, row.comment_count, row.raw
+    row.id,
+    row.ticker,
+    row.slug,
+    row.title,
+    row.description,
+    row.resolution_source,
+    row.start_date,
+    row.creation_date,
+    row.end_date,
+    row.category,
+    row.image,
+    row.icon,
+    row.active,
+    row.closed,
+    row.archived,
+    row.new,
+    row.featured,
+    row.restricted,
+    row.liquidity,
+    row.volume,
+    row.open_interest,
+    row.created_by,
+    row.created_at,
+    row.updated_at,
+    row.competitive,
+    row.volume24hr,
+    row.volume1wk,
+    row.volume1mo,
+    row.volume1yr,
+    row.enable_order_book,
+    row.liquidity_clob,
+    row.neg_risk,
+    row.comment_count,
+    row.raw,
   ]);
   return rows[0].id as string;
 }
 
 // Upsert Polymarket market to polymarket_markets table
-export async function upsertPolymarketMarket(row: any) {
+export async function upsertPolymarketMarket(row: PolymarketMarketRow) {
   const q = `
   INSERT INTO polymarket_markets(
     id, event_id, question, condition_id, slug, resolution_source, end_date, category, liquidity, start_date,
@@ -170,21 +202,93 @@ export async function upsertPolymarketMarket(row: any) {
   RETURNING id, clob_token_ids`;
 
   const { rows } = await pool.query(q, [
-    row.id, row.event_id, row.question, row.condition_id, row.slug, row.resolution_source, row.end_date, row.category, row.liquidity, row.start_date,
-    row.image, row.icon, row.description, row.outcomes, row.outcome_prices, row.volume, row.active, row.closed, row.market_maker_address,
-    row.created_at, row.updated_at, row.new, row.featured, row.submitted_by, row.archived, row.resolved_by, row.restricted,
-    row.group_item_title, row.group_item_threshold, row.question_id, row.enable_order_book, row.order_price_min_tick_size,
-    row.order_min_size, row.volume_num, row.liquidity_num, row.end_date_iso, row.start_date_iso, row.has_reviewed_dates,
-    row.volume24hr, row.volume1wk, row.volume1mo, row.volume1yr, row.clob_token_ids, row.uma_bond, row.uma_reward,
-    row.volume24hr_clob, row.volume1wk_clob, row.volume1mo_clob, row.volume1yr_clob, row.volume_clob, row.liquidity_clob,
-    row.custom_liveness, row.accepting_orders, row.neg_risk, row.neg_risk_request_id, row.ready, row.funded,
-    row.accepting_orders_timestamp, row.cyom, row.competitive, row.pager_duty_notification_enabled, row.approved,
-    row.rewards_min_size, row.rewards_max_spread, row.spread, row.one_day_price_change, row.one_hour_price_change,
-    row.one_week_price_change, row.one_month_price_change, row.last_trade_price, row.best_bid, row.best_ask,
-    row.automatically_active, row.clear_book_on_start, row.series_color, row.show_gmp_series, row.show_gmp_outcome,
-    row.manual_activation, row.neg_risk_other, row.uma_resolution_statuses, row.pending_deployment, row.deploying,
-    row.deploying_timestamp, row.rfq_enabled, row.holding_rewards_enabled, row.fees_enabled, row.raw
+    row.id,
+    row.event_id,
+    row.question,
+    row.condition_id,
+    row.slug,
+    row.resolution_source,
+    row.end_date,
+    row.category,
+    row.liquidity,
+    row.start_date,
+    row.image,
+    row.icon,
+    row.description,
+    row.outcomes,
+    row.outcome_prices,
+    row.volume,
+    row.active,
+    row.closed,
+    row.market_maker_address,
+    row.created_at,
+    row.updated_at,
+    row.new,
+    row.featured,
+    row.submitted_by,
+    row.archived,
+    row.resolved_by,
+    row.restricted,
+    row.group_item_title,
+    row.group_item_threshold,
+    row.question_id,
+    row.enable_order_book,
+    row.order_price_min_tick_size,
+    row.order_min_size,
+    row.volume_num,
+    row.liquidity_num,
+    row.end_date_iso,
+    row.start_date_iso,
+    row.has_reviewed_dates,
+    row.volume24hr,
+    row.volume1wk,
+    row.volume1mo,
+    row.volume1yr,
+    row.clob_token_ids,
+    row.uma_bond,
+    row.uma_reward,
+    row.volume24hr_clob,
+    row.volume1wk_clob,
+    row.volume1mo_clob,
+    row.volume1yr_clob,
+    row.volume_clob,
+    row.liquidity_clob,
+    row.custom_liveness,
+    row.accepting_orders,
+    row.neg_risk,
+    row.neg_risk_request_id,
+    row.ready,
+    row.funded,
+    row.accepting_orders_timestamp,
+    row.cyom,
+    row.competitive,
+    row.pager_duty_notification_enabled,
+    row.approved,
+    row.rewards_min_size,
+    row.rewards_max_spread,
+    row.spread,
+    row.one_day_price_change,
+    row.one_hour_price_change,
+    row.one_week_price_change,
+    row.one_month_price_change,
+    row.last_trade_price,
+    row.best_bid,
+    row.best_ask,
+    row.automatically_active,
+    row.clear_book_on_start,
+    row.series_color,
+    row.show_gmp_series,
+    row.show_gmp_outcome,
+    row.manual_activation,
+    row.neg_risk_other,
+    row.uma_resolution_statuses,
+    row.pending_deployment,
+    row.deploying,
+    row.deploying_timestamp,
+    row.rfq_enabled,
+    row.holding_rewards_enabled,
+    row.fees_enabled,
+    row.raw,
   ]);
   return rows[0] as { id: string; clob_token_ids: string | null };
 }
-

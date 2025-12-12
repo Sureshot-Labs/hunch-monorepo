@@ -12,21 +12,35 @@ const n = (v: unknown): number | null => {
 const parseDate = (s?: string | null) => (s ? new Date(s) : null);
 
 export async function upsertKalshiEvent(event: z.infer<typeof KalshiEvent>) {
+  const extra = event as Record<string, unknown>;
   const eventData = {
     id: event.event_ticker,
     event_ticker: event.event_ticker,
     series_ticker: event.series_ticker || null,
     sub_title: event.sub_title || null,
     title: event.title,
-    collateral_return_type: (event as any).collateral_return_type || null,
-    mutually_exclusive: (event as any).mutually_exclusive || false,
+    collateral_return_type:
+      typeof extra.collateral_return_type === "string"
+        ? extra.collateral_return_type
+        : null,
+    mutually_exclusive:
+      typeof extra.mutually_exclusive === "boolean"
+        ? extra.mutually_exclusive
+        : false,
     category: event.category || null,
-    price_level_structure: (event as any).price_level_structure || null,
-    available_on_brokers: (event as any).available_on_brokers || false,
+    price_level_structure:
+      typeof extra.price_level_structure === "string"
+        ? extra.price_level_structure
+        : null,
+    available_on_brokers:
+      typeof extra.available_on_brokers === "boolean"
+        ? extra.available_on_brokers
+        : false,
     raw: event,
   };
 
-  const result = await pool.query(`
+  const result = await pool.query(
+    `
     INSERT INTO kalshi_events (
       id, event_ticker, series_ticker, sub_title, title, collateral_return_type,
       mutually_exclusive, category, price_level_structure, available_on_brokers, raw
@@ -43,76 +57,105 @@ export async function upsertKalshiEvent(event: z.infer<typeof KalshiEvent>) {
       raw = EXCLUDED.raw,
       updated_at_db = now()
     RETURNING id
-  `, [
-    eventData.id,
-    eventData.event_ticker,
-    eventData.series_ticker,
-    eventData.sub_title,
-    eventData.title,
-    eventData.collateral_return_type,
-    eventData.mutually_exclusive,
-    eventData.category,
-    eventData.price_level_structure,
-    eventData.available_on_brokers,
-    JSON.stringify(eventData.raw),
-  ]);
+  `,
+    [
+      eventData.id,
+      eventData.event_ticker,
+      eventData.series_ticker,
+      eventData.sub_title,
+      eventData.title,
+      eventData.collateral_return_type,
+      eventData.mutually_exclusive,
+      eventData.category,
+      eventData.price_level_structure,
+      eventData.available_on_brokers,
+      JSON.stringify(eventData.raw),
+    ],
+  );
 
   return result.rows[0].id;
 }
 
 export async function upsertKalshiMarket(market: z.infer<typeof KalshiMarket>) {
+  const extra = market as Record<string, unknown>;
   const marketData = {
     id: market.ticker,
     event_ticker: market.event_ticker,
-    market_type: (market as any).market_type || 'binary',
+    market_type:
+      typeof extra.market_type === "string" ? extra.market_type : "binary",
     title: market.title || null,
-    subtitle: (market as any).subtitle || null,
-    yes_sub_title: (market as any).yes_sub_title || null,
-    no_sub_title: (market as any).no_sub_title || null,
+    subtitle: typeof extra.subtitle === "string" ? extra.subtitle : null,
+    yes_sub_title:
+      typeof extra.yes_sub_title === "string" ? extra.yes_sub_title : null,
+    no_sub_title:
+      typeof extra.no_sub_title === "string" ? extra.no_sub_title : null,
     open_time: parseDate(market.open_time),
     close_time: parseDate(market.close_time),
-    expected_expiration_time: parseDate((market as any).expected_expiration_time),
+    expected_expiration_time: parseDate(
+      typeof extra.expected_expiration_time === "string"
+        ? extra.expected_expiration_time
+        : null,
+    ),
     expiration_time: parseDate(market.expiration_time),
-    latest_expiration_time: parseDate((market as any).latest_expiration_time),
-    settlement_timer_seconds: (market as any).settlement_timer_seconds || null,
-    status: market.status || 'open',
-    response_price_units: (market as any).response_price_units || null,
-    notional_value: n((market as any).notional_value),
-    notional_value_dollars: n((market as any).notional_value_dollars),
-    yes_bid: n((market as any).yes_bid),
-    yes_bid_dollars: n((market as any).yes_bid_dollars),
-    yes_ask: n((market as any).yes_ask),
-    yes_ask_dollars: n((market as any).yes_ask_dollars),
-    no_bid: n((market as any).no_bid),
-    no_bid_dollars: n((market as any).no_bid_dollars),
-    no_ask: n((market as any).no_ask),
-    no_ask_dollars: n((market as any).no_ask_dollars),
-    last_price: n((market as any).last_price),
-    last_price_dollars: n((market as any).last_price_dollars),
-    previous_yes_bid: n((market as any).previous_yes_bid),
-    previous_yes_bid_dollars: n((market as any).previous_yes_bid_dollars),
-    previous_yes_ask: n((market as any).previous_yes_ask),
-    previous_yes_ask_dollars: n((market as any).previous_yes_ask_dollars),
-    previous_price: n((market as any).previous_price),
-    previous_price_dollars: n((market as any).previous_price_dollars),
-    volume: n((market as any).volume),
+    latest_expiration_time: parseDate(
+      typeof extra.latest_expiration_time === "string"
+        ? extra.latest_expiration_time
+        : null,
+    ),
+    settlement_timer_seconds: n(extra.settlement_timer_seconds),
+    status: market.status || "open",
+    response_price_units:
+      typeof extra.response_price_units === "string"
+        ? extra.response_price_units
+        : null,
+    notional_value: n(extra.notional_value),
+    notional_value_dollars: n(extra.notional_value_dollars),
+    yes_bid: n(extra.yes_bid),
+    yes_bid_dollars: n(extra.yes_bid_dollars),
+    yes_ask: n(extra.yes_ask),
+    yes_ask_dollars: n(extra.yes_ask_dollars),
+    no_bid: n(extra.no_bid),
+    no_bid_dollars: n(extra.no_bid_dollars),
+    no_ask: n(extra.no_ask),
+    no_ask_dollars: n(extra.no_ask_dollars),
+    last_price: n(extra.last_price),
+    last_price_dollars: n(extra.last_price_dollars),
+    previous_yes_bid: n(extra.previous_yes_bid),
+    previous_yes_bid_dollars: n(extra.previous_yes_bid_dollars),
+    previous_yes_ask: n(extra.previous_yes_ask),
+    previous_yes_ask_dollars: n(extra.previous_yes_ask_dollars),
+    previous_price: n(extra.previous_price),
+    previous_price_dollars: n(extra.previous_price_dollars),
+    volume: n(extra.volume),
     volume_24h: n(market.volume_24h),
     liquidity: n(market.liquidity),
-    liquidity_dollars: n((market as any).liquidity_dollars),
-    open_interest: n((market as any).open_interest),
-    result: (market as any).result || null,
-    can_close_early: (market as any).can_close_early || false,
-    expiration_value: (market as any).expiration_value || null,
-    category: (market as any).category || null,
-    risk_limit_cents: n((market as any).risk_limit_cents),
-    rules_primary: (market as any).rules_primary || null,
-    rules_secondary: (market as any).rules_secondary || null,
-    early_close_condition: (market as any).early_close_condition || null,
-    tick_size: n((market as any).tick_size),
+    liquidity_dollars: n(extra.liquidity_dollars),
+    open_interest: n(extra.open_interest),
+    result: typeof extra.result === "string" ? extra.result : null,
+    can_close_early:
+      typeof extra.can_close_early === "boolean"
+        ? extra.can_close_early
+        : false,
+    expiration_value:
+      typeof extra.expiration_value === "string"
+        ? extra.expiration_value
+        : null,
+    category: typeof extra.category === "string" ? extra.category : null,
+    risk_limit_cents: n(extra.risk_limit_cents),
+    rules_primary:
+      typeof extra.rules_primary === "string" ? extra.rules_primary : null,
+    rules_secondary:
+      typeof extra.rules_secondary === "string" ? extra.rules_secondary : null,
+    early_close_condition:
+      typeof extra.early_close_condition === "string"
+        ? extra.early_close_condition
+        : null,
+    tick_size: n(extra.tick_size),
     raw: market,
   };
 
-  const result = await pool.query(`
+  const result = await pool.query(
+    `
     INSERT INTO kalshi_markets (
       id, event_ticker, market_type, title, subtitle, yes_sub_title, no_sub_title,
       open_time, close_time, expected_expiration_time, expiration_time, latest_expiration_time,
@@ -178,56 +221,58 @@ export async function upsertKalshiMarket(market: z.infer<typeof KalshiMarket>) {
       raw = EXCLUDED.raw,
       updated_at_db = now()
     RETURNING id
-  `, [
-    marketData.id,
-    marketData.event_ticker,
-    marketData.market_type,
-    marketData.title,
-    marketData.subtitle,
-    marketData.yes_sub_title,
-    marketData.no_sub_title,
-    marketData.open_time,
-    marketData.close_time,
-    marketData.expected_expiration_time,
-    marketData.expiration_time,
-    marketData.latest_expiration_time,
-    marketData.settlement_timer_seconds,
-    marketData.status,
-    marketData.response_price_units,
-    marketData.notional_value,
-    marketData.notional_value_dollars,
-    marketData.yes_bid,
-    marketData.yes_bid_dollars,
-    marketData.yes_ask,
-    marketData.yes_ask_dollars,
-    marketData.no_bid,
-    marketData.no_bid_dollars,
-    marketData.no_ask,
-    marketData.no_ask_dollars,
-    marketData.last_price,
-    marketData.last_price_dollars,
-    marketData.previous_yes_bid,
-    marketData.previous_yes_bid_dollars,
-    marketData.previous_yes_ask,
-    marketData.previous_yes_ask_dollars,
-    marketData.previous_price,
-    marketData.previous_price_dollars,
-    marketData.volume,
-    marketData.volume_24h,
-    marketData.liquidity,
-    marketData.liquidity_dollars,
-    marketData.open_interest,
-    marketData.result,
-    marketData.can_close_early,
-    marketData.expiration_value,
-    marketData.category,
-    marketData.risk_limit_cents,
-    marketData.rules_primary,
-    marketData.rules_secondary,
-    marketData.early_close_condition,
-    marketData.tick_size,
-    JSON.stringify(marketData.raw),
-  ]);
+  `,
+    [
+      marketData.id,
+      marketData.event_ticker,
+      marketData.market_type,
+      marketData.title,
+      marketData.subtitle,
+      marketData.yes_sub_title,
+      marketData.no_sub_title,
+      marketData.open_time,
+      marketData.close_time,
+      marketData.expected_expiration_time,
+      marketData.expiration_time,
+      marketData.latest_expiration_time,
+      marketData.settlement_timer_seconds,
+      marketData.status,
+      marketData.response_price_units,
+      marketData.notional_value,
+      marketData.notional_value_dollars,
+      marketData.yes_bid,
+      marketData.yes_bid_dollars,
+      marketData.yes_ask,
+      marketData.yes_ask_dollars,
+      marketData.no_bid,
+      marketData.no_bid_dollars,
+      marketData.no_ask,
+      marketData.no_ask_dollars,
+      marketData.last_price,
+      marketData.last_price_dollars,
+      marketData.previous_yes_bid,
+      marketData.previous_yes_bid_dollars,
+      marketData.previous_yes_ask,
+      marketData.previous_yes_ask_dollars,
+      marketData.previous_price,
+      marketData.previous_price_dollars,
+      marketData.volume,
+      marketData.volume_24h,
+      marketData.liquidity,
+      marketData.liquidity_dollars,
+      marketData.open_interest,
+      marketData.result,
+      marketData.can_close_early,
+      marketData.expiration_value,
+      marketData.category,
+      marketData.risk_limit_cents,
+      marketData.rules_primary,
+      marketData.rules_secondary,
+      marketData.early_close_condition,
+      marketData.tick_size,
+      JSON.stringify(marketData.raw),
+    ],
+  );
 
   return result.rows[0].id;
 }

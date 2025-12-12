@@ -15,7 +15,7 @@ export async function fetchEventsPage(offset: number, limit: number) {
   const j = await r.json();
 
   const parsed = GammaEventsResponse.parse(j); // schema (value)
-  const events: GammaEvent[] = (parsed.events ?? parsed.data)!; // type
+  const events: GammaEvent[] = parsed.events ?? parsed.data ?? [];
   return { events };
 }
 
@@ -25,20 +25,20 @@ export async function* iterateEvents() {
   const page = 500; // Increased page size for efficiency
 
   console.log("Fetching all Polymarket events...");
-  
+
   while (true) {
     const { events } = await fetchEventsPage(offset, page);
     console.log(`${events.length} events at offset ${offset}`);
-    
+
     if (!events.length) {
       console.log("No more events found, stopping pagination");
       break;
     }
-    
+
     yield events; // ✅ yield one page
-    
+
     offset += events.length;
-    
+
     // Small delay to be respectful to the API
     await new Promise((res) => setTimeout(res, 100));
   }

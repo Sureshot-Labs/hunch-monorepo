@@ -4,27 +4,40 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 import { onReqStart, onReqEnd, getMetrics } from "./metrics.js";
-import { AuthService, createAuthMiddleware, User, UserWallet, PolymarketCredentials } from "./auth.js";
+import { AuthService, createAuthMiddleware } from "./auth.js";
 import { PrivyService } from "./privy-service.js";
 import { VenueOrderManagerFactory } from "./venue-order-manager-factory.js";
 import { PlaceOrderRequest, OrderStatus } from "./order-types.js";
+import type {
+  FeedEvent,
+  PgParams,
+  PolymarketRequestData,
+  PriceHistoryData,
+  PriceHistoryPoint,
+  TokenPair,
+  WatchlistEvent,
+} from "./server-types.js";
 
 // Rate limiting for external APIs
 const rateLimiters = new Map<string, { count: number; resetTime: number }>();
 
-async function checkRateLimit(key: string, maxRequests: number = 10, windowMs: number = 60000): Promise<boolean> {
+async function checkRateLimit(
+  key: string,
+  maxRequests: number = 10,
+  windowMs: number = 60000,
+): Promise<boolean> {
   const now = Date.now();
   const limiter = rateLimiters.get(key);
-  
+
   if (!limiter || now > limiter.resetTime) {
     rateLimiters.set(key, { count: 1, resetTime: now + windowMs });
     return true;
   }
-  
+
   if (limiter.count >= maxRequests) {
     return false;
   }
-  
+
   limiter.count++;
   return true;
 }
@@ -33,86 +46,111 @@ async function checkRateLimit(key: string, maxRequests: number = 10, windowMs: n
 class PolymarketRateLimiter {
   public requestQueue: Array<{
     key: string;
-    requestData: any;
-    resolve: (value: any) => void;
-    reject: (error: any) => void;
+    requestData: PolymarketRequestData;
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
   }> = [];
   public isProcessing = false;
   private lastRequestTime = 0;
   public requestCount = 0;
   public windowStart = Date.now();
-  
+
   // Polymarket rate limits by endpoint type
   private readonly RATE_LIMITS = {
-    'price-history': { maxRequests: 100, windowMs: 10000 }, // 100 requests per 10 seconds
-    'book': { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    'books': { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
-    'price': { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    'prices': { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
-    'midpoint': { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
-    'spreads': { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
+    "price-history": { maxRequests: 100, windowMs: 10000 }, // 100 requests per 10 seconds
+    book: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
+    books: { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
+    price: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
+    prices: { maxRequests: 80, windowMs: 10000 }, // 80 requests per 10 seconds
+    midpoint: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
+    spreads: { maxRequests: 200, windowMs: 10000 }, // 200 requests per 10 seconds
   };
-  
+
   private readonly WINDOW_MS = 10000; // 10 seconds
   private readonly MIN_REQUEST_INTERVAL = 50; // Minimum 50ms between requests
-  
-  async queueRequest(key: string, requestData: any): Promise<any> {
-    return new Promise((resolve, reject) => {
-      this.requestQueue.push({ key, requestData, resolve, reject });
-      this.processQueue();
+
+  async queueRequest<T = unknown>(
+    key: string,
+    requestData: PolymarketRequestData,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const resolveUnknown = (value: unknown) => resolve(value as T);
+      this.requestQueue.push({
+        key,
+        requestData,
+        resolve: resolveUnknown,
+        reject,
+      });
+      void this.processQueue();
     });
   }
-  
+
   private async processQueue() {
     if (this.isProcessing || this.requestQueue.length === 0) {
       return;
     }
-    
+
     this.isProcessing = true;
-    
+
     while (this.requestQueue.length > 0) {
       const now = Date.now();
-      
+
       // Reset window if needed
       if (now - this.windowStart >= this.WINDOW_MS) {
         this.requestCount = 0;
         this.windowStart = now;
       }
-      
+
       // Check if we can make a request (use most restrictive limit)
-      const maxRequests = Math.min(...Object.values(this.RATE_LIMITS).map(limit => limit.maxRequests));
+      const maxRequests = Math.min(
+        ...Object.values(this.RATE_LIMITS).map((limit) => limit.maxRequests),
+      );
       if (this.requestCount >= maxRequests) {
         // Wait for window to reset
         const waitTime = this.WINDOW_MS - (now - this.windowStart);
-        await new Promise(resolve => setTimeout(resolve, waitTime + 100));
+        await new Promise((resolve) => setTimeout(resolve, waitTime + 100));
         continue;
       }
-      
+
       // Ensure minimum interval between requests
       const timeSinceLastRequest = now - this.lastRequestTime;
       if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-        await new Promise(resolve => setTimeout(resolve, this.MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.MIN_REQUEST_INTERVAL - timeSinceLastRequest),
+        );
       }
-      
-      const request = this.requestQueue.shift()!;
-      
+
+      const request = this.requestQueue.shift();
+      if (!request) break;
+
       try {
         let result;
-        
+
         // Handle different request types
         if (request.requestData.isPost) {
-          result = await this.makePostRequest(request.requestData.endpoint, request.requestData.body);
+          if (!request.requestData.endpoint) {
+            throw new Error(
+              "Polymarket request isPost=true but endpoint is missing",
+            );
+          }
+          result = await this.makePostRequest(
+            request.requestData.endpoint,
+            request.requestData.body,
+          );
         } else if (request.requestData.endpoint) {
-          result = await this.makeRequest(request.requestData.endpoint, request.requestData.params);
+          result = await this.makeRequest(
+            request.requestData.endpoint,
+            request.requestData.params,
+          );
         } else {
           // Legacy price history request
-          const params = new URLSearchParams({ 
+          const params = new URLSearchParams({
             market: request.key,
-            interval: 'max'
+            interval: "max",
           });
-          result = await this.makeRequest('/price-history', params);
+          result = await this.makeRequest("/price-history", params);
         }
-        
+
         request.resolve(result);
         this.requestCount++;
         this.lastRequestTime = Date.now();
@@ -120,43 +158,53 @@ class PolymarketRateLimiter {
         request.reject(error);
       }
     }
-    
+
     this.isProcessing = false;
   }
-  
-  private async makeRequest(endpoint: string, params: URLSearchParams = new URLSearchParams()): Promise<any> {
-    const url = `https://clob.polymarket.com${endpoint}${params.toString() ? '?' + params.toString() : ''}`;
-    
+
+  private async makeRequest(
+    endpoint: string,
+    params: URLSearchParams = new URLSearchParams(),
+  ): Promise<unknown> {
+    const url = `https://clob.polymarket.com${endpoint}${params.toString() ? "?" + params.toString() : ""}`;
+
     const response = await fetch(url, {
-      method: 'GET',
+      method: "GET",
       headers: {
-        'User-Agent': 'Hunch-API/1.0',
+        "User-Agent": "Hunch-API/1.0",
       },
     });
-    
+
     if (!response.ok) {
-      throw new Error(`Polymarket API error: ${response.status} ${response.statusText}`);
+      throw new Error(
+        `Polymarket API error: ${response.status} ${response.statusText}`,
+      );
     }
-    
+
     return response.json();
   }
 
-  private async makePostRequest(endpoint: string, body: any): Promise<any> {
+  private async makePostRequest(
+    endpoint: string,
+    body: unknown,
+  ): Promise<unknown> {
     const url = `https://clob.polymarket.com${endpoint}`;
-    
+
     const response = await fetch(url, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Hunch-API/1.0',
+        "Content-Type": "application/json",
+        "User-Agent": "Hunch-API/1.0",
       },
       body: JSON.stringify(body),
     });
-    
+
     if (!response.ok) {
-      throw new Error(`Polymarket API error: ${response.status} ${response.statusText}`);
+      throw new Error(
+        `Polymarket API error: ${response.status} ${response.statusText}`,
+      );
     }
-    
+
     return response.json();
   }
 }
@@ -164,24 +212,38 @@ class PolymarketRateLimiter {
 const polymarketRateLimiter = new PolymarketRateLimiter();
 
 // Data processing utilities
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPriceHistoryPoint(value: unknown): value is PriceHistoryPoint {
+  return isRecord(value) && typeof value.t === "number";
+}
+
 class PriceHistoryProcessor {
   // Frontend-friendly time intervals in milliseconds
   private static readonly TIME_INTERVALS = {
-    '1h': 60 * 60 * 1000,           // 1 hour
-    '6h': 6 * 60 * 60 * 1000,       // 6 hours
-    '1d': 24 * 60 * 60 * 1000,      // 1 day
-    '1w': 7 * 24 * 60 * 60 * 1000,  // 1 week
-    '1m': 30 * 24 * 60 * 60 * 1000, // 1 month
-    '6m': 6 * 30 * 24 * 60 * 60 * 1000, // 6 months
-    'max': Infinity,                // All available data
+    "1h": 60 * 60 * 1000, // 1 hour
+    "6h": 6 * 60 * 60 * 1000, // 6 hours
+    "1d": 24 * 60 * 60 * 1000, // 1 day
+    "1w": 7 * 24 * 60 * 60 * 1000, // 1 week
+    "1m": 30 * 24 * 60 * 60 * 1000, // 1 month
+    "6m": 6 * 30 * 24 * 60 * 60 * 1000, // 6 months
+    max: Infinity, // All available data
   };
 
-  static processPriceHistory(rawData: any, requestedInterval: string, startTs?: number, endTs?: number): any {
-    if (!rawData?.history || !Array.isArray(rawData.history)) {
-      return rawData;
-    }
+  static processPriceHistory(
+    rawData: PriceHistoryData,
+    requestedInterval: string,
+    startTs?: number,
+    endTs?: number,
+  ): PriceHistoryData {
+    const historyRaw = rawData.history;
+    if (!Array.isArray(historyRaw)) return rawData;
 
-    const history = rawData.history;
+    const history = historyRaw.filter(isPriceHistoryPoint);
+    if (history.length === 0) return rawData;
+
     const now = Date.now() / 1000; // Convert to Unix timestamp
 
     // Determine the actual time range to return
@@ -194,29 +256,39 @@ class PriceHistoryProcessor {
       actualEndTs = endTs;
     } else {
       // Use interval-based calculation
-      const intervalMs = PriceHistoryProcessor.TIME_INTERVALS[requestedInterval as keyof typeof PriceHistoryProcessor.TIME_INTERVALS];
+      const intervalMs =
+        PriceHistoryProcessor.TIME_INTERVALS[
+          requestedInterval as keyof typeof PriceHistoryProcessor.TIME_INTERVALS
+        ];
       if (intervalMs === undefined) {
         // Invalid interval, return all data
         return rawData;
       }
-      
+
       if (intervalMs === Infinity) {
         // Max interval, return all data
         return rawData;
       }
-      
-      actualStartTs = now - (intervalMs / 1000); // Convert to seconds
+
+      actualStartTs = now - intervalMs / 1000; // Convert to seconds
     }
 
     // Filter and slice the data
-    const filteredHistory = history.filter((point: any) => {
+    const filteredHistory = history.filter((point) => {
       const timestamp = point.t;
       return timestamp >= actualStartTs && timestamp <= actualEndTs;
     });
 
     // Apply fidelity (downsampling) if needed
-    const fidelity = PriceHistoryProcessor.calculateFidelity(actualStartTs, actualEndTs, requestedInterval);
-    const downsampledHistory = PriceHistoryProcessor.downsampleData(filteredHistory, fidelity);
+    const fidelity = PriceHistoryProcessor.calculateFidelity(
+      actualStartTs,
+      actualEndTs,
+      requestedInterval,
+    );
+    const downsampledHistory = PriceHistoryProcessor.downsampleData(
+      filteredHistory,
+      fidelity,
+    );
 
     return {
       ...rawData,
@@ -229,38 +301,45 @@ class PriceHistoryProcessor {
         filteredDataPoints: filteredHistory.length,
         finalDataPoints: downsampledHistory.length,
         fidelityMinutes: fidelity,
-      }
+      },
     };
   }
 
-  private static calculateFidelity(startTs: number, endTs: number, interval: string): number {
+  private static calculateFidelity(
+    startTs: number,
+    endTs: number,
+    interval: string,
+  ): number {
     const durationMs = (endTs - startTs) * 1000;
-    
+
     // Determine appropriate fidelity based on interval and duration
     switch (interval) {
-      case '1h':
+      case "1h":
         return 1; // 1 minute fidelity for 1 hour
-      case '6h':
+      case "6h":
         return 5; // 5 minute fidelity for 6 hours
-      case '1d':
+      case "1d":
         return 15; // 15 minute fidelity for 1 day
-      case '1w':
+      case "1w":
         return 60; // 1 hour fidelity for 1 week
-      case '1m':
+      case "1m":
         return 240; // 4 hour fidelity for 1 month
-      case '6m':
+      case "6m":
         return 1440; // 1 day fidelity for 6 months
       default:
         return Math.max(1, Math.floor(durationMs / (1000 * 60 * 100))); // Dynamic based on duration
     }
   }
 
-  private static downsampleData(history: any[], fidelityMinutes: number): any[] {
+  private static downsampleData(
+    history: PriceHistoryPoint[],
+    fidelityMinutes: number,
+  ): PriceHistoryPoint[] {
     if (fidelityMinutes <= 1 || history.length <= 100) {
       return history; // No downsampling needed
     }
 
-    const downsampled: any[] = [];
+    const downsampled: PriceHistoryPoint[] = [];
     const fidelityMs = fidelityMinutes * 60 * 1000;
 
     for (let i = 0; i < history.length; i++) {
@@ -273,7 +352,7 @@ class PriceHistoryProcessor {
       }
 
       const lastTime = downsampled[downsampled.length - 1].t * 1000;
-      
+
       if (currentTime - lastTime >= fidelityMs) {
         downsampled.push(currentPoint);
       }
@@ -285,121 +364,148 @@ class PriceHistoryProcessor {
 
 // External API clients
 class PolymarketClient {
-  private pendingRequests = new Map<string, Promise<any>>();
-  
+  private pendingRequests = new Map<string, Promise<PriceHistoryData>>();
+
   // Existing price history method (maintains backward compatibility)
-  async getPriceHistory(tokenId: string, options: {
-    startTs?: number;
-    endTs?: number;
-    interval?: string;
-    fidelity?: number;
-  } = {}) {
+  async getPriceHistory(
+    tokenId: string,
+    options: {
+      startTs?: number;
+      endTs?: number;
+      interval?: string;
+      fidelity?: number;
+    } = {},
+  ): Promise<PriceHistoryData> {
     // Always use the same cache key for max data (tokenId only)
     // This ensures we fetch max data once and slice it for different requests
     const maxDataKey = `max-data:${tokenId}`;
-    
+
     // If max data is already being fetched for this token, wait for it
-    if (this.pendingRequests.has(maxDataKey)) {
-      const maxDataPromise = this.pendingRequests.get(maxDataKey)!;
-      const maxData = await maxDataPromise;
-      
+    const existingPromise = this.pendingRequests.get(maxDataKey);
+    if (existingPromise) {
+      const maxData = await existingPromise;
+
       // Process the max data for the specific request
       return PriceHistoryProcessor.processPriceHistory(
-        maxData, 
-        options.interval || 'max', 
-        options.startTs, 
-        options.endTs
+        maxData,
+        options.interval || "max",
+        options.startTs,
+        options.endTs,
       );
     }
-    
+
     // Create new request promise for max data
-    const requestPromise = polymarketRateLimiter.queueRequest(tokenId, { 
-      endpoint: '/price-history',
-      params: new URLSearchParams({ market: tokenId, interval: 'max' })
-    });
-    
+    const requestPromise = polymarketRateLimiter.queueRequest<PriceHistoryData>(
+      tokenId,
+      {
+        endpoint: "/price-history",
+        params: new URLSearchParams({ market: tokenId, interval: "max" }),
+      },
+    );
+
     // Store the promise for deduplication (using max data key)
     this.pendingRequests.set(maxDataKey, requestPromise);
-    
+
     // Clean up when request completes
     requestPromise.finally(() => {
       this.pendingRequests.delete(maxDataKey);
     });
-    
+
     // Wait for max data and then process it
     const maxData = await requestPromise;
     return PriceHistoryProcessor.processPriceHistory(
-      maxData, 
-      options.interval || 'max', 
-      options.startTs, 
-      options.endTs
+      maxData,
+      options.interval || "max",
+      options.startTs,
+      options.endTs,
     );
   }
 
   // New market data methods for trading functionality
-  
+
   /**
    * Get order book for a single token
    * Rate limit: 200 requests/10s
    */
-  async getOrderBook(tokenId: string): Promise<any> {
+  async getOrderBook(tokenId: string): Promise<unknown> {
     const params = new URLSearchParams({ token_id: tokenId });
-    return polymarketRateLimiter.queueRequest(`/book:${tokenId}`, { endpoint: '/book', params });
+    return polymarketRateLimiter.queueRequest(`/book:${tokenId}`, {
+      endpoint: "/book",
+      params,
+    });
   }
 
   /**
    * Get order books for multiple tokens
    * Rate limit: 80 requests/10s
    */
-  async getOrderBooksBatch(tokenIds: string[]): Promise<any> {
-    const body = tokenIds.map(id => ({ token_id: id }));
-    return polymarketRateLimiter.queueRequest(`/books:${tokenIds.join(',')}`, { endpoint: '/books', body, isPost: true });
+  async getOrderBooksBatch(tokenIds: string[]): Promise<unknown> {
+    const body = tokenIds.map((id) => ({ token_id: id }));
+    return polymarketRateLimiter.queueRequest(`/books:${tokenIds.join(",")}`, {
+      endpoint: "/books",
+      body,
+      isPost: true,
+    });
   }
 
   /**
    * Get price for a single token with side
    * Rate limit: 200 requests/10s
    */
-  async getPrice(tokenId: string, side: 'BUY' | 'SELL'): Promise<any> {
-    const params = new URLSearchParams({ 
+  async getPrice(tokenId: string, side: "BUY" | "SELL"): Promise<unknown> {
+    const params = new URLSearchParams({
       token_id: tokenId,
-      side: side
+      side: side,
     });
-    return polymarketRateLimiter.queueRequest(`/price:${tokenId}:${side}`, { endpoint: '/price', params });
+    return polymarketRateLimiter.queueRequest(`/price:${tokenId}:${side}`, {
+      endpoint: "/price",
+      params,
+    });
   }
 
   /**
    * Get prices for multiple tokens with sides
    * Rate limit: 80 requests/10s
    */
-  async getPricesBatch(requests: Array<{token_id: string, side: 'BUY' | 'SELL'}>): Promise<any> {
-    return polymarketRateLimiter.queueRequest(`/prices:${requests.map(r => `${r.token_id}:${r.side}`).join(',')}`, { 
-      endpoint: '/prices', 
-      body: requests, 
-      isPost: true 
-    });
+  async getPricesBatch(
+    requests: Array<{ token_id: string; side: "BUY" | "SELL" }>,
+  ): Promise<unknown> {
+    return polymarketRateLimiter.queueRequest(
+      `/prices:${requests.map((r) => `${r.token_id}:${r.side}`).join(",")}`,
+      {
+        endpoint: "/prices",
+        body: requests,
+        isPost: true,
+      },
+    );
   }
 
   /**
    * Get midpoint price for a token
    * Rate limit: 200 requests/10s
    */
-  async getMidpointPrice(tokenId: string): Promise<any> {
+  async getMidpointPrice(tokenId: string): Promise<unknown> {
     const params = new URLSearchParams({ token_id: tokenId });
-    return polymarketRateLimiter.queueRequest(`/midpoint:${tokenId}`, { endpoint: '/midpoint', params });
+    return polymarketRateLimiter.queueRequest(`/midpoint:${tokenId}`, {
+      endpoint: "/midpoint",
+      params,
+    });
   }
 
   /**
    * Get bid-ask spreads for multiple tokens
    * Rate limit: 200 requests/10s
    */
-  async getSpreadsBatch(tokenIds: string[]): Promise<any> {
-    const body = tokenIds.map(id => ({ token_id: id }));
-    return polymarketRateLimiter.queueRequest(`/spreads:${tokenIds.join(',')}`, { 
-      endpoint: '/spreads', 
-      body, 
-      isPost: true 
-    });
+  async getSpreadsBatch(tokenIds: string[]): Promise<unknown> {
+    const body = tokenIds.map((id) => ({ token_id: id }));
+    return polymarketRateLimiter.queueRequest(
+      `/spreads:${tokenIds.join(",")}`,
+      {
+        endpoint: "/spreads",
+        body,
+        isPost: true,
+      },
+    );
   }
 }
 
@@ -408,10 +514,10 @@ const polymarketClient = new PolymarketClient();
 const app = Fastify({ logger: true });
 
 app.addHook("onRequest", async (req, _reply) => {
-  (req as any)._t0 = onReqStart();
+  req._t0 = onReqStart();
 });
 app.addHook("onResponse", async (req, _reply) => {
-  onReqEnd((req as any)._t0);
+  if (req._t0 != null) onReqEnd(req._t0);
 });
 
 app.get("/metrics", async (_req, reply) => {
@@ -432,11 +538,14 @@ app.get("/price-history/status", async (request, reply) => {
       isProcessing: polymarketRateLimiter.isProcessing,
       requestCount: polymarketRateLimiter.requestCount,
       windowStart: polymarketRateLimiter.windowStart,
-      timeUntilReset: Math.max(0, polymarketRateLimiter.windowStart + 10000 - Date.now()),
+      timeUntilReset: Math.max(
+        0,
+        polymarketRateLimiter.windowStart + 10000 - Date.now(),
+      ),
     },
     timestamp: new Date().toISOString(),
   };
-  
+
   reply.header("Content-Type", "application/json; charset=utf-8");
   return reply.send(status);
 });
@@ -455,11 +564,12 @@ app.get("/prices/stream", async (request, reply) => {
   }
 
   // normalize token ids: ?token_id=a&token_id=b or ?token_id=a,b
-  const q = request.query as Record<string, any>;
+  const q = isRecord(request.query) ? request.query : {};
+  const tokenIdRaw = q["token_id"];
   let ids: string[] = [];
-  if (Array.isArray(q.token_id))
-    ids = q.token_id.flatMap((s: string) => String(s).split(","));
-  else if (typeof q.token_id === "string") ids = q.token_id.split(",");
+  if (Array.isArray(tokenIdRaw))
+    ids = tokenIdRaw.flatMap((s) => String(s).split(","));
+  else if (tokenIdRaw != null) ids = String(tokenIdRaw).split(",");
   ids = ids.map((s) => s.trim()).filter(Boolean);
 
   if (!ids.length) {
@@ -477,7 +587,7 @@ app.get("/prices/stream", async (request, reply) => {
   await sub.connect();
 
   const channels = ids.map((id) => `prices:${id}`);
-  const send = (evt: string, data: any) => {
+  const send = (evt: string, data: unknown) => {
     try {
       reply.raw.write(`event: ${evt}\n`);
       reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -491,7 +601,9 @@ app.get("/prices/stream", async (request, reply) => {
     try {
       const snap = await r.get(`book:${id}`);
       if (snap) send("snapshot", JSON.parse(snap));
-    } catch {}
+    } catch {
+      // ignore malformed cache entries
+    }
   }
 
   // subscribe to live ticks
@@ -499,7 +611,9 @@ app.get("/prices/stream", async (request, reply) => {
     await sub.subscribe(ch, (message: string) => {
       try {
         send("tick", JSON.parse(message));
-      } catch {}
+      } catch {
+        // ignore malformed pubsub events
+      }
     });
   }
 
@@ -507,7 +621,9 @@ app.get("/prices/stream", async (request, reply) => {
   const hb = setInterval(() => {
     try {
       reply.raw.write(":keepalive\n\n");
-    } catch {}
+    } catch {
+      // client closed; ignore
+    }
   }, 20000);
 
   // cleanup
@@ -515,7 +631,9 @@ app.get("/prices/stream", async (request, reply) => {
     clearInterval(hb);
     try {
       for (const ch of channels) await sub.unsubscribe(ch);
-    } catch {}
+    } catch {
+      // ignore; best-effort cleanup
+    }
     try {
       await sub.quit();
     } catch {
@@ -542,7 +660,7 @@ app.get("/feed", async (req, reply) => {
   const q = req.query as Record<string, string | undefined>;
   const limit = Math.min(
     Math.max(parseInt(q.limit ?? "") || env.defaultLimit, 1),
-    env.maxLimit
+    env.maxLimit,
   );
   const offset = Math.max(parseInt(q.offset ?? "") || 0, 0);
   const minVol = q.min_volume24hr != null ? Number(q.min_volume24hr) : 1e-9;
@@ -554,10 +672,10 @@ app.get("/feed", async (req, reply) => {
 
   // Normalize category to lowercase for consistent caching
   const normalizedCategory = category ? category.toLowerCase() : "";
-  
+
   // Calculate cache TTL (default 30 seconds, can be overridden via env var)
   const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
-  
+
   // Create cache key with all parameters normalized
   const cacheKey = `feed:v9:${limit}:${offset}:${minVol}:${minLiquidity}:${
     venue ?? ""
@@ -581,7 +699,7 @@ app.get("/feed", async (req, reply) => {
       reply.header("ETag", etag);
       reply.header(
         "Cache-Control",
-        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
+        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
       );
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(cachedBody);
@@ -591,11 +709,15 @@ app.get("/feed", async (req, reply) => {
   // Pre-calculate now() as a parameter to allow index usage
   const nowTs = new Date();
   const nowParam = nowTs.toISOString();
-  const sevenDaysAgo = new Date(nowTs.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const sevenDaysFromNow = new Date(nowTs.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const sevenDaysAgo = new Date(
+    nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const sevenDaysFromNow = new Date(
+    nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
   // 1. Get event IDs matching filters, with limit/offset
-  const eventParams: any[] = [];
+  const eventParams: PgParams = [];
   const eventWhere: string[] = [];
   let paramIdx = 1;
 
@@ -673,7 +795,7 @@ app.get("/feed", async (req, reply) => {
   eventParams.push(minVol, minLiquidity);
 
   const { rows: eventRows } = await pool.query(eventSql, eventParams);
-  const eventIds = eventRows.map((r) => r.id);
+  const eventIds = eventRows.map((r) => String(r.id));
   if (!eventIds.length) {
     const payload = {
       count: 0,
@@ -691,7 +813,13 @@ app.get("/feed", async (req, reply) => {
 
   // 2. Fetch all markets for those events, with volume/liquidity filter
   // Use parameterized now() for better index usage
-  const marketParams: any[] = [minVol, minLiquidity, eventIds, nowParam, nowParam];
+  const marketParams: PgParams = [
+    minVol,
+    minLiquidity,
+    eventIds,
+    nowParam,
+    nowParam,
+  ];
   const marketWhere: string[] = [
     "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
     "coalesce(m.liquidity, 0) >= $2",
@@ -774,50 +902,53 @@ app.get("/feed", async (req, reply) => {
   const { rows } = await pool.query(marketSql, marketParams);
 
   // Group markets under their events
-  const eventMap: Record<string, any> = {};
+  const eventMap: Record<string, FeedEvent> = {};
   for (const r of rows) {
-    const eid = r.event_id;
+    const eid = String(r.event_id);
     if (!eventMap[eid]) {
       eventMap[eid] = {
         eventId: eid,
-        eventTitle: r.event_title,
-        category: r.category,
+        eventTitle: r.event_title ?? null,
+        category: r.category ?? null,
         startTime: r.start_date,
         endTime: r.end_date,
         eventLiquidity:
           r.event_liquidity != null ? Number(r.event_liquidity) : 0,
         eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
-        eventOpenInterest: r.event_open_interest != null ? Number(r.event_open_interest) : 0,
-        eventSlug: r.event_slug,
+        eventOpenInterest:
+          r.event_open_interest != null ? Number(r.event_open_interest) : 0,
+        eventSlug: r.event_slug ?? null,
         image: r.event_image ?? null,
         icon: r.event_icon ?? null,
         markets: [],
       };
     }
     // Parse token IDs based on venue
-    let tokens = { yes: null, no: null };
-    if (r.venue === 'polymarket' && r.clob_token_ids) {
+    let tokens: TokenPair = { yes: null, no: null };
+    if (r.venue === "polymarket" && r.clob_token_ids) {
       try {
-        const tokenIds = JSON.parse(r.clob_token_ids);
-        tokens = {
-          yes: tokenIds[0] || null,
-          no: tokenIds[1] || null
-        };
-      } catch (error) {
+        const tokenIds = JSON.parse(r.clob_token_ids) as unknown;
+        if (Array.isArray(tokenIds)) {
+          tokens = {
+            yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
+            no: tokenIds[1] != null ? String(tokenIds[1]) : null,
+          };
+        }
+      } catch {
         // Invalid JSON, keep tokens as null
       }
-    } else if (r.venue === 'limitless' || r.venue === 'kalshi') {
+    } else if (r.venue === "limitless" || r.venue === "kalshi") {
       tokens = {
-        yes: r.token_yes,
-        no: r.token_no
+        yes: r.token_yes != null ? String(r.token_yes) : null,
+        no: r.token_no != null ? String(r.token_no) : null,
       };
     }
 
     eventMap[eid].markets.push({
-      venue: r.venue,
-      marketId: r.venue_market_id,
-      marketTitle: r.market_title,
-      marketSlug: r.market_slug,
+      venue: String(r.venue),
+      marketId: String(r.venue_market_id),
+      marketTitle: r.market_title ?? "",
+      marketSlug: r.market_slug ?? null,
       volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
       volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
       openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
@@ -854,7 +985,7 @@ app.get("/feed", async (req, reply) => {
         image: null,
         icon: null,
         markets: [],
-      }
+      },
   );
 
   const payload = {
@@ -878,7 +1009,7 @@ app.get("/feed", async (req, reply) => {
   reply.header("ETag", etag);
   reply.header(
     "Cache-Control",
-    `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
+    `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
   );
   reply.header("Content-Type", "application/json; charset=utf-8");
   return reply.send(body);
@@ -890,37 +1021,42 @@ app.get("/feed", async (req, reply) => {
  */
 app.get("/markets/:marketId", async (request, reply) => {
   const { marketId } = request.params as { marketId: string };
-  
+
   if (!marketId) {
     reply.code(400);
     return reply.send({ error: "marketId parameter is required" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `market:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key
   const cacheKey = `market:${marketId}`;
   const r = await getRedis();
-  
+
   // Check cache first (30-second cache for market data)
   if (r) {
     const cachedData = await r.get(cacheKey);
     if (cachedData) {
       reply.header("x-cache", "hit");
       reply.header("Content-Type", "application/json; charset=utf-8");
-      reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      reply.header(
+        "Cache-Control",
+        "public, max-age=30, stale-while-revalidate=60",
+      );
       return reply.send(cachedData);
     }
   }
-  
+
   try {
     // Query for market details with event information
     const marketSql = `
@@ -964,45 +1100,45 @@ app.get("/markets/:marketId", async (request, reply) => {
       JOIN unified_markets m ON m.event_id = e.id
       WHERE m.id = $1 OR m.venue_market_id = $1
     `;
-    
+
     const { rows } = await pool.query(marketSql, [marketId]);
-    
+
     if (rows.length === 0) {
       reply.code(404);
       return reply.send({ error: "Market not found" });
     }
-    
+
     const market = rows[0];
-    
+
     // Parse token IDs based on venue
     let tokens = { yes: null, no: null };
-    if (market.venue === 'polymarket' && market.clob_token_ids) {
+    if (market.venue === "polymarket" && market.clob_token_ids) {
       try {
         const tokenIds = JSON.parse(market.clob_token_ids);
         tokens = {
           yes: tokenIds[0] || null,
-          no: tokenIds[1] || null
+          no: tokenIds[1] || null,
         };
-      } catch (error) {
+      } catch {
         // Invalid JSON, keep tokens as null
       }
-    } else if (market.venue === 'limitless' || market.venue === 'kalshi') {
+    } else if (market.venue === "limitless" || market.venue === "kalshi") {
       tokens = {
         yes: market.token_yes,
-        no: market.token_no
+        no: market.token_no,
       };
     }
-    
+
     // Parse outcomes if available
     let outcomes = null;
     if (market.outcomes) {
       try {
         outcomes = JSON.parse(market.outcomes);
-      } catch (error) {
+      } catch {
         // Invalid JSON, keep outcomes as null
       }
     }
-    
+
     const response = {
       marketId: market.market_id,
       venue: market.venue,
@@ -1034,31 +1170,35 @@ app.get("/markets/:marketId", async (request, reply) => {
         category: market.event_category,
         startTime: market.start_date,
         endTime: market.end_date,
-        eventLiquidity: market.event_liquidity != null ? Number(market.event_liquidity) : 0,
-        eventVolume: market.event_volume != null ? Number(market.event_volume) : 0,
+        eventLiquidity:
+          market.event_liquidity != null ? Number(market.event_liquidity) : 0,
+        eventVolume:
+          market.event_volume != null ? Number(market.event_volume) : 0,
         eventImage: market.event_image || null,
         eventIcon: market.event_icon || null,
-      }
+      },
     };
-    
+
     const responseBody = JSON.stringify(response);
-    
+
     // Cache for 30 seconds
     if (r) {
       await r.set(cacheKey, responseBody, { EX: 30 });
       reply.header("x-cache", "miss");
     }
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=30, stale-while-revalidate=60",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, marketId }, 'Market details fetch failed');
+    app.log.error({ error, marketId }, "Market details fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1069,37 +1209,42 @@ app.get("/markets/:marketId", async (request, reply) => {
  */
 app.get("/events/:eventId", async (request, reply) => {
   const { eventId } = request.params as { eventId: string };
-  
+
   if (!eventId) {
     reply.code(400);
     return reply.send({ error: "eventId parameter is required" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `event:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key
   const cacheKey = `event:${eventId}`;
   const r = await getRedis();
-  
+
   // Check cache first (30-second cache for event data)
   if (r) {
     const cachedData = await r.get(cacheKey);
     if (cachedData) {
       reply.header("x-cache", "hit");
       reply.header("Content-Type", "application/json; charset=utf-8");
-      reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      reply.header(
+        "Cache-Control",
+        "public, max-age=30, stale-while-revalidate=60",
+      );
       return reply.send(cachedData);
     }
   }
-  
+
   try {
     // Query for event details with all associated markets
     const eventSql = `
@@ -1155,16 +1300,16 @@ app.get("/events/:eventId", async (request, reply) => {
       WHERE e.id = $1 OR e.venue_event_id = $1
       ORDER BY m.volume_24h DESC NULLS LAST, m.liquidity DESC NULLS LAST, m.venue_market_id
     `;
-    
+
     const { rows } = await pool.query(eventSql, [eventId]);
-    
+
     if (rows.length === 0) {
       reply.code(404);
       return reply.send({ error: "Event not found" });
     }
-    
+
     const firstRow = rows[0];
-    
+
     // Build event object
     const event = {
       eventId: firstRow.event_id,
@@ -1176,59 +1321,76 @@ app.get("/events/:eventId", async (request, reply) => {
       startTime: firstRow.start_date,
       endTime: firstRow.end_date,
       status: firstRow.event_status,
-      eventLiquidity: firstRow.event_liquidity != null ? Number(firstRow.event_liquidity) : 0,
-      eventVolume: firstRow.event_volume_total != null ? Number(firstRow.event_volume_total) : 0,
-      eventVolume24h: firstRow.event_volume_24h != null ? Number(firstRow.event_volume_24h) : 0,
-      eventOpenInterest: firstRow.event_open_interest != null ? Number(firstRow.event_open_interest) : 0,
+      eventLiquidity:
+        firstRow.event_liquidity != null ? Number(firstRow.event_liquidity) : 0,
+      eventVolume:
+        firstRow.event_volume_total != null
+          ? Number(firstRow.event_volume_total)
+          : 0,
+      eventVolume24h:
+        firstRow.event_volume_24h != null
+          ? Number(firstRow.event_volume_24h)
+          : 0,
+      eventOpenInterest:
+        firstRow.event_open_interest != null
+          ? Number(firstRow.event_open_interest)
+          : 0,
       eventSlug: firstRow.event_slug || null,
       image: firstRow.event_image || null,
       icon: firstRow.event_icon || null,
       createdAt: firstRow.event_created_at,
       updatedAt: firstRow.event_updated_at,
-      markets: [] as any[]
+      markets: [] as Record<string, unknown>[],
     };
-    
+
     // Process markets
     for (const row of rows) {
       // Skip if no market data (event exists but has no markets)
       if (!row.market_id) {
         continue;
       }
-      
+
       // Parse token IDs based on venue
-      let tokens = { yes: null, no: null };
-      if (row.market_venue === 'polymarket' && row.clob_token_ids) {
+      let tokens: TokenPair = { yes: null, no: null };
+      if (row.market_venue === "polymarket" && row.clob_token_ids) {
         try {
-          const tokenIds = JSON.parse(row.clob_token_ids);
-          tokens = {
-            yes: tokenIds[0] || null,
-            no: tokenIds[1] || null
-          };
-        } catch (error) {
+          const tokenIds = JSON.parse(row.clob_token_ids) as unknown;
+          if (Array.isArray(tokenIds)) {
+            tokens = {
+              yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
+              no: tokenIds[1] != null ? String(tokenIds[1]) : null,
+            };
+          }
+        } catch {
           // Invalid JSON, keep tokens as null
         }
-      } else if (row.market_venue === 'limitless' || row.market_venue === 'kalshi') {
+      } else if (
+        row.market_venue === "limitless" ||
+        row.market_venue === "kalshi"
+      ) {
         tokens = {
-          yes: row.token_yes,
-          no: row.token_no
+          yes: row.token_yes != null ? String(row.token_yes) : null,
+          no: row.token_no != null ? String(row.token_no) : null,
         };
       }
-      
+
       // Parse outcomes if available
       let outcomes = null;
       if (row.outcomes) {
         try {
           outcomes = JSON.parse(row.outcomes);
-        } catch (error) {
+        } catch {
           // Invalid JSON, keep outcomes as null
         }
       }
-      
+
       // Determine if market is accepting orders
-      const acceptingOrders = row.market_status === 'ACTIVE' && 
-        (row.expiration_time === null || new Date(row.expiration_time) > new Date()) &&
+      const acceptingOrders =
+        row.market_status === "ACTIVE" &&
+        (row.expiration_time === null ||
+          new Date(row.expiration_time) > new Date()) &&
         (row.close_time === null || new Date(row.close_time) > new Date());
-      
+
       event.markets.push({
         marketId: row.market_id,
         venue: row.market_venue,
@@ -1266,25 +1428,27 @@ app.get("/events/:eventId", async (request, reply) => {
         lastUpdate: row.market_updated_at,
       });
     }
-    
+
     const responseBody = JSON.stringify(event);
-    
+
     // Cache for 30 seconds
     if (r) {
       await r.set(cacheKey, responseBody, { EX: 30 });
       reply.header("x-cache", "miss");
     }
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=30, stale-while-revalidate=60",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, eventId }, 'Event details fetch failed');
+    app.log.error({ error, eventId }, "Event details fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1298,43 +1462,48 @@ app.get("/events/:eventId", async (request, reply) => {
  *  - endTs?: number (Unix timestamp)
  *  - interval?: string ("1h", "6h", "1d", "1w", "1m", "6m", "max")
  *  - fidelity?: number (resolution in minutes)
- * 
+ *
  * Fetches price history for multiple tokens from specified venue.
- * 
+ *
  * OPTIMIZATION STRATEGY:
  * - Always fetches MAX data from Polymarket API (interval=max)
  * - Caches max data per token for 30 minutes
  * - Slices and downsamples data based on frontend requirements
  * - Dramatically reduces API calls to Polymarket
- * 
+ *
  * Supports intelligent caching, rate limiting, and request deduplication.
  */
 app.get("/price-history", async (request, reply) => {
   const q = request.query as Record<string, string | undefined>;
-  
+
   // Validate required parameters
   if (!q.tokens) {
     reply.code(400);
-    return reply.send({ error: "tokens parameter is required (comma-separated token IDs)" });
+    return reply.send({
+      error: "tokens parameter is required (comma-separated token IDs)",
+    });
   }
-  
-  const tokens = q.tokens.split(',').map(t => t.trim()).filter(Boolean);
+
+  const tokens = q.tokens
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
   if (tokens.length === 0) {
     reply.code(400);
     return reply.send({ error: "At least one token ID is required" });
   }
-  
+
   if (tokens.length > 50) {
     reply.code(400);
     return reply.send({ error: "Maximum 50 tokens per request" });
   }
-  
-  const venue = q.venue?.toLowerCase() || 'polymarket';
+
+  const venue = q.venue?.toLowerCase() || "polymarket";
   const startTs = q.startTs ? parseInt(q.startTs) : undefined;
   const endTs = q.endTs ? parseInt(q.endTs) : undefined;
   const interval = q.interval;
   const fidelity = q.fidelity ? parseInt(q.fidelity) : undefined;
-  
+
   // Validate timestamp parameters
   if (startTs && (isNaN(startTs) || startTs < 0)) {
     reply.code(400);
@@ -1348,38 +1517,42 @@ app.get("/price-history", async (request, reply) => {
     reply.code(400);
     return reply.send({ error: "startTs must be less than endTs" });
   }
-  
+
   // Validate interval
-  const validIntervals = ['1h', '6h', '1d', '1w', '1m', '6m', 'max'];
+  const validIntervals = ["1h", "6h", "1d", "1w", "1m", "6m", "max"];
   if (interval && !validIntervals.includes(interval)) {
     reply.code(400);
-    return reply.send({ error: `interval must be one of: ${validIntervals.join(', ')}` });
+    return reply.send({
+      error: `interval must be one of: ${validIntervals.join(", ")}`,
+    });
   }
-  
+
   // Check client rate limiting (more generous since we handle Polymarket limits internally)
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `price-history:${venue}:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key for max data (per token) - much simpler caching strategy
-  const maxDataCacheKeys = tokens.map(token => `max-data:${venue}:${token}`);
+  const maxDataCacheKeys = tokens.map((token) => `max-data:${venue}:${token}`);
   const r = await getRedis();
-  
+
   // Check if we have max data cached for all tokens
   let allMaxDataCached = true;
-  const cachedMaxData: Record<string, any> = {};
-  
+  const cachedMaxData: Record<string, PriceHistoryData> = {};
+
   if (r) {
     for (const cacheKey of maxDataCacheKeys) {
       const cachedData = await r.get(cacheKey);
       if (cachedData) {
-        const token = cacheKey.split(':')[2]; // Extract token from cache key
-        cachedMaxData[token] = JSON.parse(cachedData);
+        const token = cacheKey.split(":")[2]; // Extract token from cache key
+        cachedMaxData[token] = JSON.parse(cachedData) as PriceHistoryData;
       } else {
         allMaxDataCached = false;
         break;
@@ -1388,21 +1561,21 @@ app.get("/price-history", async (request, reply) => {
   } else {
     allMaxDataCached = false;
   }
-  
+
   // If we have all max data cached, process it and return
   if (allMaxDataCached && Object.keys(cachedMaxData).length === tokens.length) {
-    const results: Record<string, any> = {};
-    
+    const results: Record<string, PriceHistoryData> = {};
+
     for (const token of tokens) {
       const maxData = cachedMaxData[token];
       results[token] = PriceHistoryProcessor.processPriceHistory(
         maxData,
-        interval || 'max',
+        interval || "max",
         startTs,
-        endTs
+        endTs,
       );
     }
-    
+
     const response = {
       venue,
       tokens: results,
@@ -1411,28 +1584,31 @@ app.get("/price-history", async (request, reply) => {
         successfulTokens: tokens.length,
         failedTokens: 0,
         timestamp: new Date().toISOString(),
-        cacheStatus: 'max-data-cached',
+        cacheStatus: "max-data-cached",
       },
     };
-    
+
     reply.header("x-cache", "hit");
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=60, stale-while-revalidate=300",
+    );
     return reply.send(JSON.stringify(response));
   }
-  
+
   try {
-    const results: Record<string, any> = {};
+    const results: Record<string, PriceHistoryData> = {};
     const errors: Record<string, string> = {};
-    
+
     // Process each token
     for (const token of tokens) {
       try {
-        let processedData;
-        
+        let processedData: PriceHistoryData;
+
         // Route to appropriate venue client
         switch (venue) {
-          case 'polymarket':
+          case "polymarket":
             processedData = await polymarketClient.getPriceHistory(token, {
               startTs,
               endTs,
@@ -1443,21 +1619,23 @@ app.get("/price-history", async (request, reply) => {
           default:
             throw new Error(`Unsupported venue: ${venue}`);
         }
-        
+
         results[token] = processedData;
-        
+
         // Cache the max data for this token (if we got raw max data)
         if (r && processedData && !processedData.metadata?.originalDataPoints) {
           // This is raw max data, cache it
           const maxDataCacheKey = `max-data:${venue}:${token}`;
-          await r.set(maxDataCacheKey, JSON.stringify(processedData), { EX: 1800 }); // 30 minutes
+          await r.set(maxDataCacheKey, JSON.stringify(processedData), {
+            EX: 1800,
+          }); // 30 minutes
         }
-        
       } catch (error) {
-        errors[token] = error instanceof Error ? error.message : 'Unknown error';
+        errors[token] =
+          error instanceof Error ? error.message : "Unknown error";
       }
     }
-    
+
     const response = {
       venue,
       tokens: results,
@@ -1469,22 +1647,24 @@ app.get("/price-history", async (request, reply) => {
         timestamp: new Date().toISOString(),
       },
     };
-    
+
     const responseBody = JSON.stringify(response);
-    
+
     // No need to cache processed responses since we cache max data separately
     reply.header("x-cache", "miss");
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=60, stale-while-revalidate=300",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, venue, tokens }, 'Price history fetch failed');
+    app.log.error({ error, venue, tokens }, "Price history fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1496,64 +1676,71 @@ app.get("/price-history", async (request, reply) => {
  */
 app.get("/orderbook/:tokenId", async (request, reply) => {
   const { tokenId } = request.params as { tokenId: string };
-  
+
   if (!tokenId) {
     reply.code(400);
     return reply.send({ error: "tokenId parameter is required" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `orderbook:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key
   const cacheKey = `orderbook:${tokenId}`;
   const r = await getRedis();
-  
+
   // Check cache first (5-second cache for order book data)
   if (r) {
     const cachedData = await r.get(cacheKey);
     if (cachedData) {
       reply.header("x-cache", "hit");
       reply.header("Content-Type", "application/json; charset=utf-8");
-      reply.header("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+      reply.header(
+        "Cache-Control",
+        "public, max-age=5, stale-while-revalidate=10",
+      );
       return reply.send(cachedData);
     }
   }
-  
+
   try {
     const orderBook = await polymarketClient.getOrderBook(tokenId);
-    
+
     const response = {
       tokenId,
       data: orderBook,
       timestamp: new Date().toISOString(),
     };
-    
+
     const responseBody = JSON.stringify(response);
-    
+
     // Cache for 5 seconds
     if (r) {
       await r.set(cacheKey, responseBody, { EX: 5 });
       reply.header("x-cache", "miss");
     }
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=5, stale-while-revalidate=10",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, tokenId }, 'Order book fetch failed');
+    app.log.error({ error, tokenId }, "Order book fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1565,46 +1752,57 @@ app.get("/orderbook/:tokenId", async (request, reply) => {
  */
 app.post("/orderbook/batch", async (request, reply) => {
   const body = request.body as { tokenIds: string[] };
-  
-  if (!body.tokenIds || !Array.isArray(body.tokenIds) || body.tokenIds.length === 0) {
+
+  if (
+    !body.tokenIds ||
+    !Array.isArray(body.tokenIds) ||
+    body.tokenIds.length === 0
+  ) {
     reply.code(400);
     return reply.send({ error: "tokenIds array is required" });
   }
-  
+
   if (body.tokenIds.length > 50) {
     reply.code(400);
     return reply.send({ error: "Maximum 50 tokens per request" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `orderbook-batch:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 50, 60000); // 50 requests per minute per client
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   try {
     const orderBooks = await polymarketClient.getOrderBooksBatch(body.tokenIds);
-    
+
     const response = {
       tokenIds: body.tokenIds,
       data: orderBooks,
       timestamp: new Date().toISOString(),
     };
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=5, stale-while-revalidate=10",
+    );
     return reply.send(JSON.stringify(response));
-    
   } catch (error) {
-    app.log.error({ error, tokenIds: body.tokenIds }, 'Order books batch fetch failed');
+    app.log.error(
+      { error, tokenIds: body.tokenIds },
+      "Order books batch fetch failed",
+    );
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1618,72 +1816,81 @@ app.post("/orderbook/batch", async (request, reply) => {
 app.get("/price/:tokenId", async (request, reply) => {
   const { tokenId } = request.params as { tokenId: string };
   const q = request.query as { side?: string };
-  
+
   if (!tokenId) {
     reply.code(400);
     return reply.send({ error: "tokenId parameter is required" });
   }
-  
-  if (!q.side || !['BUY', 'SELL'].includes(q.side.toUpperCase())) {
+
+  if (!q.side || !["BUY", "SELL"].includes(q.side.toUpperCase())) {
     reply.code(400);
-    return reply.send({ error: "side parameter is required and must be 'BUY' or 'SELL'" });
+    return reply.send({
+      error: "side parameter is required and must be 'BUY' or 'SELL'",
+    });
   }
-  
-  const side = q.side.toUpperCase() as 'BUY' | 'SELL';
-  
+
+  const side = q.side.toUpperCase() as "BUY" | "SELL";
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `price:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000);
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key including side
   const cacheKey = `price:${tokenId}:${side}`;
   const r = await getRedis();
-  
+
   // Check cache first (1-second cache for price data)
   if (r) {
     const cachedData = await r.get(cacheKey);
     if (cachedData) {
       reply.header("x-cache", "hit");
       reply.header("Content-Type", "application/json; charset=utf-8");
-      reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+      reply.header(
+        "Cache-Control",
+        "public, max-age=1, stale-while-revalidate=5",
+      );
       return reply.send(cachedData);
     }
   }
-  
+
   try {
     const price = await polymarketClient.getPrice(tokenId, side);
-    
+
     const response = {
       tokenId,
       side,
       data: price,
       timestamp: new Date().toISOString(),
     };
-    
+
     const responseBody = JSON.stringify(response);
-    
+
     // Cache for 1 second
     if (r) {
       await r.set(cacheKey, responseBody, { EX: 1 });
       reply.header("x-cache", "miss");
     }
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=1, stale-while-revalidate=5",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, tokenId, side }, 'Price fetch failed');
+    app.log.error({ error, tokenId, side }, "Price fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1694,61 +1901,82 @@ app.get("/price/:tokenId", async (request, reply) => {
  * Rate limit: 80 requests/10s
  */
 app.post("/price/batch", async (request, reply) => {
-  const body = request.body as { requests: Array<{token_id: string, side: string}> };
-  
-  if (!body.requests || !Array.isArray(body.requests) || body.requests.length === 0) {
+  const body = request.body as {
+    requests: Array<{ token_id: string; side: string }>;
+  };
+
+  if (
+    !body.requests ||
+    !Array.isArray(body.requests) ||
+    body.requests.length === 0
+  ) {
     reply.code(400);
-    return reply.send({ error: "requests array is required with token_id and side" });
+    return reply.send({
+      error: "requests array is required with token_id and side",
+    });
   }
-  
+
   if (body.requests.length > 50) {
     reply.code(400);
     return reply.send({ error: "Maximum 50 requests per batch" });
   }
-  
+
   // Validate each request
   for (const req of body.requests) {
-    if (!req.token_id || !req.side || !['BUY', 'SELL'].includes(req.side.toUpperCase())) {
+    if (
+      !req.token_id ||
+      !req.side ||
+      !["BUY", "SELL"].includes(req.side.toUpperCase())
+    ) {
       reply.code(400);
-      return reply.send({ error: "Each request must have token_id and side (BUY or SELL)" });
+      return reply.send({
+        error: "Each request must have token_id and side (BUY or SELL)",
+      });
     }
   }
-  
+
   // Normalize sides to uppercase
-  const normalizedRequests = body.requests.map(req => ({
+  const normalizedRequests = body.requests.map((req) => ({
     token_id: req.token_id,
-    side: req.side.toUpperCase() as 'BUY' | 'SELL'
+    side: req.side.toUpperCase() as "BUY" | "SELL",
   }));
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `price-batch:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 50, 60000);
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   try {
     const prices = await polymarketClient.getPricesBatch(normalizedRequests);
-    
+
     const response = {
       requests: normalizedRequests,
       data: prices,
       timestamp: new Date().toISOString(),
     };
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=1, stale-while-revalidate=5",
+    );
     return reply.send(JSON.stringify(response));
-    
   } catch (error) {
-    app.log.error({ error, requests: normalizedRequests }, 'Prices batch fetch failed');
+    app.log.error(
+      { error, requests: normalizedRequests },
+      "Prices batch fetch failed",
+    );
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1760,64 +1988,71 @@ app.post("/price/batch", async (request, reply) => {
  */
 app.get("/midpoint/:tokenId", async (request, reply) => {
   const { tokenId } = request.params as { tokenId: string };
-  
+
   if (!tokenId) {
     reply.code(400);
     return reply.send({ error: "tokenId parameter is required" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `midpoint:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000);
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   // Create cache key
   const cacheKey = `midpoint:${tokenId}`;
   const r = await getRedis();
-  
+
   // Check cache first (1-second cache)
   if (r) {
     const cachedData = await r.get(cacheKey);
     if (cachedData) {
       reply.header("x-cache", "hit");
       reply.header("Content-Type", "application/json; charset=utf-8");
-      reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+      reply.header(
+        "Cache-Control",
+        "public, max-age=1, stale-while-revalidate=5",
+      );
       return reply.send(cachedData);
     }
   }
-  
+
   try {
     const midpoint = await polymarketClient.getMidpointPrice(tokenId);
-    
+
     const response = {
       tokenId,
       data: midpoint,
       timestamp: new Date().toISOString(),
     };
-    
+
     const responseBody = JSON.stringify(response);
-    
+
     // Cache for 1 second
     if (r) {
       await r.set(cacheKey, responseBody, { EX: 1 });
       reply.header("x-cache", "miss");
     }
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=1, stale-while-revalidate=5",
+    );
     return reply.send(responseBody);
-    
   } catch (error) {
-    app.log.error({ error, tokenId }, 'Midpoint price fetch failed');
+    app.log.error({ error, tokenId }, "Midpoint price fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1829,46 +2064,54 @@ app.get("/midpoint/:tokenId", async (request, reply) => {
  */
 app.post("/spreads", async (request, reply) => {
   const body = request.body as { tokenIds: string[] };
-  
-  if (!body.tokenIds || !Array.isArray(body.tokenIds) || body.tokenIds.length === 0) {
+
+  if (
+    !body.tokenIds ||
+    !Array.isArray(body.tokenIds) ||
+    body.tokenIds.length === 0
+  ) {
     reply.code(400);
     return reply.send({ error: "tokenIds array is required" });
   }
-  
+
   if (body.tokenIds.length > 50) {
     reply.code(400);
     return reply.send({ error: "Maximum 50 tokens per request" });
   }
-  
+
   // Check client rate limiting
-  const clientIp = request.ip || 'unknown';
+  const clientIp = request.ip || "unknown";
   const rateLimitKey = `spreads:${clientIp}`;
   const canProceed = await checkRateLimit(rateLimitKey, 100, 60000);
-  
+
   if (!canProceed) {
     reply.code(429);
-    return reply.send({ error: "Client rate limit exceeded. Please try again later." });
+    return reply.send({
+      error: "Client rate limit exceeded. Please try again later.",
+    });
   }
-  
+
   try {
     const spreads = await polymarketClient.getSpreadsBatch(body.tokenIds);
-    
+
     const response = {
       tokenIds: body.tokenIds,
       data: spreads,
       timestamp: new Date().toISOString(),
     };
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
+    reply.header(
+      "Cache-Control",
+      "public, max-age=1, stale-while-revalidate=5",
+    );
     return reply.send(JSON.stringify(response));
-    
   } catch (error) {
-    app.log.error({ error, tokenIds: body.tokenIds }, 'Spreads fetch failed');
+    app.log.error({ error, tokenIds: body.tokenIds }, "Spreads fetch failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1883,48 +2126,61 @@ app.post("/spreads", async (request, reply) => {
  */
 app.post("/auth/privy", async (request, reply) => {
   const body = request.body as { accessToken: string };
-  
+
   if (!body.accessToken) {
     reply.code(400);
     return reply.send({ error: "accessToken is required" });
   }
-  
-  const clientIp = request.ip || 'unknown';
-  const userAgent = request.headers['user-agent'] || 'unknown';
-  
+
+  const clientIp = request.ip || "unknown";
+  const userAgent = request.headers["user-agent"] || "unknown";
+
   try {
     // Verify Privy access token and get user data
-    const { claims, user: privyUser, walletAddresses, primaryWalletAddress } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
-    
+    const {
+      claims,
+      user: privyUser,
+      walletAddresses,
+      primaryWalletAddress,
+    } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
+
     if (!primaryWalletAddress) {
       reply.code(400);
-      return reply.send({ error: "No wallet address found in Privy user data" });
+      return reply.send({
+        error: "No wallet address found in Privy user data",
+      });
     }
-    
+
     // Create or update user in our database
-    const user = await AuthService.createOrUpdateUserFromPrivy(privyUser, claims);
-    
+    const user = await AuthService.createOrUpdateUserFromPrivy(
+      privyUser,
+      claims,
+    );
+
     // Generate session token
-    const sessionToken = AuthService.generateToken(user.id, primaryWalletAddress);
-    
+    const sessionToken = AuthService.generateToken(
+      user.id,
+      primaryWalletAddress,
+    );
+
     // Create session
     const session = await AuthService.createSession(
       user.id,
-      sessionToken,
       primaryWalletAddress,
+      sessionToken,
       clientIp,
-      userAgent
+      userAgent,
     );
-    
+
     // Record successful authentication
     await AuthService.recordAuthAttempt(
       primaryWalletAddress,
-      'privy-auth',
+      "privy-auth",
       true,
       clientIp,
-      userAgent
+      userAgent,
     );
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
     return reply.send({
       user: {
@@ -1946,24 +2202,23 @@ app.post("/auth/privy", async (request, reply) => {
       primaryWalletAddress,
       privyUserId: privyUser.id,
     });
-    
   } catch (error) {
-    app.log.error({ error }, 'Privy authentication failed');
-    
+    app.log.error({ error }, "Privy authentication failed");
+
     // Record failed authentication attempt
     await AuthService.recordAuthAttempt(
-      'unknown',
-      'privy-auth',
+      "unknown",
+      "privy-auth",
       false,
       clientIp,
       userAgent,
-      error instanceof Error ? error.message : 'Unknown error'
+      error instanceof Error ? error.message : "Unknown error",
     );
-    
+
     reply.code(401);
-    return reply.send({ 
-      error: 'Authentication failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Authentication failed",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -1974,26 +2229,25 @@ app.post("/auth/privy", async (request, reply) => {
  */
 app.post("/auth/logout", async (request, reply) => {
   const authHeader = request.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     reply.code(401);
-    return reply.send({ error: 'Missing or invalid authorization header' });
+    return reply.send({ error: "Missing or invalid authorization header" });
   }
-  
+
   const token = authHeader.substring(7);
-  
+
   try {
     await AuthService.invalidateSession(token);
-    
+
     reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({ message: 'Successfully logged out' });
-    
+    return reply.send({ message: "Successfully logged out" });
   } catch (error) {
-    app.log.error({ error }, 'Logout failed');
+    app.log.error({ error }, "Logout failed");
     reply.code(500);
-    return reply.send({ 
-      error: 'Logout failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
+    return reply.send({
+      error: "Logout failed",
+      message: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
@@ -2002,317 +2256,380 @@ app.post("/auth/logout", async (request, reply) => {
  * GET /auth/me
  * Get current user information
  */
-app.get("/auth/me", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  
-  try {
-    // Get user wallets
-    const wallets = await AuthService.getUserWallets(user.id);
-    
-    // Get Polymarket credentials
-    const polymarketCreds = await AuthService.getPolymarketCredentials(user.id, walletAddress);
-    
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        displayName: user.displayName,
-        avatarUrl: user.avatarUrl,
-        isActive: user.isActive,
-        isVerified: user.isVerified,
-        createdAt: user.createdAt,
-        lastLoginAt: user.lastLoginAt,
-      },
-      wallets: wallets.map(w => ({
-        id: w.id,
-        walletAddress: w.walletAddress,
-        walletType: w.walletType,
-        isPrimary: w.isPrimary,
-        isVerified: w.isVerified,
-        createdAt: w.createdAt,
-      })),
-      polymarketCredentials: polymarketCreds ? {
-        id: polymarketCreds.id,
-        walletAddress: polymarketCreds.walletAddress,
-        isActive: polymarketCreds.isActive,
-        createdAt: polymarketCreds.createdAt,
-        lastUsedAt: polymarketCreds.lastUsedAt,
-      } : null,
-      currentWallet: walletAddress,
-    });
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id }, 'Get user info failed');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to get user information',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+app.get(
+  "/auth/me",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+
+    try {
+      // Get user wallets
+      const wallets = await AuthService.getUserWallets(user.id);
+
+      // Get Polymarket credentials
+      const polymarketCreds = await AuthService.getPolymarketCredentials(
+        user.id,
+        walletAddress,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+          isActive: user.isActive,
+          isVerified: user.isVerified,
+          createdAt: user.createdAt,
+          lastLoginAt: user.lastLoginAt,
+        },
+        wallets: wallets.map((w) => ({
+          id: w.id,
+          walletAddress: w.walletAddress,
+          walletType: w.walletType,
+          isPrimary: w.isPrimary,
+          isVerified: w.isVerified,
+          createdAt: w.createdAt,
+        })),
+        polymarketCredentials: polymarketCreds
+          ? {
+              id: polymarketCreds.id,
+              walletAddress: polymarketCreds.walletAddress,
+              isActive: polymarketCreds.isActive,
+              createdAt: polymarketCreds.createdAt,
+              lastUsedAt: polymarketCreds.lastUsedAt,
+            }
+          : null,
+        currentWallet: walletAddress,
+      });
+    } catch (error) {
+      app.log.error({ error, userId: user.id }, "Get user info failed");
+      reply.code(500);
+      return reply.send({
+        error: "Failed to get user information",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * POST /auth/venue-credentials
  * Set API credentials for any venue (Polymarket, Kalshi, Limitless)
  */
-app.post("/auth/venue-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const body = request.body as {
-    venue: 'polymarket' | 'kalshi' | 'limitless';
-    apiKey: string;
-    apiSecret: string;
-    additionalData?: any; // For venue-specific data
-  };
-  
-  if (!body.venue || !body.apiKey || !body.apiSecret) {
-    reply.code(400);
-    return reply.send({ error: "venue, apiKey and apiSecret are required" });
-  }
-  
-  if (!['polymarket', 'kalshi', 'limitless'].includes(body.venue)) {
-    reply.code(400);
-    return reply.send({ error: "venue must be one of: polymarket, kalshi, limitless" });
-  }
-  
-  try {
-    const credentials = await AuthService.createOrUpdateVenueCredentials(
-      user.id,
-      walletAddress,
-      body.venue,
-      body.apiKey,
-      body.apiSecret,
-      body.additionalData
-    );
-    
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({
-      message: `${body.venue} credentials updated successfully`,
-      credentials: {
-        id: credentials.id,
-        venue: credentials.venue,
-        walletAddress: credentials.walletAddress,
-        isActive: credentials.isActive,
-        createdAt: credentials.createdAt,
-        lastUsedAt: credentials.lastUsedAt,
-      },
-    });
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress, venue: body.venue }, 'Failed to update venue credentials');
-    reply.code(500);
-    return reply.send({ 
-      error: `Failed to update ${body.venue} credentials`,
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+app.post(
+  "/auth/venue-credentials",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const body = request.body as {
+      venue: "polymarket" | "kalshi" | "limitless";
+      apiKey: string;
+      apiSecret: string;
+      additionalData?: unknown; // For venue-specific data
+    };
+
+    if (!body.venue || !body.apiKey || !body.apiSecret) {
+      reply.code(400);
+      return reply.send({ error: "venue, apiKey and apiSecret are required" });
+    }
+
+    if (!["polymarket", "kalshi", "limitless"].includes(body.venue)) {
+      reply.code(400);
+      return reply.send({
+        error: "venue must be one of: polymarket, kalshi, limitless",
+      });
+    }
+
+    try {
+      const credentials = await AuthService.createOrUpdateVenueCredentials(
+        user.id,
+        walletAddress,
+        body.venue,
+        body.apiKey,
+        body.apiSecret,
+        body.additionalData,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: `${body.venue} credentials updated successfully`,
+        credentials: {
+          id: credentials.id,
+          venue: credentials.venue,
+          walletAddress: credentials.walletAddress,
+          isActive: credentials.isActive,
+          createdAt: credentials.createdAt,
+          lastUsedAt: credentials.lastUsedAt,
+        },
+      });
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress, venue: body.venue },
+        "Failed to update venue credentials",
+      );
+      reply.code(500);
+      return reply.send({
+        error: `Failed to update ${body.venue} credentials`,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * GET /auth/venue-credentials
  * Get all venue credentials for user
  */
-app.get("/auth/venue-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  
-  try {
-    const credentials = await AuthService.getAllVenueCredentials(user.id, walletAddress);
-    
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({
-      credentials: credentials.map(c => ({
-        id: c.id,
-        venue: c.venue,
-        walletAddress: c.walletAddress,
-        isActive: c.isActive,
-        createdAt: c.createdAt,
-        lastUsedAt: c.lastUsedAt,
-        additionalData: c.additionalData,
-      })),
-    });
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id }, 'Failed to get venue credentials');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to get venue credentials',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+app.get(
+  "/auth/venue-credentials",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+
+    try {
+      const credentials = await AuthService.getAllVenueCredentials(
+        user.id,
+        walletAddress,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        credentials: credentials.map((c) => ({
+          id: c.id,
+          venue: c.venue,
+          walletAddress: c.walletAddress,
+          isActive: c.isActive,
+          createdAt: c.createdAt,
+          lastUsedAt: c.lastUsedAt,
+          additionalData: c.additionalData,
+        })),
+      });
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id },
+        "Failed to get venue credentials",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to get venue credentials",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * POST /auth/polymarket-credentials
  * Set Polymarket API credentials for user (backward compatibility)
  */
-app.post("/auth/polymarket-credentials", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const body = request.body as {
-    apiKey: string;
-    apiSecret: string;
-  };
-  
-  if (!body.apiKey || !body.apiSecret) {
-    reply.code(400);
-    return reply.send({ error: "apiKey and apiSecret are required" });
-  }
-  
-  try {
-    const credentials = await AuthService.createOrUpdatePolymarketCredentials(
-      user.id,
-      walletAddress,
-      body.apiKey,
-      body.apiSecret
-    );
-    
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({
-      message: 'Polymarket credentials updated successfully',
-      credentials: {
-        id: credentials.id,
-        venue: 'polymarket',
-        walletAddress: credentials.walletAddress,
-        isActive: credentials.isActive,
-        createdAt: credentials.createdAt,
-        lastUsedAt: credentials.lastUsedAt,
-      },
-    });
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to update Polymarket credentials');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to update Polymarket credentials',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+app.post(
+  "/auth/polymarket-credentials",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const body = request.body as {
+      apiKey: string;
+      apiSecret: string;
+    };
+
+    if (!body.apiKey || !body.apiSecret) {
+      reply.code(400);
+      return reply.send({ error: "apiKey and apiSecret are required" });
+    }
+
+    try {
+      const credentials = await AuthService.createOrUpdatePolymarketCredentials(
+        user.id,
+        walletAddress,
+        body.apiKey,
+        body.apiSecret,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        message: "Polymarket credentials updated successfully",
+        credentials: {
+          id: credentials.id,
+          venue: "polymarket",
+          walletAddress: credentials.walletAddress,
+          isActive: credentials.isActive,
+          createdAt: credentials.createdAt,
+          lastUsedAt: credentials.lastUsedAt,
+        },
+      });
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress },
+        "Failed to update Polymarket credentials",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to update Polymarket credentials",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * GET /auth/wallets
  * Get user's wallets
  */
-app.get("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  
-  try {
-    const wallets = await AuthService.getUserWallets(user.id);
-    
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    return reply.send({
-      wallets: wallets.map(w => ({
-        id: w.id,
-        walletAddress: w.walletAddress,
-        walletType: w.walletType,
-        isPrimary: w.isPrimary,
-        isVerified: w.isVerified,
-        createdAt: w.createdAt,
-        updatedAt: w.updatedAt,
-      })),
-    });
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id }, 'Failed to get user wallets');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to get user wallets',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+app.get(
+  "/auth/wallets",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+
+    try {
+      const wallets = await AuthService.getUserWallets(user.id);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        wallets: wallets.map((w) => ({
+          id: w.id,
+          walletAddress: w.walletAddress,
+          walletType: w.walletType,
+          isPrimary: w.isPrimary,
+          isVerified: w.isVerified,
+          createdAt: w.createdAt,
+          updatedAt: w.updatedAt,
+        })),
+      });
+    } catch (error) {
+      app.log.error({ error, userId: user.id }, "Failed to get user wallets");
+      reply.code(500);
+      return reply.send({
+        error: "Failed to get user wallets",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * POST /auth/wallets
  * Add a new wallet to user account
  */
-app.post("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const body = request.body as {
-    walletAddress: string;
-    walletType?: string;
-    verificationSignature?: string;
-  };
-  
-  if (!body.walletAddress) {
-    reply.code(400);
-    return reply.send({ error: "walletAddress is required" });
-  }
-  
-  // Basic wallet address validation
-  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
-    reply.code(400);
-    return reply.send({ error: "Invalid wallet address format" });
-  }
-  
-  try {
-    const client = await pool.connect();
+app.post(
+  "/auth/wallets",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const body = request.body as {
+      walletAddress: string;
+      walletType?: string;
+      verificationSignature?: string;
+    };
+
+    if (!body.walletAddress) {
+      reply.code(400);
+      return reply.send({ error: "walletAddress is required" });
+    }
+
+    // Basic wallet address validation
+    if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+      reply.code(400);
+      return reply.send({ error: "Invalid wallet address format" });
+    }
+
     try {
-      await client.query('BEGIN');
-      
-      // Check if wallet already exists
-      const existingWallet = await client.query(
-        'SELECT id FROM user_wallets WHERE wallet_address = $1',
-        [body.walletAddress]
-      );
-      
-      if (existingWallet.rows.length > 0) {
-        reply.code(409);
-        return reply.send({ error: "Wallet address already exists" });
-      }
-      
-      // Add new wallet
-      const result = await client.query(
-        `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature) 
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Check if wallet already exists
+        const existingWallet = await client.query(
+          "SELECT id FROM user_wallets WHERE wallet_address = $1",
+          [body.walletAddress],
+        );
+
+        if (existingWallet.rows.length > 0) {
+          reply.code(409);
+          return reply.send({ error: "Wallet address already exists" });
+        }
+
+        // Add new wallet
+        const result = await client.query(
+          `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature) 
          VALUES ($1, $2, $3, false, $4, $5) 
          RETURNING id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at`,
-        [
-          user.id,
-          body.walletAddress,
-          body.walletType || 'ethereum',
-          !!body.verificationSignature,
-          body.verificationSignature || null,
-        ]
-      );
-      
-      await client.query('COMMIT');
-      
-      const newWallet = result.rows[0];
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        message: 'Wallet added successfully',
-        wallet: {
-          id: newWallet.id,
-          walletAddress: newWallet.wallet_address,
-          walletType: newWallet.wallet_type,
-          isPrimary: newWallet.is_primary,
-          isVerified: newWallet.is_verified,
-          createdAt: newWallet.created_at,
-          updatedAt: newWallet.updated_at,
-        },
-      });
-      
+          [
+            user.id,
+            body.walletAddress,
+            body.walletType || "ethereum",
+            !!body.verificationSignature,
+            body.verificationSignature || null,
+          ],
+        );
+
+        await client.query("COMMIT");
+
+        const newWallet = result.rows[0];
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Wallet added successfully",
+          wallet: {
+            id: newWallet.id,
+            walletAddress: newWallet.wallet_address,
+            walletType: newWallet.wallet_type,
+            isPrimary: newWallet.is_primary,
+            isVerified: newWallet.is_verified,
+            createdAt: newWallet.created_at,
+            updatedAt: newWallet.updated_at,
+          },
+        });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      app.log.error(
+        { error, userId: user.id, walletAddress: body.walletAddress },
+        "Failed to add wallet",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to add wallet",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress: body.walletAddress }, 'Failed to add wallet');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to add wallet',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 // ============================================================================
 // ORDER MANAGEMENT ENDPOINTS
@@ -2322,319 +2639,393 @@ app.post("/auth/wallets", { preHandler: createAuthMiddleware() }, async (request
  * POST /orders
  * Place a new order
  */
-app.post("/orders", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const body = request.body as PlaceOrderRequest & { 
-    venue: 'polymarket' | 'kalshi' | 'limitless';
-    l1Signature?: string;
-    l1Timestamp?: string;
-    l1Nonce?: string;
-  };
-  
-  // Extract L1 authentication headers from request headers
-  const l1Headers = {
-    l1Signature: request.headers['poly_signature'] as string,
-    l1Timestamp: request.headers['poly_timestamp'] as string,
-    l1Nonce: request.headers['poly_nonce'] as string,
-  };
-  
-  // Validate required fields
-  if (!body.venue) {
-    reply.code(400);
-    return reply.send({ error: "venue is required" });
-  }
-  
-  if (!body.tokenId) {
-    reply.code(400);
-    return reply.send({ error: "tokenId is required" });
-  }
-  
-  if (!body.side || !['BUY', 'SELL'].includes(body.side)) {
-    reply.code(400);
-    return reply.send({ error: "Valid side (BUY/SELL) is required" });
-  }
-  
-  if (!body.orderType || !['GTC', 'GTD', 'FAK', 'FOK'].includes(body.orderType)) {
-    reply.code(400);
-    return reply.send({ error: "Valid order type (GTC/GTD/FAK/FOK) is required" });
-  }
-  
-  if (!body.price || body.price <= 0) {
-    reply.code(400);
-    return reply.send({ error: "Valid price is required" });
-  }
-  
-  if (!body.size || body.size <= 0) {
-    reply.code(400);
-    return reply.send({ error: "Valid size is required" });
-  }
-  
-  try {
-    const result = await VenueOrderManagerFactory.placeOrder(
-      body.venue,
-      user.id,
-      walletAddress,
-      request.headers,
-      {
-        tokenId: body.tokenId,
-        side: body.side,
-        orderType: body.orderType,
-        price: body.price,
-        size: body.size,
-        expiresAt: body.expiresAt,
-        l1Signature: l1Headers.l1Signature || body.l1Signature,
-        l1Timestamp: l1Headers.l1Timestamp || body.l1Timestamp,
-        l1Nonce: l1Headers.l1Nonce || body.l1Nonce,
-      }
-    );
-    
-    if (result.success) {
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        message: 'Order placed successfully',
-        orderId: result.orderId,
-        venueOrderId: result.venueOrderId,
-        status: result.status,
-      });
-    } else {
+app.post(
+  "/orders",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const body = request.body as PlaceOrderRequest & {
+      venue: "polymarket" | "kalshi" | "limitless";
+      l1Signature?: string;
+      l1Timestamp?: string;
+      l1Nonce?: string;
+    };
+
+    // Extract L1 authentication headers from request headers
+    const l1Headers = {
+      l1Signature: request.headers["poly_signature"] as string,
+      l1Timestamp: request.headers["poly_timestamp"] as string,
+      l1Nonce: request.headers["poly_nonce"] as string,
+    };
+
+    // Validate required fields
+    if (!body.venue) {
+      reply.code(400);
+      return reply.send({ error: "venue is required" });
+    }
+
+    if (!body.tokenId) {
+      reply.code(400);
+      return reply.send({ error: "tokenId is required" });
+    }
+
+    if (!body.side || !["BUY", "SELL"].includes(body.side)) {
+      reply.code(400);
+      return reply.send({ error: "Valid side (BUY/SELL) is required" });
+    }
+
+    if (
+      !body.orderType ||
+      !["GTC", "GTD", "FAK", "FOK"].includes(body.orderType)
+    ) {
       reply.code(400);
       return reply.send({
-        error: result.errorMessage || 'Failed to place order',
-        rawError: result.rawError,
+        error: "Valid order type (GTC/GTD/FAK/FOK) is required",
       });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress, body }, 'Failed to place order');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to place order',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+
+    if (!body.price || body.price <= 0) {
+      reply.code(400);
+      return reply.send({ error: "Valid price is required" });
+    }
+
+    if (!body.size || body.size <= 0) {
+      reply.code(400);
+      return reply.send({ error: "Valid size is required" });
+    }
+
+    try {
+      const result = await VenueOrderManagerFactory.placeOrder(
+        body.venue,
+        user.id,
+        walletAddress,
+        request.headers,
+        {
+          tokenId: body.tokenId,
+          side: body.side,
+          orderType: body.orderType,
+          price: body.price,
+          size: body.size,
+          expiresAt: body.expiresAt,
+          l1Signature: l1Headers.l1Signature || body.l1Signature,
+          l1Timestamp: l1Headers.l1Timestamp || body.l1Timestamp,
+          l1Nonce: l1Headers.l1Nonce || body.l1Nonce,
+        },
+      );
+
+      if (result.success) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Order placed successfully",
+          orderId: result.orderId,
+          venueOrderId: result.venueOrderId,
+          status: result.status,
+        });
+      } else {
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || "Failed to place order",
+          rawError: result.rawError,
+        });
+      }
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress, body },
+        "Failed to place order",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to place order",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * GET /orders
  * Get active orders for the user
  */
-app.get("/orders", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
-  
-  try {
-    if (query.venue) {
-      // Get orders for specific venue
-      const result = await VenueOrderManagerFactory.getActiveOrders(
-        query.venue,
-        user.id,
-        walletAddress
-      );
-      
-      if (result.success) {
+app.get(
+  "/orders",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const query = request.query as {
+      venue?: "polymarket" | "kalshi" | "limitless";
+    };
+
+    try {
+      if (query.venue) {
+        // Get orders for specific venue
+        const result = await VenueOrderManagerFactory.getActiveOrders(
+          query.venue,
+          user.id,
+          walletAddress,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            orders: result.orders,
+            venue: query.venue,
+          });
+        } else {
+          reply.code(400);
+          return reply.send({
+            error: result.errorMessage || "Failed to fetch orders",
+          });
+        }
+      } else {
+        // Get orders for all venues
+        const allOrders = [];
+
+        for (const venue of ["polymarket", "kalshi", "limitless"] as const) {
+          try {
+            const result = await VenueOrderManagerFactory.getActiveOrders(
+              venue,
+              user.id,
+              walletAddress,
+            );
+
+            if (result.success) {
+              allOrders.push(...result.orders);
+            }
+          } catch (error) {
+            app.log.warn(
+              { error, venue, userId: user.id },
+              `Failed to fetch orders for ${venue}`,
+            );
+          }
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          orders: result.orders,
-          venue: query.venue,
-        });
-      } else {
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || 'Failed to fetch orders',
+          orders: allOrders,
         });
       }
-    } else {
-      // Get orders for all venues
-      const allOrders = [];
-      
-      for (const venue of ['polymarket', 'kalshi', 'limitless'] as const) {
-        try {
-          const result = await VenueOrderManagerFactory.getActiveOrders(
-            venue,
-            user.id,
-            walletAddress
-          );
-          
-          if (result.success) {
-            allOrders.push(...result.orders);
-          }
-        } catch (error) {
-          app.log.warn({ error, venue, userId: user.id }, `Failed to fetch orders for ${venue}`);
-        }
-      }
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress },
+        "Failed to fetch orders",
+      );
+      reply.code(500);
       return reply.send({
-        orders: allOrders,
+        error: "Failed to fetch orders",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to fetch orders');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch orders',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * GET /orders/:id
  * Get specific order details
  */
-app.get("/orders/:id", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const params = request.params as { id: string };
-  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
-  
-  try {
-    // First try to get order from database to determine venue
-    const client = await pool.connect();
-    try {
-      const orderResult = await client.query(
-        'SELECT venue FROM orders WHERE id = $1 AND user_id = $2',
-        [params.id, user.id]
-      );
-      
-      if (orderResult.rows.length === 0) {
-        reply.code(404);
-        return reply.send({ error: 'Order not found' });
-      }
-      
-      const venue = orderResult.rows[0].venue as 'polymarket' | 'kalshi' | 'limitless';
-      
-      const result = await VenueOrderManagerFactory.getOrder(
-        venue,
-        user.id,
-        walletAddress,
-        params.id
-      );
-      
-      if (result.success) {
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          order: result.order,
-        });
-      } else {
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || 'Failed to fetch order',
-        });
-      }
-      
-    } finally {
-      client.release();
+app.get(
+  "/orders/:id",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress, orderId: params.id }, 'Failed to fetch order');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch order',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+    const params = request.params as { id: string };
+    const query = request.query as {
+      venue?: "polymarket" | "kalshi" | "limitless";
+    };
+
+    try {
+      // First try to get order from database to determine venue
+      const client = await pool.connect();
+      try {
+        const orderResult = await client.query(
+          "SELECT venue FROM orders WHERE id = $1 AND user_id = $2",
+          [params.id, user.id],
+        );
+
+        if (orderResult.rows.length === 0) {
+          reply.code(404);
+          return reply.send({ error: "Order not found" });
+        }
+
+        const venueFromDb = orderResult.rows[0].venue as
+          | "polymarket"
+          | "kalshi"
+          | "limitless";
+
+        if (query.venue && query.venue !== venueFromDb) {
+          reply.code(400);
+          return reply.send({
+            error: "Venue mismatch for order",
+            venue: venueFromDb,
+          });
+        }
+
+        const venue = query.venue ?? venueFromDb;
+
+        const result = await VenueOrderManagerFactory.getOrder(
+          venue,
+          user.id,
+          walletAddress,
+          params.id,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            order: result.order,
+          });
+        } else {
+          reply.code(400);
+          return reply.send({
+            error: result.errorMessage || "Failed to fetch order",
+          });
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress, orderId: params.id },
+        "Failed to fetch order",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to fetch order",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * DELETE /orders/:id
  * Cancel an order
  */
-app.delete("/orders/:id", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const params = request.params as { id: string };
-  
-  try {
-    // First get order from database to determine venue
-    const client = await pool.connect();
-    try {
-      const orderResult = await client.query(
-        'SELECT venue FROM orders WHERE id = $1 AND user_id = $2',
-        [params.id, user.id]
-      );
-      
-      if (orderResult.rows.length === 0) {
-        reply.code(404);
-        return reply.send({ error: 'Order not found' });
-      }
-      
-      const venue = orderResult.rows[0].venue as 'polymarket' | 'kalshi' | 'limitless';
-      
-      const result = await VenueOrderManagerFactory.cancelOrder(
-        venue,
-        user.id,
-        walletAddress,
-        params.id
-      );
-      
-      if (result.success) {
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          message: 'Order cancelled successfully',
-        });
-      } else {
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || 'Failed to cancel order',
-          rawError: result.rawError,
-        });
-      }
-      
-    } finally {
-      client.release();
+app.delete(
+  "/orders/:id",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress, orderId: params.id }, 'Failed to cancel order');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to cancel order',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+    const params = request.params as { id: string };
+
+    try {
+      // First get order from database to determine venue
+      const client = await pool.connect();
+      try {
+        const orderResult = await client.query(
+          "SELECT venue FROM orders WHERE id = $1 AND user_id = $2",
+          [params.id, user.id],
+        );
+
+        if (orderResult.rows.length === 0) {
+          reply.code(404);
+          return reply.send({ error: "Order not found" });
+        }
+
+        const venue = orderResult.rows[0].venue as
+          | "polymarket"
+          | "kalshi"
+          | "limitless";
+
+        const result = await VenueOrderManagerFactory.cancelOrder(
+          venue,
+          user.id,
+          walletAddress,
+          params.id,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            message: "Order cancelled successfully",
+          });
+        } else {
+          reply.code(400);
+          return reply.send({
+            error: result.errorMessage || "Failed to cancel order",
+            rawError: result.rawError,
+          });
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress, orderId: params.id },
+        "Failed to cancel order",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to cancel order",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 /**
  * GET /orders/history
  * Get order history for the user
  */
-app.get("/orders/history", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const query = request.query as { 
-    venue?: 'polymarket' | 'kalshi' | 'limitless';
-    status?: OrderStatus;
-    limit?: number;
-    offset?: number;
-  };
-  
-  try {
-    const client = await pool.connect();
+app.get(
+  "/orders/history",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const query = request.query as {
+      venue?: "polymarket" | "kalshi" | "limitless";
+      status?: OrderStatus;
+      limit?: number;
+      offset?: number;
+    };
+
     try {
-      let whereClause = 'WHERE user_id = $1';
-      const params: any[] = [user.id];
-      let paramCount = 1;
-      
-      if (query.venue) {
-        paramCount++;
-        whereClause += ` AND venue = $${paramCount}`;
-        params.push(query.venue);
-      }
-      
-      if (query.status) {
-        paramCount++;
-        whereClause += ` AND status = $${paramCount}`;
-        params.push(query.status);
-      }
-      
-      const limit = Math.min(query.limit || 50, 100); // Max 100 orders
-      const offset = query.offset || 0;
-      
-      const result = await client.query(`
+      const client = await pool.connect();
+      try {
+        let whereClause = "WHERE user_id = $1";
+        const params: PgParams = [user.id];
+        let paramCount = 1;
+
+        if (query.venue) {
+          paramCount++;
+          whereClause += ` AND venue = $${paramCount}`;
+          params.push(query.venue);
+        }
+
+        if (query.status) {
+          paramCount++;
+          whereClause += ` AND status = $${paramCount}`;
+          params.push(query.status);
+        }
+
+        const limit = Math.min(query.limit || 50, 100); // Max 100 orders
+        const offset = query.offset || 0;
+
+        const result = await client.query(
+          `
         SELECT 
           id, user_id, venue, venue_order_id, token_id, side, order_type,
           price, size, status, filled_size, average_fill_price,
@@ -2644,192 +3035,218 @@ app.get("/orders/history", { preHandler: createAuthMiddleware() }, async (reques
         ${whereClause}
         ORDER BY created_at DESC
         LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
-      `, [...params, limit, offset]);
-      
-      const orders = result.rows.map(row => ({
-        id: row.id,
-        userId: row.user_id,
-        venue: row.venue,
-        venueOrderId: row.venue_order_id,
-        tokenId: row.token_id,
-        side: row.side,
-        orderType: row.order_type,
-        price: parseFloat(row.price),
-        size: parseFloat(row.size),
-        status: row.status,
-        filledSize: parseFloat(row.filled_size || '0'),
-        averageFillPrice: row.average_fill_price ? parseFloat(row.average_fill_price) : null,
-        expiresAt: row.expires_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        filledAt: row.filled_at,
-        cancelledAt: row.cancelled_at,
-        errorMessage: row.error_message,
-        rawError: row.raw_error,
-      }));
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+      `,
+          [...params, limit, offset],
+        );
+
+        const orders = result.rows.map((row) => ({
+          id: row.id,
+          userId: row.user_id,
+          venue: row.venue,
+          venueOrderId: row.venue_order_id,
+          tokenId: row.token_id,
+          side: row.side,
+          orderType: row.order_type,
+          price: parseFloat(row.price),
+          size: parseFloat(row.size),
+          status: row.status,
+          filledSize: parseFloat(row.filled_size || "0"),
+          averageFillPrice: row.average_fill_price
+            ? parseFloat(row.average_fill_price)
+            : null,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          filledAt: row.filled_at,
+          cancelledAt: row.cancelled_at,
+          errorMessage: row.error_message,
+          rawError: row.raw_error,
+        }));
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          orders,
+          pagination: {
+            limit,
+            offset,
+            hasMore: orders.length === limit,
+          },
+        });
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id },
+        "Failed to fetch order history",
+      );
+      reply.code(500);
       return reply.send({
-        orders,
-        pagination: {
-          limit,
-          offset,
-          hasMore: orders.length === limit,
-        },
+        error: "Failed to fetch order history",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
-      
-    } finally {
-      client.release();
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id }, 'Failed to fetch order history');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch order history',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * GET /positions
  * Get user positions
  */
-app.get("/positions", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const walletAddress = (request as any).walletAddress as string;
-  const query = request.query as { venue?: 'polymarket' | 'kalshi' | 'limitless' };
-  
-  try {
-    if (query.venue) {
-      // Get positions for specific venue
-      const result = await VenueOrderManagerFactory.getPositions(
-        query.venue,
-        user.id,
-        walletAddress
-      );
-      
-      if (result.success) {
+app.get(
+  "/positions",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const walletAddress = request.walletAddress;
+    if (!user || !walletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const query = request.query as {
+      venue?: "polymarket" | "kalshi" | "limitless";
+    };
+
+    try {
+      if (query.venue) {
+        // Get positions for specific venue
+        const result = await VenueOrderManagerFactory.getPositions(
+          query.venue,
+          user.id,
+          walletAddress,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            positions: result.positions,
+            venue: query.venue,
+          });
+        } else {
+          reply.code(400);
+          return reply.send({
+            error: result.errorMessage || "Failed to fetch positions",
+          });
+        }
+      } else {
+        // Get positions for all venues
+        const allPositions = [];
+
+        for (const venue of ["polymarket", "kalshi", "limitless"] as const) {
+          try {
+            const result = await VenueOrderManagerFactory.getPositions(
+              venue,
+              user.id,
+              walletAddress,
+            );
+
+            if (result.success) {
+              allPositions.push(...result.positions);
+            }
+          } catch (error) {
+            app.log.warn(
+              { error, venue, userId: user.id },
+              `Failed to fetch positions for ${venue}`,
+            );
+          }
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          positions: result.positions,
-          venue: query.venue,
-        });
-      } else {
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || 'Failed to fetch positions',
+          positions: allPositions,
         });
       }
-    } else {
-      // Get positions for all venues
-      const allPositions = [];
-      
-      for (const venue of ['polymarket', 'kalshi', 'limitless'] as const) {
-        try {
-          const result = await VenueOrderManagerFactory.getPositions(
-            venue,
-            user.id,
-            walletAddress
-          );
-          
-          if (result.success) {
-            allPositions.push(...result.positions);
-          }
-        } catch (error) {
-          app.log.warn({ error, venue, userId: user.id }, `Failed to fetch positions for ${venue}`);
-        }
-      }
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress },
+        "Failed to fetch positions",
+      );
+      reply.code(500);
       return reply.send({
-        positions: allPositions,
+        error: "Failed to fetch positions",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, walletAddress }, 'Failed to fetch positions');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch positions',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * POST /orders/store
  * Store order data after user performs the order on frontend
  * This API stores the orderID with walletAddress for tracking purposes
  */
-app.post("/orders/store", async (request, reply) => {
-  const body = request.body as {
-    walletAddress: string;
-    orderID: string;
-    takingAmount?: string;
-    makingAmount?: string;
-    status?: string;
-    success?: boolean;
-    errorMsg?: string;
-    venue?: string;
-    tokenId?: string;
-    side?: string;
-    price?: number;
-    size?: number;
-  };
-  
-  // Validate required fields
-  if (!body.walletAddress) {
-    reply.code(400);
-    return reply.send({ error: "walletAddress is required" });
-  }
-  
-  if (!body.orderID) {
-    reply.code(400);
-    return reply.send({ error: "orderID is required" });
-  }
-  
-  // Basic wallet address validation
-  if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
-    reply.code(400);
-    return reply.send({ error: "Invalid wallet address format" });
-  }
-  
-  try {
-    const client = await pool.connect();
+app.post(
+  "/orders/store",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const authedWalletAddress = request.walletAddress;
+    if (!user || !authedWalletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+
+    const body = request.body as {
+      walletAddress: string;
+      orderID: string;
+      takingAmount?: string;
+      makingAmount?: string;
+      status?: string;
+      success?: boolean;
+      errorMsg?: string;
+      venue?: string;
+      tokenId?: string;
+      side?: string;
+      price?: number;
+      size?: number;
+    };
+
+    // Validate required fields
+    if (!body.walletAddress) {
+      reply.code(400);
+      return reply.send({ error: "walletAddress is required" });
+    }
+
+    if (!body.orderID) {
+      reply.code(400);
+      return reply.send({ error: "orderID is required" });
+    }
+
+    // Ensure caller can only store orders for their authenticated wallet context
+    if (
+      body.walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()
+    ) {
+      reply.code(403);
+      return reply.send({
+        error: "walletAddress does not match authenticated session",
+      });
+    }
+
+    // Basic wallet address validation
+    if (!/^0x[a-fA-F0-9]{40}$/.test(body.walletAddress)) {
+      reply.code(400);
+      return reply.send({ error: "Invalid wallet address format" });
+    }
+
     try {
-      await client.query('BEGIN');
-      
-      // Check if user exists for this wallet address
-      const userResult = await client.query(
-        `SELECT u.id FROM users u 
-         JOIN user_wallets uw ON u.id = uw.user_id 
-         WHERE uw.wallet_address = $1`,
-        [body.walletAddress]
-      );
-      
-      if (userResult.rows.length === 0) {
-        reply.code(404);
-        return reply.send({ error: "User not found for this wallet address" });
-      }
-      
-      const userId = userResult.rows[0].id;
-      
-      // Check if order already exists
-      const existingOrder = await client.query(
-        'SELECT id FROM orders WHERE venue_order_id = $1 AND user_id = $2',
-        [body.orderID, userId]
-      );
-      
-      if (existingOrder.rows.length > 0) {
-        reply.code(409);
-        return reply.send({ error: "Order already exists" });
-      }
-      
-      // Insert new order record
-      const result = await client.query(
-        `INSERT INTO orders (
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Check if order already exists
+        const existingOrder = await client.query(
+          "SELECT id FROM orders WHERE venue_order_id = $1 AND user_id = $2",
+          [body.orderID, user.id],
+        );
+
+        if (existingOrder.rows.length > 0) {
+          reply.code(409);
+          return reply.send({ error: "Order already exists" });
+        }
+
+        // Insert new order record
+        const result = await client.query(
+          `INSERT INTO orders (
           id, user_id, venue, venue_order_id, token_id, side, order_type,
           price, size, status, filled_size, error_message, raw_error,
           posted_at, last_update
@@ -2837,113 +3254,123 @@ app.post("/orders/store", async (request, reply) => {
           gen_random_uuid(), $1, $2, $3, $4, $5, 'GTC', $6, $7, $8, 0, $9, $10,
           now(), now()
         ) RETURNING id, venue_order_id, status, posted_at`,
-        [
-          userId,
-          body.venue || 'polymarket',
-          body.orderID,
-          body.tokenId || null,
-          body.side || null,
-          body.price || null,
-          body.size || null,
-          body.status || 'live',
-          body.errorMsg || null,
-          body.success === false ? JSON.stringify(body) : null
-        ]
-      );
-      
-      await client.query('COMMIT');
-      
-      const newOrder = result.rows[0];
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        message: 'Order stored successfully',
-        order: {
-          id: newOrder.id,
-          orderID: newOrder.venue_order_id,
-          status: newOrder.status,
-          storedAt: newOrder.posted_at,
-        },
-      });
-      
+          [
+            user.id,
+            body.venue || "polymarket",
+            body.orderID,
+            body.tokenId || null,
+            body.side || null,
+            body.price || null,
+            body.size || null,
+            body.status || "live",
+            body.errorMsg || null,
+            body.success === false ? JSON.stringify(body) : null,
+          ],
+        );
+
+        await client.query("COMMIT");
+
+        const newOrder = result.rows[0];
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Order stored successfully",
+          order: {
+            id: newOrder.id,
+            orderID: newOrder.venue_order_id,
+            status: newOrder.status,
+            storedAt: newOrder.posted_at,
+          },
+        });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      app.log.error(
+        {
+          error,
+          userId: user.id,
+          walletAddress: body.walletAddress,
+          orderID: body.orderID,
+        },
+        "Failed to store order",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to store order",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
-    
-  } catch (error) {
-    app.log.error({ error, walletAddress: body.walletAddress, orderID: body.orderID }, 'Failed to store order');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to store order',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * GET /orders/user/:walletAddress
  * Get order IDs for a specific wallet address
  * This API fetches all order IDs associated with a wallet address
  */
-app.get("/orders/user/:walletAddress", async (request, reply) => {
-  const { walletAddress } = request.params as { walletAddress: string };
-  const query = request.query as { 
-    limit?: number; 
-    offset?: number; 
-    status?: string;
-    venue?: string;
-  };
-  
-  // Basic wallet address validation
-  if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
-    reply.code(400);
-    return reply.send({ error: "Invalid wallet address format" });
-  }
-  
-  try {
-    const client = await pool.connect();
+app.get(
+  "/orders/user/:walletAddress",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    const authedWalletAddress = request.walletAddress;
+    if (!user || !authedWalletAddress) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+
+    const { walletAddress } = request.params as { walletAddress: string };
+    const query = request.query as {
+      limit?: number;
+      offset?: number;
+      status?: string;
+      venue?: string;
+    };
+
+    // Basic wallet address validation
+    if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      reply.code(400);
+      return reply.send({ error: "Invalid wallet address format" });
+    }
+
+    // Ensure caller can only read orders for their authenticated wallet context
+    if (walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()) {
+      reply.code(403);
+      return reply.send({
+        error: "walletAddress does not match authenticated session",
+      });
+    }
+
     try {
-      // Check if user exists for this wallet address
-      const userResult = await client.query(
-        `SELECT u.id FROM users u 
-         JOIN user_wallets uw ON u.id = uw.user_id 
-         WHERE uw.wallet_address = $1`,
-        [walletAddress]
-      );
-      
-      if (userResult.rows.length === 0) {
-        reply.code(404);
-        return reply.send({ error: "User not found for this wallet address" });
-      }
-      
-      const userId = userResult.rows[0].id;
-      
-      // Build query with filters
-      let whereClause = 'WHERE user_id = $1';
-      const params: any[] = [userId];
-      let paramCount = 1;
-      
-      if (query.status) {
-        paramCount++;
-        whereClause += ` AND status = $${paramCount}`;
-        params.push(query.status);
-      }
-      
-      if (query.venue) {
-        paramCount++;
-        whereClause += ` AND venue = $${paramCount}`;
-        params.push(query.venue);
-      }
-      
-      const limit = Math.min(query.limit || 50, 100); // Max 100 orders
-      const offset = query.offset || 0;
-      
-      // Get orders
-      const result = await client.query(
-        `SELECT 
+      const client = await pool.connect();
+      try {
+        // Build query with filters
+        let whereClause = "WHERE user_id = $1";
+        const params: PgParams = [user.id];
+        let paramCount = 1;
+
+        if (query.status) {
+          paramCount++;
+          whereClause += ` AND status = $${paramCount}`;
+          params.push(query.status);
+        }
+
+        if (query.venue) {
+          paramCount++;
+          whereClause += ` AND venue = $${paramCount}`;
+          params.push(query.venue);
+        }
+
+        const limit = Math.min(query.limit || 50, 100); // Max 100 orders
+        const offset = query.offset || 0;
+
+        // Get orders
+        const result = await client.query(
+          `SELECT 
           id, venue_order_id, venue, token_id, side, order_type,
           price, size, status, filled_size, average_fill_price,
           posted_at, last_update, filled_at, cancelled_at
@@ -2951,60 +3378,64 @@ app.get("/orders/user/:walletAddress", async (request, reply) => {
         ${whereClause}
         ORDER BY posted_at DESC
         LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
-        [...params, limit, offset]
+          [...params, limit, offset],
+        );
+
+        // Get total count for pagination
+        const countResult = await client.query(
+          `SELECT COUNT(*) as total FROM orders ${whereClause}`,
+          params,
+        );
+
+        const totalCount = parseInt(countResult.rows[0].total);
+
+        const orders = result.rows.map((row) => ({
+          id: row.id,
+          orderID: row.venue_order_id,
+          venue: row.venue,
+          tokenId: row.token_id,
+          side: row.side,
+          orderType: row.order_type,
+          price: row.price ? parseFloat(row.price) : null,
+          size: row.size ? parseFloat(row.size) : null,
+          status: row.status,
+          filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
+          averageFillPrice: row.average_fill_price
+            ? parseFloat(row.average_fill_price)
+            : null,
+          postedAt: row.posted_at,
+          lastUpdate: row.last_update,
+          filledAt: row.filled_at,
+          cancelledAt: row.cancelled_at,
+        }));
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          walletAddress,
+          orders,
+          pagination: {
+            total: totalCount,
+            limit,
+            offset,
+            hasMore: offset + limit < totalCount,
+          },
+        });
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, walletAddress },
+        "Failed to fetch orders for wallet address",
       );
-      
-      // Get total count for pagination
-      const countResult = await client.query(
-        `SELECT COUNT(*) as total FROM orders ${whereClause}`,
-        params
-      );
-      
-      const totalCount = parseInt(countResult.rows[0].total);
-      
-      const orders = result.rows.map(row => ({
-        id: row.id,
-        orderID: row.venue_order_id,
-        venue: row.venue,
-        tokenId: row.token_id,
-        side: row.side,
-        orderType: row.order_type,
-        price: row.price ? parseFloat(row.price) : null,
-        size: row.size ? parseFloat(row.size) : null,
-        status: row.status,
-        filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
-        averageFillPrice: row.average_fill_price ? parseFloat(row.average_fill_price) : null,
-        postedAt: row.posted_at,
-        lastUpdate: row.last_update,
-        filledAt: row.filled_at,
-        cancelledAt: row.cancelled_at,
-      }));
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+      reply.code(500);
       return reply.send({
-        walletAddress,
-        orders,
-        pagination: {
-          total: totalCount,
-          limit,
-          offset,
-          hasMore: offset + limit < totalCount,
-        },
+        error: "Failed to fetch orders",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
-      
-    } finally {
-      client.release();
     }
-    
-  } catch (error) {
-    app.log.error({ error, walletAddress }, 'Failed to fetch orders for wallet address');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch orders',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 // ============================================================================
 // WATCHLIST ENDPOINTS
@@ -3014,101 +3445,128 @@ app.get("/orders/user/:walletAddress", async (request, reply) => {
  * POST /watchlist
  * Add a market to user's watchlist
  */
-app.post("/watchlist", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const body = request.body as { marketId: string };
-  
-  if (!body.marketId) {
-    reply.code(400);
-    return reply.send({ error: "marketId is required" });
-  }
-  
-  // Validate marketId format (should be venue:venue_market_id)
-  if (!body.marketId.includes(':')) {
-    reply.code(400);
-    return reply.send({ error: "Invalid marketId format. Expected format: venue:venue_market_id" });
-  }
-  
-  try {
-    const client = await pool.connect();
+app.post(
+  "/watchlist",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const body = request.body as { marketId: string };
+
+    if (!body.marketId) {
+      reply.code(400);
+      return reply.send({ error: "marketId is required" });
+    }
+
+    // Validate marketId format (should be venue:venue_market_id)
+    if (!body.marketId.includes(":")) {
+      reply.code(400);
+      return reply.send({
+        error:
+          "Invalid marketId format. Expected format: venue:venue_market_id",
+      });
+    }
+
     try {
-      // First, verify that the market exists in unified_markets
-      const marketCheck = await client.query(
-        'SELECT id FROM unified_markets WHERE id = $1',
-        [body.marketId]
-      );
-      
-      if (marketCheck.rows.length === 0) {
-        reply.code(400);
-        return reply.send({ error: "Market not found" });
-      }
-      
-      // Insert into watchlist
-      const result = await client.query(
-        `INSERT INTO user_watchlist (user_id, market_id) 
+      const client = await pool.connect();
+      try {
+        // First, verify that the market exists in unified_markets
+        const marketCheck = await client.query(
+          "SELECT id FROM unified_markets WHERE id = $1",
+          [body.marketId],
+        );
+
+        if (marketCheck.rows.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "Market not found" });
+        }
+
+        // Insert into watchlist
+        const result = await client.query(
+          `INSERT INTO user_watchlist (user_id, market_id) 
          VALUES ($1, $2) 
          RETURNING id, market_id, created_at`,
-        [user.id, body.marketId]
-      );
-      
-      reply.code(201);
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        message: 'Market added to watchlist successfully',
-        watchlistItem: {
-          id: result.rows[0].id,
-          marketId: result.rows[0].market_id,
-          createdAt: result.rows[0].created_at,
-        },
-      });
-      
-    } catch (error: any) {
-      // Check for unique constraint violation (duplicate)
-      if (error.code === '23505') { // PostgreSQL unique violation
-        reply.code(409);
-        return reply.send({ error: "Market already in watchlist" });
+          [user.id, body.marketId],
+        );
+
+        reply.code(201);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Market added to watchlist successfully",
+          watchlistItem: {
+            id: result.rows[0].id,
+            marketId: result.rows[0].market_id,
+            createdAt: result.rows[0].created_at,
+          },
+        });
+      } catch (error) {
+        // Check for unique constraint violation (duplicate)
+        const code = isRecord(error) ? error["code"] : undefined;
+        if (code === "23505") {
+          // PostgreSQL unique violation
+          reply.code(409);
+          return reply.send({ error: "Market already in watchlist" });
+        }
+        throw error;
+      } finally {
+        client.release();
       }
-      throw error;
-    } finally {
-      client.release();
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, marketId: body.marketId },
+        "Failed to add market to watchlist",
+      );
+      reply.code(500);
+      return reply.send({
+        error: "Failed to add market to watchlist",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, marketId: body.marketId }, 'Failed to add market to watchlist');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to add market to watchlist',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * GET /watchlist
  * Get all markets in user's watchlist
  */
-app.get("/watchlist", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const query = request.query as {
-    limit?: number;
-    offset?: number;
-    include_inactive?: string;
-  };
-  
-  const limit = Math.min(query.limit ? parseInt(String(query.limit)) : 50, 100);
-  const offset = Math.max(query.offset ? parseInt(String(query.offset)) : 0, 0);
-  const includeInactive = query.include_inactive === 'true';
-  
-  try {
-    const client = await pool.connect();
+app.get(
+  "/watchlist",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const query = request.query as {
+      limit?: number;
+      offset?: number;
+      include_inactive?: string;
+    };
+
+    const limit = Math.min(
+      query.limit ? parseInt(String(query.limit)) : 50,
+      100,
+    );
+    const offset = Math.max(
+      query.offset ? parseInt(String(query.offset)) : 0,
+      0,
+    );
+    const includeInactive = query.include_inactive === "true";
+
     try {
-      // Build WHERE clause for status filtering
-      const statusFilter = includeInactive 
-        ? '' 
-        : "AND m.status = 'ACTIVE' AND (m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())";
-      
-      // Get watchlist markets with full market and event data
-      const watchlistSql = `
+      const client = await pool.connect();
+      try {
+        // Build WHERE clause for status filtering
+        const statusFilter = includeInactive
+          ? ""
+          : "AND m.status = 'ACTIVE' AND (m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())";
+
+        // Get watchlist markets with full market and event data
+        const watchlistSql = `
         SELECT
           w.id as watchlist_id,
           w.created_at as watchlist_created_at,
@@ -3152,179 +3610,197 @@ app.get("/watchlist", { preHandler: createAuthMiddleware() }, async (request, re
         ORDER BY w.created_at DESC
         LIMIT $2 OFFSET $3
       `;
-      
-      const { rows } = await client.query(watchlistSql, [user.id, limit, offset]);
-      
-      // Get total count for pagination
-      const countSql = `
+
+        const { rows } = await client.query(watchlistSql, [
+          user.id,
+          limit,
+          offset,
+        ]);
+
+        // Get total count for pagination
+        const countSql = `
         SELECT COUNT(*) as total
         FROM user_watchlist w
         JOIN unified_markets m ON m.id = w.market_id
         WHERE w.user_id = $1
         ${statusFilter}
       `;
-      const countResult = await client.query(countSql, [user.id]);
-      const totalCount = parseInt(countResult.rows[0].total);
-      
-      // Group markets under their events (similar to /feed endpoint)
-      const eventMap: Record<string, any> = {};
-      for (const r of rows) {
-        const eid = r.event_id;
-        if (!eventMap[eid]) {
-          eventMap[eid] = {
-            eventId: eid,
-            eventTitle: r.event_title,
-            category: r.category,
-            startTime: r.start_date,
-            endTime: r.end_date,
-            eventLiquidity: r.event_liquidity != null ? Number(r.event_liquidity) : 0,
-            eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
-            eventOpenInterest: r.event_open_interest != null ? Number(r.event_open_interest) : 0,
-            eventSlug: r.event_slug,
-            image: r.event_image ?? null,
-            icon: r.event_icon ?? null,
-            markets: [],
-          };
-        }
-        
-        // Parse token IDs based on venue
-        let tokens = { yes: null, no: null };
-        if (r.venue === 'polymarket' && r.clob_token_ids) {
-          try {
-            const tokenIds = JSON.parse(r.clob_token_ids);
-            tokens = {
-              yes: tokenIds[0] || null,
-              no: tokenIds[1] || null
+        const countResult = await client.query(countSql, [user.id]);
+        const totalCount = parseInt(countResult.rows[0].total);
+
+        // Group markets under their events (similar to /feed endpoint)
+        const eventMap: Record<string, WatchlistEvent> = {};
+        for (const r of rows) {
+          const eid = String(r.event_id);
+          if (!eventMap[eid]) {
+            eventMap[eid] = {
+              eventId: eid,
+              eventTitle: r.event_title ?? null,
+              category: r.category ?? null,
+              startTime: r.start_date,
+              endTime: r.end_date,
+              eventLiquidity:
+                r.event_liquidity != null ? Number(r.event_liquidity) : 0,
+              eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
+              eventOpenInterest:
+                r.event_open_interest != null
+                  ? Number(r.event_open_interest)
+                  : 0,
+              eventSlug: r.event_slug ?? null,
+              image: r.event_image ?? null,
+              icon: r.event_icon ?? null,
+              markets: [],
             };
-          } catch (error) {
-            // Invalid JSON, keep tokens as null
           }
-        } else if (r.venue === 'limitless' || r.venue === 'kalshi') {
-          tokens = {
-            yes: r.token_yes,
-            no: r.token_no
-          };
+
+          // Parse token IDs based on venue
+          let tokens: TokenPair = { yes: null, no: null };
+          if (r.venue === "polymarket" && r.clob_token_ids) {
+            try {
+              const tokenIds = JSON.parse(r.clob_token_ids) as unknown;
+              if (Array.isArray(tokenIds)) {
+                tokens = {
+                  yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
+                  no: tokenIds[1] != null ? String(tokenIds[1]) : null,
+                };
+              }
+            } catch {
+              // Invalid JSON, keep tokens as null
+            }
+          } else if (r.venue === "limitless" || r.venue === "kalshi") {
+            tokens = {
+              yes: r.token_yes != null ? String(r.token_yes) : null,
+              no: r.token_no != null ? String(r.token_no) : null,
+            };
+          }
+
+          eventMap[eid].markets.push({
+            marketId: String(r.market_uuid),
+            venue: String(r.venue),
+            venueMarketId: String(r.venue_market_id),
+            marketTitle: r.market_title ?? "",
+            marketSlug: r.market_slug ?? null,
+            volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
+            volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
+            openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
+            liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
+            acceptingOrders: r.market_status === "ACTIVE",
+            tokens,
+            conditionId: r.condition_id || null,
+            category: r.market_category ?? null,
+            image: r.market_image ?? null,
+            icon: r.market_icon ?? null,
+            status: String(r.market_status),
+            top: {
+              yesBid: r.best_bid != null ? Number(r.best_bid) : null,
+              yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
+              noBid: r.best_bid != null ? Number(1 - r.best_bid) : null,
+              noAsk: r.best_ask != null ? Number(1 - r.best_ask) : null,
+            },
+            lastUpdate: r.last_update,
+            watchlistId: String(r.watchlist_id),
+            watchlistCreatedAt: r.watchlist_created_at,
+          });
         }
-        
-        eventMap[eid].markets.push({
-          marketId: r.market_uuid,
-          venue: r.venue,
-          venueMarketId: r.venue_market_id,
-          marketTitle: r.market_title,
-          marketSlug: r.market_slug,
-          volume24h: r.volume_24h != null ? Number(r.volume_24h) : 0,
-          volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
-          openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
-          liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
-          acceptingOrders: r.market_status === 'ACTIVE',
-          tokens,
-          conditionId: r.condition_id || null,
-          category: r.market_category ?? null,
-          image: r.market_image ?? null,
-          icon: r.market_icon ?? null,
-          status: r.market_status,
-          top: {
-            yesBid: r.best_bid != null ? Number(r.best_bid) : null,
-            yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
-            noBid: r.best_bid != null ? Number(1 - r.best_bid) : null,
-            noAsk: r.best_ask != null ? Number(1 - r.best_ask) : null,
-          },
-          lastUpdate: r.last_update,
-          watchlistId: r.watchlist_id,
-          watchlistCreatedAt: r.watchlist_created_at,
+
+        const data = Object.values(eventMap);
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          count: data.length,
+          total: totalCount,
+          limit,
+          offset,
+          data,
         });
+      } finally {
+        client.release();
       }
-      
-      const data = Object.values(eventMap);
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+    } catch (error) {
+      app.log.error({ error, userId: user.id }, "Failed to fetch watchlist");
+      reply.code(500);
       return reply.send({
-        count: data.length,
-        total: totalCount,
-        limit,
-        offset,
-        data,
+        error: "Failed to fetch watchlist",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
-      
-    } finally {
-      client.release();
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id }, 'Failed to fetch watchlist');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to fetch watchlist',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 /**
  * DELETE /watchlist/:marketId
  * Remove a market from user's watchlist
  */
-app.delete("/watchlist/:marketId", { preHandler: createAuthMiddleware() }, async (request, reply) => {
-  const user = (request as any).user as User;
-  const { marketId } = request.params as { marketId: string };
-  
-  if (!marketId) {
-    reply.code(400);
-    return reply.send({ error: "marketId parameter is required" });
-  }
-  
-  try {
-    const client = await pool.connect();
+app.delete(
+  "/watchlist/:marketId",
+  { preHandler: createAuthMiddleware() },
+  async (request, reply) => {
+    const user = request.user;
+    if (!user) {
+      reply.code(401);
+      return reply.send({ error: "Unauthorized" });
+    }
+    const { marketId } = request.params as { marketId: string };
+
+    if (!marketId) {
+      reply.code(400);
+      return reply.send({ error: "marketId parameter is required" });
+    }
+
     try {
-      // Delete from watchlist
-      // Support both composite ID format (venue:venue_market_id) and just venue_market_id
-      // If marketId contains ':', treat it as composite ID; otherwise, match any venue with that market_id
-      let deleteQuery: string;
-      let deleteParams: any[];
-      
-      if (marketId.includes(':')) {
-        // Full composite ID provided
-        deleteQuery = `DELETE FROM user_watchlist 
+      const client = await pool.connect();
+      try {
+        // Delete from watchlist
+        // Support both composite ID format (venue:venue_market_id) and just venue_market_id
+        // If marketId contains ':', treat it as composite ID; otherwise, match any venue with that market_id
+        let deleteQuery: string;
+        let deleteParams: PgParams;
+
+        if (marketId.includes(":")) {
+          // Full composite ID provided
+          deleteQuery = `DELETE FROM user_watchlist 
                        WHERE user_id = $1 AND market_id = $2
                        RETURNING id, market_id`;
-        deleteParams = [user.id, marketId];
-      } else {
-        // Just venue_market_id provided, match any venue
-        deleteQuery = `DELETE FROM user_watchlist 
+          deleteParams = [user.id, marketId];
+        } else {
+          // Just venue_market_id provided, match any venue
+          deleteQuery = `DELETE FROM user_watchlist 
                        WHERE user_id = $1 AND market_id LIKE $2
                        RETURNING id, market_id`;
-        deleteParams = [user.id, `%:${marketId}`];
+          deleteParams = [user.id, `%:${marketId}`];
+        }
+
+        const result = await client.query(deleteQuery, deleteParams);
+
+        if (result.rows.length === 0) {
+          reply.code(404);
+          return reply.send({ error: "Market not found in watchlist" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Market removed from watchlist successfully",
+          removedItem: {
+            id: result.rows[0].id,
+            marketId: result.rows[0].market_id,
+          },
+        });
+      } finally {
+        client.release();
       }
-      
-      const result = await client.query(deleteQuery, deleteParams);
-      
-      if (result.rows.length === 0) {
-        reply.code(404);
-        return reply.send({ error: "Market not found in watchlist" });
-      }
-      
-      reply.header("Content-Type", "application/json; charset=utf-8");
+    } catch (error) {
+      app.log.error(
+        { error, userId: user.id, marketId },
+        "Failed to remove market from watchlist",
+      );
+      reply.code(500);
       return reply.send({
-        message: 'Market removed from watchlist successfully',
-        removedItem: {
-          id: result.rows[0].id,
-          marketId: result.rows[0].market_id,
-        },
+        error: "Failed to remove market from watchlist",
+        message: error instanceof Error ? error.message : "Unknown error",
       });
-      
-    } finally {
-      client.release();
     }
-    
-  } catch (error) {
-    app.log.error({ error, userId: user.id, marketId }, 'Failed to remove market from watchlist');
-    reply.code(500);
-    return reply.send({ 
-      error: 'Failed to remove market from watchlist',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
+  },
+);
 
 export async function start() {
   await getRedis().catch(() => {}); // optional

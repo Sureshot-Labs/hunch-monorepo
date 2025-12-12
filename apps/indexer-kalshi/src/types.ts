@@ -59,11 +59,11 @@ const PriceLevelCents = z.union([
 // helper that coerces null/undefined/non-arrays -> []
 const Levels = z.preprocess(
   (v) => (Array.isArray(v) ? v : []),
-  z.array(PriceLevelCents)
+  z.array(PriceLevelCents),
 );
 const DollarLevels = z.preprocess(
   (v) => (Array.isArray(v) ? v : []),
-  z.array(z.tuple([z.string(), num]))
+  z.array(z.tuple([z.string(), num])),
 );
 
 export const KalshiOrderbook = z.object({
@@ -77,6 +77,6 @@ export const KalshiOrderbook = z.object({
         yes_dollars: DollarLevels.optional().default([]),
         no_dollars: DollarLevels.optional().default([]),
       })
-      .passthrough()
+      .passthrough(),
   ),
 });

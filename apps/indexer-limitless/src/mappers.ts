@@ -1,10 +1,20 @@
 import { v4 as uuid } from "uuid";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
-import type { LimitlessEventRow, LimitlessMarketRow } from "./limitless-repo.js";
-import type { UnifiedEventRow, UnifiedMarketRow } from "../../../packages/db/src/unified-repo";
+import type {
+  LimitlessEventRow,
+  LimitlessMarketRow,
+} from "./limitless-repo.js";
+import type {
+  UnifiedEventRow,
+  UnifiedMarketRow,
+} from "../../../packages/db/src/unified-repo";
 
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
-function parseVolume(volume?: string | number | null, volumeFormatted?: string | null, decimals = 6): number | null {
+function parseVolume(
+  volume?: string | number | null,
+  volumeFormatted?: string | null,
+  decimals = 6,
+): number | null {
   if (volumeFormatted && !Number.isNaN(Number(volumeFormatted)))
     return Number(volumeFormatted);
   if (volume != null && Number.isFinite(Number(volume))) {
@@ -20,8 +30,12 @@ const parseDate = (dateStr?: string | null): Date | null => {
 };
 
 export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
-  const volumeTotal = parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals);
-  
+  const volumeTotal = parseVolume(
+    lm.volume,
+    lm.volumeFormatted,
+    lm.collateralToken?.decimals,
+  );
+
   return {
     id: String(lm.id),
     slug: lm.slug || null,
@@ -72,9 +86,16 @@ export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
   };
 }
 
-export function mapLimitlessMarketRow(eventId: string, market: TLimitlessMarketItem): LimitlessMarketRow {
-  const volumeTotal = parseVolume(market.volume, market.volumeFormatted, market.collateralToken?.decimals);
-  
+export function mapLimitlessMarketRow(
+  eventId: string,
+  market: TLimitlessMarketItem | TLimitlessMarket,
+): LimitlessMarketRow {
+  const volumeTotal = parseVolume(
+    market.volume,
+    market.volumeFormatted,
+    market.collateralToken?.decimals,
+  );
+
   return {
     id: String(market.id),
     event_id: eventId,
@@ -127,7 +148,8 @@ export function mapLimitlessMarketRow(eventId: string, market: TLimitlessMarketI
 export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
   // This is kept for backward compatibility but not used in new implementation
   const id = uuid();
-  const endTs = lm.expirationTimestamp != null ? Number(lm.expirationTimestamp) : NaN;
+  const endTs =
+    lm.expirationTimestamp != null ? Number(lm.expirationTimestamp) : NaN;
   const category = lm.categories?.[0] ?? null;
 
   return {
@@ -142,7 +164,11 @@ export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
     start_time: null,
     end_time: Number.isFinite(endTs) ? new Date(endTs) : null,
     liquidity: null,
-    volume_total: parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals),
+    volume_total: parseVolume(
+      lm.volume,
+      lm.volumeFormatted,
+      lm.collateralToken?.decimals,
+    ),
     volume24hr: null,
     raw: lm,
   };
@@ -151,7 +177,7 @@ export function mapEventRow(venueId: number, lm: TLimitlessMarket) {
 export function mapMarketRow(
   venueId: number,
   eventUuid: string,
-  lm: TLimitlessMarket
+  lm: TLimitlessMarket,
 ) {
   // This is kept for backward compatibility but not used in new implementation
   const id = uuid();
@@ -178,7 +204,11 @@ export function mapMarketRow(
     neg_risk: null,
     neg_risk_market_id: null,
     liquidity: null,
-    volume_total: parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals),
+    volume_total: parseVolume(
+      lm.volume,
+      lm.volumeFormatted,
+      lm.collateralToken?.decimals,
+    ),
     volume24hr: null,
     clob_token_yes: yesToken,
     clob_token_no: noToken,
@@ -199,16 +229,20 @@ export function mapTokens(marketUuid: string, yes: string, no: string) {
 // Unified table mappers for Limitless
 export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   // Map Limitless status to unified status
-  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  if (lm.expired) status = 'CLOSED';
-  else if (lm.status === 'RESOLVED') status = 'SETTLED';
+  let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
+  if (lm.expired) status = "CLOSED";
+  else if (lm.status === "RESOLVED") status = "SETTLED";
 
-  const volumeTotal = parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ?? undefined;
-  const expirationDate = lm.expirationTimestamp ? new Date(Number(lm.expirationTimestamp)) : undefined;
+  const volumeTotal =
+    parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ??
+    undefined;
+  const expirationDate = lm.expirationTimestamp
+    ? new Date(Number(lm.expirationTimestamp))
+    : undefined;
 
   return {
     id: `limitless:${lm.id}`,
-    venue: 'limitless',
+    venue: "limitless",
     venue_event_id: String(lm.id),
     title: lm.title,
     description: lm.description,
@@ -225,14 +259,21 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   };
 }
 
-export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string): UnifiedMarketRow {
+export function mapToUnifiedMarket(
+  market: TLimitlessMarketItem | TLimitlessMarket,
+  eventId: string,
+): UnifiedMarketRow {
   // Map Limitless status to unified status
-  let status: 'ACTIVE' | 'CLOSED' | 'SETTLED' | 'ARCHIVED' = 'ACTIVE';
-  if (market.expired) status = 'CLOSED';
-  else if (market.status === 'RESOLVED') status = 'SETTLED';
+  let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
+  if (market.expired) status = "CLOSED";
+  else if (market.status === "RESOLVED") status = "SETTLED";
 
-  const volumeTotal = market.volumeFormatted ? parseFloat(market.volumeFormatted) : undefined;
-  const expirationDate = market.expirationTimestamp ? new Date(Number(market.expirationTimestamp)) : undefined;
+  const volumeTotal = market.volumeFormatted
+    ? parseFloat(market.volumeFormatted)
+    : undefined;
+  const expirationDate = market.expirationTimestamp
+    ? new Date(Number(market.expirationTimestamp))
+    : undefined;
 
   // Extract prices from prices array (convert percentage to decimal)
   let bestBid: number | undefined;
@@ -247,7 +288,7 @@ export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string
 
   return {
     id: `limitless:${market.id}`,
-    venue: 'limitless',
+    venue: "limitless",
     venue_market_id: String(market.id),
     event_id: `limitless:${eventId}`,
     title: market.title,
@@ -264,7 +305,7 @@ export function mapToUnifiedMarket(market: TLimitlessMarketItem, eventId: string
     volume_total: volumeTotal,
     volume_24h: undefined, // Limitless doesn't provide 24h volume
     liquidity: undefined, // Limitless doesn't provide liquidity
-    outcomes: JSON.stringify(['YES', 'NO']), // Limitless markets are binary
+    outcomes: JSON.stringify(["YES", "NO"]), // Limitless markets are binary
     token_yes: `limitless:${market.id}:YES`,
     token_no: `limitless:${market.id}:NO`,
     condition_id: market.conditionId ?? undefined,

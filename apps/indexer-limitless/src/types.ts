@@ -20,12 +20,14 @@ const Creator = z.object({
 });
 
 // Trends schema
-const Trends = z.object({
-  hourly: z.object({
-    rank: z.number(),
-    value: z.number(),
-  }),
-}).optional();
+const Trends = z
+  .object({
+    hourly: z.object({
+      rank: z.number(),
+      value: z.number(),
+    }),
+  })
+  .optional();
 
 // Metadata schema
 const Metadata = z.object({

@@ -1,17 +1,22 @@
 import { ensureRedis, redis } from "./redis";
 import { env } from "./env";
 import { iterateEvents } from "./gammaClient";
-import { getBook, postBooks, postBooksOnce } from "./clobClient";
+import { postBooksOnce } from "./clobClient";
+import { writeBookTop } from "./repo";
 import {
-  getVenueId,
-  upsertEvent,
-  upsertMarket,
-  upsertToken,
-  writeBookTop,
-} from "./repo";
-import { upsertPolymarketEvent, upsertPolymarketMarket } from "./polymarket-repo";
-import { mapEventRow, mapMarketRow, mapTokens, mapPolymarketEventRow, mapPolymarketMarketRow, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
-import { upsertUnifiedEvent, upsertUnifiedMarket } from "../../../packages/db/src/unified-repo";
+  upsertPolymarketEvent,
+  upsertPolymarketMarket,
+} from "./polymarket-repo";
+import {
+  mapPolymarketEventRow,
+  mapPolymarketMarketRow,
+  mapToUnifiedEvent,
+  mapToUnifiedMarket,
+} from "./mappers";
+import {
+  upsertUnifiedEvent,
+  upsertUnifiedMarket,
+} from "../../../packages/db/src/unified-repo";
 import { pool } from "./db";
 import { PolymarketEvent } from "./types";
 import { log } from "./log";
@@ -38,7 +43,7 @@ export async function bootstrapPolymarket() {
       try {
         // Validate and parse event as Polymarket event
         const polyEvent = PolymarketEvent.parse(e);
-        
+
         // Map and upsert to polymarket_events table
         const eRow = mapPolymarketEventRow(polyEvent);
         const eventId = await upsertPolymarketEvent(eRow);
@@ -51,12 +56,12 @@ export async function bootstrapPolymarket() {
         for (const m of polyEvent.markets) {
           // Map and upsert to polymarket_markets table
           const mRow = mapPolymarketMarketRow(eventId, m);
-          const result = await upsertPolymarketMarket(mRow);
+          await upsertPolymarketMarket(mRow);
 
           // Map and upsert to unified_markets table
           const unifiedMarketRow = mapToUnifiedMarket(m, eventId);
           await upsertUnifiedMarket(pool, unifiedMarketRow);
-          
+
           // Extract token IDs from clob_token_ids (can be array or JSON string)
           let tokenIds: string[] = [];
           if (m.clobTokenIds) {
@@ -73,29 +78,37 @@ export async function bootstrapPolymarket() {
           }
 
           // Add to top tokens if market is accepting orders
-          if (mRow.enable_order_book && mRow.accepting_orders && tokenIds.length > 0) {
+          if (
+            mRow.enable_order_book &&
+            mRow.accepting_orders &&
+            tokenIds.length > 0
+          ) {
             // Add each token ID to Set for deduplication
             for (const tokenId of tokenIds) {
               topTokenIds.add(tokenId);
             }
           }
-          
+
           processedMarkets++;
         }
-        
+
         processedEvents++;
       } catch (err) {
         log.warn(`Failed to process event ${e.id}:`, err);
       }
     }
-    
+
     // Log progress every 50 events
     if (processedEvents % 50 === 0) {
-      log.info(`Processed ${processedEvents} events, ${processedMarkets} markets`);
+      log.info(
+        `Processed ${processedEvents} events, ${processedMarkets} markets`,
+      );
     }
   }
 
-  log.info(`Database storage complete: ${processedEvents} events, ${processedMarkets} markets`);
+  log.info(
+    `Database storage complete: ${processedEvents} events, ${processedMarkets} markets`,
+  );
 
   // take initial book snapshots for top N tokens and warm Redis
   const snapIds = Array.from(topTokenIds).slice(0, env.topBookSnapshot);
@@ -103,7 +116,7 @@ export async function bootstrapPolymarket() {
   const batches = chunk(snapIds, 20);
   const q = new PQueue({ interval: 10_000, intervalCap: 45 }); // safe under /books 50/10s
   await Promise.all(
-    batches.map((group: any) =>
+    batches.map((group) =>
       q.add(async () => {
         try {
           const books = await postBooksOnce(group);
@@ -117,12 +130,12 @@ export async function bootstrapPolymarket() {
         } catch (e) {
           log.warn("book snapshot failed batch", group[0], String(e));
         }
-      })
-    )
+      }),
+    ),
   );
 
   log.info(
-    `Bootstrap complete: events=${processedEvents}, markets=${processedMarkets}, tokens=${topTokenIds.size}, books=${snapIds.length}`
+    `Bootstrap complete: events=${processedEvents}, markets=${processedMarkets}, tokens=${topTokenIds.size}, books=${snapIds.length}`,
   );
   return snapIds;
 }

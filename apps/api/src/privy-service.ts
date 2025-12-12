@@ -1,11 +1,8 @@
-import { PrivyClient } from '@privy-io/server-auth';
-import { env } from './env.js';
+import { PrivyClient } from "@privy-io/server-auth";
+import { env } from "./env.js";
 
 // Initialize Privy client
-const privyClient = new PrivyClient(
-  env.privyAppId,
-  env.privyAppSecret
-);
+const privyClient = new PrivyClient(env.privyAppId, env.privyAppSecret);
 
 export interface PrivyUser {
   id: string;
@@ -45,7 +42,9 @@ export class PrivyService {
       const verifiedClaims = await privyClient.verifyAuthToken(accessToken);
       return verifiedClaims as PrivyClaims;
     } catch (error) {
-      throw new Error(`Invalid Privy access token: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Invalid Privy access token: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
   }
 
@@ -57,7 +56,9 @@ export class PrivyService {
       const user = await privyClient.getUser(privyClaims.userId);
       return user as unknown as PrivyUser;
     } catch (error) {
-      throw new Error(`Failed to fetch user data from Privy: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to fetch user data from Privy: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
   }
 
@@ -66,12 +67,12 @@ export class PrivyService {
    */
   static extractWalletAddresses(privyUser: PrivyUser): string[] {
     const addresses: string[] = [];
-    
+
     // Add primary wallet if exists
     if (privyUser.wallet?.address) {
       addresses.push(privyUser.wallet.address);
     }
-    
+
     // Add additional wallets if they exist
     if (privyUser.wallets && Array.isArray(privyUser.wallets)) {
       for (const wallet of privyUser.wallets) {
@@ -80,7 +81,7 @@ export class PrivyService {
         }
       }
     }
-    
+
     return addresses;
   }
 
@@ -92,12 +93,12 @@ export class PrivyService {
     if (privyUser.wallet?.address) {
       return privyUser.wallet.address;
     }
-    
+
     // Return first wallet if no primary wallet
     if (privyUser.wallets && privyUser.wallets.length > 0) {
       return privyUser.wallets[0].address;
     }
-    
+
     return null;
   }
 
@@ -114,7 +115,7 @@ export class PrivyService {
     const user = await this.getUserData(claims);
     const walletAddresses = this.extractWalletAddresses(user);
     const primaryWalletAddress = this.getPrimaryWalletAddress(user);
-    
+
     return {
       claims,
       user,

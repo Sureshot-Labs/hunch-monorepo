@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "start": "node --enable-source-maps dist/main.js",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
+    "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
     "axios": "^1.7.2",

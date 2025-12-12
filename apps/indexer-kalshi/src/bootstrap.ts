@@ -9,7 +9,10 @@ import {
 } from "../../indexer-polymarket/src/repo";
 import { mapTokens, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
 import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo";
-import { upsertUnifiedEvent, upsertUnifiedMarket } from "../../../packages/db/src/unified-repo";
+import {
+  upsertUnifiedEvent,
+  upsertUnifiedMarket,
+} from "../../../packages/db/src/unified-repo";
 import { pool } from "../../indexer-polymarket/src/db";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
@@ -58,11 +61,15 @@ export async function bootstrapKalshi() {
 
     // Log progress every 50 events
     if (processedEvents % 50 === 0) {
-      console.log(`[Bootstrap] Processed ${processedEvents} events, ${processedMarkets} markets`);
+      console.log(
+        `[Bootstrap] Processed ${processedEvents} events, ${processedMarkets} markets`,
+      );
     }
   }
 
-  console.log(`[Bootstrap] Database storage complete: ${processedEvents} events, ${processedMarkets} markets`);
+  console.log(
+    `[Bootstrap] Database storage complete: ${processedEvents} events, ${processedMarkets} markets`,
+  );
 
   const snapTickers = Array.from(topTickers).slice(0, env.topBookSnapshot);
   const q = new PQueue({ interval: 10_000, intervalCap: 180 }); // ~18 rps
@@ -88,18 +95,18 @@ export async function bootstrapKalshi() {
                     : [],
                 timestamp: s.ts.getTime().toString(),
               }),
-              { EX: 5 }
+              { EX: 5 },
             );
           }
         } catch (e) {
           console.warn("book snapshot failed for", t, String(e));
         }
-      })
-    )
+      }),
+    ),
   );
 
   console.log(
-    `Bootstrap complete: events=${processedEvents}, markets=${topTickers.size}, books=${snapTickers.length}`
+    `Bootstrap complete: events=${processedEvents}, markets=${topTickers.size}, books=${snapTickers.length}`,
   );
 
   // WS needs tickers, not token_ids; return tickers

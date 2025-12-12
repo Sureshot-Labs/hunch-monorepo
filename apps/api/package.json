@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
-    "delete-closed": "tsx src/delete-closed-markets.ts"
+    "delete-closed": "tsx src/delete-closed-markets.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
+    "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
     "fastify": "^4.28.1",

@@ -1,8 +1,9 @@
 import { Pool } from "pg";
+import type { PoolClient } from "pg";
 import { env } from "./env";
 
 export const pool = new Pool({ connectionString: env.dbUrl });
-export async function tx<T>(fn: (c: any) => Promise<T>) {
+export async function tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
   const c = await pool.connect();
   try {
     await c.query("begin");

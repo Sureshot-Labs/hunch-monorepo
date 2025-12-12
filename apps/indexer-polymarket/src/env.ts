@@ -6,7 +6,7 @@ config({ path: resolve(cwd, "../../.env"), override: true }); // load repo .env
 
 // 🧹 Prevent pg from mixing PG* env with your connectionString
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
-  (k) => delete (process.env as any)[k]
+  (k) => delete process.env[k],
 );
 
 function req(name: string): string {

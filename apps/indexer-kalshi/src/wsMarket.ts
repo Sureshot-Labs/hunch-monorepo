@@ -67,7 +67,8 @@ export function startMarketWS(tickers: string[]) {
         cmd: "subscribe",
         params: { channels: ["orderbook"], market_tickers: unique },
       };
-      ws!.send(JSON.stringify(msg));
+      if (!ws) return;
+      ws.send(JSON.stringify(msg));
       console.log("[WS] subscribed");
 
       // keepalive: ping every 20s, if no pong in 60s -> reconnect
@@ -75,13 +76,17 @@ export function startMarketWS(tickers: string[]) {
       pingTimer = setInterval(() => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         try {
-          (ws as any).ping?.();
-        } catch {}
+          ws.ping();
+        } catch {
+          // ignore; ping not supported by client
+        }
         if (Date.now() - lastPong > 60_000) {
           console.warn("[WS] pong timeout; reconnecting");
           try {
             ws?.close();
-          } catch {}
+          } catch {
+            // ignore; socket may already be closed
+          }
         }
       }, 20_000);
 
@@ -94,7 +99,7 @@ export function startMarketWS(tickers: string[]) {
         const elapsed = (now - msgCountStartTime) / 1000;
         const rps = (msgCount / Math.max(1, elapsed)).toFixed(2);
         console.log(
-          `[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`
+          `[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`,
         );
         msgCount = 0;
         msgCountStartTime = now;
@@ -131,7 +136,9 @@ export function startMarketWS(tickers: string[]) {
       console.warn(`[WS] ${tag}`, err ? String(err) : "");
       try {
         ws?.close();
-      } catch {}
+      } catch {
+        // ignore; best-effort close
+      }
       ws = null;
       if (pingTimer) {
         clearInterval(pingTimer);

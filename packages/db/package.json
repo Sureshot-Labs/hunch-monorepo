@@ -6,7 +6,10 @@
   "main": "src/migrate.ts",
   "scripts": {
     "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
+    "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
     "@hunch/config": "workspace:*",

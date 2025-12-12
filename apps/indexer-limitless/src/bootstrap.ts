@@ -1,18 +1,28 @@
 import { env } from "./env.js";
 import { log } from "./log.js";
 import { fetchAllActive } from "./limitlessClient.js";
-import { upsertLimitlessEvent, upsertLimitlessMarket } from "./limitless-repo.js";
-import { mapLimitlessEventRow, mapLimitlessMarketRow, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers.js";
-import { upsertUnifiedEvent, upsertUnifiedMarket } from "../../../packages/db/src/unified-repo";
+import {
+  upsertLimitlessEvent,
+  upsertLimitlessMarket,
+} from "./limitless-repo.js";
+import {
+  mapLimitlessEventRow,
+  mapLimitlessMarketRow,
+  mapToUnifiedEvent,
+  mapToUnifiedMarket,
+} from "./mappers.js";
+import {
+  upsertUnifiedEvent,
+  upsertUnifiedMarket,
+} from "../../../packages/db/src/unified-repo";
 import { pool } from "../../indexer-polymarket/src/db";
-import type { TLimitlessMarket } from "./types.js";
 
 export async function bootstrapLimitless() {
   log.info("Bootstrapping Limitless…");
 
   const markets = await fetchAllActive(
     env.bootstrapMaxPages,
-    env.bootstrapPageSize
+    env.bootstrapPageSize,
   );
 
   let eventCount = 0;
@@ -32,12 +42,12 @@ export async function bootstrapLimitless() {
       // Handle different market types
       if (lm.marketType === "single") {
         // Single market: the market data is in the main object
-        const marketRow = mapLimitlessMarketRow(eventId, lm as any);
+        const marketRow = mapLimitlessMarketRow(eventId, lm);
         await upsertLimitlessMarket(marketRow);
         marketCount++;
 
         // Map and upsert to unified_markets table
-        const unifiedMarketRow = mapToUnifiedMarket(lm as any, String(lm.id));
+        const unifiedMarketRow = mapToUnifiedMarket(lm, String(lm.id));
         await upsertUnifiedMarket(pool, unifiedMarketRow);
       } else if (lm.marketType === "group" && lm.markets) {
         // Group market: iterate through sub-markets
@@ -54,10 +64,13 @@ export async function bootstrapLimitless() {
 
       log.info(`Processed ${lm.marketType} market: ${lm.title}`, {
         eventId,
-        marketCount: lm.marketType === "single" ? 1 : lm.markets?.length || 0
+        marketCount: lm.marketType === "single" ? 1 : lm.markets?.length || 0,
       });
     } catch (error) {
-      log.err(`Failed to process market ${lm.id}: ${lm.title}`, { error, market: lm });
+      log.err(`Failed to process market ${lm.id}: ${lm.title}`, {
+        error,
+        market: lm,
+      });
       // Continue processing other markets
     }
   }
