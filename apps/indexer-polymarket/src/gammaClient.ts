@@ -1,33 +1,139 @@
 import { env } from "./env";
-import { GammaEventsResponse } from "./types";
-import type { TEvent as GammaEvent } from "./types"; // <-- this is the type
+import { GammaEvent, GammaEventsResponse } from "./types";
+import type { TEvent as GammaEventType } from "./types";
+import { z } from "zod";
 
-export async function fetchEventsPage(offset: number, limit: number) {
-  const url = new URL(`${env.gammaBase}/events/pagination`);
-  url.searchParams.set("limit", String(limit));
-  url.searchParams.set("active", "true");
-  url.searchParams.set("archived", "false");
-  url.searchParams.set("order", "volume24hr");
-  url.searchParams.set("offset", String(offset));
+const GammaEventsListResponse = z.array(GammaEvent);
+
+export type GammaEventsQuery = {
+  offset: number;
+  limit: number;
+  order?: string;
+  ascending?: boolean;
+  active?: boolean;
+  archived?: boolean;
+  closed?: boolean;
+  tag_id?: number;
+  exclude_tag_id?: number[];
+  tag_slug?: string;
+  related_tags?: boolean;
+  start_date_min?: string;
+  start_date_max?: string;
+  end_date_min?: string;
+  end_date_max?: string;
+};
+
+function resolveEventsUrl(): string {
+  const base = env.gammaBase.replace(/\/+$/, "");
+  return `${base}/events`;
+}
+
+function setOptionalBool(
+  sp: URLSearchParams,
+  k: string,
+  v: boolean | undefined,
+): void {
+  if (v == null) return;
+  sp.set(k, v ? "true" : "false");
+}
+
+function setOptionalNumber(
+  sp: URLSearchParams,
+  k: string,
+  v: number | undefined,
+): void {
+  if (v == null) return;
+  sp.set(k, String(v));
+}
+
+function setOptionalString(
+  sp: URLSearchParams,
+  k: string,
+  v: string | undefined,
+): void {
+  if (!v) return;
+  sp.set(k, v);
+}
+
+export async function fetchEventsPage(q: GammaEventsQuery) {
+  const url = new URL(resolveEventsUrl());
+  url.searchParams.set("limit", String(q.limit));
+  url.searchParams.set("offset", String(q.offset));
+  setOptionalString(url.searchParams, "order", q.order);
+  setOptionalBool(url.searchParams, "ascending", q.ascending);
+  setOptionalBool(url.searchParams, "active", q.active);
+  setOptionalBool(url.searchParams, "archived", q.archived);
+  setOptionalBool(url.searchParams, "closed", q.closed);
+  setOptionalNumber(url.searchParams, "tag_id", q.tag_id);
+  setOptionalString(url.searchParams, "tag_slug", q.tag_slug);
+  setOptionalBool(url.searchParams, "related_tags", q.related_tags);
+  if (q.exclude_tag_id?.length) {
+    url.searchParams.set("exclude_tag_id", q.exclude_tag_id.join(","));
+  }
+  setOptionalString(url.searchParams, "start_date_min", q.start_date_min);
+  setOptionalString(url.searchParams, "start_date_max", q.start_date_max);
+  setOptionalString(url.searchParams, "end_date_min", q.end_date_min);
+  setOptionalString(url.searchParams, "end_date_max", q.end_date_max);
 
   const r = await fetch(url, { headers: { accept: "application/json" } });
   if (!r.ok) throw new Error(`Gamma ${r.status}`);
   const j = await r.json();
 
-  const parsed = GammaEventsResponse.parse(j); // schema (value)
-  const events: GammaEvent[] = parsed.events ?? parsed.data ?? [];
+  let events: GammaEventType[];
+  if (Array.isArray(j)) {
+    events = GammaEventsListResponse.parse(j) as GammaEventType[];
+  } else {
+    const parsed = GammaEventsResponse.parse(j);
+    events = (parsed.events ?? parsed.data ?? []) as GammaEventType[];
+  }
   return { events };
 }
 
+export type GammaEventsPage = {
+  offset: number;
+  events: GammaEventType[];
+};
+
+export type GammaEventPaginationOptions = {
+  label?: string;
+  startOffset?: number;
+  pageSize?: number;
+  maxPages?: number; // 0 = unlimited
+} & Omit<GammaEventsQuery, "offset" | "limit">;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
 // Streaming generator: yields events page-by-page to avoid loading everything into memory
-export async function* iterateEvents() {
-  let offset = 0;
-  const page = 500; // Increased page size for efficiency
+export async function* iterateEventPages(
+  opts: GammaEventPaginationOptions = {},
+): AsyncGenerator<GammaEventsPage> {
+  let offset = opts.startOffset ?? 0;
+  const pageSize = opts.pageSize ?? env.pageSize;
+  const maxPages = opts.maxPages ?? 0;
 
-  console.log("Fetching all Polymarket events...");
+  const {
+    label,
+    startOffset: _startOffset,
+    pageSize: _pageSize,
+    maxPages: _maxPages,
+    ...query
+  } = opts;
 
+  console.log(
+    `Fetching Polymarket Gamma events${label ? ` [${label}]` : ""} (order=${query.order}, ascending=${query.ascending}, closed=${query.closed})`,
+  );
+
+  let pages = 0;
   while (true) {
-    const { events } = await fetchEventsPage(offset, page);
+    if (maxPages > 0 && pages >= maxPages) break;
+
+    const { events } = await fetchEventsPage({
+      offset,
+      limit: pageSize,
+      ...query,
+    });
     console.log(`${events.length} events at offset ${offset}`);
 
     if (!events.length) {
@@ -35,18 +141,23 @@ export async function* iterateEvents() {
       break;
     }
 
-    yield events; // ✅ yield one page
+    yield { offset, events };
 
     offset += events.length;
+    pages += 1;
 
     // Small delay to be respectful to the API
-    await new Promise((res) => setTimeout(res, 100));
+    await sleep(100);
   }
+}
+
+export async function* iterateEvents(opts: GammaEventPaginationOptions = {}) {
+  for await (const page of iterateEventPages(opts)) yield page.events;
 }
 
 // Keep for backward compatibility if needed elsewhere
 export async function fetchAllEvents() {
-  const out: GammaEvent[] = [];
+  const out: GammaEventType[] = [];
   for await (const events of iterateEvents()) {
     out.push(...events);
   }

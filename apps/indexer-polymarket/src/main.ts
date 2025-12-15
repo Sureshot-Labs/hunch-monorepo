@@ -1,24 +1,31 @@
-import { bootstrapPolymarket } from "./bootstrap";
-import { startMarketWS } from "./wsMarket";
+import {
+  selectWsTokenIds,
+  snapshotBooks,
+  syncCatchUpFromCursor,
+  syncHotWindow,
+} from "./bootstrap";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
 import { log } from "./log";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
+import { env } from "./env";
 
-let bootstrapping = false;
+let running = false;
 let wsStarted = false;
 
-async function bootstrapAndMaybeStartWs() {
-  const tokenIds = await bootstrapPolymarket();
-  if (!wsStarted && tokenIds.length > 0) {
-    startMarketWS(tokenIds);
-    wsStarted = true;
-  }
-}
-
 async function periodicBootstrap() {
-  if (bootstrapping) return; // skip if one is running
-  bootstrapping = true;
+  if (running) return; // skip if one is running
+  running = true;
   try {
-    await bootstrapAndMaybeStartWs();
+    await syncHotWindow();
+    const tokenIds = await selectWsTokenIds();
+
+    if (!wsStarted && tokenIds.length > 0) {
+      await snapshotBooks(tokenIds);
+      startMarketWS(tokenIds);
+      wsStarted = true;
+    } else if (wsStarted) {
+      updateMarketWSSubscriptions(tokenIds);
+    }
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -27,14 +34,23 @@ async function periodicBootstrap() {
       log.warn("periodic bootstrap err", e);
     }
   } finally {
-    bootstrapping = false;
+    running = false;
   }
 }
 
 async function main() {
   await periodicBootstrap();
-  // 3) Keep refreshing background data every 5 minutes to catch new/changed markets.
-  setInterval(periodicBootstrap, 10 * 60 * 1000);
+  void syncCatchUpFromCursor().catch((e) => {
+    if (isPgSetupIssue(e)) {
+      log.warn(`catch-up blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("catch-up err", e);
+    }
+  });
+
+  // Keep refreshing background data to catch new/changed markets.
+  setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
 }
 
 main().catch((e) => {

@@ -88,7 +88,7 @@ node --version  # Should be v18 or higher
 
 # Verify Docker is running
 docker --version
-docker-compose --version
+docker compose version
 ```
 
 ---
@@ -134,13 +134,39 @@ Add variables to your `.env` file
 Start PostgreSQL and Redis using Docker Compose:
 
 ```bash
-pnpm infra:up
+# Docker Compose v2 (recommended)
+pnpm infra2:up
+
+# If you have legacy docker-compose v1 installed
+# pnpm infra:up
 ```
 
 This will:
-- Start PostgreSQL (TimescaleDB) on port 5432
-- Start Redis on port 6379
+- Start PostgreSQL (TimescaleDB) on port 5432 (default)
+- Start Redis on port 6379 (default)
 - Create necessary volumes for data persistence
+
+#### Port Conflicts (Common)
+
+If you already have PostgreSQL/Redis running on your machine (or in other Docker projects), you may hit an error like:
+
+- `Bind for 0.0.0.0:6379 failed: port is already allocated`
+
+All host ports are configurable via `.env` because `ops/docker-compose.yml` uses:
+
+- `PGPORT` for Postgres port mapping
+- `REDIS_PORT` for Redis port mapping
+
+If you change host ports, also update the app connection strings (apps run on your host):
+
+```bash
+# Example: run Hunch Postgres on 5433 and Redis on 6380
+PGPORT=5433
+DATABASE_URL=postgresql://hunch:hunch@localhost:5433/hunch
+
+REDIS_PORT=6380
+REDIS_URL=redis://localhost:6380
+```
 
 ### 2. Verify Services are Running
 
@@ -154,10 +180,14 @@ docker ps
 
 # Test PostgreSQL connection
 docker exec -it hunch-postgres psql -U hunch -d hunch -c "SELECT version();"
+# Or use the helper script:
+pnpm psql:docker
 
 # Test Redis connection
 docker exec -it hunch-redis redis-cli ping
 # Should return: PONG
+# Or use the helper script:
+pnpm redis:docker
 ```
 
 ### 3. Run Database Migrations
@@ -173,13 +203,25 @@ This will run all database migrations from `packages/db/migrations/` in order.
 When you're done:
 
 ```bash
-pnpm infra:down
+# Docker Compose v2 (recommended)
+pnpm infra2:down
+
+# If you have legacy docker-compose v1 installed
+# pnpm infra:down
 ```
 
 To stop and remove containers (data persists in volumes):
 
+### 5. Smoke Test API
+
+With `pnpm dev` running in another terminal:
+
 ```bash
-pnpm infra:down -v  # Also removes volumes (⚠️ deletes data)
+pnpm smoke:api
+```
+
+```bash
+pnpm infra2:down -- -v  # Also removes volumes (⚠️ deletes data)
 ```
 
 ---
@@ -197,6 +239,27 @@ pnpm dev
 This will start:
 - API server on `http://localhost:3001`
 - All indexers (polymarket, kalshi, limitless)
+
+### Polymarket Sync Tuning (Optional)
+
+The Polymarket indexer is designed to be fast on restart and avoid re-syncing the full dataset every time:
+
+- **Periodic hot refresh**: fetches the most recently updated events using `order=updatedAt&ascending=false` in a bounded time window.
+  - Runs **two passes**: `closed=false` (open) and `closed=true` (closed) to reliably catch closures and status transitions.
+- **Background catch-up**: continues an inventory crawl using `order=id&ascending=true` from a saved `offset` cursor in Redis.
+
+Common knobs:
+
+- `POLYMARKET_REFRESH_MIN=10` (how often to run hot refresh)
+- `POLYMARKET_PAGE_SIZE=500` (Gamma page size; API caps at 500)
+- `POLYMARKET_HOT_LOOKBACK_MIN=30` (how far back in time to refresh by `updatedAt`; default is `max(REFRESH_MIN*2, 30)`)
+- `POLYMARKET_HOT_MAX_PAGES=10` (safety cap for hot refresh pagination)
+- `POLYMARKET_OVERLAP_PAGES=2` (rewind the catch-up cursor by this many pages on restart)
+
+WS orderbook streaming (best bid/ask) is always a subset:
+
+- `INDEXER_WS_SUBSET=200` (max subscribed tokens)
+- `INDEXER_TOP_BOOK_SNAPSHOT=150` (how many tokens to snapshot once at startup)
 
 ---
 
@@ -245,8 +308,8 @@ If you need to modify the database schema:
 3. **Test migration**:
    ```bash
    # Reset database (⚠️ deletes all data)
-   pnpm infra:down -v
-   pnpm infra:up
+   pnpm infra2:down -- -v
+   pnpm infra2:up
    pnpm migrate
    ```
 

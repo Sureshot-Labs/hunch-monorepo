@@ -9,6 +9,21 @@ config({ path: resolve(cwd, "../../.env"), override: true }); // load repo .env
   (k) => delete process.env[k],
 );
 
+function parseOptionalInt(v: string | undefined): number | undefined {
+  if (v == null || v.trim() === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
+function clampInt(
+  v: number | undefined,
+  { min, max, fallback }: { min: number; max: number; fallback: number },
+): number {
+  if (v == null) return fallback;
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
 function req(name: string): string {
   const v = process.env[name];
   if (!v) {
@@ -17,6 +32,40 @@ function req(name: string): string {
   }
   return v;
 }
+
+const pageSizeRaw = parseOptionalInt(process.env.POLYMARKET_PAGE_SIZE);
+const pageSize = clampInt(pageSizeRaw, { min: 1, max: 500, fallback: 500 });
+
+const refreshMinutesRaw = parseOptionalInt(process.env.POLYMARKET_REFRESH_MIN);
+const refreshMinutes = clampInt(refreshMinutesRaw, {
+  min: 1,
+  max: 24 * 60,
+  fallback: 10,
+});
+
+const hotLookbackMinutesRaw = parseOptionalInt(
+  process.env.POLYMARKET_HOT_LOOKBACK_MIN,
+);
+const hotLookbackMinutesFallback = Math.max(refreshMinutes * 2, 30);
+const hotLookbackMinutes = clampInt(hotLookbackMinutesRaw, {
+  min: 1,
+  max: 7 * 24 * 60,
+  fallback: hotLookbackMinutesFallback,
+});
+
+const hotMaxPagesRaw = parseOptionalInt(process.env.POLYMARKET_HOT_MAX_PAGES);
+const hotMaxPages = clampInt(hotMaxPagesRaw, {
+  min: 1,
+  max: 10_000,
+  fallback: 10,
+});
+
+const overlapPagesRaw = parseOptionalInt(process.env.POLYMARKET_OVERLAP_PAGES);
+const overlapPages = clampInt(overlapPagesRaw, {
+  min: 0,
+  max: 10_000,
+  fallback: 2,
+});
 
 export const env = {
   dbUrl: req("DATABASE_URL"),
@@ -27,6 +76,11 @@ export const env = {
   wsUrl:
     process.env.POLYMARKET_WS ??
     "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+  pageSize,
+  refreshMinutes,
+  hotLookbackMinutes,
+  hotMaxPages,
+  overlapPages,
   // bootstrapLimit removed - now fetching all events
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),

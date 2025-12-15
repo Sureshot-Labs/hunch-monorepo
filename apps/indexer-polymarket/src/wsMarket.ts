@@ -12,6 +12,8 @@ const state: SubState = { subscribed: new Set() };
 const mq = new PQueue({ concurrency: Number(env.wsConcurrency || 8) });
 let redisBound = false;
 let shutdownBound = false;
+let currentWs: WebSocket | null = null;
+let desiredTokenIds: string[] = [];
 
 function bindRedisErrorOnce() {
   if (redisBound) return;
@@ -65,7 +67,12 @@ function syncSubscriptions(ws: WebSocket, desiredIds: string[]) {
 }
 
 export function startMarketWS(initialTokenIds: string[], attempt = 0) {
+  desiredTokenIds = initialTokenIds;
+  // New WS connection must re-subscribe from scratch.
+  // Keep a local memory set for diffing, but don't assume the server preserves it.
+  state.subscribed = new Set();
   const ws = new WebSocket(env.wsUrl, { perMessageDeflate: true });
+  currentWs = ws;
 
   // perMessageDeflate enables per-message compression (a WebSocket extension called permessage-deflate).
   // This means that data sent/received can be compressed to save bandwidth.
@@ -98,8 +105,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     log.info("WS open", env.wsUrl);
     bindRedisErrorOnce();
     await ensureRedis();
-    const initial = initialTokenIds.slice(0, env.wsSubset);
-    syncSubscriptions(ws, initial); // <- instead of manual add + send
+    syncSubscriptions(ws, desiredTokenIds); // <- instead of manual add + send
 
     pingInterval = setInterval(() => {
       try {
@@ -110,41 +116,67 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     }, 20_000);
   });
 
-  ws.on("message", async (raw) => {
-    mq.add(async () => {
-      const msg = JSON.parse(String(raw));
-      const evt = msg.event_type || msg.type; // be tolerant
-      const id = msg.asset_id || msg.token_id;
-      if (!id) return;
+  ws.on("message", (raw) => {
+    const text = String(raw);
+    if (text === "PONG" || text === "PING") return;
 
-      // book snapshot or price change
-      if (evt === "book" || evt === "price_change") {
-        // some docs show bids/asks; older text mentions buys/sells; normalize
-        const bids = msg.bids || msg.buys || [];
-        const asks = msg.asks || msg.sells || [];
+    let msg: unknown;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      // Some WS servers send non-JSON keepalives; ignore.
+      return;
+    }
+    //console.log("WS msg", msg);
+    void mq
+      .add(async () => {
+        try {
+          if (typeof msg !== "object" || msg === null) return;
+          const m = msg as Record<string, unknown>;
+          const evt = m.event_type || m.type; // be tolerant
+          const id = m.asset_id || m.token_id;
+          if (typeof id !== "string" || id.length === 0) return;
 
-        const bb = bids.length ? parseFloat(bids[0].price) : null;
-        const ba = asks.length ? parseFloat(asks[0].price) : null;
+          // book snapshot or price change
+          if (evt === "book" || evt === "price_change") {
+            // some docs show bids/asks; older text mentions buys/sells; normalize
+            const bids =
+              (m.bids as Array<{ price: string }> | undefined) ||
+              (m.buys as Array<{ price: string }> | undefined) ||
+              [];
+            const asks =
+              (m.asks as Array<{ price: string }> | undefined) ||
+              (m.sells as Array<{ price: string }> | undefined) ||
+              [];
 
-        if (bb != null || ba != null) {
-          const t = Number(msg.timestamp);
-          const ts = isFinite(t) ? (t < 1e12 ? t * 1000 : t) : Date.now();
+            const bb = bids.length ? parseFloat(bids[0].price) : null;
+            const ba = asks.length ? parseFloat(asks[0].price) : null;
 
-          const multi = redis.multi();
-          multi.set(`book:${id}`, JSON.stringify(msg), { EX: 5 });
-          multi.publish(
-            `prices:${id}`,
-            JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts }),
-          );
-          await Promise.all([
-            writeUnifiedBookTop(pool, id, bb, ba, new Date(ts)),
-            multi.exec(),
-          ]);
+            if (bb != null || ba != null) {
+              const t = Number(m.timestamp);
+              const ts = isFinite(t) ? (t < 1e12 ? t * 1000 : t) : Date.now();
+
+              const multi = redis.multi();
+              multi.set(`book:${id}`, JSON.stringify(msg), { EX: 5 });
+              multi.publish(
+                `prices:${id}`,
+                JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts }),
+              );
+              await Promise.all([
+                writeUnifiedBookTop(pool, id, bb, ba, new Date(ts)),
+                multi.exec(),
+              ]);
+            }
+          } else if (evt === "last_trade_price") {
+            // optional: buffer then batch insert into last_trade
+          }
+        } catch (err) {
+          log.warn("WS message handler error", err);
         }
-      } else if (evt === "last_trade_price") {
-        // optional: buffer then batch insert into last_trade
-      }
-    });
+      })
+      .catch((err) => {
+        log.warn("WS message task rejected", err);
+      });
   });
 
   ws.on("close", (code, reason) => {
@@ -155,11 +187,19 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     const base = 1000 * 2 ** Math.min(attempt, 5);
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
     setTimeout(
-      () => startMarketWS(Array.from(state.subscribed), attempt + 1),
+      () => startMarketWS(desiredTokenIds, attempt + 1),
       delay,
     );
   });
 
   ws.on("error", (err) => log.err("WS error", err));
   return ws;
+}
+
+export function updateMarketWSSubscriptions(nextTokenIds: string[]): void {
+  desiredTokenIds = nextTokenIds;
+  const ws = currentWs;
+  if (!ws) return;
+  if (ws.readyState !== WebSocket.OPEN) return;
+  syncSubscriptions(ws, desiredTokenIds);
 }
