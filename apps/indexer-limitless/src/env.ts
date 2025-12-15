@@ -18,16 +18,59 @@ function req(name: string): string {
   return v;
 }
 
+function parseOptionalBool(v: string | undefined): boolean | undefined {
+  if (!v) return undefined;
+  switch (v.toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+const limitlessEnabledSetting = parseOptionalBool(
+  process.env.LIMITLESS_ENABLED,
+);
+
+const pageSizeRaw = Number(process.env.LIMITLESS_PAGE_SIZE ?? "25");
+const bootstrapPageSize = Math.min(
+  25,
+  Math.max(1, Number.isFinite(pageSizeRaw) ? pageSizeRaw : 25),
+);
+
+const maxPagesRaw = Number(process.env.LIMITLESS_MAX_PAGES ?? "10");
+const bootstrapMaxPages = Math.max(
+  0,
+  Number.isFinite(maxPagesRaw) ? maxPagesRaw : 10,
+);
+
+const refreshMinutesRaw = Number(process.env.LIMITLESS_REFRESH_MIN ?? "5");
+const refreshMinutes = Math.max(
+  1,
+  Number.isFinite(refreshMinutesRaw) ? refreshMinutesRaw : 5,
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "",
 
+  limitlessEnabledSetting,
+  limitlessEnabled: limitlessEnabledSetting ?? true,
+
   limitlessBase: process.env.LIMITLESS_BASE ?? "https://api.limitless.exchange",
   // how many markets we’ll pull per bootstrap tick
-  bootstrapPageSize: Number(process.env.LIMITLESS_PAGE_SIZE ?? "100"),
-  bootstrapMaxPages: Number(process.env.LIMITLESS_MAX_PAGES ?? "10"),
+  bootstrapPageSize,
+  bootstrapMaxPages,
   // minutes between refreshes
-  refreshMinutes: Number(process.env.LIMITLESS_REFRESH_MIN ?? "5"),
+  refreshMinutes,
 
   // prices are % (0..100). convert to 0..1
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",

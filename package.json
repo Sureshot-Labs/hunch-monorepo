@@ -14,6 +14,9 @@
     "infra:up": "docker-compose --env-file .env -f ops/docker-compose.yml up -d postgres redis",
     "infra:down": "docker-compose --env-file .env -f ops/docker-compose.yml down",
     "logs": "docker-compose -f ops/docker-compose.yml logs -f --tail=200",
+    "infra2:up": "docker compose --env-file .env -f ops/docker-compose.yml up -d postgres redis",
+    "infra2:down": "docker compose --env-file .env -f ops/docker-compose.yml down",
+    "infra2:logs": "docker compose -f ops/docker-compose.yml logs -f --tail=200",
     "run-db": "docker exec -it hunch-postgres psql -U hunch -d hunch"
   },
   "devDependencies": {
