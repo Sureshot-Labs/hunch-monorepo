@@ -2,8 +2,13 @@ import type { FastifyPluginAsync } from "fastify";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { parseOrReply } from "../lib/zod.js";
-import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
-import type { Order, OrderStatus, Position } from "../order-types.js";
+import type { Order, Position } from "../order-types.js";
+import {
+  fetchOrderHistoryRows,
+  fetchOrdersForUser,
+  findOrderVenueForUser,
+  storeOrder,
+} from "../repos/orders-repo.js";
 import { VenueOrderManagerFactory } from "../venue-order-manager-factory.js";
 import {
   orderHistoryQuerySchema,
@@ -182,51 +187,46 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       const venueQuery = query.venue;
 
       try {
-        const client = await pool.connect();
-        try {
-          const orderResult = await client.query<{ venue: string }>(
-            "SELECT venue FROM orders WHERE id = $1 AND user_id = $2",
-            [params.id, user.id],
-          );
+        const venueFromDb = await findOrderVenueForUser(pool, {
+          orderId: params.id,
+          userId: user.id,
+        });
 
-          if (orderResult.rows.length === 0) {
-            reply.code(404);
-            return reply.send({ error: "Order not found" });
-          }
+        if (!venueFromDb) {
+          reply.code(404);
+          return reply.send({ error: "Order not found" });
+        }
 
-          const venueFromDb = orderResult.rows[0].venue as
-            | "polymarket"
-            | "kalshi"
-            | "limitless";
+        const venueFromDbTyped = venueFromDb as
+          | "polymarket"
+          | "kalshi"
+          | "limitless";
 
-          if (venueQuery && venueQuery !== venueFromDb) {
-            reply.code(400);
-            return reply.send({
-              error: "Venue mismatch for order",
-              venue: venueFromDb,
-            });
-          }
-
-          const venue = venueQuery ?? venueFromDb;
-          const result = await VenueOrderManagerFactory.getOrder(
-            venue,
-            user.id,
-            walletAddress,
-            params.id,
-          );
-
-          if (result.success) {
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({ order: result.order });
-          }
-
+        if (venueQuery && venueQuery !== venueFromDbTyped) {
           reply.code(400);
           return reply.send({
-            error: result.errorMessage || "Failed to fetch order",
+            error: "Venue mismatch for order",
+            venue: venueFromDbTyped,
           });
-        } finally {
-          client.release();
         }
+
+        const venue = venueQuery ?? venueFromDbTyped;
+        const result = await VenueOrderManagerFactory.getOrder(
+          venue,
+          user.id,
+          walletAddress,
+          params.id,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({ order: result.order });
+        }
+
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || "Failed to fetch order",
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress, orderId: params.id },
@@ -260,43 +260,33 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       if (!params) return;
 
       try {
-        const client = await pool.connect();
-        try {
-          const orderResult = await client.query<{ venue: string }>(
-            "SELECT venue FROM orders WHERE id = $1 AND user_id = $2",
-            [params.id, user.id],
-          );
+        const venueFromDb = await findOrderVenueForUser(pool, {
+          orderId: params.id,
+          userId: user.id,
+        });
 
-          if (orderResult.rows.length === 0) {
-            reply.code(404);
-            return reply.send({ error: "Order not found" });
-          }
-
-          const venue = orderResult.rows[0].venue as
-            | "polymarket"
-            | "kalshi"
-            | "limitless";
-
-          const result = await VenueOrderManagerFactory.cancelOrder(
-            venue,
-            user.id,
-            walletAddress,
-            params.id,
-          );
-
-          if (result.success) {
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({ message: "Order cancelled successfully" });
-          }
-
-          reply.code(400);
-          return reply.send({
-            error: result.errorMessage || "Failed to cancel order",
-            rawError: result.rawError,
-          });
-        } finally {
-          client.release();
+        if (!venueFromDb) {
+          reply.code(404);
+          return reply.send({ error: "Order not found" });
         }
+
+        const result = await VenueOrderManagerFactory.cancelOrder(
+          venueFromDb as "polymarket" | "kalshi" | "limitless",
+          user.id,
+          walletAddress,
+          params.id,
+        );
+
+        if (result.success) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({ message: "Order cancelled successfully" });
+        }
+
+        reply.code(400);
+        return reply.send({
+          error: result.errorMessage || "Failed to cancel order",
+          rawError: result.rawError,
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress, orderId: params.id },
@@ -329,78 +319,50 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       if (!query) return;
 
       try {
-        const client = await pool.connect();
-        try {
-          let whereClause = "WHERE user_id = $1";
-          const params: PgParams = [user.id];
-          let paramCount = 1;
+        const limit = query.limit;
+        const offset = query.offset;
 
-          if (query.venue) {
-            paramCount++;
-            whereClause += ` AND venue = $${paramCount}`;
-            params.push(query.venue);
-          }
+        const rows = await fetchOrderHistoryRows(pool, {
+          userId: user.id,
+          venue: query.venue,
+          status: query.status,
+          limit,
+          offset,
+        });
 
-          if (query.status) {
-            paramCount++;
-            whereClause += ` AND status = $${paramCount}`;
-            params.push(query.status as OrderStatus);
-          }
+        const orders = rows.map((row) => ({
+          id: row.id,
+          userId: row.user_id,
+          venue: row.venue,
+          venueOrderId: row.venue_order_id,
+          tokenId: row.token_id,
+          side: row.side,
+          orderType: row.order_type,
+          price: parseFloat(row.price),
+          size: parseFloat(row.size),
+          status: row.status,
+          filledSize: parseFloat(row.filled_size || "0"),
+          averageFillPrice: row.average_fill_price
+            ? parseFloat(row.average_fill_price)
+            : null,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          filledAt: row.filled_at,
+          cancelledAt: row.cancelled_at,
+          errorMessage: row.error_message,
+          rawError: row.raw_error,
+        }));
 
-          const limit = query.limit;
-          const offset = query.offset;
-
-          const result = await client.query<OrderHistoryRow>(
-            `
-              SELECT
-                id, user_id, venue, venue_order_id, token_id, side, order_type,
-                price, size, status, filled_size, average_fill_price,
-                expires_at, created_at, updated_at, filled_at, cancelled_at,
-                error_message, raw_error
-              FROM orders
-              ${whereClause}
-              ORDER BY created_at DESC
-              LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
-            `,
-            [...params, limit, offset],
-          );
-
-          const orders = result.rows.map((row) => ({
-            id: row.id,
-            userId: row.user_id,
-            venue: row.venue,
-            venueOrderId: row.venue_order_id,
-            tokenId: row.token_id,
-            side: row.side,
-            orderType: row.order_type,
-            price: parseFloat(row.price),
-            size: parseFloat(row.size),
-            status: row.status,
-            filledSize: parseFloat(row.filled_size || "0"),
-            averageFillPrice: row.average_fill_price
-              ? parseFloat(row.average_fill_price)
-              : null,
-            expiresAt: row.expires_at,
-            createdAt: row.created_at,
-            updatedAt: row.updated_at,
-            filledAt: row.filled_at,
-            cancelledAt: row.cancelled_at,
-            errorMessage: row.error_message,
-            rawError: row.raw_error,
-          }));
-
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            orders,
-            pagination: {
-              limit,
-              offset,
-              hasMore: orders.length === limit,
-            },
-          });
-        } finally {
-          client.release();
-        }
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          orders,
+          pagination: {
+            limit,
+            offset,
+            hasMore: orders.length === limit,
+          },
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id },
@@ -514,68 +476,36 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const client = await pool.connect();
-        try {
-          await client.query("BEGIN");
+        const result = await storeOrder(pool, {
+          userId: user.id,
+          venue: body.venue ?? "polymarket",
+          venueOrderId: body.orderID,
+          tokenId: body.tokenId ?? null,
+          side: body.side ?? null,
+          price: body.price ?? null,
+          size: body.size ?? null,
+          status: body.status || "live",
+          errorMessage: body.errorMsg ?? null,
+          rawError: body.success === false ? JSON.stringify(body) : null,
+        });
 
-          const existingOrder = await client.query<{ id: string }>(
-            "SELECT id FROM orders WHERE venue_order_id = $1 AND user_id = $2",
-            [body.orderID, user.id],
-          );
-
-          if (existingOrder.rows.length > 0) {
-            reply.code(409);
-            return reply.send({ error: "Order already exists" });
-          }
-
-          const result = await client.query<{
-            id: string;
-            venue_order_id: string;
-            status: string;
-            posted_at: Date;
-          }>(
-            `INSERT INTO orders (
-                id, user_id, venue, venue_order_id, token_id, side, order_type,
-                price, size, status, filled_size, error_message, raw_error,
-                posted_at, last_update
-              ) VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, 'GTC', $6, $7, $8, 0, $9, $10,
-                now(), now()
-              ) RETURNING id, venue_order_id, status, posted_at`,
-            [
-              user.id,
-              body.venue ?? "polymarket",
-              body.orderID,
-              body.tokenId ?? null,
-              body.side ?? null,
-              body.price ?? null,
-              body.size ?? null,
-              body.status || "live",
-              body.errorMsg ?? null,
-              body.success === false ? JSON.stringify(body) : null,
-            ],
-          );
-
-          await client.query("COMMIT");
-
-          const newOrder = result.rows[0];
-
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            message: "Order stored successfully",
-            order: {
-              id: newOrder.id,
-              orderID: newOrder.venue_order_id,
-              status: newOrder.status,
-              storedAt: newOrder.posted_at,
-            },
-          });
-        } catch (error) {
-          await client.query("ROLLBACK");
-          throw error;
-        } finally {
-          client.release();
+        if (result.kind === "exists") {
+          reply.code(409);
+          return reply.send({ error: "Order already exists" });
         }
+
+        const newOrder = result.order;
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Order stored successfully",
+          order: {
+            id: newOrder.id,
+            orderID: newOrder.venue_order_id,
+            status: newOrder.status,
+            storedAt: newOrder.posted_at,
+          },
+        });
       } catch (error) {
         app.log.error(
           {
@@ -633,80 +563,48 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const client = await pool.connect();
-        try {
-          let whereClause = "WHERE user_id = $1";
-          const params: PgParams = [user.id];
-          let paramCount = 1;
+        const limit = query.limit;
+        const offset = query.offset;
 
-          if (query.status) {
-            paramCount++;
-            whereClause += ` AND status = $${paramCount}`;
-            params.push(query.status);
-          }
+        const result = await fetchOrdersForUser(pool, {
+          userId: user.id,
+          status: query.status,
+          venue: query.venue,
+          limit,
+          offset,
+        });
 
-          if (query.venue) {
-            paramCount++;
-            whereClause += ` AND venue = $${paramCount}`;
-            params.push(query.venue);
-          }
+        const orders = result.rows.map((row) => ({
+          id: row.id,
+          orderID: row.venue_order_id,
+          venue: row.venue,
+          tokenId: row.token_id,
+          side: row.side,
+          orderType: row.order_type,
+          price: row.price ? parseFloat(row.price) : null,
+          size: row.size ? parseFloat(row.size) : null,
+          status: row.status,
+          filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
+          averageFillPrice: row.average_fill_price
+            ? parseFloat(row.average_fill_price)
+            : null,
+          postedAt: row.posted_at,
+          lastUpdate: row.last_update,
+          filledAt: row.filled_at,
+          cancelledAt: row.cancelled_at,
+        }));
 
-          const limit = query.limit;
-          const offset = query.offset;
-
-          const result = await client.query<OrderRow>(
-            `SELECT
-                id, venue_order_id, venue, token_id, side, order_type,
-                price, size, status, filled_size, average_fill_price,
-                posted_at, last_update, filled_at, cancelled_at
-              FROM orders
-              ${whereClause}
-              ORDER BY posted_at DESC
-              LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
-            [...params, limit, offset],
-          );
-
-          const countResult = await client.query<{ total: string }>(
-            `SELECT COUNT(*) as total FROM orders ${whereClause}`,
-            params,
-          );
-
-          const totalCount = parseInt(countResult.rows[0].total);
-
-          const orders = result.rows.map((row) => ({
-            id: row.id,
-            orderID: row.venue_order_id,
-            venue: row.venue,
-            tokenId: row.token_id,
-            side: row.side,
-            orderType: row.order_type,
-            price: row.price ? parseFloat(row.price) : null,
-            size: row.size ? parseFloat(row.size) : null,
-            status: row.status,
-            filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
-            averageFillPrice: row.average_fill_price
-              ? parseFloat(row.average_fill_price)
-              : null,
-            postedAt: row.posted_at,
-            lastUpdate: row.last_update,
-            filledAt: row.filled_at,
-            cancelledAt: row.cancelled_at,
-          }));
-
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            walletAddress,
-            orders,
-            pagination: {
-              total: totalCount,
-              limit,
-              offset,
-              hasMore: offset + limit < totalCount,
-            },
-          });
-        } finally {
-          client.release();
-        }
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          walletAddress,
+          orders,
+          pagination: {
+            total: result.total,
+            limit,
+            offset,
+            hasMore: offset + limit < result.total,
+          },
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress },
