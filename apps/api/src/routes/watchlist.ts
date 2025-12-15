@@ -1,8 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { isRecord } from "../lib/type-guards.js";
-import { parseOrReply } from "../lib/zod.js";
 import {
   watchlistAddBodySchema,
   watchlistListQuerySchema,
@@ -12,13 +12,18 @@ import { fetchWatchlistPage } from "../repos/watchlist-repo.js";
 import type { PgParams, TokenPair, WatchlistEvent } from "../server-types.js";
 
 export const watchlistRoutes: FastifyPluginAsync = async (app) => {
+  const z = app.withTypeProvider<ZodTypeProvider>();
+
   /**
    * POST /watchlist
    * Add a market to user's watchlist
    */
-  app.post(
+  z.post(
     "/watchlist",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: watchlistAddBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -26,8 +31,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(reply, watchlistAddBodySchema, request.body);
-      if (!body) return;
+      const body = request.body;
 
       try {
         const client = await pool.connect();
@@ -91,9 +95,12 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
    * GET /watchlist
    * Get all markets in user's watchlist
    */
-  app.get(
+  z.get(
     "/watchlist",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: watchlistListQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -101,12 +108,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const query = parseOrReply(
-        reply,
-        watchlistListQuerySchema,
-        request.query,
-      );
-      if (!query) return;
+      const query = request.query;
       const limit = query.limit;
       const offset = query.offset;
       const includeInactive = query.include_inactive;
@@ -217,9 +219,12 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
    * DELETE /watchlist/:marketId
    * Remove a market from user's watchlist
    */
-  app.delete(
+  z.delete(
     "/watchlist/:marketId",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { params: watchlistRemoveParamsSchema },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -227,13 +232,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const params = parseOrReply(
-        reply,
-        watchlistRemoveParamsSchema,
-        request.params,
-      );
-      if (!params) return;
-      const { marketId } = params;
+      const { marketId } = request.params;
 
       try {
         const client = await pool.connect();

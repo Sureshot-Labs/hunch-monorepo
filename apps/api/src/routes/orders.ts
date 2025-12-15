@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
-import { parseOrReply } from "../lib/zod.js";
 import type { Order, Position } from "../order-types.js";
 import {
   fetchOrderHistoryRows,
@@ -22,13 +22,18 @@ import {
 } from "../schemas/orders.js";
 
 export const orderRoutes: FastifyPluginAsync = async (app) => {
+  const z = app.withTypeProvider<ZodTypeProvider>();
+
   /**
    * POST /orders
    * Place a new order
    */
-  app.post(
+  z.post(
     "/orders",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: placeOrderBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -37,8 +42,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(reply, placeOrderBodySchema, request.body);
-      if (!body) return;
+      const body = request.body;
 
       const l1Headers = {
         l1Signature: request.headers["poly_signature"] as string,
@@ -98,9 +102,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * GET /orders
    * Get active orders for the user
    */
-  app.get(
+  z.get(
     "/orders",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: ordersListQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -109,8 +116,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const query = parseOrReply(reply, ordersListQuerySchema, request.query);
-      if (!query) return;
+      const query = request.query;
       const venue = query.venue;
 
       try {
@@ -169,9 +175,15 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * GET /orders/:id
    * Get specific order details
    */
-  app.get(
+  z.get(
     "/orders/:id",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: orderIdParamsSchema,
+        querystring: ordersListQuerySchema,
+      },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -180,10 +192,8 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const params = parseOrReply(reply, orderIdParamsSchema, request.params);
-      if (!params) return;
-      const query = parseOrReply(reply, ordersListQuerySchema, request.query);
-      if (!query) return;
+      const params = request.params;
+      const query = request.query;
       const venueQuery = query.venue;
 
       try {
@@ -245,9 +255,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * DELETE /orders/:id
    * Cancel an order
    */
-  app.delete(
+  z.delete(
     "/orders/:id",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { params: orderIdParamsSchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -256,8 +269,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const params = parseOrReply(reply, orderIdParamsSchema, request.params);
-      if (!params) return;
+      const params = request.params;
 
       try {
         const venueFromDb = await findOrderVenueForUser(pool, {
@@ -305,9 +317,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * GET /orders/history
    * Get order history for the user
    */
-  app.get(
+  z.get(
     "/orders/history",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: orderHistoryQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -315,8 +330,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const query = parseOrReply(reply, orderHistoryQuerySchema, request.query);
-      if (!query) return;
+      const query = request.query;
 
       try {
         const limit = query.limit;
@@ -381,9 +395,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * GET /positions
    * Get user positions
    */
-  app.get(
+  z.get(
     "/positions",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: positionsQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -392,8 +409,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const query = parseOrReply(reply, positionsQuerySchema, request.query);
-      if (!query) return;
+      const query = request.query;
       const venue = query.venue;
 
       try {
@@ -452,9 +468,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * POST /orders/store
    * Store order data after user performs the order on frontend
    */
-  app.post(
+  z.post(
     "/orders/store",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: storeOrderBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const authedWalletAddress = request.walletAddress;
@@ -463,8 +482,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(reply, storeOrderBodySchema, request.body);
-      if (!body) return;
+      const body = request.body;
 
       if (
         body.walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()
@@ -529,9 +547,15 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
    * GET /orders/user/:walletAddress
    * Get order IDs for a specific wallet address
    */
-  app.get(
+  z.get(
     "/orders/user/:walletAddress",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: ordersForWalletParamsSchema,
+        querystring: ordersForWalletQuerySchema,
+      },
+    },
     async (request, reply) => {
       const user = request.user;
       const authedWalletAddress = request.walletAddress;
@@ -540,20 +564,8 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const paramsParsed = parseOrReply(
-        reply,
-        ordersForWalletParamsSchema,
-        request.params,
-      );
-      if (!paramsParsed) return;
-      const { walletAddress } = paramsParsed;
-
-      const query = parseOrReply(
-        reply,
-        ordersForWalletQuerySchema,
-        request.query,
-      );
-      if (!query) return;
+      const { walletAddress } = request.params;
+      const query = request.query;
 
       if (walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()) {
         reply.code(403);

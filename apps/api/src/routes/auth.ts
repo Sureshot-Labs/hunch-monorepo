@@ -1,11 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import {
   AuthService,
   WalletAlreadyExistsError,
   createAuthMiddleware,
 } from "../auth.js";
 import { PrivyService } from "../privy-service.js";
-import { parseOrReply } from "../lib/zod.js";
 import {
   addWalletBodySchema,
   authPrivyBodySchema,
@@ -14,104 +14,109 @@ import {
 } from "../schemas/auth.js";
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
+  const z = app.withTypeProvider<ZodTypeProvider>();
+
   /**
    * POST /auth/privy
    * Authenticate user using Privy access token
    */
-  app.post("/auth/privy", async (request, reply) => {
-    const body = parseOrReply(reply, authPrivyBodySchema, request.body);
-    if (!body) return;
+  z.post(
+    "/auth/privy",
+    { schema: { body: authPrivyBodySchema } },
+    async (request, reply) => {
+      const body = request.body;
 
-    const clientIp = request.ip || "unknown";
-    const userAgent = request.headers["user-agent"] || "unknown";
+      const clientIp = request.ip || "unknown";
+      const userAgent = request.headers["user-agent"] || "unknown";
 
-    try {
-      const {
-        claims,
-        user: privyUser,
-        walletAddresses,
-        primaryWalletAddress,
-      } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
+      try {
+        const {
+          claims,
+          user: privyUser,
+          walletAddresses,
+          primaryWalletAddress,
+        } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
 
-      if (!primaryWalletAddress) {
-        reply.code(400);
+        if (!primaryWalletAddress) {
+          reply.code(400);
+          return reply.send({
+            error: "No wallet address found in Privy user data",
+          });
+        }
+
+        const user = await AuthService.createOrUpdateUserFromPrivy(
+          privyUser,
+          claims,
+        );
+
+        const sessionToken = AuthService.generateToken(
+          user.id,
+          primaryWalletAddress,
+        );
+
+        const session = await AuthService.createSession(
+          user.id,
+          primaryWalletAddress,
+          sessionToken,
+          clientIp,
+          userAgent,
+        );
+
+        await AuthService.recordAuthAttempt(
+          primaryWalletAddress,
+          "privy-auth",
+          true,
+          clientIp,
+          userAgent,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          error: "No wallet address found in Privy user data",
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            displayName: user.displayName,
+            avatarUrl: user.avatarUrl,
+            isActive: user.isActive,
+            isVerified: user.isVerified,
+            createdAt: user.createdAt,
+            lastLoginAt: user.lastLoginAt,
+          },
+          session: {
+            token: sessionToken,
+            expiresAt: session.expiresAt,
+          },
+          walletAddresses,
+          primaryWalletAddress,
+          privyUserId: privyUser.id,
+        });
+      } catch (error) {
+        app.log.error({ error }, "Privy authentication failed");
+
+        await AuthService.recordAuthAttempt(
+          "unknown",
+          "privy-auth",
+          false,
+          clientIp,
+          userAgent,
+          error instanceof Error ? error.message : "Unknown error",
+        );
+
+        reply.code(401);
+        return reply.send({
+          error: "Authentication failed",
+          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
-
-      const user = await AuthService.createOrUpdateUserFromPrivy(
-        privyUser,
-        claims,
-      );
-
-      const sessionToken = AuthService.generateToken(
-        user.id,
-        primaryWalletAddress,
-      );
-
-      const session = await AuthService.createSession(
-        user.id,
-        primaryWalletAddress,
-        sessionToken,
-        clientIp,
-        userAgent,
-      );
-
-      await AuthService.recordAuthAttempt(
-        primaryWalletAddress,
-        "privy-auth",
-        true,
-        clientIp,
-        userAgent,
-      );
-
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          displayName: user.displayName,
-          avatarUrl: user.avatarUrl,
-          isActive: user.isActive,
-          isVerified: user.isVerified,
-          createdAt: user.createdAt,
-          lastLoginAt: user.lastLoginAt,
-        },
-        session: {
-          token: sessionToken,
-          expiresAt: session.expiresAt,
-        },
-        walletAddresses,
-        primaryWalletAddress,
-        privyUserId: privyUser.id,
-      });
-    } catch (error) {
-      app.log.error({ error }, "Privy authentication failed");
-
-      await AuthService.recordAuthAttempt(
-        "unknown",
-        "privy-auth",
-        false,
-        clientIp,
-        userAgent,
-        error instanceof Error ? error.message : "Unknown error",
-      );
-
-      reply.code(401);
-      return reply.send({
-        error: "Authentication failed",
-        message: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
-  });
+    },
+  );
 
   /**
    * POST /auth/logout
    * Logout user and invalidate session
    */
-  app.post("/auth/logout", async (request, reply) => {
+  z.post("/auth/logout", async (request, reply) => {
     const authHeader = request.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -139,7 +144,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * GET /auth/me
    * Get current user information
    */
-  app.get(
+  z.get(
     "/auth/me",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
@@ -204,9 +209,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * POST /auth/venue-credentials
    * Set API credentials for any venue (Polymarket, Kalshi, Limitless)
    */
-  app.post(
+  z.post(
     "/auth/venue-credentials",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: venueCredentialsBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -215,12 +223,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(
-        reply,
-        venueCredentialsBodySchema,
-        request.body,
-      );
-      if (!body) return;
+      const body = request.body;
       const venue = body.venue;
 
       try {
@@ -263,7 +266,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * GET /auth/venue-credentials
    * Get all venue credentials for user + wallet
    */
-  app.get(
+  z.get(
     "/auth/venue-credentials",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
@@ -310,9 +313,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * POST /auth/polymarket-credentials
    * Set Polymarket API credentials for user (backward compatibility)
    */
-  app.post(
+  z.post(
     "/auth/polymarket-credentials",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketCredentialsBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -321,12 +327,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(
-        reply,
-        polymarketCredentialsBodySchema,
-        request.body,
-      );
-      if (!body) return;
+      const body = request.body;
 
       try {
         const credentials =
@@ -367,7 +368,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * GET /auth/wallets
    * Get user's wallets
    */
-  app.get(
+  z.get(
     "/auth/wallets",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
@@ -407,9 +408,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * POST /auth/wallets
    * Add a new wallet to user account
    */
-  app.post(
+  z.post(
     "/auth/wallets",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: addWalletBodySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -417,8 +421,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const body = parseOrReply(reply, addWalletBodySchema, request.body);
-      if (!body) return;
+      const body = request.body;
 
       const walletType = body.walletType || "ethereum";
       const verificationSignature = body.verificationSignature || undefined;
