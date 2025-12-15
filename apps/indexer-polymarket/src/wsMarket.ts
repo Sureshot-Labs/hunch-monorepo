@@ -160,7 +160,12 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
               multi.set(`book:${id}`, JSON.stringify(msg), { EX: 5 });
               multi.publish(
                 `prices:${id}`,
-                JSON.stringify({ token_id: id, best_bid: bb, best_ask: ba, ts }),
+                JSON.stringify({
+                  token_id: id,
+                  best_bid: bb,
+                  best_ask: ba,
+                  ts,
+                }),
               );
               await Promise.all([
                 writeUnifiedBookTop(pool, id, bb, ba, new Date(ts)),
@@ -186,10 +191,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     const max = 30_000;
     const base = 1000 * 2 ** Math.min(attempt, 5);
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
-    setTimeout(
-      () => startMarketWS(desiredTokenIds, attempt + 1),
-      delay,
-    );
+    setTimeout(() => startMarketWS(desiredTokenIds, attempt + 1), delay);
   });
 
   ws.on("error", (err) => log.err("WS error", err));

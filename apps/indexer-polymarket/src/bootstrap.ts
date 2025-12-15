@@ -299,7 +299,9 @@ export async function selectWsTokenIds(): Promise<string[]> {
   const seen = new Set<string>();
 
   for (const row of rows) {
-    const tokenIds = parseJsonStringArray((row as { clob_token_ids?: unknown }).clob_token_ids);
+    const tokenIds = parseJsonStringArray(
+      (row as { clob_token_ids?: unknown }).clob_token_ids,
+    );
     for (const tokenId of tokenIds) {
       if (seen.has(tokenId)) continue;
       seen.add(tokenId);

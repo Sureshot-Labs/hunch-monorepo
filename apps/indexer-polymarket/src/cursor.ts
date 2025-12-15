@@ -26,4 +26,3 @@ export async function resetPolymarketEventsOffset(): Promise<void> {
   await ensureRedis();
   await redis.set(POLYMARKET_EVENTS_OFFSET_KEY, "0");
 }
-
