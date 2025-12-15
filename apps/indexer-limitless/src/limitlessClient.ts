@@ -3,7 +3,15 @@ import { LimitlessActiveResponse, TLimitlessMarket } from "./types.js";
 
 async function getJson(url: string) {
   const r = await fetch(url, { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error(`Limitless ${r.status} ${url}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    const snippet = body.trim();
+    const details =
+      snippet.length > 0
+        ? `: ${snippet.slice(0, 800)}${snippet.length > 800 ? "…" : ""}`
+        : "";
+    throw new Error(`Limitless ${r.status} ${url}${details}`);
+  }
   return r.json();
 }
 

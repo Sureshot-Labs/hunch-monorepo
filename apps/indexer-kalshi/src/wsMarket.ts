@@ -21,6 +21,12 @@ function deriveTop(ob: { yes?: [number, number][]; no?: [number, number][] }) {
 }
 
 function signWsHeaders() {
+  if (!env.kalshiKeyId || !env.kalshiPrivateKeyPath) {
+    const extra =
+      env.kalshiIssues.length > 0 ? ` (${env.kalshiIssues.join("; ")})` : "";
+    throw new Error(`[kalshi] Missing auth env${extra}`);
+  }
+
   const wsPath = "/trade-api/ws/v2";
   const ts = Date.now().toString();
   const pkPem = fs.readFileSync(path.resolve(env.kalshiPrivateKeyPath), "utf8");

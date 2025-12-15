@@ -1,26 +1,56 @@
 import { bootstrapKalshi } from "./bootstrap";
 import { startMarketWS } from "./wsMarket";
 import { log } from "./log";
+import { env } from "./env";
+import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 
 let bootstrapping = false;
+let wsStarted = false;
+
+async function bootstrapAndMaybeStartWs() {
+  const tickers = await bootstrapKalshi();
+  if (!wsStarted && tickers.length > 0) {
+    startMarketWS(tickers);
+    wsStarted = true;
+  }
+}
 
 async function periodicBootstrap() {
   if (bootstrapping) return; // skip if one is running
   bootstrapping = true;
   try {
-    await bootstrapKalshi();
+    await bootstrapAndMaybeStartWs();
   } catch (e) {
-    log.warn("periodic bootstrap err", e);
+    if (isPgSetupIssue(e)) {
+      log.warn(`bootstrap blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic bootstrap err", e);
+    }
   } finally {
     bootstrapping = false;
   }
 }
 
 async function main() {
-  // 1) Initial bootstrap: get the list of markets/token IDs and prep any caches.
-  const tokenIds = await bootstrapKalshi();
-  // 2) Start streaming updates for those markets. Should handle reconnects internally.
-  startMarketWS(tokenIds);
+  if (env.kalshiEnabledSetting === true && !env.kalshiConfigured) {
+    log.err(
+      `Kalshi indexer enabled but not configured: ${env.kalshiIssues.join("; ")}`,
+    );
+    process.exit(1);
+  }
+
+  if (!env.kalshiEnabled) {
+    const extra =
+      env.kalshiIssues.length > 0 ? ` (${env.kalshiIssues.join("; ")})` : "";
+    log.warn(`Kalshi indexer disabled${extra}`);
+    log.warn(
+      "Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in ../../.env (and ensure the key file exists) to enable.",
+    );
+    return;
+  }
+
+  await periodicBootstrap();
   // 3) Keep refreshing background data every 5 minutes to catch new/changed markets.
   setInterval(periodicBootstrap, 10 * 60 * 1000);
 }

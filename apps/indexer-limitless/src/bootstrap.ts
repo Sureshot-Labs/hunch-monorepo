@@ -12,10 +12,14 @@ import {
   mapToUnifiedMarket,
 } from "./mappers.js";
 import { upsertUnifiedEvent, upsertUnifiedMarket } from "@hunch/db";
+import { isPgSetupIssue } from "@hunch/infra";
 import { pool } from "./db.js";
 
 export async function bootstrapLimitless() {
   log.info("Bootstrapping Limitless…");
+
+  // Fail fast on DB/auth/migrations issues (otherwise we spam per-market failures).
+  await pool.query("select 1");
 
   const markets = await fetchAllActive(
     env.bootstrapMaxPages,
@@ -64,6 +68,7 @@ export async function bootstrapLimitless() {
         marketCount: lm.marketType === "single" ? 1 : lm.markets?.length || 0,
       });
     } catch (error) {
+      if (isPgSetupIssue(error)) throw error;
       log.err(`Failed to process market ${lm.id}: ${lm.title}`, {
         error,
         market: lm,

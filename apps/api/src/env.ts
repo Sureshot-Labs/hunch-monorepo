@@ -10,6 +10,7 @@ function req(name: string) {
 }
 
 export const env = {
+  host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "", // optional

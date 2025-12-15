@@ -1,11 +1,32 @@
 // apps/indexer-kalshi/src/kalshiClient.ts
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import PQueue from "p-queue";
 import { env } from "./env";
 
-const pkPem = fs.readFileSync(path.resolve(env.kalshiPrivateKeyPath), "utf8");
+let cachedKeyPem: string | undefined;
+let cachedKeyPath: string | undefined;
+
+function requireKalshiAuth(): { keyId: string; privateKeyPath: string } {
+  if (!env.kalshiKeyId || !env.kalshiPrivateKeyPath) {
+    const extra =
+      env.kalshiIssues.length > 0 ? ` (${env.kalshiIssues.join("; ")})` : "";
+    throw new Error(`[kalshi] Missing auth env${extra}`);
+  }
+
+  return { keyId: env.kalshiKeyId, privateKeyPath: env.kalshiPrivateKeyPath };
+}
+
+function getPrivateKeyPem(): string {
+  const { privateKeyPath } = requireKalshiAuth();
+  const resolved = path.resolve(privateKeyPath);
+  if (cachedKeyPem && cachedKeyPath === resolved) return cachedKeyPem;
+
+  cachedKeyPem = fs.readFileSync(resolved, "utf8");
+  cachedKeyPath = resolved;
+  return cachedKeyPem;
+}
 
 function sign(method: string, pathOnly: string, tsMs: string) {
   const msg = tsMs + method.toUpperCase() + pathOnly;
@@ -13,7 +34,7 @@ function sign(method: string, pathOnly: string, tsMs: string) {
   sign.update(msg);
   sign.end();
   const sig = sign.sign({
-    key: pkPem,
+    key: getPrivateKeyPem(),
     padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
     saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
   });
@@ -30,10 +51,11 @@ export class KalshiClient {
     init: RequestInit = {},
     write = false,
   ) {
+    const { keyId } = requireKalshiAuth();
     const ts = Date.now().toString();
     const sig = sign(method, pathOnly, ts);
     const headers = new Headers(init.headers);
-    headers.set("KALSHI-ACCESS-KEY", env.kalshiKeyId);
+    headers.set("KALSHI-ACCESS-KEY", keyId);
     headers.set("KALSHI-ACCESS-TIMESTAMP", ts);
     headers.set("KALSHI-ACCESS-SIGNATURE", sig);
     headers.set("accept", "application/json");

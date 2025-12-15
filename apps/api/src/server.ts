@@ -3809,7 +3809,7 @@ app.delete(
 
 export async function start() {
   await getRedis().catch(() => {}); // optional
-  const addr = await app.listen({ port: env.port, host: "0.0.0.0" });
+  const addr = await app.listen({ port: env.port, host: env.host });
   app.log.info(`api listening on ${addr}`);
 }
 

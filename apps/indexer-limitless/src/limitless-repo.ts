@@ -1,8 +1,5 @@
-import { Pool } from "pg";
-import { env } from "./env.js";
 import { log } from "./log.js";
-
-const pool = new Pool({ connectionString: env.dbUrl });
+import { pool } from "./db.js";
 
 export interface LimitlessEventRow {
   id: string;

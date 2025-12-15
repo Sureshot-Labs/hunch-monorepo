@@ -17,6 +17,7 @@ import {
   upsertUnifiedMarket,
   writeUnifiedBookTop,
 } from "@hunch/db";
+import { isPgSetupIssue } from "@hunch/infra";
 import { pool } from "./db";
 import { PolymarketEvent } from "./types";
 import { log } from "./log";
@@ -30,6 +31,9 @@ function chunk<T>(arr: T[], n: number): T[][] {
 
 export async function bootstrapPolymarket() {
   await ensureRedis();
+  // Fail fast on DB/auth/migrations issues (otherwise we spam per-event failures).
+  await pool.query("select 1");
+
   log.info("Bootstrapping Polymarket…");
 
   const topTokenIds = new Set<string>(); // ✅ dedup as you go
@@ -94,6 +98,7 @@ export async function bootstrapPolymarket() {
 
         processedEvents++;
       } catch (err) {
+        if (isPgSetupIssue(err)) throw err;
         log.warn(`Failed to process event ${e.id}:`, err);
       }
     }
@@ -128,6 +133,7 @@ export async function bootstrapPolymarket() {
             await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
           }
         } catch (e) {
+          if (isPgSetupIssue(e)) throw e;
           log.warn("book snapshot failed batch", group[0], String(e));
         }
       }),

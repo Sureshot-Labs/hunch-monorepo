@@ -1,26 +1,38 @@
 import { bootstrapPolymarket } from "./bootstrap";
 import { startMarketWS } from "./wsMarket";
 import { log } from "./log";
+import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 
 let bootstrapping = false;
+let wsStarted = false;
+
+async function bootstrapAndMaybeStartWs() {
+  const tokenIds = await bootstrapPolymarket();
+  if (!wsStarted && tokenIds.length > 0) {
+    startMarketWS(tokenIds);
+    wsStarted = true;
+  }
+}
 
 async function periodicBootstrap() {
   if (bootstrapping) return; // skip if one is running
   bootstrapping = true;
   try {
-    await bootstrapPolymarket();
+    await bootstrapAndMaybeStartWs();
   } catch (e) {
-    log.warn("periodic bootstrap err", e);
+    if (isPgSetupIssue(e)) {
+      log.warn(`bootstrap blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic bootstrap err", e);
+    }
   } finally {
     bootstrapping = false;
   }
 }
 
 async function main() {
-  // 1) Initial bootstrap: get the list of markets/token IDs and prep any caches.
-  const tokenIds = await bootstrapPolymarket();
-  // 2) Start streaming updates for those markets. Should handle reconnects internally.
-  startMarketWS(tokenIds);
+  await periodicBootstrap();
   // 3) Keep refreshing background data every 5 minutes to catch new/changed markets.
   setInterval(periodicBootstrap, 10 * 60 * 1000);
 }
