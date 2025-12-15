@@ -38,6 +38,12 @@ export interface UserWallet {
   updatedAt: Date;
 }
 
+export class WalletAlreadyExistsError extends Error {
+  constructor() {
+    super("Wallet address already exists");
+  }
+}
+
 type UserWalletRow = {
   id: string;
   user_id: string;
@@ -429,6 +435,61 @@ export class AuthService {
     }));
   }
 
+  static async addWallet(
+    userId: string,
+    input: {
+      walletAddress: string;
+      walletType: string;
+      verificationSignature?: string;
+    },
+  ): Promise<UserWallet> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const existingWallet = await client.query<{ id: string }>(
+        "SELECT id FROM user_wallets WHERE wallet_address = $1",
+        [input.walletAddress],
+      );
+
+      if (existingWallet.rows.length > 0) {
+        throw new WalletAlreadyExistsError();
+      }
+
+      const result = await client.query<UserWalletRow>(
+        `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature)
+         VALUES ($1, $2, $3, false, $4, $5)
+         RETURNING id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at`,
+        [
+          userId,
+          input.walletAddress,
+          input.walletType,
+          !!input.verificationSignature,
+          input.verificationSignature ?? null,
+        ],
+      );
+
+      await client.query("COMMIT");
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        userId: row.user_id,
+        walletAddress: row.wallet_address,
+        walletType: row.wallet_type,
+        isPrimary: row.is_primary,
+        isVerified: row.is_verified,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * Create or update venue credentials (Polymarket, Kalshi, Limitless, etc.)
    */
@@ -470,7 +531,7 @@ export class AuthService {
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      lastUsedAt: row.last_used_at,
+      lastUsedAt: row.last_used_at ?? undefined,
     };
   }
 
@@ -480,20 +541,18 @@ export class AuthService {
   static async getVenueCredentials(
     userId: string,
     venue: "polymarket" | "kalshi" | "limitless",
-    walletAddress?: string,
+    walletAddress: string,
   ): Promise<VenueCredentials | null> {
-    let query =
-      "SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at FROM user_venue_credentials WHERE user_id = $1 AND venue = $2 AND is_active = true";
-    const params = [userId, venue];
-
-    if (walletAddress) {
-      query += " AND wallet_address = $3";
-      params.push(walletAddress);
-    }
-
-    query += " ORDER BY last_used_at DESC NULLS LAST, created_at DESC LIMIT 1";
-
-    const result = await pool.query(query, params);
+    const result = await pool.query<VenueCredentialsRow>(
+      `SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at
+       FROM user_venue_credentials
+       WHERE user_id = $1
+         AND venue = $2
+         AND wallet_address = $3
+         AND is_active = true
+       LIMIT 1`,
+      [userId, venue, walletAddress],
+    );
 
     if (result.rows.length === 0) {
       return null;
@@ -513,7 +572,7 @@ export class AuthService {
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      lastUsedAt: row.last_used_at,
+      lastUsedAt: row.last_used_at ?? undefined,
     };
   }
 
@@ -522,20 +581,17 @@ export class AuthService {
    */
   static async getAllVenueCredentials(
     userId: string,
-    walletAddress?: string,
+    walletAddress: string,
   ): Promise<VenueCredentials[]> {
-    let query =
-      "SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at FROM user_venue_credentials WHERE user_id = $1 AND is_active = true";
-    const params = [userId];
-
-    if (walletAddress) {
-      query += " AND wallet_address = $2";
-      params.push(walletAddress);
-    }
-
-    query += " ORDER BY venue, last_used_at DESC NULLS LAST";
-
-    const result = await pool.query<VenueCredentialsRow>(query, params);
+    const result = await pool.query<VenueCredentialsRow>(
+      `SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at
+       FROM user_venue_credentials
+       WHERE user_id = $1
+         AND wallet_address = $2
+         AND is_active = true
+       ORDER BY venue, last_used_at DESC NULLS LAST`,
+      [userId, walletAddress],
+    );
 
     // Map snake_case to camelCase
     return result.rows.map((row) => ({
@@ -571,7 +627,7 @@ export class AuthService {
 
   static async getPolymarketCredentials(
     userId: string,
-    walletAddress?: string,
+    walletAddress: string,
   ): Promise<PolymarketCredentials | null> {
     return this.getVenueCredentials(userId, "polymarket", walletAddress);
   }

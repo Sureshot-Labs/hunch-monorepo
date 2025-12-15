@@ -1,0 +1,24 @@
+import { z } from "zod";
+import { zEthAddressRequired, zRequiredString, zVenue } from "./common.js";
+
+export const authPrivyBodySchema = z.object({
+  accessToken: zRequiredString("accessToken is required"),
+});
+
+export const venueCredentialsBodySchema = z.object({
+  venue: zVenue,
+  apiKey: zRequiredString("apiKey is required"),
+  apiSecret: zRequiredString("apiSecret is required"),
+  additionalData: z.unknown().optional(),
+});
+
+export const polymarketCredentialsBodySchema = z.object({
+  apiKey: zRequiredString("apiKey is required"),
+  apiSecret: zRequiredString("apiSecret is required"),
+});
+
+export const addWalletBodySchema = z.object({
+  walletAddress: zEthAddressRequired,
+  walletType: z.string().optional(),
+  verificationSignature: z.string().optional(),
+});

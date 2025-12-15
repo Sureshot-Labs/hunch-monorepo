@@ -194,7 +194,10 @@ export class PolymarketOrderManager implements VenueOrderManager {
       }
 
       // Get user's Polymarket credentials
-      const credentials = await AuthService.getPolymarketCredentials(userId);
+      const credentials = await AuthService.getPolymarketCredentials(
+        userId,
+        walletAddress,
+      );
       if (!credentials) {
         return {
           success: false,
@@ -244,7 +247,7 @@ export class PolymarketOrderManager implements VenueOrderManager {
 
   async getOrder(
     userId: string,
-    _walletAddress: string,
+    walletAddress: string,
     orderId: string,
   ): Promise<GetOrderResponse> {
     try {
@@ -258,7 +261,10 @@ export class PolymarketOrderManager implements VenueOrderManager {
 
       // If order has been submitted to venue, fetch latest status
       if (order.venueOrderId) {
-        const credentials = await AuthService.getPolymarketCredentials(userId);
+        const credentials = await AuthService.getPolymarketCredentials(
+          userId,
+          walletAddress,
+        );
         if (credentials) {
           const venueStatus = await this.getOrderStatusFromPolymarket(
             order.venueOrderId,
@@ -299,13 +305,16 @@ export class PolymarketOrderManager implements VenueOrderManager {
 
   async getActiveOrders(
     userId: string,
-    _walletAddress: string,
+    walletAddress: string,
   ): Promise<GetActiveOrdersResponse> {
     try {
       const orders = await this.getActiveOrdersFromDatabase(userId);
 
       // Update orders with latest venue status
-      const credentials = await AuthService.getPolymarketCredentials(userId);
+      const credentials = await AuthService.getPolymarketCredentials(
+        userId,
+        walletAddress,
+      );
       if (credentials) {
         for (const order of orders) {
           if (order.venueOrderId) {
