@@ -17,7 +17,14 @@
     "infra2:up": "docker compose --env-file .env -f ops/docker-compose.yml up -d postgres redis",
     "infra2:down": "docker compose --env-file .env -f ops/docker-compose.yml down",
     "infra2:logs": "docker compose -f ops/docker-compose.yml logs -f --tail=200",
-    "run-db": "docker exec -it hunch-postgres psql -U hunch -d hunch"
+    "run-db": "docker exec -it hunch-postgres psql -U hunch -d hunch",
+    "psql": "node ops/psql.js",
+    "psql:docker": "node ops/psql.js --docker",
+    "psql:local": "node ops/psql.js --local",
+    "redis": "node ops/redis.js",
+    "redis:docker": "node ops/redis.js --docker",
+    "redis:local": "node ops/redis.js --local",
+    "smoke:api": "node ops/smoke-api.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
