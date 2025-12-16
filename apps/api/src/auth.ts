@@ -648,7 +648,7 @@ export class AuthService {
       `INSERT INTO user_sessions (user_id, session_token, wallet_address, ip_address, user_agent, expires_at) 
        VALUES ($1, $2, $3, $4, $5, $6) 
        RETURNING id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at`,
-      [userId, walletAddress, sessionToken, ipAddress, userAgent, expiresAt],
+      [userId, sessionToken, walletAddress, ipAddress, userAgent, expiresAt],
     );
 
     const row = result.rows[0];
