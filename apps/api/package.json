@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "openapi:dump": "tsx src/dump-openapi.ts",
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
     "delete-closed": "tsx src/delete-closed-markets.ts",
     "lint": "eslint .",

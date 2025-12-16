@@ -24,6 +24,7 @@ logs/
 .vscode/*
 !.vscode/extensions.json
 test-hunch.txt
+apps/api/openapi.json
 
 # Turborepo
 .turbo/
