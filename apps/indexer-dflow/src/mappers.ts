@@ -8,6 +8,22 @@ function n(v: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function pickNumber(
+  sources: Array<Record<string, unknown> | undefined | null>,
+  keys: string[],
+): number | undefined {
+  for (const source of sources) {
+    if (!source) continue;
+    for (const key of keys) {
+      if (!(key in source)) continue;
+      const value = source[key];
+      const parsed = n(value);
+      if (parsed !== undefined) return parsed;
+    }
+  }
+  return undefined;
+}
+
 function parseDate(v: unknown): Date | undefined {
   if (typeof v === "string") {
     const d = new Date(v);
@@ -65,6 +81,7 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
   const venueEventId = pickEventTicker(e);
   if (!venueEventId) return null;
 
+  const extra = e as Record<string, unknown>;
   const markets = (e.markets ?? []) as TDflowMarket[];
   const openTimes = markets.map((m) =>
     parseDate(m.openTime ?? (m as Record<string, unknown>).open_time),
@@ -89,14 +106,35 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
     parseDate(e.endDate) ??
     maxDate(expTimes.concat(closeTimes));
 
+  const derivedVolumeTotal = markets.reduce(
+    (sum, m) => sum + (n(m.volume) ?? 0),
+    0,
+  );
+  const derivedVolume24h = markets.reduce(
+    (sum, m) => sum + (n(m.volume24h) ?? 0),
+    0,
+  );
+  const derivedLiquidity = markets.reduce(
+    (sum, m) => sum + (n(m.liquidity) ?? 0),
+    0,
+  );
+  const derivedOpenInterest = markets.reduce(
+    (sum, m) => sum + (n(m.openInterest) ?? 0),
+    0,
+  );
+
   const volume_total =
-    markets.reduce((sum, m) => sum + (n(m.volume) ?? 0), 0) || undefined;
+    pickNumber([extra], ["volume", "volumeTotal", "volume_total"]) ??
+    (derivedVolumeTotal > 0 ? derivedVolumeTotal : undefined);
   const volume_24h =
-    markets.reduce((sum, m) => sum + (n(m.volume24h) ?? 0), 0) || undefined;
+    pickNumber([extra], ["volume24h", "volume_24h", "volume24hr"]) ??
+    (derivedVolume24h > 0 ? derivedVolume24h : undefined);
   const liquidity =
-    markets.reduce((sum, m) => sum + (n(m.liquidity) ?? 0), 0) || undefined;
+    pickNumber([extra], ["liquidity", "liquidityNum", "liquidityUsd"]) ??
+    (derivedLiquidity > 0 ? derivedLiquidity : undefined);
   const open_interest =
-    markets.reduce((sum, m) => sum + (n(m.openInterest) ?? 0), 0) || undefined;
+    pickNumber([extra], ["openInterest", "open_interest", "openInterestNum"]) ??
+    (derivedOpenInterest > 0 ? derivedOpenInterest : undefined);
 
   const status = "ACTIVE";
 
@@ -135,6 +173,7 @@ type Instrument = {
   settlementMint: string;
   yesMint: string;
   noMint: string;
+  account?: Record<string, unknown>;
 };
 
 function pickUsdcInstrument(
@@ -152,7 +191,12 @@ function pickUsdcInstrument(
   const no = entry.noMint?.trim();
   if (!yes || !no) return null;
 
-  return { settlementMint: usdcMint, yesMint: yes, noMint: no };
+  return {
+    settlementMint: usdcMint,
+    yesMint: yes,
+    noMint: no,
+    account: entry as unknown as Record<string, unknown>,
+  };
 }
 
 export type DflowMarketSnapshot = {
@@ -189,6 +233,9 @@ export function mapToUnifiedMarket(
   const status = mapDflowStatusToUnified(market.status);
   if (status !== "ACTIVE") return null;
 
+  const extra = market as Record<string, unknown>;
+  const account = instrument.account;
+
   const yesTokenId = `sol:${instrument.yesMint}`;
   const noTokenId = `sol:${instrument.noMint}`;
 
@@ -197,8 +244,27 @@ export function mapToUnifiedMarket(
   const noBid = n(market.noBid);
   const noAsk = n(market.noAsk);
 
-  const volume24h = n(market.volume24h) ?? 0;
-  const liquidity = n(market.liquidity) ?? 0;
+  const volumeTotal = pickNumber(
+    [account, extra],
+    ["volume", "volumeTotal", "volume_total", "volumeNum"],
+  );
+  const volume24h = pickNumber(
+    [account, extra],
+    ["volume24h", "volume_24h", "volume24hr", "volume_24hr", "volume24Hr"],
+  );
+  const liquidity = pickNumber(
+    [account, extra],
+    ["liquidity", "liquidityNum", "liquidity_usd", "liquidityUsd"],
+  );
+  const openInterest = pickNumber(
+    [account, extra],
+    ["openInterest", "open_interest", "openInterestNum"],
+  );
+
+  const storedVolume24h =
+    volume24h != null && volume24h > 0 ? volume24h : undefined;
+  const storedLiquidity =
+    liquidity != null && liquidity > 0 ? liquidity : undefined;
 
   const open_time =
     parseDate(
@@ -248,10 +314,10 @@ export function mapToUnifiedMarket(
     best_ask: yesAsk,
     last_price:
       yesBid != null && yesAsk != null ? (yesBid + yesAsk) / 2 : undefined,
-    volume_total: n(market.volume),
-    volume_24h: volume24h || undefined,
-    open_interest: n(market.openInterest),
-    liquidity: liquidity || undefined,
+    volume_total: volumeTotal,
+    volume_24h: storedVolume24h,
+    open_interest: openInterest,
+    liquidity: storedLiquidity,
     outcomes: JSON.stringify(["YES", "NO"]),
     token_yes: yesTokenId,
     token_no: noTokenId,
@@ -276,8 +342,8 @@ export function mapToUnifiedMarket(
     yesAsk: yesAsk ?? null,
     noBid: noBid ?? null,
     noAsk: noAsk ?? null,
-    volume24h,
-    liquidity,
+    volume24h: volume24h ?? 0,
+    liquidity: liquidity ?? 0,
   };
 
   return { marketRow, tokenRows, snapshot };

@@ -2,10 +2,34 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { zVenue } from "./common.js";
 
-const zVenueQuery = z.preprocess(
-  (v) => (typeof v === "string" ? v.toLowerCase() : v),
-  zVenue.optional(),
-);
+const zVenueQuery = z
+  .preprocess((v) => {
+    const toParts = (value: unknown): string[] => {
+      if (Array.isArray(value)) {
+        return value
+          .filter((p): p is string => typeof p === "string")
+          .flatMap((p) => p.split(","))
+          .map((p) => p.trim().toLowerCase())
+          .filter(Boolean);
+      }
+      if (typeof value === "string") {
+        return value
+          .split(",")
+          .map((p) => p.trim().toLowerCase())
+          .filter(Boolean);
+      }
+      return [];
+    };
+
+    const parts = toParts(v);
+    return parts.length ? parts : undefined;
+  }, z.array(zVenue).optional())
+  .transform((venues) => {
+    if (!venues?.length) return undefined;
+    const unique = Array.from(new Set(venues)).sort();
+    // Treat selecting all venues the same as omitting the filter.
+    return unique.length === zVenue.options.length ? undefined : unique;
+  });
 
 export const feedQuerySchema = z.object({
   limit: z.coerce

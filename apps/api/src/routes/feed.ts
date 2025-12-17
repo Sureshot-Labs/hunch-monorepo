@@ -17,7 +17,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
    *  - limit?: number (default env.defaultLimit, max env.maxLimit)
    *  - offset?: number (default 0)
    *  - min_volume24hr?: number (default > 0)
-   *  - venue?: string ("polymarket" | "kalshi" | "limitless")
+   *  - venue?: string | string[] ("polymarket" | "kalshi" | "limitless", supports CSV)
    *  - category?: string (exact match)
    *  - sort?: string ("trending" | "totalvol" | "liquidity", default: "trending")
    *
@@ -39,7 +39,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const offset = q.offset;
       const minVol = q.min_volume24hr;
       const minLiquidity = q.min_liquidity;
-      const venue = q.venue;
+      const venues = q.venue;
       const category = q.category;
       const filter = q.filter;
       const sort = q.sort;
@@ -51,9 +51,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
 
       // Create cache key with all parameters normalized
-      const cacheKey = `feed:v10:${limit}:${offset}:${minVol}:${minLiquidity}:${
-        venue ?? ""
-      }:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
+      const venueKey = venues?.length ? venues.join(",") : "";
+      const cacheKey = `feed:v10:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -96,7 +95,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         offset,
         minVol,
         minLiquidity,
-        venue,
+        venues,
         category,
         filter,
         sort,
@@ -129,7 +128,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           offset,
           minVol,
           minLiquidity,
-          venue,
+          venues,
           category,
           filter,
           sort,

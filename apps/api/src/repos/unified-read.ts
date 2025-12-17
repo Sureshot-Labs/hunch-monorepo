@@ -6,7 +6,7 @@ export type FeedInputs = {
   offset: number;
   minVol: number;
   minLiquidity: number;
-  venue?: string;
+  venues?: string[];
   category?: string;
   filter?: string;
   sort?: string;
@@ -23,9 +23,9 @@ export async function fetchFeedEventIds(
   const eventWhere: string[] = [];
   let paramIdx = 1;
 
-  if (inputs.venue) {
-    eventParams.push(inputs.venue);
-    eventWhere.push(`lower(e.venue) = $${paramIdx++}`);
+  if (inputs.venues?.length) {
+    eventParams.push(inputs.venues);
+    eventWhere.push(`lower(e.venue) = ANY($${paramIdx++}::text[])`);
   }
   if (inputs.category) {
     // Case-insensitive category matching

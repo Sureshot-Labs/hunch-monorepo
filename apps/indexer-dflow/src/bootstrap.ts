@@ -116,8 +116,14 @@ async function processEvents(events: TDflowEvent[]): Promise<{
     const unifiedEvent = mapToUnifiedEvent(e);
     if (!unifiedEvent) continue;
 
-    unifiedEventRows.push(unifiedEvent);
-    processedEvents += 1;
+    let volumeTotalSum = 0;
+    let volume24hSum = 0;
+    let liquiditySum = 0;
+    let openInterestSum = 0;
+    let hasVolumeTotal = false;
+    let hasVolume24h = false;
+    let hasLiquidity = false;
+    let hasOpenInterest = false;
 
     const markets = e.markets ?? [];
     for (const m of markets) {
@@ -133,7 +139,33 @@ async function processEvents(events: TDflowEvent[]): Promise<{
       tokenRows.push(...mapped.tokenRows);
       snapshots.push(mapped.snapshot);
       processedMarkets += 1;
+
+      const row = mapped.marketRow;
+      if (row.volume_total != null) {
+        volumeTotalSum += row.volume_total;
+        hasVolumeTotal = true;
+      }
+      if (row.volume_24h != null) {
+        volume24hSum += row.volume_24h;
+        hasVolume24h = true;
+      }
+      if (row.liquidity != null) {
+        liquiditySum += row.liquidity;
+        hasLiquidity = true;
+      }
+      if (row.open_interest != null) {
+        openInterestSum += row.open_interest;
+        hasOpenInterest = true;
+      }
     }
+
+    if (hasVolumeTotal) unifiedEvent.volume_total = volumeTotalSum;
+    if (hasVolume24h) unifiedEvent.volume_24h = volume24hSum;
+    if (hasLiquidity) unifiedEvent.liquidity = liquiditySum;
+    if (hasOpenInterest) unifiedEvent.open_interest = openInterestSum;
+
+    unifiedEventRows.push(unifiedEvent);
+    processedEvents += 1;
   }
 
   if (unifiedEventRows.length) {
