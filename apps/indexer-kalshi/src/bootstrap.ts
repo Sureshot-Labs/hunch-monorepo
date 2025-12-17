@@ -101,6 +101,15 @@ export async function bootstrapKalshi() {
               }),
               { EX: 5 },
             );
+            const tick = {
+              token_id: tokenId,
+              best_bid: s.bestBid,
+              best_ask: s.bestAsk,
+              ts: s.ts.getTime(),
+            };
+            const tickJson = JSON.stringify(tick);
+            await redis.set(`top:${tokenId}`, tickJson, { EX: 60 });
+            await redis.publish(`prices:${tokenId}`, tickJson);
           }
         } catch (e) {
           console.warn("book snapshot failed for", t, String(e));

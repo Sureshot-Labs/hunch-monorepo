@@ -9,6 +9,15 @@ function req(name: string) {
   return v;
 }
 
+function optionalPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const asInt = Math.trunc(n);
+  return asInt > 0 ? asInt : fallback;
+}
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
@@ -20,4 +29,5 @@ export const env = {
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
+  pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
 };

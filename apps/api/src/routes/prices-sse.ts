@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
+import { subscribeToPriceTicks } from "../lib/prices-stream-manager.js";
 
 /**
  * GET /prices/stream
@@ -11,6 +12,14 @@ import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
  */
 export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  const parseJson = (raw: string): unknown | null => {
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  };
 
   z.get(
     "/prices/stream",
@@ -30,38 +39,61 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       reply.raw.setHeader("Connection", "keep-alive");
       reply.raw.flushHeaders();
 
-      const sub = r.duplicate();
-      await sub.connect();
-
-      const channels = ids.map((id) => `prices:${id}`);
+      let writable = true;
       const send = (evt: string, data: unknown) => {
+        if (request.raw.destroyed) return;
+        if (!writable) return;
         try {
-          reply.raw.write(`event: ${evt}\n`);
-          reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+          const ok =
+            reply.raw.write(`event: ${evt}\n`) &&
+            reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+          if (!ok) {
+            writable = false;
+            reply.raw.once("drain", () => {
+              writable = true;
+            });
+          }
         } catch {
           /* client closed mid-write */
         }
       };
 
-      // send current snapshots if present
-      for (const id of ids) {
-        try {
-          const snap = await r.get(`book:${id}`);
-          if (snap) send("snapshot", JSON.parse(snap));
-        } catch {
-          // ignore malformed cache entries
-        }
-      }
-
-      // subscribe to live ticks
-      for (const ch of channels) {
-        await sub.subscribe(ch, (message: string) => {
+      // Send current cached tops/snapshots if present.
+      await Promise.all(
+        ids.map(async (id) => {
           try {
-            send("tick", JSON.parse(message));
+            const top = await r.get(`top:${id}`);
+            if (top) {
+              const parsed = parseJson(top);
+              if (parsed) send("tick", parsed);
+            }
           } catch {
-            // ignore malformed pubsub events
+            // ignore malformed cache entries
           }
+
+          try {
+            const snap = await r.get(`book:${id}`);
+            if (snap) send("snapshot", JSON.parse(snap));
+          } catch {
+            // ignore malformed cache entries
+          }
+        }),
+      );
+
+      let unsubscribe: (() => void) | null = null;
+      try {
+        unsubscribe = await subscribeToPriceTicks(ids, (payload) => {
+          send("tick", payload);
         });
+      } catch (err) {
+        request.log.warn({ err }, "prices SSE subscribe failed");
+        send("error", { error: "Prices stream unavailable" });
+        try {
+          reply.raw.end();
+        } catch {
+          // ignore; connection may already be closed
+        }
+        return;
       }
 
       // heartbeat so proxies don’t kill idle streams
@@ -74,18 +106,9 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }, 20000);
 
       // cleanup
-      request.raw.on("close", async () => {
+      request.raw.on("close", () => {
         clearInterval(hb);
-        try {
-          for (const ch of channels) await sub.unsubscribe(ch);
-        } catch {
-          // ignore; best-effort cleanup
-        }
-        try {
-          await sub.quit();
-        } catch {
-          sub.disconnect();
-        }
+        unsubscribe?.();
       });
     },
   );

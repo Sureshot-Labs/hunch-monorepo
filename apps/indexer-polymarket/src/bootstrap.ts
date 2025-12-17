@@ -251,6 +251,16 @@ export async function snapshotBooks(tokenIds: string[]): Promise<void> {
             const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
             await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
             await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
+            await redis.set(
+              `top:${b.asset_id}`,
+              JSON.stringify({
+                token_id: b.asset_id,
+                best_bid: bb,
+                best_ask: ba,
+                ts: ts.getTime(),
+              }),
+              { EX: 60 },
+            );
           }
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;

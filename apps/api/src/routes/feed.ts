@@ -19,7 +19,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
    *  - min_volume24hr?: number (default > 0)
    *  - venue?: string ("polymarket" | "kalshi" | "limitless")
    *  - category?: string (exact match)
-   *  - sort?: string ("totalvol", "liquidity", default: "trending")
+   *  - sort?: string ("trending" | "totalvol" | "liquidity", default: "trending")
    *
    * Default sorting uses trending algorithm: 40% volume + 30% liquidity + 20% new events + 10% ending soon
    * Adds ETag + Cache-Control. Uses Redis string body as the single source of truth
@@ -51,7 +51,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
 
       // Create cache key with all parameters normalized
-      const cacheKey = `feed:v9:${limit}:${offset}:${minVol}:${minLiquidity}:${
+      const cacheKey = `feed:v10:${limit}:${offset}:${minVol}:${minLiquidity}:${
         venue ?? ""
       }:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
@@ -104,7 +104,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysAgo,
         sevenDaysFromNow,
       });
-      const eventIds = eventRows.map((row) => row.id);
+      let eventIds = eventRows.map((row) => row.id);
 
       if (!eventIds.length) {
         const payload = {
@@ -214,6 +214,71 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           },
           lastUpdate: rRow.last_update,
         });
+      }
+
+      // When explicitly requesting trending, bias the ordering to SSE-updatable markets
+      // by floating markets/events whose YES token has an active Redis `top:<tokenId>` entry.
+      if (r && sort === "trending") {
+        const uniqueTokenIds: string[] = [];
+        const seen = new Set<string>();
+
+        for (const eid of eventIds) {
+          const event = eventMap[eid];
+          if (!event) continue;
+          for (const market of event.markets) {
+            const tokenId = market.tokens?.yes;
+            if (!tokenId) continue;
+            if (seen.has(tokenId)) continue;
+            seen.add(tokenId);
+            uniqueTokenIds.push(tokenId);
+          }
+        }
+
+        if (uniqueTokenIds.length) {
+          const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
+          const tops = await r.mGet(topKeys);
+          const hotTokenIds = new Set<string>();
+          for (let i = 0; i < uniqueTokenIds.length; i += 1) {
+            if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
+          }
+
+          if (hotTokenIds.size) {
+            for (const eid of eventIds) {
+              const event = eventMap[eid];
+              if (!event) continue;
+              if (event.markets.length < 2) continue;
+
+              const hotMarkets: FeedEvent["markets"] = [];
+              const coldMarkets: FeedEvent["markets"] = [];
+              for (const market of event.markets) {
+                const tokenId = market.tokens?.yes;
+                if (tokenId && hotTokenIds.has(tokenId)) hotMarkets.push(market);
+                else coldMarkets.push(market);
+              }
+
+              if (hotMarkets.length && coldMarkets.length) {
+                event.markets = [...hotMarkets, ...coldMarkets];
+              }
+            }
+
+            const eventMeta = eventIds.map((eid, index) => {
+              const event = eventMap[eid];
+              const hotCount =
+                event?.markets.reduce((acc, market) => {
+                  const tokenId = market.tokens?.yes;
+                  return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
+                }, 0) ?? 0;
+              return { eid, index, hotCount };
+            });
+
+            eventMeta.sort((a, b) => {
+              const byHot = b.hotCount - a.hotCount;
+              if (byHot) return byHot;
+              return a.index - b.index;
+            });
+            eventIds = eventMeta.map((m) => m.eid);
+          }
+        }
       }
 
       // Only include events that were in the limited eventIds list

@@ -130,20 +130,31 @@ export function startMarketWS(tickers: string[]) {
 
         const top = deriveTop(m.data);
         const ts = new Date();
-        await writeUnifiedBookTop(
-          pool,
-          `kalshi:${t}:YES`,
-          top.yesBid,
-          top.yesAsk,
-          ts,
-        );
-        await writeUnifiedBookTop(
-          pool,
-          `kalshi:${t}:NO`,
-          top.noBid,
-          top.noAsk,
-          ts,
-        );
+        const tsMs = ts.getTime();
+        const yesTokenId = `kalshi:${t}:YES`;
+        const noTokenId = `kalshi:${t}:NO`;
+
+        const yesTick = {
+          token_id: yesTokenId,
+          best_bid: top.yesBid,
+          best_ask: top.yesAsk,
+          ts: tsMs,
+        };
+        const noTick = {
+          token_id: noTokenId,
+          best_bid: top.noBid,
+          best_ask: top.noAsk,
+          ts: tsMs,
+        };
+
+        await Promise.all([
+          writeUnifiedBookTop(pool, yesTokenId, top.yesBid, top.yesAsk, ts),
+          writeUnifiedBookTop(pool, noTokenId, top.noBid, top.noAsk, ts),
+          redis.set(`top:${yesTokenId}`, JSON.stringify(yesTick), { EX: 60 }),
+          redis.set(`top:${noTokenId}`, JSON.stringify(noTick), { EX: 60 }),
+          redis.publish(`prices:${yesTokenId}`, JSON.stringify(yesTick)),
+          redis.publish(`prices:${noTokenId}`, JSON.stringify(noTick)),
+        ]);
 
         msgCount++;
       } catch (e) {

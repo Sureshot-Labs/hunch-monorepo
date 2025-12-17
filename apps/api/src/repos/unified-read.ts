@@ -60,7 +60,7 @@ export async function fetchFeedEventIds(
   } else if (inputs.filter === "endingsoon") {
     // When filtering by ending soon, sort by end_date ascending (ending soonest first)
     eventOrder = "e.end_date asc nulls last, e.id";
-  } else if (inputs.sort == null) {
+  } else if (inputs.sort == null || inputs.sort === "trending") {
     // Trending algorithm: combines volume, liquidity, and recency
     eventParams.push(inputs.sevenDaysAgo, inputs.sevenDaysFromNow);
     eventOrder = `
@@ -90,8 +90,10 @@ export async function fetchFeedEventIds(
       and (m.close_time IS NULL OR m.close_time > $${paramIdx++})
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date
-    having (sum(coalesce(m.volume_24h, 0)) >= $${paramIdx++} or sum(m.volume_24h) is null)
-      and sum(coalesce(m.liquidity, 0)) >= $${paramIdx++}
+    having bool_or(
+      (coalesce(m.volume_24h, 0) >= $${paramIdx++} or m.volume_24h is null)
+      and coalesce(m.liquidity, 0) >= $${paramIdx++}
+    )
     ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${inputs.limit} offset ${inputs.offset}
   `;
@@ -172,7 +174,7 @@ export async function fetchFeedMarkets(
   } else if (inputs.filter === "endingsoon") {
     // When filtering by ending soon, sort by event end_date ascending (ending soonest first)
     marketOrder = "e.end_date asc nulls last, m.venue_market_id";
-  } else if (inputs.sort == null) {
+  } else if (inputs.sort == null || inputs.sort === "trending") {
     // Trending algorithm for markets: combines volume, liquidity, and recency
     // Use parameterized dates for index usage
     // Parameters are already: $1=minVol, $2=minLiquidity, $3=eventIds, $4=nowParam, $5=nowParam

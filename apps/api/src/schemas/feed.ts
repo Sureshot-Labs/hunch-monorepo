@@ -35,5 +35,7 @@ export const feedQuerySchema = z.object({
       z.string(),
     )
     .optional()
-    .transform((v) => (v === "totalvol" || v === "liquidity" ? v : undefined)),
+    .transform((v) =>
+      v === "trending" || v === "totalvol" || v === "liquidity" ? v : undefined,
+    ),
 });
