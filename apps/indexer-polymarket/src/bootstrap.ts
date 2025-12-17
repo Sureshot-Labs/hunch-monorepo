@@ -3,8 +3,8 @@ import { env } from "./env";
 import { iterateEventPages } from "./gammaClient";
 import { postBooksOnce } from "./clobClient";
 import {
-  upsertPolymarketEvent,
-  upsertPolymarketMarket,
+  upsertPolymarketEvents,
+  upsertPolymarketMarkets,
 } from "./polymarket-repo";
 import {
   mapPolymarketEventRow,
@@ -13,13 +13,13 @@ import {
   mapToUnifiedMarket,
 } from "./mappers";
 import {
-  upsertUnifiedEvent,
-  upsertUnifiedMarket,
+  upsertUnifiedEvents,
+  upsertUnifiedMarkets,
   writeUnifiedBookTop,
 } from "@hunch/db";
 import { isPgSetupIssue } from "@hunch/infra";
 import { pool } from "./db";
-import { PolymarketEvent } from "./types";
+import { PolymarketEvent, type TPolymarketEvent } from "./types";
 import { log } from "./log";
 import PQueue from "p-queue";
 import {
@@ -51,30 +51,12 @@ async function hasAnyPolymarketData(): Promise<boolean> {
 }
 
 async function processEvents(events: unknown[]): Promise<ProcessResult> {
-  let processedEvents = 0;
-  let processedMarkets = 0;
+  const parsedEvents: TPolymarketEvent[] = [];
 
   for (const e of events) {
     try {
       const polyEvent = PolymarketEvent.parse(e);
-
-      const eRow = mapPolymarketEventRow(polyEvent);
-      const eventId = await upsertPolymarketEvent(eRow);
-
-      const unifiedEventRow = mapToUnifiedEvent(polyEvent);
-      await upsertUnifiedEvent(pool, unifiedEventRow);
-
-      for (const m of polyEvent.markets) {
-        const mRow = mapPolymarketMarketRow(eventId, m);
-        await upsertPolymarketMarket(mRow);
-
-        const unifiedMarketRow = mapToUnifiedMarket(m, eventId);
-        await upsertUnifiedMarket(pool, unifiedMarketRow);
-
-        processedMarkets += 1;
-      }
-
-      processedEvents += 1;
+      parsedEvents.push(polyEvent);
     } catch (err) {
       if (isPgSetupIssue(err)) throw err;
       const id = (() => {
@@ -87,7 +69,32 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     }
   }
 
-  return { processedEvents, processedMarkets };
+  if (!parsedEvents.length) return { processedEvents: 0, processedMarkets: 0 };
+
+  const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
+  const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
+
+  const polymarketMarketRows = parsedEvents.flatMap((event) =>
+    event.markets.map((market) => mapPolymarketMarketRow(event.id, market)),
+  );
+  const unifiedMarketRows = parsedEvents.flatMap((event) =>
+    event.markets.map((market) => mapToUnifiedMarket(market, event.id)),
+  );
+
+  await Promise.all([
+    upsertPolymarketEvents(polymarketEventRows),
+    upsertUnifiedEvents(pool, unifiedEventRows),
+  ]);
+
+  await Promise.all([
+    upsertPolymarketMarkets(polymarketMarketRows),
+    upsertUnifiedMarkets(pool, unifiedMarketRows),
+  ]);
+
+  return {
+    processedEvents: parsedEvents.length,
+    processedMarkets: polymarketMarketRows.length,
+  };
 }
 
 function parseDateOrNull(v: unknown): Date | null {
