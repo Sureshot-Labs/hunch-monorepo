@@ -203,6 +203,51 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * DELETE /auth/me
+   * Delete the current user account (local DB + best-effort Privy deletion).
+   */
+  z.delete(
+    "/auth/me",
+    { preHandler: createAuthMiddleware() },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const privyUserId = user.privyUserId;
+
+      try {
+        await AuthService.deleteUser(user.id);
+      } catch (error) {
+        app.log.error({ error, userId: user.id }, "Failed to delete user");
+        reply.code(500);
+        return reply.send({
+          error: "Failed to delete user",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+
+      let privyDeleted = false;
+      if (privyUserId) {
+        try {
+          await PrivyService.deleteUser(privyUserId);
+          privyDeleted = true;
+        } catch (error) {
+          app.log.error(
+            { error, userId: user.id, privyUserId },
+            "Failed to delete Privy user",
+          );
+        }
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, privyDeleted });
+    },
+  );
+
+  /**
    * POST /auth/venue-credentials
    * Set API credentials for any venue (Polymarket, Kalshi, Limitless)
    */

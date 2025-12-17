@@ -131,4 +131,14 @@ export class PrivyService {
       primaryWalletAddress,
     };
   }
+
+  static async deleteUser(privyUserId: string): Promise<void> {
+    try {
+      await privyClient.deleteUser(privyUserId);
+    } catch (error) {
+      throw new Error(
+        `Failed to delete Privy user: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
 }

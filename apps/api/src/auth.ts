@@ -16,6 +16,7 @@ const JWT_EXPIRES_IN: SignOptions["expiresIn"] =
 
 export interface User {
   id: string;
+  privyUserId?: string;
   email?: string;
   username?: string;
   displayName?: string;
@@ -29,6 +30,7 @@ export interface User {
 
 type UserRow = {
   id: string;
+  privy_user_id: string | null;
   email: string | null;
   username: string | null;
   display_name: string | null;
@@ -43,6 +45,7 @@ type UserRow = {
 function mapUserRow(row: UserRow): User {
   return {
     id: row.id,
+    privyUserId: row.privy_user_id ?? undefined,
     email: row.email ?? undefined,
     username: row.username ?? undefined,
     displayName: row.display_name ?? undefined,
@@ -193,6 +196,7 @@ export class AuthService {
 
       // Extract user data from Privy
       const email = privyUser.email?.address;
+      const privyUserId = privyUser.id;
       const privyWallets = PrivyService.extractWallets(privyUser);
       const primaryWallet = privyWallets[0];
       if (!primaryWallet) {
@@ -202,37 +206,87 @@ export class AuthService {
       const walletAddresses = privyWallets.map((w) => w.address);
       const primaryWalletAddress = primaryWallet.address;
 
-      // Check if user exists with any of the wallet addresses
-      let userId: string;
+      let userId: string | null = null;
+
+      const userByPrivyId = await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
+        [privyUserId],
+      );
+      userId = userByPrivyId.rows[0]?.id ?? null;
+
+      // Backward-compat: find user by any linked wallet address.
       const walletConditions: string[] = [];
       const walletValues: string[] = [];
-      for (const wallet of walletAddresses) {
-        const index = walletValues.length + 1;
-        walletValues.push(wallet);
-        walletConditions.push(
-          ETH_ADDRESS_RE.test(wallet)
-            ? `lower(wallet_address) = lower($${index})`
-            : `wallet_address = $${index}`,
+      if (!userId) {
+        for (const wallet of walletAddresses) {
+          const index = walletValues.length + 1;
+          walletValues.push(wallet);
+          walletConditions.push(
+            ETH_ADDRESS_RE.test(wallet)
+              ? `lower(wallet_address) = lower($${index})`
+              : `wallet_address = $${index}`,
+          );
+        }
+
+        const walletResult = await client.query<{ user_id: string }>(
+          `SELECT user_id FROM user_wallets WHERE ${walletConditions.join(" OR ")} LIMIT 1`,
+          walletValues,
         );
+
+        userId = walletResult.rows[0]?.user_id ?? null;
       }
 
-      const walletResult = await client.query<{ user_id: string }>(
-        `SELECT user_id FROM user_wallets WHERE ${walletConditions.join(" OR ")} LIMIT 1`,
-        walletValues,
-      );
+      if (userId) {
+        const normalizeAddress = (input: string): string => {
+          const trimmed = input.trim();
+          if (ETH_ADDRESS_RE.test(trimmed)) return trimmed.toLowerCase();
+          return trimmed;
+        };
 
-      if (walletResult.rows.length > 0) {
-        userId = walletResult.rows[0].user_id;
-
-        // Update user data
+        // Update user data (and persist Privy DID for stable identity).
         await client.query(
-          `UPDATE users SET 
-           email = $1, 
+          `UPDATE users SET
+           email = $1,
+           privy_user_id = $2,
            last_login_at = now(),
            updated_at = now()
-           WHERE id = $2`,
-          [email || null, userId],
+           WHERE id = $3`,
+          [email || null, privyUserId, userId],
         );
+
+        // Remove wallets that were unlinked in Privy (and dependent venue creds).
+        const existingWallets = await client.query<{
+          id: string;
+          wallet_address: string;
+        }>(
+          "SELECT id, wallet_address FROM user_wallets WHERE user_id = $1",
+          [userId],
+        );
+
+        const linkedWalletSet = new Set(
+          privyWallets.map((w) => normalizeAddress(w.address)),
+        );
+        const walletIdsToDelete: string[] = [];
+        for (const wallet of existingWallets.rows) {
+          const normalized = normalizeAddress(wallet.wallet_address);
+          if (!linkedWalletSet.has(normalized)) walletIdsToDelete.push(wallet.id);
+        }
+
+        if (walletIdsToDelete.length > 0) {
+          await client.query(
+            `DELETE FROM user_venue_credentials
+             WHERE user_id = $1
+               AND wallet_address IN (
+                 SELECT wallet_address FROM user_wallets WHERE id = ANY($2::uuid[])
+               )`,
+            [userId, walletIdsToDelete],
+          );
+
+          await client.query(
+            "DELETE FROM user_wallets WHERE user_id = $1 AND id = ANY($2::uuid[])",
+            [userId, walletIdsToDelete],
+          );
+        }
 
         // Add any new wallet addresses
         for (const wallet of privyWallets) {
@@ -284,10 +338,10 @@ export class AuthService {
       } else {
         // Create new user
         const userResult = await client.query<UserRow>(
-          `INSERT INTO users (email, last_login_at) 
-           VALUES ($1, now()) 
-           RETURNING id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
-          [email || null],
+          `INSERT INTO users (email, privy_user_id, last_login_at)
+           VALUES ($1, $2, now())
+           RETURNING id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
+          [email || null, privyUserId],
         );
 
         userId = userResult.rows[0].id;
@@ -321,7 +375,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -401,7 +455,7 @@ export class AuthService {
         const userResult = await client.query(
           `INSERT INTO users (email, username, display_name, avatar_url, last_login_at) 
            VALUES ($1, $2, $3, $4, now()) 
-           RETURNING id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
+           RETURNING id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
           [
             userData?.email || null,
             userData?.username || null,
@@ -434,7 +488,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -454,7 +508,7 @@ export class AuthService {
    */
   static async getUserById(userId: string): Promise<User | null> {
     const result = await pool.query<UserRow>(
-      "SELECT id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -463,6 +517,10 @@ export class AuthService {
     }
 
     return mapUserRow(result.rows[0]);
+  }
+
+  static async deleteUser(userId: string): Promise<void> {
+    await pool.query("DELETE FROM users WHERE id = $1", [userId]);
   }
 
   /**
