@@ -10,6 +10,7 @@ export type WatchlistRow = {
   end_date: unknown;
   event_liquidity: unknown;
   event_volume: unknown;
+  event_volume_24h: unknown;
   event_open_interest: unknown;
   event_slug: string | null;
   event_image: string | null;
@@ -60,6 +61,7 @@ export async function fetchWatchlistPage(
       e.end_date,
       e.liquidity as event_liquidity,
       e.volume_total as event_volume,
+      e.volume_24h as event_volume_24h,
       e.open_interest as event_open_interest,
       e.slug as event_slug,
       e.image as event_image,

@@ -34,6 +34,8 @@ type SyncCounters = {
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
   if (b.volume24h !== a.volume24h) return b.volume24h - a.volume24h;
   if (b.liquidity !== a.liquidity) return b.liquidity - a.liquidity;
+  if (b.openInterest !== a.openInterest) return b.openInterest - a.openInterest;
+  if (b.volumeTotal !== a.volumeTotal) return b.volumeTotal - a.volumeTotal;
   return a.marketId.localeCompare(b.marketId);
 }
 
@@ -132,6 +134,7 @@ async function processEvents(events: TDflowEvent[]): Promise<{
         unifiedEvent.id,
         unifiedEvent.title,
         env.solanaUsdcMint,
+        env.requireInitialized,
       );
       if (!mapped) continue;
 
@@ -159,10 +162,14 @@ async function processEvents(events: TDflowEvent[]): Promise<{
       }
     }
 
-    if (hasVolumeTotal) unifiedEvent.volume_total = volumeTotalSum;
-    if (hasVolume24h) unifiedEvent.volume_24h = volume24hSum;
-    if (hasLiquidity) unifiedEvent.liquidity = liquiditySum;
-    if (hasOpenInterest) unifiedEvent.open_interest = openInterestSum;
+    if (unifiedEvent.volume_total == null && hasVolumeTotal)
+      unifiedEvent.volume_total = volumeTotalSum;
+    if (unifiedEvent.volume_24h == null && hasVolume24h)
+      unifiedEvent.volume_24h = volume24hSum;
+    if (unifiedEvent.liquidity == null && hasLiquidity)
+      unifiedEvent.liquidity = liquiditySum;
+    if (unifiedEvent.open_interest == null && hasOpenInterest)
+      unifiedEvent.open_interest = openInterestSum;
 
     unifiedEventRows.push(unifiedEvent);
     processedEvents += 1;

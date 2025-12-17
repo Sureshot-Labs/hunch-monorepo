@@ -134,6 +134,8 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
               eventLiquidity:
                 r.event_liquidity != null ? Number(r.event_liquidity) : 0,
               eventVolume: r.event_volume != null ? Number(r.event_volume) : 0,
+              eventVolume24h:
+                r.event_volume_24h != null ? Number(r.event_volume_24h) : 0,
               eventOpenInterest:
                 r.event_open_interest != null
                   ? Number(r.event_open_interest)

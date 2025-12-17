@@ -179,6 +179,7 @@ type Instrument = {
 function pickUsdcInstrument(
   market: TDflowMarket,
   usdcMint: string,
+  requireInitialized: boolean,
 ): Instrument | null {
   const accounts = market.accounts ?? {};
   const entry = (accounts as Record<string, TDflowMarketAccount | null>)[
@@ -186,7 +187,7 @@ function pickUsdcInstrument(
   ];
   if (!entry) return null;
 
-  if (entry.isInitialized !== true) return null;
+  if (requireInitialized && entry.isInitialized !== true) return null;
   const yes = entry.yesMint?.trim();
   const no = entry.noMint?.trim();
   if (!yes || !no) return null;
@@ -207,7 +208,9 @@ export type DflowMarketSnapshot = {
   yesAsk: number | null;
   noBid: number | null;
   noAsk: number | null;
+  volumeTotal: number;
   volume24h: number;
+  openInterest: number;
   liquidity: number;
 };
 
@@ -226,8 +229,9 @@ export function mapToUnifiedMarket(
   eventId: string,
   eventTitle: string,
   usdcMint: string,
+  requireInitialized: boolean,
 ): DflowMappedMarket | null {
-  const instrument = pickUsdcInstrument(market, usdcMint);
+  const instrument = pickUsdcInstrument(market, usdcMint, requireInitialized);
   if (!instrument) return null;
 
   const status = mapDflowStatusToUnified(market.status);
@@ -284,12 +288,30 @@ export function mapToUnifiedMarket(
         (market as Record<string, unknown>).expiration_time,
     ) ?? close_time;
 
+  const outcomeLabel = (() => {
+    const record = market as Record<string, unknown>;
+    const candidates = [
+      record.yesSubTitle,
+      record.yes_sub_title,
+      record.noSubTitle,
+      record.no_sub_title,
+    ];
+    for (const c of candidates) {
+      if (typeof c !== "string") continue;
+      const trimmed = c.trim();
+      if (trimmed.length) return trimmed;
+    }
+    return null;
+  })();
+
   const title =
-    (typeof market.title === "string" && market.title.trim().length
-      ? market.title.trim()
-      : eventTitle.trim().length
-        ? eventTitle
-        : market.ticker) || market.ticker;
+    (outcomeLabel ??
+      (typeof market.title === "string" && market.title.trim().length
+        ? market.title.trim()
+        : eventTitle.trim().length
+          ? eventTitle
+          : market.ticker)) ||
+    market.ticker;
 
   const marketRow: UnifiedMarketRow = {
     id: `kalshi:${market.ticker}`,
@@ -342,7 +364,9 @@ export function mapToUnifiedMarket(
     yesAsk: yesAsk ?? null,
     noBid: noBid ?? null,
     noAsk: noAsk ?? null,
+    volumeTotal: volumeTotal ?? 0,
     volume24h: volume24h ?? 0,
+    openInterest: openInterest ?? 0,
     liquidity: liquidity ?? 0,
   };
 

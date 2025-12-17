@@ -52,7 +52,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v10:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
+      const cacheKey = `feed:v11:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -154,6 +154,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
             eventVolume:
               rRow.event_volume != null ? Number(rRow.event_volume) : 0,
+            eventVolume24h:
+              rRow.event_volume_24h != null ? Number(rRow.event_volume_24h) : 0,
             eventOpenInterest:
               rRow.event_open_interest != null
                 ? Number(rRow.event_open_interest)
@@ -251,7 +253,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               const coldMarkets: FeedEvent["markets"] = [];
               for (const market of event.markets) {
                 const tokenId = market.tokens?.yes;
-                if (tokenId && hotTokenIds.has(tokenId)) hotMarkets.push(market);
+                if (tokenId && hotTokenIds.has(tokenId))
+                  hotMarkets.push(market);
                 else coldMarkets.push(market);
               }
 

@@ -90,6 +90,7 @@ export type FeedEvent = {
   endTime: unknown;
   eventLiquidity: number;
   eventVolume: number;
+  eventVolume24h: number;
   eventOpenInterest: number;
   eventSlug: string | null;
   image: string | null;
@@ -133,6 +134,7 @@ export type WatchlistEvent = {
   endTime: unknown;
   eventLiquidity: number;
   eventVolume: number;
+  eventVolume24h: number;
   eventOpenInterest: number;
   eventSlug: string | null;
   image: string | null;

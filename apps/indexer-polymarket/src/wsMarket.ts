@@ -167,10 +167,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
               const multi = redis.multi();
               multi.set(`book:${id}`, JSON.stringify(msg), { EX: 5 });
               multi.set(`top:${id}`, tickJson, { EX: 60 });
-              multi.publish(
-                `prices:${id}`,
-                tickJson,
-              );
+              multi.publish(`prices:${id}`, tickJson);
               await Promise.all([
                 writeUnifiedBookTop(pool, id, bb, ba, new Date(ts)),
                 multi.exec(),

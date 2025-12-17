@@ -65,14 +65,17 @@ async function getSharedSubscriber(): Promise<RedisClient | null> {
 
     const sub = base.duplicate();
     sub.on("error", (err: unknown) =>
-      console.warn("[prices-sse] redis subscriber error", String(err))
+      console.warn("[prices-sse] redis subscriber error", String(err)),
     );
     await sub.connect();
     sharedSubscriber = sub;
     return sub;
   })()
     .catch((err: unknown) => {
-      console.warn("[prices-sse] failed to create redis subscriber", String(err));
+      console.warn(
+        "[prices-sse] failed to create redis subscriber",
+        String(err),
+      );
       return null;
     })
     .finally(() => {
@@ -84,7 +87,7 @@ async function getSharedSubscriber(): Promise<RedisClient | null> {
 
 async function ensureChannelSubscribed(
   sub: RedisClient,
-  tokenId: string
+  tokenId: string,
 ): Promise<void> {
   const channel = channelName(tokenId);
   const state = getOrCreateChannelState(channel);
@@ -107,7 +110,7 @@ async function ensureChannelSubscribed(
 
 async function maybeUnsubscribe(
   sub: RedisClient,
-  tokenId: string
+  tokenId: string,
 ): Promise<void> {
   const channel = channelName(tokenId);
   const state = getOrCreateChannelState(channel);
@@ -126,7 +129,7 @@ async function maybeUnsubscribe(
 
 export async function subscribeToPriceTicks(
   tokenIds: string[],
-  listener: TickListener
+  listener: TickListener,
 ): Promise<() => void> {
   const uniqueTokenIds = Array.from(new Set(tokenIds));
   if (uniqueTokenIds.length === 0) return () => undefined;
@@ -142,7 +145,9 @@ export async function subscribeToPriceTicks(
     state.listeners.add(listener);
   }
 
-  await Promise.all(uniqueTokenIds.map((id) => ensureChannelSubscribed(sub, id)));
+  await Promise.all(
+    uniqueTokenIds.map((id) => ensureChannelSubscribed(sub, id)),
+  );
 
   return () => {
     for (const tokenId of uniqueTokenIds) {

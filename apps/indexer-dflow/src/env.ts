@@ -166,6 +166,11 @@ const isInitializedSetting = parseOptionalBool(
   process.env.DFLOW_IS_INITIALIZED,
 );
 
+const requireInitializedSetting = parseOptionalBool(
+  process.env.DFLOW_REQUIRE_INITIALIZED,
+);
+const requireInitialized = requireInitializedSetting ?? dflowEnv === "prod";
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -197,6 +202,8 @@ export const env = {
   catchupMaxPages,
   isInitializedSetting,
   isInitialized: isInitializedSetting,
+  requireInitializedSetting,
+  requireInitialized,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

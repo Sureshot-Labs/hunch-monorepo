@@ -407,12 +407,19 @@ export function mapToUnifiedMarket(
     }
   }
 
+  const title = (() => {
+    const groupItemTitle =
+      typeof m.groupItemTitle === "string" ? m.groupItemTitle.trim() : "";
+    if (groupItemTitle) return groupItemTitle;
+    return m.question;
+  })();
+
   return {
     id: `polymarket:${m.id}`,
     venue: "polymarket",
     venue_market_id: m.id,
     event_id: `polymarket:${eventId}`,
-    title: m.question,
+    title,
     description: m.description ?? undefined,
     category: m.category ?? extractCategoryFromTitle(m.question, m.description), // Use API category if available, else extract from question/description
     status,

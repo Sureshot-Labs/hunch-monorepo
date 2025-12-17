@@ -89,10 +89,10 @@ export async function fetchFeedEventIds(
       and (m.expiration_time IS NULL OR m.expiration_time > $${paramIdx++})
       and (m.close_time IS NULL OR m.close_time > $${paramIdx++})
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
-    group by e.id, e.start_date, e.end_date
+    group by e.id, e.start_date, e.end_date, e.liquidity
     having bool_or(
       (coalesce(m.volume_24h, 0) >= $${paramIdx++} or m.volume_24h is null)
-      and coalesce(m.liquidity, 0) >= $${paramIdx++}
+      and coalesce(m.liquidity, e.liquidity, 0) >= $${paramIdx++}
     )
     ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${inputs.limit} offset ${inputs.offset}
@@ -111,6 +111,7 @@ export type FeedMarketRow = {
   end_date: unknown;
   event_liquidity: unknown;
   event_volume: unknown;
+  event_volume_24h: unknown;
   event_open_interest: unknown;
   event_slug: string | null;
   event_image: string | null;
@@ -151,7 +152,7 @@ export async function fetchFeedMarkets(
   ];
   const marketWhere: string[] = [
     "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
-    "coalesce(m.liquidity, 0) >= $2",
+    "coalesce(m.liquidity, e.liquidity, 0) >= $2",
     // Only show ACTIVE markets - exclude CLOSED, SETTLED, and ARCHIVED
     "m.status = 'ACTIVE'",
     `m.event_id = ANY($3::text[])`,
@@ -165,7 +166,7 @@ export async function fetchFeedMarkets(
   // Sorting for markets: use same sort as for events, or none
   let marketOrder = "";
   if (inputs.sort === "totalvol")
-    marketOrder = "m.volume_24h desc nulls last, m.venue_market_id";
+    marketOrder = "m.volume_total desc nulls last, m.venue_market_id";
   else if (inputs.sort === "liquidity")
     marketOrder = "m.liquidity desc nulls last, m.venue_market_id";
   else if (inputs.filter === "newest") {
@@ -198,6 +199,7 @@ export async function fetchFeedMarkets(
       e.end_date,
       e.liquidity as event_liquidity,
       e.volume_total as event_volume,
+      e.volume_24h as event_volume_24h,
       e.open_interest as event_open_interest,
       e.slug as event_slug,
       e.image as event_image,

@@ -258,10 +258,9 @@ export class AuthService {
         const existingWallets = await client.query<{
           id: string;
           wallet_address: string;
-        }>(
-          "SELECT id, wallet_address FROM user_wallets WHERE user_id = $1",
-          [userId],
-        );
+        }>("SELECT id, wallet_address FROM user_wallets WHERE user_id = $1", [
+          userId,
+        ]);
 
         const linkedWalletSet = new Set(
           privyWallets.map((w) => normalizeAddress(w.address)),
@@ -269,7 +268,8 @@ export class AuthService {
         const walletIdsToDelete: string[] = [];
         for (const wallet of existingWallets.rows) {
           const normalized = normalizeAddress(wallet.wallet_address);
-          if (!linkedWalletSet.has(normalized)) walletIdsToDelete.push(wallet.id);
+          if (!linkedWalletSet.has(normalized))
+            walletIdsToDelete.push(wallet.id);
         }
 
         if (walletIdsToDelete.length > 0) {
@@ -313,7 +313,10 @@ export class AuthService {
           }
 
           const existing = existingWallet.rows[0];
-          if (existing.wallet_type !== wallet.walletType || !existing.is_verified) {
+          if (
+            existing.wallet_type !== wallet.walletType ||
+            !existing.is_verified
+          ) {
             await client.query(
               `UPDATE user_wallets
                SET wallet_type = $3, is_verified = true, updated_at = now()
