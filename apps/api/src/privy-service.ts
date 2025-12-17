@@ -1,36 +1,37 @@
-import { PrivyClient } from "@privy-io/server-auth";
+import {
+  PrivyClient,
+  type AuthTokenClaims,
+  type LinkedAccountWithMetadata,
+  type User,
+  type WalletWithMetadata,
+} from "@privy-io/server-auth";
 import { env } from "./env.js";
 
 // Initialize Privy client
 const privyClient = new PrivyClient(env.privyAppId, env.privyAppSecret);
 
-export interface PrivyUser {
-  id: string;
-  email?: {
-    address: string;
-    verified: boolean;
-  };
-  wallet?: {
-    address: string;
-    walletType: string;
-    verifiedAt?: string;
-  };
-  wallets?: Array<{
-    address: string;
-    walletType: string;
-    verifiedAt?: string;
-  }>;
-  createdAt: Date;
-  lastActiveAt?: Date;
+export type PrivyUser = User;
+export type PrivyClaims = AuthTokenClaims;
+
+export type PrivyWalletType = "ethereum" | "solana";
+export type PrivyWallet = {
+  address: string;
+  walletType: PrivyWalletType;
+};
+
+const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+function normalizeWalletAddress(walletType: PrivyWalletType, address: string) {
+  const trimmed = address.trim();
+  if (walletType === "ethereum" && ETH_ADDRESS_RE.test(trimmed))
+    return trimmed.toLowerCase();
+  return trimmed;
 }
 
-export interface PrivyClaims {
-  appId: string;
-  userId: string;
-  issuer: string;
-  issuedAt: number;
-  expiration: number;
-  sessionId: string;
+function isWalletAccount(
+  account: LinkedAccountWithMetadata,
+): account is WalletWithMetadata {
+  return account.type === "wallet";
 }
 
 export class PrivyService {
@@ -39,8 +40,7 @@ export class PrivyService {
    */
   static async verifyAccessToken(accessToken: string): Promise<PrivyClaims> {
     try {
-      const verifiedClaims = await privyClient.verifyAuthToken(accessToken);
-      return verifiedClaims as PrivyClaims;
+      return await privyClient.verifyAuthToken(accessToken);
     } catch (error) {
       throw new Error(
         `Invalid Privy access token: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -53,8 +53,7 @@ export class PrivyService {
    */
   static async getUserData(privyClaims: PrivyClaims): Promise<PrivyUser> {
     try {
-      const user = await privyClient.getUser(privyClaims.userId);
-      return user as unknown as PrivyUser;
+      return await privyClient.getUser(privyClaims.userId);
     } catch (error) {
       throw new Error(
         `Failed to fetch user data from Privy: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -62,44 +61,53 @@ export class PrivyService {
     }
   }
 
-  /**
-   * Extract wallet addresses from Privy user data
-   */
-  static extractWalletAddresses(privyUser: PrivyUser): string[] {
-    const addresses: string[] = [];
+  static extractWallets(privyUser: PrivyUser): PrivyWallet[] {
+    const out: PrivyWallet[] = [];
+    const seen = new Set<string>();
 
-    // Add primary wallet if exists
-    if (privyUser.wallet?.address) {
-      addresses.push(privyUser.wallet.address);
+    for (const account of privyUser.linkedAccounts) {
+      if (!isWalletAccount(account)) continue;
+      const chainType = account.chainType;
+      if (chainType !== "ethereum" && chainType !== "solana") continue;
+
+      const normalized = normalizeWalletAddress(chainType, account.address);
+      const key = `${chainType}:${normalized}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ address: normalized, walletType: chainType });
     }
 
-    // Add additional wallets if they exist
-    if (privyUser.wallets && Array.isArray(privyUser.wallets)) {
-      for (const wallet of privyUser.wallets) {
-        if (wallet.address && !addresses.includes(wallet.address)) {
-          addresses.push(wallet.address);
+    // Some Privy accounts expose a `user.wallet` (most recently linked wallet) which may not
+    // be present in `linkedAccounts` under some configurations; include it as a fallback.
+    const primary = privyUser.wallet;
+    if (primary?.address && primary.chainType) {
+      const chainType = primary.chainType;
+      if (chainType === "ethereum" || chainType === "solana") {
+        const normalized = normalizeWalletAddress(chainType, primary.address);
+        const key = `${chainType}:${normalized}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.unshift({ address: normalized, walletType: chainType });
         }
       }
     }
 
-    return addresses;
+    return out;
+  }
+
+  /**
+   * Extract wallet addresses from Privy user data
+   */
+  static extractWalletAddresses(privyUser: PrivyUser): string[] {
+    return this.extractWallets(privyUser).map((w) => w.address);
   }
 
   /**
    * Get the primary wallet address from Privy user data
    */
   static getPrimaryWalletAddress(privyUser: PrivyUser): string | null {
-    // Return primary wallet if exists
-    if (privyUser.wallet?.address) {
-      return privyUser.wallet.address;
-    }
-
-    // Return first wallet if no primary wallet
-    if (privyUser.wallets && privyUser.wallets.length > 0) {
-      return privyUser.wallets[0].address;
-    }
-
-    return null;
+    const wallets = this.extractWallets(privyUser);
+    return wallets[0]?.address ?? null;
   }
 
   /**

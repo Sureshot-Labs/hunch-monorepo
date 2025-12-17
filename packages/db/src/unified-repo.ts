@@ -334,9 +334,10 @@ export async function upsertUnifiedMarkets(
   if (closedIds.length) {
     const idBatches = chunkArray(closedIds, 5000);
     for (const batch of idBatches) {
-      await pool.query("delete from unified_markets where id = any($1::text[])", [
-        batch,
-      ]);
+      await pool.query(
+        "delete from unified_markets where id = any($1::text[])",
+        [batch],
+      );
     }
   }
 
@@ -450,6 +451,7 @@ export async function upsertUnifiedMarkets(
 
 function venueFromUnifiedTokenId(tokenId: string): string {
   if (tokenId.startsWith("kalshi:")) return "kalshi";
+  if (tokenId.startsWith("sol:")) return "kalshi";
   if (tokenId.startsWith("limitless:")) return "limitless";
   return "polymarket";
 }
@@ -475,6 +477,47 @@ export async function upsertUnifiedToken(
       token.side,
     ],
   );
+}
+
+export async function upsertUnifiedTokens(
+  pool: Pool,
+  tokens: Array<{
+    token_id: string;
+    market_id: string;
+    side: "YES" | "NO";
+  }>,
+): Promise<void> {
+  if (tokens.length === 0) return;
+
+  const byId = new Map<string, (typeof tokens)[number]>();
+  for (const token of tokens) byId.set(token.token_id, token);
+  const rows = Array.from(byId.values());
+
+  // We want to call venueFromUnifiedTokenId() from SQL, but it's a TS function.
+  // Instead, inject venue values in JS and batch insert.
+  const payload = rows.map((r) => ({
+    token_id: r.token_id,
+    venue: venueFromUnifiedTokenId(r.token_id),
+    market_id: r.market_id,
+    side: r.side,
+  }));
+
+  const batchedQuery = `
+    with input as (
+      select *
+      from json_to_recordset($1::json)
+        as x(token_id text, venue text, market_id text, side text)
+    )
+    insert into unified_tokens(token_id, venue, market_id, side)
+    select token_id, venue, market_id, side
+    from input
+    on conflict (token_id) do nothing
+  `;
+
+  const batches = chunkArray(payload, 500);
+  for (const batch of batches) {
+    await pool.query(batchedQuery, [JSON.stringify(batch)]);
+  }
 }
 
 export async function writeUnifiedBookTop(

@@ -119,6 +119,39 @@ importers:
         specifier: ^4.19.2
         version: 4.20.5
 
+  apps/indexer-dflow:
+    dependencies:
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
+      fast-json-stable-stringify:
+        specifier: ^2.1.0
+        version: 2.1.0
+      p-queue:
+        specifier: ^8.0.1
+        version: 8.1.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.16.3
+      redis:
+        specifier: ^4.7.0
+        version: 4.7.1
+      undici:
+        specifier: ^6.19.8
+        version: 6.21.3
+      uuid:
+        specifier: ^9.0.1
+        version: 9.0.1
+      ws:
+        specifier: ^8.18.0
+        version: 8.18.3(bufferutil@4.0.9)(utf-8-validate@5.0.10)
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+
   apps/indexer-kalshi:
     dependencies:
       '@hunch/db':

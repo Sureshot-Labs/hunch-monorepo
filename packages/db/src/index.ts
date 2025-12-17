@@ -5,6 +5,7 @@ export {
   upsertUnifiedMarket,
   upsertUnifiedMarkets,
   upsertUnifiedToken,
+  upsertUnifiedTokens,
   writeUnifiedBookTop,
 } from "./unified-repo.js";
 export { getVenueId } from "./venues-repo.js";

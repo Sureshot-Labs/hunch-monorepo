@@ -49,10 +49,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           claims,
         );
 
-        const sessionToken = AuthService.generateToken(
-          user.id,
-          primaryWalletAddress,
-        );
+        const sessionToken = AuthService.generateToken(user.id);
 
         const session = await AuthService.createSession(
           user.id,
