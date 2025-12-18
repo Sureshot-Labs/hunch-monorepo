@@ -10,7 +10,7 @@ type JsonRpcResponse<T> =
   | { jsonrpc: "2.0"; id: number; result: T }
   | { jsonrpc: "2.0"; id: number; error: JsonRpcError };
 
-function formatUiAmount(amount: bigint, decimals: number): string {
+export function formatUiAmount(amount: bigint, decimals: number): string {
   if (decimals <= 0) return amount.toString();
 
   const negative = amount < 0n;
@@ -119,6 +119,113 @@ export type SolanaTokenBalance = {
   decimals: number;
   uiAmountString: string;
 };
+
+export async function fetchSolanaBalanceLamports(inputs: {
+  rpcUrl: string;
+  owner: string;
+  timeoutMs: number;
+}): Promise<bigint> {
+  const result = await solanaRpcRequest<{ value: number }>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "getBalance",
+    params: [inputs.owner],
+  });
+
+  const value = result?.value;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("Solana RPC: invalid getBalance response");
+  }
+  return BigInt(Math.trunc(value));
+}
+
+export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
+  rpcUrl: string;
+  owner: string;
+  mint: string;
+  timeoutMs: number;
+}): Promise<{ amount: bigint; decimals: number; uiAmountString: string } | null> {
+  const result = await solanaRpcRequest<{ value: unknown[] }>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenAccountsByOwner",
+    params: [
+      inputs.owner,
+      { mint: inputs.mint },
+      {
+        encoding: "jsonParsed",
+      },
+    ],
+  });
+
+  const entries = Array.isArray(result.value) ? result.value : [];
+  let total = 0n;
+  let decimals: number | null = null;
+
+  for (const entry of entries) {
+    const parsed = parseTokenAccount(entry);
+    if (!parsed) continue;
+    if (parsed.amount <= 0n) continue;
+    total += parsed.amount;
+    decimals = parsed.decimals;
+  }
+
+  if (decimals == null) return null;
+
+  return {
+    amount: total,
+    decimals,
+    uiAmountString: formatUiAmount(total, decimals),
+  };
+}
+
+export async function fetchSolanaMintDecimals(inputs: {
+  rpcUrl: string;
+  mint: string;
+  timeoutMs: number;
+}): Promise<number> {
+  const result = await solanaRpcRequest<{ value?: { decimals?: number } }>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenSupply",
+    params: [inputs.mint],
+  });
+
+  const decimalsRaw = result?.value?.decimals;
+  if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw)) {
+    throw new Error("Solana RPC: invalid getTokenSupply response");
+  }
+
+  return Math.max(0, Math.trunc(decimalsRaw));
+}
+
+export async function sendSolanaRawTransaction(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  signedTransaction: string;
+  skipPreflight?: boolean;
+  maxRetries?: number;
+}): Promise<string> {
+  const params: Record<string, unknown> = { encoding: "base64" };
+  if (inputs.skipPreflight !== undefined) {
+    params.skipPreflight = inputs.skipPreflight;
+  }
+  if (inputs.maxRetries !== undefined) {
+    params.maxRetries = inputs.maxRetries;
+  }
+
+  const result = await solanaRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "sendTransaction",
+    params: [inputs.signedTransaction, params],
+  });
+
+  if (typeof result !== "string" || result.trim().length === 0) {
+    throw new Error("Solana RPC: invalid sendTransaction response");
+  }
+  return result;
+}
 
 export async function fetchSolanaTokenBalancesByOwner(inputs: {
   rpcUrl: string;

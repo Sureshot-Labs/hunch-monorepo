@@ -18,12 +18,78 @@ function optionalPositiveInt(name: string, fallback: number): number {
   return asInt > 0 ? asInt : fallback;
 }
 
+function parseOptionalBool(value: string | undefined): boolean | undefined {
+  if (!value) return undefined;
+  switch (value.toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+    case "off":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+const nodeEnv = process.env.NODE_ENV ?? "development";
+
+const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
+const dflowEnv: "dev" | "prod" =
+  dflowEnvRaw === "dev" || dflowEnvRaw === "prod" ? dflowEnvRaw : "prod";
+
+const dflowPredictionMarketsDefault =
+  dflowEnv === "dev"
+    ? "https://dev-prediction-markets-api.dflow.net"
+    : "https://prediction-markets-api.dflow.net";
+const dflowQuoteDefault =
+  dflowEnv === "dev"
+    ? "https://dev-quote-api.dflow.net"
+    : "https://quote-api.dflow.net";
+const dflowWsDefault =
+  dflowEnv === "dev"
+    ? "wss://dev-prediction-markets-api.dflow.net/api/v1/ws"
+    : "wss://prediction-markets-api.dflow.net/api/v1/ws";
+
+const dflowPredictionMarketsBase =
+  process.env.DFLOW_PREDICTION_MARKETS_API_BASE?.trim() ||
+  dflowPredictionMarketsDefault;
+const dflowQuoteBase =
+  process.env.DFLOW_QUOTE_API_BASE?.trim() || dflowQuoteDefault;
+const dflowWsUrl = process.env.DFLOW_WS_URL?.trim() || dflowWsDefault;
+
+if (nodeEnv.toLowerCase() === "production" && dflowEnv === "dev") {
+  throw new Error("[env] DFLOW_ENV=dev is not allowed in production");
+}
+
+if (
+  nodeEnv.toLowerCase() === "production" &&
+  [dflowPredictionMarketsBase, dflowQuoteBase, dflowWsUrl].some((value) =>
+    value.includes("dev-"),
+  )
+) {
+  throw new Error(
+    "[env] DFlow dev endpoints are not allowed in production",
+  );
+}
+
+const dflowRequireApiKeySetting = parseOptionalBool(
+  process.env.DFLOW_REQUIRE_API_KEY,
+);
+const dflowRequireApiKey = dflowRequireApiKeySetting ?? dflowEnv === "prod";
+const dflowApiKey = process.env.DFLOW_API_KEY?.trim() || "";
+const dflowConfigured = !dflowRequireApiKey || dflowApiKey.length > 0;
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "", // optional
-  nodeEnv: process.env.NODE_ENV ?? "development",
+  nodeEnv,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
@@ -33,6 +99,9 @@ export const env = {
   solanaRpcUrl:
     process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
   solanaRpcTimeoutMs: optionalPositiveInt("SOLANA_RPC_TIMEOUT_MS", 10_000),
+  solanaUsdcMint:
+    process.env.DFLOW_USDC_MINT?.trim() ||
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   polygonRpcUrl:
     process.env.POLYGON_RPC_URL?.trim() || "https://polygon-rpc.com",
   polygonRpcTimeoutMs: optionalPositiveInt("POLYGON_RPC_TIMEOUT_MS", 10_000),
@@ -50,4 +119,13 @@ export const env = {
   polymarketConditionalTokensAddress:
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+
+  // DFlow config (execution-ready)
+  dflowEnv,
+  dflowPredictionMarketsBase,
+  dflowQuoteBase,
+  dflowWsUrl,
+  dflowRequireApiKey,
+  dflowApiKey,
+  dflowConfigured,
 };

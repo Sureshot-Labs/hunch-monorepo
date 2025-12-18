@@ -9,8 +9,6 @@ import {
   findOrderVenueForUser,
   storeOrder,
 } from "../repos/orders-repo.js";
-import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
-import { syncPositionsForUserWallet } from "../services/positions-sync.js";
 import { VenueOrderManagerFactory } from "../venue-order-manager-factory.js";
 import {
   orderHistoryQuerySchema,
@@ -19,10 +17,11 @@ import {
   ordersForWalletQuerySchema,
   ordersListQuerySchema,
   placeOrderBodySchema,
-  positionsQuerySchema,
   storeOrderBodySchema,
 } from "../schemas/orders.js";
 
+// Legacy/unified orders routes (deprecated). Prefer /polymarket/* for CLOB and
+// /dflow/* for Solana swaps. These will be removed once clients migrate.
 export const orderRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -398,107 +397,6 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * GET /positions
-   * Get user positions
-   */
-  z.get(
-    "/positions",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { querystring: positionsQuerySchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const query = request.query;
-      const venue = query.venue;
-
-      try {
-        const positions = await fetchPositionsForUserWallet(pool, {
-          userId: user.id,
-          walletAddress,
-          venue,
-        });
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        if (venue) return reply.send({ positions, venue });
-        return reply.send({ positions });
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id, walletAddress },
-          "Failed to fetch positions",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to fetch positions",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
-
-  /**
-   * POST /positions/sync
-   * Sync cached positions for the selected wallet
-   */
-  z.post(
-    "/positions/sync",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { querystring: positionsQuerySchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const query = request.query;
-
-      try {
-        const result = await syncPositionsForUserWallet(pool, {
-          userId: user.id,
-          walletAddress,
-          venue: query.venue,
-        });
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          message: "Positions synced",
-          ...result,
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown error";
-        const messageLower = message.toLowerCase();
-        const statusCode = messageLower.includes("not implemented")
-          ? 501
-          : messageLower.includes("select a solana") ||
-              messageLower.includes("evm address")
-            ? 400
-            : 500;
-
-        if (statusCode >= 500) {
-          app.log.error(
-            { error, userId: user.id, walletAddress, venue: query.venue },
-            "Failed to sync positions",
-          );
-        }
-
-        reply.code(statusCode);
-        return reply.send({ error: message });
-      }
-    },
-  );
-
-  /**
    * POST /orders/store
    * Store order data after user performs the order on frontend
    */
@@ -535,6 +433,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
           venueOrderId: body.orderID,
           tokenId: body.tokenId ?? null,
           side: body.side ?? null,
+          orderType: body.orderType ?? "GTC",
           price: body.price ?? null,
           size: body.size ?? null,
           status: body.status || "live",

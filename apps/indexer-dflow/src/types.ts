@@ -5,6 +5,8 @@ export const DflowMarketAccount = z
     isInitialized: z.boolean().optional().nullable(),
     yesMint: z.string().optional().nullable(),
     noMint: z.string().optional().nullable(),
+    marketLedger: z.string().optional().nullable(),
+    redemptionStatus: z.string().optional().nullable(),
   })
   .passthrough();
 

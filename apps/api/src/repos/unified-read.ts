@@ -329,6 +329,15 @@ export type MarketDetailsRow = {
   token_no: string | null;
   clob_token_ids: string | null;
   condition_id: string | null;
+  market_ledger: string | null;
+  settlement_mint: string | null;
+  is_initialized: boolean | null;
+  redemption_status: string | null;
+  pm_order_price_min_tick_size: unknown;
+  pm_order_min_size: unknown;
+  pm_accepting_orders: boolean | null;
+  pm_neg_risk: boolean | null;
+  pm_clob_token_ids: string | null;
   slug: string | null;
   market_category: string | null;
   market_image: string | null;
@@ -373,6 +382,15 @@ export async function fetchMarketDetails(
       m.token_no,
       m.clob_token_ids,
       m.condition_id,
+      m.market_ledger,
+      m.settlement_mint,
+      m.is_initialized,
+      m.redemption_status,
+      pm.order_price_min_tick_size as pm_order_price_min_tick_size,
+      pm.order_min_size as pm_order_min_size,
+      pm.accepting_orders as pm_accepting_orders,
+      pm.neg_risk as pm_neg_risk,
+      pm.clob_token_ids as pm_clob_token_ids,
       m.slug,
       m.category as market_category,
       m.image as market_image,
@@ -381,6 +399,8 @@ export async function fetchMarketDetails(
       m.updated_at
     FROM unified_events e
     JOIN unified_markets m ON m.event_id = e.id
+    LEFT JOIN polymarket_markets pm
+      ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
     WHERE m.id = $1 OR m.venue_market_id = $1
   `;
 

@@ -62,6 +62,10 @@ export interface UnifiedMarketRow {
   token_no?: string; // Token ID for NO outcome (used by Limitless, Kalshi)
   clob_token_ids?: string; // JSON array of token IDs (used by Polymarket)
   condition_id?: string; // Condition ID for CLOB and resolution ties
+  market_ledger?: string; // DFlow market ledger (Solana)
+  settlement_mint?: string; // DFlow settlement mint (Solana USDC)
+  is_initialized?: boolean; // DFlow account initialization state
+  redemption_status?: string; // DFlow redemption status (optional enum)
   slug?: string;
   image?: string;
   icon?: string;
@@ -243,10 +247,11 @@ export async function upsertUnifiedMarket(
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
-      token_yes, token_no, clob_token_ids, condition_id, slug,
+      token_yes, token_no, clob_token_ids, condition_id, market_ledger,
+      settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -271,6 +276,10 @@ export async function upsertUnifiedMarket(
       token_no = EXCLUDED.token_no,
       clob_token_ids = EXCLUDED.clob_token_ids,
       condition_id = EXCLUDED.condition_id,
+      market_ledger = EXCLUDED.market_ledger,
+      settlement_mint = EXCLUDED.settlement_mint,
+      is_initialized = EXCLUDED.is_initialized,
+      redemption_status = EXCLUDED.redemption_status,
       slug = EXCLUDED.slug,
       image = EXCLUDED.image,
       icon = EXCLUDED.icon,
@@ -305,6 +314,10 @@ export async function upsertUnifiedMarket(
     marketRow.token_no,
     marketRow.clob_token_ids,
     marketRow.condition_id,
+    marketRow.market_ledger,
+    marketRow.settlement_mint,
+    marketRow.is_initialized,
+    marketRow.redemption_status,
     marketRow.slug,
     marketRow.image,
     marketRow.icon,
@@ -371,6 +384,10 @@ export async function upsertUnifiedMarkets(
         token_no text,
         clob_token_ids text,
         condition_id text,
+        market_ledger text,
+        settlement_mint text,
+        is_initialized boolean,
+        redemption_status text,
         slug text,
         image text,
         icon text,
@@ -382,14 +399,16 @@ export async function upsertUnifiedMarkets(
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
-      token_yes, token_no, clob_token_ids, condition_id, slug,
+      token_yes, token_no, clob_token_ids, condition_id, market_ledger,
+      settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
     )
     select
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
-      token_yes, token_no, clob_token_ids, condition_id, slug,
+      token_yes, token_no, clob_token_ids, condition_id, market_ledger,
+      settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
     from input
     on conflict (venue, venue_market_id)
@@ -415,6 +434,10 @@ export async function upsertUnifiedMarkets(
       token_no = excluded.token_no,
       clob_token_ids = excluded.clob_token_ids,
       condition_id = excluded.condition_id,
+      market_ledger = excluded.market_ledger,
+      settlement_mint = excluded.settlement_mint,
+      is_initialized = excluded.is_initialized,
+      redemption_status = excluded.redemption_status,
       slug = excluded.slug,
       image = excluded.image,
       icon = excluded.icon,
@@ -429,6 +452,8 @@ export async function upsertUnifiedMarkets(
        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
        unified_markets.liquidity, unified_markets.outcomes, unified_markets.token_yes,
        unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
+       unified_markets.market_ledger, unified_markets.settlement_mint,
+       unified_markets.is_initialized, unified_markets.redemption_status,
        unified_markets.slug, unified_markets.image, unified_markets.icon,
        unified_markets.created_at, unified_markets.updated_at)
       is distinct from
@@ -439,6 +464,8 @@ export async function upsertUnifiedMarkets(
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
        excluded.liquidity, excluded.outcomes, excluded.token_yes,
        excluded.token_no, excluded.clob_token_ids, excluded.condition_id,
+       excluded.market_ledger, excluded.settlement_mint,
+       excluded.is_initialized, excluded.redemption_status,
        excluded.slug, excluded.image, excluded.icon,
        excluded.created_at, excluded.updated_at)
   `;

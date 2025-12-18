@@ -101,6 +101,95 @@ export async function fetchPositionsForUserWallet(
   }));
 }
 
+export async function fetchPositionsForUserWalletByTokenIds(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    tokenIds: string[];
+    venue?: string;
+  },
+): Promise<Position[]> {
+  if (inputs.tokenIds.length === 0) return [];
+
+  let whereClause =
+    "where user_id = $1 and (wallet_address is null or wallet_address = $2)";
+  const params: PgParams = [inputs.userId, inputs.walletAddress];
+  let paramCount = 2;
+
+  paramCount += 1;
+  whereClause += ` and token_id = any($${paramCount}::text[])`;
+  params.push(inputs.tokenIds);
+
+  if (inputs.venue) {
+    paramCount += 1;
+    whereClause += ` and venue = $${paramCount}`;
+    params.push(inputs.venue);
+  }
+
+  const { rows } = await pool.query<PositionRow>(
+    `
+      with wallet_positions as (
+        select distinct on (venue, token_id)
+          id,
+          user_id,
+          wallet_address,
+          venue,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        from positions
+        ${whereClause}
+        order by
+          venue asc,
+          token_id asc,
+          (wallet_address is null) asc,
+          last_updated_at desc nulls last,
+          updated_at desc nulls last
+      )
+      select
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        token_id,
+        side,
+        size,
+        average_price,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      from wallet_positions
+      order by last_updated_at desc nulls last, venue asc, token_id asc
+    `,
+    params,
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    userId: row.user_id,
+    venue: row.venue as Position["venue"],
+    tokenId: row.token_id,
+    side: row.side as Position["side"],
+    size: parseFloat(row.size),
+    averagePrice:
+      row.average_price != null ? parseFloat(row.average_price) : undefined,
+    unrealizedPnl: parseFloat(row.unrealized_pnl ?? "0"),
+    realizedPnl: parseFloat(row.realized_pnl ?? "0"),
+    lastUpdatedAt: row.last_updated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
 export type WalletTokenBalance = {
   tokenId: string;
   size: string;

@@ -272,6 +272,27 @@ export function mapToUnifiedMarket(
     ["openInterest", "open_interest", "openInterestNum"],
   );
 
+  const marketLedgerRaw =
+    typeof account?.marketLedger === "string"
+      ? account.marketLedger
+      : typeof account?.market_ledger === "string"
+        ? account.market_ledger
+        : undefined;
+  const marketLedger = marketLedgerRaw?.trim() || undefined;
+
+  const redemptionRaw =
+    typeof account?.redemptionStatus === "string"
+      ? account.redemptionStatus
+      : typeof account?.redemption_status === "string"
+        ? account.redemption_status
+        : undefined;
+  const redemptionStatus = redemptionRaw?.trim() || undefined;
+
+  const isInitialized =
+    typeof account?.isInitialized === "boolean"
+      ? account.isInitialized
+      : undefined;
+
   const storedVolume24h =
     volume24h != null && volume24h > 0 ? volume24h : undefined;
   const storedLiquidity =
@@ -351,6 +372,10 @@ export function mapToUnifiedMarket(
     token_yes: yesTokenId,
     token_no: noTokenId,
     condition_id: undefined,
+    market_ledger: marketLedger,
+    settlement_mint: instrument.settlementMint,
+    is_initialized: isInitialized,
+    redemption_status: redemptionStatus,
     slug: undefined,
     image: undefined,
     icon: undefined,

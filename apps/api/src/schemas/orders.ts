@@ -47,10 +47,6 @@ export const orderHistoryQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).catch(0),
 });
 
-export const positionsQuerySchema = z.object({
-  venue: zVenueOptional,
-});
-
 export const storeOrderBodySchema = z.object({
   walletAddress: zEthAddressRequired,
   orderID: zRequiredString("orderID is required"),
@@ -62,6 +58,7 @@ export const storeOrderBodySchema = z.object({
   venue: zVenueOptional,
   tokenId: z.string().optional(),
   side: z.string().optional(),
+  orderType: z.enum(["GTC", "GTD", "FAK", "FOK"]).optional(),
   price: z.coerce.number().optional(),
   size: z.coerce.number().optional(),
 });

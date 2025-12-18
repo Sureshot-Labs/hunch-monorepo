@@ -86,6 +86,7 @@ async function storeOrderInTx(
     venueOrderId: string;
     tokenId: string | null;
     side: string | null;
+    orderType?: "GTC" | "GTD" | "FAK" | "FOK";
     price: number | null;
     size: number | null;
     status: string;
@@ -116,6 +117,8 @@ async function storeOrderInTx(
     return { kind: "exists" };
   }
 
+  const orderType = inputs.orderType ?? "GTC";
+
   const result = await client.query<{
     id: string;
     venue_order_id: string;
@@ -127,7 +130,7 @@ async function storeOrderInTx(
         price, size, status, filled_size, error_message, raw_error,
         posted_at, last_update
       ) VALUES (
-        gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'GTC', $7, $8, $9, 0, $10, $11,
+        gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12,
         now(), now()
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
@@ -137,6 +140,7 @@ async function storeOrderInTx(
       inputs.venueOrderId,
       inputs.tokenId,
       inputs.side,
+      orderType,
       inputs.price,
       inputs.size,
       inputs.status,
@@ -157,6 +161,7 @@ export async function storeOrder(
     venueOrderId: string;
     tokenId: string | null;
     side: string | null;
+    orderType?: "GTC" | "GTD" | "FAK" | "FOK";
     price: number | null;
     size: number | null;
     status: string;

@@ -59,11 +59,16 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
 
         const market = rows[0];
 
+        const clobTokenIdsRaw =
+          market.clob_token_ids ??
+          market.pm_clob_token_ids ??
+          null;
+
         // Parse token IDs based on venue
         let tokens = { yes: null as string | null, no: null as string | null };
-        if (market.venue === "polymarket" && market.clob_token_ids) {
+        if (market.venue === "polymarket" && clobTokenIdsRaw) {
           try {
-            const tokenIds = JSON.parse(market.clob_token_ids);
+            const tokenIds = JSON.parse(clobTokenIdsRaw);
             tokens = {
               yes: tokenIds[0] || null,
               no: tokenIds[1] || null,
@@ -106,6 +111,29 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             market.last_price != null ? Number(market.last_price) : null,
           outcomes,
           tokens,
+          clobTokenIds:
+            clobTokenIdsRaw != null ? clobTokenIdsRaw : null,
+          orderPriceMinTickSize:
+            market.pm_order_price_min_tick_size != null
+              ? Number(market.pm_order_price_min_tick_size)
+              : null,
+          orderMinSize:
+            market.pm_order_min_size != null
+              ? Number(market.pm_order_min_size)
+              : null,
+          acceptingOrders:
+            market.pm_accepting_orders != null
+              ? Boolean(market.pm_accepting_orders)
+              : null,
+          negRisk:
+            market.pm_neg_risk != null ? Boolean(market.pm_neg_risk) : null,
+          marketLedger: market.market_ledger ?? null,
+          settlementMint: market.settlement_mint ?? null,
+          isInitialized:
+            market.is_initialized != null
+              ? Boolean(market.is_initialized)
+              : null,
+          redemptionStatus: market.redemption_status ?? null,
           conditionId: market.condition_id || null,
           category: market.market_category || null,
           marketSlug: market.slug || null,
