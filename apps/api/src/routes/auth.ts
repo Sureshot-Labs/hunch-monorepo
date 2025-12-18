@@ -9,6 +9,7 @@ import { PrivyService } from "../privy-service.js";
 import {
   addWalletBodySchema,
   authPrivyBodySchema,
+  polymarketConnectBodySchema,
   polymarketCredentialsBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
@@ -154,8 +155,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const wallets = await AuthService.getUserWallets(user.id);
-        const polymarketCreds = await AuthService.getPolymarketCredentials(
+        const polymarketCreds = await AuthService.getVenueCredentialsInfo(
           user.id,
+          "polymarket",
           walletAddress,
         );
 
@@ -320,7 +322,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const credentials = await AuthService.getAllVenueCredentials(
+        const credentials = await AuthService.getAllVenueCredentialsInfo(
           user.id,
           walletAddress,
         );
@@ -345,6 +347,127 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to get venue credentials",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /auth/polymarket/connect
+   * Derive Polymarket CLOB L2 credentials via L1 signature and store encrypted-at-rest.
+   */
+  z.post(
+    "/auth/polymarket/connect",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketConnectBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!walletAddress.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket connect requires an EVM wallet address",
+        });
+      }
+
+      const body = request.body;
+
+      const clobBase =
+        process.env.POLYMARKET_CLOB_BASE?.trim() ||
+        "https://clob.polymarket.com";
+
+      try {
+        const upstream = await fetch(`${clobBase}/auth/api-key`, {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "Hunch-API/1.0",
+            POLY_ADDRESS: walletAddress,
+            POLY_SIGNATURE: body.signature,
+            POLY_TIMESTAMP: body.timestamp,
+            POLY_NONCE: body.nonce.toString(),
+          },
+          body: JSON.stringify({}),
+        });
+
+        if (!upstream.ok) {
+          const text = await upstream.text().catch(() => "");
+          const message = text.trim().length
+            ? text
+            : `${upstream.status} ${upstream.statusText}`;
+          reply.code(upstream.status === 401 ? 400 : 502);
+          return reply.send({
+            error: "Polymarket auth failed",
+            message,
+          });
+        }
+
+        const payload = (await upstream.json()) as unknown;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          reply.code(502);
+          return reply.send({
+            error: "Polymarket auth failed",
+            message: "Unexpected response from Polymarket",
+          });
+        }
+
+        const record = payload as Record<string, unknown>;
+        const apiKeyRaw =
+          record.apiKey ??
+          record.api_key ??
+          record.key ??
+          record.apiKeyId ??
+          record.api_key_id;
+        const secretRaw =
+          record.secret ?? record.apiSecret ?? record.api_secret;
+        const passphraseRaw = record.passphrase ?? record.apiPassphrase;
+
+        const apiKey = typeof apiKeyRaw === "string" ? apiKeyRaw.trim() : "";
+        const apiSecret = typeof secretRaw === "string" ? secretRaw.trim() : "";
+        const passphrase =
+          typeof passphraseRaw === "string" ? passphraseRaw.trim() : "";
+
+        if (!apiKey || !apiSecret || !passphrase) {
+          reply.code(502);
+          return reply.send({
+            error: "Polymarket auth failed",
+            message: "Polymarket did not return apiKey/secret/passphrase",
+          });
+        }
+
+        const additionalData: Record<string, unknown> = {
+          passphrase,
+          ...(body.funderAddress ? { funderAddress: body.funderAddress } : {}),
+        };
+
+        await AuthService.createOrUpdateVenueCredentials(
+          user.id,
+          walletAddress,
+          "polymarket",
+          apiKey,
+          apiSecret,
+          additionalData,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Polymarket connect failed",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Polymarket connect failed",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

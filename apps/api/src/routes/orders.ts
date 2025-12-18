@@ -2,13 +2,15 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
-import type { Order, Position } from "../order-types.js";
+import type { Order } from "../order-types.js";
 import {
   fetchOrderHistoryRows,
   fetchOrdersForUser,
   findOrderVenueForUser,
   storeOrder,
 } from "../repos/orders-repo.js";
+import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
+import { syncPositionsForUserWallet } from "../services/positions-sync.js";
 import { VenueOrderManagerFactory } from "../venue-order-manager-factory.js";
 import {
   orderHistoryQuerySchema,
@@ -200,6 +202,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         const venueFromDb = await findOrderVenueForUser(pool, {
           orderId: params.id,
           userId: user.id,
+          walletAddress,
         });
 
         if (!venueFromDb) {
@@ -275,6 +278,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         const venueFromDb = await findOrderVenueForUser(pool, {
           orderId: params.id,
           userId: user.id,
+          walletAddress,
         });
 
         if (!venueFromDb) {
@@ -325,7 +329,8 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const user = request.user;
-      if (!user) {
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
@@ -338,6 +343,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
         const rows = await fetchOrderHistoryRows(pool, {
           userId: user.id,
+          walletAddress,
           venue: query.venue,
           status: query.status,
           limit,
@@ -413,43 +419,15 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       const venue = query.venue;
 
       try {
-        if (venue) {
-          const result = await VenueOrderManagerFactory.getPositions(
-            venue,
-            user.id,
-            walletAddress,
-          );
-
-          if (result.success) {
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({ positions: result.positions, venue });
-          }
-
-          reply.code(400);
-          return reply.send({
-            error: result.errorMessage || "Failed to fetch positions",
-          });
-        }
-
-        const allPositions: Position[] = [];
-        for (const v of ["polymarket", "kalshi", "limitless"] as const) {
-          try {
-            const result = await VenueOrderManagerFactory.getPositions(
-              v,
-              user.id,
-              walletAddress,
-            );
-            if (result.success) allPositions.push(...result.positions);
-          } catch (error) {
-            app.log.warn(
-              { error, venue: v, userId: user.id },
-              `Failed to fetch positions for ${v}`,
-            );
-          }
-        }
+        const positions = await fetchPositionsForUserWallet(pool, {
+          userId: user.id,
+          walletAddress,
+          venue,
+        });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ positions: allPositions });
+        if (venue) return reply.send({ positions, venue });
+        return reply.send({ positions });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress },
@@ -460,6 +438,62 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
           error: "Failed to fetch positions",
           message: error instanceof Error ? error.message : "Unknown error",
         });
+      }
+    },
+  );
+
+  /**
+   * POST /positions/sync
+   * Sync cached positions for the selected wallet
+   */
+  z.post(
+    "/positions/sync",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: positionsQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+
+      try {
+        const result = await syncPositionsForUserWallet(pool, {
+          userId: user.id,
+          walletAddress,
+          venue: query.venue,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          message: "Positions synced",
+          ...result,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        const messageLower = message.toLowerCase();
+        const statusCode = messageLower.includes("not implemented")
+          ? 501
+          : messageLower.includes("select a solana") ||
+              messageLower.includes("evm address")
+            ? 400
+            : 500;
+
+        if (statusCode >= 500) {
+          app.log.error(
+            { error, userId: user.id, walletAddress, venue: query.venue },
+            "Failed to sync positions",
+          );
+        }
+
+        reply.code(statusCode);
+        return reply.send({ error: message });
       }
     },
   );
@@ -496,6 +530,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       try {
         const result = await storeOrder(pool, {
           userId: user.id,
+          walletAddress: authedWalletAddress,
           venue: body.venue ?? "polymarket",
           venueOrderId: body.orderID,
           tokenId: body.tokenId ?? null,
@@ -580,6 +615,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
         const result = await fetchOrdersForUser(pool, {
           userId: user.id,
+          walletAddress: authedWalletAddress,
           status: query.status,
           venue: query.venue,
           limit,

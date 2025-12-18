@@ -5,6 +5,11 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { pool } from "./db.js";
 import "./env.js";
 import { PrivyService, PrivyUser, PrivyClaims } from "./privy-service.js";
+import {
+  decryptCredentialsString,
+  encryptCredentialsString,
+  getCredentialsEncryptionKey,
+} from "./lib/credentials-encryption.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -93,6 +98,9 @@ export interface VenueCredentials {
   venue: "polymarket" | "kalshi" | "limitless";
   apiKey: string;
   apiSecret: string;
+  apiPassphrase?: string;
+  funderAddress?: string;
+  funderUpdatedAt?: Date;
   additionalData?: unknown; // For venue-specific data
   isActive: boolean;
   createdAt: Date;
@@ -106,13 +114,184 @@ type VenueCredentialsRow = {
   wallet_address: string;
   venue: "polymarket" | "kalshi" | "limitless";
   api_key: string;
-  api_secret: string;
+  api_secret: string | null;
+  api_secret_enc?: string | null;
+  api_passphrase_enc?: string | null;
+  funder_address?: string | null;
+  funder_updated_at?: Date | null;
   additional_data: unknown | null;
   is_active: boolean;
   created_at: Date;
   updated_at: Date;
   last_used_at: Date | null;
 };
+
+export interface VenueCredentialsInfo {
+  id: string;
+  userId: string;
+  walletAddress: string;
+  venue: "polymarket" | "kalshi" | "limitless";
+  additionalData?: unknown;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  lastUsedAt?: Date;
+  funderAddress?: string;
+  funderUpdatedAt?: Date;
+}
+
+type VenueCredentialsInfoRow = {
+  id: string;
+  user_id: string;
+  wallet_address: string;
+  venue: "polymarket" | "kalshi" | "limitless";
+  additional_data: unknown | null;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+  last_used_at: Date | null;
+  funder_address?: string | null;
+  funder_updated_at?: Date | null;
+};
+
+type VenueCredentialsDbFeatures = {
+  hasEncryptedSecret: boolean;
+  hasEncryptedPassphrase: boolean;
+  hasFunderAddress: boolean;
+};
+
+let venueCredentialsDbFeaturesPromise: Promise<VenueCredentialsDbFeatures> | null =
+  null;
+
+async function getVenueCredentialsDbFeatures(): Promise<VenueCredentialsDbFeatures> {
+  if (venueCredentialsDbFeaturesPromise)
+    return venueCredentialsDbFeaturesPromise;
+
+  venueCredentialsDbFeaturesPromise = (async () => {
+    const result = await pool.query<{ column_name: string }>(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'user_venue_credentials'
+         AND column_name = ANY($1::text[])`,
+      [
+        [
+          "api_secret_enc",
+          "api_passphrase_enc",
+          "funder_address",
+          "funder_updated_at",
+        ],
+      ],
+    );
+
+    const columns = new Set(result.rows.map((row) => row.column_name));
+    return {
+      hasEncryptedSecret: columns.has("api_secret_enc"),
+      hasEncryptedPassphrase: columns.has("api_passphrase_enc"),
+      hasFunderAddress:
+        columns.has("funder_address") && columns.has("funder_updated_at"),
+    };
+  })();
+
+  return venueCredentialsDbFeaturesPromise;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  if (Array.isArray(value)) return false;
+  return true;
+}
+
+function extractPassphrase(
+  venue: VenueCredentials["venue"],
+  additionalData: unknown,
+): { passphrase?: string; additionalDataSanitized?: unknown } {
+  if (venue !== "polymarket") {
+    return { additionalDataSanitized: additionalData };
+  }
+
+  if (!isPlainRecord(additionalData)) {
+    return { additionalDataSanitized: additionalData };
+  }
+
+  const passphraseRaw = additionalData.passphrase;
+  const passphrase =
+    typeof passphraseRaw === "string" && passphraseRaw.trim().length
+      ? passphraseRaw.trim()
+      : undefined;
+
+  if (!Object.prototype.hasOwnProperty.call(additionalData, "passphrase")) {
+    return { passphrase, additionalDataSanitized: additionalData };
+  }
+
+  const { passphrase: _removed, ...rest } = additionalData;
+  return {
+    passphrase,
+    additionalDataSanitized: Object.keys(rest).length ? rest : undefined,
+  };
+}
+
+function extractFunderAddress(
+  venue: VenueCredentials["venue"],
+  additionalData: unknown,
+): { funderAddress?: string; additionalDataSanitized?: unknown } {
+  if (venue !== "polymarket") {
+    return { additionalDataSanitized: additionalData };
+  }
+
+  if (!isPlainRecord(additionalData)) {
+    return { additionalDataSanitized: additionalData };
+  }
+
+  const raw =
+    additionalData.funderAddress ??
+    additionalData.funder_address ??
+    additionalData.funder;
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  const funderAddress = ETH_ADDRESS_RE.test(trimmed)
+    ? normalizeWalletAddress(trimmed)
+    : undefined;
+
+  if (
+    !Object.prototype.hasOwnProperty.call(additionalData, "funderAddress") &&
+    !Object.prototype.hasOwnProperty.call(additionalData, "funder_address") &&
+    !Object.prototype.hasOwnProperty.call(additionalData, "funder")
+  ) {
+    return { funderAddress, additionalDataSanitized: additionalData };
+  }
+
+  const {
+    funderAddress: _f0,
+    funder_address: _f1,
+    funder: _f2,
+    ...rest
+  } = additionalData;
+  return {
+    funderAddress,
+    additionalDataSanitized: Object.keys(rest).length ? rest : undefined,
+  };
+}
+
+function redactAdditionalDataForResponse(value: unknown): unknown | undefined {
+  if (!isPlainRecord(value)) return value ?? undefined;
+
+  const redactedKeys = new Set([
+    "passphrase",
+    "apiSecret",
+    "api_secret",
+    "secret",
+    "privateKey",
+    "private_key",
+  ]);
+
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (redactedKeys.has(key)) continue;
+    output[key] = entry;
+  }
+
+  return Object.keys(output).length ? output : undefined;
+}
 
 // Backward compatibility
 export type PolymarketCredentials = VenueCredentials;
@@ -646,19 +825,72 @@ export class AuthService {
     apiSecret: string,
     additionalData?: unknown,
   ): Promise<VenueCredentials> {
+    const { passphrase, additionalDataSanitized } = extractPassphrase(
+      venue,
+      additionalData,
+    );
+    const {
+      funderAddress,
+      additionalDataSanitized: additionalDataWithoutFunder,
+    } = extractFunderAddress(venue, additionalDataSanitized);
+    const additionalDataSafe = redactAdditionalDataForResponse(
+      additionalDataWithoutFunder,
+    );
+
+    const dbFeatures = await getVenueCredentialsDbFeatures();
+    if (
+      !dbFeatures.hasEncryptedSecret ||
+      !dbFeatures.hasEncryptedPassphrase ||
+      !dbFeatures.hasFunderAddress
+    ) {
+      throw new Error(
+        "Encrypted credential storage is not available: apply DB migration 0027_encrypt_venue_credentials_and_add_funder.sql",
+      );
+    }
+
+    const encryptionKey = getCredentialsEncryptionKey();
+    const secretEnc = encryptCredentialsString(apiSecret, encryptionKey);
+    const passphraseEnc =
+      dbFeatures.hasEncryptedPassphrase && passphrase
+        ? encryptCredentialsString(passphrase, encryptionKey)
+        : null;
+    const funderAddressValue = funderAddress ?? null;
+
     const result = await pool.query(
-      `INSERT INTO user_venue_credentials (user_id, wallet_address, venue, api_key, api_secret, additional_data) 
-       VALUES ($1, $2, $3, $4, $5, $6) 
-       ON CONFLICT (user_id, wallet_address, venue) 
-       DO UPDATE SET api_key = $4, api_secret = $5, additional_data = $6, updated_at = now(), last_used_at = now()
-       RETURNING id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at`,
+      `INSERT INTO user_venue_credentials (
+          user_id,
+          wallet_address,
+          venue,
+          api_key,
+          api_secret,
+          api_secret_enc,
+          api_passphrase_enc,
+          additional_data,
+          funder_address,
+          funder_updated_at
+        )
+       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8::text, CASE WHEN $8::text IS NULL THEN NULL ELSE now() END)
+       ON CONFLICT (user_id, wallet_address, venue)
+       DO UPDATE SET
+         api_key = $4,
+         api_secret = NULL,
+         api_secret_enc = $5,
+         api_passphrase_enc = $6,
+         additional_data = $7,
+         funder_address = CASE WHEN $8::text IS NULL THEN user_venue_credentials.funder_address ELSE $8::text END,
+         funder_updated_at = CASE WHEN $8::text IS NULL THEN user_venue_credentials.funder_updated_at ELSE now() END,
+         updated_at = now(),
+         last_used_at = now()
+       RETURNING id, user_id, wallet_address, venue, api_key, additional_data, funder_address, funder_updated_at, is_active, created_at, updated_at, last_used_at`,
       [
         userId,
         walletAddress,
         venue,
         apiKey,
-        apiSecret,
-        additionalData ? JSON.stringify(additionalData) : null,
+        secretEnc,
+        passphraseEnc,
+        additionalDataSafe ? JSON.stringify(additionalDataSafe) : null,
+        funderAddressValue,
       ],
     );
 
@@ -671,7 +903,10 @@ export class AuthService {
       walletAddress: row.wallet_address,
       venue: row.venue,
       apiKey: row.api_key,
-      apiSecret: row.api_secret,
+      apiSecret,
+      apiPassphrase: passphrase,
+      funderAddress: row.funder_address ?? undefined,
+      funderUpdatedAt: row.funder_updated_at ?? undefined,
       additionalData: row.additional_data,
       isActive: row.is_active,
       createdAt: row.created_at,
@@ -688,8 +923,28 @@ export class AuthService {
     venue: "polymarket" | "kalshi" | "limitless",
     walletAddress: string,
   ): Promise<VenueCredentials | null> {
+    const dbFeatures = await getVenueCredentialsDbFeatures();
+    const selectedColumns = [
+      "id",
+      "user_id",
+      "wallet_address",
+      "venue",
+      "api_key",
+      "api_secret",
+      "additional_data",
+      "is_active",
+      "created_at",
+      "updated_at",
+      "last_used_at",
+      ...(dbFeatures.hasEncryptedSecret ? ["api_secret_enc"] : []),
+      ...(dbFeatures.hasEncryptedPassphrase ? ["api_passphrase_enc"] : []),
+      ...(dbFeatures.hasFunderAddress
+        ? ["funder_address", "funder_updated_at"]
+        : []),
+    ].join(", ");
+
     const result = await pool.query<VenueCredentialsRow>(
-      `SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at
+      `SELECT ${selectedColumns}
        FROM user_venue_credentials
        WHERE user_id = $1
          AND venue = $2
@@ -705,6 +960,35 @@ export class AuthService {
 
     const row = result.rows[0];
 
+    let apiSecret = row.api_secret ?? "";
+    let apiPassphrase: string | undefined;
+    let funderAddress: string | undefined;
+    let funderUpdatedAt: Date | undefined;
+
+    const additionalData = redactAdditionalDataForResponse(row.additional_data);
+
+    if (dbFeatures.hasEncryptedSecret && row.api_secret_enc) {
+      const encryptionKey = getCredentialsEncryptionKey();
+      apiSecret = decryptCredentialsString(row.api_secret_enc, encryptionKey);
+    }
+
+    if (dbFeatures.hasEncryptedPassphrase && row.api_passphrase_enc) {
+      const encryptionKey = getCredentialsEncryptionKey();
+      apiPassphrase = decryptCredentialsString(
+        row.api_passphrase_enc,
+        encryptionKey,
+      );
+    }
+
+    if (
+      dbFeatures.hasFunderAddress &&
+      row.funder_address &&
+      row.funder_updated_at
+    ) {
+      funderAddress = row.funder_address;
+      funderUpdatedAt = row.funder_updated_at;
+    }
+
     // Map snake_case to camelCase
     return {
       id: row.id,
@@ -712,8 +996,11 @@ export class AuthService {
       walletAddress: row.wallet_address,
       venue: row.venue,
       apiKey: row.api_key,
-      apiSecret: row.api_secret,
-      additionalData: row.additional_data,
+      apiSecret,
+      apiPassphrase,
+      funderAddress,
+      funderUpdatedAt,
+      additionalData,
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -722,14 +1009,83 @@ export class AuthService {
   }
 
   /**
-   * Get all venue credentials for user
+   * Get venue credentials metadata (no secrets)
    */
-  static async getAllVenueCredentials(
+  static async getVenueCredentialsInfo(
+    userId: string,
+    venue: "polymarket" | "kalshi" | "limitless",
+    walletAddress: string,
+  ): Promise<VenueCredentialsInfo | null> {
+    const dbFeatures = await getVenueCredentialsDbFeatures();
+    const selectedColumns = [
+      "id",
+      "user_id",
+      "wallet_address",
+      "venue",
+      "additional_data",
+      "is_active",
+      "created_at",
+      "updated_at",
+      "last_used_at",
+      ...(dbFeatures.hasFunderAddress
+        ? ["funder_address", "funder_updated_at"]
+        : []),
+    ].join(", ");
+
+    const result = await pool.query<VenueCredentialsInfoRow>(
+      `SELECT ${selectedColumns}
+       FROM user_venue_credentials
+       WHERE user_id = $1
+         AND venue = $2
+         AND wallet_address = $3
+         AND is_active = true
+       LIMIT 1`,
+      [userId, venue, walletAddress],
+    );
+
+    const row = result.rows[0];
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      userId: row.user_id,
+      walletAddress: row.wallet_address,
+      venue: row.venue,
+      additionalData: redactAdditionalDataForResponse(row.additional_data),
+      isActive: row.is_active,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      lastUsedAt: row.last_used_at ?? undefined,
+      funderAddress: row.funder_address ?? undefined,
+      funderUpdatedAt: row.funder_updated_at ?? undefined,
+    };
+  }
+
+  /**
+   * Get all venue credentials metadata for user + wallet (no secrets)
+   */
+  static async getAllVenueCredentialsInfo(
     userId: string,
     walletAddress: string,
-  ): Promise<VenueCredentials[]> {
-    const result = await pool.query<VenueCredentialsRow>(
-      `SELECT id, user_id, wallet_address, venue, api_key, api_secret, additional_data, is_active, created_at, updated_at, last_used_at
+  ): Promise<VenueCredentialsInfo[]> {
+    const dbFeatures = await getVenueCredentialsDbFeatures();
+    const selectedColumns = [
+      "id",
+      "user_id",
+      "wallet_address",
+      "venue",
+      "additional_data",
+      "is_active",
+      "created_at",
+      "updated_at",
+      "last_used_at",
+      ...(dbFeatures.hasFunderAddress
+        ? ["funder_address", "funder_updated_at"]
+        : []),
+    ].join(", ");
+
+    const result = await pool.query<VenueCredentialsInfoRow>(
+      `SELECT ${selectedColumns}
        FROM user_venue_credentials
        WHERE user_id = $1
          AND wallet_address = $2
@@ -744,13 +1100,13 @@ export class AuthService {
       userId: row.user_id,
       walletAddress: row.wallet_address,
       venue: row.venue,
-      apiKey: row.api_key,
-      apiSecret: row.api_secret,
-      additionalData: row.additional_data,
+      additionalData: redactAdditionalDataForResponse(row.additional_data),
       isActive: row.is_active,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastUsedAt: row.last_used_at ?? undefined,
+      funderAddress: row.funder_address ?? undefined,
+      funderUpdatedAt: row.funder_updated_at ?? undefined,
     }));
   }
 

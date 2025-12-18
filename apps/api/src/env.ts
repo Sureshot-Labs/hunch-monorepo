@@ -30,4 +30,10 @@ export const env = {
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
+  solanaRpcUrl:
+    process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
+  solanaRpcTimeoutMs: optionalPositiveInt("SOLANA_RPC_TIMEOUT_MS", 10_000),
+  polygonRpcUrl:
+    process.env.POLYGON_RPC_URL?.trim() || "https://polygon-rpc.com",
+  polygonRpcTimeoutMs: optionalPositiveInt("POLYGON_RPC_TIMEOUT_MS", 10_000),
 };
