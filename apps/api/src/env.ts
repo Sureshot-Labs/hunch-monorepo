@@ -18,6 +18,15 @@ function optionalPositiveInt(name: string, fallback: number): number {
   return asInt > 0 ? asInt : fallback;
 }
 
+function optionalNonNegativeInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const asInt = Math.trunc(n);
+  return asInt >= 0 ? asInt : fallback;
+}
+
 function parseOptionalBool(value: string | undefined): boolean | undefined {
   if (!value) return undefined;
   switch (value.toLowerCase()) {
@@ -119,6 +128,13 @@ export const env = {
   polymarketConditionalTokensAddress:
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+
+  // Fee policy (defaults to 0 bps)
+  feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
+  feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
+  feeCollectorAddress:
+    process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
+  dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
 
   // DFlow config (execution-ready)
   dflowEnv,

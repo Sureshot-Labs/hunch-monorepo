@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { randomBytes } from "crypto";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -10,6 +11,7 @@ import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
   polymarketCancelOrderBodySchema,
   polymarketMarketInfoQuerySchema,
+  polymarketOrderParamsQuerySchema,
   polymarketOpenOrdersQuerySchema,
   polymarketPlaceOrderBodySchema,
   polymarketQuoteBodySchema,
@@ -215,6 +217,12 @@ function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
   return negRisk ? env.polymarketNegRiskExchangeAddress : env.polymarketExchangeAddress;
 }
 
+function generatePolymarketNonce(): string {
+  const bytes = randomBytes(16);
+  const value = BigInt(`0x${bytes.toString("hex")}`);
+  return value === 0n ? "1" : value.toString();
+}
+
 function normalizeOrderForPayload(
   order: Record<string, unknown>,
   side: PolymarketSide,
@@ -314,6 +322,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         const info = await fetchPolymarketMarketInfo(pool, {
           tokenId: query.tokenId,
           marketId: query.marketId,
+          conditionId: query.conditionId,
         });
 
         if (!info) {
@@ -341,6 +350,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ok: true,
           tokenId: query.tokenId ?? null,
           marketId: query.marketId ?? null,
+          conditionId: query.conditionId ?? null,
           polymarketId: info.polymarket_id,
           unifiedMarketId: info.unified_market_id,
           clobTokenIds,
@@ -370,6 +380,47 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }
+    },
+  );
+
+  /**
+   * GET /polymarket/order-params
+   * Returns default params needed to build an order signature.
+   */
+  z.get(
+    "/polymarket/order-params",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: polymarketOrderParamsQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket order params require an EVM wallet address",
+        });
+      }
+
+      const tokenId = request.query.tokenId.trim();
+      if (!tokenId) {
+        reply.code(400);
+        return reply.send({ error: "tokenId is required" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        tokenId,
+        nonce: generatePolymarketNonce(),
+        feeRateBps: 0,
+      });
     },
   );
 

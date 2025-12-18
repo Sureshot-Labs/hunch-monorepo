@@ -13,10 +13,11 @@ export type PolymarketMarketInfoRow = {
 
 export async function fetchPolymarketMarketInfo(
   pool: Pool,
-  inputs: { tokenId?: string; marketId?: string },
+  inputs: { tokenId?: string; marketId?: string; conditionId?: string },
 ): Promise<PolymarketMarketInfoRow | null> {
   const tokenId = inputs.tokenId?.trim();
   const marketId = inputs.marketId?.trim();
+  const conditionId = inputs.conditionId?.trim();
 
   if (tokenId) {
     const { rows } = await pool.query<PolymarketMarketInfoRow>(
@@ -39,6 +40,31 @@ export async function fetchPolymarketMarketInfo(
         limit 1
       `,
       [tokenId],
+    );
+
+    return rows[0] ?? null;
+  }
+
+  if (conditionId) {
+    const { rows } = await pool.query<PolymarketMarketInfoRow>(
+      `
+        select
+          pm.id as polymarket_id,
+          m.id as unified_market_id,
+          pm.condition_id,
+          pm.clob_token_ids,
+          pm.neg_risk,
+          pm.order_price_min_tick_size,
+          pm.order_min_size,
+          pm.accepting_orders
+        from polymarket_markets pm
+        left join unified_markets m
+          on m.venue = 'polymarket' and m.venue_market_id = pm.id
+        where pm.condition_id = $1
+           or m.condition_id = $1
+        limit 1
+      `,
+      [conditionId],
     );
 
     return rows[0] ?? null;

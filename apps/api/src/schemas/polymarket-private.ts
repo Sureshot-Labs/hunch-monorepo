@@ -47,10 +47,15 @@ export const polymarketMarketInfoQuerySchema = z
   .object({
     tokenId: z.string().optional(),
     marketId: z.string().optional(),
+    conditionId: z.string().optional(),
   })
-  .refine((v) => Boolean(v.tokenId || v.marketId), {
-    message: "tokenId or marketId is required",
+  .refine((v) => Boolean(v.tokenId || v.marketId || v.conditionId), {
+    message: "tokenId, marketId, or conditionId is required",
   });
+
+export const polymarketOrderParamsQuerySchema = z.object({
+  tokenId: zRequiredString("tokenId is required"),
+});
 
 export const polymarketQuoteBodySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),

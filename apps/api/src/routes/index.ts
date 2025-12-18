@@ -3,6 +3,7 @@ import { authRoutes } from "./auth.js";
 import { dflowPrivateRoutes } from "./dflow-private.js";
 import { eventRoutes } from "./events.js";
 import { executionsRoutes } from "./executions.js";
+import { feesRoutes } from "./fees.js";
 import { feedRoutes } from "./feed.js";
 import { healthRoutes } from "./health.js";
 import { kalshiPrivateRoutes } from "./kalshi-private.js";
@@ -21,6 +22,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(metricsRoutes);
   await app.register(healthRoutes);
   await app.register(metaRoutes);
+  await app.register(feesRoutes);
   await app.register(authRoutes);
   await app.register(dflowPrivateRoutes);
   await app.register(kalshiPrivateRoutes);
