@@ -20,6 +20,9 @@ if (envPath) {
 }
 
 const rawArgs = process.argv.slice(2);
+// `pnpm <script> -- <args>` passes a literal `--` through to the script.
+// Strip it so we can forward flags like `-c` to psql.
+if (rawArgs[0] === "--") rawArgs.shift();
 const dockerFlag = rawArgs.includes("--docker");
 const localFlag = rawArgs.includes("--local");
 const args = rawArgs.filter((a) => a !== "--docker" && a !== "--local");

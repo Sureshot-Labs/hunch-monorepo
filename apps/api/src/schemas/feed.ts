@@ -31,6 +31,33 @@ const zVenueQuery = z
     return unique.length === zVenue.options.length ? undefined : unique;
   });
 
+const zCategoriesQuery = z
+  .preprocess((v) => {
+    const toParts = (value: unknown): string[] => {
+      if (Array.isArray(value)) {
+        return value
+          .filter((p): p is string => typeof p === "string")
+          .flatMap((p) => p.split(","))
+          .map((p) => p.trim().toLowerCase())
+          .filter(Boolean);
+      }
+      if (typeof value === "string") {
+        return value
+          .split(",")
+          .map((p) => p.trim().toLowerCase())
+          .filter(Boolean);
+      }
+      return [];
+    };
+
+    const parts = toParts(v);
+    return parts.length ? parts : undefined;
+  }, z.array(z.string()).optional())
+  .transform((categories) => {
+    if (!categories?.length) return undefined;
+    return Array.from(new Set(categories)).sort();
+  });
+
 export const feedQuerySchema = z.object({
   limit: z.coerce
     .number()
@@ -46,6 +73,7 @@ export const feedQuerySchema = z.object({
   min_liquidity: z.coerce.number().catch(0),
   venue: zVenueQuery,
   category: z.string().optional(),
+  categories: zCategoriesQuery,
   filter: z
     .preprocess(
       (v) => (typeof v === "string" ? v.toLowerCase() : v),
@@ -62,4 +90,28 @@ export const feedQuerySchema = z.object({
     .transform((v) =>
       v === "trending" || v === "totalvol" || v === "liquidity" ? v : undefined,
     ),
+  min_prob: z.coerce
+    .number()
+    .optional()
+    .transform((v) => (v == null ? undefined : Math.min(1, Math.max(0, v)))),
+  max_prob: z.coerce
+    .number()
+    .optional()
+    .transform((v) => (v == null ? undefined : Math.min(1, Math.max(0, v)))),
+  max_spread: z.coerce
+    .number()
+    .optional()
+    .transform((v) => (v == null ? undefined : Math.min(1, Math.max(0, v)))),
+  end_within_hours: z.coerce
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .transform((v) => (v == null ? undefined : Math.min(24 * 365 * 5, v))),
+  age_within_hours: z.coerce
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .transform((v) => (v == null ? undefined : Math.min(24 * 365 * 5, v))),
 });

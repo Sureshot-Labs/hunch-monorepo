@@ -2,10 +2,17 @@ import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types";
 
+const DFLOW_U64_SENTINEL_MIN = 9e18;
+
 function n(v: unknown): number | undefined {
   if (v == null) return undefined;
   const parsed = typeof v === "string" ? Number(v) : (v as number);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  if (!Number.isFinite(parsed)) return undefined;
+  if (parsed < 0) return undefined;
+  // DFlow sometimes returns unsigned 64-bit sentinel values (~2^64) for missing metrics.
+  // Treat them as absent so they don't dominate sorting or UI.
+  if (parsed >= DFLOW_U64_SENTINEL_MIN) return undefined;
+  return parsed;
 }
 
 function pickNumber(

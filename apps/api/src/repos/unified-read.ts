@@ -8,98 +8,145 @@ export type FeedInputs = {
   minLiquidity: number;
   venues?: string[];
   category?: string;
+  categories?: string[];
   filter?: string;
   sort?: string;
+  minProb?: number;
+  maxProb?: number;
+  maxSpread?: number;
+  endWithin?: string;
+  ageSince?: string;
   nowParam: string;
   sevenDaysAgo: string;
   sevenDaysFromNow: string;
 };
 
+function createParamBuilder() {
+  const params: PgParams = [];
+  const add = (value: PgParams[number]): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  return { params, add };
+}
+
 export async function fetchFeedEventIds(
   pool: Pool,
   inputs: FeedInputs,
 ): Promise<Array<{ id: string }>> {
-  const eventParams: PgParams = [];
+  const { params, add } = createParamBuilder();
   const eventWhere: string[] = [];
-  let paramIdx = 1;
+  const safeEventLiquidityExpr =
+    "case when e.liquidity >= 9e18 then null else e.liquidity end";
 
   if (inputs.venues?.length) {
-    eventParams.push(inputs.venues);
-    eventWhere.push(`lower(e.venue) = ANY($${paramIdx++}::text[])`);
+    eventWhere.push(`lower(e.venue) = ANY(${add(inputs.venues)}::text[])`);
   }
-  if (inputs.category) {
-    // Case-insensitive category matching
-    eventParams.push(inputs.category.toLowerCase());
-    eventWhere.push(`lower(e.category) = $${paramIdx++}`);
+  if (inputs.categories?.length) {
+    eventWhere.push(
+      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
+    );
+  } else if (inputs.category) {
+    eventWhere.push(
+      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
+    );
   }
 
-  // Filtering logic (filter param) - use parameterized dates for index usage
   if (inputs.filter === "newest") {
-    eventParams.push(inputs.sevenDaysAgo);
-    eventWhere.push(`e.start_date >= $${paramIdx++}`);
+    eventWhere.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
   } else if (inputs.filter === "endingsoon") {
-    eventParams.push(inputs.sevenDaysFromNow);
-    eventWhere.push(`e.end_date <= $${paramIdx++}`);
+    eventWhere.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
   }
-  // if filter is not present, do not apply any filter
 
-  // Always exclude expired, closed, settled, or archived events
   eventWhere.push("e.status = 'ACTIVE'");
-  eventParams.push(inputs.nowParam);
-  eventWhere.push(`(e.end_date IS NULL OR e.end_date > $${paramIdx++})`);
 
-  // Sorting logic (sort param)
+  const nowParam = add(inputs.nowParam);
+  eventWhere.push(`(e.end_date is null or e.end_date > ${nowParam})`);
+
+  if (inputs.endWithin) {
+    eventWhere.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+    );
+  }
+  if (inputs.ageSince) {
+    eventWhere.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+    );
+  }
+
+  const yesMidExpr = `
+    case
+      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
+      else coalesce(m.best_bid, m.best_ask)
+    end
+  `;
+
+  const marketQual: string[] = [];
+  if (inputs.minLiquidity > 0) {
+    marketQual.push(
+      `coalesce(m.liquidity, ${safeEventLiquidityExpr}, 0) >= ${add(inputs.minLiquidity)}`,
+    );
+  }
+  if (inputs.minProb != null) {
+    marketQual.push(`(${yesMidExpr}) >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    marketQual.push(`(${yesMidExpr}) <= ${add(inputs.maxProb)}`);
+  }
+  if (inputs.maxSpread != null) {
+    marketQual.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
+  const marketQualSql = marketQual.length
+    ? marketQual.map((clause) => `(${clause})`).join(" and ")
+    : "true";
+
+  const having: string[] = [];
+  if (inputs.minVol > 1e-9) {
+    having.push(
+      `coalesce(e.volume_24h, sum(coalesce(m.volume_24h, 0))) >= ${add(inputs.minVol)}`,
+    );
+  }
+  having.push(`bool_or(${marketQualSql})`);
+
   let eventOrder = "";
   if (inputs.sort === "totalvol")
     eventOrder = "e.volume_total desc nulls last, e.id";
   else if (inputs.sort === "liquidity")
-    eventOrder = "e.liquidity desc nulls last, e.id";
-  else if (inputs.filter === "newest") {
-    // When filtering by newest, sort by start_date descending (newest first)
+    eventOrder = `(${safeEventLiquidityExpr}) desc nulls last, e.id`;
+  else if (inputs.filter === "newest")
     eventOrder = "e.start_date desc nulls last, e.id";
-  } else if (inputs.filter === "endingsoon") {
-    // When filtering by ending soon, sort by end_date ascending (ending soonest first)
+  else if (inputs.filter === "endingsoon")
     eventOrder = "e.end_date asc nulls last, e.id";
-  } else if (inputs.sort == null || inputs.sort === "trending") {
-    // Trending algorithm: combines volume, liquidity, and recency
-    eventParams.push(inputs.sevenDaysAgo, inputs.sevenDaysFromNow);
+  else if (inputs.sort == null || inputs.sort === "trending") {
+    const sevenDaysAgo = add(inputs.sevenDaysAgo);
+    const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
     eventOrder = `
-      (coalesce(e.volume_24h, 0) * 0.4 + 
-       coalesce(e.liquidity, 0) * 0.3 + 
-       case when e.start_date >= $${paramIdx++} then 1000 else 0 end * 0.2 +
-       case when e.end_date <= $${paramIdx++} then 500 else 0 end * 0.1
+      (coalesce(e.volume_24h, 0) * 0.4 +
+       coalesce(${safeEventLiquidityExpr}, 0) * 0.3 +
+       case when e.start_date >= ${sevenDaysAgo} then 1000 else 0 end * 0.2 +
+       case when e.end_date <= ${sevenDaysFromNow} then 500 else 0 end * 0.1
       ) desc nulls last, e.id
     `;
-  } else eventOrder = "e.start_date desc nulls last, e.id"; // fallback
+  } else eventOrder = "e.start_date desc nulls last, e.id";
 
-  // Aggregate volume/liquidity for events
-  // CRITICAL: Filter markets by ACTIVE status BEFORE joining to avoid scanning closed/settled markets
-  // Use parameterized now() for better index usage
-  eventParams.push(inputs.nowParam, inputs.nowParam);
   const eventSql = `
     select
-      e.id,
-      sum(coalesce(m.volume_24h, 0)) as total_volume,
-      sum(coalesce(m.liquidity, 0)) as total_liquidity,
-      e.start_date,
-      e.end_date
+      e.id
     from unified_events e
     join unified_markets m on m.event_id = e.id
       and m.status = 'ACTIVE'
-      and (m.expiration_time IS NULL OR m.expiration_time > $${paramIdx++})
-      and (m.close_time IS NULL OR m.close_time > $${paramIdx++})
+      and (m.expiration_time is null or m.expiration_time > ${nowParam})
+      and (m.close_time is null or m.close_time > ${nowParam})
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
-    having bool_or(
-      (coalesce(m.volume_24h, 0) >= $${paramIdx++} or m.volume_24h is null)
-      and coalesce(m.liquidity, e.liquidity, 0) >= $${paramIdx++}
-    )
+    having ${having.map((clause) => `(${clause})`).join(" and ")}
     ${eventOrder ? `order by ${eventOrder}` : ""}
     limit ${inputs.limit} offset ${inputs.offset}
   `;
-  eventParams.push(inputs.minVol, inputs.minLiquidity);
 
-  const { rows } = await pool.query<{ id: string }>(eventSql, eventParams);
+  const { rows } = await pool.query<{ id: string }>(eventSql, params);
   return rows;
 }
 
@@ -143,25 +190,47 @@ export async function fetchFeedMarkets(
   inputs: FeedInputs,
   eventIds: string[],
 ): Promise<FeedMarketRow[]> {
-  const marketParams: PgParams = [
-    inputs.minVol,
-    inputs.minLiquidity,
-    eventIds,
-    inputs.nowParam,
-    inputs.nowParam,
-  ];
+  const { params, add } = createParamBuilder();
+  const safeEventLiquidityExpr =
+    "case when e.liquidity >= 9e18 then null else e.liquidity end";
+
+  const eventIdsParam = add(eventIds);
+  const nowParam = add(inputs.nowParam);
+  const nowCloseParam = add(inputs.nowParam);
+  const yesMidExpr = `
+    case
+      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
+      else coalesce(m.best_bid, m.best_ask)
+    end
+  `;
   const marketWhere: string[] = [
-    "(coalesce(m.volume_24h, 0) >= $1 or m.volume_24h is null)",
-    "coalesce(m.liquidity, e.liquidity, 0) >= $2",
     // Only show ACTIVE markets - exclude CLOSED, SETTLED, and ARCHIVED
     "m.status = 'ACTIVE'",
-    `m.event_id = ANY($3::text[])`,
+    `m.event_id = ANY(${eventIdsParam}::text[])`,
     // Critical: Exclude expired or closed markets based on time
     // This ensures we don't show expired/closed markets even if status hasn't been updated yet
     // Use parameterized dates for index usage
-    "(m.expiration_time IS NULL OR m.expiration_time > $4)",
-    "(m.close_time IS NULL OR m.close_time > $5)",
+    `(m.expiration_time is null or m.expiration_time > ${nowParam})`,
+    `(m.close_time is null or m.close_time > ${nowCloseParam})`,
   ];
+
+  if (inputs.minLiquidity > 0) {
+    marketWhere.push(
+      `coalesce(m.liquidity, ${safeEventLiquidityExpr}, 0) >= ${add(inputs.minLiquidity)}`,
+    );
+  }
+
+  if (inputs.minProb != null) {
+    marketWhere.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    marketWhere.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
+  }
+  if (inputs.maxSpread != null) {
+    marketWhere.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
 
   // Sorting for markets: use same sort as for events, or none
   let marketOrder = "";
@@ -177,15 +246,11 @@ export async function fetchFeedMarkets(
     marketOrder = "e.end_date asc nulls last, m.venue_market_id";
   } else if (inputs.sort == null || inputs.sort === "trending") {
     // Trending algorithm for markets: combines volume, liquidity, and recency
-    // Use parameterized dates for index usage
-    // Parameters are already: $1=minVol, $2=minLiquidity, $3=eventIds, $4=nowParam, $5=nowParam
-    // So $6 and $7 will be the date parameters
-    marketParams.push(inputs.sevenDaysAgo, inputs.sevenDaysFromNow);
     marketOrder = `
       (coalesce(m.volume_24h, 0) * 0.4 + 
        coalesce(m.liquidity, 0) * 0.3 + 
-       case when e.start_date >= $6 then 1000 else 0 end * 0.2 +
-       case when e.end_date <= $7 then 500 else 0 end * 0.1
+       case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
+       case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) desc nulls last, m.venue_market_id
     `;
   } else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
@@ -197,7 +262,7 @@ export async function fetchFeedMarkets(
       e.category,
       e.start_date,
       e.end_date,
-      e.liquidity as event_liquidity,
+      (${safeEventLiquidityExpr}) as event_liquidity,
       e.volume_total as event_volume,
       e.volume_24h as event_volume_24h,
       e.open_interest as event_open_interest,
@@ -230,7 +295,7 @@ export async function fetchFeedMarkets(
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
-  const { rows } = await pool.query<FeedMarketRow>(marketSql, marketParams);
+  const { rows } = await pool.query<FeedMarketRow>(marketSql, params);
   return rows;
 }
 

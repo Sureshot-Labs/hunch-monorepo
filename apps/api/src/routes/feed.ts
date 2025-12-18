@@ -41,18 +41,27 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minLiquidity = q.min_liquidity;
       const venues = q.venue;
       const category = q.category;
+      const categories = q.categories;
       const filter = q.filter;
       const sort = q.sort;
+      const minProb = q.min_prob;
+      const maxProb = q.max_prob;
+      const maxSpread = q.max_spread;
+      const endWithinHours = q.end_within_hours;
+      const ageWithinHours = q.age_within_hours;
 
       // Normalize category to lowercase for consistent caching
       const normalizedCategory = category ? category.toLowerCase() : "";
+      const categoriesKey = categories?.length
+        ? categories.join(",")
+        : normalizedCategory;
 
       // Calculate cache TTL (default 30 seconds, can be overridden via env var)
       const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v11:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${normalizedCategory}:${filter ?? ""}:${sort ?? ""}`;
+      const cacheKey = `feed:v15:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -89,6 +98,19 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
       ).toISOString();
 
+      const endWithin =
+        endWithinHours != null
+          ? new Date(
+              nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+      const ageSince =
+        ageWithinHours != null
+          ? new Date(
+              nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+
       // 1. Get event IDs matching filters, with limit/offset
       const eventRows = await fetchFeedEventIds(pool, {
         limit,
@@ -97,8 +119,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minLiquidity,
         venues,
         category,
+        categories,
         filter,
         sort,
+        minProb,
+        maxProb,
+        maxSpread,
+        endWithin,
+        ageSince,
         nowParam,
         sevenDaysAgo,
         sevenDaysFromNow,
@@ -130,8 +158,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           minLiquidity,
           venues,
           category,
+          categories,
           filter,
           sort,
+          minProb,
+          maxProb,
+          maxSpread,
+          endWithin,
+          ageSince,
           nowParam,
           sevenDaysAgo,
           sevenDaysFromNow,
@@ -284,23 +318,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Only include events that were in the limited eventIds list
-      const data = eventIds.map(
-        (eid) =>
-          eventMap[eid] || {
-            eventId: eid,
-            eventTitle: null,
-            category: null,
-            startTime: null,
-            endTime: null,
-            eventLiquidity: 0,
-            eventVolume: 0,
-            eventOpenInterest: 0,
-            eventSlug: null,
-            image: null,
-            icon: null,
-            markets: [],
-          },
-      );
+      const data = eventIds.flatMap((eid) => {
+        const event = eventMap[eid];
+        return event ? [event] : [];
+      });
 
       const payload = {
         count: data.length,
