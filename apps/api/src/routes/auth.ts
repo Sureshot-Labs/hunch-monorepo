@@ -11,6 +11,7 @@ import {
   authPrivyBodySchema,
   polymarketConnectBodySchema,
   polymarketCredentialsBodySchema,
+  polymarketFunderBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 
@@ -468,6 +469,61 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Polymarket connect failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /auth/polymarket/funder
+   * Update (or clear) the Polymarket funder/vault address for this signer wallet.
+   */
+  z.post(
+    "/auth/polymarket/funder",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketFunderBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!walletAddress.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket funder update requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const updated = await AuthService.updateVenueFunderAddress(
+          user.id,
+          walletAddress,
+          "polymarket",
+          request.body.funderAddress,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          venue: "polymarket",
+          walletAddress,
+          funderAddress: updated.funderAddress,
+          funderUpdatedAt: updated.funderUpdatedAt,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Polymarket funder update failed",
+        );
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket funder update failed",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

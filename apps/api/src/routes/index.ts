@@ -8,6 +8,7 @@ import { metaRoutes } from "./meta.js";
 import { metricsRoutes } from "./metrics.js";
 import { orderRoutes } from "./orders.js";
 import { pricesSseRoutes } from "./prices-sse.js";
+import { polymarketPrivateRoutes } from "./polymarket-private.js";
 import { polymarketProxyRoutes } from "./polymarket-proxy.js";
 import { watchlistRoutes } from "./watchlist.js";
 
@@ -16,6 +17,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(healthRoutes);
   await app.register(metaRoutes);
   await app.register(authRoutes);
+  await app.register(polymarketPrivateRoutes);
   await app.register(polymarketProxyRoutes);
   await app.register(pricesSseRoutes);
   await app.register(feedRoutes);

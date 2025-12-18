@@ -915,6 +915,53 @@ export class AuthService {
     };
   }
 
+  static async updateVenueFunderAddress(
+    userId: string,
+    walletAddress: string,
+    venue: "polymarket" | "kalshi" | "limitless",
+    funderAddress: string | null,
+  ): Promise<{ funderAddress: string | null; funderUpdatedAt: Date | null }> {
+    const dbFeatures = await getVenueCredentialsDbFeatures();
+    if (!dbFeatures.hasFunderAddress) {
+      throw new Error(
+        "Funder address storage is not available: apply DB migration 0027_encrypt_venue_credentials_and_add_funder.sql",
+      );
+    }
+
+    const funderAddressValue = funderAddress ? funderAddress.trim() : null;
+
+    const result = await pool.query<{
+      funder_address: string | null;
+      funder_updated_at: Date | null;
+    }>(
+      `
+        update user_venue_credentials
+        set funder_address = $4::text,
+            funder_updated_at = case when $4::text is null then null else now() end,
+            updated_at = now(),
+            last_used_at = now()
+        where user_id = $1
+          and wallet_address = $2
+          and venue = $3
+          and is_active = true
+        returning funder_address, funder_updated_at
+      `,
+      [userId, walletAddress, venue, funderAddressValue],
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error(
+        `No active ${venue} credentials found for this wallet (connect first).`,
+      );
+    }
+
+    return {
+      funderAddress: row.funder_address,
+      funderUpdatedAt: row.funder_updated_at,
+    };
+  }
+
   /**
    * Get venue credentials for user
    */

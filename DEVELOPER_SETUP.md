@@ -109,6 +109,23 @@ touch .env
 
 Add variables to your `.env` file
 
+At minimum (for auth + safely storing venue credentials), set:
+
+- `JWT_SECRET`
+- `PRIVY_APP_ID`
+- `PRIVY_APP_SECRET`
+- `CREDENTIALS_ENCRYPTION_KEY` (32 bytes; base64 or 64-char hex). Generate with:
+  ```bash
+  openssl rand -base64 32
+  ```
+
+For Polymarket positions sync (on-chain reads), also set:
+
+- Optional: `POLYGON_RPC_URL` (defaults to `https://polygon-rpc.com`)
+- Optional overrides:
+  - `POLYGON_RPC_TIMEOUT_MS`
+  - `POLYMARKET_CONDITIONAL_TOKENS_ADDRESS` (defaults to `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`)
+
 ### 3. Get API Credentials
 
 #### Privy Credentials

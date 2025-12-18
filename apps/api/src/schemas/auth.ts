@@ -34,3 +34,7 @@ export const polymarketConnectBodySchema = z.object({
   nonce: z.number().int().nonnegative(),
   funderAddress: zEthAddress.optional(),
 });
+
+export const polymarketFunderBodySchema = z.object({
+  funderAddress: zEthAddress.nullable(),
+});

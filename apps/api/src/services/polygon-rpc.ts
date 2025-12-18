@@ -13,6 +13,12 @@ type JsonRpcResponse<T> =
 
 const erc1155Iface = new Interface([
   "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+  "function isApprovedForAll(address owner,address operator) view returns (bool)",
+]);
+
+const erc20Iface = new Interface([
+  "function balanceOf(address owner) view returns (uint256)",
+  "function allowance(address owner,address spender) view returns (uint256)",
 ]);
 
 async function ethRpcRequest<T>(inputs: {
@@ -105,4 +111,109 @@ export async function fetchErc1155BalancesByOwner(inputs: {
   }
 
   return output;
+}
+
+export async function fetchEvmCode(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  address: string;
+}): Promise<string> {
+  const address = ethers.getAddress(inputs.address);
+  return ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getCode",
+    params: [address, "latest"],
+  });
+}
+
+export async function fetchErc20BalanceOf(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  tokenAddress: string;
+  owner: string;
+}): Promise<bigint> {
+  const tokenAddress = ethers.getAddress(inputs.tokenAddress);
+  const owner = ethers.getAddress(inputs.owner);
+
+  const data = erc20Iface.encodeFunctionData("balanceOf", [owner]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: tokenAddress, data }, "latest"],
+  });
+
+  const decoded = erc20Iface.decodeFunctionResult(
+    "balanceOf",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "bigint") {
+    throw new Error("Polygon RPC: invalid balanceOf result");
+  }
+  return value;
+}
+
+export async function fetchErc20Allowance(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  tokenAddress: string;
+  owner: string;
+  spender: string;
+}): Promise<bigint> {
+  const tokenAddress = ethers.getAddress(inputs.tokenAddress);
+  const owner = ethers.getAddress(inputs.owner);
+  const spender = ethers.getAddress(inputs.spender);
+
+  const data = erc20Iface.encodeFunctionData("allowance", [owner, spender]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: tokenAddress, data }, "latest"],
+  });
+
+  const decoded = erc20Iface.decodeFunctionResult(
+    "allowance",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "bigint") {
+    throw new Error("Polygon RPC: invalid allowance result");
+  }
+  return value;
+}
+
+export async function fetchErc1155IsApprovedForAll(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  owner: string;
+  operator: string;
+}): Promise<boolean> {
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const owner = ethers.getAddress(inputs.owner);
+  const operator = ethers.getAddress(inputs.operator);
+
+  const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
+    owner,
+    operator,
+  ]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: contractAddress, data }, "latest"],
+  });
+
+  const decoded = erc1155Iface.decodeFunctionResult(
+    "isApprovedForAll",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "boolean") {
+    throw new Error("Polygon RPC: invalid isApprovedForAll result");
+  }
+  return value;
 }
