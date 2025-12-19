@@ -11,6 +11,7 @@ import {
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
+  polymarketOrderHashBodySchema,
   polymarketOrderParamsQuerySchema,
   polymarketOpenOrdersQuerySchema,
   polymarketPlaceOrderBodySchema,
@@ -20,7 +21,9 @@ import {
   fetchErc1155IsApprovedForAll,
   fetchErc20Allowance,
   fetchErc20BalanceOf,
+  fetchFeeCollectorNonce,
   fetchEvmCode,
+  fetchPolymarketOrderHash,
 } from "../services/polygon-rpc.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { polymarketClient } from "../services/polymarket-client.js";
@@ -52,6 +55,10 @@ type OrderbookSummary = {
 const USDC_SCALE = 1_000_000n;
 
 function normalizeAddress(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeHex(value: string): string {
   return value.trim().toLowerCase();
 }
 
@@ -294,6 +301,74 @@ function normalizeOrderForPayload(
   return normalized;
 }
 
+function normalizeOrderForHash(
+  order: Record<string, unknown>,
+  side: PolymarketSide,
+): {
+  salt: string;
+  maker: string;
+  signer: string;
+  taker: string;
+  tokenId: string;
+  makerAmount: string;
+  takerAmount: string;
+  expiration: string;
+  nonce: string;
+  feeRateBps: string;
+  side: number;
+  signatureType: number;
+  signature: string;
+} | null {
+  const signatureType = normalizeSignatureType(order.signatureType);
+  if (signatureType == null) return null;
+
+  const maker = typeof order.maker === "string" ? order.maker.trim() : "";
+  const signer = typeof order.signer === "string" ? order.signer.trim() : "";
+  if (!maker || !signer) return null;
+
+  const salt = normalizeNumberishString(order.salt);
+  const tokenId = normalizeNumberishString(order.tokenId);
+  const makerAmount = normalizeNumberishString(order.makerAmount);
+  const takerAmount = normalizeNumberishString(order.takerAmount);
+  const expiration = normalizeNumberishString(order.expiration);
+  const nonce = normalizeNumberishString(order.nonce);
+  const feeRateBps = normalizeNumberishString(order.feeRateBps);
+  if (
+    !salt ||
+    !tokenId ||
+    !makerAmount ||
+    !takerAmount ||
+    !expiration ||
+    !nonce ||
+    !feeRateBps
+  ) {
+    return null;
+  }
+
+  const takerRaw = typeof order.taker === "string" ? order.taker.trim() : "";
+  const taker = takerRaw.length ? takerRaw : ZERO_ADDRESS;
+
+  const signature =
+    typeof order.signature === "string" ? order.signature.trim() : "";
+  if (!signature) return null;
+
+  return {
+    salt,
+    maker,
+    signer,
+    taker,
+    tokenId,
+    makerAmount,
+    takerAmount,
+    expiration,
+    nonce,
+    feeRateBps,
+    side: side === "BUY" ? 0 : 1,
+    signatureType,
+    signature,
+  };
+}
+
 function derivePriceAndSize(
   order: Record<string, unknown>,
   side: PolymarketSide,
@@ -459,6 +534,106 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         nonce: generatePolymarketNonce(),
         feeRateBps: 0,
       });
+    },
+  );
+
+  /**
+   * POST /order-hash
+   * Compute the Polymarket exchange order hash for a signed order.
+   */
+  z.post(
+    "/order-hash",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketOrderHashBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket order hash requires an EVM wallet address",
+        });
+      }
+
+      const body = request.body;
+      const order = body.order;
+
+      const orderSigner = typeof order.signer === "string" ? order.signer : "";
+      if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Order signer must match the selected wallet",
+        });
+      }
+
+      const credsInfo = await AuthService.getVenueCredentialsInfo(
+        user.id,
+        "polymarket",
+        signer,
+      );
+      const funder = credsInfo?.funderAddress ?? signer;
+      const maker = typeof order.maker === "string" ? order.maker : "";
+      if (normalizeAddress(maker) !== normalizeAddress(funder)) {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Order maker does not match the configured Polymarket funder/vault",
+        });
+      }
+
+      const side = normalizeOrderSide(order.side);
+      if (!side) {
+        reply.code(400);
+        return reply.send({
+          error: "Order side must be BUY/SELL (or 0/1)",
+        });
+      }
+
+      const normalizedForHash = normalizeOrderForHash(order, side);
+      if (!normalizedForHash) {
+        reply.code(400);
+        return reply.send({
+          error: "Order payload is missing required hash fields",
+        });
+      }
+
+      const exchangeAddress =
+        (typeof body.exchangeAddress === "string" && body.exchangeAddress) ||
+        exchangeAddressForNegRisk(body.negRisk ?? null) ||
+        env.polymarketExchangeAddress;
+
+      try {
+        const orderHash = await fetchPolymarketOrderHash({
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          exchangeAddress,
+          order: normalizedForHash,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          orderHash,
+          exchangeAddress,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to compute Polymarket order hash",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Polymarket order hash failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     },
   );
 
@@ -830,6 +1005,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           okExchange,
           okNegRisk,
           allowanceFeeCollector,
+          feeCollectorNonce,
         ] = await Promise.all([
             fetchEvmCode({
               rpcUrl: env.polygonRpcUrl,
@@ -877,6 +1053,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                   tokenAddress: env.polymarketUsdcAddress,
                   owner: funder,
                   spender: feeCollectorAddress,
+                })
+              : Promise.resolve(null),
+            feeCollectorAddress
+              ? fetchFeeCollectorNonce({
+                  rpcUrl: env.polygonRpcUrl,
+                  timeoutMs: env.polygonRpcTimeoutMs,
+                  collectorAddress: feeCollectorAddress,
+                  signer,
                 })
               : Promise.resolve(null),
           ]);
@@ -931,6 +1115,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               negRiskExchange: okNegRisk,
             },
           },
+          ...(feeCollectorAddress
+            ? {
+                feeCollector: {
+                  address: feeCollectorAddress,
+                  nonce: feeCollectorNonce?.toString() ?? null,
+                },
+              }
+            : {}),
           hasCredentials: Boolean(credsInfo),
         });
       } catch (error) {
@@ -1286,6 +1478,124 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const normalizedOrder = normalizeOrderForPayload(order, side);
       const orderType = normalizeOrderTypeForClob(body.orderType);
 
+      const feeAuth = body.feeAuth;
+      const feeAuthSig =
+        typeof body.feeAuthSig === "string" ? body.feeAuthSig.trim() : "";
+      const exchangeAddress =
+        (typeof body.exchangeAddress === "string" && body.exchangeAddress) ||
+        exchangeAddressForNegRisk(body.negRisk ?? null) ||
+        "";
+      const feeCollectorAddress =
+        (typeof body.feeCollectorAddress === "string" &&
+          body.feeCollectorAddress.trim()) ||
+        env.feeCollectorAddress?.trim() ||
+        "";
+
+      let orderHash: string | null = null;
+      let feeBps: number | null = null;
+      let feeDeadline: number | null = null;
+      let feeAuthStored: Record<string, unknown> | null = null;
+
+      if (feeAuth || feeAuthSig) {
+        if (!feeAuth || !feeAuthSig) {
+          reply.code(400);
+          return reply.send({
+            error: "feeAuth and feeAuthSig are both required when using fees",
+          });
+        }
+
+        if (!feeCollectorAddress) {
+          reply.code(400);
+          return reply.send({
+            error: "Fee collector address is required for fee-auth orders",
+          });
+        }
+
+        if (
+          env.feeCollectorAddress &&
+          normalizeAddress(feeCollectorAddress) !==
+            normalizeAddress(env.feeCollectorAddress)
+        ) {
+          reply.code(400);
+          return reply.send({
+            error: "Fee collector address does not match configured policy",
+          });
+        }
+
+        if (!exchangeAddress) {
+          reply.code(400);
+          return reply.send({
+            error: "exchangeAddress (or negRisk) is required to hash the order",
+          });
+        }
+
+        const normalizedForHash = normalizeOrderForHash(order, side);
+        if (!normalizedForHash) {
+          reply.code(400);
+          return reply.send({
+            error: "Order payload is missing required hash fields",
+          });
+        }
+
+        const computedOrderHash = await fetchPolymarketOrderHash({
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          exchangeAddress,
+          order: normalizedForHash,
+        });
+
+        const feeAuthSigner =
+          typeof feeAuth.signer === "string" ? feeAuth.signer : "";
+        const feeAuthVault =
+          typeof feeAuth.vault === "string" ? feeAuth.vault : "";
+        const feeAuthExchange =
+          typeof feeAuth.exchange === "string" ? feeAuth.exchange : "";
+        const feeAuthOrderHash =
+          typeof feeAuth.orderHash === "string" ? feeAuth.orderHash : "";
+        if (normalizeAddress(feeAuthSigner) !== normalizeAddress(orderSigner)) {
+          reply.code(400);
+          return reply.send({
+            error: "feeAuth.signer must match the order signer",
+          });
+        }
+        if (normalizeAddress(feeAuthVault) !== normalizeAddress(maker)) {
+          reply.code(400);
+          return reply.send({
+            error: "feeAuth.vault must match the order maker",
+          });
+        }
+        if (
+          normalizeAddress(feeAuthExchange) !== normalizeAddress(exchangeAddress)
+        ) {
+          reply.code(400);
+          return reply.send({
+            error: "feeAuth.exchange must match the order exchange",
+          });
+        }
+        if (normalizeHex(feeAuthOrderHash) !== normalizeHex(computedOrderHash)) {
+          reply.code(400);
+          return reply.send({
+            error: "feeAuth.orderHash does not match the computed order hash",
+          });
+        }
+
+        const feeBpsRaw = parseNumberish(feeAuth.feeBps);
+        feeBps = feeBpsRaw != null ? Math.trunc(feeBpsRaw) : null;
+        const deadlineRaw = parseNumberish(feeAuth.deadline);
+        feeDeadline = deadlineRaw != null ? Math.trunc(deadlineRaw) : null;
+
+        orderHash = computedOrderHash;
+        feeAuthStored = {
+          signer: feeAuthSigner,
+          vault: feeAuthVault,
+          exchange: feeAuthExchange,
+          orderHash: computedOrderHash,
+          feeBps: normalizeNumberishString(feeAuth.feeBps) ?? feeAuth.feeBps,
+          nonce: normalizeNumberishString(feeAuth.nonce) ?? feeAuth.nonce,
+          deadline: normalizeNumberishString(feeAuth.deadline) ?? feeAuth.deadline,
+        };
+      }
+
       const payload = {
         order: normalizedOrder,
         owner: creds.apiKey,
@@ -1353,6 +1663,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         status: statusRaw,
         errorMessage: null,
         rawError: null,
+        orderHash,
+        feeBps,
+        feeAuth: feeAuthStored,
+        feeAuthSig: feeAuthSig || null,
+        feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
+        feeDeadline,
       });
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1360,6 +1676,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         venue: "polymarket",
         orderId: venueOrderId,
+        orderHash,
         stored: stored.kind,
         payload: upstream.payload,
       });

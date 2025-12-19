@@ -28,10 +28,48 @@ const polymarketOrderSchema = z
   })
   .passthrough();
 
+const polymarketFeeAuthSchema = z.object({
+  signer: zEthAddressRequired,
+  vault: zEthAddressRequired,
+  exchange: zEthAddressRequired,
+  orderHash: zRequiredString("orderHash is required"),
+  feeBps: zNumberish,
+  nonce: zNumberish,
+  deadline: zNumberish,
+});
+
 export const polymarketPlaceOrderBodySchema = z.object({
   order: polymarketOrderSchema,
   orderType: zOrderType.default("GTC"),
   deferExec: z.boolean().optional(),
+  exchangeAddress: zEthAddress.optional(),
+  negRisk: z.boolean().optional(),
+  feeCollectorAddress: zEthAddress.optional(),
+  feeAuth: polymarketFeeAuthSchema.optional(),
+  feeAuthSig: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.feeAuth || value.feeAuthSig) {
+    if (!value.feeAuth) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "feeAuth is required when feeAuthSig is provided",
+        path: ["feeAuth"],
+      });
+    }
+    if (!value.feeAuthSig) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "feeAuthSig is required when feeAuth is provided",
+        path: ["feeAuthSig"],
+      });
+    }
+  }
+});
+
+export const polymarketOrderHashBodySchema = z.object({
+  order: polymarketOrderSchema,
+  exchangeAddress: zEthAddress.optional(),
+  negRisk: z.boolean().optional(),
 });
 
 export const polymarketCancelOrderBodySchema = z.object({

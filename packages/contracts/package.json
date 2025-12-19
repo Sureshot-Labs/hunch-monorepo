@@ -1,0 +1,30 @@
+{
+  "name": "@hunch/contracts",
+  "version": "0.2.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-abis.js",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "typechain": "hardhat typechain",
+    "abi:export": "ts-node scripts/export-abis.ts",
+    "deploy": "hardhat run scripts/deploy.ts",
+    "demo": "node demo/server.js",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "hardhat": "^2.26.0",
+    "typechain": "^8.3.2",
+    "typescript": "^5.4.5",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.11.30",
+    "minimist": "^1.2.8",
+    "express": "^4.19.2"
+  }
+}

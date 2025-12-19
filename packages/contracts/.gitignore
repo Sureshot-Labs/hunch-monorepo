@@ -1,0 +1,23 @@
+# Hardhat artifacts/cache
+artifacts/
+hh-cache/
+cache/
+typechain/
+typechain-types/
+
+# node modules / lockfiles
+node_modules/
+package-lock.json
+
+# TS build output
+dist/
+
+# Coverage
+coverage/
+coverage.json
+
+# VSCode
+.vscode/
+
+# Env/local
+.env

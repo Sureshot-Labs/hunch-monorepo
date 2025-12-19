@@ -1,3 +1,4 @@
+import { abis } from "@hunch/contracts";
 import { Interface, ethers } from "ethers";
 import { isRecord } from "../lib/type-guards.js";
 
@@ -20,6 +21,9 @@ const erc20Iface = new Interface([
   "function balanceOf(address owner) view returns (uint256)",
   "function allowance(address owner,address spender) view returns (uint256)",
 ]);
+
+const polymarketExchangeIface = new Interface(abis.IPolymarketExchange);
+const feeCollectorIface = new Interface(abis.PolymarketFeeCollector);
 
 async function ethRpcRequest<T>(inputs: {
   rpcUrl: string;
@@ -196,6 +200,73 @@ export async function fetchErc20Allowance(inputs: {
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
     throw new Error("Polygon RPC: invalid allowance result");
+  }
+  return value;
+}
+
+export async function fetchPolymarketOrderHash(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  exchangeAddress: string;
+  order: {
+    salt: string | number | bigint;
+    maker: string;
+    signer: string;
+    taker: string;
+    tokenId: string | number | bigint;
+    makerAmount: string | number | bigint;
+    takerAmount: string | number | bigint;
+    expiration: string | number | bigint;
+    nonce: string | number | bigint;
+    feeRateBps: string | number | bigint;
+    side: number;
+    signatureType: number;
+    signature: string;
+  };
+}): Promise<string> {
+  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
+  const data = polymarketExchangeIface.encodeFunctionData("hashOrder", [
+    inputs.order,
+  ]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: exchangeAddress, data }, "latest"],
+  });
+  const decoded = polymarketExchangeIface.decodeFunctionResult(
+    "hashOrder",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "string") {
+    throw new Error("Polygon RPC: invalid hashOrder result");
+  }
+  return value;
+}
+
+export async function fetchFeeCollectorNonce(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  collectorAddress: string;
+  signer: string;
+}): Promise<bigint> {
+  const collectorAddress = ethers.getAddress(inputs.collectorAddress);
+  const signer = ethers.getAddress(inputs.signer);
+  const data = feeCollectorIface.encodeFunctionData("nonces", [signer]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: collectorAddress, data }, "latest"],
+  });
+  const decoded = feeCollectorIface.decodeFunctionResult(
+    "nonces",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "bigint") {
+    throw new Error("Polygon RPC: invalid nonces result");
   }
   return value;
 }

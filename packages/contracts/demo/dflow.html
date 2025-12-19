@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DFlow Protocol Demo (WIP)</title>
+  <!-- Legacy web3.js 1.x UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+  <style>
+    body { background:#0f1115; color:#e6e8ec; font-family: sans-serif; padding:16px; }
+    .card { border:1px solid #2a2d36; border-radius:8px; padding:12px; margin-bottom:12px; }
+    button { padding:10px 12px; border:none; border-radius:8px; background:#24b47e; color:#fff; cursor:pointer; }
+    input, select { width:100%; padding:8px; margin:6px 0; border-radius:6px; border:1px solid #2a2d36; background:#1b1e25; color:#e6e8ec; }
+    pre { background:#11141b; padding:10px; border-radius:6px; overflow:auto; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  </style>
+</head>
+<body>
+  <h2>DFlow Protocol Demo (WIP)</h2>
+
+  <div class="card">
+    <div class="row">
+      <div><label>Wallet</label><input value="Phantom (Solana)" readonly /></div>
+      <div style="display:flex;align-items:flex-end;">
+        <button id="connectBtn" style="width:100%;">Connect Wallet</button>
+      </div>
+    </div>
+    <div id="account"></div>
+    <div id="network"></div>
+    <div id="logVersion"></div>
+  </div>
+
+  <div class="card">
+    <h3>API / RPC</h3>
+    <label>Trade API host</label><input id="apiHost" value="https://dev-quote-api.dflow.net" />
+    <label>Metadata API host</label><input id="metaHost" value="https://dev-prediction-markets-api.dflow.net" />
+    <label>API key (optional)</label><input id="apiKey" placeholder="x-api-key" />
+  </div>
+
+  <div class="card">
+    <h3>Markets (metadata)</h3>
+    <button id="fetchMarkets">Fetch active markets</button>
+    <div id="marketsStatus"></div>
+    <label>Search</label><input id="marketSearch" placeholder="filter by ticker/title" />
+    <select id="marketSelect" size="6" style="width:100%;"></select>
+    <div id="marketInfo"></div>
+    <div class="row">
+      <div><label>YES mint</label><input id="yesMint" /></div>
+      <div><label>NO mint</label><input id="noMint" /></div>
+    </div>
+    <label>Settlement mint</label><input id="settlementMint" />
+    <div class="row">
+      <button id="buyYes">Buy YES</button>
+      <button id="buyNo">Buy NO</button>
+    </div>
+    <div class="row">
+      <button id="sellYes">Sell YES</button>
+      <button id="sellNo">Sell NO</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Trade params</h3>
+    <div class="row">
+      <div><label>Input mint</label><input id="inputMint" value="So11111111111111111111111111111111111111112" /></div>
+      <div><label>Output mint</label><input id="outputMint" value="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" /></div>
+    </div>
+    <div class="row">
+      <div><label>Amount (raw units)</label><input id="amount" value="100000000" /></div>
+      <div><label>Slippage bps</label><input id="slippage" value="50" /></div>
+    </div>
+    <div class="row">
+      <div><label>platformFeeBps</label><input id="feeBps" value="0" /></div>
+      <div><label>platformFeeMode (inputMint/outputMint)</label><input id="feeMode" value="outputMint" /></div>
+    </div>
+    <label>feeAccount (token account for fee)</label><input id="feeAccount" placeholder="Optional token account" />
+    <button id="redeemBtn">Check redemption & build /order (outcome -> settlement)</button>
+    <div id="redeemStatus"></div>
+  </div>
+
+  <div class="card">
+    <h3>Actions</h3>
+    <button id="getOrder">GET /order (Trade API)</button>
+    <button id="getQuote">GET /quote (imperative)</button>
+    <button id="postSwap">POST /swap (from last quote)</button>
+    <button id="getIntent">GET /intent (declarative)</button>
+    <button id="submitIntent">POST /submit-intent (uses last intent)</button>
+    <button id="sendTx">Sign & send last transaction</button>
+    <button id="pollStatus">Poll /order-status (last tx sig)</button>
+    <div id="actionStatus"></div>
+  </div>
+
+  <div class="card">
+    <h3>Logs</h3>
+    <pre id="log"></pre>
+  </div>
+
+  <script>
+    let provider, signer; // EVM (placeholder) not used
+    let solWallet = null;
+    const kit = window.solanaWeb3 || {};
+    const { Connection, VersionedTransaction, Transaction, PublicKey } = kit;
+    let solConnection = Connection ? new Connection("https://api.mainnet-beta.solana.com") : null;
+    let lastSig = null;
+    let lastExecutionMode = null;
+    let lastOrderResponse = null;
+    let lastQuoteResponse = null;
+    let lastSwapResponse = null;
+    let lastIntentResponse = null;
+    let lastTxBase64 = "";
+    let marketsCache = [];
+    let marketsFiltered = [];
+    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    document.getElementById("logVersion").textContent = "solana web3.js loaded: " + (!!Connection);
+    console.log("Solana web3:", kit);
+    console.log("Connection:", solConnection);
+
+    const logEl = document.getElementById("log");
+    const log = (m) => { logEl.textContent += m + "\n"; console.log(m); };
+
+    const b64ToUint8 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const uint8ToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
+
+    async function connect() {
+      if (!window.solana || !window.solana.isPhantom) {
+        alert("Phantom (Solana) wallet required");
+        return;
+      }
+      if (!Connection) {
+        alert("Solana web3.js failed to load; check script tag.");
+        return;
+      }
+      try {
+        const resp = await window.solana.connect({ onlyIfTrusted: true }).catch(() => window.solana.connect());
+        solWallet = window.solana;
+        if (!resp || !resp.publicKey) throw new Error("No publicKey from Phantom");
+        document.getElementById("account").textContent = `Account: ${resp.publicKey.toBase58()}`;
+        document.getElementById("network").textContent = `RPC: mainnet-beta`;
+        log(`Connected Solana wallet ${resp.publicKey.toBase58()}`);
+      } catch (e) {
+        const msg = e?.message || e;
+        log("Connect error: " + msg);
+        alert("Failed to connect Phantom: " + msg);
+      }
+    }
+
+    const getApiHost = () => (document.getElementById("apiHost").value || "").replace(/\/$/, "");
+    const getMetaHost = () => (document.getElementById("metaHost").value || "").replace(/\/$/, "");
+    const getApiKey = () => (document.getElementById("apiKey").value || "").trim();
+
+    function applyQuickAction(action) {
+      const yes = document.getElementById("yesMint").value.trim();
+      const no = document.getElementById("noMint").value.trim();
+      const settle = document.getElementById("settlementMint").value.trim() || USDC_MINT;
+      if (!yes || !no) return alert("Select a market first");
+      const inp = document.getElementById("inputMint");
+      const out = document.getElementById("outputMint");
+      if (action === "buy_yes") {
+        inp.value = settle;
+        out.value = yes;
+      } else if (action === "buy_no") {
+        inp.value = settle;
+        out.value = no;
+      } else if (action === "sell_yes") {
+        inp.value = yes;
+        out.value = settle;
+      } else if (action === "sell_no") {
+        inp.value = no;
+        out.value = settle;
+      }
+      document.getElementById("actionStatus").textContent = `Prepared ${action.replace("_", " ").toUpperCase()} using settle ${settle}`;
+    }
+
+    async function dflowFetch(path, { method = "GET", params, body } = {}) {
+      const host = getApiHost();
+      const url = params ? `${host}${path}?${params.toString()}` : `${host}${path}`;
+      const headers = {};
+      const apiKey = getApiKey();
+      if (apiKey) headers["x-api-key"] = apiKey;
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      const txt = await res.text();
+      try {
+        return { ok: res.ok, status: res.status, json: JSON.parse(txt), raw: txt };
+      } catch {
+        return { ok: res.ok, status: res.status, json: null, raw: txt };
+      }
+    }
+
+    function renderMarkets(list) {
+      marketsFiltered = list;
+      const sel = document.getElementById("marketSelect");
+      sel.innerHTML = "";
+      list.forEach((m, i) => {
+        const opt = document.createElement("option");
+        opt.value = i.toString();
+        const yesP = m.yesBid || m.yesAsk ? `YES ${m.yesBid || "-"} / ${m.yesAsk || "-"}` : "";
+        const noP = m.noBid || m.noAsk ? `NO ${m.noBid || "-"} / ${m.noAsk || "-"}` : "";
+        const settleShort = m.settlementMint ? `${m.settlementMint.slice(0,4)}...` : "";
+        opt.textContent = `${m.ticker || ""} | ${m.title || ""} | ${yesP} ${noP} | ${m.status || ""} | ${settleShort}`;
+        sel.appendChild(opt);
+      });
+      document.getElementById("marketInfo").textContent = `Loaded ${list.length} markets`;
+    }
+
+    function applyMarketSelection(idx) {
+      if (Number.isNaN(idx) || !marketsFiltered[idx]) return;
+      const mk = marketsFiltered[idx];
+      document.getElementById("yesMint").value = mk.yesMint;
+      document.getElementById("noMint").value = mk.noMint;
+      document.getElementById("settlementMint").value = mk.settlementMint || "";
+      document.getElementById("inputMint").value = mk.yesMint;
+      document.getElementById("outputMint").value = mk.noMint;
+      const priceInfo = `YES ${mk.yesBid || "-"} / ${mk.yesAsk || "-"} | NO ${mk.noBid || "-"} / ${mk.noAsk || "-"}`;
+      document.getElementById("marketInfo").textContent = `Selected ${mk.ticker || ""} ${mk.title || ""} | ${priceInfo} | status ${mk.status || ""} | settle ${mk.settlementMint || ""}`;
+    }
+
+    async function fetchMarkets() {
+      const status = document.getElementById("marketsStatus");
+      status.textContent = "Loading...";
+      try {
+        const host = getMetaHost();
+        const res = await fetch(`${host}/api/v1/events?withNestedMarkets=true&status=active&limit=100`);
+        const data = await res.json();
+        const events = data.events || [];
+        const list = [];
+        events.forEach((ev) => {
+          (ev.markets || []).forEach((mk) => {
+            (mk.accounts ? Object.entries(mk.accounts) : []).forEach(([settleMint, acc]) => {
+              const st = (mk.status || "").toLowerCase();
+              if (st === "finalized" || st === "determined") return;
+              if (!acc.yesMint || !acc.noMint) return;
+              if (!acc.isInitialized) return; // skip uninitialized for now
+              list.push({
+                title: mk.title || ev.title || mk.ticker,
+                ticker: mk.ticker,
+                yesMint: acc.yesMint,
+                noMint: acc.noMint,
+                yesBid: mk.yesBid,
+                yesAsk: mk.yesAsk,
+                noBid: mk.noBid,
+                noAsk: mk.noAsk,
+                status: mk.status,
+                settlementMint: settleMint,
+              });
+            });
+          });
+        });
+        marketsCache = list;
+        renderMarkets(list);
+        document.getElementById("marketsStatus").textContent = "Done";
+      } catch (e) {
+        status.textContent = "Error: " + (e?.message || e);
+        log("Markets error: " + (e?.message || e));
+      }
+    }
+
+    function ensureWallet() {
+      if (!solWallet) throw new Error("Connect Phantom first");
+      return solWallet.publicKey.toBase58();
+    }
+
+    function buildCommonParams() {
+      const qp = new URLSearchParams();
+      qp.append("inputMint", document.getElementById("inputMint").value.trim());
+      qp.append("outputMint", document.getElementById("outputMint").value.trim());
+      qp.append("amount", document.getElementById("amount").value.trim());
+      qp.append("slippageBps", document.getElementById("slippage").value.trim());
+      qp.append("userPublicKey", ensureWallet());
+      const feeBps = document.getElementById("feeBps").value.trim();
+      const feeMode = document.getElementById("feeMode").value.trim();
+      const feeAcc = document.getElementById("feeAccount").value.trim();
+      if (feeBps && feeBps !== "0") qp.append("platformFeeBps", feeBps);
+      if (feeMode) qp.append("platformFeeMode", feeMode);
+      if (feeAcc) qp.append("feeAccount", feeAcc);
+      return qp;
+    }
+
+    async function getOrder() {
+      try {
+        const qp = buildCommonParams();
+        const res = await dflowFetch("/order", { params: qp });
+        document.getElementById("actionStatus").textContent = `/order status ${res.status}`;
+        log(`Order resp (${res.status}): ${res.raw}`);
+        if (res.json?.platformFee) {
+          const pf = res.json.platformFee;
+          log(`PlatformFee -> amount=${pf.amount} feeBps=${pf.feeBps} account=${pf.feeAccount || ""}`);
+        }
+        lastOrderResponse = res.json;
+        lastTxBase64 = res.json?.transaction || "";
+        lastSig = null;
+        lastExecutionMode = res.json?.executionMode;
+      } catch (e) {
+        log("getOrder error: " + (e?.message || e));
+      }
+    }
+
+    async function getQuote() {
+      try {
+        const qp = buildCommonParams();
+        qp.delete("userPublicKey"); // quote does not need it
+        const res = await dflowFetch("/quote", { params: qp });
+        document.getElementById("actionStatus").textContent = `/quote status ${res.status}`;
+        log(`Quote resp (${res.status}): ${res.raw}`);
+        lastQuoteResponse = res.json;
+      } catch (e) {
+        log("getQuote error: " + (e?.message || e));
+      }
+    }
+
+    async function postSwap() {
+      try {
+        if (!lastQuoteResponse) throw new Error("Fetch quote first");
+        const body = {
+          userPublicKey: ensureWallet(),
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: 150000,
+          quoteResponse: lastQuoteResponse,
+        };
+        const res = await dflowFetch("/swap", { method: "POST", body });
+        document.getElementById("actionStatus").textContent = `/swap status ${res.status}`;
+        log(`Swap resp (${res.status}): ${res.raw}`);
+        lastSwapResponse = res.json;
+        lastTxBase64 = res.json?.swapTransaction || "";
+        lastSig = null;
+        lastExecutionMode = null;
+      } catch (e) {
+        log("postSwap error: " + (e?.message || e));
+      }
+    }
+
+    async function getIntent() {
+      try {
+        const qp = buildCommonParams();
+        const res = await dflowFetch("/intent", { params: qp });
+        document.getElementById("actionStatus").textContent = `/intent status ${res.status}`;
+        log(`Intent resp (${res.status}): ${res.raw}`);
+        lastIntentResponse = res.json;
+        lastTxBase64 = res.json?.openTransaction || "";
+        lastSig = null;
+        lastExecutionMode = null;
+      } catch (e) {
+        log("getIntent error: " + (e?.message || e));
+      }
+    }
+
+    async function submitIntent() {
+      try {
+        if (!lastIntentResponse || !lastTxBase64) throw new Error("Call /intent first");
+        const signed = await signBase64Tx(lastTxBase64);
+        const res = await dflowFetch("/submit-intent", {
+          method: "POST",
+          body: {
+            quoteResponse: lastIntentResponse,
+            signedOpenTransaction: signed,
+          },
+        });
+        document.getElementById("actionStatus").textContent = `/submit-intent status ${res.status}`;
+        log(`Submit intent resp (${res.status}): ${res.raw}`);
+      } catch (e) {
+        log("submitIntent error: " + (e?.message || e));
+      }
+    }
+
+    async function signBase64Tx(b64) {
+      if (!solWallet) throw new Error("Connect Phantom");
+      const buf = b64ToUint8(b64);
+      let tx;
+      try {
+        tx = VersionedTransaction.deserialize(buf);
+      } catch {
+        tx = Transaction.from(buf);
+      }
+      const signed = await solWallet.signTransaction(tx);
+      const serialized = signed.serialize();
+      return uint8ToB64(serialized);
+    }
+
+    async function sendTx() {
+      try {
+        if (!lastTxBase64) throw new Error("No transaction cached");
+        const buf = b64ToUint8(lastTxBase64);
+        let tx;
+        let isV0 = false;
+        try {
+          tx = VersionedTransaction.deserialize(buf);
+          isV0 = true;
+        } catch {
+          tx = Transaction.from(buf);
+        }
+        const signed = await solWallet.signTransaction(tx);
+        const raw = isV0 ? signed.serialize() : signed.serialize();
+        const sig = await solConnection.sendRawTransaction(raw);
+        lastSig = sig;
+        document.getElementById("actionStatus").textContent = `Sent tx: ${sig}`;
+        log(`Sent tx: ${sig}`);
+      } catch (e) {
+        log("sendTx error: " + (e?.message || e));
+      }
+    }
+
+    async function pollStatus() {
+      try {
+        if (!lastSig) return alert("No tx signature cached");
+        const qp = new URLSearchParams();
+        qp.append("signature", lastSig);
+        const res = await dflowFetch("/order-status", { params: qp });
+        log(`order-status (${res.status}): ${res.raw}`);
+        document.getElementById("actionStatus").textContent = `order-status: ${res.json?.status || res.status}`;
+      } catch (e) {
+        log("pollStatus error: " + (e?.message || e));
+      }
+    }
+
+    async function checkRedemptionAndOrder() {
+      try {
+        const inMint = document.getElementById("inputMint").value.trim();
+        const outMint = document.getElementById("outputMint").value.trim();
+        const yesMint = document.getElementById("yesMint").value.trim();
+        const noMint = document.getElementById("noMint").value.trim();
+        let mint = inMint;
+        // If input is USDC or empty, try outcome mints
+        if (!mint || mint === USDC_MINT) {
+          if (outMint && outMint !== USDC_MINT) mint = outMint;
+          else if (yesMint && yesMint !== USDC_MINT) mint = yesMint;
+          else if (noMint && noMint !== USDC_MINT) mint = noMint;
+        }
+        if (!mint || mint === USDC_MINT) {
+          document.getElementById("redeemStatus").textContent = "Provide an outcome mint (YES/NO) to redeem.";
+          return;
+        }
+        const statusEl = document.getElementById("redeemStatus");
+        statusEl.textContent = `Checking redemption for mint ${mint.slice(0,6)}...`;
+        const metaHost = getMetaHost();
+        const res = await fetch(`${metaHost}/api/v1/market/by-mint/${mint}`);
+        const market = await res.json();
+        if (!res.ok) {
+          if (res.status === 404) {
+            statusEl.textContent = "Mint not recognized as an outcome token (404). Pick a YES/NO mint.";
+            return;
+          }
+          throw new Error(market?.message || "market lookup failed");
+        }
+        const result = market.result;
+        const accounts = market.accounts || {};
+        const match = Object.values(accounts).find(
+          (acc) => acc.redemptionStatus?.toLowerCase() === "open" &&
+            ((result === "yes" && acc.yesMint === mint) || (result === "no" && acc.noMint === mint))
+        );
+        if (!match) {
+          const statuses = Object.values(accounts).map((acc) => acc.redemptionStatus || "n/a").join(", ");
+          throw new Error(`No open redemption for this mint/result (market status=${market.status}, redemption=${statuses})`);
+        }
+        const settlementMint = match.settlementMint || Object.keys(accounts).find((k) => accounts[k] === match) || "";
+        if (!settlementMint) throw new Error("No settlement mint found");
+        document.getElementById("outputMint").value = settlementMint;
+        statusEl.textContent = `Redeemable: result=${result} settlement=${settlementMint}`;
+        // Build order params with amount from form
+        await getOrder();
+      } catch (e) {
+        document.getElementById("redeemStatus").textContent = "Redeem check error: " + (e?.message || e);
+        log("Redeem check error: " + (e?.message || e));
+      }
+    }
+
+    document.getElementById("connectBtn").onclick = connect;
+    document.getElementById("fetchMarkets").onclick = fetchMarkets;
+    document.getElementById("marketSelect").onchange = () => {
+      const idx = Number(document.getElementById("marketSelect").value);
+      applyMarketSelection(idx);
+    };
+    document.getElementById("marketSearch").oninput = () => {
+      const term = (document.getElementById("marketSearch").value || "").toLowerCase();
+      const filtered = marketsCache.filter((m) =>
+        (m.ticker || "").toLowerCase().includes(term) ||
+        (m.title || "").toLowerCase().includes(term)
+      );
+      renderMarkets(filtered);
+    };
+    document.getElementById("getOrder").onclick = getOrder;
+    document.getElementById("getQuote").onclick = getQuote;
+    document.getElementById("postSwap").onclick = postSwap;
+    document.getElementById("getIntent").onclick = getIntent;
+    document.getElementById("submitIntent").onclick = submitIntent;
+    document.getElementById("sendTx").onclick = sendTx;
+    document.getElementById("pollStatus").onclick = pollStatus;
+    document.getElementById("redeemBtn").onclick = checkRedemptionAndOrder;
+    document.getElementById("buyYes").onclick = () => applyQuickAction("buy_yes");
+    document.getElementById("buyNo").onclick = () => applyQuickAction("buy_no");
+    document.getElementById("sellYes").onclick = () => applyQuickAction("sell_yes");
+    document.getElementById("sellNo").onclick = () => applyQuickAction("sell_no");
+  </script>
+</body>
+</html>

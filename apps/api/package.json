@@ -17,6 +17,7 @@
   "dependencies": {
     "@fastify/swagger": "^9.6.1",
     "@fastify/swagger-ui": "^5.2.3",
+    "@hunch/contracts": "workspace:*",
     "@hunch/infra": "workspace:*",
     "@privy-io/server-auth": "^1.0.0",
     "ethers": "^6.8.1",

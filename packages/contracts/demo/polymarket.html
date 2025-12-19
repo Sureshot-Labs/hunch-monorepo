@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Polymarket FeeCollector Demo (clean)</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <script>
+    if (typeof ethers === "undefined") {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"><\/script>');
+    }
+  </script>
+  <style>
+    body { background:#0f1115; color:#e6e8ec; font-family: sans-serif; padding:16px; }
+    input, select, button { width:100%; margin:6px 0; padding:8px; border-radius:6px; border:1px solid #2a2d36; background:#1b1e25; color:#e6e8ec; }
+    button { cursor:pointer; background:#2f6fed; border:none; color:#fff; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .card { border:1px solid #2a2d36; border-radius:8px; padding:12px; margin-bottom:12px; }
+    pre { background:#11141b; padding:10px; border-radius:6px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h2>Polymarket FeeCollector Demo (clean)</h2>
+
+  <div class="card">
+    <button id="connectBtn">Connect MetaMask</button>
+    <div id="account"></div>
+    <div id="network"></div>
+    <div id="logVersion"></div>
+  </div>
+
+  <div class="card">
+    <h3>Addresses</h3>
+    <label>FeeCollector</label><input id="collector" placeholder="0x..." />
+    <label>CLOB host</label><input id="clobHost" value="https://clob.polymarket.com" />
+  </div>
+
+  <div class="card">
+    <h3>CLOB API Key</h3>
+    <div class="row">
+      <div><label>ChainId</label><input id="clobChainId" value="137" /></div>
+      <div><label>Nonce (optional)</label><input id="clobNonce" /></div>
+    </div>
+    <button id="deriveApiKey">Derive/Create API key</button>
+    <div id="apiKeyStatus"></div>
+    <div><strong>apiKey:</strong> <span id="apiKeyOut"></span></div>
+    <div><strong>secret:</strong> <span id="apiSecretOut"></span></div>
+    <div><strong>passphrase:</strong> <span id="apiPassOut"></span></div>
+    <label>CLOB API key (x-api-key header)</label><input id="clobApiKey" placeholder="auto-filled" />
+  </div>
+
+  <div class="card">
+    <h3>Markets (active only)</h3>
+    <button id="fetchMarkets">Fetch markets</button>
+    <div id="marketsStatus"></div>
+    <select id="marketSelect" size="6" style="width:100%;"></select>
+    <div id="marketInfo"></div>
+    <label>Tick size</label><input id="tickSize" value="0.01" />
+    <div class="row">
+      <button id="applyYes">Use YES tokenId</button>
+      <button id="applyNo">Use NO tokenId</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Quick Order</h3>
+    <div class="row">
+      <div>
+        <label>Side</label>
+        <select id="quickSide">
+          <option value="buy_yes">BUY YES</option>
+          <option value="buy_no">BUY NO</option>
+          <option value="sell_yes">SELL YES</option>
+          <option value="sell_no">SELL NO</option>
+        </select>
+      </div>
+      <div><label>Shares</label><input id="quickSize" value="1" /></div>
+    </div>
+    <label>Price (0-1)</label><input id="quickPrice" value="0.5" />
+    <div class="row">
+      <button id="quickFromYes">Use market YES price</button>
+      <button id="quickFromNo">Use market NO price</button>
+    </div>
+    <button id="buildQuick">Fill order fields</button>
+    <div id="quickStatus"></div>
+  </div>
+
+  <div class="card">
+    <h3>Deploy FeeCollector</h3>
+    <label>Treasury</label><input id="deployTreasury" placeholder="0x..." />
+    <div class="row">
+      <div><label>Collateral</label><input id="deployCollateral" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" /></div>
+    </div>
+    <label>Exchange</label><input id="deployExchange" value="0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" />
+    <button id="deployBtn">Deploy FeeCollector</button>
+    <div id="deployStatus"></div>
+  </div>
+
+  <div class="card">
+    <h3>Allowances</h3>
+    <label>Collateral (USDC.e)</label><input id="allowCollateral" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" />
+    <label>Amount</label><input id="allowAmount" value="100" />
+    <label>Decimals</label><input id="allowDecimals" value="6" />
+    <div class="row">
+      <button id="approveExchange">Approve Exchange</button>
+      <button id="approveCollector">Approve FeeCollector</button>
+    </div>
+    <div id="allowStatus"></div>
+    <label>Conditional Tokens (ERC1155)</label><input id="condTokens" value="0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" />
+    <button id="approve1155">Approve ERC1155 to Exchange</button>
+    <div id="allow1155Status"></div>
+  </div>
+
+  <div class="card">
+    <h3>Order struct</h3>
+    <label>Salt</label><input id="salt" value="1" />
+    <div class="row">
+      <div><label>Maker</label><input id="maker" /></div>
+      <div><label>Signer</label><input id="signer" /></div>
+    </div>
+    <label>Taker (0x0 public)</label><input id="taker" value="0x0000000000000000000000000000000000000000" />
+    <label>TokenId</label><input id="tokenId" value="0" />
+    <div class="row">
+      <div><label>MakerAmount</label><input id="makerAmount" value="0" /></div>
+      <div><label>TakerAmount</label><input id="takerAmount" value="0" /></div>
+    </div>
+    <label>Expiration (unix)</label><input id="expiration" value="0" />
+    <label>Nonce</label><input id="nonce" value="0" />
+    <label>feeRateBps</label><input id="feeRateBps" value="0" />
+    <div class="row">
+      <div><label>Side (0=BUY,1=SELL)</label><input id="side" value="0" /></div>
+      <div><label>SignatureType</label><input id="sigType" value="0" /></div>
+    </div>
+    <label>Signature</label><input id="signature" value="0x" />
+  </div>
+
+  <div class="card">
+    <h3>FeeAuth</h3>
+    <label>Exchange (override)</label><input id="feeAuthExchange" placeholder="0x..." />
+    <label>feeBps</label><input id="feeBps" value="50" />
+    <label>Deadline (unix)</label><input id="deadline" value="0" />
+    <button id="fetchNonce">Fetch nonce from collector</button>
+    <div id="nonceDisplay"></div>
+  </div>
+
+  <div class="card">
+    <h3>Actions</h3>
+    <div class="row">
+      <div>
+        <label>Order type</label>
+        <select id="orderType">
+          <option value="GTC">GTC</option>
+          <option value="GTD">GTD</option>
+          <option value="FOK">FOK</option>
+        </select>
+      </div>
+    </div>
+    <label>OrderHash override (collectFee)</label><input id="orderHashInput" />
+    <button id="hashBtn">Compute orderHash</button>
+    <div id="orderHash"></div>
+    <button id="postOrder">POST order (fetch)</button>
+    <button id="statusBtn">Fetch order status</button>
+    <div id="orderStatus"></div>
+    <button id="signFeeAuth">Sign FeeAuth</button>
+    <div id="feeAuthSig"></div>
+    <button id="collectFee">Call collectFee</button>
+  </div>
+
+  <div class="card">
+    <h3>Logs</h3>
+    <pre id="log"></pre>
+  </div>
+
+  <script>
+    let provider, signer;
+    let currentAccount = "";
+    let clobClient = null;
+    let latestPostedOrder = null;
+    let lastOrderHash = "";
+    const EXCHANGE_ADDR = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+    const NEG_RISK_EXCHANGE_ADDR = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+    const negRiskCache = {};
+
+    const logEl = document.getElementById("log");
+    const log = (m) => { logEl.textContent += m + "\n"; console.log(m); };
+    const logErr = (m) => { logEl.textContent += "[ERR] " + m + "\n"; console.error(m); };
+
+    document.getElementById("logVersion").textContent = typeof ethers !== "undefined"
+      ? "ethers loaded: " + (ethers.version || "")
+      : "ethers NOT loaded";
+
+    const exchangeAbi = [
+      "function hashOrder((uint256,address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint8,bytes)) view returns (bytes32)",
+      "function getOrderStatus(bytes32) view returns (bool isFilledOrCancelled, uint256 remaining)"
+    ];
+    const collectorAbi = [
+      "function nonces(address) view returns (uint256)",
+      "function collectFee((uint256,address,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint8,uint8,bytes),(address,address,bytes32,uint256,uint256,uint256),bytes) external"
+    ];
+    const erc20Abi = [
+      "function approve(address,uint256) returns (bool)",
+      "function allowance(address,address) view returns (uint256)",
+      "function decimals() view returns (uint8)",
+      "function balanceOf(address) view returns (uint256)"
+    ];
+    const erc1155Abi = [
+      "function setApprovalForAll(address operator,bool approved)",
+      "function isApprovedForAll(address owner,address operator) view returns (bool)"
+    ];
+
+    const marketsState = { list: [] };
+
+    const orderTypesDef = {
+      Order: [
+        { name: "salt", type: "uint256" },
+        { name: "maker", type: "address" },
+        { name: "signer", type: "address" },
+        { name: "taker", type: "address" },
+        { name: "tokenId", type: "uint256" },
+        { name: "makerAmount", type: "uint256" },
+        { name: "takerAmount", type: "uint256" },
+        { name: "expiration", type: "uint256" },
+        { name: "nonce", type: "uint256" },
+        { name: "feeRateBps", type: "uint256" },
+        { name: "side", type: "uint8" },
+        { name: "signatureType", type: "uint8" },
+      ],
+    };
+
+    const mapMarket = (m) => {
+      const yes = (m.tokens || []).find((t) => (t.outcome || "").toLowerCase() === "yes");
+      const no  = (m.tokens || []).find((t) => (t.outcome || "").toLowerCase() === "no");
+      return {
+        name: m.question || m.market_slug || m.condition_id || "Unknown",
+        yesTokenId: yes?.token_id || "",
+        noTokenId: no?.token_id || "",
+        yesPrice: yes?.price,
+        noPrice: no?.price,
+        tickSize: m.minimum_tick_size ? m.minimum_tick_size.toString() : undefined,
+        acceptingOrders: !!m.accepting_orders,
+        active: !!m.active,
+        closed: !!m.closed,
+        archived: !!m.archived,
+        enableOrderBook: !!m.enable_order_book,
+      };
+    };
+    const isActive = (m) => m.acceptingOrders && m.active && !m.archived && !m.closed && m.enableOrderBook;
+
+    const requireAddr = (val, label) => {
+      if (!val || !ethers.utils.isAddress(val)) throw new Error(`Bad ${label}`);
+      return ethers.utils.getAddress(val);
+    };
+
+    const getClobHost = () => (document.getElementById("clobHost").value || "").replace(/\/$/, "");
+    async function isNegRiskToken(tokenId) {
+      const key = tokenId?.toString() || "";
+      if (!key) return false;
+      if (negRiskCache[key] !== undefined) return negRiskCache[key];
+      try {
+        const host = getClobHost();
+        if (!host) return false;
+        const res = await fetch(`${host}/neg-risk?token_id=${encodeURIComponent(key)}`);
+        const j = await res.json();
+        if (typeof j?.neg_risk === "boolean") {
+          log(`neg-risk ${key}: ${j.neg_risk}`);
+          negRiskCache[key] = j.neg_risk;
+          return j.neg_risk;
+        }
+      } catch (e) {
+        logErr("neg-risk lookup failed: " + (e?.message || e));
+      }
+      negRiskCache[key] = false;
+      return false;
+    }
+
+    async function resolveExchangeAddr(tokenId) {
+      const isNeg = await isNegRiskToken(tokenId);
+      return isNeg ? NEG_RISK_EXCHANGE_ADDR : EXCHANGE_ADDR;
+    }
+
+    function readOrderInputs() {
+      return {
+        salt: document.getElementById("salt").value,
+        maker: document.getElementById("maker").value,
+        signer: document.getElementById("signer").value,
+        taker: document.getElementById("taker").value,
+        tokenId: document.getElementById("tokenId").value,
+        makerAmount: document.getElementById("makerAmount").value,
+        takerAmount: document.getElementById("takerAmount").value,
+        expiration: document.getElementById("expiration").value,
+        nonce: document.getElementById("nonce").value,
+        feeRateBps: document.getElementById("feeRateBps").value,
+        side: document.getElementById("side").value,
+        signatureType: document.getElementById("sigType").value,
+        signature: document.getElementById("signature").value,
+      };
+    }
+
+    async function buildOrderFromInputs(overrides = {}) {
+      if (!signer) await connect();
+      const walletAddr = (await signer.getAddress()).toLowerCase();
+      const f = readOrderInputs();
+      const saltVal = overrides.salt ?? (f.salt || Date.now().toString());
+      const makerVal = overrides.maker ?? (f.maker || walletAddr);
+      const signerVal = overrides.signer ?? (f.signer || walletAddr);
+      const sigTypeVal = Number(overrides.signatureType ?? (parseInt(f.signatureType || "0") || 0));
+      if (sigTypeVal === 0 && signerVal.toLowerCase() !== walletAddr) {
+        document.getElementById("signer").value = walletAddr;
+        throw new Error(`order.signer must match connected wallet (${walletAddr})`);
+      }
+      const normalized = {
+        salt: Number(saltVal),
+        maker: requireAddr(makerVal, "maker"),
+        signer: requireAddr(signerVal, "signer"),
+        taker: requireAddr((overrides.taker ?? (f.taker || ethers.constants.AddressZero)).trim(), "taker"),
+        tokenId: (overrides.tokenId ?? (f.tokenId || "0")).toString(),
+        makerAmount: (overrides.makerAmount ?? (f.makerAmount || "0")).toString(),
+        takerAmount: (overrides.takerAmount ?? (f.takerAmount || "0")).toString(),
+        expiration: (overrides.expiration ?? (f.expiration || "0")).toString(),
+        nonce: (overrides.nonce ?? (f.nonce || "0")).toString(),
+        feeRateBps: (overrides.feeRateBps ?? (f.feeRateBps || "0")).toString(),
+        side: (overrides.side ?? parseInt(f.side || "0")).toString(),
+        signatureType: Number(sigTypeVal),
+        signature: overrides.signature ?? (f.signature || "0x"),
+      };
+      document.getElementById("maker").value = normalized.maker;
+      document.getElementById("signer").value = normalized.signer;
+      document.getElementById("salt").value = normalized.salt;
+      document.getElementById("sigType").value = normalized.signatureType.toString();
+      return normalized;
+    }
+
+    function getMetaMaskProvider() {
+      const eth = window.ethereum;
+      if (!eth) return null;
+      if (eth.providers && Array.isArray(eth.providers)) {
+        const mm = eth.providers.find((p) => p.isMetaMask);
+        if (mm) return mm;
+      }
+      return eth.isMetaMask ? eth : eth;
+    }
+    const DEFAULT_EVM_CHAIN = 137; // Polygon mainnet
+
+    async function ensureDefaultChain() {
+      const eth = getMetaMaskProvider();
+      if (!eth) return;
+      try {
+        const current = parseInt(await eth.request({ method: "eth_chainId" }), 16);
+        if (current !== DEFAULT_EVM_CHAIN) {
+          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x89" }] });
+        }
+      } catch (e) {
+        logErr("Chain switch warning: " + (e?.message || e));
+      }
+    }
+
+    async function connect() {
+      const eth = getMetaMaskProvider();
+      if (!eth) return alert("MetaMask required (make sure MetaMask provider is enabled; Phantom can inject its own EVM provider)");
+      await ensureDefaultChain();
+      provider = new ethers.providers.Web3Provider(eth);
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      currentAccount = await signer.getAddress();
+      const net = await provider.getNetwork();
+      document.getElementById("account").textContent = `Account: ${currentAccount}`;
+      document.getElementById("network").textContent = `Chain: ${net.chainId}`;
+      document.getElementById("maker").value = currentAccount;
+      document.getElementById("signer").value = currentAccount;
+      document.getElementById("deadline").value = Math.floor(Date.now()/1000) + 3600;
+      log(`Connected chain ${net.chainId} account ${currentAccount}`);
+    }
+
+    async function initClobClient() {
+      const host = getClobHost();
+      const chainId = Number(document.getElementById("clobChainId").value || "137");
+      const mod = await import("https://esm.sh/@polymarket/clob-client@5.0.1?bundle");
+      const { ClobClient } = mod;
+      clobClient = new ClobClient(host, chainId, signer);
+      return clobClient;
+    }
+
+    async function fetchMarketsUI() {
+      if (!signer) await connect();
+      const status = document.getElementById("marketsStatus");
+      status.textContent = "Fetching...";
+      try {
+        const client = clobClient || await initClobClient();
+        let cursor;
+        const active = [];
+        let total = 0;
+        while (active.length < 200) {
+          const page = await client.getMarkets(cursor);
+          const data = page?.data || [];
+          total += data.length;
+          for (const m of data) {
+            const mm = mapMarket(m);
+            if (!mm.yesTokenId || !mm.noTokenId) continue;
+            if (isActive(mm)) active.push(mm);
+          }
+          cursor = page?.next_cursor;
+          if (!cursor) break;
+        }
+        marketsState.list = active;
+        renderMarkets(active);
+        status.textContent = `Fetched ${total}, showing ${active.length} active`;
+      } catch (e) {
+        status.textContent = "Error: " + (e?.message || e);
+        logErr(status.textContent);
+      }
+    }
+
+    function renderMarkets(list) {
+      const sel = document.getElementById("marketSelect");
+      sel.innerHTML = "";
+      list.forEach((m, i) => {
+        const opt = document.createElement("option");
+        opt.value = i.toString();
+        opt.textContent = `${m.name} | YES ${m.yesPrice ?? "-"} | NO ${m.noPrice ?? "-"} | tick ${m.tickSize ?? "?"}`;
+        sel.appendChild(opt);
+      });
+      document.getElementById("marketInfo").textContent = `Loaded ${list.length} markets`;
+    }
+
+    const getSelectedMarket = () => {
+      const idx = Number(document.getElementById("marketSelect").value);
+      return Number.isNaN(idx) ? undefined : marketsState.list[idx];
+    };
+
+    function applyMarketToken(side) {
+      const m = getSelectedMarket();
+      if (!m) return alert("Select a market");
+      const tokenId = side === "yes" ? m.yesTokenId : m.noTokenId;
+      document.getElementById("tokenId").value = tokenId;
+      if (m.tickSize) document.getElementById("tickSize").value = m.tickSize;
+      log(`Applied ${side.toUpperCase()} tokenId ${tokenId}`);
+    }
+
+    function applyQuickPriceFrom(side) {
+      const m = getSelectedMarket();
+      if (!m) return alert("Select a market");
+      const p = side === "yes" ? m.yesPrice : m.noPrice;
+      if (p === undefined || p === null) return alert("Price missing");
+      document.getElementById("quickPrice").value = p;
+      if (m.tickSize) document.getElementById("tickSize").value = m.tickSize;
+      document.getElementById("quickStatus").textContent = `Applied ${side.toUpperCase()} price ${p}`;
+    }
+
+    function buildQuickOrder() {
+      const m = getSelectedMarket();
+      if (!m) return alert("Select a market");
+      const sideSel = document.getElementById("quickSide").value;
+      const size = parseFloat(document.getElementById("quickSize").value || "0");
+      const price = parseFloat(document.getElementById("quickPrice").value || "0");
+      if (!(price > 0 && price <= 1)) return alert("Price 0-1");
+      if (!(size > 0)) return alert("Size > 0");
+
+      let side = 0;
+      let tokenId = m.yesTokenId;
+      if (sideSel === "buy_no") tokenId = m.noTokenId;
+      if (sideSel === "sell_yes") { side = 1; tokenId = m.yesTokenId; }
+      if (sideSel === "sell_no")  { side = 1; tokenId = m.noTokenId; }
+
+      document.getElementById("tokenId").value = tokenId || "0";
+      document.getElementById("side").value = side.toString();
+      try {
+        const tick = document.getElementById("tickSize").value || m.tickSize || "0.01";
+        const rounded = snapAmounts(price, size, side, tick);
+        if (side === 0) {
+          // BUY: maker=USD, taker=shares
+          document.getElementById("makerAmount").value = rounded.makerMicro.toString();
+          document.getElementById("takerAmount").value = rounded.takerMicro.toString();
+        } else {
+          // SELL: maker=shares, taker=USD (so taker shows expected USD received)
+          document.getElementById("makerAmount").value = rounded.takerMicro.toString();
+          document.getElementById("takerAmount").value = rounded.makerMicro.toString();
+        }
+        document.getElementById("salt").value = Date.now().toString();
+        document.getElementById("expiration").value = Math.floor(Date.now() / 1000) + 3600;
+        document.getElementById("nonce").value = "0";
+        document.getElementById("feeRateBps").value = document.getElementById("feeRateBps").value || "0";
+        document.getElementById("sigType").value = document.getElementById("sigType").value || "0";
+        document.getElementById("signature").value = "0x";
+        document.getElementById("maker").value = document.getElementById("maker").value || currentAccount;
+        document.getElementById("signer").value = document.getElementById("signer").value || currentAccount;
+        document.getElementById("quickStatus").textContent =
+          `Filled: ${side === 0 ? "BUY" : "SELL"} size ${rounded.sizeRounded.toFixed(5)} @ ${rounded.price} | maker=${rounded.makerMicro} taker=${rounded.takerMicro}`;
+        log(`Quick fill -> price=${rounded.price} size=${rounded.sizeRounded} makerMicro=${rounded.makerMicro} takerMicro=${rounded.takerMicro}`);
+      } catch (e) {
+        document.getElementById("quickStatus").textContent = "Error: " + (e?.message || e);
+        logErr("Quick fill error: " + (e?.message || e));
+      }
+    }
+
+    function requireProvider() {
+      if (!provider) throw new Error("Connect first");
+    }
+
+    async function signOrderWithHardening(orderStruct, exchAddr) {
+      if (!signer) throw new Error("Connect first");
+      const walletAddr = (await signer.getAddress()).toLowerCase();
+      const inputSigner = requireAddr(orderStruct.signer, "order.signer").toLowerCase();
+      if (walletAddr !== inputSigner) {
+        document.getElementById("signer").value = walletAddr;
+        throw new Error(`order.signer must match connected wallet (${walletAddr})`);
+      }
+
+      const net = await provider.getNetwork();
+      const chainFromUi = Number(document.getElementById("clobChainId").value || net.chainId);
+      if (chainFromUi && chainFromUi !== net.chainId) {
+        logErr(`ChainId mismatch: wallet ${net.chainId} vs UI ${chainFromUi}; signing with wallet chain`);
+      }
+
+      const domain = { 
+        name: "Polymarket CTF Exchange", 
+        version: "1", 
+        chainId: net.chainId, 
+        verifyingContract: exchAddr 
+      };
+      const msg = {
+        salt: String(orderStruct.salt),
+        maker: orderStruct.maker,
+        signer: orderStruct.signer,
+        taker: orderStruct.taker,
+        tokenId: orderStruct.tokenId,
+        makerAmount: orderStruct.makerAmount,
+        takerAmount: orderStruct.takerAmount,
+        expiration: orderStruct.expiration,
+        nonce: orderStruct.nonce,
+        feeRateBps: orderStruct.feeRateBps,
+        side: Number(orderStruct.side),
+        signatureType: Number(orderStruct.signatureType),
+      };
+      log(`Signing order with signer=${walletAddr} chainId=${domain.chainId} domain=${JSON.stringify(domain)} msg=${JSON.stringify(msg)}`);
+      const sig = await signer._signTypedData(domain, orderTypesDef, msg);
+      const sigInput = document.getElementById("signature");
+      if (sigInput) sigInput.value = sig;
+      return { signedOrder: { ...orderStruct, signature: sig }, orderDomain: domain };
+    }
+
+    async function computeHash() {
+      requireProvider();
+      const order = latestPostedOrder || await buildOrderFromInputs();
+      const exchAddr = await resolveExchangeAddr(order.tokenId);
+      const orderTuple = [
+        order.salt,
+        order.maker,
+        order.signer,
+        order.taker || ethers.constants.AddressZero,
+        order.tokenId.toString(),
+        order.makerAmount.toString(),
+        order.takerAmount.toString(),
+        order.expiration.toString(),
+        order.nonce.toString(),
+        order.feeRateBps.toString(),
+        order.side,
+        order.signatureType,
+        order.signature || "0x",
+      ];
+      const exch = new ethers.Contract(exchAddr, exchangeAbi, provider);
+      log("Calling hashOrder with " + JSON.stringify(orderTuple));
+      const orderHash = await exch.hashOrder(orderTuple);
+      document.getElementById("orderHash").textContent = orderHash;
+      const ov = document.getElementById("orderHashInput");
+      if (ov && !ov.value) ov.value = orderHash;
+      log("orderHash: " + orderHash);
+      return orderHash;
+    }
+
+    async function deployFeeCollector() {
+      if (!signer) return alert("Connect first");
+      try {
+        const artRes = await fetch("/artifacts/src/PolymarketFeeCollector.sol/PolymarketFeeCollector.json");
+        if (!artRes.ok) throw new Error("Compile contracts first (npm run compile)");
+        const art = await artRes.json();
+        const factory = new ethers.ContractFactory(art.abi, art.bytecode, signer);
+        const treasury = document.getElementById("deployTreasury").value;
+        const collateral = document.getElementById("deployCollateral").value;
+        const exchange = document.getElementById("deployExchange").value;
+        const statusEl = document.getElementById("deployStatus");
+        statusEl.textContent = "Deploying...";
+        const c = await factory.deploy(treasury, collateral, exchange);
+        log("Deploy tx: " + c.deployTransaction.hash);
+        await c.deployed();
+        statusEl.textContent = "Deployed at " + c.address;
+        document.getElementById("collector").value = c.address;
+      } catch (e) {
+        document.getElementById("deployStatus").textContent = "Error: " + (e?.message || e);
+        logErr("Deploy error: " + (e?.message || e));
+      }
+    }
+
+    async function deriveApiKey() {
+      if (!signer) return alert("Connect first");
+      const status = document.getElementById("apiKeyStatus");
+      status.textContent = "Deriving...";
+      try {
+        const client = clobClient || await initClobClient();
+        const nonceRaw = document.getElementById("clobNonce").value;
+        const nonce = nonceRaw ? Number(nonceRaw) : undefined;
+        let creds;
+        try {
+          creds = await client.deriveApiKey(nonce);
+          log("Derived via deriveApiKey");
+        } catch {
+          creds = await client.createOrDeriveApiKey(nonce);
+          log("createOrDerive fallback");
+        }
+        if (!creds.key) throw new Error("API key response missing key");
+        document.getElementById("clobApiKey").value = creds.key;
+        document.getElementById("apiKeyOut").textContent = creds.key;
+        document.getElementById("apiSecretOut").textContent = creds.secret || "";
+        document.getElementById("apiPassOut").textContent = creds.passphrase || "";
+        status.textContent = "API key ready";
+      } catch (e) {
+        status.textContent = "Error: " + (e?.message || e);
+        logErr("API key error: " + (e?.message || e));
+      }
+    }
+
+    const decimalPlaces = (v) => {
+      const s = v.toString();
+      const idx = s.indexOf(".");
+      return idx >= 0 ? s.length - idx - 1 : 0;
+    };
+    const roundDown = (v, d) => {
+      const m = Math.pow(10, d);
+      return Math.floor(v * m) / m;
+    };
+    const roundUp = (v, d) => {
+      const m = Math.pow(10, d);
+      return Math.ceil(v * m) / m;
+    };
+    const roundNormal = (v, d) => {
+      const m = Math.pow(10, d);
+      return Math.round(v * m) / m;
+    };
+
+    const ROUNDING_CONFIG = {
+      "0.1": { price: 1, size: 2, amount: 3 },
+      "0.01": { price: 2, size: 2, amount: 4 },
+      "0.001": { price: 3, size: 2, amount: 5 },
+      "0.0001": { price: 4, size: 2, amount: 6 },
+    };
+    const getRoundConfig = (tickSize) => ROUNDING_CONFIG[tickSize] || { price: 2, size: 2, amount: 4 };
+
+    function snapAmounts(price, size, side, tickSize) {
+      const cfg = getRoundConfig(tickSize || "0.01");
+      const rawPrice = roundNormal(price, cfg.price);
+
+      let rawMakerAmt, rawTakerAmt;
+      if (side === 0) {
+        // BUY: taker = shares, maker = USD
+        rawTakerAmt = roundDown(size, cfg.size);
+        rawMakerAmt = rawTakerAmt * rawPrice;
+        if (decimalPlaces(rawMakerAmt) > cfg.amount) {
+          rawMakerAmt = roundUp(rawMakerAmt, cfg.amount + 4);
+          if (decimalPlaces(rawMakerAmt) > cfg.amount) {
+            rawMakerAmt = roundDown(rawMakerAmt, cfg.amount);
+          }
+        }
+      } else {
+        // SELL: maker = shares, taker = USD
+        rawMakerAmt = roundDown(size, cfg.size);
+        rawTakerAmt = rawMakerAmt * rawPrice;
+        if (decimalPlaces(rawTakerAmt) > cfg.amount) {
+          rawTakerAmt = roundUp(rawTakerAmt, cfg.amount + 4);
+          if (decimalPlaces(rawTakerAmt) > cfg.amount) {
+            rawTakerAmt = roundDown(rawTakerAmt, cfg.amount);
+          }
+        }
+      }
+
+      const ONE = 1e6; // USDC/CTF decimals
+      const makerMicro = Math.floor(rawMakerAmt * ONE);
+      const takerMicro = Math.floor(rawTakerAmt * ONE);
+
+      return {
+        price: rawPrice,
+        makerMicro,
+        takerMicro,
+        sizeRounded: side === 0 ? rawTakerAmt : rawMakerAmt,
+      };
+    }
+
+    async function fetchBalanceAndAllowance(owner, spender, token) {
+      try {
+        const erc20 = new ethers.Contract(token, erc20Abi, provider || signer);
+        const [decimals, bal, alw] = await Promise.all([
+          erc20.decimals(),
+          erc20.balanceOf(owner),
+          erc20.allowance(owner, spender),
+        ]);
+        return { decimals, balance: bal, allowance: alw };
+      } catch (e) {
+        logErr("Balance/allowance failed: " + (e?.message || e));
+        return undefined;
+      }
+    }
+
+    async function postOrder() {
+      try {
+        if (!signer) await connect();
+        const host = getClobHost();
+        const apiKey = (document.getElementById("clobApiKey").value || "").trim();
+        const apiSecret = (document.getElementById("apiSecretOut").textContent || "").trim();
+        const apiPass = (document.getElementById("apiPassOut").textContent || "").trim();
+        if (!apiKey || !apiSecret || !apiPass) return alert("Derive API key first");
+
+        const sideInt = parseInt(document.getElementById("side").value || "0");
+        const priceInput = parseFloat(document.getElementById("quickPrice").value || "0");
+        const sizeInput = parseFloat(document.getElementById("quickSize").value || "0");
+        const tickSizeVal = document.getElementById("tickSize").value || "0.01";
+        if (!(priceInput > 0 && priceInput <= 1)) throw new Error("Price must be 0-1");
+        if (!(sizeInput > 0)) throw new Error("Size must be > 0");
+
+        const { price, makerMicro, takerMicro, sizeRounded } = snapAmounts(priceInput, sizeInput, sideInt, tickSizeVal);
+
+        const makerAddr = requireAddr((document.getElementById("maker").value || await signer.getAddress()).trim(), "maker");
+        const signerAddr = await signer.getAddress();
+        document.getElementById("maker").value = makerAddr;
+        document.getElementById("signer").value = signerAddr;
+        const tokenId = document.getElementById("tokenId").value;
+        const exchAddr = await resolveExchangeAddr(tokenId);
+        const collAddr = document.getElementById("allowCollateral").value || document.getElementById("deployCollateral").value;
+
+        // preflight balance: BUY needs USDC, SELL does not
+        if (sideInt === 0) {
+          const bal = await fetchBalanceAndAllowance(makerAddr, exchAddr, collAddr);
+          if (bal) {
+            const need = makerMicro;
+            log(`Preflight: need ~${need} raw units ($${(need/1e6).toFixed(3)}); balance=${bal.balance.toString()} allowance=${bal.allowance.toString()}`);
+            if (bal.balance.lt(need)) { logErr("Not enough balance"); return; }
+            if (bal.allowance.lt(need)) { logErr("Allowance to exchange too low"); return; }
+          }
+        }
+
+        const salt = Date.now().toString();
+        const saltInt = parseInt(salt, 10);
+        const orderTypeSel = (document.getElementById("orderType").value || "GTC").toUpperCase();
+        const expirationVal = (() => {
+          const uiExp = document.getElementById("expiration").value;
+          if (orderTypeSel === "GTD") {
+            if (uiExp && uiExp !== "0") return uiExp;
+            return (Math.floor(Date.now()/1000) + 3600).toString();
+          }
+          return "0";
+        })();
+        // Log computed amounts but honor form values
+        log(`Amounts -> side=${sideInt === 0 ? "BUY" : "SELL"} makerAmt=${makerMicro} (computed) takerAmt=${takerMicro} (computed) price=${price}`);
+
+        const orderStruct = await buildOrderFromInputs({
+          salt: saltInt,
+          maker: makerAddr,
+          signer: signerAddr,
+          taker: "0x0000000000000000000000000000000000000000",
+          tokenId,
+          expiration: expirationVal,
+          side: sideInt,
+          signatureType: parseInt(document.getElementById("sigType").value || "0") || 0,
+        });
+
+        // Sign EIP-712 with wallet chainId and signer guard
+        const { signedOrder } = await signOrderWithHardening(orderStruct, exchAddr);
+        latestPostedOrder = signedOrder;
+
+        const orderTuple = [
+          signedOrder.salt,
+          signedOrder.maker,
+          signedOrder.signer,
+          signedOrder.taker,
+          signedOrder.tokenId,
+          signedOrder.makerAmount,
+          signedOrder.takerAmount,
+          signedOrder.expiration,
+          signedOrder.nonce,
+          signedOrder.feeRateBps,
+          signedOrder.side,
+          signedOrder.signatureType,
+          signedOrder.signature,
+        ];
+        const exch = new ethers.Contract(exchAddr, exchangeAbi, provider);
+        const orderHash = await exch.hashOrder(orderTuple);
+        document.getElementById("orderHash").textContent = orderHash;
+        const ov = document.getElementById("orderHashInput"); if (ov && !ov.value) ov.value = orderHash;
+        if (ov) ov.value = orderHash; // always reflect the last posted order hash
+
+        const orderType = orderTypeSel === "FOK" ? "FOK" : orderTypeSel === "GTD" ? "GTD" : "GTC";
+
+        // Build payload
+        const payload = {
+          deferExec: false,
+          order: {
+            ...signedOrder,
+            side: sideInt === 0 ? "BUY" : "SELL",
+            //signatureType: Number(signedOrder.signatureType), // API expects integer here
+          },
+          owner: apiKey,
+          orderType,
+        };
+
+        // L2 headers (HMAC per clob-client createL2Headers)
+        const path = "/order";
+        const bodyStr = JSON.stringify(payload);
+        const tsRemote = await fetchClobTime(host);
+        const headers = await createL2Headers(signer, { key: apiKey, secret: apiSecret, passphrase: apiPass }, {
+          method: "POST",
+          requestPath: path,
+          body: bodyStr,
+        }, Number(tsRemote));
+        headers["Content-Type"] = "application/json";
+
+        log(`Posting order via fetch type ${orderType} price=${price} size=${sizeRounded} exp=${orderStruct.expiration}`);
+        const res = await fetch(host + path, { method:"POST", headers, body: bodyStr });
+        const txt = await res.text();
+        log(`CLOB response (${res.status}): ${txt}`);
+        lastOrderHash = orderHash;
+      } catch (e) {
+        logErr("POST error: " + (e?.message || e));
+      }
+    }
+
+    async function fetchClobTime(host) {
+      try {
+        const res = await fetch(host + "/time");
+        const j = await res.json();
+        if (j?.time) return j.time.toString();
+      } catch (e) {
+        logErr("time endpoint failed, using local time");
+      }
+      return Math.floor(Date.now()/1000).toString();
+    }
+
+    const replaceAll = (s, search, replace) => s.split(search).join(replace);
+    function base64ToArrayBuffer(base64) {
+      const sanitized = base64.replace(/-/g, "+").replace(/_/g, "/").replace(/[^A-Za-z0-9+/=]/g, "");
+      const binary = atob(sanitized);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+    function arrayBufferToBase64(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    }
+    async function buildPolyHmacSignature(secret, timestamp, method, requestPath, body) {
+      let message = `${timestamp}${method}${requestPath}`;
+      if (body !== undefined) message += body;
+      const keyData = base64ToArrayBuffer(secret);
+      const cryptoKey = await crypto.subtle.importKey("raw", keyData, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const msgBuf = new TextEncoder().encode(message);
+      const sigBuf = await crypto.subtle.sign("HMAC", cryptoKey, msgBuf);
+      const sigB64 = arrayBufferToBase64(sigBuf);
+      return replaceAll(replaceAll(sigB64, "+", "-"), "/", "_");
+    }
+    async function createL2Headers(signer, creds, l2HeaderArgs, timestamp) {
+      let ts = Math.floor(Date.now()/1000);
+      if (timestamp !== undefined) ts = timestamp;
+      const address = await signer.getAddress();
+      const sig = await buildPolyHmacSignature(
+        creds.secret,
+        ts,
+        l2HeaderArgs.method,
+        l2HeaderArgs.requestPath,
+        l2HeaderArgs.body,
+      );
+      return {
+        POLY_ADDRESS: address,
+        POLY_SIGNATURE: sig,
+        POLY_TIMESTAMP: `${ts}`,
+        POLY_API_KEY: creds.key,
+        POLY_PASSPHRASE: creds.passphrase,
+      };
+    }
+
+    async function fetchOrderStatus() {
+      requireProvider();
+      const tokenId = document.getElementById("tokenId").value || "0";
+      const exchAddr = await resolveExchangeAddr(tokenId);
+      const oh = document.getElementById("orderHash").textContent || document.getElementById("orderHashInput").value;
+      if (!oh) return alert("Compute hash first");
+      const exch = new ethers.Contract(exchAddr, exchangeAbi, provider);
+      const st = await exch.getOrderStatus(oh);
+      const remaining = st.remaining ? st.remaining.toString() : "0";
+      document.getElementById("orderStatus").textContent = `isFilledOrCancelled=${st.isFilledOrCancelled} remaining=${remaining}`;
+      log(`Order status: ${document.getElementById("orderStatus").textContent}`);
+    }
+
+    async function approveSpender(type) {
+      if (!signer) return alert("Connect first");
+      try {
+        const coll = document.getElementById("allowCollateral").value;
+        const spender = type === "exchange"
+          ? await resolveExchangeAddr(document.getElementById("tokenId").value || "0")
+          : document.getElementById("collector").value;
+        const dec = parseInt(document.getElementById("allowDecimals").value || "6");
+        const raw = document.getElementById("allowAmount").value.trim();
+        const amt = raw.toLowerCase() === "max" ? ethers.constants.MaxUint256 : ethers.utils.parseUnits(raw || "0", dec);
+        const erc = new ethers.Contract(coll, erc20Abi, signer);
+        const tx = await erc.approve(spender, amt);
+        document.getElementById("allowStatus").textContent = `Approve tx: ${tx.hash}`;
+        await tx.wait();
+        document.getElementById("allowStatus").textContent = `Approve confirmed`;
+      } catch (e) {
+        document.getElementById("allowStatus").textContent = "Error: " + (e?.message || e);
+        logErr("Approve error: " + (e?.message || e));
+      }
+    }
+
+    async function approveERC1155() {
+      if (!signer) return alert("Connect first");
+      try {
+        const tokenAddr = document.getElementById("condTokens").value;
+        const exchAddr = await resolveExchangeAddr(document.getElementById("tokenId").value || "0");
+        const erc = new ethers.Contract(tokenAddr, erc1155Abi, signer);
+        const statusEl = document.getElementById("allow1155Status");
+        const tx = await erc.setApprovalForAll(exchAddr, true);
+        statusEl.textContent = `setApprovalForAll tx: ${tx.hash}`;
+        await tx.wait();
+        statusEl.textContent = "ERC1155 approved for exchange";
+      } catch (e) {
+        document.getElementById("allow1155Status").textContent = "Error: " + (e?.message || e);
+        logErr("ERC1155 approve error: " + (e?.message || e));
+      }
+    }
+
+    async function fetchNonce() {
+      if (!signer) return alert("Connect first");
+      const col = new ethers.Contract(document.getElementById("collector").value, collectorAbi, provider);
+      const n = await col.nonces(await signer.getAddress());
+      document.getElementById("nonceDisplay").textContent = `nonce: ${n.toString()}`;
+      log("nonce: " + n.toString());
+      return n;
+    }
+
+    async function signFeeAuth() {
+      if (!signer) return alert("Connect first");
+      const chainId = (await provider.getNetwork()).chainId;
+      const collectorAddr = requireAddr((document.getElementById("collector").value || "").trim(), "collector");
+      const overrideHash = (document.getElementById("orderHashInput").value || "").trim();
+      const orderHash = overrideHash || document.getElementById("orderHash").textContent || await computeHash();
+      const exchangeOverride = (document.getElementById("feeAuthExchange").value || "").trim();
+      const order = latestPostedOrder || await buildOrderFromInputs();
+      const exchangeAddr = exchangeOverride || await resolveExchangeAddr(order.tokenId);
+      const nonce = await fetchNonce();
+      const feeBps = parseInt(document.getElementById("feeBps").value || "0");
+      const deadline = ethers.BigNumber.from(document.getElementById("deadline").value || "0");
+      const domain = { name:"Polymarket Aggregator FeeCollector", version:"2", chainId, verifyingContract: collectorAddr };
+      const types = { FeeAuth: [
+        { name:"signer", type:"address" },
+        { name:"vault", type:"address" },
+        { name:"exchange", type:"address" },
+        { name:"orderHash", type:"bytes32" },
+        { name:"feeBps", type:"uint256" },
+        { name:"nonce", type:"uint256" },
+        { name:"deadline", type:"uint256" },
+      ]};
+      const msg = {
+        signer: document.getElementById("signer").value,
+        vault: document.getElementById("maker").value,
+        exchange: exchangeAddr,
+        orderHash,
+        feeBps,
+        nonce,
+        deadline,
+      };
+      log("Signing FeeAuth: " + JSON.stringify(msg));
+      const sig = await signer._signTypedData(domain, types, msg);
+      document.getElementById("feeAuthSig").textContent = sig;
+      return { msg, sig };
+    }
+
+    async function callCollectFee() {
+      if (!signer) return alert("Connect first");
+      const collectorAddr = requireAddr((document.getElementById("collector").value || "").trim(), "collector");
+      const collector = new ethers.Contract(collectorAddr, collectorAbi, signer);
+      const order = latestPostedOrder || await buildOrderFromInputs();
+      const { msg, sig } = await signFeeAuth();
+      const orderTuple = [
+        order.salt.toString(),
+        requireAddr(order.maker, "order.maker"),
+        requireAddr(order.signer, "order.signer"),
+        order.taker || ethers.constants.AddressZero,
+        order.tokenId.toString(),
+        order.makerAmount.toString(),
+        order.takerAmount.toString(),
+        order.expiration.toString(),
+        order.nonce.toString(),
+        order.feeRateBps.toString(),
+        order.side,
+        order.signatureType,
+        order.signature || "0x",
+      ];
+      const exchAddr = await resolveExchangeAddr(order.tokenId);
+      const exch = new ethers.Contract(exchAddr, exchangeAbi, provider);
+      const computedHash = await exch.hashOrder(orderTuple);
+      const overrideHash = lastOrderHash || (document.getElementById("orderHashInput").value || "").trim();
+      if (overrideHash && overrideHash.toLowerCase() !== computedHash.toLowerCase()) {
+        logErr(`Override hash != computed (${overrideHash} vs ${computedHash})`);
+        return;
+      }
+      const orderHash = overrideHash || computedHash;
+      const feeAuthTuple = [
+        requireAddr(msg.signer, "feeAuth.signer"),
+        requireAddr(msg.vault, "feeAuth.vault"),
+        requireAddr(msg.exchange, "feeAuth.exchange"),
+        orderHash,
+        msg.feeBps.toString(),
+        msg.nonce.toString(),
+        msg.deadline.toString(),
+      ];
+      log("Calling collectFee with order tuple " + JSON.stringify(orderTuple) + " feeAuth " + JSON.stringify(feeAuthTuple));
+      const tx = await collector.collectFee(orderTuple, feeAuthTuple, sig);
+      log("collectFee tx: " + tx.hash);
+      const rc = await tx.wait();
+      log("Receipt status: " + rc.status);
+    }
+
+    // events
+    document.getElementById("connectBtn").onclick = connect;
+    document.getElementById("fetchMarkets").onclick = fetchMarketsUI;
+    document.getElementById("applyYes").onclick = () => applyMarketToken("yes");
+    document.getElementById("applyNo").onclick = () => applyMarketToken("no");
+    document.getElementById("quickFromYes").onclick = () => applyQuickPriceFrom("yes");
+    document.getElementById("quickFromNo").onclick = () => applyQuickPriceFrom("no");
+    document.getElementById("buildQuick").onclick = buildQuickOrder;
+    document.getElementById("hashBtn").onclick = computeHash;
+    document.getElementById("deriveApiKey").onclick = deriveApiKey;
+    document.getElementById("deployBtn").onclick = deployFeeCollector;
+    document.getElementById("postOrder").onclick = postOrder;
+    document.getElementById("statusBtn").onclick = fetchOrderStatus;
+    document.getElementById("fetchNonce").onclick = fetchNonce;
+    document.getElementById("signFeeAuth").onclick = signFeeAuth;
+    document.getElementById("collectFee").onclick = callCollectFee;
+    document.getElementById("approveExchange").onclick = () => approveSpender("exchange");
+    document.getElementById("approveCollector").onclick = () => approveSpender("collector");
+    document.getElementById("approve1155").onclick = approveERC1155;
+  </script>
+</body>
+</html>

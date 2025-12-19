@@ -92,6 +92,12 @@ async function storeOrderInTx(
     status: string;
     errorMessage: string | null;
     rawError: string | null;
+    orderHash?: string | null;
+    feeBps?: number | null;
+    feeAuth?: unknown | null;
+    feeAuthSig?: string | null;
+    feeCollectorAddress?: string | null;
+    feeDeadline?: number | null;
   },
 ): Promise<StoreOrderResult> {
   const existingOrder = await client.query<{
@@ -128,9 +134,11 @@ async function storeOrderInTx(
     `INSERT INTO orders (
         id, user_id, wallet_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
+        order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline,
         posted_at, last_update
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12,
+        $13, $14, $15, $16, $17, $18,
         now(), now()
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
@@ -146,6 +154,12 @@ async function storeOrderInTx(
       inputs.status,
       inputs.errorMessage,
       inputs.rawError,
+      inputs.orderHash ?? null,
+      inputs.feeBps ?? null,
+      inputs.feeAuth ?? null,
+      inputs.feeAuthSig ?? null,
+      inputs.feeCollectorAddress ?? null,
+      inputs.feeDeadline ?? null,
     ],
   );
 
@@ -167,6 +181,12 @@ export async function storeOrder(
     status: string;
     errorMessage: string | null;
     rawError: string | null;
+    orderHash?: string | null;
+    feeBps?: number | null;
+    feeAuth?: unknown | null;
+    feeAuthSig?: string | null;
+    feeCollectorAddress?: string | null;
+    feeDeadline?: number | null;
   },
 ): Promise<StoreOrderResult> {
   const client = await pool.connect();
