@@ -12,6 +12,58 @@ function isEthAddress(address: string): boolean {
   return ETH_ADDRESS_RE.test(address);
 }
 
+async function backfillPolymarketUnifiedTokens(
+  pool: Pool,
+  tokenIds: string[],
+): Promise<void> {
+  if (tokenIds.length === 0) return;
+
+  await pool.query(
+    `
+      with wanted as (
+        select unnest($1::text[]) as token_id
+      ),
+      matched_yes as (
+        select m.id as market_id, w.token_id, 'YES'::text as side
+        from unified_markets m
+        join wanted w on w.token_id = m.token_yes
+        where m.venue = 'polymarket'
+      ),
+      matched_no as (
+        select m.id as market_id, w.token_id, 'NO'::text as side
+        from unified_markets m
+        join wanted w on w.token_id = m.token_no
+        where m.venue = 'polymarket'
+      ),
+      matched_clob as (
+        select m.id as market_id,
+               elem.token_id,
+               case when elem.ordinality = 1 then 'YES' else 'NO' end as side
+        from unified_markets m
+        join lateral json_array_elements_text(m.clob_token_ids::json)
+          with ordinality as elem(token_id, ordinality) on true
+        join wanted w on w.token_id = elem.token_id
+        where m.venue = 'polymarket'
+          and m.clob_token_ids is not null
+          and m.clob_token_ids <> ''
+          and m.clob_token_ids <> '[]'
+      ),
+      to_insert as (
+        select * from matched_yes
+        union all
+        select * from matched_no
+        union all
+        select * from matched_clob
+      )
+      insert into unified_tokens(token_id, venue, market_id, side)
+      select token_id, 'polymarket', market_id, side
+      from to_insert
+      on conflict do nothing
+    `,
+    [tokenIds],
+  );
+}
+
 async function fetchPolymarketCandidateTokenIds(
   pool: Pool,
   inputs: { userId: string; walletAddress: string; limit: number },
@@ -28,6 +80,14 @@ async function fetchPolymarketCandidateTokenIds(
           and m.clob_token_ids is not null
           and m.clob_token_ids <> '[]'
       ),
+      order_tokens as (
+        select token_id
+        from orders
+        where user_id = $1
+          and (wallet_address is null or wallet_address = $2)
+          and venue = 'polymarket'
+          and token_id is not null
+      ),
       position_tokens as (
         select token_id
         from positions
@@ -38,6 +98,8 @@ async function fetchPolymarketCandidateTokenIds(
       select distinct token_id
       from (
         select token_id from watchlist_tokens
+        union all
+        select token_id from order_tokens
         union all
         select token_id from position_tokens
       ) t
@@ -162,12 +224,17 @@ async function syncPolymarketPositionsFromPolygon(
       tokenIds: chunk,
     });
 
-    for (const tokenId of chunk) {
+  for (const tokenId of chunk) {
       const balance = balances.get(tokenId) ?? 0n;
       if (balance <= 0n) continue;
       held.push({ tokenId, size: ethers.formatUnits(balance, 6) });
     }
   }
+
+  await backfillPolymarketUnifiedTokens(
+    pool,
+    held.map((item) => item.tokenId),
+  );
 
   const result = await syncWalletPositionsFromTokenBalances(pool, {
     userId: inputs.userId,

@@ -32,9 +32,12 @@ import {
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const POLY_DECIMALS = 6;
+const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
+const MARKET_SHARES_MICRO_STEP = 10n; // 5 decimals in 6-decimal share units
 
 type PolymarketSide = "BUY" | "SELL";
 type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
+type PolymarketClobOrderType = "GTC" | "GTD" | "FOK";
 type OrderbookSummary = {
   bids: Array<{ price: number; size: number }>;
   asks: Array<{ price: number; size: number }>;
@@ -114,6 +117,15 @@ function normalizeOrderType(value: unknown): PolymarketOrderType | null {
     return upper;
   }
   return null;
+}
+
+function normalizeOrderTypeForClob(value: unknown): PolymarketClobOrderType {
+  const normalized = normalizeOrderType(value);
+  if (normalized === "FAK") return "FOK";
+  if (normalized === "GTC" || normalized === "GTD" || normalized === "FOK") {
+    return normalized;
+  }
+  return "GTC";
 }
 
 function parseNumberish(value: unknown): number | null {
@@ -212,15 +224,18 @@ function gcd(a: bigint, b: bigint): bigint {
   return x;
 }
 
+function lcm(a: bigint, b: bigint): bigint {
+  if (a === 0n || b === 0n) return 0n;
+  return (a / gcd(a, b)) * b;
+}
+
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
   if (negRisk == null) return null;
   return negRisk ? env.polymarketNegRiskExchangeAddress : env.polymarketExchangeAddress;
 }
 
 function generatePolymarketNonce(): string {
-  const bytes = randomBytes(16);
-  const value = BigInt(`0x${bytes.toString("hex")}`);
-  return value === 0n ? "1" : value.toString();
+  return "0";
 }
 
 function normalizeOrderForPayload(
@@ -236,8 +251,13 @@ function normalizeOrderForPayload(
     normalized.signatureType = signatureType;
   }
 
+  const saltRaw = normalizeNumberishString(order.salt);
+  if (saltRaw !== null) {
+    const saltNumber = Number(saltRaw);
+    normalized.salt = Number.isSafeInteger(saltNumber) ? saltNumber : saltRaw;
+  }
+
   for (const key of [
-    "salt",
     "tokenId",
     "makerAmount",
     "takerAmount",
@@ -288,15 +308,16 @@ function extractOrderType(order: Record<string, unknown>): PolymarketOrderType |
   return normalizeOrderType(raw);
 }
 
+// Mounted under /polymarket and /trade/polymarket (alias).
 export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   /**
-   * GET /polymarket/market-info
+   * GET /market-info
    * Returns Polymarket-specific market constraints and exchange selection.
    */
   z.get(
-    "/polymarket/market-info",
+    "/market-info",
     {
       preHandler: createAuthMiddleware(),
       schema: { querystring: polymarketMarketInfoQuerySchema },
@@ -384,11 +405,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * GET /polymarket/order-params
+   * GET /order-params
    * Returns default params needed to build an order signature.
    */
   z.get(
-    "/polymarket/order-params",
+    "/order-params",
     {
       preHandler: createAuthMiddleware(),
       schema: { querystring: polymarketOrderParamsQuerySchema },
@@ -425,11 +446,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /polymarket/quote
+   * POST /quote
    * Returns a price/size preview derived from the current orderbook.
    */
   z.post(
-    "/polymarket/quote",
+    "/quote",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: polymarketQuoteBodySchema },
@@ -451,6 +472,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
       const tokenId = body.tokenId.trim();
+      const orderType = normalizeOrderTypeForClob(body.orderType ?? "FOK");
 
       if (!tokenId) {
         reply.code(400);
@@ -513,21 +535,72 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Invalid price computed from orderbook" });
         }
 
-        const amountUsdMicro = BigInt(Math.floor(body.amountUsd * 1_000_000));
         const priceMicro = BigInt(Math.round(price * 1_000_000));
-
-        if (amountUsdMicro <= 0n || priceMicro <= 0n) {
+        if (priceMicro <= 0n) {
           reply.code(400);
-          return reply.send({ error: "Invalid amount or price" });
+          return reply.send({ error: "Invalid price computed from orderbook" });
         }
 
-        const denom = USDC_SCALE / gcd(priceMicro, USDC_SCALE);
-        const sizeMicroRaw = (amountUsdMicro * USDC_SCALE) / priceMicro;
-        const sizeMicro = sizeMicroRaw - (sizeMicroRaw % denom);
+        let sizeMicro: bigint;
+        let makerAmountMicro: bigint;
+        let takerAmountMicro: bigint;
 
-        if (sizeMicro <= 0n) {
-          reply.code(400);
-          return reply.send({ error: "Amount too small for order" });
+        if (orderType === "FOK") {
+          const amountUsdCents = BigInt(Math.floor(body.amountUsd * 100));
+          if (amountUsdCents <= 0n) {
+            reply.code(400);
+            return reply.send({ error: "Invalid amount or price" });
+          }
+
+          const makerAmountMicroMax = amountUsdCents * MARKET_USD_MICRO_STEP;
+          const precisionProduct = MARKET_USD_MICRO_STEP * USDC_SCALE;
+          const stepForPrice =
+            precisionProduct / gcd(priceMicro, precisionProduct);
+          const step = lcm(stepForPrice, MARKET_SHARES_MICRO_STEP);
+
+          const sizeMicroRaw =
+            (makerAmountMicroMax * USDC_SCALE) / priceMicro;
+          sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
+
+          if (sizeMicro <= 0n) {
+            reply.code(400);
+            return reply.send({ error: "Amount too small for order" });
+          }
+
+          if (body.side === "BUY") {
+            makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+            takerAmountMicro = sizeMicro;
+          } else {
+            makerAmountMicro = sizeMicro;
+            takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+          }
+        } else {
+          const amountUsdMicro = BigInt(
+            Math.floor(body.amountUsd * 1_000_000),
+          );
+
+          if (amountUsdMicro <= 0n) {
+            reply.code(400);
+            return reply.send({ error: "Invalid amount or price" });
+          }
+
+          const denom = USDC_SCALE / gcd(priceMicro, USDC_SCALE);
+          const sizeMicroRaw = (amountUsdMicro * USDC_SCALE) / priceMicro;
+          sizeMicro = sizeMicroRaw - (sizeMicroRaw % denom);
+
+          if (sizeMicro <= 0n) {
+            reply.code(400);
+            return reply.send({ error: "Amount too small for order" });
+          }
+
+          makerAmountMicro =
+            body.side === "BUY"
+              ? (sizeMicro * priceMicro) / USDC_SCALE
+              : sizeMicro;
+          takerAmountMicro =
+            body.side === "BUY"
+              ? sizeMicro
+              : (sizeMicro * priceMicro) / USDC_SCALE;
         }
 
         if (minOrderSize != null) {
@@ -541,15 +614,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const makerAmountMicro =
-          body.side === "BUY"
-            ? (sizeMicro * priceMicro) / USDC_SCALE
-            : sizeMicro;
-        const takerAmountMicro =
-          body.side === "BUY"
-            ? sizeMicro
-            : (sizeMicro * priceMicro) / USDC_SCALE;
-
         const size = Number(sizeMicro) / 1_000_000;
         const amountUsdUsed =
           body.side === "BUY"
@@ -557,7 +621,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             : Number(takerAmountMicro) / 1_000_000;
         const estimatedPayout = size;
         const estimatedProfit =
-          body.side === "BUY" ? estimatedPayout - amountUsdUsed : amountUsdUsed - estimatedPayout;
+          body.side === "BUY"
+            ? estimatedPayout - amountUsdUsed
+            : amountUsdUsed - estimatedPayout;
 
         const negRisk =
           orderbook.negRisk ??
@@ -568,7 +634,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ok: true,
           tokenId,
           side: body.side,
-          orderType: body.orderType ?? "FAK",
+          orderType,
           amountUsd: body.amountUsd,
           amountUsdUsed,
           bestBid,
@@ -600,7 +666,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * GET /polymarket/account
+   * GET /account
    * Returns a wallet-scoped Polymarket account snapshot (Polygon on-chain reads).
    *
    * Notes:
@@ -608,7 +674,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
    * - `funder_address` (if set) is used as the on-chain owner for balances/allowances.
    */
   z.get(
-    "/polymarket/account",
+    "/account",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
       const user = request.user;
@@ -635,8 +701,16 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const funderSource = credsInfo?.funderAddress ? "credentials" : "signer";
 
       try {
-        const [code, usdcBalance, allowanceExchange, allowanceNegRisk, okExchange, okNegRisk] =
-          await Promise.all([
+        const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
+        const [
+          code,
+          usdcBalance,
+          allowanceExchange,
+          allowanceNegRisk,
+          okExchange,
+          okNegRisk,
+          allowanceFeeCollector,
+        ] = await Promise.all([
             fetchEvmCode({
               rpcUrl: env.polygonRpcUrl,
               timeoutMs: env.polygonRpcTimeoutMs,
@@ -676,6 +750,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               owner: funder,
               operator: env.polymarketNegRiskExchangeAddress,
             }),
+            feeCollectorAddress
+              ? fetchErc20Allowance({
+                  rpcUrl: env.polygonRpcUrl,
+                  timeoutMs: env.polygonRpcTimeoutMs,
+                  tokenAddress: env.polymarketUsdcAddress,
+                  owner: funder,
+                  spender: feeCollectorAddress,
+                })
+              : Promise.resolve(null),
           ]);
 
         const isContract = typeof code === "string" && code.length > 2;
@@ -707,6 +790,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                 allowance: ethers.formatUnits(allowanceNegRisk, 6),
                 allowanceRaw: allowanceNegRisk.toString(),
               },
+              ...(feeCollectorAddress
+                ? {
+                    feeCollector: {
+                      spender: feeCollectorAddress,
+                      allowance: ethers.formatUnits(
+                        allowanceFeeCollector ?? 0n,
+                        6,
+                      ),
+                      allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
+                    },
+                  }
+                : {}),
             },
           },
           conditionalTokens: {
@@ -733,11 +828,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /polymarket/orders/sync
+   * POST /orders/sync
    * Fetch open orders from Polymarket CLOB using stored L2 credentials and upsert them into `orders`.
    */
   z.post(
-    "/polymarket/orders/sync",
+    "/orders/sync",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
       const user = request.user;
@@ -920,11 +1015,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * GET /polymarket/orders/open
+   * GET /orders/open
    * Fetch open orders directly from Polymarket CLOB (no DB writes).
    */
   z.get(
-    "/polymarket/orders/open",
+    "/orders/open",
     {
       preHandler: createAuthMiddleware(),
       schema: { querystring: polymarketOpenOrdersQuerySchema },
@@ -1003,11 +1098,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /polymarket/order
+   * POST /order
    * Place a signed Polymarket order using stored L2 credentials.
    */
   z.post(
-    "/polymarket/order",
+    "/order",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: polymarketPlaceOrderBodySchema },
@@ -1069,13 +1164,38 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const normalizedOrder = normalizeOrderForPayload(order, side);
+      const orderType = normalizeOrderTypeForClob(body.orderType);
 
       const payload = {
         order: normalizedOrder,
         owner: creds.apiKey,
-        orderType: body.orderType ?? "GTC",
+        orderType,
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
+
+      if (env.nodeEnv !== "production") {
+        const signature =
+          typeof normalizedOrder.signature === "string"
+            ? normalizedOrder.signature.trim()
+            : "";
+        const redactedSignature =
+          signature.length > 18
+            ? `${signature.slice(0, 10)}...${signature.slice(-8)}`
+            : signature || "<missing>";
+
+        app.log.info(
+          {
+            userId: user.id,
+            signer,
+            payload: {
+              ...payload,
+              owner: "<redacted>",
+              order: { ...normalizedOrder, signature: redactedSignature },
+            },
+          },
+          "Polymarket order payload (sanitized)",
+        );
+      }
 
       const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
@@ -1131,7 +1251,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         venueOrderId,
         tokenId,
         side,
-        orderType: body.orderType ?? "GTC",
+        orderType,
         price,
         size,
         status: statusRaw,
@@ -1151,11 +1271,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * DELETE /polymarket/order
+   * DELETE /order
    * Cancel a Polymarket order by venue order ID.
    */
   z.delete(
-    "/polymarket/order",
+    "/order",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: polymarketCancelOrderBodySchema },

@@ -5,13 +5,20 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { storeExecution } from "../repos/executions-repo.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
-import { sendSolanaRawTransaction } from "../services/solana-rpc.js";
+import {
+  fetchSolanaBalanceLamports,
+  fetchSolanaTokenBalanceByOwnerAndMint,
+  formatUiAmount,
+  sendSolanaRawTransaction,
+} from "../services/solana-rpc.js";
 import {
   dflowExecutionBodySchema,
   dflowQuoteQuerySchema,
   dflowSubmitBodySchema,
   dflowSwapBodySchema,
 } from "../schemas/dflow.js";
+
+const SOL_DECIMALS = 9;
 
 function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
@@ -25,15 +32,88 @@ function ensureDflowReady(reply: { code: (status: number) => void; send: (payloa
   return false;
 }
 
+// Mounted under /dflow, /trade/kalshi, and /trade/dflow (alias).
 export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   /**
-   * GET /dflow/quote
+   * GET /account
+   * Returns a wallet-scoped Kalshi/DFlow account snapshot (Solana on-chain reads).
+   */
+  z.get(
+    "/account",
+    { preHandler: createAuthMiddleware() },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isSolanaWallet(walletAddress)) {
+        reply.code(400);
+        return reply.send({
+          error: "Kalshi account snapshot requires a Solana wallet address",
+        });
+      }
+
+      try {
+        const [solLamports, usdc] = await Promise.all([
+          fetchSolanaBalanceLamports({
+            rpcUrl: env.solanaRpcUrl,
+            timeoutMs: env.solanaRpcTimeoutMs,
+            owner: walletAddress,
+          }),
+          fetchSolanaTokenBalanceByOwnerAndMint({
+            rpcUrl: env.solanaRpcUrl,
+            timeoutMs: env.solanaRpcTimeoutMs,
+            owner: walletAddress,
+            mint: env.solanaUsdcMint,
+          }),
+        ]);
+
+        const usdcDecimals = usdc?.decimals ?? 6;
+        const usdcAmount = usdc?.amount ?? 0n;
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          venue: "kalshi",
+          walletAddress,
+          rpcUrl: env.solanaRpcUrl,
+          sol: {
+            decimals: SOL_DECIMALS,
+            balance: formatUiAmount(solLamports, SOL_DECIMALS),
+            balanceRaw: solLamports.toString(),
+          },
+          usdc: {
+            mint: env.solanaUsdcMint,
+            decimals: usdcDecimals,
+            balance: formatUiAmount(usdcAmount, usdcDecimals),
+            balanceRaw: usdcAmount.toString(),
+          },
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Failed to fetch Kalshi account snapshot",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Failed to fetch Kalshi account snapshot",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /quote
    * Proxy quote requests to DFlow (no signing).
    */
   z.get(
-    "/dflow/quote",
+    "/quote",
     {
       preHandler: createAuthMiddleware(),
       schema: { querystring: dflowQuoteQuerySchema },
@@ -94,11 +174,11 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /dflow/swap
+   * POST /swap
    * Returns an unsigned swap transaction from DFlow.
    */
   z.post(
-    "/dflow/swap",
+    "/swap",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: dflowSwapBodySchema },
@@ -162,11 +242,11 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /dflow/submit
+   * POST /submit
    * Broadcast a signed Solana transaction and return the signature.
    */
   z.post(
-    "/dflow/submit",
+    "/submit",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: dflowSubmitBodySchema },
@@ -215,11 +295,11 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
-   * POST /dflow/executions
+   * POST /executions
    * Persist DFlow execution metadata for the selected wallet.
    */
   z.post(
-    "/dflow/executions",
+    "/executions",
     {
       preHandler: createAuthMiddleware(),
       schema: { body: dflowExecutionBodySchema },
