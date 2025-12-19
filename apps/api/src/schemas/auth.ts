@@ -38,3 +38,25 @@ export const polymarketConnectBodySchema = z.object({
 export const polymarketFunderBodySchema = z.object({
   funderAddress: zEthAddress.nullable(),
 });
+
+const relayerMethodSchema = z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]);
+const relayerPathSchema = z.enum([
+  "/nonce",
+  "/relay-payload",
+  "/transaction",
+  "/transactions",
+  "/submit",
+  "/deployed",
+]);
+
+export const polymarketRelayerSignBodySchema = z.object({
+  method: relayerMethodSchema,
+  path: relayerPathSchema,
+  body: z.unknown().optional(),
+  timestamp: z.number().int().positive().optional(),
+});
+
+export const polymarketRelayerStatusResponseSchema = z.object({
+  enabled: z.boolean(),
+  reason: z.string().optional(),
+});

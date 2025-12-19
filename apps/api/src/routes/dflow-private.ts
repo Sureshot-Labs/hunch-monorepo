@@ -32,7 +32,7 @@ function ensureDflowReady(reply: { code: (status: number) => void; send: (payloa
   return false;
 }
 
-// Mounted under /dflow, /trade/kalshi, and /trade/dflow (alias).
+// Mounted under /trade/kalshi and /trade/dflow (alias).
 export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 

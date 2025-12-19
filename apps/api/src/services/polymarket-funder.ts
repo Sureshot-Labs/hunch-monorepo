@@ -12,6 +12,8 @@ export type PolymarketFunderCandidate = {
   expectedContract: boolean;
   deployed: boolean;
   contractKind: ContractKind;
+  safeOwners?: string[];
+  safeThreshold?: number;
 };
 
 export type PolymarketFunderDeriveResult = {
@@ -87,11 +89,11 @@ function deriveSafeProxyAddress(signer: string): string | null {
   return ethers.getCreate2Address(factory, salt, initCodeHash);
 }
 
-async function isSafeLike(inputs: {
+async function inspectSafe(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   address: string;
-}): Promise<boolean> {
+}): Promise<{ safe: boolean; owners?: string[]; threshold?: number }> {
   try {
     const ownersData = SAFE_READ_IFACE.encodeFunctionData("getOwners");
     const ownersRaw = await fetchEvmCall({
@@ -107,7 +109,9 @@ async function isSafeLike(inputs: {
     const owners = Array.isArray(ownersDecoded)
       ? (ownersDecoded[0] as unknown)
       : null;
-    if (!Array.isArray(owners) || owners.length === 0) return false;
+    if (!Array.isArray(owners) || owners.length === 0) {
+      return { safe: false };
+    }
 
     const thresholdData = SAFE_READ_IFACE.encodeFunctionData("getThreshold");
     const thresholdRaw = await fetchEvmCall({
@@ -123,13 +127,28 @@ async function isSafeLike(inputs: {
     const thresholdValue = Array.isArray(thresholdDecoded)
       ? thresholdDecoded[0]
       : null;
-    if (typeof thresholdValue !== "bigint") return false;
+    if (typeof thresholdValue !== "bigint") {
+      return { safe: false };
+    }
     const thresholdNumber = Number(thresholdValue);
-    if (!Number.isFinite(thresholdNumber)) return false;
+    if (!Number.isFinite(thresholdNumber)) {
+      return { safe: false };
+    }
 
-    return thresholdNumber >= 1 && thresholdNumber <= owners.length;
+    const normalizedOwners = owners
+      .map((owner) => (typeof owner === "string" ? normalizeEthAddress(owner) : null))
+      .filter((owner): owner is string => Boolean(owner));
+
+    const safe =
+      thresholdNumber >= 1 &&
+      thresholdNumber <= normalizedOwners.length &&
+      normalizedOwners.length > 0;
+
+    return safe
+      ? { safe: true, owners: normalizedOwners, threshold: thresholdNumber }
+      : { safe: false };
   } catch {
-    return false;
+    return { safe: false };
   }
 }
 
@@ -138,7 +157,12 @@ async function inspectCandidate(inputs: {
   timeoutMs: number;
   funder: string;
   expectedContract: boolean;
-}): Promise<{ deployed: boolean; contractKind: ContractKind }> {
+}): Promise<{
+  deployed: boolean;
+  contractKind: ContractKind;
+  safeOwners?: string[];
+  safeThreshold?: number;
+}> {
   try {
     const code = await fetchEvmCode({
       rpcUrl: inputs.rpcUrl,
@@ -153,7 +177,7 @@ async function inspectCandidate(inputs: {
       return { deployed: true, contractKind: "EOA" };
     }
 
-    const safeLike = await isSafeLike({
+    const safeInfo = await inspectSafe({
       rpcUrl: inputs.rpcUrl,
       timeoutMs: inputs.timeoutMs,
       address: inputs.funder,
@@ -161,7 +185,9 @@ async function inspectCandidate(inputs: {
 
     return {
       deployed: true,
-      contractKind: safeLike ? "SAFE_LIKE" : "CONTRACT",
+      contractKind: safeInfo.safe ? "SAFE_LIKE" : "CONTRACT",
+      safeOwners: safeInfo.owners,
+      safeThreshold: safeInfo.threshold,
     };
   } catch {
     return { deployed: false, contractKind: "UNKNOWN" };
@@ -175,6 +201,7 @@ export async function derivePolymarketFunders(inputs: {
 }): Promise<PolymarketFunderDeriveResult> {
   const warnings: string[] = [];
   const candidates: PolymarketFunderCandidate[] = [];
+  const candidateKeys = new Set<string>();
 
   const signerAddress = normalizeEthAddress(inputs.signer);
   if (!signerAddress) {
@@ -197,22 +224,37 @@ export async function derivePolymarketFunders(inputs: {
     deployed: true,
     contractKind: "EOA",
   };
-  candidates.push(signerCandidate);
+  const addCandidate = (candidate: PolymarketFunderCandidate): void => {
+    const key = candidate.funder.toLowerCase();
+    if (candidateKeys.has(key)) return;
+    candidateKeys.add(key);
+    candidates.push(candidate);
+  };
+
+  addCandidate(signerCandidate);
+
+  const safeFunder = deriveSafeProxyAddress(signerAddress);
+  const magicFunder =
+    inputs.includeMagicProxy ? deriveMagicProxyAddress(signerAddress) : null;
+
+  const storedMatchesMagic =
+    Boolean(storedFunder && magicFunder) && storedFunder === magicFunder;
+  const storedMatchesSafe =
+    Boolean(storedFunder && safeFunder) && storedFunder === safeFunder;
 
   if (storedFunder && storedFunder !== signerAddress) {
-    candidates.push({
+    addCandidate({
       funder: storedFunder,
-      signatureType: 2,
+      signatureType: storedMatchesMagic ? 1 : 2,
       source: "stored",
-      expectedContract: false,
+      expectedContract: storedMatchesMagic || storedMatchesSafe,
       deployed: false,
       contractKind: "UNKNOWN",
     });
   }
 
-  const safeFunder = deriveSafeProxyAddress(signerAddress);
   if (safeFunder) {
-    candidates.push({
+    addCandidate({
       funder: safeFunder,
       signatureType: 2,
       source: "safe_proxy",
@@ -225,9 +267,8 @@ export async function derivePolymarketFunders(inputs: {
   }
 
   if (inputs.includeMagicProxy) {
-    const magicFunder = deriveMagicProxyAddress(signerAddress);
     if (magicFunder) {
-      candidates.push({
+      addCandidate({
         funder: magicFunder,
         signatureType: 1,
         source: "magic_proxy",
@@ -250,7 +291,9 @@ export async function derivePolymarketFunders(inputs: {
     });
     candidate.deployed = inspection.deployed;
     candidate.contractKind = inspection.contractKind;
-    if (candidate.source === "stored") {
+    candidate.safeOwners = inspection.safeOwners;
+    candidate.safeThreshold = inspection.safeThreshold;
+    if (candidate.source === "stored" && candidate.signatureType !== 1) {
       if (inspection.contractKind === "EOA") {
         candidate.signatureType = 0;
         candidate.expectedContract = false;

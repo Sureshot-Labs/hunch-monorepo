@@ -1,10 +1,12 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { BuilderSigner } from "@polymarket/builder-signing-sdk";
 import {
   AuthService,
   WalletAlreadyExistsError,
   createAuthMiddleware,
 } from "../auth.js";
+import { env } from "../env.js";
 import { PrivyService } from "../privy-service.js";
 import {
   addWalletBodySchema,
@@ -12,6 +14,8 @@ import {
   polymarketConnectBodySchema,
   polymarketCredentialsBodySchema,
   polymarketFunderBodySchema,
+  polymarketRelayerStatusResponseSchema,
+  polymarketRelayerSignBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 
@@ -524,6 +528,101 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "Polymarket funder update failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /auth/polymarket/relayer-status
+   * Returns whether relayer signing is configured on the server.
+   */
+  z.get(
+    "/auth/polymarket/relayer-status",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        response: {
+          200: polymarketRelayerStatusResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const key = env.polymarketBuilderApiKey;
+      const secret = env.polymarketBuilderApiSecret;
+      const passphrase = env.polymarketBuilderApiPassphrase;
+      const enabled = Boolean(key && secret && passphrase);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        enabled,
+        reason: enabled ? undefined : "Builder credentials not configured.",
+      });
+    },
+  );
+
+  /**
+   * POST /auth/polymarket/relayer-sign
+   * Returns builder auth headers for the Polymarket relayer (used by client-side relayer requests).
+   */
+  z.post(
+    "/auth/polymarket/relayer-sign",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketRelayerSignBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const key = env.polymarketBuilderApiKey;
+      const secret = env.polymarketBuilderApiSecret;
+      const passphrase = env.polymarketBuilderApiPassphrase;
+
+      if (!key || !secret || !passphrase) {
+        reply.code(501);
+        return reply.send({
+          error: "Polymarket relayer signing is not configured",
+        });
+      }
+
+      const { method, path, body, timestamp } = request.body;
+      const bodyString =
+        typeof body === "string"
+          ? body
+          : body == null
+            ? ""
+            : JSON.stringify(body);
+
+      try {
+        const signer = new BuilderSigner({ key, secret, passphrase });
+        const headers = signer.createBuilderHeaderPayload(
+          method,
+          path,
+          bodyString,
+          timestamp,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(headers);
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id },
+          "Polymarket relayer signing failed",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Polymarket relayer signing failed",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

@@ -400,7 +400,7 @@ function extractOrderType(order: Record<string, unknown>): PolymarketOrderType |
   return normalizeOrderType(raw);
 }
 
-// Mounted under /polymarket and /trade/polymarket (alias).
+// Mounted under /trade/polymarket.
 export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -845,17 +845,20 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             const makerAmountMicroMax = amountUsdCents * MARKET_USD_MICRO_STEP;
             const sizeMicroRaw =
               (makerAmountMicroMax * USDC_SCALE) / priceMicro;
-            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
-
-            if (sizeMicro <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Amount too small for order" });
-            }
-
             if (body.side === "BUY") {
-              makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+              sizeMicro = sizeMicroRaw - (sizeMicroRaw % shareStep);
+              if (sizeMicro <= 0n) {
+                reply.code(400);
+                return reply.send({ error: "Amount too small for order" });
+              }
+              makerAmountMicro = makerAmountMicroMax;
               takerAmountMicro = sizeMicro;
             } else {
+              sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
+              if (sizeMicro <= 0n) {
+                reply.code(400);
+                return reply.send({ error: "Amount too small for order" });
+              }
               makerAmountMicro = sizeMicro;
               takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
             }
@@ -997,6 +1000,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
+        const negRiskAdapterAddress =
+          env.polymarketNegRiskAdapterAddress?.trim() || "";
         const [
           code,
           usdcBalance,
@@ -1004,6 +1009,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           allowanceNegRisk,
           okExchange,
           okNegRisk,
+          allowanceNegRiskAdapter,
           allowanceFeeCollector,
           feeCollectorNonce,
         ] = await Promise.all([
@@ -1046,6 +1052,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               owner: funder,
               operator: env.polymarketNegRiskExchangeAddress,
             }),
+            negRiskAdapterAddress
+              ? fetchErc20Allowance({
+                  rpcUrl: env.polygonRpcUrl,
+                  timeoutMs: env.polygonRpcTimeoutMs,
+                  tokenAddress: env.polymarketUsdcAddress,
+                  owner: funder,
+                  spender: negRiskAdapterAddress,
+                })
+              : Promise.resolve(null),
             feeCollectorAddress
               ? fetchErc20Allowance({
                   rpcUrl: env.polygonRpcUrl,
@@ -1094,6 +1109,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                 allowance: ethers.formatUnits(allowanceNegRisk, 6),
                 allowanceRaw: allowanceNegRisk.toString(),
               },
+              ...(negRiskAdapterAddress
+                ? {
+                    negRiskAdapter: {
+                      spender: negRiskAdapterAddress,
+                      allowance: ethers.formatUnits(
+                        allowanceNegRiskAdapter ?? 0n,
+                        6,
+                      ),
+                      allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
+                    },
+                  }
+                : {}),
               ...(feeCollectorAddress
                 ? {
                     feeCollector: {

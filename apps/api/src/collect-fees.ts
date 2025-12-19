@@ -216,6 +216,13 @@ function truncateError(value: string, max = 500): string {
   return `${value.slice(0, max - 3)}...`;
 }
 
+function rowLabel(row: FeeOrderRow, orderHash?: string): string {
+  const hash =
+    orderHash ??
+    (typeof row.order_hash === "string" ? normalizeHex(row.order_hash) : "");
+  return hash || `row:${row.id}`;
+}
+
 async function fetchPendingOrders(options: ScriptOptions): Promise<FeeOrderRow[]> {
   const params: Array<string | number> = [options.maxAttempts];
   let whereClause = `
@@ -315,26 +322,46 @@ async function main() {
   console.log(
     `Found ${orders.length} pending fee orders (dryRun=${options.dryRun})`,
   );
+  if (orders.length > 0) {
+    console.log(
+      "Pending rows include any with prior errors; use fee_collect_error to inspect skipped items.",
+    );
+  }
 
   const nowSec = Math.floor(Date.now() / 1000);
+  let skippedLive = 0;
+  let skippedNothing = 0;
+  let skippedError = 0;
+  let dryRunCount = 0;
+  let collected = 0;
 
   for (const row of orders) {
     const attempts = (row.fee_collect_attempts ?? 0) + 1;
     const orderHash = row.order_hash ? normalizeHex(row.order_hash) : "";
+    const label = rowLabel(row, orderHash);
     if (!orderHash) {
-      await updateFeeError(row.id, attempts, "Missing order_hash");
+      const reason = "Missing order_hash";
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, reason);
       continue;
     }
 
     const order = normalizeOrderPayload(row.order_payload);
     if (!order) {
-      await updateFeeError(row.id, attempts, "Invalid order_payload");
+      const reason = "Invalid order_payload";
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, reason);
       continue;
     }
 
     const feeAuth = normalizeFeeAuth(row.fee_auth);
     if (!feeAuth) {
-      await updateFeeError(row.id, attempts, "Invalid fee_auth payload");
+      const reason = "Invalid fee_auth payload";
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, reason);
       continue;
     }
 
@@ -343,22 +370,27 @@ async function main() {
       normalizeHex(row.fee_collector_address) !==
         normalizeHex(feeCollectorAddress)
     ) {
-      await updateFeeError(
-        row.id,
-        attempts,
-        "Fee collector address mismatch",
-      );
+      const reason = `Fee collector address mismatch (row=${row.fee_collector_address}, expected=${feeCollectorAddress})`;
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, "Fee collector address mismatch");
       continue;
     }
 
     const feeAuthSig = row.fee_auth_sig?.trim() ?? "";
     if (!feeAuthSig) {
-      await updateFeeError(row.id, attempts, "Missing fee_auth_sig");
+      const reason = "Missing fee_auth_sig";
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, reason);
       continue;
     }
 
     if (!options.includeExpired && row.fee_deadline) {
       if (nowSec > row.fee_deadline) {
+        const reason = `Fee auth deadline expired (deadline=${row.fee_deadline}, now=${nowSec})`;
+        console.log(`Skip ${label}: ${reason}`);
+        skippedError += 1;
         await updateFeeError(row.id, attempts, "Fee auth deadline expired");
         continue;
       }
@@ -372,12 +404,20 @@ async function main() {
 
     const computedHash = await exchange.hashOrder(order);
     if (normalizeHex(computedHash) !== orderHash) {
+      const reason = `order_hash mismatch (db=${orderHash}, computed=${normalizeHex(
+        computedHash,
+      )})`;
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
       await updateFeeError(row.id, attempts, "order_hash mismatch");
       continue;
     }
 
     const allowed = await collector.allowedExchanges(feeAuth.exchange);
     if (!allowed) {
+      const reason = `Exchange not allowlisted (${feeAuth.exchange})`;
+      console.log(`Skip ${label}: ${reason}`);
+      skippedError += 1;
       await updateFeeError(row.id, attempts, "Exchange not allowlisted");
       continue;
     }
@@ -387,7 +427,10 @@ async function main() {
     const remaining = BigInt(status.remaining);
 
     if (!status.isFilledOrCancelled && remaining > 0n) {
-      console.log(`Skip ${orderHash}: order still live`);
+      console.log(
+        `Skip ${label}: order still live (remaining=${remaining}, maker=${makerAmount})`,
+      );
+      skippedLive += 1;
       continue;
     }
 
@@ -398,12 +441,18 @@ async function main() {
 
     const charged = await collector.makerFilledCharged(orderHash);
     if (makerFilled <= charged) {
-      console.log(`Skip ${orderHash}: nothing to charge yet`);
+      console.log(
+        `Skip ${label}: nothing to charge yet (filled=${makerFilled}, charged=${charged})`,
+      );
+      skippedNothing += 1;
       continue;
     }
 
     if (options.dryRun) {
-      console.log(`Dry run: would collect fee for ${orderHash}`);
+      console.log(
+        `Dry run: would collect fee for ${orderHash} (filled=${makerFilled}, charged=${charged})`,
+      );
+      dryRunCount += 1;
       continue;
     }
 
@@ -417,13 +466,19 @@ async function main() {
       console.log(`collectFee tx ${tx.hash} for ${orderHash}`);
       await tx.wait();
       await updateFeeSuccess(row.id, attempts, tx.hash);
+      collected += 1;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unknown collectFee error";
+      console.log(`Error ${label}: ${message}`);
+      skippedError += 1;
       await updateFeeError(row.id, attempts, message);
     }
   }
 
+  console.log(
+    `Done. dryRun=${dryRunCount}, collected=${collected}, skippedLive=${skippedLive}, skippedNoCharge=${skippedNothing}, skippedError=${skippedError}`,
+  );
   await pool.end();
 }
 

@@ -125,6 +125,8 @@ export const env = {
   polymarketNegRiskExchangeAddress:
     process.env.POLYMARKET_NEG_RISK_EXCHANGE_ADDRESS?.trim() ||
     "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+  polymarketNegRiskAdapterAddress:
+    process.env.POLYMARKET_NEG_RISK_ADAPTER_ADDRESS?.trim() || "",
   polymarketConditionalTokensAddress:
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
@@ -144,11 +146,22 @@ export const env = {
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
+  feePolicyTtlSec: optionalPositiveInt(
+    "HUNCH_FEE_POLICY_TTL_SEC",
+    7 * 24 * 60 * 60,
+  ),
   feeCollectorAddress:
     process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
   feeCollectorPrivateKey:
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
+
+  polymarketBuilderApiKey:
+    process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
+  polymarketBuilderApiSecret:
+    process.env.POLYMARKET_BUILDER_API_SECRET?.trim() || "",
+  polymarketBuilderApiPassphrase:
+    process.env.POLYMARKET_BUILDER_API_PASSPHRASE?.trim() || "",
 
   // DFlow config (execution-ready)
   dflowEnv,

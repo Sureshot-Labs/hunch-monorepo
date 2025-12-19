@@ -5,7 +5,7 @@ import { env } from "../env.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
 
 const MAX_FEE_BPS = 10_000;
-const POLICY_TTL_MS = 5 * 60 * 1000;
+const MS_PER_SEC = 1000;
 
 function clampFeeBps(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -38,7 +38,8 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         venue === "polymarket" ? env.feeBpsPolymarket : env.feeBpsKalshi;
       const feeBps = clampFeeBps(feeBpsRaw);
 
-      const deadline = new Date(Date.now() + POLICY_TTL_MS).toISOString();
+      const ttlMs = env.feePolicyTtlSec * MS_PER_SEC;
+      const deadline = new Date(Date.now() + ttlMs).toISOString();
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
