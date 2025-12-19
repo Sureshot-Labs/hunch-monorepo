@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { randomBytes } from "crypto";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -473,6 +472,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
       const tokenId = body.tokenId.trim();
       const orderType = normalizeOrderTypeForClob(body.orderType ?? "FOK");
+      const amountType = (body.amountType ?? "usd") === "shares" ? "shares" : "usd";
+      const amountUsdInput =
+        amountType === "usd" ? (body.amountUsd ?? body.amount) : null;
+      const amountSharesInput =
+        amountType === "shares" ? body.amount : null;
 
       if (!tokenId) {
         reply.code(400);
@@ -546,37 +550,81 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         let takerAmountMicro: bigint;
 
         if (orderType === "FOK") {
-          const amountUsdCents = BigInt(Math.floor(body.amountUsd * 100));
-          if (amountUsdCents <= 0n) {
-            reply.code(400);
-            return reply.send({ error: "Invalid amount or price" });
-          }
-
-          const makerAmountMicroMax = amountUsdCents * MARKET_USD_MICRO_STEP;
           const precisionProduct = MARKET_USD_MICRO_STEP * USDC_SCALE;
           const stepForPrice =
             precisionProduct / gcd(priceMicro, precisionProduct);
           const step = lcm(stepForPrice, MARKET_SHARES_MICRO_STEP);
 
-          const sizeMicroRaw =
-            (makerAmountMicroMax * USDC_SCALE) / priceMicro;
-          sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
+          if (amountType === "shares") {
+            if (amountSharesInput == null) {
+              reply.code(400);
+              return reply.send({ error: "amount is required for shares quotes" });
+            }
 
-          if (sizeMicro <= 0n) {
-            reply.code(400);
-            return reply.send({ error: "Amount too small for order" });
-          }
+            const sizeMicroRaw = BigInt(
+              Math.floor(amountSharesInput * 1_000_000),
+            );
+            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
 
-          if (body.side === "BUY") {
-            makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
-            takerAmountMicro = sizeMicro;
+            if (sizeMicro <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Amount too small for order" });
+            }
+
+            if (body.side === "BUY") {
+              makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+              takerAmountMicro = sizeMicro;
+            } else {
+              makerAmountMicro = sizeMicro;
+              takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+            }
           } else {
-            makerAmountMicro = sizeMicro;
-            takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+            if (amountUsdInput == null) {
+              reply.code(400);
+              return reply.send({ error: "amountUsd is required for USD quotes" });
+            }
+
+            const amountUsdCents = BigInt(
+              Math.floor(amountUsdInput * 100),
+            );
+            if (amountUsdCents <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Invalid amount or price" });
+            }
+
+            const makerAmountMicroMax = amountUsdCents * MARKET_USD_MICRO_STEP;
+            const sizeMicroRaw =
+              (makerAmountMicroMax * USDC_SCALE) / priceMicro;
+            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
+
+            if (sizeMicro <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Amount too small for order" });
+            }
+
+            if (body.side === "BUY") {
+              makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+              takerAmountMicro = sizeMicro;
+            } else {
+              makerAmountMicro = sizeMicro;
+              takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
+            }
           }
         } else {
+          if (amountType === "shares") {
+            reply.code(400);
+            return reply.send({
+              error: "amountType=shares is only supported for market orders",
+            });
+          }
+
+          if (amountUsdInput == null) {
+            reply.code(400);
+            return reply.send({ error: "amountUsd is required for USD quotes" });
+          }
+
           const amountUsdMicro = BigInt(
-            Math.floor(body.amountUsd * 1_000_000),
+            Math.floor(amountUsdInput * 1_000_000),
           );
 
           if (amountUsdMicro <= 0n) {
@@ -635,7 +683,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           tokenId,
           side: body.side,
           orderType,
-          amountUsd: body.amountUsd,
+          amountType,
+          amountUsd: amountUsdInput ?? undefined,
+          amountShares: amountSharesInput ?? undefined,
           amountUsdUsed,
           bestBid,
           bestAsk,

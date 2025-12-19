@@ -8,6 +8,8 @@ const zOrderType = z.preprocess(
   z.enum(["GTC", "GTD", "FAK", "FOK"]),
 );
 
+const zAmountType = z.enum(["usd", "shares"]);
+
 const polymarketOrderSchema = z
   .object({
     salt: zNumberish,
@@ -62,7 +64,17 @@ export const polymarketQuoteBodySchema = z.object({
   side: z.enum(["BUY", "SELL"], {
     message: "Valid side (BUY/SELL) is required",
   }),
-  amountUsd: z.coerce.number().positive("amountUsd must be > 0"),
+  amountUsd: z.coerce.number().positive("amountUsd must be > 0").optional(),
+  amount: z.coerce.number().positive("amount must be > 0").optional(),
+  amountType: zAmountType.optional(),
   orderType: zOrderType.optional(),
   slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
+}).refine((value) => {
+  const amountType = value.amountType ?? "usd";
+  if (amountType === "shares") {
+    return value.amount != null;
+  }
+  return value.amountUsd != null || value.amount != null;
+}, {
+  message: "amountUsd (or amount) is required",
 });
