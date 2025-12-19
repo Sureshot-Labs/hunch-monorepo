@@ -9,6 +9,7 @@
     "openapi:dump": "tsx src/dump-openapi.ts",
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
     "delete-closed": "tsx src/delete-closed-markets.ts",
+    "fees:collect": "tsx src/collect-fees.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

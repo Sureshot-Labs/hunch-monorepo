@@ -146,6 +146,8 @@ export const env = {
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
   feeCollectorAddress:
     process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
+  feeCollectorPrivateKey:
+    process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
 
   // DFlow config (execution-ready)

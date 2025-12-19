@@ -1476,6 +1476,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const normalizedOrder = normalizeOrderForPayload(order, side);
+      const normalizedForHash = normalizeOrderForHash(order, side);
+      const orderPayload = normalizedForHash ?? normalizedOrder;
       const orderType = normalizeOrderTypeForClob(body.orderType);
 
       const feeAuth = body.feeAuth;
@@ -1529,7 +1531,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
-        const normalizedForHash = normalizeOrderForHash(order, side);
         if (!normalizedForHash) {
           reply.code(400);
           return reply.send({
@@ -1650,24 +1651,25 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ? upstream.payload.status
           : "submitted";
 
-      const stored = await storeOrder(pool, {
-        userId: user.id,
-        walletAddress: signer,
-        venue: "polymarket",
-        venueOrderId,
-        tokenId,
-        side,
-        orderType,
-        price,
-        size,
-        status: statusRaw,
-        errorMessage: null,
-        rawError: null,
-        orderHash,
-        feeBps,
-        feeAuth: feeAuthStored,
-        feeAuthSig: feeAuthSig || null,
-        feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
+        const stored = await storeOrder(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          venue: "polymarket",
+          venueOrderId,
+          tokenId,
+          side,
+          orderType,
+          price,
+          size,
+          status: statusRaw,
+          errorMessage: null,
+          rawError: null,
+          orderPayload,
+          orderHash,
+          feeBps,
+          feeAuth: feeAuthStored,
+          feeAuthSig: feeAuthSig || null,
+          feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
         feeDeadline,
       });
 

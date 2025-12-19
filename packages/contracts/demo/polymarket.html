@@ -90,7 +90,7 @@
     <div class="row">
       <div><label>Collateral</label><input id="deployCollateral" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" /></div>
     </div>
-    <label>Exchange</label><input id="deployExchange" value="0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" />
+    <label>Exchanges (comma separated)</label><input id="deployExchanges" value="0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E,0xC5d563A36AE78145C45a50134d48A1215220f80a" />
     <button id="deployBtn">Deploy FeeCollector</button>
     <div id="deployStatus"></div>
   </div>
@@ -575,10 +575,16 @@
         const factory = new ethers.ContractFactory(art.abi, art.bytecode, signer);
         const treasury = document.getElementById("deployTreasury").value;
         const collateral = document.getElementById("deployCollateral").value;
-        const exchange = document.getElementById("deployExchange").value;
+        const exchangeList = document.getElementById("deployExchanges").value;
         const statusEl = document.getElementById("deployStatus");
         statusEl.textContent = "Deploying...";
-        const c = await factory.deploy(treasury, collateral, exchange);
+        const exchanges = exchangeList
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        if (!exchanges.length) throw new Error("Provide at least one exchange");
+        const normalized = exchanges.map((addr) => requireAddr(addr, "exchange"));
+        const c = await factory.deploy(treasury, collateral, normalized);
         log("Deploy tx: " + c.deployTransaction.hash);
         await c.deployed();
         statusEl.textContent = "Deployed at " + c.address;
