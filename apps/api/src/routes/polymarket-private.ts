@@ -661,16 +661,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               : (sizeMicro * priceMicro) / USDC_SCALE;
         }
 
-        if (minOrderSize != null) {
-          const minSizeMicro = BigInt(Math.ceil(minOrderSize * 1_000_000));
-          if (sizeMicro < minSizeMicro) {
-            reply.code(400);
-            return reply.send({
-              error: "Order size below minimum",
-              minOrderSize,
-            });
-          }
-        }
+        const violatesMinOrderSize =
+          minOrderSize != null
+            ? sizeMicro < BigInt(Math.ceil(minOrderSize * 1_000_000))
+            : null;
 
         const size = Number(sizeMicro) / 1_000_000;
         const amountUsdUsed =
@@ -705,6 +699,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           takerAmount: takerAmountMicro.toString(),
           orderPriceMinTickSize: tickSize,
           orderMinSize: minOrderSize,
+          violatesMinOrderSize,
           negRisk,
           exchangeAddress: exchangeAddressForNegRisk(negRisk),
           estimatedPayout,
