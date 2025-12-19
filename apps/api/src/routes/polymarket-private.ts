@@ -32,7 +32,9 @@ import {
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const POLY_DECIMALS = 6;
 const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
+const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
 const MARKET_SHARES_MICRO_STEP = 10n; // 5 decimals in 6-decimal share units
+const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
 
 type PolymarketSide = "BUY" | "SELL";
 type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
@@ -550,10 +552,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         let takerAmountMicro: bigint;
 
         if (orderType === "FOK") {
-          const precisionProduct = MARKET_USD_MICRO_STEP * USDC_SCALE;
+          const shareStep =
+            body.side === "SELL"
+              ? MARKET_SHARES_MICRO_STEP_2_DEC
+              : MARKET_SHARES_MICRO_STEP;
+          const usdcStep =
+            body.side === "SELL"
+              ? MARKET_USD_MICRO_STEP_5_DEC
+              : MARKET_USD_MICRO_STEP;
+          const precisionProduct = usdcStep * USDC_SCALE;
           const stepForPrice =
             precisionProduct / gcd(priceMicro, precisionProduct);
-          const step = lcm(stepForPrice, MARKET_SHARES_MICRO_STEP);
+          const step = lcm(stepForPrice, shareStep);
 
           if (amountType === "shares") {
             if (amountSharesInput == null) {
@@ -1222,30 +1232,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderType,
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
-
-      if (env.nodeEnv !== "production") {
-        const signature =
-          typeof normalizedOrder.signature === "string"
-            ? normalizedOrder.signature.trim()
-            : "";
-        const redactedSignature =
-          signature.length > 18
-            ? `${signature.slice(0, 10)}...${signature.slice(-8)}`
-            : signature || "<missing>";
-
-        app.log.info(
-          {
-            userId: user.id,
-            signer,
-            payload: {
-              ...payload,
-              owner: "<redacted>",
-              order: { ...normalizedOrder, signature: redactedSignature },
-            },
-          },
-          "Polymarket order payload (sanitized)",
-        );
-      }
 
       const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
