@@ -59,6 +59,10 @@ export const polymarketOrderParamsQuerySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),
 });
 
+export const polymarketFunderDeriveQuerySchema = z.object({
+  includeMagicProxy: z.string().optional(),
+});
+
 export const polymarketQuoteBodySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),
   side: z.enum(["BUY", "SELL"], {

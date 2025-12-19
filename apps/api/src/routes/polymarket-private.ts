@@ -9,6 +9,7 @@ import { storeOrder } from "../repos/orders-repo.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
   polymarketCancelOrderBodySchema,
+  polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
   polymarketOrderParamsQuerySchema,
   polymarketOpenOrdersQuerySchema,
@@ -21,6 +22,7 @@ import {
   fetchErc20BalanceOf,
   fetchEvmCode,
 } from "../services/polygon-rpc.js";
+import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import {
   extractOrderArray,
@@ -51,6 +53,20 @@ const USDC_SCALE = 1_000_000n;
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized === "1" || normalized === "true" || normalized === "yes") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no") {
+    return false;
+  }
+  return undefined;
 }
 
 function normalizeOrderSide(value: unknown): PolymarketSide | null {
@@ -442,6 +458,55 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         tokenId,
         nonce: generatePolymarketNonce(),
         feeRateBps: 0,
+      });
+    },
+  );
+
+  /**
+   * GET /funder-derive
+   * Returns candidate Polymarket funder/vault addresses for the selected signer.
+   */
+  z.get(
+    "/funder-derive",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: polymarketFunderDeriveQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket funder derive requires an EVM wallet address",
+        });
+      }
+
+      const credsInfo = await AuthService.getVenueCredentialsInfo(
+        user.id,
+        "polymarket",
+        signer,
+      );
+
+      const query = isRecord(request.query) ? request.query : null;
+      const includeMagicProxy =
+        parseOptionalBoolean(query?.includeMagicProxy) ?? false;
+
+      const result = await derivePolymarketFunders({
+        signer,
+        storedFunder: credsInfo?.funderAddress ?? null,
+        includeMagicProxy,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        ...result,
       });
     },
   );

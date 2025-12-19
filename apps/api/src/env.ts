@@ -128,6 +128,18 @@ export const env = {
   polymarketConditionalTokensAddress:
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+  polymarketSafeFactoryAddress:
+    process.env.POLYMARKET_SAFE_FACTORY_ADDRESS?.trim() ||
+    "0xaacfeea03eb1561c4e67d661e40682bd20e3541b",
+  polymarketSafeInitCodeHash:
+    process.env.POLYMARKET_SAFE_INIT_CODE_HASH?.trim() ||
+    "0x2bce2127ff07fb632d16c8347c4ebf501f4841168bed00d9e6ef715ddb6fcecf",
+  polymarketMagicProxyFactoryAddress:
+    process.env.POLYMARKET_MAGIC_PROXY_FACTORY_ADDRESS?.trim() ||
+    "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052",
+  polymarketMagicProxyImplementation:
+    process.env.POLYMARKET_MAGIC_PROXY_IMPLEMENTATION?.trim() ||
+    "0x44e999d5c2F66Ef0861317f9A4805AC2e90aEB4f",
 
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),

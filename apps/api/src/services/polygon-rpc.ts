@@ -127,6 +127,21 @@ export async function fetchEvmCode(inputs: {
   });
 }
 
+export async function fetchEvmCall(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  to: string;
+  data: string;
+}): Promise<string> {
+  const to = ethers.getAddress(inputs.to);
+  return ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to, data: inputs.data }, "latest"],
+  });
+}
+
 export async function fetchErc20BalanceOf(inputs: {
   rpcUrl: string;
   timeoutMs: number;
