@@ -15,6 +15,7 @@ export interface UnifiedEventRow {
   volume_24h?: number;
   open_interest?: number;
   liquidity?: number;
+  metadata?: unknown;
   slug?: string;
   image?: string;
   icon?: string;
@@ -57,6 +58,7 @@ export interface UnifiedMarketRow {
   volume_24h?: number;
   open_interest?: number;
   liquidity?: number;
+  metadata?: unknown;
   outcomes?: string; // JSON string
   token_yes?: string; // Token ID for YES outcome (used by Limitless, Kalshi)
   token_no?: string; // Token ID for NO outcome (used by Limitless, Kalshi)
@@ -81,10 +83,10 @@ export async function upsertUnifiedEvent(
   const query = `
     INSERT INTO unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, slug,
+      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
       image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
     )
     ON CONFLICT (venue, venue_event_id) 
     DO UPDATE SET
@@ -98,6 +100,7 @@ export async function upsertUnifiedEvent(
       volume_24h = EXCLUDED.volume_24h,
       open_interest = EXCLUDED.open_interest,
       liquidity = EXCLUDED.liquidity,
+      metadata = EXCLUDED.metadata,
       slug = EXCLUDED.slug,
       image = EXCLUDED.image,
       icon = EXCLUDED.icon,
@@ -121,6 +124,7 @@ export async function upsertUnifiedEvent(
     eventRow.volume_24h,
     eventRow.open_interest,
     eventRow.liquidity,
+    eventRow.metadata,
     eventRow.slug,
     eventRow.image,
     eventRow.icon,
@@ -157,6 +161,7 @@ export async function upsertUnifiedEvents(
         volume_24h numeric,
         open_interest numeric,
         liquidity numeric,
+        metadata jsonb,
         slug text,
         image text,
         icon text,
@@ -166,12 +171,12 @@ export async function upsertUnifiedEvents(
     )
     insert into unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, slug,
+      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
       image, icon, created_at, updated_at
     )
     select
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, slug,
+      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
       image, icon, created_at, updated_at
     from input
     on conflict (venue, venue_event_id)
@@ -186,6 +191,7 @@ export async function upsertUnifiedEvents(
       volume_24h = excluded.volume_24h,
       open_interest = excluded.open_interest,
       liquidity = excluded.liquidity,
+      metadata = excluded.metadata,
       slug = excluded.slug,
       image = excluded.image,
       icon = excluded.icon,
@@ -196,13 +202,13 @@ export async function upsertUnifiedEvents(
       (unified_events.title, unified_events.description, unified_events.category,
        unified_events.status, unified_events.start_date, unified_events.end_date,
        unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
-       unified_events.liquidity, unified_events.slug, unified_events.image, unified_events.icon,
+       unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
        unified_events.created_at, unified_events.updated_at)
       is distinct from
       (excluded.title, excluded.description, excluded.category,
        excluded.status, excluded.start_date, excluded.end_date,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
-       excluded.liquidity, excluded.slug, excluded.image, excluded.icon,
+       excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
        excluded.created_at, excluded.updated_at)
   `;
 
@@ -216,42 +222,16 @@ export async function upsertUnifiedMarket(
   pool: Pool,
   marketRow: UnifiedMarketRow,
 ): Promise<string> {
-  // Handle closed markets: skip new ones, delete existing ones
-  if (
-    marketRow.status === "CLOSED" ||
-    marketRow.status === "SETTLED" ||
-    marketRow.status === "ARCHIVED"
-  ) {
-    // Check if market exists in the database
-    const existingMarket = await pool.query(
-      "SELECT id FROM unified_markets WHERE venue = $1 AND venue_market_id = $2",
-      [marketRow.venue, marketRow.venue_market_id],
-    );
-
-    if (existingMarket.rows.length === 0) {
-      // Market doesn't exist and is closed - skip storing it
-      return marketRow.id;
-    } else {
-      // Market exists and is now closed - delete it instead of updating
-      await pool.query(
-        "DELETE FROM unified_markets WHERE venue = $1 AND venue_market_id = $2",
-        [marketRow.venue, marketRow.venue_market_id],
-      );
-      return marketRow.id;
-    }
-  }
-
-  // Normal upsert for active markets
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
-      last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
+      last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -271,6 +251,7 @@ export async function upsertUnifiedMarket(
       volume_24h = EXCLUDED.volume_24h,
       open_interest = EXCLUDED.open_interest,
       liquidity = EXCLUDED.liquidity,
+      metadata = EXCLUDED.metadata,
       outcomes = EXCLUDED.outcomes,
       token_yes = EXCLUDED.token_yes,
       token_no = EXCLUDED.token_no,
@@ -309,6 +290,7 @@ export async function upsertUnifiedMarket(
     marketRow.volume_24h,
     marketRow.open_interest,
     marketRow.liquidity,
+    marketRow.metadata,
     marketRow.outcomes,
     marketRow.token_yes,
     marketRow.token_no,
@@ -337,25 +319,6 @@ export async function upsertUnifiedMarkets(
 
   const rows = dedupeById(marketRows);
 
-  const active: UnifiedMarketRow[] = [];
-  const closedIds: string[] = [];
-  for (const row of rows) {
-    if (row.status === "ACTIVE") active.push(row);
-    else closedIds.push(row.id);
-  }
-
-  if (closedIds.length) {
-    const idBatches = chunkArray(closedIds, 5000);
-    for (const batch of idBatches) {
-      await pool.query(
-        "delete from unified_markets where id = any($1::text[])",
-        [batch],
-      );
-    }
-  }
-
-  if (!active.length) return;
-
   const query = `
     with input as (
       select *
@@ -379,6 +342,7 @@ export async function upsertUnifiedMarkets(
         volume_24h numeric,
         open_interest numeric,
         liquidity numeric,
+        metadata jsonb,
         outcomes text,
         token_yes text,
         token_no text,
@@ -398,7 +362,7 @@ export async function upsertUnifiedMarkets(
     insert into unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
-      last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
+      last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
@@ -406,7 +370,7 @@ export async function upsertUnifiedMarkets(
     select
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, open_time, close_time, expiration_time, best_bid, best_ask,
-      last_price, volume_total, volume_24h, open_interest, liquidity, outcomes,
+      last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, slug,
       image, icon, created_at, updated_at
@@ -429,6 +393,7 @@ export async function upsertUnifiedMarkets(
       volume_24h = excluded.volume_24h,
       open_interest = excluded.open_interest,
       liquidity = excluded.liquidity,
+      metadata = excluded.metadata,
       outcomes = excluded.outcomes,
       token_yes = excluded.token_yes,
       token_no = excluded.token_no,
@@ -450,7 +415,7 @@ export async function upsertUnifiedMarkets(
        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
-       unified_markets.liquidity, unified_markets.outcomes, unified_markets.token_yes,
+       unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
        unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
        unified_markets.market_ledger, unified_markets.settlement_mint,
        unified_markets.is_initialized, unified_markets.redemption_status,
@@ -462,7 +427,7 @@ export async function upsertUnifiedMarkets(
        excluded.open_time, excluded.close_time, excluded.expiration_time,
        excluded.best_bid, excluded.best_ask, excluded.last_price,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
-       excluded.liquidity, excluded.outcomes, excluded.token_yes,
+       excluded.liquidity, excluded.metadata, excluded.outcomes, excluded.token_yes,
        excluded.token_no, excluded.clob_token_ids, excluded.condition_id,
        excluded.market_ledger, excluded.settlement_mint,
        excluded.is_initialized, excluded.redemption_status,
@@ -470,7 +435,7 @@ export async function upsertUnifiedMarkets(
        excluded.created_at, excluded.updated_at)
   `;
 
-  const batches = chunkArray(active, 500);
+  const batches = chunkArray(rows, 500);
   for (const batch of batches) {
     await pool.query(query, [JSON.stringify(batch)]);
   }

@@ -152,7 +152,7 @@ async function syncKalshiPositionsFromSolana(
   inputs: { userId: string; walletAddress: string },
 ): Promise<PositionsSyncResult> {
   const balances = await fetchSolanaTokenBalancesByOwner({
-    rpcUrl: env.solanaRpcUrl,
+    rpcUrls: env.solanaRpcUrls,
     timeoutMs: env.solanaRpcTimeoutMs,
     owner: inputs.walletAddress,
     includeToken2022: true,

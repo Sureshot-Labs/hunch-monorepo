@@ -36,7 +36,13 @@ export function mapEventRow(venueId: number, e: z.infer<typeof KalshiEvent>) {
     return parseDate(typeof latest === "string" ? latest : null);
   });
 
-  const liqSum = markets.reduce((s, m) => s + (n(m.liquidity) ?? 0), 0);
+  const liqSum = markets.reduce((s, m) => {
+    const extra = m as Record<string, unknown>;
+    const liqDollars = n(extra.liquidity_dollars);
+    if (liqDollars != null) return s + liqDollars;
+    const liqCents = n(m.liquidity);
+    return s + (liqCents != null ? liqCents / 100 : 0);
+  }, 0);
   const vol24Sum = markets.reduce((s, m) => s + (n(m.volume_24h) ?? 0), 0);
   const volSum = markets.reduce((s, m) => s + (n(m.volume) ?? 0), 0);
 
@@ -137,7 +143,13 @@ export function mapToUnifiedEvent(
     return parseDate(typeof latest === "string" ? latest : null);
   });
 
-  const liqSum = markets.reduce((s, m) => s + (n(m.liquidity) ?? 0), 0);
+  const liqSum = markets.reduce((s, m) => {
+    const extra = m as Record<string, unknown>;
+    const liqDollars = n(extra.liquidity_dollars);
+    if (liqDollars != null) return s + liqDollars;
+    const liqCents = n(m.liquidity);
+    return s + (liqCents != null ? liqCents / 100 : 0);
+  }, 0);
   const vol24Sum = markets.reduce((s, m) => s + (n(m.volume_24h) ?? 0), 0);
   const volSum = markets.reduce((s, m) => s + (n(m.volume) ?? 0), 0);
 
@@ -209,6 +221,11 @@ export function mapToUnifiedMarket(
   const bestBid = n(extra.yes_bid_dollars) ?? undefined;
   const bestAsk = n(extra.yes_ask_dollars) ?? undefined;
   const lastPrice = n(extra.last_price_dollars) ?? undefined;
+  const liquidityDollars = n(extra.liquidity_dollars);
+  const liquidityCents = n(m.liquidity);
+  const liquidity =
+    liquidityDollars ??
+    (liquidityCents != null ? liquidityCents / 100 : undefined);
 
   return {
     id: `kalshi:${m.ticker}`,
@@ -236,7 +253,7 @@ export function mapToUnifiedMarket(
     volume_total: n(m.volume) ?? undefined,
     volume_24h: n(m.volume_24h) ?? undefined,
     open_interest: n(extra.open_interest) ?? undefined,
-    liquidity: n(m.liquidity) ?? undefined,
+    liquidity,
     outcomes: JSON.stringify(["YES", "NO"]), // Kalshi markets are binary
     token_yes: `kalshi:${m.ticker}:YES`,
     token_no: `kalshi:${m.ticker}:NO`,

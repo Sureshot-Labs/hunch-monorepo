@@ -150,7 +150,7 @@ const overlapPagesRaw = parseOptionalInt(process.env.DFLOW_OVERLAP_PAGES);
 const overlapPages = clampInt(overlapPagesRaw, {
   min: 0,
   max: 10_000,
-  fallback: 2,
+  fallback: 5,
 });
 
 const catchupMaxPagesRaw = parseOptionalInt(

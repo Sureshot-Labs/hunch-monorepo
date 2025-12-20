@@ -45,6 +45,16 @@ function parseOptionalBool(value: string | undefined): boolean | undefined {
   }
 }
 
+function parseList(raw: string | undefined, fallback?: string): string[] {
+  const values = (raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (values.length > 0) return values;
+  if (fallback && fallback.trim().length > 0) return [fallback.trim()];
+  return [];
+}
+
 const nodeEnv = process.env.NODE_ENV ?? "development";
 
 const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
@@ -93,6 +103,11 @@ const dflowRequireApiKey = dflowRequireApiKeySetting ?? dflowEnv === "prod";
 const dflowApiKey = process.env.DFLOW_API_KEY?.trim() || "";
 const dflowConfigured = !dflowRequireApiKey || dflowApiKey.length > 0;
 
+const solanaRpcUrls = parseList(
+  process.env.SOLANA_RPC_URLS,
+  process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
+);
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
@@ -105,8 +120,8 @@ export const env = {
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
-  solanaRpcUrl:
-    process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
+  solanaRpcUrls,
+  solanaRpcUrl: solanaRpcUrls[0],
   solanaRpcTimeoutMs: optionalPositiveInt("SOLANA_RPC_TIMEOUT_MS", 10_000),
   solanaUsdcMint:
     process.env.DFLOW_USDC_MINT?.trim() ||

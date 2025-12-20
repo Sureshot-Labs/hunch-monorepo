@@ -15,6 +15,25 @@ function n(v: unknown): number | undefined {
   return parsed;
 }
 
+function s(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const trimmed = v.trim();
+  return trimmed.length ? trimmed : undefined;
+}
+
+function compactMetadata(
+  values: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (value == null) continue;
+    if (typeof value === "string" && value.trim().length === 0) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function pickNumber(
   sources: Array<Record<string, unknown> | undefined | null>,
   keys: string[],
@@ -77,6 +96,18 @@ export function mapDflowStatusToUnified(
   return "ACTIVE";
 }
 
+function aggregateEventStatus(
+  markets: TDflowMarket[],
+): "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" {
+  if (!markets.length) return "ACTIVE";
+  const mapped = markets.map((m) => mapDflowStatusToUnified(m.status));
+  if (mapped.includes("ACTIVE")) return "ACTIVE";
+  if (mapped.includes("SETTLED")) return "SETTLED";
+  if (mapped.includes("CLOSED")) return "CLOSED";
+  if (mapped.includes("ARCHIVED")) return "ARCHIVED";
+  return "ACTIVE";
+}
+
 function pickEventTicker(e: TDflowEvent): string | null {
   const candidates = [e.event_ticker, e.eventTicker, e.ticker, e.id].filter(
     (x): x is string => typeof x === "string" && x.trim().length > 0,
@@ -121,7 +152,7 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
     (sum, m) => sum + (n(m.volume24h) ?? 0),
     0,
   );
-  const derivedLiquidity = markets.reduce(
+  const derivedLiquidityCents = markets.reduce(
     (sum, m) => sum + (n(m.liquidity) ?? 0),
     0,
   );
@@ -136,14 +167,45 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
   const volume_24h =
     pickNumber([extra], ["volume24h", "volume_24h", "volume24hr"]) ??
     (derivedVolume24h > 0 ? derivedVolume24h : undefined);
+  const liquidityUsd = pickNumber([extra], ["liquidityUsd", "liquidity_usd"]);
+  const liquidityCents =
+    pickNumber([extra], ["liquidity", "liquidityNum"]) ??
+    (derivedLiquidityCents > 0 ? derivedLiquidityCents : undefined);
   const liquidity =
-    pickNumber([extra], ["liquidity", "liquidityNum", "liquidityUsd"]) ??
-    (derivedLiquidity > 0 ? derivedLiquidity : undefined);
+    liquidityUsd ??
+    (liquidityCents != null ? liquidityCents / 100 : undefined);
   const open_interest =
     pickNumber([extra], ["openInterest", "open_interest", "openInterestNum"]) ??
     (derivedOpenInterest > 0 ? derivedOpenInterest : undefined);
 
-  const status = "ACTIVE";
+  const status = aggregateEventStatus(markets);
+
+  const image =
+    s(extra.imageUrl) ?? s(extra.image_url) ?? s(extra.image) ?? undefined;
+  const icon = s(extra.icon) ?? s(extra.iconUrl) ?? s(extra.icon_url);
+  const slug = s(extra.slug);
+  const subtitle = s(extra.subtitle);
+  const seriesTicker = s(extra.seriesTicker) ?? s(extra.series_ticker);
+  const competition = s(extra.competition);
+  const competitionScope = s(extra.competitionScope) ?? s(extra.competition_scope);
+  const strikeDate = s(extra.strikeDate) ?? s(extra.strike_date);
+  const strikePeriod = s(extra.strikePeriod) ?? s(extra.strike_period);
+  const settlementSources =
+    Array.isArray(extra.settlementSources) && extra.settlementSources.length
+      ? extra.settlementSources
+      : Array.isArray(extra.settlement_sources) &&
+          extra.settlement_sources.length
+        ? extra.settlement_sources
+        : undefined;
+  const metadata = compactMetadata({
+    seriesTicker,
+    subtitle,
+    competition,
+    competitionScope,
+    strikeDate,
+    strikePeriod,
+    settlementSources,
+  });
 
   return {
     id: `kalshi:${venueEventId}`,
@@ -168,9 +230,10 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
     volume_24h,
     open_interest,
     liquidity,
-    slug: undefined,
-    image: undefined,
-    icon: undefined,
+    metadata,
+    slug,
+    image,
+    icon,
     created_at: undefined,
     updated_at: undefined,
   };
@@ -228,7 +291,7 @@ export type DflowMappedMarket = {
     market_id: string;
     side: "YES" | "NO";
   }>;
-  snapshot: DflowMarketSnapshot;
+  snapshot: DflowMarketSnapshot | null;
 };
 
 export function mapToUnifiedMarket(
@@ -238,11 +301,10 @@ export function mapToUnifiedMarket(
   usdcMint: string,
   requireInitialized: boolean,
 ): DflowMappedMarket | null {
-  const instrument = pickUsdcInstrument(market, usdcMint, requireInitialized);
-  if (!instrument) return null;
-
   const status = mapDflowStatusToUnified(market.status);
-  if (status !== "ACTIVE") return null;
+  const requireInit = status === "ACTIVE" ? requireInitialized : false;
+  const instrument = pickUsdcInstrument(market, usdcMint, requireInit);
+  if (!instrument) return null;
 
   const extra = market as Record<string, unknown>;
   const account = instrument.account;
@@ -263,9 +325,13 @@ export function mapToUnifiedMarket(
     [account, extra],
     ["volume24h", "volume_24h", "volume24hr", "volume_24hr", "volume24Hr"],
   );
-  const liquidity = pickNumber(
+  const liquidityUsd = pickNumber(
     [account, extra],
-    ["liquidity", "liquidityNum", "liquidity_usd", "liquidityUsd"],
+    ["liquidityUsd", "liquidity_usd"],
+  );
+  const liquidityCents = pickNumber(
+    [account, extra],
+    ["liquidity", "liquidityNum"],
   );
   const openInterest = pickNumber(
     [account, extra],
@@ -293,10 +359,9 @@ export function mapToUnifiedMarket(
       ? account.isInitialized
       : undefined;
 
-  const storedVolume24h =
-    volume24h != null && volume24h > 0 ? volume24h : undefined;
-  const storedLiquidity =
-    liquidity != null && liquidity > 0 ? liquidity : undefined;
+  const normalizedVolume24h = volume24h ?? 0;
+  const normalizedLiquidity =
+    liquidityUsd ?? (liquidityCents != null ? liquidityCents / 100 : 0);
 
   const open_time =
     parseDate(
@@ -341,6 +406,34 @@ export function mapToUnifiedMarket(
           : market.ticker)) ||
     market.ticker;
 
+  const subtitle = s(extra.subtitle);
+  const yesSubTitle = s(extra.yesSubTitle) ?? s(extra.yes_sub_title);
+  const noSubTitle = s(extra.noSubTitle) ?? s(extra.no_sub_title);
+  const rulesPrimary = s(extra.rulesPrimary) ?? s(extra.rules_primary);
+  const rulesSecondary = s(extra.rulesSecondary) ?? s(extra.rules_secondary);
+  const earlyCloseCondition =
+    s(extra.earlyCloseCondition) ?? s(extra.early_close_condition);
+  const result = s(extra.result);
+  const marketType = s(extra.marketType) ?? s(extra.market_type);
+  const canCloseEarly =
+    typeof extra.canCloseEarly === "boolean" ? extra.canCloseEarly : undefined;
+  const metadata = compactMetadata({
+    subtitle,
+    yesSubTitle,
+    noSubTitle,
+    rulesPrimary,
+    rulesSecondary,
+    earlyCloseCondition,
+    canCloseEarly,
+    result,
+    marketType,
+  });
+
+  const image =
+    s(extra.imageUrl) ?? s(extra.image_url) ?? s(extra.image) ?? undefined;
+  const icon = s(extra.icon) ?? s(extra.iconUrl) ?? s(extra.icon_url);
+  const slug = s(extra.slug);
+
   const marketRow: UnifiedMarketRow = {
     id: `kalshi:${market.ticker}`,
     venue: "kalshi",
@@ -365,9 +458,10 @@ export function mapToUnifiedMarket(
     last_price:
       yesBid != null && yesAsk != null ? (yesBid + yesAsk) / 2 : undefined,
     volume_total: volumeTotal,
-    volume_24h: storedVolume24h,
+    volume_24h: normalizedVolume24h,
     open_interest: openInterest,
-    liquidity: storedLiquidity,
+    liquidity: normalizedLiquidity,
+    metadata,
     outcomes: JSON.stringify(["YES", "NO"]),
     token_yes: yesTokenId,
     token_no: noTokenId,
@@ -376,9 +470,9 @@ export function mapToUnifiedMarket(
     settlement_mint: instrument.settlementMint,
     is_initialized: isInitialized,
     redemption_status: redemptionStatus,
-    slug: undefined,
-    image: undefined,
-    icon: undefined,
+    slug,
+    image,
+    icon,
     created_at: undefined,
     updated_at: undefined,
   };
@@ -388,19 +482,22 @@ export function mapToUnifiedMarket(
     { token_id: noTokenId, market_id: marketRow.id, side: "NO" as const },
   ];
 
-  const snapshot: DflowMarketSnapshot = {
-    marketId: marketRow.id,
-    yesTokenId,
-    noTokenId,
-    yesBid: yesBid ?? null,
-    yesAsk: yesAsk ?? null,
-    noBid: noBid ?? null,
-    noAsk: noAsk ?? null,
-    volumeTotal: volumeTotal ?? 0,
-    volume24h: volume24h ?? 0,
-    openInterest: openInterest ?? 0,
-    liquidity: liquidity ?? 0,
-  };
+  const snapshot: DflowMarketSnapshot | null =
+    status === "ACTIVE"
+      ? {
+          marketId: marketRow.id,
+          yesTokenId,
+          noTokenId,
+          yesBid: yesBid ?? null,
+          yesAsk: yesAsk ?? null,
+          noBid: noBid ?? null,
+          noAsk: noAsk ?? null,
+          volumeTotal: volumeTotal ?? 0,
+          volume24h: volume24h ?? 0,
+          openInterest: openInterest ?? 0,
+          liquidity: normalizedLiquidity,
+        }
+      : null;
 
   return { marketRow, tokenRows, snapshot };
 }

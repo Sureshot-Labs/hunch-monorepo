@@ -62,12 +62,12 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       try {
         const [solLamports, usdc] = await Promise.all([
           fetchSolanaBalanceLamports({
-            rpcUrl: env.solanaRpcUrl,
+            rpcUrls: env.solanaRpcUrls,
             timeoutMs: env.solanaRpcTimeoutMs,
             owner: walletAddress,
           }),
           fetchSolanaTokenBalanceByOwnerAndMint({
-            rpcUrl: env.solanaRpcUrl,
+            rpcUrls: env.solanaRpcUrls,
             timeoutMs: env.solanaRpcTimeoutMs,
             owner: walletAddress,
             mint: env.solanaUsdcMint,
@@ -345,7 +345,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const signature = await sendSolanaRawTransaction({
-          rpcUrl: env.solanaRpcUrl,
+          rpcUrls: env.solanaRpcUrls,
           timeoutMs: env.solanaRpcTimeoutMs,
           signedTransaction: request.body.signedTransaction,
           skipPreflight: request.body.skipPreflight,

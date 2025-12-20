@@ -140,7 +140,7 @@ async function processEvents(events: TDflowEvent[]): Promise<{
 
       unifiedMarketRows.push(mapped.marketRow);
       tokenRows.push(...mapped.tokenRows);
-      snapshots.push(mapped.snapshot);
+      if (mapped.snapshot) snapshots.push(mapped.snapshot);
       processedMarkets += 1;
 
       const row = mapped.marketRow;

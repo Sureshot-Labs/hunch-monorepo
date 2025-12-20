@@ -120,8 +120,56 @@
     const b64ToUint8 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     const uint8ToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
 
+    function describeError(error) {
+      if (!error) return "Unknown error";
+      const details = {
+        name: error?.name,
+        message: error?.message,
+        code: error?.code,
+        data: error?.data,
+        cause: error?.cause,
+      };
+      try {
+        return JSON.stringify(details);
+      } catch {
+        return String(error);
+      }
+    }
+
+    function getPhantomProvider() {
+      const phantom = window.phantom?.solana;
+      if (phantom?.isPhantom) return phantom;
+      if (window.solana?.isPhantom) return window.solana;
+      return null;
+    }
+
+    async function attemptConnect(provider, options, method) {
+      if (typeof provider.request === "function") {
+        try {
+          if (method) {
+            return options
+              ? provider.request({ method, params: options })
+              : provider.request({ method });
+          }
+          return options
+            ? provider.request({ method: "connect", params: options })
+            : provider.request({ method: "connect" });
+        } catch (err) {
+          if (options && !method) {
+            return provider.request({ method: "connect", params: [options] });
+          }
+          throw err;
+        }
+      }
+      if (typeof provider.connect === "function") {
+        return options ? provider.connect(options) : provider.connect();
+      }
+      throw new Error("Phantom provider has no connect method");
+    }
+
     async function connect() {
-      if (!window.solana || !window.solana.isPhantom) {
+      const provider = getPhantomProvider();
+      if (!provider) {
         alert("Phantom (Solana) wallet required");
         return;
       }
@@ -130,15 +178,90 @@
         return;
       }
       try {
-        const resp = await window.solana.connect({ onlyIfTrusted: true }).catch(() => window.solana.connect());
-        solWallet = window.solana;
-        if (!resp || !resp.publicKey) throw new Error("No publicKey from Phantom");
-        document.getElementById("account").textContent = `Account: ${resp.publicKey.toBase58()}`;
+        if (typeof provider.disconnect === "function") {
+          try {
+            await provider.disconnect();
+            log("Reset Phantom connection");
+          } catch (disconnectErr) {
+            log("Reset Phantom failed: " + (disconnectErr?.message || disconnectErr));
+          }
+        }
+
+        if (provider.isConnected && provider.publicKey) {
+          solWallet = provider;
+          const pubkey = provider.publicKey;
+          document.getElementById("account").textContent = `Account: ${pubkey.toBase58()}`;
+          document.getElementById("network").textContent = `RPC: mainnet-beta`;
+          log(`Connected Solana wallet ${pubkey.toBase58()}`);
+          return;
+        }
+
+        let resp;
+        log(
+          `Provider meta: isPhantom=${Boolean(provider?.isPhantom)}, isConnected=${Boolean(
+            provider?.isConnected
+          )}, hasPublicKey=${Boolean(provider?.publicKey)}`
+        );
+
+        const attempts = [
+          {
+            label: "request sol_connect",
+            run: () => attemptConnect(provider, { onlyIfTrusted: false }, "sol_connect"),
+          },
+          { label: "connect()", run: () => attemptConnect(provider) },
+          {
+            label: "connect({ onlyIfTrusted: false })",
+            run: () => attemptConnect(provider, { onlyIfTrusted: false }),
+          },
+        ];
+        let lastErr;
+        for (const attempt of attempts) {
+          try {
+            log("Trying " + attempt.label);
+            resp = await attempt.run();
+            if (resp) break;
+          } catch (err) {
+            lastErr = err;
+            log(
+              `Attempt failed (${attempt.label}): ${err?.message || err} ${err?.code != null ? `(code ${err.code})` : ""}`
+            );
+            if (err?.stack) {
+              log(err.stack);
+            }
+            log("Error details: " + describeError(err));
+            const isInternal =
+              err?.code === -32603 || /unexpected error/i.test(err?.message || "");
+            if (isInternal && typeof provider.disconnect === "function") {
+              try {
+                await provider.disconnect();
+              } catch (disconnectErr) {
+                log("Disconnect retry failed: " + (disconnectErr?.message || disconnectErr));
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250));
+              continue;
+            }
+          }
+        }
+        if (!resp && lastErr) throw lastErr;
+        solWallet = provider;
+        const pubkey = resp?.publicKey || provider.publicKey;
+        if (!pubkey) throw new Error("No publicKey from Phantom");
+        document.getElementById("account").textContent = `Account: ${pubkey.toBase58()}`;
         document.getElementById("network").textContent = `RPC: mainnet-beta`;
-        log(`Connected Solana wallet ${resp.publicKey.toBase58()}`);
+        log(`Connected Solana wallet ${pubkey.toBase58()}`);
       } catch (e) {
         const msg = e?.message || e;
-        log("Connect error: " + msg);
+        const code = e?.code != null ? ` (code ${e.code})` : "";
+        log("Connect error: " + msg + code);
+        if (e?.stack) {
+          log(e.stack);
+        }
+        log("Connect error details: " + describeError(e));
+        log(
+          `Provider state: isConnected=${Boolean(provider?.isConnected)}, hasKey=${Boolean(
+            provider?.publicKey
+          )}`
+        );
         alert("Failed to connect Phantom: " + msg);
       }
     }

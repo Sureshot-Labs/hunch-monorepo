@@ -50,7 +50,7 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         let decimals: number | null = null;
         try {
           decimals = await fetchSolanaMintDecimals({
-            rpcUrl: env.solanaRpcUrl,
+            rpcUrls: env.solanaRpcUrls,
             timeoutMs: env.solanaRpcTimeoutMs,
             mint,
           });

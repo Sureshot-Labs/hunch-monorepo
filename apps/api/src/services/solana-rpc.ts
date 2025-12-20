@@ -61,51 +61,80 @@ function parseTokenAccount(
 }
 
 async function solanaRpcRequest<T>(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   timeoutMs: number;
   method: string;
   params: unknown[];
 }): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+  let lastError: unknown = null;
 
-  try {
-    const response = await fetch(inputs.rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: inputs.method,
-        params: inputs.params,
-      }),
-      signal: controller.signal,
-    });
+  for (const rpcUrl of inputs.rpcUrls) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+    try {
+      const response = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: inputs.method,
+          params: inputs.params,
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      throw new Error(
-        `Solana RPC error: ${response.status} ${response.statusText}`,
-      );
+      if (!response.ok) {
+        const error = new Error(
+          `Solana RPC error: ${response.status} ${response.statusText}`,
+        );
+        lastError = error;
+        if (response.status === 429 && inputs.rpcUrls.length > 1) {
+          continue;
+        }
+        throw error;
+      }
+
+      const json = (await response.json()) as unknown;
+      if (!isRecord(json)) {
+        throw new Error("Solana RPC: invalid JSON response");
+      }
+
+      const rpc = json as JsonRpcResponse<T>;
+      if ("error" in rpc) {
+        const message =
+          typeof rpc.error.message === "string"
+            ? rpc.error.message
+            : "Unknown Solana RPC error";
+        const error = new Error(
+          `Solana RPC ${inputs.method} error: ${message}`,
+        );
+        lastError = error;
+        if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
+          continue;
+        }
+        throw error;
+      }
+
+      return rpc.result;
+    } catch (error) {
+      lastError = error;
+      if (inputs.rpcUrls.length > 1) {
+        const message = error instanceof Error ? error.message : "";
+        if (
+          /Solana RPC error: 429/i.test(message) ||
+          /too many requests/i.test(message)
+        ) {
+          continue;
+        }
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const json = (await response.json()) as unknown;
-    if (!isRecord(json)) {
-      throw new Error("Solana RPC: invalid JSON response");
-    }
-
-    const rpc = json as JsonRpcResponse<T>;
-    if ("error" in rpc) {
-      const message =
-        typeof rpc.error.message === "string"
-          ? rpc.error.message
-          : "Unknown Solana RPC error";
-      throw new Error(`Solana RPC ${inputs.method} error: ${message}`);
-    }
-
-    return rpc.result;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError ?? new Error("Solana RPC request failed");
 }
 
 export const SOLANA_SPL_TOKEN_PROGRAM_ID =
@@ -121,12 +150,12 @@ export type SolanaTokenBalance = {
 };
 
 export async function fetchSolanaBalanceLamports(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   owner: string;
   timeoutMs: number;
 }): Promise<bigint> {
   const result = await solanaRpcRequest<{ value: number }>({
-    rpcUrl: inputs.rpcUrl,
+    rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
     method: "getBalance",
     params: [inputs.owner],
@@ -140,13 +169,13 @@ export async function fetchSolanaBalanceLamports(inputs: {
 }
 
 export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   owner: string;
   mint: string;
   timeoutMs: number;
 }): Promise<{ amount: bigint; decimals: number; uiAmountString: string } | null> {
   const result = await solanaRpcRequest<{ value: unknown[] }>({
-    rpcUrl: inputs.rpcUrl,
+    rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
     method: "getTokenAccountsByOwner",
     params: [
@@ -180,12 +209,12 @@ export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
 }
 
 export async function fetchSolanaMintDecimals(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   mint: string;
   timeoutMs: number;
 }): Promise<number> {
   const result = await solanaRpcRequest<{ value?: { decimals?: number } }>({
-    rpcUrl: inputs.rpcUrl,
+    rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
     method: "getTokenSupply",
     params: [inputs.mint],
@@ -200,7 +229,7 @@ export async function fetchSolanaMintDecimals(inputs: {
 }
 
 export async function sendSolanaRawTransaction(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   timeoutMs: number;
   signedTransaction: string;
   skipPreflight?: boolean;
@@ -215,7 +244,7 @@ export async function sendSolanaRawTransaction(inputs: {
   }
 
   const result = await solanaRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
+    rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
     method: "sendTransaction",
     params: [inputs.signedTransaction, params],
@@ -228,7 +257,7 @@ export async function sendSolanaRawTransaction(inputs: {
 }
 
 export async function fetchSolanaTokenBalancesByOwner(inputs: {
-  rpcUrl: string;
+  rpcUrls: string[];
   owner: string;
   timeoutMs: number;
   includeToken2022?: boolean;
@@ -243,7 +272,7 @@ export async function fetchSolanaTokenBalancesByOwner(inputs: {
 
   for (const programId of programIds) {
     const result = await solanaRpcRequest<{ value: unknown[] }>({
-      rpcUrl: inputs.rpcUrl,
+      rpcUrls: inputs.rpcUrls,
       timeoutMs: inputs.timeoutMs,
       method: "getTokenAccountsByOwner",
       params: [

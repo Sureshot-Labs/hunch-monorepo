@@ -13,6 +13,33 @@ const n = (v: unknown): number | null => {
   return Number.isFinite(x as number) ? (x as number) : null;
 };
 
+const s = (v: unknown): string | undefined => {
+  if (typeof v !== "string") return undefined;
+  const trimmed = v.trim();
+  return trimmed.length ? trimmed : undefined;
+};
+
+const nOrUndefined = (v: unknown): number | undefined => {
+  const parsed = n(v);
+  return parsed === null ? undefined : parsed;
+};
+
+const bool = (v: unknown): boolean | undefined =>
+  typeof v === "boolean" ? v : undefined;
+
+const compactMetadata = (
+  values: Record<string, unknown>,
+): Record<string, unknown> | undefined => {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (value == null) continue;
+    if (typeof value === "string" && value.trim().length === 0) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+};
+
 export function mapEventRow(venueId: number, e: TEvent) {
   const id = uuid();
   return {
@@ -339,6 +366,25 @@ function extractCategoryFromTitle(
 }
 
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
+  const extra = e as Record<string, unknown>;
+  const metadata = compactMetadata({
+    ticker: s(extra.ticker),
+    resolutionSource: s(extra.resolutionSource),
+    creationDate: s(extra.creationDate),
+    createdBy: s(extra.createdBy),
+    sponsorName: s(extra.sponsorName),
+    sponsorImage: s(extra.sponsorImage),
+    twitterCardImage: s(extra.twitterCardImage),
+    competitive: nOrUndefined(extra.competitive),
+    volume1wk: nOrUndefined(extra.volume1wk),
+    volume1mo: nOrUndefined(extra.volume1mo),
+    volume1yr: nOrUndefined(extra.volume1yr),
+    enableOrderBook: bool(extra.enableOrderBook),
+    liquidityClob: nOrUndefined(extra.liquidityClob),
+    negRisk: bool(extra.negRisk),
+    commentCount: nOrUndefined(extra.commentCount),
+  });
+
   // Map Polymarket status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
 
@@ -369,6 +415,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     volume_24h: n(e.volume24hr) ?? undefined,
     open_interest: n(e.openInterest) ?? undefined,
     liquidity: n(e.liquidity) ?? undefined,
+    metadata,
     slug: e.slug ?? undefined,
     image: e.image ?? undefined,
     icon: e.icon ?? undefined,
@@ -381,6 +428,8 @@ export function mapToUnifiedMarket(
   m: TPolymarketMarket,
   eventId: string,
 ): UnifiedMarketRow {
+  const extra = m as Record<string, unknown>;
+
   // Map Polymarket status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
 
@@ -414,6 +463,51 @@ export function mapToUnifiedMarket(
     return m.question;
   })();
 
+  const metadata = compactMetadata({
+    question: s(extra.question),
+    resolutionSource: s(extra.resolutionSource),
+    outcomes: s(extra.outcomes),
+    outcomePrices: s(extra.outcomePrices),
+    fee: nOrUndefined(extra.fee),
+    marketMakerAddress: s(extra.marketMakerAddress),
+    clobTokenIds: Array.isArray(m.clobTokenIds) ? m.clobTokenIds : undefined,
+    groupItemTitle: s(extra.groupItemTitle),
+    groupItemThreshold: s(extra.groupItemThreshold),
+    questionId: s(extra.questionID),
+    enableOrderBook: bool(extra.enableOrderBook),
+    orderPriceMinTickSize: nOrUndefined(extra.orderPriceMinTickSize),
+    orderMinSize: nOrUndefined(extra.orderMinSize),
+    volume1wk: nOrUndefined(extra.volume1wk),
+    volume1mo: nOrUndefined(extra.volume1mo),
+    volume1yr: nOrUndefined(extra.volume1yr),
+    volume24hrClob: nOrUndefined(extra.volume24hrClob),
+    volume1wkClob: nOrUndefined(extra.volume1wkClob),
+    volume1moClob: nOrUndefined(extra.volume1moClob),
+    volume1yrClob: nOrUndefined(extra.volume1yrClob),
+    volumeClob: nOrUndefined(extra.volumeClob),
+    volumeAmm: nOrUndefined(extra.volumeAmm),
+    liquidityClob: nOrUndefined(extra.liquidityClob),
+    liquidityAmm: nOrUndefined(extra.liquidityAmm),
+    acceptingOrders: bool(extra.acceptingOrders),
+    acceptingOrdersTimestamp: s(extra.acceptingOrdersTimestamp),
+    ready: bool(extra.ready),
+    funded: bool(extra.funded),
+    negRisk: bool(extra.negRisk),
+    negRiskRequestId: s(extra.negRiskRequestID),
+    umaBond: s(extra.umaBond),
+    umaReward: s(extra.umaReward),
+    umaResolutionStatuses: s(extra.umaResolutionStatuses),
+    customLiveness: nOrUndefined(extra.customLiveness),
+    ammType: s(extra.ammType),
+    denominationToken: s(extra.denominationToken),
+    lowerBound: s(extra.lowerBound),
+    upperBound: s(extra.upperBound),
+    lowerBoundDate: s(extra.lowerBoundDate),
+    upperBoundDate: s(extra.upperBoundDate),
+    marketType: s(extra.marketType),
+    formatType: s(extra.formatType),
+  });
+
   return {
     id: `polymarket:${m.id}`,
     venue: "polymarket",
@@ -434,6 +528,7 @@ export function mapToUnifiedMarket(
     volume_24h: n(m.volume24hr) ?? undefined,
     open_interest: n(m.openInterest) ?? undefined,
     liquidity: n(m.liquidity) ?? undefined,
+    metadata,
     outcomes: m.outcomes ?? undefined, // Already JSON string
     clob_token_ids: clobTokenIds,
     condition_id: m.conditionId ?? undefined,
