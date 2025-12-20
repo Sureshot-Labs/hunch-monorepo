@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
+import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -171,6 +172,16 @@ async function syncKalshiPositionsFromSolana(
     tokenIdLike: "sol:%",
   });
 
+  try {
+    await recomputePositionMetricsForWallet(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "kalshi",
+    });
+  } catch (error) {
+    console.error("Kalshi position metrics update failed", error);
+  }
+
   return {
     venue: "kalshi",
     walletAddress: inputs.walletAddress,
@@ -242,6 +253,16 @@ async function syncPolymarketPositionsFromPolygon(
     venue: "polymarket",
     tokenBalances: held,
   });
+
+  try {
+    await recomputePositionMetricsForWallet(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "polymarket",
+    });
+  } catch (error) {
+    console.error("Polymarket position metrics update failed", error);
+  }
 
   return {
     venue: "polymarket",

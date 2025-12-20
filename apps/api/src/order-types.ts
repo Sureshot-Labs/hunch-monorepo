@@ -54,6 +54,8 @@ export interface Position {
   averagePrice?: number;
   unrealizedPnl: number;
   realizedPnl: number;
+  estimatedPayout?: number;
+  estimatedProfit?: number;
 
   lastUpdatedAt: Date;
   createdAt: Date;

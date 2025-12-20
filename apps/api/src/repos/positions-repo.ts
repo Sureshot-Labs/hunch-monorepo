@@ -19,6 +19,34 @@ type PositionRow = {
   updated_at: Date;
 };
 
+function mapPositionRow(row: PositionRow): Position {
+  const size = parseFloat(row.size);
+  const averagePrice =
+    row.average_price != null ? parseFloat(row.average_price) : undefined;
+  const estimatedPayout = Number.isFinite(size) && size > 0 ? size : 0;
+  const estimatedProfit =
+    averagePrice != null && Number.isFinite(size)
+      ? estimatedPayout - averagePrice * size
+      : undefined;
+
+  return {
+    id: row.id,
+    userId: row.user_id,
+    venue: row.venue as Position["venue"],
+    tokenId: row.token_id,
+    side: row.side as Position["side"],
+    size,
+    averagePrice,
+    unrealizedPnl: parseFloat(row.unrealized_pnl ?? "0"),
+    realizedPnl: parseFloat(row.realized_pnl ?? "0"),
+    estimatedPayout,
+    estimatedProfit,
+    lastUpdatedAt: row.last_updated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export async function fetchPositionsForUserWallet(
   pool: Pool,
   inputs: {
@@ -84,21 +112,7 @@ export async function fetchPositionsForUserWallet(
     params,
   );
 
-  return rows.map((row) => ({
-    id: row.id,
-    userId: row.user_id,
-    venue: row.venue as Position["venue"],
-    tokenId: row.token_id,
-    side: row.side as Position["side"],
-    size: parseFloat(row.size),
-    averagePrice:
-      row.average_price != null ? parseFloat(row.average_price) : undefined,
-    unrealizedPnl: parseFloat(row.unrealized_pnl ?? "0"),
-    realizedPnl: parseFloat(row.realized_pnl ?? "0"),
-    lastUpdatedAt: row.last_updated_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  return rows.map((row) => mapPositionRow(row));
 }
 
 export async function fetchPositionsForUserWalletByTokenIds(
@@ -173,21 +187,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
     params,
   );
 
-  return rows.map((row) => ({
-    id: row.id,
-    userId: row.user_id,
-    venue: row.venue as Position["venue"],
-    tokenId: row.token_id,
-    side: row.side as Position["side"],
-    size: parseFloat(row.size),
-    averagePrice:
-      row.average_price != null ? parseFloat(row.average_price) : undefined,
-    unrealizedPnl: parseFloat(row.unrealized_pnl ?? "0"),
-    realizedPnl: parseFloat(row.realized_pnl ?? "0"),
-    lastUpdatedAt: row.last_updated_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  return rows.map((row) => mapPositionRow(row));
 }
 
 export type WalletTokenBalance = {
@@ -353,4 +353,58 @@ export async function syncWalletPositionsFromTokenBalances(
     upsertedPositions: result.upsertedPositions,
     flattenedPositions: result.flattenedPositions,
   };
+}
+
+export async function updatePositionMetrics(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: Position["venue"];
+    metrics: Array<{
+      tokenId: string;
+      averagePrice: number | null;
+      realizedPnl: number;
+      unrealizedPnl: number;
+    }>;
+  },
+): Promise<void> {
+  if (inputs.metrics.length === 0) return;
+
+  const tokenIds = inputs.metrics.map((metric) => metric.tokenId);
+  const averagePrices = inputs.metrics.map((metric) => metric.averagePrice);
+  const realizedPnls = inputs.metrics.map((metric) => metric.realizedPnl);
+  const unrealizedPnls = inputs.metrics.map((metric) => metric.unrealizedPnl);
+
+  await pool.query(
+    `
+      update positions p
+      set
+        average_price = v.average_price,
+        realized_pnl = v.realized_pnl,
+        unrealized_pnl = v.unrealized_pnl,
+        last_updated_at = now(),
+        updated_at = now()
+      from (
+        select
+          unnest($1::text[]) as token_id,
+          unnest($2::numeric[]) as average_price,
+          unnest($3::numeric[]) as realized_pnl,
+          unnest($4::numeric[]) as unrealized_pnl
+      ) v
+      where p.user_id = $5
+        and (p.wallet_address is null or p.wallet_address = $6)
+        and p.venue = $7
+        and p.token_id = v.token_id
+    `,
+    [
+      tokenIds,
+      averagePrices,
+      realizedPnls,
+      unrealizedPnls,
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.venue,
+    ],
+  );
 }
