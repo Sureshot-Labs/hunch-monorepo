@@ -13,6 +13,7 @@ import {
 } from "../services/solana-rpc.js";
 import {
   dflowExecutionBodySchema,
+  dflowOrderQuerySchema,
   dflowQuoteQuerySchema,
   dflowSubmitBodySchema,
   dflowSwapBodySchema,
@@ -105,6 +106,82 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }
+    },
+  );
+
+  /**
+   * GET /order
+   * Proxy order requests to DFlow (returns unsigned transaction + quote).
+   */
+  z.get(
+    "/order",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: dflowOrderQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isSolanaWallet(walletAddress)) {
+        reply.code(400);
+        return reply.send({
+          error: "DFlow order requires a Solana wallet address",
+        });
+      }
+
+      if (!ensureDflowReady(reply)) return;
+
+      const query = request.query;
+      const userPublicKey =
+        query.userPublicKey?.trim() || walletAddress.trim();
+      if (userPublicKey !== walletAddress.trim()) {
+        reply.code(400);
+        return reply.send({
+          error: "userPublicKey must match the selected wallet",
+        });
+      }
+
+      const upstream = await dflowRequest({
+        baseUrl: env.dflowQuoteBase,
+        timeoutMs: 15_000,
+        method: "GET",
+        requestPath: "/order",
+        apiKey: env.dflowApiKey,
+        query: {
+          inputMint: query.inputMint,
+          outputMint: query.outputMint,
+          amount: query.amount,
+          userPublicKey,
+          ...(query.slippageBps != null
+            ? { slippageBps: query.slippageBps }
+            : {}),
+          ...(query.platformFeeBps != null
+            ? { platformFeeBps: query.platformFeeBps }
+            : {}),
+          ...(query.platformFeeMode
+            ? { platformFeeMode: query.platformFeeMode }
+            : {}),
+          ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
+        },
+      });
+
+      if (!upstream.ok) {
+        reply.code(502);
+        return reply.send({
+          error: "DFlow order failed",
+          status: upstream.status,
+          message: extractDflowErrorMessage(upstream.payload),
+          payload: upstream.payload,
+        });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send(upstream.payload);
     },
   );
 

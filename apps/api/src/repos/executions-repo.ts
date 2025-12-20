@@ -72,7 +72,7 @@ export async function storeExecution(
       values (
         gen_random_uuid(),
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16,
+        $10, $11, $12, $13, $14, $15,
         now(), now()
       )
       on conflict on constraint executions_user_id_wallet_address_venue_tx_signature_key
