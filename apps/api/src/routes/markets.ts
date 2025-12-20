@@ -3,11 +3,150 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
-import { marketParamsSchema } from "../schemas/market.js";
-import { fetchMarketDetails } from "../repos/unified-read.js";
+import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
+import { fetchMarketDetails, fetchMarketsByTokenIds } from "../repos/unified-read.js";
 
 export const marketRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  /**
+   * GET /markets/by-token
+   * Get market summaries for a list of token IDs
+   */
+  z.get(
+    "/markets/by-token",
+    { schema: { querystring: marketsByTokenQuerySchema } },
+    async (request, reply) => {
+      const { tokenIds, venue } = request.query;
+
+      if (tokenIds.length > 200) {
+        reply.code(400);
+        return reply.send({
+          error: "tokenIds length exceeded",
+          message: "Max 200 tokenIds allowed per request.",
+        });
+      }
+
+      try {
+        const rows = await fetchMarketsByTokenIds(pool, { tokenIds, venue });
+        const now = new Date();
+
+        const response = rows.map((row) => {
+          let tokens = { yes: null as string | null, no: null as string | null };
+          if (row.venue === "polymarket" && row.clob_token_ids) {
+            try {
+              const parsed = JSON.parse(String(row.clob_token_ids));
+              if (Array.isArray(parsed)) {
+                tokens = {
+                  yes: parsed[0] != null ? String(parsed[0]) : null,
+                  no: parsed[1] != null ? String(parsed[1]) : null,
+                };
+              }
+            } catch {
+              // keep tokens as null
+            }
+          } else if (row.venue === "limitless" || row.venue === "kalshi") {
+            tokens = {
+              yes: row.token_yes != null ? String(row.token_yes) : null,
+              no: row.token_no != null ? String(row.token_no) : null,
+            };
+          }
+
+          let outcomes: unknown = null;
+          if (row.outcomes) {
+            try {
+              outcomes = JSON.parse(row.outcomes);
+            } catch {
+              // ignore parse errors
+            }
+          }
+
+          const acceptingOrders =
+            row.market_status === "ACTIVE" &&
+            (row.expiration_time == null ||
+              new Date(String(row.expiration_time)) > now) &&
+            (row.close_time == null || new Date(String(row.close_time)) > now);
+
+          return {
+            tokenId: row.token_id,
+            side: row.side,
+            market: {
+              marketId: row.market_id,
+              venue: row.venue,
+              venueMarketId: row.venue_market_id,
+              marketTitle: row.market_title,
+              marketDescription: row.market_description,
+              marketType: row.market_type,
+              status: row.market_status,
+              openTime: row.open_time,
+              closeTime: row.close_time,
+              expirationTime: row.expiration_time,
+              volume24h: row.volume_24h != null ? Number(row.volume_24h) : 0,
+              volumeTotal:
+                row.volume_total != null ? Number(row.volume_total) : 0,
+              openInterest:
+                row.open_interest != null ? Number(row.open_interest) : 0,
+              liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
+              bestBid: row.best_bid != null ? Number(row.best_bid) : null,
+              bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+              lastPrice: row.last_price != null ? Number(row.last_price) : null,
+              outcomes,
+              tokens,
+              conditionId: row.condition_id || null,
+              marketSlug: row.slug || null,
+              marketImage: row.market_image || null,
+              marketIcon: row.market_icon || null,
+              redemptionStatus: row.redemption_status || null,
+              acceptingOrders,
+              event: {
+                eventId: row.event_id,
+                venue: row.event_venue,
+                venueEventId: row.venue_event_id,
+                eventTitle: row.event_title,
+                eventDescription: row.event_description || null,
+                category: row.event_category || null,
+                status: row.event_status,
+                startTime: row.start_date,
+                endTime: row.end_date,
+                eventLiquidity:
+                  row.event_liquidity != null
+                    ? Number(row.event_liquidity)
+                    : 0,
+                eventVolume:
+                  row.event_volume_total != null
+                    ? Number(row.event_volume_total)
+                    : 0,
+                eventVolume24h:
+                  row.event_volume_24h != null
+                    ? Number(row.event_volume_24h)
+                    : 0,
+                eventOpenInterest:
+                  row.event_open_interest != null
+                    ? Number(row.event_open_interest)
+                    : 0,
+                eventSlug: row.event_slug || null,
+                image: row.event_image || null,
+                icon: row.event_icon || null,
+              },
+            },
+          };
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ data: response });
+      } catch (error) {
+        app.log.error(
+          { error, tokenIds, venue },
+          "Markets by token fetch failed",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Internal server error",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
 
   /**
    * GET /markets/:marketId

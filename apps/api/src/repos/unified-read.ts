@@ -37,7 +37,7 @@ export async function fetchFeedEventIds(
   const { params, add } = createParamBuilder();
   const eventWhere: string[] = [];
   const safeEventLiquidityExpr =
-    "case when e.liquidity >= 9e18 then null else e.liquidity end";
+    "case when e.liquidity >= 9e16 then null else e.liquidity end";
 
   if (inputs.venues?.length) {
     eventWhere.push(`lower(e.venue) = ANY(${add(inputs.venues)}::text[])`);
@@ -192,7 +192,7 @@ export async function fetchFeedMarkets(
 ): Promise<FeedMarketRow[]> {
   const { params, add } = createParamBuilder();
   const safeEventLiquidityExpr =
-    "case when e.liquidity >= 9e18 then null else e.liquidity end";
+    "case when e.liquidity >= 9e16 then null else e.liquidity end";
 
   const eventIdsParam = add(eventIds);
   const nowParam = add(inputs.nowParam);
@@ -517,5 +517,158 @@ export async function fetchEventDetails(
   `;
 
   const { rows } = await pool.query<EventDetailsRow>(eventSql, [eventId]);
+  return rows;
+}
+
+export type MarketByTokenRow = {
+  token_id: string;
+  side: string | null;
+  market_id: string;
+  venue: string;
+  venue_market_id: string;
+  market_title: string | null;
+  market_description: string | null;
+  market_type: string | null;
+  market_status: string | null;
+  open_time: unknown;
+  close_time: unknown;
+  expiration_time: unknown;
+  volume_24h: unknown;
+  volume_total: unknown;
+  open_interest: unknown;
+  liquidity: unknown;
+  best_bid: unknown;
+  best_ask: unknown;
+  last_price: unknown;
+  outcomes: string | null;
+  token_yes: string | null;
+  token_no: string | null;
+  clob_token_ids: string | null;
+  condition_id: string | null;
+  market_ledger: string | null;
+  settlement_mint: string | null;
+  is_initialized: boolean | null;
+  redemption_status: string | null;
+  slug: string | null;
+  market_category: string | null;
+  market_image: string | null;
+  market_icon: string | null;
+  created_at: unknown;
+  updated_at: unknown;
+  event_id: string | null;
+  event_venue: string | null;
+  venue_event_id: string | null;
+  event_title: string | null;
+  event_description: string | null;
+  event_category: string | null;
+  event_status: string | null;
+  start_date: unknown;
+  end_date: unknown;
+  event_volume_total: unknown;
+  event_volume_24h: unknown;
+  event_liquidity: unknown;
+  event_open_interest: unknown;
+  event_slug: string | null;
+  event_image: string | null;
+  event_icon: string | null;
+};
+
+export async function fetchMarketsByTokenIds(
+  pool: Pool,
+  inputs: { tokenIds: string[]; venue?: string },
+): Promise<MarketByTokenRow[]> {
+  if (inputs.tokenIds.length === 0) return [];
+
+  const params: PgParams = [inputs.tokenIds];
+  let venueClause = "";
+  if (inputs.venue) {
+    params.push(inputs.venue);
+    venueClause = `and m.venue = $${params.length}`;
+  }
+
+  const sql = `
+    with token_matches as (
+      select
+        ut.token_id,
+        ut.side,
+        ut.market_id
+      from unified_tokens ut
+      where ut.token_id = any($1::text[])
+
+      union
+
+      select
+        token_map.token_id,
+        case when token_map.ordinality = 1 then 'YES' else 'NO' end as side,
+        m.id as market_id
+      from unified_markets m
+      cross join lateral (
+        select elem.token_id, elem.ordinality
+        from jsonb_array_elements_text(m.clob_token_ids::jsonb)
+          with ordinality as elem(token_id, ordinality)
+        where elem.token_id = any($1::text[])
+      ) token_map
+      where m.venue = 'polymarket'
+        and m.clob_token_ids is not null
+    )
+    select
+      tm.token_id,
+      tm.side,
+      m.id as market_id,
+      m.venue,
+      m.venue_market_id,
+      m.title as market_title,
+      m.description as market_description,
+      m.market_type,
+      m.status as market_status,
+      m.open_time,
+      m.close_time,
+      m.expiration_time,
+      m.volume_24h,
+      m.volume_total,
+      m.open_interest,
+      m.liquidity,
+      m.best_bid,
+      m.best_ask,
+      m.last_price,
+      m.outcomes,
+      m.token_yes,
+      m.token_no,
+      m.clob_token_ids,
+      m.condition_id,
+      m.market_ledger,
+      m.settlement_mint,
+      m.is_initialized,
+      m.redemption_status,
+      m.slug,
+      m.category as market_category,
+      m.image as market_image,
+      m.icon as market_icon,
+      m.created_at,
+      m.updated_at,
+      e.id as event_id,
+      e.venue as event_venue,
+      e.venue_event_id,
+      e.title as event_title,
+      e.description as event_description,
+      e.category as event_category,
+      e.status as event_status,
+      e.start_date,
+      e.end_date,
+      e.volume_total as event_volume_total,
+      e.volume_24h as event_volume_24h,
+      e.liquidity as event_liquidity,
+      e.open_interest as event_open_interest,
+      e.slug as event_slug,
+      e.image as event_image,
+      e.icon as event_icon
+    from token_matches tm
+    join unified_markets m on m.id = tm.market_id
+    left join unified_events e on e.id = m.event_id
+    ${venueClause}
+    order by array_position($1::text[], tm.token_id)
+  `;
+
+  const { rows } = await pool.query<MarketByTokenRow>(sql, params);
   return rows;
 }

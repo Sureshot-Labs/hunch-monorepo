@@ -141,7 +141,8 @@ export const env = {
     process.env.POLYMARKET_NEG_RISK_EXCHANGE_ADDRESS?.trim() ||
     "0xC5d563A36AE78145C45a50134d48A1215220f80a",
   polymarketNegRiskAdapterAddress:
-    process.env.POLYMARKET_NEG_RISK_ADAPTER_ADDRESS?.trim() || "",
+    process.env.POLYMARKET_NEG_RISK_ADAPTER_ADDRESS?.trim() ||
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
   polymarketConditionalTokensAddress:
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",

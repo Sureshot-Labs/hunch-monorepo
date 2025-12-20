@@ -4,10 +4,15 @@ import type { z } from "zod";
 import { KalshiEvent, KalshiMarket } from "./types";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
+const KALSHI_U64_SENTINEL_MIN = 9e18;
+
 const n = (v: unknown): number | null => {
   if (v == null) return null;
   const x = typeof v === "string" ? parseFloat(v) : (v as number);
-  return Number.isFinite(x) ? (x as number) : null;
+  if (!Number.isFinite(x)) return null;
+  if (x < 0) return null;
+  if (x >= KALSHI_U64_SENTINEL_MIN) return null;
+  return x as number;
 };
 const parseDate = (s?: string | null) => (s ? new Date(s) : null);
 const minDate = (ds: Array<Date | null>): Date | null => {

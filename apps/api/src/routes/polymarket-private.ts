@@ -38,7 +38,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const POLY_DECIMALS = 6;
 const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
 const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
-const MARKET_SHARES_MICRO_STEP = 10n; // 5 decimals in 6-decimal share units
+const MARKET_SHARES_MICRO_STEP = 100n; // 4 decimals in 6-decimal share units
 const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
 
 type PolymarketSide = "BUY" | "SELL";
@@ -1009,6 +1009,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           allowanceNegRisk,
           okExchange,
           okNegRisk,
+          okNegRiskAdapter,
           allowanceNegRiskAdapter,
           allowanceFeeCollector,
           feeCollectorNonce,
@@ -1052,6 +1053,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               owner: funder,
               operator: env.polymarketNegRiskExchangeAddress,
             }),
+            negRiskAdapterAddress
+              ? fetchErc1155IsApprovedForAll({
+                  rpcUrl: env.polygonRpcUrl,
+                  timeoutMs: env.polygonRpcTimeoutMs,
+                  contractAddress: env.polymarketConditionalTokensAddress,
+                  owner: funder,
+                  operator: negRiskAdapterAddress,
+                })
+              : Promise.resolve(null),
             negRiskAdapterAddress
               ? fetchErc20Allowance({
                   rpcUrl: env.polygonRpcUrl,
@@ -1140,6 +1150,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             isApprovedForAll: {
               exchange: okExchange,
               negRiskExchange: okNegRisk,
+              ...(negRiskAdapterAddress
+                ? { negRiskAdapter: okNegRiskAdapter }
+                : {}),
             },
           },
           ...(feeCollectorAddress

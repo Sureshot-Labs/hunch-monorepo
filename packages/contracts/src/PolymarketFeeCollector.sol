@@ -41,8 +41,11 @@ contract PolymarketFeeCollector {
     /// @notice Address receiving collected fees
     address public immutable treasury;
 
-    /// @notice Per-signer nonce for FeeAuth messages
+    /// @notice Deprecated global nonce (unused). Kept for interface compatibility.
     mapping(address => uint256) public nonces;
+
+    /// @notice Prevent fee auth replay per orderHash (one-time use per order)
+    mapping(bytes32 => bool) public feeAuthUsed;
 
     /// @notice For each orderHash, how much makerAmount has already been charged
     mapping(bytes32 => uint256) public makerFilledCharged;
@@ -56,7 +59,7 @@ contract PolymarketFeeCollector {
         address exchange; // Polymarket exchange for the order
         bytes32 orderHash; // exchange.hashOrder(order)
         uint256 feeBps; // exact fee bps for this order
-        uint256 nonce; // must match nonces[signer]
+        uint256 nonce; // included in signature, not enforced on-chain
         uint256 deadline; // unix timestamp
     }
 
@@ -74,7 +77,7 @@ contract PolymarketFeeCollector {
     event Unpaused(address indexed by);
 
     error Expired();
-    error BadNonce();
+    error FeeAuthUsed();
     error InvalidFeeBps();
     error BadSignature();
     error NothingToCharge();
@@ -153,7 +156,6 @@ contract PolymarketFeeCollector {
     ) external {
         if (paused) revert PausedError();
         if (block.timestamp > auth.deadline) revert Expired();
-        if (auth.nonce != nonces[auth.signer]) revert BadNonce();
         if (auth.feeBps > MAX_FEE_BPS) revert InvalidFeeBps();
         if (!allowedExchanges[auth.exchange]) revert ExchangeNotAllowed();
 
@@ -165,9 +167,7 @@ contract PolymarketFeeCollector {
         if (auth.vault != order.maker) revert ParamMismatch();
 
         if (!_isValidSignature(auth.signer, hashFeeAuth(auth), authSig)) revert BadSignature();
-
-        // Consume nonce to prevent replay.
-        nonces[auth.signer]++;
+        if (feeAuthUsed[orderHash]) revert FeeAuthUsed();
 
         IPolymarketExchange.OrderStatus memory st = exchange.getOrderStatus(orderHash);
 
@@ -195,6 +195,8 @@ contract PolymarketFeeCollector {
 
         uint256 feeAmount = (collateralDelta * auth.feeBps) / MAX_FEE_BPS;
         if (feeAmount == 0) revert NothingToCharge();
+
+        feeAuthUsed[orderHash] = true;
 
         SafeERC20.safeTransferFrom(COLLATERAL, order.maker, treasury, feeAmount);
 

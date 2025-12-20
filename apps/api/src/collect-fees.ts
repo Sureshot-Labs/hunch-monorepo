@@ -48,6 +48,7 @@ type ScriptOptions = {
   maxAttempts: number;
   orderHash?: string;
   includeExpired: boolean;
+  archiveLegacy: boolean;
 };
 
 const DEFAULT_LIMIT = 25;
@@ -75,6 +76,7 @@ function parseArgs(): ScriptOptions {
   return {
     dryRun: hasFlag("--dry-run"),
     includeExpired: hasFlag("--include-expired"),
+    archiveLegacy: hasFlag("--archive-legacy"),
     limit: Number.isFinite(limit) ? Math.trunc(limit) : DEFAULT_LIMIT,
     maxAttempts: Number.isFinite(maxAttempts)
       ? Math.trunc(maxAttempts)
@@ -254,7 +256,10 @@ async function fetchPendingOrders(options: ScriptOptions): Promise<FeeOrderRow[]
       fee_collect_attempts
     FROM orders
     ${whereClause}
-    ORDER BY posted_at DESC NULLS LAST
+    ORDER BY
+      (fee_auth->>'signer') ASC NULLS LAST,
+      (fee_auth->>'nonce')::numeric ASC NULLS LAST,
+      posted_at ASC NULLS LAST
     LIMIT $${params.length}
   `;
 
@@ -292,6 +297,24 @@ async function updateFeeError(
       SET
         fee_collect_error = $1,
         fee_collect_attempts = $2
+      WHERE id = $3
+    `,
+    [truncateError(error), attempts, id],
+  );
+}
+
+async function archiveFeeError(
+  id: string,
+  attempts: number,
+  error: string,
+): Promise<void> {
+  await pool.query(
+    `
+      UPDATE orders
+      SET
+        fee_collect_error = $1,
+        fee_collect_attempts = $2,
+        fee_collected_at = now()
       WHERE id = $3
     `,
     [truncateError(error), attempts, id],
@@ -373,7 +396,19 @@ async function main() {
       const reason = `Fee collector address mismatch (row=${row.fee_collector_address}, expected=${feeCollectorAddress})`;
       console.log(`Skip ${label}: ${reason}`);
       skippedError += 1;
-      await updateFeeError(row.id, attempts, "Fee collector address mismatch");
+      if (options.archiveLegacy) {
+        await archiveFeeError(
+          row.id,
+          attempts,
+          "Fee collector address mismatch (archived)",
+        );
+      } else {
+        await updateFeeError(
+          row.id,
+          attempts,
+          "Fee collector address mismatch",
+        );
+      }
       continue;
     }
 

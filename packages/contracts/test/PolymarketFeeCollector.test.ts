@@ -1,10 +1,12 @@
 import { expect } from "chai";
 import { ethers, artifacts, network } from "hardhat";
+import type { TypedDataDomain, TypedDataField } from "ethers";
 import type { PolymarketFeeCollector } from "../typechain-types";
 
 // Canonical Polymarket addresses on Polygon (used for deterministic mock injection)
 const EXCHANGE_ADDR = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 const USDC_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+type HardhatSigner = Awaited<ReturnType<typeof ethers.getSigners>>[number];
 
 async function setCodeAt(address: string, contractName: string) {
   const artifact = await artifacts.readArtifact(contractName);
@@ -15,41 +17,56 @@ async function setCodeAt(address: string, contractName: string) {
   return ethers.getContractAt(contractName, address);
 }
 
-function buildOrder(
-  overrides: Partial<{
-    salt: bigint;
-    maker: string;
-    signer: string;
-    taker: string;
-    tokenId: bigint;
-    makerAmount: bigint;
-    takerAmount: bigint;
-    expiration: bigint;
-    nonce: bigint;
-    feeRateBps: bigint;
-    side: number;
-    signatureType: number;
-    signature: string;
-  }> = {}
-) {
+type OrderOverrides = {
+  maker: string;
+  signer: string;
+} & Partial<{
+  salt: bigint;
+  taker: string;
+  tokenId: bigint;
+  makerAmount: bigint;
+  takerAmount: bigint;
+  expiration: bigint;
+  nonce: bigint;
+  feeRateBps: bigint;
+  side: number;
+  signatureType: number;
+  signature: string;
+}>;
+
+function buildOrder({
+  maker,
+  signer,
+  salt,
+  taker,
+  tokenId,
+  makerAmount,
+  takerAmount,
+  expiration,
+  nonce,
+  feeRateBps,
+  side,
+  signatureType,
+  signature,
+}: OrderOverrides) {
   return {
-    salt: overrides.salt ?? 1n,
-    maker: overrides.maker!,
-    signer: overrides.signer!,
-    taker: overrides.taker ?? ethers.ZeroAddress,
-    tokenId: overrides.tokenId ?? 123n,
-    makerAmount: overrides.makerAmount ?? ethers.parseUnits("100", 6),
-    takerAmount: overrides.takerAmount ?? ethers.parseUnits("50", 6),
-    expiration: overrides.expiration ?? BigInt(Math.floor(Date.now() / 1000) + 3600),
-    nonce: overrides.nonce ?? 0n,
-    feeRateBps: overrides.feeRateBps ?? 0n,
-    side: overrides.side ?? 0,
-    signatureType: overrides.signatureType ?? 0,
-    signature: overrides.signature ?? "0x",
+    salt: salt ?? 1n,
+    maker,
+    signer,
+    taker: taker ?? ethers.ZeroAddress,
+    tokenId: tokenId ?? 123n,
+    makerAmount: makerAmount ?? ethers.parseUnits("100", 6),
+    takerAmount: takerAmount ?? ethers.parseUnits("50", 6),
+    expiration: expiration ?? BigInt(Math.floor(Date.now() / 1000) + 3600),
+    nonce: nonce ?? 0n,
+    feeRateBps: feeRateBps ?? 0n,
+    side: side ?? 0,
+    signatureType: signatureType ?? 0,
+    signature: signature ?? "0x",
   };
 }
 
-function buildDomain(chainId: number, collector: string) {
+function buildDomain(chainId: number, collector: string): TypedDataDomain {
   return {
     name: "Polymarket Aggregator FeeCollector",
     version: "2",
@@ -58,7 +75,7 @@ function buildDomain(chainId: number, collector: string) {
   };
 }
 
-const feeAuthTypes = {
+const feeAuthTypes: Record<string, TypedDataField[]> = {
   FeeAuth: [
     { name: "signer", type: "address" },
     { name: "vault", type: "address" },
@@ -68,13 +85,13 @@ const feeAuthTypes = {
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
   ],
-} as const;
+};
 
 describe("PolymarketFeeCollector (v2)", () => {
-  let treasury: any;
-  let signer: any;
-  let vault: any;
-  let deployer: any;
+  let treasury: HardhatSigner;
+  let signer: HardhatSigner;
+  let vault: HardhatSigner;
+  let deployer: HardhatSigner;
   let feeCollector: PolymarketFeeCollector;
 
   beforeEach(async () => {
@@ -103,7 +120,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     deadline: bigint;
     exchange?: string;
     authSignerAddress?: string;
-    signingWallet?: any;
+    signingWallet?: HardhatSigner;
   }) {
     const networkData = await ethers.provider.getNetwork();
     const domain = buildDomain(
@@ -121,11 +138,7 @@ describe("PolymarketFeeCollector (v2)", () => {
       nonce: params.nonce,
       deadline: params.deadline,
     };
-    const sig = await signingWallet.signTypedData(
-      domain,
-      feeAuthTypes as any,
-      feeAuth
-    );
+    const sig = await signingWallet.signTypedData(domain, feeAuthTypes, feeAuth);
     return { feeAuth, sig };
   }
 
@@ -144,7 +157,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -164,13 +177,13 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth: feeAuth2, sig: sig2 } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
     await expect(feeCollector.collectFee(order, feeAuth2, sig2)).to.be.revertedWithCustomError(
       feeCollector,
-      "NothingToCharge"
+      "FeeAuthUsed"
     );
   });
 
@@ -196,7 +209,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -222,7 +235,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 10_001,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -246,7 +259,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) - 1),
     });
 
@@ -256,7 +269,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     );
   });
 
-  it("reverts on BadNonce reuse", async () => {
+  it("reverts on FeeAuth reuse", async () => {
     const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
     const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
     const orderHash = await mockExchange.hashOrder(order);
@@ -267,11 +280,10 @@ describe("PolymarketFeeCollector (v2)", () => {
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
     await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
-    const nonce = await feeCollector.nonces(signer.address);
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce,
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -279,7 +291,7 @@ describe("PolymarketFeeCollector (v2)", () => {
 
     await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
       feeCollector,
-      "BadNonce"
+      "FeeAuthUsed"
     );
   });
 
@@ -297,7 +309,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -331,7 +343,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
     feeAuth.vault = deployer.address;
@@ -356,7 +368,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
@@ -381,7 +393,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
       exchange: deployer.address,
     });
@@ -417,7 +429,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(contractSignerAddress),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
       authSignerAddress: contractSignerAddress,
       signingWallet: signer,
@@ -440,7 +452,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
       feeBps: 50,
-      nonce: await feeCollector.nonces(signer.address),
+      nonce: 0n,
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 

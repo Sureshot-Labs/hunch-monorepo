@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { BuilderSigner } from "@polymarket/builder-signing-sdk";
+import { z as zod } from "zod";
 import {
   AuthService,
   WalletAlreadyExistsError,
@@ -545,6 +546,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       schema: {
         response: {
           200: polymarketRelayerStatusResponseSchema,
+          401: zod.object({ error: zod.string() }),
         },
       },
     },
