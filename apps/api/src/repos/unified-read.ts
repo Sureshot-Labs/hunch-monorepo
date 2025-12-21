@@ -337,6 +337,10 @@ export type MarketDetailsRow = {
   pm_order_min_size: unknown;
   pm_accepting_orders: boolean | null;
   pm_neg_risk: boolean | null;
+  pm_neg_risk_market_id: string | null;
+  pm_neg_risk_parent_condition_id: string | null;
+  pm_neg_risk_request_id: string | null;
+  pm_question_id: string | null;
   pm_clob_token_ids: string | null;
   slug: string | null;
   market_category: string | null;
@@ -390,6 +394,10 @@ export async function fetchMarketDetails(
       pm.order_min_size as pm_order_min_size,
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
+      coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID') as pm_neg_risk_market_id,
+      pm_parent.condition_id as pm_neg_risk_parent_condition_id,
+      pm.neg_risk_request_id as pm_neg_risk_request_id,
+      pm.question_id as pm_question_id,
       pm.clob_token_ids as pm_clob_token_ids,
       m.slug,
       m.category as market_category,
@@ -401,6 +409,8 @@ export async function fetchMarketDetails(
     JOIN unified_markets m ON m.event_id = e.id
     LEFT JOIN polymarket_markets pm
       ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
+    LEFT JOIN polymarket_markets pm_parent
+      ON pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')
     WHERE m.id = $1 OR m.venue_market_id = $1
   `;
 
@@ -435,6 +445,11 @@ export type EventDetailsRow = {
   market_type: string | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
+  pm_neg_risk: boolean | null;
+  pm_neg_risk_market_id: string | null;
+  pm_neg_risk_parent_condition_id: string | null;
+  pm_neg_risk_request_id: string | null;
+  pm_question_id: string | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -491,6 +506,11 @@ export async function fetchEventDetails(
       m.market_type,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
+      pm.neg_risk as pm_neg_risk,
+      coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID') as pm_neg_risk_market_id,
+      pm_parent.condition_id as pm_neg_risk_parent_condition_id,
+      pm.neg_risk_request_id as pm_neg_risk_request_id,
+      pm.question_id as pm_question_id,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -516,6 +536,8 @@ export async function fetchEventDetails(
     LEFT JOIN unified_markets m ON m.event_id = e.id
     LEFT JOIN polymarket_markets pm
       ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
+    LEFT JOIN polymarket_markets pm_parent
+      ON pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')
     WHERE e.id = $1 OR e.venue_event_id = $1
     ORDER BY m.volume_24h DESC NULLS LAST, m.liquidity DESC NULLS LAST, m.venue_market_id
   `;
@@ -535,6 +557,11 @@ export type MarketByTokenRow = {
   market_type: string | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
+  pm_neg_risk: boolean | null;
+  pm_neg_risk_market_id: string | null;
+  pm_neg_risk_parent_condition_id: string | null;
+  pm_neg_risk_request_id: string | null;
+  pm_question_id: string | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -627,6 +654,11 @@ export async function fetchMarketsByTokenIds(
       m.market_type,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
+      pm.neg_risk as pm_neg_risk,
+      coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID') as pm_neg_risk_market_id,
+      pm_parent.condition_id as pm_neg_risk_parent_condition_id,
+      pm.neg_risk_request_id as pm_neg_risk_request_id,
+      pm.question_id as pm_question_id,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -672,6 +704,8 @@ export async function fetchMarketsByTokenIds(
     join unified_markets m on m.id = tm.market_id
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
+    left join polymarket_markets pm_parent
+      on pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')
     left join unified_events e on e.id = m.event_id
     ${venueClause}
     order by array_position($1::text[], tm.token_id)

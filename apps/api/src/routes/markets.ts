@@ -73,7 +73,12 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
 
           return {
             tokenId: row.token_id,
-            side: row.side,
+            side:
+              row.token_id === tokens.yes
+                ? "YES"
+                : row.token_id === tokens.no
+                  ? "NO"
+                  : row.side,
             market: {
               marketId: row.market_id,
               venue: row.venue,
@@ -97,11 +102,17 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               outcomes,
               tokens,
               conditionId: row.condition_id || null,
+              questionId: row.pm_question_id || null,
               marketSlug: row.slug || null,
               marketImage: row.market_image || null,
               marketIcon: row.market_icon || null,
               redemptionStatus: row.redemption_status || null,
               acceptingOrders,
+              negRisk: row.pm_neg_risk != null ? Boolean(row.pm_neg_risk) : null,
+              negRiskMarketId: row.pm_neg_risk_market_id || null,
+              negRiskParentConditionId:
+                row.pm_neg_risk_parent_condition_id || null,
+              negRiskRequestId: row.pm_neg_risk_request_id || null,
               event: {
                 eventId: row.event_id,
                 venue: row.event_venue,
@@ -274,6 +285,10 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               : null,
           negRisk:
             market.pm_neg_risk != null ? Boolean(market.pm_neg_risk) : null,
+          negRiskMarketId: market.pm_neg_risk_market_id || null,
+          negRiskParentConditionId:
+            market.pm_neg_risk_parent_condition_id || null,
+          negRiskRequestId: market.pm_neg_risk_request_id || null,
           marketLedger: market.market_ledger ?? null,
           settlementMint: market.settlement_mint ?? null,
           isInitialized:
@@ -282,6 +297,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               : null,
           redemptionStatus: market.redemption_status ?? null,
           conditionId: market.condition_id || null,
+          questionId: market.pm_question_id || null,
           category: market.market_category || null,
           marketSlug: market.slug || null,
           marketImage: market.market_image || null,

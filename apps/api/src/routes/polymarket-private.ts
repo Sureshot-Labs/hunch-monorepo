@@ -1111,6 +1111,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           funderUpdatedAt: credsInfo?.funderUpdatedAt ?? null,
           funderIsContract: isContract,
           rpcUrl: env.polygonRpcUrl,
+          negRiskAdapterAddress: negRiskAdapterAddress || null,
           usdc: {
             tokenAddress: env.polymarketUsdcAddress,
             decimals: 6,

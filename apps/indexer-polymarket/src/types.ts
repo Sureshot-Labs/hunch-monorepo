@@ -139,6 +139,7 @@ export const PolymarketMarket = z
     customLiveness: num.optional().nullable(),
     acceptingOrders: z.boolean().optional(),
     negRisk: z.boolean().optional(),
+    negRiskMarketID: z.string().optional().nullable(),
     negRiskRequestID: z.string().optional().nullable(),
     ready: z.boolean().optional(),
     funded: z.boolean().optional(),

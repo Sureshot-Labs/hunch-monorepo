@@ -204,6 +204,7 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     custom_liveness: n(m.customLiveness),
     accepting_orders: m.acceptingOrders ?? true,
     neg_risk: m.negRisk ?? false,
+    neg_risk_market_id: m.negRiskMarketID ?? null,
     neg_risk_request_id: m.negRiskRequestID,
     ready: m.ready ?? false,
     funded: m.funded ?? false,
