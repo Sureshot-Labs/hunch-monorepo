@@ -46,6 +46,7 @@ export interface OrderFill {
 export interface Position {
   id: string;
   userId: string;
+  walletAddress: string | null;
   venue: "polymarket" | "kalshi" | "limitless";
   tokenId: string;
 

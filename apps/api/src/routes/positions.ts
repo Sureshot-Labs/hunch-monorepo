@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { createAuthMiddleware } from "../auth.js";
+import { AuthService, createAuthMiddleware } from "../auth.js";
+import { env } from "../env.js";
 import { pool } from "../db.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import {
@@ -8,6 +9,7 @@ import {
   fetchPositionsForUserWalletByTokenIds,
 } from "../repos/positions-repo.js";
 import { syncPositionsForUserWallet } from "../services/positions-sync.js";
+import { getRedis } from "../redis.js";
 import {
   positionsByTokenQuerySchema,
   positionsQuerySchema,
@@ -15,6 +17,30 @@ import {
 
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  const resolveWalletAddresses = async (
+    userId: string,
+    walletAddress: string | undefined,
+    requestedWallets: string[] | undefined,
+  ): Promise<string[]> => {
+    if (requestedWallets && requestedWallets.length) {
+      const wallets = await AuthService.getUserWallets(userId);
+      const walletMap = new Map(
+        wallets.map((wallet) => [
+          wallet.walletAddress.toLowerCase(),
+          wallet.walletAddress,
+        ]),
+      );
+      const resolved = requestedWallets
+        .map((address) => address.trim().toLowerCase())
+        .map((address) => walletMap.get(address))
+        .filter((address): address is string => Boolean(address));
+      return Array.from(new Set(resolved));
+    }
+
+    if (!walletAddress) return [];
+    return [walletAddress];
+  };
 
   /**
    * GET /positions
@@ -29,7 +55,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
@@ -38,9 +64,19 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const venue = query.venue;
 
       try {
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
+          walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to query." });
+        }
+
         const positions = await fetchPositionsForUserWallet(pool, {
           userId: user.id,
-          walletAddress,
+          walletAddresses,
           venue,
         });
 
@@ -80,7 +116,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
@@ -88,9 +124,19 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       try {
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
+          walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to query." });
+        }
+
         const positions = await fetchPositionsForUserWalletByTokenIds(pool, {
           userId: user.id,
-          walletAddress,
+          walletAddresses,
           tokenIds: query.tokenIds,
           venue: query.venue,
         });
@@ -139,16 +185,104 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       try {
-        const result = await syncPositionsForUserWallet(pool, {
-          userId: user.id,
+        if (!query.wallets || query.wallets.length === 0) {
+          const result = await syncPositionsForUserWallet(pool, {
+            userId: user.id,
+            walletAddress,
+            venue: query.venue,
+          });
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            message: "Positions synced",
+            ...result,
+          });
+        }
+
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
           walletAddress,
-          venue: query.venue,
-        });
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to sync." });
+        }
+
+        const cooldownSec = Math.max(0, env.positionsSyncCooldownSec);
+        const r = cooldownSec > 0 ? await getRedis() : null;
+
+        const results: Array<{
+          walletAddress: string;
+          venue: string | null;
+          status: "ok" | "skipped" | "error";
+          heldTokens?: number;
+          knownTokens?: number;
+          upsertedPositions?: number;
+          flattenedPositions?: number;
+          skippedReason?: string;
+          error?: string;
+        }> = [];
+
+        let synced = 0;
+        let skipped = 0;
+        let errors = 0;
+
+        for (const wallet of walletAddresses) {
+          if (r && cooldownSec > 0) {
+            const key = `positions:sync:${user.id}:${wallet}:${
+              query.venue ?? "all"
+            }`;
+            const locked = await r.set(key, Date.now().toString(), {
+              NX: true,
+              EX: cooldownSec,
+            });
+            if (!locked) {
+              skipped += 1;
+              results.push({
+                walletAddress: wallet,
+                venue: query.venue ?? null,
+                status: "skipped",
+                skippedReason: "cooldown",
+              });
+              continue;
+            }
+          }
+
+          try {
+            const result = await syncPositionsForUserWallet(pool, {
+              userId: user.id,
+              walletAddress: wallet,
+              venue: query.venue,
+            });
+            synced += 1;
+            results.push({
+              walletAddress: wallet,
+              venue: result.venue,
+              status: "ok",
+              heldTokens: result.heldTokens,
+              knownTokens: result.knownTokens,
+              upsertedPositions: result.upsertedPositions,
+              flattenedPositions: result.flattenedPositions,
+            });
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Unknown error";
+            errors += 1;
+            results.push({
+              walletAddress: wallet,
+              venue: query.venue ?? null,
+              status: "error",
+              error: message,
+            });
+          }
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           message: "Positions synced",
-          ...result,
+          results,
+          summary: { synced, skipped, errors },
         });
       } catch (error) {
         const message =

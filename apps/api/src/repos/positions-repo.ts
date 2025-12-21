@@ -32,6 +32,7 @@ function mapPositionRow(row: PositionRow): Position {
   return {
     id: row.id,
     userId: row.user_id,
+    walletAddress: row.wallet_address,
     venue: row.venue as Position["venue"],
     tokenId: row.token_id,
     side: row.side as Position["side"],
@@ -51,13 +52,15 @@ export async function fetchPositionsForUserWallet(
   pool: Pool,
   inputs: {
     userId: string;
-    walletAddress: string;
+    walletAddresses: string[];
     venue?: string;
   },
 ): Promise<Position[]> {
+  if (inputs.walletAddresses.length === 0) return [];
+
   let whereClause =
-    "where user_id = $1 and (wallet_address is null or wallet_address = $2)";
-  const params: PgParams = [inputs.userId, inputs.walletAddress];
+    "where user_id = $1 and (wallet_address is null or wallet_address = any($2::text[]))";
+  const params: PgParams = [inputs.userId, inputs.walletAddresses];
   let paramCount = 2;
 
   if (inputs.venue) {
@@ -119,16 +122,17 @@ export async function fetchPositionsForUserWalletByTokenIds(
   pool: Pool,
   inputs: {
     userId: string;
-    walletAddress: string;
+    walletAddresses: string[];
     tokenIds: string[];
     venue?: string;
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
+  if (inputs.walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and (wallet_address is null or wallet_address = $2)";
-  const params: PgParams = [inputs.userId, inputs.walletAddress];
+    "where user_id = $1 and (wallet_address is null or wallet_address = any($2::text[]))";
+  const params: PgParams = [inputs.userId, inputs.walletAddresses];
   let paramCount = 2;
 
   paramCount += 1;
