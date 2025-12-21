@@ -434,7 +434,7 @@ export type EventDetailsRow = {
   market_description: string | null;
   market_type: string | null;
   market_status: string | null;
-  accepting_orders: boolean | null;
+  pm_accepting_orders: boolean | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -490,7 +490,7 @@ export async function fetchEventDetails(
       m.description as market_description,
       m.market_type,
       m.status as market_status,
-      m.accepting_orders,
+      pm.accepting_orders as pm_accepting_orders,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -514,6 +514,8 @@ export async function fetchEventDetails(
       m.updated_at as market_updated_at
     FROM unified_events e
     LEFT JOIN unified_markets m ON m.event_id = e.id
+    LEFT JOIN polymarket_markets pm
+      ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
     WHERE e.id = $1 OR e.venue_event_id = $1
     ORDER BY m.volume_24h DESC NULLS LAST, m.liquidity DESC NULLS LAST, m.venue_market_id
   `;

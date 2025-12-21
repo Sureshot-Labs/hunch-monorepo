@@ -140,11 +140,13 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
           // Determine if market is accepting orders
           const acceptingOrders =
-            row.market_status === "ACTIVE" &&
-            (row.expiration_time === null ||
-              new Date(String(row.expiration_time)) > new Date()) &&
-            (row.close_time === null ||
-              new Date(String(row.close_time)) > new Date());
+            row.pm_accepting_orders != null
+              ? Boolean(row.pm_accepting_orders)
+              : row.market_status === "ACTIVE" &&
+                (row.expiration_time === null ||
+                  new Date(String(row.expiration_time)) > new Date()) &&
+                (row.close_time === null ||
+                  new Date(String(row.close_time)) > new Date());
 
           event.markets.push({
             marketId: row.market_id,
