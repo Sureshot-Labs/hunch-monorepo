@@ -182,6 +182,14 @@ const requireInitializedSetting = parseOptionalBool(
 );
 const requireInitialized = requireInitializedSetting ?? dflowEnv === "prod";
 
+const dflowWsAllSetting = parseOptionalBool(process.env.DFLOW_WS_ALL);
+const dflowWsAll = dflowWsAllSetting ?? false;
+
+const dflowWsLogEverySec = clampInt(
+  parseOptionalInt(process.env.DFLOW_WS_LOG_EVERY_SEC),
+  { min: 0, max: 3600, fallback: 0 },
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -217,6 +225,8 @@ export const env = {
   isInitialized: isInitializedSetting,
   requireInitializedSetting,
   requireInitialized,
+  dflowWsAll,
+  dflowWsLogEverySec,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

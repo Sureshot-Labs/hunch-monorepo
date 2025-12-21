@@ -4,9 +4,11 @@ import {
   syncCatchUpFromCursor,
   syncHotMarketStatuses,
   syncHotWindow,
+  resolveHotTickersForWs,
 } from "./bootstrap";
 import { env } from "./env";
 import { log } from "./log";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
 
 let running = false;
 
@@ -16,6 +18,8 @@ async function periodicBootstrap() {
   try {
     await syncHotWindow();
     await syncHotMarketStatuses();
+    const tickers = await resolveHotTickersForWs();
+    updateMarketWSSubscriptions(tickers);
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -30,6 +34,8 @@ async function periodicBootstrap() {
 
 async function main() {
   await periodicBootstrap();
+  const tickers = await resolveHotTickersForWs();
+  startMarketWS(tickers);
 
   void syncCatchUpFromCursor().catch((e) => {
     if (isPgSetupIssue(e)) {

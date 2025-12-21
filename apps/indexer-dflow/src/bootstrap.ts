@@ -156,6 +156,36 @@ async function fetchPositionTokenIds(
   return rows.map((row) => row.token_id).filter(Boolean);
 }
 
+async function fetchHotTickers(): Promise<string[]> {
+  const hotTokenIds = await fetchHotTokenIds();
+  const positionTokenIds = await fetchPositionTokenIds();
+  const tokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<{ venue_market_id: string }>(
+    `
+      select distinct m.venue_market_id
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      where t.token_id = any($1::text[])
+        and t.token_id like 'sol:%'
+        and m.venue = 'kalshi'
+    `,
+    [tokenIds],
+  );
+
+  return rows
+    .map((row) => row.venue_market_id)
+    .filter((ticker): ticker is string => Boolean(ticker));
+}
+
+export async function resolveHotTickersForWs(): Promise<string[]> {
+  if (!env.dflowEnabled) return [];
+  await ensureRedis();
+  await pool.query("select 1");
+  return fetchHotTickers();
+}
+
 async function fetchMarketEventInfoByTickers(
   tickers: string[],
 ): Promise<Map<string, { eventId: string; eventTitle: string }>> {
