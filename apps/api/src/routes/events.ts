@@ -162,8 +162,18 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             openInterest:
               row.open_interest != null ? Number(row.open_interest) : 0,
             liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-            bestBid: row.best_bid != null ? Number(row.best_bid) : null,
-            bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+            bestBid:
+              row.best_bid_yes != null
+                ? Number(row.best_bid_yes)
+                : row.best_bid != null
+                  ? Number(row.best_bid)
+                  : null,
+            bestAsk:
+              row.best_ask_yes != null
+                ? Number(row.best_ask_yes)
+                : row.best_ask != null
+                  ? Number(row.best_ask)
+                  : null,
             lastPrice: row.last_price != null ? Number(row.last_price) : null,
             outcomes,
             tokens,
@@ -174,12 +184,34 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketIcon: row.market_icon || null,
             acceptingOrders,
             top: {
-              yesBid: row.best_bid != null ? Number(row.best_bid) : null,
-              yesAsk: row.best_ask != null ? Number(row.best_ask) : null,
+              yesBid:
+                row.best_bid_yes != null
+                  ? Number(row.best_bid_yes)
+                  : row.best_bid != null
+                    ? Number(row.best_bid)
+                    : null,
+              yesAsk:
+                row.best_ask_yes != null
+                  ? Number(row.best_ask_yes)
+                  : row.best_ask != null
+                    ? Number(row.best_ask)
+                    : null,
               noBid:
-                row.best_bid != null ? Number(1 - Number(row.best_bid)) : null,
+                row.best_bid_no != null
+                  ? Number(row.best_bid_no)
+                  : row.best_bid_yes != null
+                    ? Number(1 - Number(row.best_bid_yes))
+                    : row.best_bid != null
+                      ? Number(1 - Number(row.best_bid))
+                      : null,
               noAsk:
-                row.best_ask != null ? Number(1 - Number(row.best_ask)) : null,
+                row.best_ask_no != null
+                  ? Number(row.best_ask_no)
+                  : row.best_ask_yes != null
+                    ? Number(1 - Number(row.best_ask_yes))
+                    : row.best_ask != null
+                      ? Number(1 - Number(row.best_ask))
+                      : null,
             },
             openTime: row.open_time,
             closeTime: row.close_time,

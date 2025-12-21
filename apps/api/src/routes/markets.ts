@@ -96,8 +96,26 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               openInterest:
                 row.open_interest != null ? Number(row.open_interest) : 0,
               liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-              bestBid: row.best_bid != null ? Number(row.best_bid) : null,
-              bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+              bestBid:
+                row.best_bid_yes != null
+                  ? Number(row.best_bid_yes)
+                  : row.best_bid != null
+                    ? Number(row.best_bid)
+                    : null,
+              bestAsk:
+                row.best_ask_yes != null
+                  ? Number(row.best_ask_yes)
+                  : row.best_ask != null
+                    ? Number(row.best_ask)
+                    : null,
+              bestBidYes:
+                row.best_bid_yes != null ? Number(row.best_bid_yes) : null,
+              bestAskYes:
+                row.best_ask_yes != null ? Number(row.best_ask_yes) : null,
+              bestBidNo:
+                row.best_bid_no != null ? Number(row.best_bid_no) : null,
+              bestAskNo:
+                row.best_ask_no != null ? Number(row.best_ask_no) : null,
               lastPrice: row.last_price != null ? Number(row.last_price) : null,
               outcomes,
               tokens,
@@ -263,8 +281,26 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           expirationTime: market.expiration_time,
           volume24h: market.volume_24h != null ? Number(market.volume_24h) : 0,
           liquidity: market.liquidity != null ? Number(market.liquidity) : 0,
-          bestBid: market.best_bid != null ? Number(market.best_bid) : null,
-          bestAsk: market.best_ask != null ? Number(market.best_ask) : null,
+          bestBid:
+            market.best_bid_yes != null
+              ? Number(market.best_bid_yes)
+              : market.best_bid != null
+                ? Number(market.best_bid)
+                : null,
+          bestAsk:
+            market.best_ask_yes != null
+              ? Number(market.best_ask_yes)
+              : market.best_ask != null
+                ? Number(market.best_ask)
+                : null,
+          bestBidYes:
+            market.best_bid_yes != null ? Number(market.best_bid_yes) : null,
+          bestAskYes:
+            market.best_ask_yes != null ? Number(market.best_ask_yes) : null,
+          bestBidNo:
+            market.best_bid_no != null ? Number(market.best_bid_no) : null,
+          bestAskNo:
+            market.best_ask_no != null ? Number(market.best_ask_no) : null,
           lastPrice:
             market.last_price != null ? Number(market.last_price) : null,
           outcomes,

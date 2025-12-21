@@ -173,7 +173,12 @@ export type FeedMarketRow = {
   liquidity: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
   last_price: unknown;
+  outcomes: string | null;
   token_yes: unknown;
   token_no: unknown;
   clob_token_ids: unknown;
@@ -279,9 +284,14 @@ export async function fetchFeedMarkets(
       m.liquidity,
       m.best_bid,
       m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
       m.last_price,
-      m.token_yes,
-      m.token_no,
+      m.outcomes,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -291,6 +301,33 @@ export async function fetchFeedMarkets(
       m.updated_at as last_update
     from unified_events e
     join unified_markets m on m.event_id = e.id
+    cross join lateral (
+      select
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>0)
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>1)
+          else m.token_no
+        end as token_no
+    ) mt
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     where ${marketWhere.join(" and ")}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
@@ -323,6 +360,10 @@ export type MarketDetailsRow = {
   liquidity: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: string | null;
@@ -380,10 +421,14 @@ export async function fetchMarketDetails(
       m.liquidity,
       m.best_bid,
       m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
       m.last_price,
       m.outcomes,
-      m.token_yes,
-      m.token_no,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.market_ledger,
@@ -407,6 +452,33 @@ export async function fetchMarketDetails(
       m.updated_at
     FROM unified_events e
     JOIN unified_markets m ON m.event_id = e.id
+    cross join lateral (
+      select
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>0)
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>1)
+          else m.token_no
+        end as token_no
+    ) mt
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     LEFT JOIN polymarket_markets pm
       ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
     LEFT JOIN polymarket_markets pm_parent
@@ -459,6 +531,10 @@ export type EventDetailsRow = {
   liquidity: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: unknown;
@@ -520,10 +596,14 @@ export async function fetchEventDetails(
       m.liquidity,
       m.best_bid,
       m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
       m.last_price,
       m.outcomes,
-      m.token_yes,
-      m.token_no,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -534,6 +614,33 @@ export async function fetchEventDetails(
       m.updated_at as market_updated_at
     FROM unified_events e
     LEFT JOIN unified_markets m ON m.event_id = e.id
+    LEFT JOIN LATERAL (
+      select
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>0)
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>1)
+          else m.token_no
+        end as token_no
+    ) mt on true
+    LEFT JOIN LATERAL (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    LEFT JOIN LATERAL (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     LEFT JOIN polymarket_markets pm
       ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
     LEFT JOIN polymarket_markets pm_parent
@@ -571,6 +678,10 @@ export type MarketByTokenRow = {
   liquidity: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: string | null;
@@ -619,7 +730,22 @@ export async function fetchMarketsByTokenIds(
   }
 
   const sql = `
-    with token_matches as (
+    with market_tokens as (
+      select
+        m.id as market_id,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>0)
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>1)
+          else m.token_no
+        end as token_no
+      from unified_markets m
+    ),
+    token_matches as (
       select
         ut.token_id,
         ut.side,
@@ -668,10 +794,14 @@ export async function fetchMarketsByTokenIds(
       m.liquidity,
       m.best_bid,
       m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
       m.last_price,
       m.outcomes,
-      m.token_yes,
-      m.token_no,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.market_ledger,
@@ -702,6 +832,21 @@ export async function fetchMarketsByTokenIds(
       e.icon as event_icon
     from token_matches tm
     join unified_markets m on m.id = tm.market_id
+    join market_tokens mt on mt.market_id = m.id
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
     left join polymarket_markets pm_parent

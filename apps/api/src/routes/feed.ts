@@ -223,6 +223,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           };
         }
 
+        let outcomes: unknown = null;
+        if (rRow.outcomes) {
+          try {
+            outcomes = JSON.parse(rRow.outcomes);
+          } catch {
+            // ignore parse errors
+          }
+        }
+
         eventMap[eid].markets.push({
           venue: String(rRow.venue),
           marketId: String(rRow.venue_market_id),
@@ -236,17 +245,40 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           liquidity: rRow.liquidity != null ? Number(rRow.liquidity) : 0,
           acceptingOrders: true, // Always true for active markets in unified table
           tokens,
+          outcomes,
           conditionId: (rRow.condition_id as string | null) || null,
           category: rRow.market_category ?? null,
           image: rRow.market_image ?? null,
           icon: rRow.market_icon ?? null,
           top: {
-            yesBid: rRow.best_bid != null ? Number(rRow.best_bid) : null,
-            yesAsk: rRow.best_ask != null ? Number(rRow.best_ask) : null,
+            yesBid:
+              rRow.best_bid_yes != null
+                ? Number(rRow.best_bid_yes)
+                : rRow.best_bid != null
+                  ? Number(rRow.best_bid)
+                  : null,
+            yesAsk:
+              rRow.best_ask_yes != null
+                ? Number(rRow.best_ask_yes)
+                : rRow.best_ask != null
+                  ? Number(rRow.best_ask)
+                  : null,
             noBid:
-              rRow.best_bid != null ? Number(1 - Number(rRow.best_bid)) : null,
+              rRow.best_bid_no != null
+                ? Number(rRow.best_bid_no)
+                : rRow.best_bid_yes != null
+                  ? Number(1 - Number(rRow.best_bid_yes))
+                  : rRow.best_bid != null
+                    ? Number(1 - Number(rRow.best_bid))
+                    : null,
             noAsk:
-              rRow.best_ask != null ? Number(1 - Number(rRow.best_ask)) : null,
+              rRow.best_ask_no != null
+                ? Number(rRow.best_ask_no)
+                : rRow.best_ask_yes != null
+                  ? Number(1 - Number(rRow.best_ask_yes))
+                  : rRow.best_ask != null
+                    ? Number(1 - Number(rRow.best_ask))
+                    : null,
           },
           lastUpdate: rRow.last_update,
         });

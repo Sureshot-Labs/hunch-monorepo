@@ -8,6 +8,7 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "check": "pnpm typecheck && pnpm lint",
     "format": "prettier -w apps packages --ignore-path .gitignore --ignore-unknown",
     "format:check": "prettier -c apps packages --ignore-path .gitignore --ignore-unknown",
     "migrate": "pnpm --filter @hunch/db migrate",

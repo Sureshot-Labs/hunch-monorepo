@@ -73,6 +73,7 @@ export type FeedMarket = {
   category: string | null;
   image: string | null;
   icon: string | null;
+  outcomes?: unknown;
   top: {
     yesBid: number | null;
     yesAsk: number | null;
