@@ -15,13 +15,17 @@ import {
 } from "./cursor";
 import { pool } from "./db";
 import { log } from "./log";
-import { iterateEventPages, iterateEventsWithMarkets } from "./marketClient";
+import {
+  fetchMarketsBatch,
+  iterateEventPages,
+  iterateEventsWithMarkets,
+} from "./marketClient";
 import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   type DflowMarketSnapshot,
 } from "./mappers";
-import type { TDflowEvent } from "./types";
+import type { TDflowEvent, TDflowMarket } from "./types";
 import { ensureRedis, redis } from "./redis";
 
 type SyncCounters = {
@@ -30,7 +34,11 @@ type SyncCounters = {
   pages: number;
   publishedMarkets?: number;
   publishedHotTokens?: number;
+  statusMarkets?: number;
 };
+
+const STATUS_BATCH_LIMIT = 100;
+const STATUS_POSITION_TOKEN_LIMIT = 200;
 
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
   if (b.volume24h !== a.volume24h) return b.volume24h - a.volume24h;
@@ -113,6 +121,70 @@ async function fetchHotTokenIds(): Promise<string[]> {
   }
 }
 
+function stripSolanaPrefix(tokenId: string): string | null {
+  if (!tokenId) return null;
+  return tokenId.startsWith("sol:") ? tokenId.slice(4) : tokenId;
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (size <= 0) return [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+async function fetchPositionTokenIds(
+  limit = STATUS_POSITION_TOKEN_LIMIT,
+): Promise<string[]> {
+  const { rows } = await pool.query<{ token_id: string }>(
+    `
+      select token_id
+      from (
+        select token_id, max(updated_at) as updated_at
+        from positions
+        where venue = 'kalshi'
+          and token_id like 'sol:%'
+        group by token_id
+      ) as recent
+      order by updated_at desc nulls last
+      limit $1
+    `,
+    [limit],
+  );
+  return rows.map((row) => row.token_id).filter(Boolean);
+}
+
+async function fetchMarketEventInfoByTickers(
+  tickers: string[],
+): Promise<Map<string, { eventId: string; eventTitle: string }>> {
+  if (!tickers.length) return new Map();
+  const { rows } = await pool.query<{
+    venue_market_id: string;
+    event_id: string;
+    event_title: string;
+  }>(
+    `
+      select m.venue_market_id, m.event_id, e.title as event_title
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      where m.venue = 'kalshi'
+        and m.venue_market_id = any($1::text[])
+    `,
+    [tickers],
+  );
+
+  const map = new Map<string, { eventId: string; eventTitle: string }>();
+  for (const row of rows) {
+    map.set(row.venue_market_id, {
+      eventId: row.event_id,
+      eventTitle: row.event_title,
+    });
+  }
+  return map;
+}
+
 function deriveNoBid(yesAsk: number | null): number | null {
   if (yesAsk == null) return null;
   return Math.max(0, 1 - yesAsk);
@@ -171,6 +243,78 @@ async function refreshHotTokenTops(): Promise<number> {
   );
 
   return publish.length;
+}
+
+export async function syncHotMarketStatuses(): Promise<{ processedMarkets: number }> {
+  if (!env.dflowEnabled) return { processedMarkets: 0 };
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const hotTokenIds = await fetchHotTokenIds();
+  const positionTokenIds = await fetchPositionTokenIds();
+
+  const allTokenIds = Array.from(
+    new Set([...hotTokenIds, ...positionTokenIds]),
+  );
+  if (!allTokenIds.length) return { processedMarkets: 0 };
+
+  const mints = Array.from(
+    new Set(
+      allTokenIds
+        .map((tokenId) => stripSolanaPrefix(tokenId))
+        .filter((mint): mint is string => Boolean(mint)),
+    ),
+  );
+
+  if (!mints.length) return { processedMarkets: 0 };
+
+  const batches = chunkArray(mints, STATUS_BATCH_LIMIT);
+  const markets: TDflowMarket[] = [];
+  for (const batch of batches) {
+    const result = await fetchMarketsBatch({ mints: batch });
+    markets.push(...result);
+  }
+
+  const tickers = markets
+    .map((market) => market.ticker)
+    .filter((ticker): ticker is string => Boolean(ticker));
+  const eventInfoByTicker = await fetchMarketEventInfoByTickers(tickers);
+
+  const unifiedMarketRows: UnifiedMarketRow[] = [];
+  const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
+
+  let processedMarkets = 0;
+
+  for (const market of markets) {
+    const eventInfo = eventInfoByTicker.get(market.ticker);
+    if (!eventInfo) continue;
+    const mapped = mapToUnifiedMarket(
+      market,
+      eventInfo.eventId,
+      eventInfo.eventTitle,
+      env.solanaUsdcMint,
+      env.requireInitialized,
+    );
+    if (!mapped) continue;
+    unifiedMarketRows.push(mapped.marketRow);
+    tokenRows.push(...mapped.tokenRows);
+    processedMarkets += 1;
+  }
+
+  if (unifiedMarketRows.length) {
+    await upsertUnifiedMarkets(pool, unifiedMarketRows);
+  }
+  if (tokenRows.length) {
+    await upsertUnifiedTokens(pool, tokenRows);
+  }
+
+  log.info("DFlow hot status refresh complete", {
+    tokens: allTokenIds.length,
+    markets: processedMarkets,
+  });
+
+  return { processedMarkets };
 }
 
 async function processEvents(events: TDflowEvent[]): Promise<{

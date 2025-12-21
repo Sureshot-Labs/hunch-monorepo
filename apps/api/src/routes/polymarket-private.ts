@@ -1223,10 +1223,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Per CLOB docs, open orders live under `/data/orders` (L2 header required).
-      // Some deployments may require filtering by `asset_id`/`market`; we first try "all open orders".
       const requestPathAll = "/data/orders";
 
-      const upstreamAll = await polymarketL2Request({
+      const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
         timeoutMs: 10_000,
         address: signer,
@@ -1239,81 +1238,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         requestPath: requestPathAll,
       });
 
-      let upstream = upstreamAll;
-      let triedAssetIds: string[] = [];
-      if (!upstream.ok && upstream.status === 400) {
-        // Fallback: fetch open orders by a candidate set of assetIds (watchlist + existing positions).
-        const candidateRows = await pool.query<{ token_id: string }>(
-          `
-            with watchlist_tokens as (
-              select json_array_elements_text(m.clob_token_ids::json) as token_id
-              from user_watchlist w
-              join unified_markets m
-                on m.id = w.market_id
-              where w.user_id = $1
-                and m.venue = 'polymarket'
-                and m.clob_token_ids is not null
-                and m.clob_token_ids <> '[]'
-            ),
-            position_tokens as (
-              select token_id
-              from positions
-              where user_id = $1
-                and wallet_address = $2
-                and venue = 'polymarket'
-            )
-            select distinct token_id
-            from (
-              select token_id from watchlist_tokens
-              union all
-              select token_id from position_tokens
-            ) t
-            where token_id is not null
-              and token_id <> ''
-              and token_id ~ '^[0-9]+$'
-            limit 50
-          `,
-          [user.id, signer],
-        );
-
-        const tokenIds = candidateRows.rows
-          .map((row) => row.token_id)
-          .filter((tokenId): tokenId is string => Boolean(tokenId));
-        triedAssetIds = tokenIds;
-
-        const aggregated: unknown[] = [];
-        for (const tokenId of tokenIds) {
-          const byAsset = await polymarketL2Request({
-            baseUrl: env.polymarketClobBase,
-            timeoutMs: 10_000,
-            address: signer,
-            creds: {
-              apiKey: creds.apiKey,
-              apiSecret: creds.apiSecret,
-              apiPassphrase: creds.apiPassphrase,
-            },
-            method: "GET",
-            requestPath: `/data/orders?asset_id=${encodeURIComponent(tokenId)}`,
-          });
-
-          if (!byAsset.ok) continue;
-          aggregated.push(...extractOrderArray(byAsset.payload));
-        }
-
-        upstream = { ok: true, payload: aggregated };
-      }
-
       if (!upstream.ok) {
         reply.code(502);
         return reply.send({
           error: "Polymarket orders sync failed",
           status: upstream.status,
-          tried: {
-            get: requestPathAll,
-            ...(triedAssetIds.length
-              ? { assetIdFallback: triedAssetIds.slice(0, 10) }
-              : {}),
-          },
+          tried: { get: requestPathAll },
           payload: upstream.payload,
         });
       }

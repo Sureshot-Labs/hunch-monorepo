@@ -7,6 +7,8 @@ import { env } from "./env.js";
 
 type FeeOrderRow = {
   id: string;
+  status: string | null;
+  filled_size: string | number | null;
   order_hash: string | null;
   order_payload: unknown | null;
   fee_auth: unknown | null;
@@ -46,6 +48,7 @@ type ScriptOptions = {
   dryRun: boolean;
   limit: number;
   maxAttempts: number;
+  dustRemainingMicro: bigint;
   orderHash?: string;
   includeExpired: boolean;
   archiveLegacy: boolean;
@@ -53,6 +56,7 @@ type ScriptOptions = {
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_DUST_REMAINING = 5n;
 
 function parseArgs(): ScriptOptions {
   const args = process.argv.slice(2);
@@ -66,12 +70,17 @@ function parseArgs(): ScriptOptions {
 
   const limitRaw = getValue("--limit");
   const maxAttemptsRaw = getValue("--max-attempts");
+  const dustRaw = getValue("--dust-remaining");
   const orderHash = getValue("--order-hash");
 
   const limit = limitRaw ? Math.max(1, Number(limitRaw)) : DEFAULT_LIMIT;
   const maxAttempts = maxAttemptsRaw
     ? Math.max(1, Number(maxAttemptsRaw))
     : DEFAULT_MAX_ATTEMPTS;
+  const dustParsed = dustRaw ? Number(dustRaw) : Number.NaN;
+  const dustRemainingMicro = Number.isFinite(dustParsed)
+    ? BigInt(Math.max(0, Math.trunc(dustParsed)))
+    : DEFAULT_DUST_REMAINING;
 
   return {
     dryRun: hasFlag("--dry-run"),
@@ -81,12 +90,23 @@ function parseArgs(): ScriptOptions {
     maxAttempts: Number.isFinite(maxAttempts)
       ? Math.trunc(maxAttempts)
       : DEFAULT_MAX_ATTEMPTS,
+    dustRemainingMicro,
     orderHash: orderHash?.trim(),
   };
 }
 
 function normalizeHex(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function parseNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function normalizeOrderSide(value: unknown): number | null {
@@ -225,7 +245,10 @@ function rowLabel(row: FeeOrderRow, orderHash?: string): string {
   return hash || `row:${row.id}`;
 }
 
-async function fetchPendingOrders(options: ScriptOptions): Promise<FeeOrderRow[]> {
+async function fetchPendingOrders(
+  options: ScriptOptions,
+  feeCollectorAddress: string,
+): Promise<FeeOrderRow[]> {
   const params: Array<string | number> = [options.maxAttempts];
   let whereClause = `
     WHERE venue = 'polymarket'
@@ -235,6 +258,11 @@ async function fetchPendingOrders(options: ScriptOptions): Promise<FeeOrderRow[]
       AND fee_collected_at IS NULL
       AND COALESCE(fee_collect_attempts, 0) < $1
   `;
+
+  if (!options.archiveLegacy && feeCollectorAddress) {
+    params.push(feeCollectorAddress.toLowerCase());
+    whereClause += ` AND (fee_collector_address IS NULL OR lower(fee_collector_address) = $${params.length})`;
+  }
 
   if (options.orderHash) {
     params.push(options.orderHash);
@@ -247,6 +275,8 @@ async function fetchPendingOrders(options: ScriptOptions): Promise<FeeOrderRow[]
   const query = `
     SELECT
       id,
+      status,
+      filled_size,
       order_hash,
       order_payload,
       fee_auth,
@@ -341,7 +371,7 @@ async function main() {
     wallet ?? provider,
   );
 
-  const orders = await fetchPendingOrders(options);
+  const orders = await fetchPendingOrders(options, feeCollectorAddress);
   console.log(
     `Found ${orders.length} pending fee orders (dryRun=${options.dryRun})`,
   );
@@ -353,6 +383,7 @@ async function main() {
 
   const nowSec = Math.floor(Date.now() / 1000);
   let skippedLive = 0;
+  let skippedNoCharge = 0;
   let skippedNothing = 0;
   let skippedError = 0;
   let dryRunCount = 0;
@@ -362,6 +393,20 @@ async function main() {
     const attempts = (row.fee_collect_attempts ?? 0) + 1;
     const orderHash = row.order_hash ? normalizeHex(row.order_hash) : "";
     const label = rowLabel(row, orderHash);
+
+    const orderStatus = row.status?.trim().toLowerCase() ?? "";
+    const filledSize = parseNumber(row.filled_size) ?? 0;
+    if (
+      (orderStatus.includes("cancel") || orderStatus.includes("expire")) &&
+      filledSize <= 0
+    ) {
+      const reason = `Order ${orderStatus || "cancelled"} with no fills`;
+      console.log(`Skip ${label}: ${reason}`);
+      skippedNoCharge += 1;
+      await archiveFeeError(row.id, attempts, reason);
+      continue;
+    }
+
     if (!orderHash) {
       const reason = "Missing order_hash";
       console.log(`Skip ${label}: ${reason}`);
@@ -457,9 +502,26 @@ async function main() {
       continue;
     }
 
-    const status = await exchange.getOrderStatus(orderHash);
+    let status: { isFilledOrCancelled: boolean; remaining: bigint };
+    try {
+      const rawStatus = await exchange.getOrderStatus(orderHash);
+      status = {
+        isFilledOrCancelled: Boolean(rawStatus.isFilledOrCancelled),
+        remaining: BigInt(rawStatus.remaining),
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown order status error";
+      console.log(`Skip ${label}: getOrderStatus failed (${message})`);
+      skippedError += 1;
+      await updateFeeError(row.id, attempts, `getOrderStatus failed: ${message}`);
+      continue;
+    }
+
     const makerAmount = BigInt(order.makerAmount);
-    const remaining = BigInt(status.remaining);
+    const remainingRaw = status.remaining;
+    const remaining =
+      remainingRaw <= options.dustRemainingMicro ? 0n : remainingRaw;
 
     if (!status.isFilledOrCancelled && remaining > 0n) {
       console.log(
@@ -469,10 +531,7 @@ async function main() {
       continue;
     }
 
-    const makerFilled =
-      remaining === 0n && !status.isFilledOrCancelled
-        ? 0n
-        : makerAmount - remaining;
+    const makerFilled = makerAmount > remaining ? makerAmount - remaining : 0n;
 
     const charged = await collector.makerFilledCharged(orderHash);
     if (makerFilled <= charged) {
@@ -512,7 +571,7 @@ async function main() {
   }
 
   console.log(
-    `Done. dryRun=${dryRunCount}, collected=${collected}, skippedLive=${skippedLive}, skippedNoCharge=${skippedNothing}, skippedError=${skippedError}`,
+    `Done. dryRun=${dryRunCount}, collected=${collected}, skippedLive=${skippedLive}, skippedNoCharge=${skippedNoCharge}, skippedNothing=${skippedNothing}, skippedError=${skippedError}`,
   );
   await pool.end();
 }

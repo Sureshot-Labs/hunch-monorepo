@@ -1,6 +1,10 @@
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 
-import { syncCatchUpFromCursor, syncHotWindow } from "./bootstrap";
+import {
+  syncCatchUpFromCursor,
+  syncHotMarketStatuses,
+  syncHotWindow,
+} from "./bootstrap";
 import { env } from "./env";
 import { log } from "./log";
 
@@ -11,6 +15,7 @@ async function periodicBootstrap() {
   running = true;
   try {
     await syncHotWindow();
+    await syncHotMarketStatuses();
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);

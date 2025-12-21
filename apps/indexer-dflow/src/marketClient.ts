@@ -1,6 +1,7 @@
 import { env } from "./env";
-import { DflowEventsResponse } from "./types";
+import { DflowEventsResponse, DflowMarketsBatchResponse } from "./types";
 import type { TDflowEvent } from "./types";
+import type { TDflowMarket } from "./types";
 
 export type DflowEventsQuery = {
   status?: string;
@@ -14,6 +15,11 @@ export type DflowEventsQuery = {
 function resolveEventsUrl(): string {
   const base = env.dflowPredictionMarketsBase.replace(/\/+$/, "");
   return `${base}/api/v1/events`;
+}
+
+function resolveMarketsBatchUrl(): string {
+  const base = env.dflowPredictionMarketsBase.replace(/\/+$/, "");
+  return `${base}/api/v1/markets/batch`;
 }
 
 function setOptionalString(
@@ -91,6 +97,37 @@ export async function fetchEventsPage(q: DflowEventsQuery): Promise<{
     normalizeCursor(parsed.nextCursor) ?? normalizeCursor(parsed.cursor);
 
   return { events, nextCursor };
+}
+
+export type DflowMarketsBatchQuery = {
+  mints?: string[];
+  tickers?: string[];
+};
+
+export async function fetchMarketsBatch(
+  query: DflowMarketsBatchQuery,
+): Promise<TDflowMarket[]> {
+  const url = resolveMarketsBatchUrl();
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json",
+  };
+  if (env.dflowApiKey) headers["x-api-key"] = env.dflowApiKey;
+
+  const body = JSON.stringify({
+    mints: query.mints?.length ? query.mints : null,
+    tickers: query.tickers?.length ? query.tickers : null,
+  });
+
+  const res = await fetch(url, { method: "POST", headers, body });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`DFlow markets batch ${res.status}: ${text.slice(0, 500)}`);
+  }
+
+  const raw = (await res.json()) as unknown;
+  const parsed = DflowMarketsBatchResponse.parse(raw);
+  return (parsed.markets ?? []) as TDflowMarket[];
 }
 
 export type DflowEventsPage = {

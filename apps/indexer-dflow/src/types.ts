@@ -58,7 +58,15 @@ export const DflowEventsResponse = z
   })
   .passthrough();
 
+export const DflowMarketsBatchResponse = z
+  .object({
+    markets: z.array(DflowMarket).optional().nullable(),
+    cursor: z.union([z.string(), z.number()]).optional().nullable(),
+  })
+  .passthrough();
+
 export type TDflowMarketAccount = z.infer<typeof DflowMarketAccount>;
 export type TDflowMarket = z.infer<typeof DflowMarket>;
 export type TDflowEvent = z.infer<typeof DflowEvent>;
 export type TDflowEventsResponse = z.infer<typeof DflowEventsResponse>;
+export type TDflowMarketsBatchResponse = z.infer<typeof DflowMarketsBatchResponse>;
