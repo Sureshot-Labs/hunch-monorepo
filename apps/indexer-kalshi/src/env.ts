@@ -41,6 +41,21 @@ function parseOptionalBool(v: string | undefined): boolean | undefined {
   }
 }
 
+function parseOptionalInt(v: string | undefined): number | undefined {
+  if (v == null || v.trim() === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
+function clampInt(
+  v: number | undefined,
+  { min, max, fallback }: { min: number; max: number; fallback: number },
+): number {
+  if (v == null) return fallback;
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
 const kalshiEnabledSetting = parseOptionalBool(process.env.KALSHI_ENABLED);
 const kalshiKeyId = opt("KALSHI_API_KEY_ID");
 const kalshiPrivateKeyPath = opt("KALSHI_PRIVATE_KEY_PATH");
@@ -60,6 +75,16 @@ if (kalshiPrivateKeyResolvedPath && !existsSync(kalshiPrivateKeyResolvedPath)) {
 const kalshiConfigured = kalshiIssues.length === 0;
 const kalshiEnabled = kalshiEnabledSetting ?? kalshiConfigured;
 
+const hotTokensTtlSec = clampInt(
+  parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC),
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 600 },
+);
+const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
+  min: 10,
+  max: 50_000,
+  fallback: 1000,
+});
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -78,6 +103,8 @@ export const env = {
   // indexer knobs
   bootstrapLimit: Number(process.env.INDEXER_BOOTSTRAP_LIMIT ?? "200"),
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
+  hotTokensTtlSec,
+  hotTokensMax,
   rpsRead: Number(process.env.KALSHI_RPS_READ ?? "18"), // under 20/s
   rpsWrite: Number(
     process.env.KALSHI_RPS_WRITE ?? process.env.KALSHI_RPS_WRIT ?? "9",

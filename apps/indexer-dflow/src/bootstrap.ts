@@ -29,6 +29,7 @@ type SyncCounters = {
   processedMarkets: number;
   pages: number;
   publishedMarkets?: number;
+  publishedHotTokens?: number;
 };
 
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
@@ -95,6 +96,81 @@ async function publishTokenTop(
     writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, ts),
     multi.exec(),
   ]);
+}
+
+async function fetchHotTokenIds(): Promise<string[]> {
+  if (env.hotTokensMax <= 0) return [];
+  await ensureRedis();
+
+  const key = "hot:tokens:dflow";
+  const cutoff = Date.now() - env.hotTokensTtlSec * 1000;
+  try {
+    await redis.zRemRangeByScore(key, 0, cutoff);
+    return await redis.zRange(key, 0, env.hotTokensMax - 1, { REV: true });
+  } catch (error) {
+    log.warn("Failed to fetch hot tokens", error);
+    return [];
+  }
+}
+
+function deriveNoBid(yesAsk: number | null): number | null {
+  if (yesAsk == null) return null;
+  return Math.max(0, 1 - yesAsk);
+}
+
+function deriveNoAsk(yesBid: number | null): number | null {
+  if (yesBid == null) return null;
+  return Math.max(0, 1 - yesBid);
+}
+
+async function refreshHotTokenTops(): Promise<number> {
+  const tokenIds = await fetchHotTokenIds();
+  if (!tokenIds.length) return 0;
+
+  const { rows } = await pool.query<{
+    token_id: string;
+    side: "YES" | "NO";
+    best_bid: number | null;
+    best_ask: number | null;
+  }>(
+    `
+      select t.token_id, t.side, m.best_bid, m.best_ask
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      where t.token_id = any($1::text[])
+    `,
+    [tokenIds],
+  );
+
+  if (!rows.length) return 0;
+
+  const ts = new Date();
+  const publish = rows
+    .map((row) => {
+      const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
+      const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
+      const bestBid =
+        row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
+      const bestAsk =
+        row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
+      if (bestBid == null && bestAsk == null) return null;
+      return { tokenId: row.token_id, bestBid, bestAsk };
+    })
+    .filter(
+      (row): row is { tokenId: string; bestBid: number | null; bestAsk: number | null } =>
+        Boolean(row),
+    );
+
+  if (!publish.length) return 0;
+
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    publish.map((row) =>
+      q.add(() => publishTokenTop(row.tokenId, row.bestBid, row.bestAsk, ts)),
+    ),
+  );
+
+  return publish.length;
 }
 
 async function processEvents(events: TDflowEvent[]): Promise<{
@@ -244,6 +320,9 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   const hot = snapshots.slice(0, env.topBookSnapshot);
   await publishSnapshots(hot);
   totals.publishedMarkets = hot.length;
+
+  const hotTokenCount = await refreshHotTokenTops();
+  if (hotTokenCount > 0) totals.publishedHotTokens = hotTokenCount;
 
   log.info("DFlow hot refresh complete", totals);
   return totals;

@@ -16,6 +16,39 @@ import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
 
+function parseKalshiTicker(tokenId: string): string | null {
+  if (!tokenId.startsWith("kalshi:")) return null;
+  const parts = tokenId.split(":");
+  if (parts.length < 3) return null;
+  return parts[1] || null;
+}
+
+async function fetchHotTickers(): Promise<string[]> {
+  if (env.hotTokensMax <= 0) return [];
+  const key = "hot:tokens:kalshi";
+  const cutoff = Date.now() - env.hotTokensTtlSec * 1000;
+
+  try {
+    await redis.zRemRangeByScore(key, 0, cutoff);
+    const tokens = await redis.zRange(key, 0, env.hotTokensMax - 1, {
+      REV: true,
+    });
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const tokenId of tokens) {
+      const ticker = parseKalshiTicker(tokenId);
+      if (!ticker) continue;
+      if (seen.has(ticker)) continue;
+      seen.add(ticker);
+      out.push(ticker);
+    }
+    return out;
+  } catch (error) {
+    console.warn("[kalshi] Failed to fetch hot tickers", error);
+    return [];
+  }
+}
+
 export async function bootstrapKalshi() {
   await ensureRedis();
   const venueId = await getVenueId(pool, "kalshi");
@@ -69,7 +102,21 @@ export async function bootstrapKalshi() {
     `[Bootstrap] Database storage complete: ${processedEvents} events, ${processedMarkets} markets`,
   );
 
-  const snapTickers = Array.from(topTickers).slice(0, env.topBookSnapshot);
+  const hotTickers = await fetchHotTickers();
+  const orderedTickers: string[] = [];
+  const seenTickers = new Set<string>();
+  for (const ticker of hotTickers) {
+    if (seenTickers.has(ticker)) continue;
+    seenTickers.add(ticker);
+    orderedTickers.push(ticker);
+  }
+  for (const ticker of topTickers) {
+    if (seenTickers.has(ticker)) continue;
+    seenTickers.add(ticker);
+    orderedTickers.push(ticker);
+  }
+
+  const snapTickers = orderedTickers.slice(0, env.topBookSnapshot);
   const q = new PQueue({ interval: 10_000, intervalCap: 180 }); // ~18 rps
   await Promise.all(
     snapTickers.map((t) =>

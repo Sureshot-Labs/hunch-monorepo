@@ -1,5 +1,5 @@
 import { bootstrapKalshi } from "./bootstrap";
-import { startMarketWS } from "./wsMarket";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
 import { log } from "./log";
 import { env } from "./env";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
@@ -12,6 +12,8 @@ async function bootstrapAndMaybeStartWs() {
   if (!wsStarted && tickers.length > 0) {
     startMarketWS(tickers);
     wsStarted = true;
+  } else if (wsStarted) {
+    updateMarketWSSubscriptions(tickers);
   }
 }
 

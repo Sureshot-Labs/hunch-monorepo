@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
 import { storeOrder } from "../repos/orders-repo.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
@@ -564,6 +565,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
       const order = body.order;
+      const orderTokenId =
+        typeof order.tokenId === "string" ? order.tokenId : "";
+      if (orderTokenId) {
+        void markHotTokens({ tokenIds: [orderTokenId], venue: "polymarket" });
+      }
 
       const orderSigner = typeof order.signer === "string" ? order.signer : "";
       if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
@@ -724,6 +730,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({ error: "tokenId is required" });
       }
+
+      void markHotTokens({ tokenIds: [tokenId], venue: "polymarket" });
 
       try {
         const [orderbookPayload, marketInfo] = await Promise.all([

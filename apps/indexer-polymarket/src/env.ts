@@ -67,6 +67,29 @@ const overlapPages = clampInt(overlapPagesRaw, {
   fallback: 2,
 });
 
+const hotStatusMaxEventsRaw = parseOptionalInt(
+  process.env.POLYMARKET_HOT_STATUS_MAX_EVENTS,
+);
+const hotStatusMaxEvents = clampInt(hotStatusMaxEventsRaw, {
+  min: 1,
+  max: 10_000,
+  fallback: 200,
+});
+
+const hotTokensTtlSecRaw = parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC);
+const hotTokensTtlSec = clampInt(hotTokensTtlSecRaw, {
+  min: 60,
+  max: 7 * 24 * 60 * 60,
+  fallback: 600,
+});
+
+const hotTokensMaxRaw = parseOptionalInt(process.env.HOT_TOKENS_MAX);
+const hotTokensMax = clampInt(hotTokensMaxRaw, {
+  min: 10,
+  max: 50_000,
+  fallback: 1000,
+});
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -82,6 +105,9 @@ export const env = {
   hotMaxPages,
   overlapPages,
   // bootstrapLimit removed - now fetching all events
+  hotTokensTtlSec,
+  hotTokensMax,
+  hotStatusMaxEvents,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

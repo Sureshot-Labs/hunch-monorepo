@@ -117,6 +117,8 @@ export const env = {
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
+  hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),

@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { env } from "../env.js";
 import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import { feedQuerySchema } from "../schemas/feed.js";
 import { fetchFeedEventIds, fetchFeedMarkets } from "../repos/unified-read.js";
@@ -330,6 +331,18 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minVolume24h: minVol,
         data,
       };
+
+      if (data.length) {
+        const tokenIds: string[] = [];
+        for (const event of data) {
+          for (const market of event.markets) {
+            const tokens = market.tokens;
+            if (tokens?.yes) tokenIds.push(tokens.yes);
+            if (tokens?.no) tokenIds.push(tokens.no);
+          }
+        }
+        if (tokenIds.length) void markHotTokens({ tokenIds });
+      }
 
       // serialize once, hash those exact bytes for ETag, then cache/send same bytes
       const body = JSON.stringify(payload);

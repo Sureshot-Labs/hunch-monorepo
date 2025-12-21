@@ -1,6 +1,6 @@
 import { ensureRedis, redis } from "./redis";
 import { env } from "./env";
-import { iterateEventPages } from "./gammaClient";
+import { fetchEventsByIds, iterateEventPages } from "./gammaClient";
 import { postBooksOnce } from "./clobClient";
 import {
   upsertPolymarketEvents,
@@ -32,6 +32,34 @@ function chunk<T>(arr: T[], n: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
   return out;
+}
+
+function parsePrice(value: unknown): number | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function bestBid(levels: Array<{ price: string }> | undefined): number | null {
+  if (!levels || levels.length === 0) return null;
+  let best: number | null = null;
+  for (const level of levels) {
+    const p = parsePrice(level.price);
+    if (p == null) continue;
+    if (best == null || p > best) best = p;
+  }
+  return best;
+}
+
+function bestAsk(levels: Array<{ price: string }> | undefined): number | null {
+  if (!levels || levels.length === 0) return null;
+  let best: number | null = null;
+  for (const level of levels) {
+    const p = parsePrice(level.price);
+    if (p == null) continue;
+    if (best == null || p < best) best = p;
+  }
+  return best;
 }
 
 type SyncCounters = {
@@ -253,8 +281,8 @@ export async function snapshotBooks(tokenIds: string[]): Promise<void> {
         try {
           const books = await postBooksOnce(group);
           for (const b of books) {
-            const bb = b.bids?.length ? parseFloat(b.bids[0].price) : null;
-            const ba = b.asks?.length ? parseFloat(b.asks[0].price) : null;
+            const bb = bestBid(b.bids);
+            const ba = bestAsk(b.asks);
             const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
             await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
             await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
@@ -290,6 +318,63 @@ function parseJsonStringArray(raw: unknown): string[] {
   }
 }
 
+async function fetchHotTokenIds(): Promise<string[]> {
+  if (env.hotTokensMax <= 0) return [];
+  await ensureRedis();
+
+  const key = "hot:tokens:polymarket";
+  const cutoff = Date.now() - env.hotTokensTtlSec * 1000;
+
+  try {
+    await redis.zRemRangeByScore(key, 0, cutoff);
+    return await redis.zRange(key, 0, env.hotTokensMax - 1, { REV: true });
+  } catch (error) {
+    log.warn("Failed to fetch hot tokens", error);
+    return [];
+  }
+}
+
+export async function selectHotTokenIds(): Promise<string[]> {
+  return fetchHotTokenIds();
+}
+
+async function fetchHotEventIdsFromTokens(): Promise<string[]> {
+  const tokenIds = await fetchHotTokenIds();
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<{ event_id: string }>(
+    `
+      select distinct event_id
+      from polymarket_markets
+      where clob_token_ids is not null
+        and clob_token_ids <> '[]'
+        and (clob_token_ids::jsonb ?| $1::text[])
+      limit $2
+    `,
+    [tokenIds, env.hotStatusMaxEvents],
+  );
+
+  return rows.map((row) => row.event_id).filter(Boolean);
+}
+
+export async function syncHotEventStatuses(): Promise<void> {
+  const eventIds = await fetchHotEventIdsFromTokens();
+  if (!eventIds.length) return;
+
+  log.info("Polymarket hot status refresh", {
+    events: eventIds.length,
+  });
+
+  const events = await fetchEventsByIds(eventIds);
+  if (!events.length) return;
+  const result = await processEvents(events as unknown[]);
+
+  log.info("Polymarket hot status refresh complete", {
+    events: result.processedEvents,
+    markets: result.processedMarkets,
+  });
+}
+
 export async function selectWsTokenIds(): Promise<string[]> {
   const limitMarkets = Math.max(100, env.wsSubset * 2);
   const { rows } = await pool.query(
@@ -314,6 +399,15 @@ export async function selectWsTokenIds(): Promise<string[]> {
 
   const out: string[] = [];
   const seen = new Set<string>();
+  const hotTokenIds = await fetchHotTokenIds();
+
+  for (const tokenId of hotTokenIds) {
+    if (!tokenId) continue;
+    if (seen.has(tokenId)) continue;
+    seen.add(tokenId);
+    out.push(tokenId);
+    if (out.length >= env.wsSubset) return out;
+  }
 
   for (const row of rows) {
     const tokenIds = parseJsonStringArray(

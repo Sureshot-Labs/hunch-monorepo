@@ -10,6 +10,7 @@ export type GammaEventsQuery = {
   limit: number;
   order?: string;
   ascending?: boolean;
+  id?: number[];
   active?: boolean;
   archived?: boolean;
   closed?: boolean;
@@ -46,6 +47,17 @@ function setOptionalNumber(
   sp.set(k, String(v));
 }
 
+function setOptionalArrayParam(
+  sp: URLSearchParams,
+  k: string,
+  v: number[] | undefined,
+): void {
+  if (!v || v.length === 0) return;
+  for (const item of v) {
+    sp.append(k, String(item));
+  }
+}
+
 function setOptionalString(
   sp: URLSearchParams,
   k: string,
@@ -61,6 +73,7 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
   url.searchParams.set("offset", String(q.offset));
   setOptionalString(url.searchParams, "order", q.order);
   setOptionalBool(url.searchParams, "ascending", q.ascending);
+  setOptionalArrayParam(url.searchParams, "id", q.id);
   setOptionalBool(url.searchParams, "active", q.active);
   setOptionalBool(url.searchParams, "archived", q.archived);
   setOptionalBool(url.searchParams, "closed", q.closed);
@@ -162,5 +175,29 @@ export async function fetchAllEvents() {
     out.push(...events);
   }
   console.log(`Total events fetched: ${out.length}`);
+  return out;
+}
+
+export async function fetchEventsByIds(
+  ids: Array<number | string>,
+): Promise<GammaEventType[]> {
+  const cleaned = ids
+    .map((id) => Number(String(id).trim()))
+    .filter((id) => Number.isFinite(id));
+  if (cleaned.length === 0) return [];
+
+  const out: GammaEventType[] = [];
+  const chunkSize = Math.min(env.pageSize, 200);
+
+  for (let i = 0; i < cleaned.length; i += chunkSize) {
+    const chunk = cleaned.slice(i, i + chunkSize);
+    const { events } = await fetchEventsPage({
+      offset: 0,
+      limit: chunk.length,
+      id: chunk,
+    });
+    out.push(...(events ?? []));
+  }
+
   return out;
 }

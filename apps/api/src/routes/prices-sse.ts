@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
 import { subscribeToPriceTicks } from "../lib/prices-stream-manager.js";
 
@@ -32,6 +33,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const ids = request.query.token_id;
+      void markHotTokens({ tokenIds: ids });
 
       // SSE headers
       reply.raw.setHeader("Content-Type", "text/event-stream");

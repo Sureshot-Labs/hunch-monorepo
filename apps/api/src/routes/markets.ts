@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
 import { fetchMarketDetails, fetchMarketsByTokenIds } from "../repos/unified-read.js";
 
@@ -62,10 +63,13 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           }
 
           const acceptingOrders =
-            row.market_status === "ACTIVE" &&
-            (row.expiration_time == null ||
-              new Date(String(row.expiration_time)) > now) &&
-            (row.close_time == null || new Date(String(row.close_time)) > now);
+            row.pm_accepting_orders != null
+              ? Boolean(row.pm_accepting_orders)
+              : row.market_status === "ACTIVE" &&
+                (row.expiration_time == null ||
+                  new Date(String(row.expiration_time)) > now) &&
+                (row.close_time == null ||
+                  new Date(String(row.close_time)) > now);
 
           return {
             tokenId: row.token_id,
@@ -131,6 +135,10 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             },
           };
         });
+
+        if (tokenIds.length) {
+          void markHotTokens({ tokenIds });
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ data: response });
@@ -297,6 +305,13 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             eventIcon: market.event_icon || null,
           },
         };
+
+        const tokenIds = [tokens.yes, tokens.no].filter(
+          (tokenId): tokenId is string => Boolean(tokenId),
+        );
+        if (tokenIds.length) {
+          void markHotTokens({ tokenIds });
+        }
 
         const responseBody = JSON.stringify(response);
 

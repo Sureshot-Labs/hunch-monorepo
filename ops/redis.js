@@ -37,9 +37,24 @@ function canUseDocker(containerName) {
   return Boolean((p.stdout || "").trim());
 }
 
+function canUseLocalRedisCli() {
+  const p = spawnSync("redis-cli", ["--version"], { encoding: "utf8" });
+  if (p.error && p.error.code === "ENOENT") return false;
+  return p.status === 0;
+}
+
 const container = process.env.REDIS_CONTAINER || "hunch-redis";
-const preferDocker = dockerFlag || (!localFlag && canUseDocker(container));
+const localRedisCli = canUseLocalRedisCli();
+const dockerAvailable = canUseDocker(container);
+const preferDocker =
+  dockerFlag || (!localFlag && (dockerAvailable || !localRedisCli));
 if (preferDocker) {
+  if (!dockerAvailable) {
+    console.error(
+      `[redis] Docker container \"${container}\" not running. Start it with \`pnpm infra:up\` or pass --local to use redis-cli.`,
+    );
+    process.exit(1);
+  }
   const dockerTty = process.stdin.isTTY ? ["-t"] : [];
 
   const child = spawn(

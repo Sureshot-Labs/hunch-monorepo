@@ -1,7 +1,9 @@
 import {
+  selectHotTokenIds,
   selectWsTokenIds,
   snapshotBooks,
   syncCatchUpFromCursor,
+  syncHotEventStatuses,
   syncHotWindow,
 } from "./bootstrap";
 import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
@@ -17,14 +19,33 @@ async function periodicBootstrap() {
   running = true;
   try {
     await syncHotWindow();
+    await syncHotEventStatuses();
     const tokenIds = await selectWsTokenIds();
 
     if (!wsStarted && tokenIds.length > 0) {
-      await snapshotBooks(tokenIds);
+      const hotTokenIds = await selectHotTokenIds();
+      const combined =
+        hotTokenIds.length > 0
+          ? Array.from(new Set([...hotTokenIds, ...tokenIds]))
+          : tokenIds;
+      log.info("Polymarket bootstrap snapshot", {
+        wsTokens: tokenIds.length,
+        hotTokens: hotTokenIds.length,
+        snapshotTokens: combined.length,
+      });
+      await snapshotBooks(combined);
       startMarketWS(tokenIds);
       wsStarted = true;
     } else if (wsStarted) {
       updateMarketWSSubscriptions(tokenIds);
+      const hotTokenIds = await selectHotTokenIds();
+      log.info("Polymarket hot refresh snapshot", {
+        wsTokens: tokenIds.length,
+        hotTokens: hotTokenIds.length,
+      });
+      if (hotTokenIds.length > 0) {
+        await snapshotBooks(hotTokenIds);
+      }
     }
   } catch (e) {
     if (isPgSetupIssue(e)) {

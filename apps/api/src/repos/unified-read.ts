@@ -434,6 +434,7 @@ export type EventDetailsRow = {
   market_description: string | null;
   market_type: string | null;
   market_status: string | null;
+  accepting_orders: boolean | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -489,6 +490,7 @@ export async function fetchEventDetails(
       m.description as market_description,
       m.market_type,
       m.status as market_status,
+      m.accepting_orders,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -530,6 +532,7 @@ export type MarketByTokenRow = {
   market_description: string | null;
   market_type: string | null;
   market_status: string | null;
+  pm_accepting_orders: boolean | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -621,6 +624,7 @@ export async function fetchMarketsByTokenIds(
       m.description as market_description,
       m.market_type,
       m.status as market_status,
+      pm.accepting_orders as pm_accepting_orders,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -664,6 +668,8 @@ export async function fetchMarketsByTokenIds(
       e.icon as event_icon
     from token_matches tm
     join unified_markets m on m.id = tm.market_id
+    left join polymarket_markets pm
+      on pm.id = m.venue_market_id and m.venue = 'polymarket'
     left join unified_events e on e.id = m.event_id
     ${venueClause}
     order by array_position($1::text[], tm.token_id)

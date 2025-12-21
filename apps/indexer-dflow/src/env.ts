@@ -162,6 +162,17 @@ const catchupMaxPages = clampInt(catchupMaxPagesRaw, {
   fallback: 0,
 });
 
+const hotTokensTtlSec = clampInt(parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC), {
+  min: 60,
+  max: 7 * 24 * 60 * 60,
+  fallback: 600,
+});
+const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
+  min: 10,
+  max: 50_000,
+  fallback: 1000,
+});
+
 const isInitializedSetting = parseOptionalBool(
   process.env.DFLOW_IS_INITIALIZED,
 );
@@ -200,6 +211,8 @@ export const env = {
   catchupEnabled,
   overlapPages,
   catchupMaxPages,
+  hotTokensTtlSec,
+  hotTokensMax,
   isInitializedSetting,
   isInitialized: isInitializedSetting,
   requireInitializedSetting,

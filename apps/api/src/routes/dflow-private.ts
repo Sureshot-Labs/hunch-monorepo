@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import { storeExecution } from "../repos/executions-repo.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
 import {
@@ -146,6 +147,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const hotTokenIds = [query.inputMint, query.outputMint]
+        .filter(
+          (mint): mint is string =>
+            Boolean(mint) && mint !== env.solanaUsdcMint,
+        )
+        .map((mint) => `sol:${mint}`);
+      if (hotTokenIds.length) {
+        void markHotTokens({ tokenIds: hotTokenIds, venue: "dflow" });
+      }
+
       const upstream = await dflowRequest({
         baseUrl: env.dflowQuoteBase,
         timeoutMs: 15_000,
@@ -213,6 +224,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!ensureDflowReady(reply)) return;
 
       const query = request.query;
+
+      const hotTokenIds = [query.inputMint, query.outputMint]
+        .filter(
+          (mint): mint is string =>
+            Boolean(mint) && mint !== env.solanaUsdcMint,
+        )
+        .map((mint) => `sol:${mint}`);
+      if (hotTokenIds.length) {
+        void markHotTokens({ tokenIds: hotTokenIds, venue: "dflow" });
+      }
 
       const upstream = await dflowRequest({
         baseUrl: env.dflowQuoteBase,

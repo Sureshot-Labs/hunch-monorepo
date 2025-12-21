@@ -48,142 +48,187 @@ function signWsHeaders() {
   };
 }
 
-export function startMarketWS(tickers: string[]) {
-  if (!tickers.length) {
-    console.log("[indexer] No tickers to subscribe");
+function buildUniqueTickers(tickers: string[]): string[] {
+  return Array.from(new Set(tickers)).slice(0, env.wsSubset);
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+let desiredTickers: string[] = [];
+let ws: WebSocket | null = null;
+let pingTimer: NodeJS.Timeout | null = null;
+let msgLogTimer: NodeJS.Timeout | null = null;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let lastPong = Date.now();
+let msgCount = 0;
+let msgCountStartTime = Date.now();
+
+function clearTimers() {
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = null;
+  }
+  if (msgLogTimer) {
+    clearInterval(msgLogTimer);
+    msgLogTimer = null;
+  }
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  if (!desiredTickers.length) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, 2000);
+}
+
+function connect() {
+  const unique = buildUniqueTickers(desiredTickers);
+  if (!unique.length) {
+    console.log("[WS] No tickers to subscribe");
     return;
   }
 
-  const unique = Array.from(new Set(tickers)).slice(0, env.wsSubset);
-  console.log(`[WS] subscribing to ${unique.length} tickers`);
+  const headers = signWsHeaders();
+  ws = new WebSocket(env.kalshiWsUrl, { headers });
 
-  let ws: WebSocket | null = null;
-  let pingTimer: NodeJS.Timeout | null = null;
-  let lastPong = Date.now();
-  let msgCount = 0;
-  let msgCountStartTime = Date.now();
-  let msgLogTimer: NodeJS.Timeout | null = null;
-
-  const connect = () => {
-    const headers = signWsHeaders();
-    ws = new WebSocket(env.kalshiWsUrl, { headers });
-
-    ws.on("open", () => {
-      const msg = {
-        id: 1,
-        cmd: "subscribe",
-        params: { channels: ["orderbook"], market_tickers: unique },
-      };
-      if (!ws) return;
-      ws.send(JSON.stringify(msg));
-      console.log("[WS] subscribed");
-
-      // keepalive: ping every 20s, if no pong in 60s -> reconnect
-      if (pingTimer) clearInterval(pingTimer);
-      pingTimer = setInterval(() => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        try {
-          ws.ping();
-        } catch {
-          // ignore; ping not supported by client
-        }
-        if (Date.now() - lastPong > 60_000) {
-          console.warn("[WS] pong timeout; reconnecting");
-          try {
-            ws?.close();
-          } catch {
-            // ignore; socket may already be closed
-          }
-        }
-      }, 20_000);
-
-      // reset message counters and start logging interval
-      msgCount = 0;
-      msgCountStartTime = Date.now();
-      if (msgLogTimer) clearInterval(msgLogTimer);
-      msgLogTimer = setInterval(() => {
-        const now = Date.now();
-        const elapsed = (now - msgCountStartTime) / 1000;
-        const rps = (msgCount / Math.max(1, elapsed)).toFixed(2);
-        console.log(
-          `[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`,
-        );
-        msgCount = 0;
-        msgCountStartTime = now;
-      }, 10_000);
-    });
-
-    ws.on("pong", () => {
-      lastPong = Date.now();
-    });
-
-    ws.on("message", async (buf: Buffer) => {
-      try {
-        const m = JSON.parse(buf.toString());
-        if (!m || !m.type || !m.data) return;
-        if (!String(m.type).startsWith("orderbook")) return;
-        const t = m.data.market_ticker as string;
-        if (!t) return;
-
-        // store raw book (so UI can render depth later)
-        await redis.set(`book:kalshi:${t}`, JSON.stringify(m.data), { EX: 5 });
-
-        const top = deriveTop(m.data);
-        const ts = new Date();
-        const tsMs = ts.getTime();
-        const yesTokenId = `kalshi:${t}:YES`;
-        const noTokenId = `kalshi:${t}:NO`;
-
-        const yesTick = {
-          token_id: yesTokenId,
-          best_bid: top.yesBid,
-          best_ask: top.yesAsk,
-          ts: tsMs,
-        };
-        const noTick = {
-          token_id: noTokenId,
-          best_bid: top.noBid,
-          best_ask: top.noAsk,
-          ts: tsMs,
-        };
-
-        await Promise.all([
-          writeUnifiedBookTop(pool, yesTokenId, top.yesBid, top.yesAsk, ts),
-          writeUnifiedBookTop(pool, noTokenId, top.noBid, top.noAsk, ts),
-          redis.set(`top:${yesTokenId}`, JSON.stringify(yesTick), { EX: 60 }),
-          redis.set(`top:${noTokenId}`, JSON.stringify(noTick), { EX: 60 }),
-          redis.publish(`prices:${yesTokenId}`, JSON.stringify(yesTick)),
-          redis.publish(`prices:${noTokenId}`, JSON.stringify(noTick)),
-        ]);
-
-        msgCount++;
-      } catch (e) {
-        console.warn("[WS] parse", String(e));
-      }
-    });
-
-    const onCloseOrError = (tag: string, err?: unknown) => {
-      console.warn(`[WS] ${tag}`, err ? String(err) : "");
-      try {
-        ws?.close();
-      } catch {
-        // ignore; best-effort close
-      }
-      ws = null;
-      if (pingTimer) {
-        clearInterval(pingTimer);
-        pingTimer = null;
-      }
-      if (msgLogTimer) {
-        clearInterval(msgLogTimer);
-        msgLogTimer = null;
-      }
-      setTimeout(connect, 2000);
+  ws.on("open", () => {
+    const msg = {
+      id: 1,
+      cmd: "subscribe",
+      params: { channels: ["orderbook"], market_tickers: unique },
     };
+    ws?.send(JSON.stringify(msg));
+    console.log(`[WS] subscribed (${unique.length} tickers)`);
 
-    ws.on("error", (e) => onCloseOrError("error", e));
-    ws.on("close", () => onCloseOrError("closed"));
+    lastPong = Date.now();
+    clearTimers();
+
+    pingTimer = setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.ping();
+      } catch {
+        // ignore; ping not supported by client
+      }
+      if (Date.now() - lastPong > 60_000) {
+        console.warn("[WS] pong timeout; reconnecting");
+        try {
+          ws?.close();
+        } catch {
+          // ignore; socket may already be closed
+        }
+      }
+    }, 20_000);
+
+    msgCount = 0;
+    msgCountStartTime = Date.now();
+    msgLogTimer = setInterval(() => {
+      const now = Date.now();
+      const elapsed = (now - msgCountStartTime) / 1000;
+      const rps = (msgCount / Math.max(1, elapsed)).toFixed(2);
+      console.log(`[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`);
+      msgCount = 0;
+      msgCountStartTime = now;
+    }, 10_000);
+  });
+
+  ws.on("pong", () => {
+    lastPong = Date.now();
+  });
+
+  ws.on("message", async (buf: Buffer) => {
+    try {
+      const m = JSON.parse(buf.toString());
+      if (!m || !m.type || !m.data) return;
+      if (!String(m.type).startsWith("orderbook")) return;
+      const t = m.data.market_ticker as string;
+      if (!t) return;
+
+      // store raw book (so UI can render depth later)
+      await redis.set(`book:kalshi:${t}`, JSON.stringify(m.data), { EX: 5 });
+
+      const top = deriveTop(m.data);
+      const ts = new Date();
+      const tsMs = ts.getTime();
+      const yesTokenId = `kalshi:${t}:YES`;
+      const noTokenId = `kalshi:${t}:NO`;
+
+      const yesTick = {
+        token_id: yesTokenId,
+        best_bid: top.yesBid,
+        best_ask: top.yesAsk,
+        ts: tsMs,
+      };
+      const noTick = {
+        token_id: noTokenId,
+        best_bid: top.noBid,
+        best_ask: top.noAsk,
+        ts: tsMs,
+      };
+
+      await Promise.all([
+        writeUnifiedBookTop(pool, yesTokenId, top.yesBid, top.yesAsk, ts),
+        writeUnifiedBookTop(pool, noTokenId, top.noBid, top.noAsk, ts),
+        redis.set(`top:${yesTokenId}`, JSON.stringify(yesTick), { EX: 60 }),
+        redis.set(`top:${noTokenId}`, JSON.stringify(noTick), { EX: 60 }),
+        redis.publish(`prices:${yesTokenId}`, JSON.stringify(yesTick)),
+        redis.publish(`prices:${noTokenId}`, JSON.stringify(noTick)),
+      ]);
+
+      msgCount += 1;
+    } catch (e) {
+      console.warn("[WS] parse", String(e));
+    }
+  });
+
+  const onCloseOrError = (tag: string, err?: unknown) => {
+    console.warn(`[WS] ${tag}`, err ? String(err) : "");
+    try {
+      ws?.close();
+    } catch {
+      // ignore; best-effort close
+    }
+    ws = null;
+    clearTimers();
+    scheduleReconnect();
   };
 
+  ws.on("error", (e) => onCloseOrError("error", e));
+  ws.on("close", () => onCloseOrError("closed"));
+}
+
+export function startMarketWS(tickers: string[]) {
+  desiredTickers = buildUniqueTickers(tickers);
+  if (!desiredTickers.length) {
+    console.log("[indexer] No tickers to subscribe");
+    return;
+  }
+  if (ws) {
+    ws.close();
+    return;
+  }
+  connect();
+}
+
+export function updateMarketWSSubscriptions(tickers: string[]) {
+  const next = buildUniqueTickers(tickers);
+  if (arraysEqual(next, desiredTickers)) return;
+  desiredTickers = next;
+  if (!desiredTickers.length) {
+    if (ws) ws.close();
+    return;
+  }
+  if (ws) {
+    ws.close();
+    return;
+  }
   connect();
 }

@@ -34,6 +34,34 @@ function diffSets(current: Set<string>, desired: Iterable<string>) {
   return { toSub, toUnsub, next };
 }
 
+function parsePrice(value: unknown): number | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function bestBid(levels: Array<{ price: string }> | undefined): number | null {
+  if (!levels || levels.length === 0) return null;
+  let best: number | null = null;
+  for (const level of levels) {
+    const p = parsePrice(level.price);
+    if (p == null) continue;
+    if (best == null || p > best) best = p;
+  }
+  return best;
+}
+
+function bestAsk(levels: Array<{ price: string }> | undefined): number | null {
+  if (!levels || levels.length === 0) return null;
+  let best: number | null = null;
+  for (const level of levels) {
+    const p = parsePrice(level.price);
+    if (p == null) continue;
+    if (best == null || p < best) best = p;
+  }
+  return best;
+}
+
 // tolerant payload builders (send both keys; server will ignore one)
 function sendSubscribe(ws: WebSocket, ids: string[]) {
   if (!ids.length) return;
@@ -149,8 +177,8 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
               (m.sells as Array<{ price: string }> | undefined) ||
               [];
 
-            const bb = bids.length ? parseFloat(bids[0].price) : null;
-            const ba = asks.length ? parseFloat(asks[0].price) : null;
+            const bb = bestBid(bids);
+            const ba = bestAsk(asks);
 
             if (bb != null || ba != null) {
               const t = Number(m.timestamp);

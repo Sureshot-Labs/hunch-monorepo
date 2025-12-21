@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import {
   fetchPositionsForUserWallet,
   fetchPositionsForUserWalletByTokenIds,
@@ -42,6 +43,12 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           walletAddress,
           venue,
         });
+
+        if (positions.length) {
+          void markHotTokens({
+            tokenIds: positions.map((position) => position.tokenId),
+          });
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         if (venue) return reply.send({ positions, venue });
@@ -87,6 +94,12 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           tokenIds: query.tokenIds,
           venue: query.venue,
         });
+
+        if (positions.length) {
+          void markHotTokens({
+            tokenIds: positions.map((position) => position.tokenId),
+          });
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         if (query.venue) return reply.send({ positions, venue: query.venue });

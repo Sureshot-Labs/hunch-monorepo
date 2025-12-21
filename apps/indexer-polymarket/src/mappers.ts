@@ -433,16 +433,13 @@ export function mapToUnifiedMarket(
   // Map Polymarket status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
 
-  const endDate = m.endDate ? new Date(m.endDate) : null;
-  const isExpired = endDate && endDate < new Date();
-
   if (m.archived) {
     status = "ARCHIVED";
-  } else if (m.closed || (m.active && m.closed) || isExpired) {
-    // Mark as CLOSED if:
-    // 1. closed flag is true, OR
-    // 2. both active=true and closed=true (contradictory state - treat as closed), OR
-    // 3. endDate has passed (expired)
+  } else if (m.closed || (m.active && m.closed)) {
+    // Prefer explicit close flags over endDate since Polymarket can
+    // keep accepting orders after the scheduled end time.
+    status = "CLOSED";
+  } else if (m.acceptingOrders === false) {
     status = "CLOSED";
   }
 

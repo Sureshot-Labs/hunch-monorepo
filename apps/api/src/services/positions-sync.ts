@@ -2,6 +2,7 @@ import type { Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
 import { syncWalletPositionsFromTokenBalances } from "../repos/positions-repo.js";
 import { env } from "../env.js";
+import { markHotTokens } from "../lib/hot-tokens.js";
 import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
@@ -164,6 +165,13 @@ async function syncKalshiPositionsFromSolana(
     size: balance.uiAmountString,
   }));
 
+  if (tokenBalances.length) {
+    void markHotTokens({
+      tokenIds: tokenBalances.map((balance) => balance.tokenId),
+      venue: "dflow",
+    });
+  }
+
   const result = await syncWalletPositionsFromTokenBalances(pool, {
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
@@ -253,6 +261,13 @@ async function syncPolymarketPositionsFromPolygon(
     venue: "polymarket",
     tokenBalances: held,
   });
+
+  if (held.length) {
+    void markHotTokens({
+      tokenIds: held.map((item) => item.tokenId),
+      venue: "polymarket",
+    });
+  }
 
   try {
     await recomputePositionMetricsForWallet(pool, {
