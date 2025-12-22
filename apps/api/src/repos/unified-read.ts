@@ -374,6 +374,8 @@ export type MarketDetailsRow = {
   settlement_mint: string | null;
   is_initialized: boolean | null;
   redemption_status: string | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
   pm_order_price_min_tick_size: unknown;
   pm_order_min_size: unknown;
   pm_accepting_orders: boolean | null;
@@ -435,6 +437,8 @@ export async function fetchMarketDetails(
       m.settlement_mint,
       m.is_initialized,
       m.redemption_status,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
       pm.order_price_min_tick_size as pm_order_price_min_tick_size,
       pm.order_min_size as pm_order_min_size,
       pm.accepting_orders as pm_accepting_orders,
@@ -692,6 +696,8 @@ export type MarketByTokenRow = {
   settlement_mint: string | null;
   is_initialized: boolean | null;
   redemption_status: string | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
   slug: string | null;
   market_category: string | null;
   market_image: string | null;
@@ -808,6 +814,8 @@ export async function fetchMarketsByTokenIds(
       m.settlement_mint,
       m.is_initialized,
       m.redemption_status,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
       m.slug,
       m.category as market_category,
       m.image as market_image,

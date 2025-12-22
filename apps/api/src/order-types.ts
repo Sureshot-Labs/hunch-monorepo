@@ -57,6 +57,9 @@ export interface Position {
   realizedPnl: number;
   estimatedPayout?: number;
   estimatedProfit?: number;
+  isHidden?: boolean;
+  hiddenReason?: string;
+  hiddenAt?: Date;
 
   lastUpdatedAt: Date;
   createdAt: Date;

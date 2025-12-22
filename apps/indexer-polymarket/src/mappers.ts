@@ -40,6 +40,46 @@ const compactMetadata = (
   return Object.keys(out).length ? out : undefined;
 };
 
+function parseOutcomePrices(raw: unknown): number[] | null {
+  if (raw == null) return null;
+  if (Array.isArray(raw)) {
+    const parsed = raw
+      .map((value) => n(value))
+      .filter((value): value is number => value != null);
+    return parsed.length ? parsed : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) {
+        const values = parsed
+          .map((value) => n(value))
+          .filter((value): value is number => value != null);
+        return values.length ? values : null;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function resolveBinaryOutcome(
+  prices: number[] | null,
+): "YES" | "NO" | undefined {
+  if (!prices || prices.length < 2) return undefined;
+  const yes = prices[0];
+  const no = prices[1];
+  if (yes == null || no == null) return undefined;
+  const winThreshold = 0.999;
+  const loseThreshold = 0.001;
+  if (yes >= winThreshold && no <= loseThreshold) return "YES";
+  if (no >= winThreshold && yes <= loseThreshold) return "NO";
+  return undefined;
+}
+
 export function mapEventRow(venueId: number, e: TEvent) {
   const id = uuid();
   return {
@@ -461,6 +501,10 @@ export function mapToUnifiedMarket(
     return m.question;
   })();
 
+  const outcomePrices = parseOutcomePrices(m.outcomePrices ?? extra.outcomePrices);
+  const resolvedOutcome =
+    status !== "ACTIVE" ? resolveBinaryOutcome(outcomePrices) : undefined;
+
   const metadata = compactMetadata({
     question: s(extra.question),
     resolutionSource: s(extra.resolutionSource),
@@ -530,6 +574,8 @@ export function mapToUnifiedMarket(
     outcomes: m.outcomes ?? undefined, // Already JSON string
     clob_token_ids: clobTokenIds,
     condition_id: m.conditionId ?? undefined,
+    resolved_outcome: resolvedOutcome,
+    resolved_outcome_pct: undefined,
     slug: m.slug ?? undefined,
     image: m.image ?? undefined,
     icon: m.icon ?? undefined,

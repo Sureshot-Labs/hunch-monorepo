@@ -14,6 +14,9 @@ type PositionRow = {
   average_price: string | null;
   unrealized_pnl: string | null;
   realized_pnl: string | null;
+  is_hidden: boolean | null;
+  hidden_reason: string | null;
+  hidden_at: Date | null;
   last_updated_at: Date;
   created_at: Date;
   updated_at: Date;
@@ -42,6 +45,9 @@ function mapPositionRow(row: PositionRow): Position {
     realizedPnl: parseFloat(row.realized_pnl ?? "0"),
     estimatedPayout,
     estimatedProfit,
+    isHidden: row.is_hidden ?? false,
+    hiddenReason: row.hidden_reason ?? undefined,
+    hiddenAt: row.hidden_at ?? undefined,
     lastUpdatedAt: row.last_updated_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -54,6 +60,7 @@ export async function fetchPositionsForUserWallet(
     userId: string;
     walletAddresses: string[];
     venue?: string;
+    includeHidden?: boolean;
   },
 ): Promise<Position[]> {
   if (inputs.walletAddresses.length === 0) return [];
@@ -62,6 +69,10 @@ export async function fetchPositionsForUserWallet(
     "where user_id = $1 and (wallet_address is null or wallet_address = any($2::text[]))";
   const params: PgParams = [inputs.userId, inputs.walletAddresses];
   let paramCount = 2;
+
+  if (!inputs.includeHidden) {
+    whereClause += " and (is_hidden is null or is_hidden = false)";
+  }
 
   if (inputs.venue) {
     paramCount += 1;
@@ -83,6 +94,9 @@ export async function fetchPositionsForUserWallet(
           average_price,
           unrealized_pnl,
           realized_pnl,
+          is_hidden,
+          hidden_reason,
+          hidden_at,
           last_updated_at,
           created_at,
           updated_at
@@ -106,6 +120,9 @@ export async function fetchPositionsForUserWallet(
         average_price,
         unrealized_pnl,
         realized_pnl,
+        is_hidden,
+        hidden_reason,
+        hidden_at,
         last_updated_at,
         created_at,
         updated_at
@@ -125,6 +142,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
     walletAddresses: string[];
     tokenIds: string[];
     venue?: string;
+    includeHidden?: boolean;
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
@@ -138,6 +156,10 @@ export async function fetchPositionsForUserWalletByTokenIds(
   paramCount += 1;
   whereClause += ` and token_id = any($${paramCount}::text[])`;
   params.push(inputs.tokenIds);
+
+  if (!inputs.includeHidden) {
+    whereClause += " and (is_hidden is null or is_hidden = false)";
+  }
 
   if (inputs.venue) {
     paramCount += 1;
@@ -159,6 +181,9 @@ export async function fetchPositionsForUserWalletByTokenIds(
           average_price,
           unrealized_pnl,
           realized_pnl,
+          is_hidden,
+          hidden_reason,
+          hidden_at,
           last_updated_at,
           created_at,
           updated_at
@@ -182,6 +207,9 @@ export async function fetchPositionsForUserWalletByTokenIds(
         average_price,
         unrealized_pnl,
         realized_pnl,
+        is_hidden,
+        hidden_reason,
+        hidden_at,
         last_updated_at,
         created_at,
         updated_at
@@ -357,6 +385,42 @@ export async function syncWalletPositionsFromTokenBalances(
     upsertedPositions: result.upsertedPositions,
     flattenedPositions: result.flattenedPositions,
   };
+}
+
+export async function autoHideResolvedLosingPositions(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: Position["venue"];
+  },
+): Promise<number> {
+  const result = await pool.query(
+    `
+      update positions p
+      set
+        is_hidden = true,
+        hidden_reason = 'auto_lost',
+        hidden_at = now(),
+        updated_at = now()
+      from unified_tokens ut
+      join unified_markets m on m.id = ut.market_id
+      where p.user_id = $1
+        and p.wallet_address = $2
+        and p.venue = $3
+        and p.token_id = ut.token_id
+        and ut.venue = $3
+        and (p.is_hidden is null or p.is_hidden = false)
+        and p.side <> 'FLAT'
+        and p.size > 0
+        and m.resolved_outcome is not null
+        and upper(m.resolved_outcome) in ('YES', 'NO')
+        and upper(m.resolved_outcome) <> ut.side
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.venue],
+  );
+
+  return result.rowCount ?? 0;
 }
 
 export async function updatePositionMetrics(

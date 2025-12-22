@@ -129,6 +129,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               marketImage: row.market_image || null,
               marketIcon: row.market_icon || null,
               redemptionStatus: row.redemption_status || null,
+              resolvedOutcome: row.resolved_outcome || null,
+              resolvedOutcomePct:
+                row.resolved_outcome_pct != null
+                  ? Number(row.resolved_outcome_pct)
+                  : null,
               acceptingOrders,
               negRisk: row.pm_neg_risk != null ? Boolean(row.pm_neg_risk) : null,
               negRiskMarketId: row.pm_neg_risk_market_id || null,
@@ -336,6 +341,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               ? Boolean(market.is_initialized)
               : null,
           redemptionStatus: market.redemption_status ?? null,
+          resolvedOutcome: market.resolved_outcome ?? null,
+          resolvedOutcomePct:
+            market.resolved_outcome_pct != null
+              ? Number(market.resolved_outcome_pct)
+              : null,
           conditionId: market.condition_id || null,
           questionId: market.pm_question_id || null,
           category: market.market_category || null,

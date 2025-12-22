@@ -9,10 +9,18 @@ const zVenueOptional = z.preprocess(
 export const positionsQuerySchema = z.object({
   venue: zVenueOptional,
   wallets: zCsvString("wallets is required").optional(),
+  includeHidden: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
 });
 
 export const positionsByTokenQuerySchema = z.object({
   tokenIds: zCsvString("tokenIds is required"),
   venue: zVenueOptional,
   wallets: zCsvString("wallets is required").optional(),
+  includeHidden: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
 });

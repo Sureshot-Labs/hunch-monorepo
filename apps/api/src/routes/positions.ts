@@ -78,6 +78,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddresses,
           venue,
+          includeHidden: query.includeHidden,
         });
 
         if (positions.length) {
@@ -139,6 +140,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           walletAddresses,
           tokenIds: query.tokenIds,
           venue: query.venue,
+          includeHidden: query.includeHidden,
         });
 
         if (positions.length) {

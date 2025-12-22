@@ -414,6 +414,16 @@ export function mapToUnifiedMarket(
   const earlyCloseCondition =
     s(extra.earlyCloseCondition) ?? s(extra.early_close_condition);
   const result = s(extra.result);
+  const scalarOutcomePct = pickNumber(
+    [account, extra],
+    ["scalarOutcomePct", "scalar_outcome_pct"],
+  );
+  const resolvedOutcome =
+    result?.toLowerCase() === "yes"
+      ? "YES"
+      : result?.toLowerCase() === "no"
+        ? "NO"
+        : undefined;
   const marketType = s(extra.marketType) ?? s(extra.market_type);
   const canCloseEarly =
     typeof extra.canCloseEarly === "boolean" ? extra.canCloseEarly : undefined;
@@ -426,6 +436,7 @@ export function mapToUnifiedMarket(
     earlyCloseCondition,
     canCloseEarly,
     result,
+    scalarOutcomePct,
     marketType,
   });
 
@@ -470,6 +481,8 @@ export function mapToUnifiedMarket(
     settlement_mint: instrument.settlementMint,
     is_initialized: isInitialized,
     redemption_status: redemptionStatus,
+    resolved_outcome: resolvedOutcome,
+    resolved_outcome_pct: scalarOutcomePct,
     slug,
     image,
     icon,
