@@ -27,6 +27,14 @@ function optionalNonNegativeInt(name: string, fallback: number): number {
   return asInt >= 0 ? asInt : fallback;
 }
 
+function optionalNonNegativeNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return n >= 0 ? n : fallback;
+}
+
 function parseOptionalBool(value: string | undefined): boolean | undefined {
   if (!value) return undefined;
   switch (value.toLowerCase()) {
@@ -168,6 +176,7 @@ export const env = {
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
+  feeScaleKalshi: optionalNonNegativeNumber("HUNCH_FEE_SCALE_KALSHI", 0),
   feePolicyTtlSec: optionalPositiveInt(
     "HUNCH_FEE_POLICY_TTL_SEC",
     7 * 24 * 60 * 60,

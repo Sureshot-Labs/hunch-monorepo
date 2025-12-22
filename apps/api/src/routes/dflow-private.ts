@@ -174,6 +174,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           ...(query.platformFeeBps != null
             ? { platformFeeBps: query.platformFeeBps }
             : {}),
+          ...(query.platformFeeScale != null
+            ? { platformFeeScale: query.platformFeeScale }
+            : {}),
           ...(query.platformFeeMode
             ? { platformFeeMode: query.platformFeeMode }
             : {}),
@@ -250,6 +253,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             : {}),
           ...(query.platformFeeBps != null
             ? { platformFeeBps: query.platformFeeBps }
+            : {}),
+          ...(query.platformFeeScale != null
+            ? { platformFeeScale: query.platformFeeScale }
             : {}),
           ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
           ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),

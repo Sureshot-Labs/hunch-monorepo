@@ -5,11 +5,17 @@ import { env } from "../env.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
 
 const MAX_FEE_BPS = 10_000;
+const MAX_FEE_SCALE = 10_000;
 const MS_PER_SEC = 1000;
 
 function clampFeeBps(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(Math.max(Math.trunc(value), 0), MAX_FEE_BPS);
+}
+
+function clampFeeScale(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), MAX_FEE_SCALE);
 }
 
 export const feesRoutes: FastifyPluginAsync = async (app) => {
@@ -37,6 +43,8 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       const feeBpsRaw =
         venue === "polymarket" ? env.feeBpsPolymarket : env.feeBpsKalshi;
       const feeBps = clampFeeBps(feeBpsRaw);
+      const feeScaleRaw = venue === "kalshi" ? env.feeScaleKalshi : 0;
+      const feeScale = clampFeeScale(feeScaleRaw);
 
       const ttlMs = env.feePolicyTtlSec * MS_PER_SEC;
       const deadline = new Date(Date.now() + ttlMs).toISOString();
@@ -46,6 +54,7 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         venue,
         feeBps,
+        feeScale: feeScale > 0 ? feeScale : null,
         deadline,
         collectorAddress: env.feeCollectorAddress || null,
         feeAccount: venue === "kalshi" ? env.dflowFeeAccount || null : null,
