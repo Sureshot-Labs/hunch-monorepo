@@ -353,6 +353,7 @@ export type MarketDetailsRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_status: string | null;
   open_time: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -416,6 +417,7 @@ export async function fetchMarketDetails(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.status as market_status,
       m.open_time,
       m.close_time,
       m.expiration_time,
@@ -545,6 +547,8 @@ export type EventDetailsRow = {
   token_no: unknown;
   clob_token_ids: unknown;
   condition_id: string | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
   market_slug: string | null;
   market_category: string | null;
   market_image: string | null;
@@ -610,6 +614,8 @@ export async function fetchEventDetails(
       mt.token_no,
       m.clob_token_ids,
       m.condition_id,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
       m.slug as market_slug,
       m.category as market_category,
       m.image as market_image,

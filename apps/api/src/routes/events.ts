@@ -181,6 +181,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             outcomes,
             tokens,
             conditionId: row.condition_id || null,
+            resolvedOutcome: row.resolved_outcome || null,
+            resolvedOutcomePct:
+              row.resolved_outcome_pct != null
+                ? Number(row.resolved_outcome_pct)
+                : null,
             category: row.market_category || null,
             marketSlug: row.market_slug || null,
             marketImage: row.market_image || null,

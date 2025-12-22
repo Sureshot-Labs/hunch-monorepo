@@ -285,6 +285,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           marketTitle: market.market_title,
           marketDescription: market.market_description,
           marketType: market.market_type,
+          status: market.market_status ?? null,
           openTime: market.open_time,
           closeTime: market.close_time,
           expirationTime: market.expiration_time,
