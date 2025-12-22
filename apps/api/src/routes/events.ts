@@ -2,9 +2,12 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
+import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
-import { eventParamsSchema } from "../schemas/event.js";
 import { fetchEventDetails } from "../repos/unified-read.js";
+import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
+import { eventParamsSchema } from "../schemas/event.js";
 import type { TokenPair } from "../server-types.js";
 
 export const eventRoutes: FastifyPluginAsync = async (app) => {
@@ -238,6 +241,133 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(responseBody);
       } catch (error) {
         app.log.error({ error, eventId }, "Event details fetch failed");
+        reply.code(500);
+        return reply.send({
+          error: "Internal server error",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /events/:eventId/candlesticks
+   * Proxy candlestick data for a specific event.
+   */
+  z.get(
+    "/events/:eventId/candlesticks",
+    {
+      schema: {
+        params: eventParamsSchema,
+        querystring: candlesticksQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const { eventId } = request.params;
+      const { startTs, endTs, periodInterval } = request.query;
+
+      const clientIp = request.ip || "unknown";
+      const rateLimitKey = `candlesticks:event:${clientIp}`;
+      const canProceed = await checkRateLimit(rateLimitKey, 60, 60000);
+      if (!canProceed) {
+        reply.code(429);
+        return reply.send({
+          error: "Client rate limit exceeded. Please try again later.",
+        });
+      }
+
+      const cacheKey = `candlesticks:event:${eventId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}`;
+      const r = await getRedis();
+      if (r) {
+        const cached = await r.get(cacheKey);
+        if (cached) {
+          reply.header("x-cache", "hit");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(cached);
+        }
+      }
+
+      try {
+        const rows = await fetchEventDetails(pool, eventId);
+        if (rows.length === 0) {
+          reply.code(404);
+          return reply.send({ error: "Event not found" });
+        }
+
+        const event = rows[0];
+        if (event.event_venue === "kalshi" || event.event_venue === "limitless") {
+          if (startTs == null || endTs == null || periodInterval == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+          if (!event.venue_event_id) {
+            reply.code(400);
+            return reply.send({ error: "Missing event ticker." });
+          }
+          if (env.dflowRequireApiKey && !env.dflowApiKey) {
+            reply.code(400);
+            return reply.send({ error: "Missing DFLOW_API_KEY" });
+          }
+
+          const upstream = await dflowRequest({
+            baseUrl: env.dflowPredictionMarketsBase,
+            timeoutMs: 15_000,
+            method: "GET",
+            requestPath: `/api/v1/event/${encodeURIComponent(
+              event.venue_event_id,
+            )}/candlesticks`,
+            apiKey: env.dflowApiKey,
+            query: {
+              startTs,
+              endTs,
+              periodInterval,
+            },
+          });
+
+          if (!upstream.ok) {
+            reply.code(502);
+            return reply.send({
+              error: "Kalshi candlesticks fetch failed",
+              status: upstream.status,
+              message: extractDflowErrorMessage(upstream.payload),
+              payload: upstream.payload,
+            });
+          }
+
+          const response = {
+            ok: true,
+            venue: "kalshi",
+            eventId: event.event_id,
+            ticker: event.venue_event_id,
+            data: upstream.payload,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        reply.code(400);
+        return reply.send({
+          error: `Candlesticks not supported for venue ${event.event_venue ?? "unknown"}.`,
+        });
+      } catch (error) {
+        app.log.error({ error, eventId }, "Event candlestick fetch failed");
         reply.code(500);
         return reply.send({
           error: "Internal server error",

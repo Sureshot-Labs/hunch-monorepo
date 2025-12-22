@@ -47,7 +47,11 @@ export class PolymarketRateLimiter {
         resolve: resolveUnknown,
         reject,
       });
-      void this.processQueue();
+      void this.processQueue().catch((error) => {
+        // Avoid crashing the process if the queue loop throws unexpectedly.
+        this.isProcessing = false;
+        reject(error);
+      });
     });
   }
 
@@ -114,7 +118,7 @@ export class PolymarketRateLimiter {
             market: request.key,
             interval: "max",
           });
-          result = await this.makeRequest("/price-history", params);
+          result = await this.makeRequest("/prices-history", params);
         }
 
         request.resolve(result);
@@ -367,7 +371,7 @@ export class PolymarketClient {
     const requestPromise = this.rateLimiter.queueRequest<PriceHistoryData>(
       tokenId,
       {
-        endpoint: "/price-history",
+        endpoint: "/prices-history",
         params: new URLSearchParams({ market: tokenId, interval: "max" }),
       },
     );

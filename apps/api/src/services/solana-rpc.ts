@@ -22,10 +22,20 @@ export function formatUiAmount(amount: bigint, decimals: number): string {
   return negative ? `-${ui}` : ui;
 }
 
+type ParsedTokenAccount = {
+  pubkey: string;
+  mint: string;
+  owner: string | null;
+  amount: bigint;
+  decimals: number;
+};
+
 function parseTokenAccount(
   entry: unknown,
-): { mint: string; amount: bigint; decimals: number } | null {
+): ParsedTokenAccount | null {
   if (!isRecord(entry)) return null;
+  const pubkey = entry.pubkey;
+  if (typeof pubkey !== "string" || pubkey.trim().length === 0) return null;
   const account = entry.account;
   if (!isRecord(account)) return null;
   const data = account.data;
@@ -37,6 +47,9 @@ function parseTokenAccount(
 
   const mint = info.mint;
   if (typeof mint !== "string" || mint.trim().length === 0) return null;
+  const owner = info.owner;
+  const ownerValue =
+    typeof owner === "string" && owner.trim().length > 0 ? owner : null;
 
   const tokenAmount = info.tokenAmount;
   if (!isRecord(tokenAmount)) return null;
@@ -57,7 +70,7 @@ function parseTokenAccount(
     return null;
   const decimals = Math.max(0, Math.trunc(decimalsRaw));
 
-  return { mint, amount, decimals };
+  return { pubkey, mint, owner: ownerValue, amount, decimals };
 }
 
 async function solanaRpcRequest<T>(inputs: {
@@ -312,4 +325,79 @@ export async function fetchSolanaTokenBalancesByOwner(inputs: {
     decimals: value.decimals,
     uiAmountString: formatUiAmount(value.amount, value.decimals),
   }));
+}
+
+export async function fetchSolanaTokenAccountByOwnerAndMint(inputs: {
+  rpcUrls: string[];
+  owner: string;
+  mint: string;
+  timeoutMs: number;
+}): Promise<string | null> {
+  const result = await solanaRpcRequest<{ value: unknown[] }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenAccountsByOwner",
+    params: [
+      inputs.owner,
+      { mint: inputs.mint },
+      {
+        encoding: "jsonParsed",
+      },
+    ],
+  });
+
+  const entries = Array.isArray(result.value) ? result.value : [];
+  let first: string | null = null;
+  let best: { pubkey: string; amount: bigint } | null = null;
+
+  for (const entry of entries) {
+    const parsed = parseTokenAccount(entry);
+    if (!parsed) continue;
+    if (!first) first = parsed.pubkey;
+    if (!best || parsed.amount > best.amount) {
+      best = { pubkey: parsed.pubkey, amount: parsed.amount };
+    }
+  }
+
+  return best?.pubkey ?? first;
+}
+
+export async function fetchSolanaTokenAccountInfo(inputs: {
+  rpcUrls: string[];
+  account: string;
+  timeoutMs: number;
+}): Promise<{ mint: string; owner: string } | null> {
+  const result = await solanaRpcRequest<{ value: unknown }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getAccountInfo",
+    params: [
+      inputs.account,
+      {
+        encoding: "jsonParsed",
+      },
+    ],
+  });
+
+  const value = (result as { value?: unknown }).value;
+  if (!isRecord(value)) return null;
+
+  const data = value.data;
+  if (!isRecord(data)) return null;
+
+  const program = data.program;
+  if (program !== "spl-token") return null;
+
+  const parsed = data.parsed;
+  if (!isRecord(parsed)) return null;
+
+  const info = parsed.info;
+  if (!isRecord(info)) return null;
+
+  const mint = info.mint;
+  const owner = info.owner;
+  if (typeof mint !== "string" || mint.trim().length === 0) return null;
+  if (typeof owner !== "string" || owner.trim().length === 0) return null;
+
+  return { mint, owner };
 }

@@ -2,10 +2,14 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
+import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
-import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
 import { fetchMarketDetails, fetchMarketsByTokenIds } from "../repos/unified-read.js";
+import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import { polymarketClient } from "../services/polymarket-client.js";
+import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
+import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
 
 export const marketRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -381,6 +385,192 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(responseBody);
       } catch (error) {
         app.log.error({ error, marketId }, "Market details fetch failed");
+        reply.code(500);
+        return reply.send({
+          error: "Internal server error",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/candlesticks
+   * Proxy candlestick/time-series data for a specific market.
+   */
+  z.get(
+    "/markets/:marketId/candlesticks",
+    {
+      schema: {
+        params: marketParamsSchema,
+        querystring: candlesticksQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const { marketId } = request.params;
+      const { startTs, endTs, periodInterval, interval, fidelity, side } =
+        request.query;
+
+      const clientIp = request.ip || "unknown";
+      const rateLimitKey = `candlesticks:market:${clientIp}`;
+      const canProceed = await checkRateLimit(rateLimitKey, 60, 60000);
+      if (!canProceed) {
+        reply.code(429);
+        return reply.send({
+          error: "Client rate limit exceeded. Please try again later.",
+        });
+      }
+
+      const cacheKey = `candlesticks:market:${marketId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}:${interval ?? ""}:${fidelity ?? ""}:${side ?? ""}`;
+      const r = await getRedis();
+      if (r) {
+        const cached = await r.get(cacheKey);
+        if (cached) {
+          reply.header("x-cache", "hit");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(cached);
+        }
+      }
+
+      try {
+        const rows = await fetchMarketDetails(pool, marketId);
+        if (rows.length === 0) {
+          reply.code(404);
+          return reply.send({ error: "Market not found" });
+        }
+
+        const market = rows[0];
+        if (market.venue === "kalshi" || market.venue === "limitless") {
+          if (startTs == null || endTs == null || periodInterval == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+          if (!market.venue_market_id) {
+            reply.code(400);
+            return reply.send({ error: "Missing market ticker." });
+          }
+          if (env.dflowRequireApiKey && !env.dflowApiKey) {
+            reply.code(400);
+            return reply.send({ error: "Missing DFLOW_API_KEY" });
+          }
+
+          const upstream = await dflowRequest({
+            baseUrl: env.dflowPredictionMarketsBase,
+            timeoutMs: 15_000,
+            method: "GET",
+            requestPath: `/api/v1/market/${encodeURIComponent(
+              market.venue_market_id,
+            )}/candlesticks`,
+            apiKey: env.dflowApiKey,
+            query: {
+              startTs,
+              endTs,
+              periodInterval,
+            },
+          });
+
+          if (!upstream.ok) {
+            reply.code(502);
+            return reply.send({
+              error: "Kalshi candlesticks fetch failed",
+              status: upstream.status,
+              message: extractDflowErrorMessage(upstream.payload),
+              payload: upstream.payload,
+            });
+          }
+
+          const response = {
+            ok: true,
+            venue: "kalshi",
+            marketId: market.market_id,
+            ticker: market.venue_market_id,
+            data: upstream.payload,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (market.venue === "polymarket") {
+          const clobTokenIdsRaw =
+            market.clob_token_ids ?? market.pm_clob_token_ids ?? null;
+          let tokenIds: string[] = [];
+          if (clobTokenIdsRaw) {
+            try {
+              const parsed = JSON.parse(String(clobTokenIdsRaw));
+              if (Array.isArray(parsed)) {
+                tokenIds = parsed
+                  .map((token) => (token != null ? String(token) : null))
+                  .filter((token): token is string => Boolean(token));
+              }
+            } catch {
+              tokenIds = [];
+            }
+          }
+
+          if (tokenIds.length < 1) {
+            reply.code(400);
+            return reply.send({ error: "Missing Polymarket token IDs." });
+          }
+
+          const resolvedSide = side ?? "YES";
+          const tokenId =
+            resolvedSide === "NO" && tokenIds.length > 1
+              ? tokenIds[1]
+              : tokenIds[0];
+
+          const history = await polymarketClient.getPriceHistory(tokenId, {
+            startTs,
+            endTs,
+            interval,
+            fidelity,
+          });
+
+          const response = {
+            ok: true,
+            venue: "polymarket",
+            marketId: market.market_id,
+            tokenId,
+            side: resolvedSide,
+            data: history,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        reply.code(400);
+        return reply.send({
+          error: `Candlesticks not supported for venue ${market.venue ?? "unknown"}.`,
+        });
+      } catch (error) {
+        app.log.error({ error, marketId }, "Candlestick fetch failed");
         reply.code(500);
         return reply.send({
           error: "Internal server error",
