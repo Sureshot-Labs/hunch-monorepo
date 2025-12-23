@@ -81,7 +81,7 @@ const defaultPredictionMarketsBase =
 const defaultQuoteBase =
   dflowEnv === "dev"
     ? "https://dev-quote-api.dflow.net"
-    : "https://quote-api.dflow.net";
+    : "https://a.quote-api.dflow.net";
 const defaultWsUrl =
   dflowEnv === "dev"
     ? "wss://dev-prediction-markets-api.dflow.net/api/v1/ws"

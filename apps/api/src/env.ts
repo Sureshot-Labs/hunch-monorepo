@@ -76,7 +76,7 @@ const dflowPredictionMarketsDefault =
 const dflowQuoteDefault =
   dflowEnv === "dev"
     ? "https://dev-quote-api.dflow.net"
-    : "https://quote-api.dflow.net";
+    : "https://a.quote-api.dflow.net";
 const dflowWsDefault =
   dflowEnv === "dev"
     ? "wss://dev-prediction-markets-api.dflow.net/api/v1/ws"
@@ -194,6 +194,12 @@ export const env = {
     process.env.DEBRIDGE_DLN_BASE?.trim() || "https://dln.debridge.finance/v1.0",
   debridgeStatsBase:
     process.env.DEBRIDGE_STATS_BASE?.trim() || "https://stats-api.dln.trade/api",
+  debridgeAffiliateFeePercent: optionalNonNegativeNumber(
+    "DEBRIDGE_AFFILIATE_FEE_PERCENT",
+    0,
+  ),
+  debridgeAffiliateFeeRecipients:
+    process.env.DEBRIDGE_AFFILIATE_FEE_RECIPIENTS?.trim() || "",
 
   polymarketBuilderApiKey:
     process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",

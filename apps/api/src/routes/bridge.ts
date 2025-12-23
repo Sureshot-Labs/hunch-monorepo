@@ -72,6 +72,11 @@ type DebridgeSameChainInputs = {
   deBridgeApp?: string;
 };
 
+type AffiliateDefaults = {
+  affiliateFeePercent?: number;
+  affiliateFeeRecipient?: string;
+};
+
 const FALLBACK_TOKEN_META: Record<
   string,
   Record<string, { symbol: string; decimals: number; name?: string }>
@@ -182,6 +187,74 @@ function normalizeDebridgeTokens(payload: unknown): DebridgeToken[] {
     });
   }
   return tokens;
+}
+
+function parseAffiliateRecipientMap(raw: string): Record<string, string> {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (isRecord(parsed)) {
+      const map: Record<string, string> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== "string") continue;
+        const recipient = value.trim();
+        if (!recipient) continue;
+        map[String(key).trim()] = recipient;
+      }
+      return map;
+    }
+  } catch {
+    // fall through to text parsing
+  }
+
+  const map: Record<string, string> = {};
+  for (const entry of trimmed.split(",")) {
+    const [chainId, recipient] = entry.split(":");
+    if (!chainId || !recipient) continue;
+    const chainKey = chainId.trim();
+    const address = recipient.trim();
+    if (!chainKey || !address) continue;
+    map[chainKey] = address;
+  }
+  return map;
+}
+
+function resolveAffiliateDefaults(inputs: {
+  swapType: BridgeSwapType;
+  srcChainId: string;
+  dstChainId: string;
+  affiliateFeePercent?: number;
+  affiliateFeeRecipient?: string;
+}): AffiliateDefaults {
+  if (
+    inputs.affiliateFeePercent != null ||
+    (inputs.affiliateFeeRecipient &&
+      inputs.affiliateFeeRecipient.trim().length > 0)
+  ) {
+    return {
+      affiliateFeePercent: inputs.affiliateFeePercent,
+      affiliateFeeRecipient: inputs.affiliateFeeRecipient?.trim() || undefined,
+    };
+  }
+
+  const percent = env.debridgeAffiliateFeePercent;
+  if (!percent || percent <= 0) return {};
+
+  const recipients = parseAffiliateRecipientMap(
+    env.debridgeAffiliateFeeRecipients,
+  );
+  const chainId = inputs.srcChainId;
+  const recipient = recipients[chainId];
+  if (!recipient) return {};
+  if (chainId !== "7565164" && !ethers.isAddress(recipient)) return {};
+  if (chainId === "7565164" && recipient.startsWith("0x")) return {};
+
+  return {
+    affiliateFeePercent: percent,
+    affiliateFeeRecipient: recipient,
+  };
 }
 
 function buildDebridgeCreateTxQuery(inputs: DebridgeOrderInputs) {
@@ -376,6 +449,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const affiliateDefaults = resolveAffiliateDefaults({
+        swapType,
+        srcChainId: query.srcChainId,
+        dstChainId: query.dstChainId,
+        affiliateFeePercent: query.affiliateFeePercent,
+        affiliateFeeRecipient: query.affiliateFeeRecipient,
+      });
+
       const upstream =
         swapType === "same_chain"
           ? await debridgeRequest({
@@ -391,8 +472,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 senderAddress: addresses.senderAddress,
                 recipientAddress: addresses.recipientAddress,
                 slippage: query.slippage,
-                affiliateFeePercent: query.affiliateFeePercent,
-                affiliateFeeRecipient: query.affiliateFeeRecipient,
+                affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
+                affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: query.deBridgeApp,
               }),
             })
@@ -413,8 +494,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 slippage: query.slippage,
                 additionalTakerRewardBps: query.additionalTakerRewardBps,
                 referralCode: query.referralCode,
-                affiliateFeePercent: query.affiliateFeePercent,
-                affiliateFeeRecipient: query.affiliateFeeRecipient,
+                affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
+                affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: query.deBridgeApp,
                 prependOperatingExpenses: query.prependOperatingExpenses,
                 srcChainOrderAuthorityAddress: query.srcChainOrderAuthorityAddress,
@@ -486,6 +567,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const affiliateDefaults = resolveAffiliateDefaults({
+        swapType,
+        srcChainId: body.srcChainId,
+        dstChainId: body.dstChainId,
+        affiliateFeePercent: body.affiliateFeePercent,
+        affiliateFeeRecipient: body.affiliateFeeRecipient,
+      });
+
       const upstream =
         swapType === "same_chain"
           ? await debridgeRequest({
@@ -501,8 +590,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 senderAddress: addresses.senderAddress,
                 recipientAddress: addresses.recipientAddress,
                 slippage: body.slippage,
-                affiliateFeePercent: body.affiliateFeePercent,
-                affiliateFeeRecipient: body.affiliateFeeRecipient,
+                affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
+                affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: body.deBridgeApp,
               }),
             })
@@ -523,8 +612,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 slippage: body.slippage,
                 additionalTakerRewardBps: body.additionalTakerRewardBps,
                 referralCode: body.referralCode,
-                affiliateFeePercent: body.affiliateFeePercent,
-                affiliateFeeRecipient: body.affiliateFeeRecipient,
+                affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
+                affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: body.deBridgeApp,
                 prependOperatingExpenses: body.prependOperatingExpenses,
                 srcChainOrderAuthorityAddress: body.srcChainOrderAuthorityAddress,

@@ -264,7 +264,14 @@ export function startMarketWS(initialTickers: string[], attempt = 0) {
     return null;
   }
 
-  const ws = new WebSocket(env.dflowWsUrl, { perMessageDeflate: true });
+  const ws = new WebSocket(env.dflowWsUrl, {
+    perMessageDeflate: true,
+    headers: env.dflowApiKey
+      ? {
+          "x-api-key": env.dflowApiKey,
+        }
+      : undefined,
+  });
   currentWs = ws;
   let pingInterval: NodeJS.Timeout | null = null;
 
