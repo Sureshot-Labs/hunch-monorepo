@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { zRequiredString } from "./common.js";
-export const zBridgeProvider = z.enum(["debridge", "bungee"]);
+export const zBridgeProvider = z.enum(["debridge"]);
 export const zBridgeSwapType = z.enum(["cross_chain", "same_chain"]);
 
 const zChainId = z.preprocess(

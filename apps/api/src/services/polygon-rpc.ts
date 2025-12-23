@@ -146,6 +146,24 @@ export async function fetchEvmCall(inputs: {
   });
 }
 
+export async function fetchEvmBalance(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  address: string;
+}): Promise<bigint> {
+  const address = ethers.getAddress(inputs.address);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_getBalance",
+    params: [address, "latest"],
+  });
+  if (typeof result !== "string" || result.trim().length === 0) {
+    throw new Error("Polygon RPC: invalid getBalance result");
+  }
+  return BigInt(result);
+}
+
 export async function fetchErc20BalanceOf(inputs: {
   rpcUrl: string;
   timeoutMs: number;

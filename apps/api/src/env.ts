@@ -143,6 +143,9 @@ export const env = {
   polygonRpcUrl:
     process.env.POLYGON_RPC_URL?.trim() || "https://polygon-rpc.com",
   polygonRpcTimeoutMs: optionalPositiveInt("POLYGON_RPC_TIMEOUT_MS", 10_000),
+  baseRpcUrl:
+    process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
+  baseRpcTimeoutMs: optionalPositiveInt("BASE_RPC_TIMEOUT_MS", 10_000),
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
   polymarketUsdcAddress:
@@ -191,9 +194,6 @@ export const env = {
     process.env.DEBRIDGE_DLN_BASE?.trim() || "https://dln.debridge.finance/v1.0",
   debridgeStatsBase:
     process.env.DEBRIDGE_STATS_BASE?.trim() || "https://stats-api.dln.trade/api",
-  bungeeBase:
-    process.env.BUNGEE_BASE?.trim() ||
-    "https://public-backend.bungee.exchange",
 
   polymarketBuilderApiKey:
     process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",

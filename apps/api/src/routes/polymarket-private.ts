@@ -1605,6 +1605,17 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
 
+      const builderCreds =
+        env.polymarketBuilderApiKey &&
+        env.polymarketBuilderApiSecret &&
+        env.polymarketBuilderApiPassphrase
+          ? {
+              key: env.polymarketBuilderApiKey,
+              secret: env.polymarketBuilderApiSecret,
+              passphrase: env.polymarketBuilderApiPassphrase,
+            }
+          : undefined;
+
       const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
         timeoutMs: 10_000,
@@ -1614,6 +1625,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
+        builderCreds,
         method: "POST",
         requestPath: "/order",
         body: payload,
