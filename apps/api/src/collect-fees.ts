@@ -56,7 +56,7 @@ type ScriptOptions = {
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_MAX_ATTEMPTS = 5;
-const DEFAULT_DUST_REMAINING = 5n;
+const DEFAULT_DUST_REMAINING = 1000n;
 
 function parseArgs(): ScriptOptions {
   const args = process.argv.slice(2);
