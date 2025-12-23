@@ -1,10 +1,12 @@
 import type { FastifyPluginAsync } from "fastify";
+import { ethers } from "ethers";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
 import {
   bridgeChainsQuerySchema,
   bridgeOrderBodySchema,
@@ -53,6 +55,21 @@ type DebridgeOrderInputs = {
   srcChainOrderAuthorityAddress?: string;
   srcChainRefundAddress?: string;
   dstChainOrderAuthorityAddress?: string;
+};
+
+type BridgeSwapType = "cross_chain" | "same_chain";
+
+type DebridgeSameChainInputs = {
+  chainId: string;
+  srcToken: string;
+  dstToken: string;
+  amountIn: string;
+  senderAddress: string;
+  recipientAddress: string;
+  slippage?: number;
+  affiliateFeePercent?: number;
+  affiliateFeeRecipient?: string;
+  deBridgeApp?: string;
 };
 
 function normalizeDebridgeChains(payload: unknown): DebridgeChain[] {
@@ -153,6 +170,58 @@ function buildDebridgeCreateTxQuery(inputs: DebridgeOrderInputs) {
   return query;
 }
 
+function buildDebridgeSameChainQuery(inputs: DebridgeSameChainInputs) {
+  const query: Record<string, string | number | boolean> = {
+    chainId: inputs.chainId,
+    tokenIn: inputs.srcToken,
+    tokenInAmount: inputs.amountIn,
+    tokenOut: inputs.dstToken,
+    tokenOutRecipient: inputs.recipientAddress,
+    senderAddress: inputs.senderAddress,
+  };
+
+  if (inputs.slippage != null) query.slippage = inputs.slippage;
+  if (
+    inputs.affiliateFeePercent != null &&
+    inputs.affiliateFeeRecipient &&
+    inputs.affiliateFeeRecipient.trim().length > 0
+  ) {
+    query.affiliateFeePercent = inputs.affiliateFeePercent;
+    query.affiliateFeeRecipient = inputs.affiliateFeeRecipient.trim();
+  }
+  if (inputs.deBridgeApp && inputs.deBridgeApp.trim().length > 0) {
+    query.deBridgeApp = inputs.deBridgeApp.trim();
+  }
+
+  return query;
+}
+
+async function fetchEvmReceiptStatus(inputs: {
+  chainId: string;
+  txHash: string;
+}) {
+  if (inputs.chainId !== "137") return null;
+  const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+  const receipt = await provider.getTransactionReceipt(inputs.txHash);
+  if (!receipt) return { status: "submitted" };
+  if (receipt.status === 1) return { status: "fulfilled" };
+  if (receipt.status === 0) return { status: "failed" };
+  return { status: "submitted" };
+}
+
+async function fetchSolanaReceiptStatus(inputs: {
+  chainId: string;
+  txHash: string;
+}) {
+  if (inputs.chainId !== "7565164") return null;
+  const result = await fetchSolanaSignatureStatus({
+    rpcUrls: env.solanaRpcUrls,
+    signature: inputs.txHash,
+    timeoutMs: 10_000,
+  });
+  return result;
+}
+
 function resolveBridgeAddresses(
   senderAddress: string | undefined,
   recipientAddress: string | undefined,
@@ -162,6 +231,19 @@ function resolveBridgeAddresses(
   const recipient = recipientAddress?.trim() || fallback?.trim() || "";
   if (!sender || !recipient) return null;
   return { senderAddress: sender, recipientAddress: recipient };
+}
+
+function resolveSwapType(
+  srcChainId: string,
+  dstChainId: string,
+  swapType?: BridgeSwapType | null,
+): BridgeSwapType | null {
+  if (swapType) {
+    if (swapType === "same_chain" && srcChainId !== dstChainId) return null;
+    if (swapType === "cross_chain" && srcChainId === dstChainId) return null;
+    return swapType;
+  }
+  return srcChainId === dstChainId ? "same_chain" : "cross_chain";
 }
 
 export const bridgeRoutes: FastifyPluginAsync = async (app) => {
@@ -213,10 +295,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({ error: "Unsupported bridge provider" });
       }
-      if (query.srcChainId === query.dstChainId) {
+      const swapType = resolveSwapType(
+        query.srcChainId,
+        query.dstChainId,
+        query.swapType ?? null,
+      );
+      if (!swapType) {
         reply.code(400);
         return reply.send({
-          error: "srcChainId and dstChainId must be different",
+          error: "swapType does not match srcChainId/dstChainId",
         });
       }
 
@@ -232,32 +319,52 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const upstream = await debridgeRequest({
-        baseUrl: env.debridgeDlnBase,
-        timeoutMs: 15_000,
-        method: "GET",
-        requestPath: "/dln/order/create-tx",
-        query: buildDebridgeCreateTxQuery({
-          srcChainId: query.srcChainId,
-          dstChainId: query.dstChainId,
-          srcToken: query.srcToken,
-          dstToken: query.dstToken,
-          amountIn: query.amountIn,
-          senderAddress: addresses.senderAddress,
-          recipientAddress: addresses.recipientAddress,
-          dstChainTokenOutAmount: query.dstChainTokenOutAmount,
-          slippage: query.slippage,
-          additionalTakerRewardBps: query.additionalTakerRewardBps,
-          referralCode: query.referralCode,
-          affiliateFeePercent: query.affiliateFeePercent,
-          affiliateFeeRecipient: query.affiliateFeeRecipient,
-          deBridgeApp: query.deBridgeApp,
-          prependOperatingExpenses: query.prependOperatingExpenses,
-          srcChainOrderAuthorityAddress: query.srcChainOrderAuthorityAddress,
-          srcChainRefundAddress: query.srcChainRefundAddress,
-          dstChainOrderAuthorityAddress: query.dstChainOrderAuthorityAddress,
-        }),
-      });
+      const upstream =
+        swapType === "same_chain"
+          ? await debridgeRequest({
+              baseUrl: env.debridgeDlnBase,
+              timeoutMs: 15_000,
+              method: "GET",
+              requestPath: "/chain/transaction",
+              query: buildDebridgeSameChainQuery({
+                chainId: query.srcChainId,
+                srcToken: query.srcToken,
+                dstToken: query.dstToken,
+                amountIn: query.amountIn,
+                senderAddress: addresses.senderAddress,
+                recipientAddress: addresses.recipientAddress,
+                slippage: query.slippage,
+                affiliateFeePercent: query.affiliateFeePercent,
+                affiliateFeeRecipient: query.affiliateFeeRecipient,
+                deBridgeApp: query.deBridgeApp,
+              }),
+            })
+          : await debridgeRequest({
+              baseUrl: env.debridgeDlnBase,
+              timeoutMs: 15_000,
+              method: "GET",
+              requestPath: "/dln/order/create-tx",
+              query: buildDebridgeCreateTxQuery({
+                srcChainId: query.srcChainId,
+                dstChainId: query.dstChainId,
+                srcToken: query.srcToken,
+                dstToken: query.dstToken,
+                amountIn: query.amountIn,
+                senderAddress: addresses.senderAddress,
+                recipientAddress: addresses.recipientAddress,
+                dstChainTokenOutAmount: query.dstChainTokenOutAmount,
+                slippage: query.slippage,
+                additionalTakerRewardBps: query.additionalTakerRewardBps,
+                referralCode: query.referralCode,
+                affiliateFeePercent: query.affiliateFeePercent,
+                affiliateFeeRecipient: query.affiliateFeeRecipient,
+                deBridgeApp: query.deBridgeApp,
+                prependOperatingExpenses: query.prependOperatingExpenses,
+                srcChainOrderAuthorityAddress: query.srcChainOrderAuthorityAddress,
+                srcChainRefundAddress: query.srcChainRefundAddress,
+                dstChainOrderAuthorityAddress: query.dstChainOrderAuthorityAddress,
+              }),
+            });
 
       if (!upstream.ok) {
         reply.code(502);
@@ -270,7 +377,13 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      return reply.send({
+        ...((isRecord(upstream.payload) ? upstream.payload : {}) as Record<
+          string,
+          unknown
+        >),
+        swapType,
+      });
     },
   );
 
@@ -292,10 +405,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({ error: "Unsupported bridge provider" });
       }
-      if (body.srcChainId === body.dstChainId) {
+      const swapType = resolveSwapType(
+        body.srcChainId,
+        body.dstChainId,
+        body.swapType ?? null,
+      );
+      if (!swapType) {
         reply.code(400);
         return reply.send({
-          error: "srcChainId and dstChainId must be different",
+          error: "swapType does not match srcChainId/dstChainId",
         });
       }
 
@@ -311,32 +429,52 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const upstream = await debridgeRequest({
-        baseUrl: env.debridgeDlnBase,
-        timeoutMs: 20_000,
-        method: "GET",
-        requestPath: "/dln/order/create-tx",
-        query: buildDebridgeCreateTxQuery({
-          srcChainId: body.srcChainId,
-          dstChainId: body.dstChainId,
-          srcToken: body.srcToken,
-          dstToken: body.dstToken,
-          amountIn: body.amountIn,
-          senderAddress: addresses.senderAddress,
-          recipientAddress: addresses.recipientAddress,
-          dstChainTokenOutAmount: body.dstChainTokenOutAmount,
-          slippage: body.slippage,
-          additionalTakerRewardBps: body.additionalTakerRewardBps,
-          referralCode: body.referralCode,
-          affiliateFeePercent: body.affiliateFeePercent,
-          affiliateFeeRecipient: body.affiliateFeeRecipient,
-          deBridgeApp: body.deBridgeApp,
-          prependOperatingExpenses: body.prependOperatingExpenses,
-          srcChainOrderAuthorityAddress: body.srcChainOrderAuthorityAddress,
-          srcChainRefundAddress: body.srcChainRefundAddress,
-          dstChainOrderAuthorityAddress: body.dstChainOrderAuthorityAddress,
-        }),
-      });
+      const upstream =
+        swapType === "same_chain"
+          ? await debridgeRequest({
+              baseUrl: env.debridgeDlnBase,
+              timeoutMs: 20_000,
+              method: "GET",
+              requestPath: "/chain/transaction",
+              query: buildDebridgeSameChainQuery({
+                chainId: body.srcChainId,
+                srcToken: body.srcToken,
+                dstToken: body.dstToken,
+                amountIn: body.amountIn,
+                senderAddress: addresses.senderAddress,
+                recipientAddress: addresses.recipientAddress,
+                slippage: body.slippage,
+                affiliateFeePercent: body.affiliateFeePercent,
+                affiliateFeeRecipient: body.affiliateFeeRecipient,
+                deBridgeApp: body.deBridgeApp,
+              }),
+            })
+          : await debridgeRequest({
+              baseUrl: env.debridgeDlnBase,
+              timeoutMs: 20_000,
+              method: "GET",
+              requestPath: "/dln/order/create-tx",
+              query: buildDebridgeCreateTxQuery({
+                srcChainId: body.srcChainId,
+                dstChainId: body.dstChainId,
+                srcToken: body.srcToken,
+                dstToken: body.dstToken,
+                amountIn: body.amountIn,
+                senderAddress: addresses.senderAddress,
+                recipientAddress: addresses.recipientAddress,
+                dstChainTokenOutAmount: body.dstChainTokenOutAmount,
+                slippage: body.slippage,
+                additionalTakerRewardBps: body.additionalTakerRewardBps,
+                referralCode: body.referralCode,
+                affiliateFeePercent: body.affiliateFeePercent,
+                affiliateFeeRecipient: body.affiliateFeeRecipient,
+                deBridgeApp: body.deBridgeApp,
+                prependOperatingExpenses: body.prependOperatingExpenses,
+                srcChainOrderAuthorityAddress: body.srcChainOrderAuthorityAddress,
+                srcChainRefundAddress: body.srcChainRefundAddress,
+                dstChainOrderAuthorityAddress: body.dstChainOrderAuthorityAddress,
+              }),
+            });
 
       if (!upstream.ok) {
         reply.code(502);
@@ -378,11 +516,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      await pool.query(
+      const insertResult = await pool.query<{ id: string }>(
         `
           insert into bridge_orders (
             user_id,
             provider,
+            swap_type,
             src_chain_id,
             dst_chain_id,
             src_token,
@@ -406,12 +545,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             $9,
             $10,
             $11,
-            $12
+            $12,
+            $13
           )
+          returning id
         `,
         [
           user.id,
           body.provider,
+          swapType,
           body.srcChainId,
           body.dstChainId,
           body.srcToken,
@@ -426,7 +568,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       );
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      const bridgeOrderId = insertResult.rows[0]?.id ?? null;
+      return reply.send({
+        ...((isRecord(upstream.payload) ? upstream.payload : {}) as Record<
+          string,
+          unknown
+        >),
+        bridgeOrderId,
+        swapType,
+      });
     },
   );
 
@@ -445,6 +595,152 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       if (!orderId && !txHash) {
         reply.code(400);
         return reply.send({ error: "orderId or txHash is required" });
+      }
+
+      let resolvedSwapType: BridgeSwapType | null =
+        query.swapType ?? null;
+      let resolvedChainId = query.chainId?.trim() || null;
+
+      if (!resolvedSwapType) {
+        const lookupColumn = orderId ? "order_id" : "tx_hash_src";
+        const lookupValue = orderId ?? txHash ?? "";
+        const { rows } = await pool.query<{
+          swap_type: BridgeSwapType;
+          src_chain_id: string;
+        }>(
+          `
+            select swap_type, src_chain_id
+            from bridge_orders
+            where provider = 'debridge'
+              and ${lookupColumn} = $1
+            order by updated_at desc
+            limit 1
+          `,
+          [lookupValue],
+        );
+        if (rows[0]) {
+          resolvedSwapType = rows[0].swap_type;
+          if (!resolvedChainId) {
+            resolvedChainId = rows[0].src_chain_id;
+          }
+        }
+      }
+
+      if (resolvedSwapType === "same_chain") {
+        if (!txHash) {
+          reply.code(400);
+          return reply.send({ error: "txHash is required for same-chain" });
+        }
+        if (!resolvedChainId) {
+          reply.code(400);
+          return reply.send({ error: "chainId is required for same-chain" });
+        }
+
+        const orderRes = await debridgeRequest({
+          baseUrl: env.debridgeStatsBase,
+          timeoutMs: 15_000,
+          method: "GET",
+          requestPath: `/SameChainSwap/${resolvedChainId}/tx/${txHash}`,
+        });
+
+        if (!orderRes.ok) {
+          const message = extractDebridgeErrorMessage(orderRes.payload);
+          const isNotFound =
+            orderRes.status === 422 &&
+            /swap not found/i.test(message ?? "");
+          if (isNotFound) {
+            const fallback =
+              (await fetchEvmReceiptStatus({
+                chainId: resolvedChainId,
+                txHash,
+              })) ??
+              (await fetchSolanaReceiptStatus({
+                chainId: resolvedChainId,
+                txHash,
+              }));
+            if (fallback?.status) {
+              await pool.query(
+                `
+                  update bridge_orders
+                  set status = $1, updated_at = now()
+                  where provider = 'debridge'
+                    and tx_hash_src = $2
+                `,
+                [fallback.status, txHash],
+              );
+              reply.header("Content-Type", "application/json; charset=utf-8");
+              return reply.send({
+                ok: true,
+                provider: query.provider,
+                swapType: "same_chain",
+                chainId: resolvedChainId,
+                orderIds: [],
+                txLookup: null,
+                orders: [
+                  {
+                    orderId: txHash,
+                    payload: { status: fallback.status, source: "rpc" },
+                  },
+                ],
+              });
+            }
+
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send({
+              ok: true,
+              provider: query.provider,
+              swapType: "same_chain",
+              chainId: resolvedChainId,
+              orderIds: [],
+              txLookup: null,
+              orders: [
+                {
+                  orderId: txHash,
+                  payload: { status: "submitted", source: "indexer_pending" },
+                },
+              ],
+            });
+          }
+
+          reply.code(502);
+          return reply.send({
+            error: "deBridge same-chain status failed",
+            status: orderRes.status,
+            message,
+            payload: orderRes.payload,
+          });
+        }
+
+        if (isRecord(orderRes.payload)) {
+          const status =
+            typeof orderRes.payload.status === "string"
+              ? orderRes.payload.status
+              : typeof orderRes.payload.state === "string"
+                ? orderRes.payload.state
+                : null;
+          if (status) {
+            await pool.query(
+              `
+                update bridge_orders
+                set status = $1, updated_at = now()
+                where provider = 'debridge'
+                  and tx_hash_src = $2
+              `,
+              [status, txHash],
+            );
+          }
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          provider: query.provider,
+          swapType: "same_chain",
+          chainId: resolvedChainId,
+          orderIds: [],
+          txLookup: null,
+          orders: [{ orderId: txHash, payload: orderRes.payload }],
+        });
       }
 
       let orderIds: string[] = [];
@@ -525,6 +821,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         provider: query.provider,
+        swapType: resolvedSwapType ?? "cross_chain",
         orderIds,
         txLookup,
         orders,
@@ -551,27 +848,39 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unsupported bridge provider" });
       }
 
-      if (!body.orderId) {
+      const bridgeOrderId = body.bridgeOrderId?.trim() || null;
+      const orderId = body.orderId?.trim() || null;
+      if (!bridgeOrderId && !orderId) {
         reply.code(400);
-        return reply.send({ error: "orderId is required" });
+        return reply.send({ error: "bridgeOrderId or orderId is required" });
       }
 
       const txColumn = body.txChain === "dst" ? "tx_hash_dst" : "tx_hash_src";
       const status = body.status?.trim() || "submitted";
 
       const txHashValue = body.txHash;
-      const { rowCount } = await pool.query(
-        `
-          update bridge_orders
-          set ${txColumn} = $1,
-              status = $2,
-              updated_at = now()
-          where provider = 'debridge'
-            and order_id = $3
-            and user_id = $4
-        `,
-        [txHashValue, status, body.orderId, user.id],
-      );
+      const updateQuery = bridgeOrderId
+        ? `
+            update bridge_orders
+            set ${txColumn} = $1,
+                status = $2,
+                updated_at = now()
+            where id = $3
+              and user_id = $4
+          `
+        : `
+            update bridge_orders
+            set ${txColumn} = $1,
+                status = $2,
+                updated_at = now()
+            where provider = 'debridge'
+              and order_id = $3
+              and user_id = $4
+          `;
+      const updateParams = bridgeOrderId
+        ? [txHashValue, status, bridgeOrderId, user.id]
+        : [txHashValue, status, orderId, user.id];
+      const { rowCount } = await pool.query(updateQuery, updateParams);
 
       if (!rowCount) {
         reply.code(404);
@@ -621,6 +930,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           select
             id,
             provider,
+            swap_type,
             src_chain_id,
             dst_chain_id,
             src_token,

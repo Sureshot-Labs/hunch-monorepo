@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zRequiredString } from "./common.js";
 export const zBridgeProvider = z.enum(["debridge", "bungee"]);
+export const zBridgeSwapType = z.enum(["cross_chain", "same_chain"]);
 
 const zChainId = z.preprocess(
   (value) => (value == null ? "" : String(value).trim()),
@@ -38,6 +39,7 @@ const zOptionalBool = z.preprocess((value) => {
 
 export const bridgeQuoteQuerySchema = z.object({
   provider: zBridgeProvider.default("debridge"),
+  swapType: zBridgeSwapType.optional(),
   srcChainId: zChainId,
   dstChainId: zChainId,
   srcToken: zRequiredString("srcToken is required"),
@@ -64,12 +66,16 @@ export const bridgeOrderBodySchema = bridgeQuoteQuerySchema.extend({
 
 export const bridgeStatusQuerySchema = z.object({
   provider: zBridgeProvider.default("debridge"),
+  swapType: zBridgeSwapType.optional(),
+  chainId: zChainId.optional(),
   orderId: z.string().optional(),
   txHash: z.string().optional(),
 });
 
 export const bridgeSubmitBodySchema = z.object({
   provider: zBridgeProvider.default("debridge"),
+  swapType: zBridgeSwapType.optional(),
+  bridgeOrderId: z.string().optional(),
   orderId: z.string().optional(),
   txHash: zRequiredString("txHash is required"),
   txChain: z.enum(["src", "dst"]).optional(),

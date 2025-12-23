@@ -425,3 +425,33 @@ export async function fetchSolanaTokenAccountInfo(inputs: {
 
   return { mint, owner };
 }
+
+export async function fetchSolanaSignatureStatus(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  timeoutMs: number;
+}): Promise<{ status: "submitted" | "fulfilled" | "failed" } | null> {
+  const result = await solanaRpcRequest<{
+    value?: Array<
+      | {
+          confirmationStatus?: string | null;
+          confirmations?: number | null;
+          err?: unknown;
+        }
+      | null
+    >;
+  }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getSignatureStatuses",
+    params: [[inputs.signature], { searchTransactionHistory: true }],
+  });
+
+  const entry = Array.isArray(result?.value) ? result.value[0] : null;
+  if (!entry) return null;
+  if (entry.err) return { status: "failed" };
+  if (entry.confirmationStatus === "finalized") {
+    return { status: "fulfilled" };
+  }
+  return { status: "submitted" };
+}
