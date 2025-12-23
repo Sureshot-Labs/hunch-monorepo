@@ -10,6 +10,7 @@ import { storeOrder } from "../repos/orders-repo.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
   polymarketCancelOrderBodySchema,
+  polymarketFunderDeriveBatchBodySchema,
   polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
   polymarketOrderHashBodySchema,
@@ -710,6 +711,73 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         ...result,
+      });
+    },
+  );
+
+  /**
+   * POST /funder-derive/batch
+   * Returns candidate Polymarket funder/vault addresses for multiple signers.
+   */
+  z.post(
+    "/funder-derive/batch",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketFunderDeriveBatchBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const body = request.body;
+      const wallets = Array.from(new Set(body.wallets.map(normalizeAddress)));
+
+      const userWallets = await AuthService.getUserWallets(user.id);
+      const allowedWallets = new Set(
+        userWallets.map((wallet) => normalizeAddress(wallet.walletAddress)),
+      );
+
+      for (const wallet of wallets) {
+        if (!allowedWallets.has(wallet)) {
+          reply.code(403);
+          return reply.send({
+            error: "walletAddress does not belong to the current user",
+          });
+        }
+      }
+
+      const includeMagicProxy = Boolean(body.includeMagicProxy);
+
+      const results: Record<string, unknown> = {};
+
+      for (const wallet of wallets) {
+        try {
+          const credsInfo = await AuthService.getVenueCredentialsInfo(
+            user.id,
+            "polymarket",
+            wallet,
+          );
+          const result = await derivePolymarketFunders({
+            signer: wallet,
+            storedFunder: credsInfo?.funderAddress ?? null,
+            includeMagicProxy,
+          });
+          results[wallet] = result;
+        } catch (error) {
+          results[wallet] = {
+            error: "Funder derive failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          };
+        }
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        results,
       });
     },
   );

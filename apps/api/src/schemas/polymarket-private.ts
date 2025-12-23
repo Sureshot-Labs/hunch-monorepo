@@ -102,6 +102,11 @@ export const polymarketFunderDeriveQuerySchema = z.object({
   walletAddress: zEthAddress.optional(),
 });
 
+export const polymarketFunderDeriveBatchBodySchema = z.object({
+  wallets: z.array(zEthAddress).min(1, "wallets is required"),
+  includeMagicProxy: z.boolean().optional(),
+});
+
 export const polymarketQuoteBodySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),
   side: z.enum(["BUY", "SELL"], {
