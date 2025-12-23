@@ -187,6 +187,14 @@ export const env = {
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
 
+  debridgeDlnBase:
+    process.env.DEBRIDGE_DLN_BASE?.trim() || "https://dln.debridge.finance/v1.0",
+  debridgeStatsBase:
+    process.env.DEBRIDGE_STATS_BASE?.trim() || "https://stats-api.dln.trade/api",
+  bungeeBase:
+    process.env.BUNGEE_BASE?.trim() ||
+    "https://public-backend.bungee.exchange",
+
   polymarketBuilderApiKey:
     process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
   polymarketBuilderApiSecret:

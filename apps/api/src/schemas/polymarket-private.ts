@@ -99,6 +99,7 @@ export const polymarketOrderParamsQuerySchema = z.object({
 
 export const polymarketFunderDeriveQuerySchema = z.object({
   includeMagicProxy: z.string().optional(),
+  walletAddress: zEthAddress.optional(),
 });
 
 export const polymarketQuoteBodySchema = z.object({

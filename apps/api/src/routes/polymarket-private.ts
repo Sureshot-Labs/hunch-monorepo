@@ -655,10 +655,20 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const user = request.user;
-      const signer = request.walletAddress;
-      if (!user || !signer) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = isRecord(request.query) ? request.query : null;
+      const walletOverride =
+        typeof query?.walletAddress === "string"
+          ? query.walletAddress.trim()
+          : null;
+      const signer = walletOverride || request.walletAddress;
+      if (!signer) {
+        reply.code(400);
+        return reply.send({ error: "walletAddress is required" });
       }
 
       if (!signer.startsWith("0x")) {
@@ -668,13 +678,25 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      if (walletOverride) {
+        const walletRecord = await AuthService.getUserWalletByAddress(
+          user.id,
+          signer,
+        );
+        if (!walletRecord) {
+          reply.code(403);
+          return reply.send({
+            error: "walletAddress does not belong to the current user",
+          });
+        }
+      }
+
       const credsInfo = await AuthService.getVenueCredentialsInfo(
         user.id,
         "polymarket",
         signer,
       );
 
-      const query = isRecord(request.query) ? request.query : null;
       const includeMagicProxy =
         parseOptionalBoolean(query?.includeMagicProxy) ?? false;
 

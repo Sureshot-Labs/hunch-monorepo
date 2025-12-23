@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { authRoutes } from "./auth.js";
+import { bridgeRoutes } from "./bridge.js";
 import { dflowPrivateRoutes } from "./dflow-private.js";
 import { eventRoutes } from "./events.js";
 import { executionsRoutes } from "./executions.js";
@@ -22,6 +23,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(healthRoutes);
   await app.register(metaRoutes);
   await app.register(feesRoutes);
+  await app.register(bridgeRoutes);
   await app.register(authRoutes);
   await app.register(polymarketPrivateRoutes, { prefix: "/trade/polymarket" });
   await app.register(dflowPrivateRoutes, { prefix: "/trade/kalshi" });

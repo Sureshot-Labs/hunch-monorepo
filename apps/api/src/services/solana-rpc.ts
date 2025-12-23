@@ -221,6 +221,30 @@ export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
   };
 }
 
+export async function fetchSolanaLatestBlockhash(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+}): Promise<{ blockhash: string; lastValidBlockHeight: number } | null> {
+  const result = await solanaRpcRequest<{
+    value?: { blockhash?: string; lastValidBlockHeight?: number } | null;
+  }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getLatestBlockhash",
+    params: [],
+  });
+
+  const value = result?.value ?? null;
+  if (!value) return null;
+  if (typeof value.blockhash !== "string") return null;
+  if (typeof value.lastValidBlockHeight !== "number") return null;
+
+  return {
+    blockhash: value.blockhash,
+    lastValidBlockHeight: Math.trunc(value.lastValidBlockHeight),
+  };
+}
+
 export async function fetchSolanaMintDecimals(inputs: {
   rpcUrls: string[];
   mint: string;

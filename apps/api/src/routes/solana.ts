@@ -1,12 +1,27 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { createAuthMiddleware } from "../auth.js";
+import { AuthService, createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
-import { fetchSolanaMintDecimals } from "../services/solana-rpc.js";
-import { solanaMintsQuerySchema } from "../schemas/solana.js";
+import {
+  formatUiAmount,
+  fetchSolanaMintDecimals,
+  fetchSolanaLatestBlockhash,
+  fetchSolanaTokenBalanceByOwnerAndMint,
+  sendSolanaRawTransaction,
+} from "../services/solana-rpc.js";
+import {
+  solanaBalanceQuerySchema,
+  solanaBlockhashQuerySchema,
+  solanaMintsQuerySchema,
+  solanaSubmitBodySchema,
+} from "../schemas/solana.js";
 
 const DECIMALS_CACHE_TTL_SEC = 60 * 60 * 24;
+
+function isSolanaWallet(address: string): boolean {
+  return !address.startsWith("0x");
+}
 
 export const solanaRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -69,6 +84,196 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ mints: results });
+    },
+  );
+
+  /**
+   * GET /solana/balance
+   * Returns SPL token balance for a given mint and wallet.
+   */
+  z.get(
+    "/solana/balance",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: solanaBalanceQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const walletOverride =
+        typeof query.walletAddress === "string"
+          ? query.walletAddress.trim()
+          : null;
+      const owner = walletOverride || walletAddress;
+      if (!owner) {
+        reply.code(400);
+        return reply.send({ error: "walletAddress is required" });
+      }
+
+      if (!isSolanaWallet(owner)) {
+        reply.code(400);
+        return reply.send({
+          error: "Solana balance requires a Solana wallet address",
+        });
+      }
+
+      if (walletOverride) {
+        const walletRecord = await AuthService.getUserWalletByAddress(
+          user.id,
+          owner,
+        );
+        if (!walletRecord) {
+          reply.code(403);
+          return reply.send({
+            error: "walletAddress does not belong to the current user",
+          });
+        }
+      }
+
+      const mint = query.mint.trim();
+      let decimals: number | null = null;
+      let amount = 0n;
+      let uiAmountString = "0";
+
+      try {
+        const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
+          rpcUrls: env.solanaRpcUrls,
+          timeoutMs: env.solanaRpcTimeoutMs,
+          owner,
+          mint,
+        });
+        if (balance) {
+          amount = balance.amount;
+          decimals = balance.decimals;
+          uiAmountString = balance.uiAmountString;
+        } else {
+          decimals = await fetchSolanaMintDecimals({
+            rpcUrls: env.solanaRpcUrls,
+            timeoutMs: env.solanaRpcTimeoutMs,
+            mint,
+          });
+          uiAmountString = formatUiAmount(amount, decimals);
+        }
+      } catch (error) {
+        app.log.warn({ error, mint, owner }, "Solana balance fetch failed");
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        walletAddress: owner,
+        mint,
+        amount: amount.toString(),
+        decimals,
+        uiAmountString,
+      });
+    },
+  );
+
+  /**
+   * GET /solana/blockhash
+   * Returns the latest blockhash for client-side signing.
+   */
+  z.get(
+    "/solana/blockhash",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: solanaBlockhashQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isSolanaWallet(walletAddress)) {
+        reply.code(400);
+        return reply.send({
+          error: "Solana blockhash requires a Solana wallet address",
+        });
+      }
+
+      try {
+        const latest = await fetchSolanaLatestBlockhash({
+          rpcUrls: env.solanaRpcUrls,
+          timeoutMs: env.solanaRpcTimeoutMs,
+        });
+        if (!latest) {
+          reply.code(502);
+          return reply.send({ error: "Solana blockhash unavailable" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, ...latest });
+      } catch (error) {
+        app.log.error({ error, userId: user.id }, "Solana blockhash failed");
+        reply.code(502);
+        return reply.send({
+          error: "Solana blockhash failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /solana/submit
+   * Broadcast a signed Solana transaction and return the signature.
+   */
+  z.post(
+    "/solana/submit",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: solanaSubmitBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isSolanaWallet(walletAddress)) {
+        reply.code(400);
+        return reply.send({
+          error: "Solana submit requires a Solana wallet address",
+        });
+      }
+
+      try {
+        const signature = await sendSolanaRawTransaction({
+          rpcUrls: env.solanaRpcUrls,
+          timeoutMs: env.solanaRpcTimeoutMs,
+          signedTransaction: request.body.signedTransaction,
+          skipPreflight: request.body.skipPreflight,
+          maxRetries: request.body.maxRetries,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          signature,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Solana submit failed",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Solana submit failed",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     },
   );
 };
