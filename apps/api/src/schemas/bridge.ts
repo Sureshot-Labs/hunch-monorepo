@@ -84,6 +84,14 @@ export const bridgeSubmitBodySchema = z.object({
 
 export const bridgeOrdersQuerySchema = z.object({
   provider: zBridgeProvider.optional(),
+  sync: zOptionalBool.optional(),
+  syncLimit: z
+    .preprocess(
+      (value) =>
+        value == null || value === "" ? undefined : Number(value),
+      z.number().int().min(1).max(20),
+    )
+    .optional(),
   limit: z
     .preprocess(
       (value) =>

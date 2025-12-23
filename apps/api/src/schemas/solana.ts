@@ -7,7 +7,9 @@ export const solanaMintsQuerySchema = z.object({
   }),
 });
 
-export const solanaBlockhashQuerySchema = z.object({});
+export const solanaBlockhashQuerySchema = z.object({
+  walletAddress: z.string().optional(),
+});
 
 export const solanaBalanceQuerySchema = z.object({
   walletAddress: z.string().optional(),
@@ -18,4 +20,5 @@ export const solanaSubmitBodySchema = z.object({
   signedTransaction: zRequiredString("signedTransaction is required"),
   skipPreflight: z.boolean().optional(),
   maxRetries: z.coerce.number().int().min(0).optional(),
+  walletAddress: z.string().optional(),
 });

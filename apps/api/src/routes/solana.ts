@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 import {
   formatUiAmount,
+  fetchSolanaBalanceLamports,
   fetchSolanaMintDecimals,
   fetchSolanaLatestBlockhash,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -18,6 +19,8 @@ import {
 } from "../schemas/solana.js";
 
 const DECIMALS_CACHE_TTL_SEC = 60 * 60 * 24;
+const SOLANA_NATIVE_MINT = "11111111111111111111111111111111";
+const SOLANA_WRAPPED_MINT = "So11111111111111111111111111111111111111112";
 
 function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
@@ -142,23 +145,43 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
       let uiAmountString = "0";
 
       try {
-        const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
-          rpcUrls: env.solanaRpcUrls,
-          timeoutMs: env.solanaRpcTimeoutMs,
-          owner,
-          mint,
-        });
-        if (balance) {
-          amount = balance.amount;
-          decimals = balance.decimals;
-          uiAmountString = balance.uiAmountString;
-        } else {
-          decimals = await fetchSolanaMintDecimals({
+        if (mint === SOLANA_NATIVE_MINT) {
+          const lamports = await fetchSolanaBalanceLamports({
             rpcUrls: env.solanaRpcUrls,
             timeoutMs: env.solanaRpcTimeoutMs,
+            owner,
+          });
+          amount = lamports;
+          decimals = 9;
+          uiAmountString = formatUiAmount(amount, decimals);
+        } else {
+          const balance = await fetchSolanaTokenBalanceByOwnerAndMint({
+            rpcUrls: env.solanaRpcUrls,
+            timeoutMs: env.solanaRpcTimeoutMs,
+            owner,
             mint,
           });
-          uiAmountString = formatUiAmount(amount, decimals);
+          if (balance) {
+            amount = balance.amount;
+            decimals = balance.decimals;
+            uiAmountString = balance.uiAmountString;
+          } else if (mint === SOLANA_WRAPPED_MINT) {
+            const lamports = await fetchSolanaBalanceLamports({
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+              owner,
+            });
+            amount = lamports;
+            decimals = 9;
+            uiAmountString = formatUiAmount(amount, decimals);
+          } else {
+            decimals = await fetchSolanaMintDecimals({
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+              mint,
+            });
+            uiAmountString = formatUiAmount(amount, decimals);
+          }
         }
       } catch (error) {
         app.log.warn({ error, mint, owner }, "Solana balance fetch failed");
@@ -194,11 +217,35 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      if (!isSolanaWallet(walletAddress)) {
+      const query = request.query;
+      const walletOverride =
+        typeof query.walletAddress === "string"
+          ? query.walletAddress.trim()
+          : null;
+      const owner = walletOverride || walletAddress;
+      if (!owner) {
+        reply.code(400);
+        return reply.send({ error: "walletAddress is required" });
+      }
+
+      if (!isSolanaWallet(owner)) {
         reply.code(400);
         return reply.send({
           error: "Solana blockhash requires a Solana wallet address",
         });
+      }
+
+      if (walletOverride) {
+        const walletRecord = await AuthService.getUserWalletByAddress(
+          user.id,
+          owner,
+        );
+        if (!walletRecord) {
+          reply.code(403);
+          return reply.send({
+            error: "walletAddress does not belong to the current user",
+          });
+        }
       }
 
       try {
@@ -242,20 +289,44 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      if (!isSolanaWallet(walletAddress)) {
+      const body = request.body;
+      const walletOverride =
+        typeof body.walletAddress === "string"
+          ? body.walletAddress.trim()
+          : null;
+      const owner = walletOverride || walletAddress;
+      if (!owner) {
+        reply.code(400);
+        return reply.send({ error: "walletAddress is required" });
+      }
+
+      if (!isSolanaWallet(owner)) {
         reply.code(400);
         return reply.send({
           error: "Solana submit requires a Solana wallet address",
         });
       }
 
+      if (walletOverride) {
+        const walletRecord = await AuthService.getUserWalletByAddress(
+          user.id,
+          owner,
+        );
+        if (!walletRecord) {
+          reply.code(403);
+          return reply.send({
+            error: "walletAddress does not belong to the current user",
+          });
+        }
+      }
+
       try {
         const signature = await sendSolanaRawTransaction({
           rpcUrls: env.solanaRpcUrls,
           timeoutMs: env.solanaRpcTimeoutMs,
-          signedTransaction: request.body.signedTransaction,
-          skipPreflight: request.body.skipPreflight,
-          maxRetries: request.body.maxRetries,
+          signedTransaction: body.signedTransaction,
+          skipPreflight: body.skipPreflight,
+          maxRetries: body.maxRetries,
         });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
