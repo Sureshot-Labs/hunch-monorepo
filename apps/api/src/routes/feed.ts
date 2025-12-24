@@ -7,7 +7,12 @@ import { getRedis } from "../redis.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import { feedQuerySchema } from "../schemas/feed.js";
-import { fetchFeedEventIds, fetchFeedMarkets } from "../repos/unified-read.js";
+import {
+  fetchFeedEventIds,
+  fetchFeedMarkets,
+  fetchFeedMarketsDirect,
+  type FeedMarketRow,
+} from "../repos/unified-read.js";
 
 export const feedRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -41,6 +46,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minVol = q.min_volume24hr;
       const minLiquidity = q.min_liquidity;
       const search = q.q;
+      const view: "events" | "markets" =
+        q.view === "markets" ? "markets" : "events";
+      const eventScope: "grouped" | "single" | undefined =
+        q.event_scope === "grouped"
+          ? "grouped"
+          : q.event_scope === "single"
+            ? "single"
+            : undefined;
       const venues = q.venue;
       const category = q.category;
       const categories = q.categories;
@@ -63,7 +76,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v16:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
+      const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -113,13 +126,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             ).toISOString()
           : undefined;
 
-      // 1. Get event IDs matching filters, with limit/offset
-      const eventRows = await fetchFeedEventIds(pool, {
+      const inputs = {
         limit,
         offset,
         minVol,
         minLiquidity,
         q: search,
+        view,
+        eventScope,
         venues,
         category,
         categories,
@@ -133,86 +147,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         nowParam,
         sevenDaysAgo,
         sevenDaysFromNow,
-      });
-      let eventIds = eventRows.map((row) => row.id);
+      };
 
-      if (!eventIds.length) {
-        const payload = {
-          count: 0,
-          limit,
-          offset,
-          minVolume24h: minVol,
-          data: [],
-        };
-        const body = JSON.stringify(payload);
-        const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
-        reply.header("ETag", etag);
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send(body);
-      }
-
-      // 2. Fetch all markets for those events, with volume/liquidity filter
-      const rows = await fetchFeedMarkets(
-        pool,
-        {
-          limit,
-          offset,
-          minVol,
-          minLiquidity,
-          q: search,
-          venues,
-          category,
-          categories,
-          filter,
-          sort,
-          minProb,
-          maxProb,
-          maxSpread,
-          endWithin,
-          ageSince,
-          nowParam,
-          sevenDaysAgo,
-          sevenDaysFromNow,
-        },
-        eventIds,
-      );
-
-      // Group markets under their events
-      const eventMap: Record<string, FeedEvent> = {};
-      for (const rRow of rows) {
-        const eid = String(rRow.event_id);
-        if (!eventMap[eid]) {
-          eventMap[eid] = {
-            eventId: eid,
-            eventTitle: rRow.event_title ?? null,
-            category: rRow.category ?? null,
-            startTime: rRow.start_date,
-            endTime: rRow.end_date,
-            eventLiquidity:
-              rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
-            eventLiquidityDisplay:
-              rRow.event_liquidity_display != null
-                ? Number(rRow.event_liquidity_display)
-                : 0,
-            eventVolume:
-              rRow.event_volume != null ? Number(rRow.event_volume) : 0,
-            eventVolume24h:
-              rRow.event_volume_24h != null ? Number(rRow.event_volume_24h) : 0,
-            eventVolumeDisplay:
-              rRow.event_volume_display != null
-                ? Number(rRow.event_volume_display)
-                : 0,
-            eventOpenInterest:
-              rRow.event_open_interest != null
-                ? Number(rRow.event_open_interest)
-                : 0,
-            eventSlug: rRow.event_slug ?? null,
-            image: rRow.event_image ?? null,
-            icon: rRow.event_icon ?? null,
-            markets: [],
-          };
-        }
-
+      const buildMarket = (
+        rRow: FeedMarketRow,
+      ): FeedEvent["markets"][number] => {
         // Parse token IDs based on venue
         let tokens: TokenPair = { yes: null, no: null };
         if (rRow.venue === "polymarket" && rRow.clob_token_ids) {
@@ -243,7 +182,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        eventMap[eid].markets.push({
+        return {
           venue: String(rRow.venue),
           marketId: String(rRow.venue_market_id),
           marketTitle: rRow.market_title ?? "",
@@ -298,80 +237,151 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                     : null,
           },
           lastUpdate: rRow.last_update,
-        });
+        };
+      };
+
+      const buildEvent = (rRow: FeedMarketRow): FeedEvent => ({
+        eventId: String(rRow.event_id),
+        eventTitle: rRow.event_title ?? null,
+        category: rRow.category ?? null,
+        startTime: rRow.start_date,
+        endTime: rRow.end_date,
+        eventLiquidity:
+          rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
+        eventLiquidityDisplay:
+          rRow.event_liquidity_display != null
+            ? Number(rRow.event_liquidity_display)
+            : 0,
+        eventVolume:
+          rRow.event_volume != null ? Number(rRow.event_volume) : 0,
+        eventVolume24h:
+          rRow.event_volume_24h != null ? Number(rRow.event_volume_24h) : 0,
+        eventVolumeDisplay:
+          rRow.event_volume_display != null
+            ? Number(rRow.event_volume_display)
+            : 0,
+        eventOpenInterest:
+          rRow.event_open_interest != null
+            ? Number(rRow.event_open_interest)
+            : 0,
+        eventSlug: rRow.event_slug ?? null,
+        image: rRow.event_image ?? null,
+        icon: rRow.event_icon ?? null,
+        markets: [],
+      });
+
+      let rows: FeedMarketRow[] = [];
+      let eventIds: string[] = [];
+      if (view === "markets") {
+        rows = await fetchFeedMarketsDirect(pool, inputs);
+      } else {
+        const eventRows = await fetchFeedEventIds(pool, inputs);
+        eventIds = eventRows.map((row) => row.id);
+        if (eventIds.length) {
+          rows = await fetchFeedMarkets(pool, inputs, eventIds);
+        }
       }
 
-      // When explicitly requesting trending, bias the ordering to SSE-updatable markets
-      // by floating markets/events whose YES token has an active Redis `top:<tokenId>` entry.
-      if (r && sort === "trending") {
-        const uniqueTokenIds: string[] = [];
-        const seen = new Set<string>();
+      if (!rows.length) {
+        const payload = {
+          count: 0,
+          limit,
+          offset,
+          minVolume24h: minVol,
+          data: [],
+        };
+        const body = JSON.stringify(payload);
+        const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+        reply.header("ETag", etag);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(body);
+      }
 
-        for (const eid of eventIds) {
-          const event = eventMap[eid];
-          if (!event) continue;
-          for (const market of event.markets) {
-            const tokenId = market.tokens?.yes;
-            if (!tokenId) continue;
-            if (seen.has(tokenId)) continue;
-            seen.add(tokenId);
-            uniqueTokenIds.push(tokenId);
+      let data: FeedEvent[] = [];
+      if (view === "markets") {
+        data = rows.map((rRow) => {
+          const market = buildMarket(rRow);
+          return { ...buildEvent(rRow), markets: [market] };
+        });
+      } else {
+        const eventMap: Record<string, FeedEvent> = {};
+        for (const rRow of rows) {
+          const eid = String(rRow.event_id);
+          if (!eventMap[eid]) {
+            eventMap[eid] = buildEvent(rRow);
           }
+          eventMap[eid].markets.push(buildMarket(rRow));
         }
 
-        if (uniqueTokenIds.length) {
-          const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
-          const tops = await r.mGet(topKeys);
-          const hotTokenIds = new Set<string>();
-          for (let i = 0; i < uniqueTokenIds.length; i += 1) {
-            if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
+        if (r && sort === "trending") {
+          const uniqueTokenIds: string[] = [];
+          const seen = new Set<string>();
+
+          for (const eid of eventIds) {
+            const event = eventMap[eid];
+            if (!event) continue;
+            for (const market of event.markets) {
+              const tokenId = market.tokens?.yes;
+              if (!tokenId) continue;
+              if (seen.has(tokenId)) continue;
+              seen.add(tokenId);
+              uniqueTokenIds.push(tokenId);
+            }
           }
 
-          if (hotTokenIds.size) {
-            for (const eid of eventIds) {
-              const event = eventMap[eid];
-              if (!event) continue;
-              if (event.markets.length < 2) continue;
-
-              const hotMarkets: FeedEvent["markets"] = [];
-              const coldMarkets: FeedEvent["markets"] = [];
-              for (const market of event.markets) {
-                const tokenId = market.tokens?.yes;
-                if (tokenId && hotTokenIds.has(tokenId))
-                  hotMarkets.push(market);
-                else coldMarkets.push(market);
-              }
-
-              if (hotMarkets.length && coldMarkets.length) {
-                event.markets = [...hotMarkets, ...coldMarkets];
-              }
+          if (uniqueTokenIds.length) {
+            const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
+            const tops = await r.mGet(topKeys);
+            const hotTokenIds = new Set<string>();
+            for (let i = 0; i < uniqueTokenIds.length; i += 1) {
+              if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
             }
 
-            const eventMeta = eventIds.map((eid, index) => {
-              const event = eventMap[eid];
-              const hotCount =
-                event?.markets.reduce((acc, market) => {
-                  const tokenId = market.tokens?.yes;
-                  return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
-                }, 0) ?? 0;
-              return { eid, index, hotCount };
-            });
+            if (hotTokenIds.size) {
+              for (const eid of eventIds) {
+                const event = eventMap[eid];
+                if (!event) continue;
+                if (event.markets.length < 2) continue;
 
-            eventMeta.sort((a, b) => {
-              const byHot = b.hotCount - a.hotCount;
-              if (byHot) return byHot;
-              return a.index - b.index;
-            });
-            eventIds = eventMeta.map((m) => m.eid);
+                const hotMarkets: FeedEvent["markets"] = [];
+                const coldMarkets: FeedEvent["markets"] = [];
+                for (const market of event.markets) {
+                  const tokenId = market.tokens?.yes;
+                  if (tokenId && hotTokenIds.has(tokenId))
+                    hotMarkets.push(market);
+                  else coldMarkets.push(market);
+                }
+
+                if (hotMarkets.length && coldMarkets.length) {
+                  event.markets = [...hotMarkets, ...coldMarkets];
+                }
+              }
+
+              const eventMeta = eventIds.map((eid, index) => {
+                const event = eventMap[eid];
+                const hotCount =
+                  event?.markets.reduce((acc, market) => {
+                    const tokenId = market.tokens?.yes;
+                    return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
+                  }, 0) ?? 0;
+                return { eid, index, hotCount };
+              });
+
+              eventMeta.sort((a, b) => {
+                const byHot = b.hotCount - a.hotCount;
+                if (byHot) return byHot;
+                return a.index - b.index;
+              });
+              eventIds = eventMeta.map((m) => m.eid);
+            }
           }
         }
-      }
 
-      // Only include events that were in the limited eventIds list
-      const data = eventIds.flatMap((eid) => {
-        const event = eventMap[eid];
-        return event ? [event] : [];
-      });
+        data = eventIds.flatMap((eid) => {
+          const event = eventMap[eid];
+          return event ? [event] : [];
+        });
+      }
 
       const payload = {
         count: data.length,

@@ -78,6 +78,22 @@ export const feedQuerySchema = z.object({
     )
     .optional()
     .transform((v) => (v && v.length ? v : undefined)),
+  view: z
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toLowerCase() : v),
+      z.string(),
+    )
+    .optional()
+    .transform((v) => (v === "events" || v === "markets" ? v : undefined)),
+  event_scope: z
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toLowerCase() : v),
+      z.string(),
+    )
+    .optional()
+    .transform((v) =>
+      v === "grouped" || v === "single" ? v : undefined,
+    ),
   venue: zVenueQuery,
   category: z.string().optional(),
   categories: zCategoriesQuery,
