@@ -536,6 +536,9 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               );
               const funder = creds?.funderAddress ?? walletAddress;
               const funderSource = creds?.funderAddress ? "credentials" : "signer";
+              const signerNormalized = walletAddress.toLowerCase();
+              const funderNormalized = funder.toLowerCase();
+              const shouldFetchSignerUsdc = signerNormalized !== funderNormalized;
 
               const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
               const negRiskAdapterAddress =
@@ -545,6 +548,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 signerCode,
                 funderCode,
                 usdcBalance,
+                signerUsdcBalance,
                 allowanceExchange,
                 allowanceNegRisk,
                 okExchange,
@@ -569,6 +573,14 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                   tokenAddress: env.polymarketUsdcAddress,
                   owner: funder,
                 }),
+                shouldFetchSignerUsdc
+                  ? fetchErc20BalanceOf({
+                      rpcUrl: env.polygonRpcUrl,
+                      timeoutMs: env.polygonRpcTimeoutMs,
+                      tokenAddress: env.polymarketUsdcAddress,
+                      owner: walletAddress,
+                    })
+                  : Promise.resolve(null),
                 fetchErc20Allowance({
                   rpcUrl: env.polygonRpcUrl,
                   timeoutMs: env.polygonRpcTimeoutMs,
@@ -630,6 +642,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 typeof signerCode === "string" && signerCode.length > 2;
               const funderIsContract =
                 typeof funderCode === "string" && funderCode.length > 2;
+              const signerUsdcBalanceResolved =
+                shouldFetchSignerUsdc && signerUsdcBalance != null
+                  ? signerUsdcBalance
+                  : usdcBalance;
 
               const reasons: string[] = [];
               if (!creds) reasons.push("missing_credentials");
@@ -715,6 +731,21 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                       : {}),
                   },
                 },
+                ...(funderIsContract
+                  ? {
+                      signerUsdc: {
+                        tokenAddress: env.polymarketUsdcAddress,
+                        decimals: 6,
+                        balance: ethers.formatUnits(
+                          signerUsdcBalanceResolved ?? 0n,
+                          6,
+                        ),
+                        balanceRaw: (
+                          signerUsdcBalanceResolved ?? 0n
+                        ).toString(),
+                      },
+                    }
+                  : {}),
                 conditionalTokens: {
                   contractAddress: env.polymarketConditionalTokensAddress,
                   isApprovedForAll: {
