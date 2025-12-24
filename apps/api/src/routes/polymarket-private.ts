@@ -60,6 +60,18 @@ function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function getPolymarketBuilderCreds() {
+  return env.polymarketBuilderApiKey &&
+    env.polymarketBuilderApiSecret &&
+    env.polymarketBuilderApiPassphrase
+    ? {
+        key: env.polymarketBuilderApiKey,
+        secret: env.polymarketBuilderApiSecret,
+        passphrase: env.polymarketBuilderApiPassphrase,
+      }
+    : undefined;
+}
+
 function normalizeHex(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -1324,6 +1336,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
+        builderCreds: getPolymarketBuilderCreds(),
         method: "GET",
         requestPath: requestPathAll,
       });
@@ -1453,6 +1466,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
+        builderCreds: getPolymarketBuilderCreds(),
         method: "GET",
         requestPath,
       });
@@ -1673,17 +1687,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
 
-      const builderCreds =
-        env.polymarketBuilderApiKey &&
-        env.polymarketBuilderApiSecret &&
-        env.polymarketBuilderApiPassphrase
-          ? {
-              key: env.polymarketBuilderApiKey,
-              secret: env.polymarketBuilderApiSecret,
-              passphrase: env.polymarketBuilderApiPassphrase,
-            }
-          : undefined;
-
+      const builderCreds = getPolymarketBuilderCreds();
+      //console.log("ENV", env.polymarketBuilderApiKey, env.polymarketBuilderApiSecret, env.polymarketBuilderApiPassphrase);      
       const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
         timeoutMs: 10_000,
@@ -1812,6 +1817,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
+        builderCreds: getPolymarketBuilderCreds(),
         method: "DELETE",
         requestPath: "/order",
         body: { orderID: request.body.orderID },

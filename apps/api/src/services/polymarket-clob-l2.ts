@@ -177,11 +177,16 @@ export async function polymarketL2Request(inputs: {
       ...(remoteTime != null ? { timestampSec: remoteTime } : {}),
     }) ?? {}),
   });
-
   if (bodyString !== undefined) {
     headers.set("content-type", "application/json; charset=utf-8");
   }
-
+  /*console.log("!!! Polymarket L2 Request:", {
+    method: inputs.method,
+    requestPath,
+    hasBuilderCreds: Boolean(inputs.builderCreds?.key),
+  });
+  console.log("!!! Polymarket L2 Request Headers:", Object.fromEntries(headers.entries()));
+  console.log("!!! Polymarket inputs.builderCreds :", inputs.builderCreds);*/
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
 

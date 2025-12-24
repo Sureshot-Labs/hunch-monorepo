@@ -1,11 +1,13 @@
 import { config } from "dotenv";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
-config({ path: resolve(process.cwd(), "../../.env"), override: true });
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+config({ path: envPath, override: true });
 
 function req(name: string) {
   const v = process.env[name];
-  if (!v) throw new Error(`[env] Missing ${name} in ../../.env`);
+  if (!v) throw new Error(`[env] Missing ${name} in ${envPath}`);
   return v;
 }
 
