@@ -60,20 +60,25 @@ const refreshMinutes = Math.max(
 
 export const env = {
   dbUrl: req("DATABASE_URL"),
-  redisUrl: process.env.REDIS_URL ?? "",
+  redisUrl: req("REDIS_URL"),
 
   limitlessEnabledSetting,
   limitlessEnabled: limitlessEnabledSetting ?? true,
 
   limitlessBase: process.env.LIMITLESS_BASE ?? "https://api.limitless.exchange",
+  limitlessWsUrl:
+    process.env.LIMITLESS_WS ?? "wss://ws.limitless.exchange",
+  limitlessWsSession: process.env.LIMITLESS_WS_SESSION ?? "",
   // how many markets we’ll pull per bootstrap tick
   bootstrapPageSize,
   bootstrapMaxPages,
   // minutes between refreshes
   refreshMinutes,
 
-  // prices are % (0..100). convert to 0..1
+  // AMM prices are % (0..100) in /markets/active; CLOB prices are 0..1.
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",
+  wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
+  wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
 
   venueName: "limitless",
   venueId: Number(process.env.LIMITLESS_VENUE_ID ?? "3"),

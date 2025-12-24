@@ -20,11 +20,101 @@ function parseVolume(
   return null;
 }
 
+function parseMetric(
+  value?: string | number | null,
+  formatted?: string | null,
+  decimals = 6,
+): number | null {
+  if (formatted && !Number.isNaN(Number(formatted))) return Number(formatted);
+  if (value != null && Number.isFinite(Number(value))) {
+    return Number(value) / Math.pow(10, decimals);
+  }
+  return null;
+}
+
+function normalizePositionIds(
+  value?: Array<string | string[]> | null,
+): string[] {
+  if (!value) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (Array.isArray(entry)) {
+      for (const id of entry) {
+        if (id) out.push(id);
+      }
+    } else if (entry) {
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
 const parseDate = (dateStr?: string | null): Date | null => {
   if (!dateStr) return null;
   const date = new Date(dateStr);
   return isNaN(date.getTime()) ? null : date;
 };
+
+function normalizePriceValue(
+  value: number | undefined,
+  tradeType?: string | null,
+): number | undefined {
+  if (value == null || Number.isNaN(value)) return undefined;
+  const shouldScale =
+    tradeType?.toLowerCase() === "amm" || (!tradeType && value > 1);
+  return shouldScale ? value / 100 : value;
+}
+
+function normalizePrices(
+  prices: Array<number | undefined>,
+  tradeType?: string | null,
+): Array<number | undefined> {
+  return prices.map((value) => normalizePriceValue(value, tradeType));
+}
+
+function pickImage(input: {
+  ogImageURI?: string | null;
+  logo?: string | null;
+  creator?: { imageURI?: string | null } | null;
+}): string | undefined {
+  return (
+    input.ogImageURI ??
+    input.logo ??
+    input.creator?.imageURI ??
+    undefined
+  );
+}
+
+function pickIcon(input: {
+  logo?: string | null;
+  creator?: { imageURI?: string | null } | null;
+}): string | undefined {
+  return input.creator?.imageURI ?? input.logo ?? undefined;
+}
+
+function prefixLimitlessToken(tokenId?: string | null): string | undefined {
+  if (!tokenId) return undefined;
+  return tokenId.startsWith("limitless:") ? tokenId : `limitless:${tokenId}`;
+}
+
+function resolveOutcomeTokens(market: {
+  tokens?: { yes?: string | null; no?: string | null } | null;
+  positionIds?: Array<string | string[]> | null;
+}): { yes?: string; no?: string } {
+  const explicitYes = market.tokens?.yes ?? null;
+  const explicitNo = market.tokens?.no ?? null;
+  if (explicitYes || explicitNo) {
+    return {
+      yes: explicitYes ?? undefined,
+      no: explicitNo ?? undefined,
+    };
+  }
+  const normalized = normalizePositionIds(market.positionIds);
+  return {
+    yes: normalized[0],
+    no: normalized[1],
+  };
+}
 
 export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
   const volumeTotal = parseVolume(
@@ -76,7 +166,7 @@ export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
     og_image_uri: lm.ogImageURI || null,
     daily_reward: lm.dailyReward || null,
     outcome_tokens: lm.outcomeTokens || [],
-    trade_type: lm.tradeType,
+    trade_type: lm.tradeType ?? "clob",
     created_at: parseDate(lm.createdAt),
     updated_at: parseDate(lm.updatedAt),
     raw: lm,
@@ -92,6 +182,7 @@ export function mapLimitlessMarketRow(
     market.volumeFormatted,
     market.collateralToken?.decimals,
   );
+  const outcomeTokens = resolveOutcomeTokens(market);
 
   return {
     id: String(market.id),
@@ -118,8 +209,8 @@ export function mapLimitlessMarketRow(
     volume_formatted: market.volumeFormatted || null,
     volume_total: volumeTotal,
     prices: market.prices || [],
-    tokens_no: market.tokens?.no || null,
-    tokens_yes: market.tokens?.yes || null,
+    tokens_no: outcomeTokens.no ?? null,
+    tokens_yes: outcomeTokens.yes ?? null,
     metadata_fee: market.metadata?.fee || false,
     metadata_is_bannered: market.metadata?.isBannered || false,
     metadata_is_poly_arbitrage: market.metadata?.isPolyArbitrage || false,
@@ -134,7 +225,7 @@ export function mapLimitlessMarketRow(
     collateral_token_decimals: market.collateralToken?.decimals || 6,
     neg_risk_request_id: market.negRiskRequestId || null,
     winning_outcome_index: market.winningOutcomeIndex || null,
-    trade_type: market.tradeType,
+    trade_type: market.tradeType ?? "clob",
     created_at: parseDate(market.createdAt),
     updated_at: parseDate(market.updatedAt),
     raw: market,
@@ -233,9 +324,23 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const volumeTotal =
     parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ??
     undefined;
+  const openInterest =
+    parseMetric(
+      lm.openInterest,
+      lm.openInterestFormatted,
+      lm.collateralToken?.decimals,
+    ) ?? undefined;
+  const liquidity =
+    parseMetric(
+      lm.liquidity,
+      lm.liquidityFormatted,
+      lm.collateralToken?.decimals,
+    ) ?? undefined;
   const expirationDate = lm.expirationTimestamp
     ? new Date(Number(lm.expirationTimestamp))
     : undefined;
+  const image = pickImage(lm);
+  const icon = pickIcon(lm);
 
   return {
     id: `limitless:${lm.id}`,
@@ -249,8 +354,16 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     end_date: expirationDate,
     volume_total: volumeTotal,
     volume_24h: undefined, // Limitless doesn't provide 24h volume
-    liquidity: undefined, // Limitless doesn't provide liquidity
+    open_interest: openInterest,
+    liquidity,
+    metadata: {
+      tradeType: lm.tradeType ?? "clob",
+      marketType: lm.marketType,
+      address: lm.address ?? undefined,
+    },
     slug: lm.slug || undefined,
+    image,
+    icon,
     created_at: parseDate(lm.createdAt) || undefined,
     updated_at: parseDate(lm.updatedAt) || undefined,
   };
@@ -268,20 +381,33 @@ export function mapToUnifiedMarket(
   const volumeTotal = market.volumeFormatted
     ? parseFloat(market.volumeFormatted)
     : undefined;
+  const openInterest =
+    parseMetric(
+      market.openInterest,
+      market.openInterestFormatted,
+      market.collateralToken?.decimals,
+    ) ?? undefined;
+  const liquidity =
+    parseMetric(
+      market.liquidity,
+      market.liquidityFormatted,
+      market.collateralToken?.decimals,
+    ) ?? undefined;
   const expirationDate = market.expirationTimestamp
     ? new Date(Number(market.expirationTimestamp))
     : undefined;
 
-  // Extract prices from prices array (convert percentage to decimal)
-  let bestBid: number | undefined;
-  let bestAsk: number | undefined;
-  let lastPrice: number | undefined;
-
-  if (market.prices && market.prices.length >= 2) {
-    bestBid = market.prices[0] / 100; // Convert percentage to decimal
-    bestAsk = market.prices[1] / 100; // Convert percentage to decimal
-    lastPrice = market.prices[0] / 100; // Convert percentage to decimal
-  }
+  const tradeType = market.tradeType ?? "clob";
+  const normalizedPrices = normalizePrices(
+    [market.prices?.[0], market.prices?.[1]],
+    tradeType,
+  );
+  const yesPrice = normalizedPrices[0];
+  const lastPrice = yesPrice;
+  const usePriceAsTop = tradeType.toLowerCase() === "amm" && yesPrice != null;
+  const outcomeTokens = resolveOutcomeTokens(market);
+  const image = pickImage(market);
+  const icon = pickIcon(market);
 
   return {
     id: `limitless:${market.id}`,
@@ -292,21 +418,29 @@ export function mapToUnifiedMarket(
     description: market.description,
     category: market.categories?.[0], // First category
     status,
-    market_type: market.marketType,
+    market_type: market.marketType === "group" ? "group" : "binary",
     open_time: parseDate(market.createdAt) || undefined,
     close_time: expirationDate,
     expiration_time: expirationDate,
-    best_bid: bestBid,
-    best_ask: bestAsk,
+    best_bid: usePriceAsTop ? yesPrice : undefined,
+    best_ask: usePriceAsTop ? yesPrice : undefined,
     last_price: lastPrice,
     volume_total: volumeTotal,
     volume_24h: undefined, // Limitless doesn't provide 24h volume
-    liquidity: undefined, // Limitless doesn't provide liquidity
+    open_interest: openInterest,
+    liquidity,
+    metadata: {
+      tradeType,
+      marketType: market.marketType,
+      address: market.address ?? undefined,
+    },
     outcomes: JSON.stringify(["YES", "NO"]), // Limitless markets are binary
-    token_yes: `limitless:${market.id}:YES`,
-    token_no: `limitless:${market.id}:NO`,
+    token_yes: prefixLimitlessToken(outcomeTokens.yes),
+    token_no: prefixLimitlessToken(outcomeTokens.no),
     condition_id: market.conditionId ?? undefined,
     slug: market.slug || undefined,
+    image,
+    icon,
     created_at: parseDate(market.createdAt) || undefined,
     updated_at: parseDate(market.updatedAt) || undefined,
   };

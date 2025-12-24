@@ -1,8 +1,19 @@
 import { env } from "./env.js";
-import { LimitlessActiveResponse, TLimitlessMarket } from "./types.js";
+import {
+  LimitlessActiveResponse,
+  LimitlessMarket,
+  LimitlessOrderbook,
+  TLimitlessMarket,
+} from "./types.js";
+
+const defaultHeaders = {
+  accept: "application/json",
+  "X-API-Version": "v1",
+  "user-agent": "hunch-indexer/limitless",
+};
 
 async function getJson(url: string) {
-  const r = await fetch(url, { headers: { accept: "application/json" } });
+  const r = await fetch(url, { headers: defaultHeaders });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
     const snippet = body.trim();
@@ -38,7 +49,29 @@ export async function fetchAllActive(maxPages: number, pageSize: number) {
     out.push(...res.data);
     // cheap throttling
     await new Promise((r) => setTimeout(r, 150));
-    if (res.totalPages && p >= res.totalPages) break;
+    const totalCount = res.totalMarketsCount;
+    const totalPages =
+      res.totalPages ??
+      (typeof totalCount === "number" && Number.isFinite(totalCount)
+        ? Math.ceil(totalCount / pageSize)
+        : undefined);
+    if (totalPages && p >= totalPages) break;
   }
   return out;
+}
+
+export async function fetchMarket(slugOrAddress: string) {
+  const base = env.limitlessBase.replace(/\/+$/, "");
+  const safe = encodeURIComponent(slugOrAddress);
+  const url = `${base}/markets/${safe}`;
+  const j = await getJson(url);
+  return LimitlessMarket.parse(j);
+}
+
+export async function fetchOrderbook(slug: string) {
+  const base = env.limitlessBase.replace(/\/+$/, "");
+  const safe = encodeURIComponent(slug);
+  const url = `${base}/markets/${safe}/orderbook`;
+  const j = await getJson(url);
+  return LimitlessOrderbook.parse(j);
 }

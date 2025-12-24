@@ -65,8 +65,10 @@ export type FeedMarket = {
   marketSlug: string | null;
   volume24h: number;
   volumeTotal: number;
+  volumeDisplay: number;
   openInterest: number;
   liquidity: number;
+  liquidityDisplay: number;
   acceptingOrders: boolean;
   tokens: TokenPair;
   conditionId: string | null;
@@ -90,8 +92,10 @@ export type FeedEvent = {
   startTime: unknown;
   endTime: unknown;
   eventLiquidity: number;
+  eventLiquidityDisplay: number;
   eventVolume: number;
   eventVolume24h: number;
+  eventVolumeDisplay: number;
   eventOpenInterest: number;
   eventSlug: string | null;
   image: string | null;

@@ -40,6 +40,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const offset = q.offset;
       const minVol = q.min_volume24hr;
       const minLiquidity = q.min_liquidity;
+      const search = q.q;
       const venues = q.venue;
       const category = q.category;
       const categories = q.categories;
@@ -62,7 +63,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v15:${limit}:${offset}:${minVol}:${minLiquidity}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
+      const cacheKey = `feed:v16:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -118,6 +119,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         offset,
         minVol,
         minLiquidity,
+        q: search,
         venues,
         category,
         categories,
@@ -157,6 +159,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           offset,
           minVol,
           minLiquidity,
+          q: search,
           venues,
           category,
           categories,
@@ -187,10 +190,18 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             endTime: rRow.end_date,
             eventLiquidity:
               rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
+            eventLiquidityDisplay:
+              rRow.event_liquidity_display != null
+                ? Number(rRow.event_liquidity_display)
+                : 0,
             eventVolume:
               rRow.event_volume != null ? Number(rRow.event_volume) : 0,
             eventVolume24h:
               rRow.event_volume_24h != null ? Number(rRow.event_volume_24h) : 0,
+            eventVolumeDisplay:
+              rRow.event_volume_display != null
+                ? Number(rRow.event_volume_display)
+                : 0,
             eventOpenInterest:
               rRow.event_open_interest != null
                 ? Number(rRow.event_open_interest)
@@ -240,9 +251,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           volume24h: rRow.volume_24h != null ? Number(rRow.volume_24h) : 0,
           volumeTotal:
             rRow.volume_total != null ? Number(rRow.volume_total) : 0,
+          volumeDisplay:
+            rRow.volume_display != null ? Number(rRow.volume_display) : 0,
           openInterest:
             rRow.open_interest != null ? Number(rRow.open_interest) : 0,
           liquidity: rRow.liquidity != null ? Number(rRow.liquidity) : 0,
+          liquidityDisplay:
+            rRow.liquidity_display != null
+              ? Number(rRow.liquidity_display)
+              : 0,
           acceptingOrders: true, // Always true for active markets in unified table
           tokens,
           outcomes,

@@ -1,7 +1,8 @@
-import { bootstrapLimitless } from "./bootstrap.js";
+import { bootstrapLimitless, resolveHotSlugsForWs } from "./bootstrap.js";
 import { log } from "./log.js";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 import { env } from "./env.js";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 
 let bootstrapping = false;
 
@@ -10,6 +11,8 @@ async function periodicBootstrap() {
   bootstrapping = true;
   try {
     await bootstrapLimitless();
+    const slugs = await resolveHotSlugsForWs();
+    updateMarketWSSubscriptions(slugs);
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -29,9 +32,9 @@ async function main() {
   }
 
   await periodicBootstrap();
-  // 2) Start streaming updates for those markets. Should handle reconnects internally.
-  //   startMarketWS(_tokenIds);
-  // 3) Keep refreshing background data every 5 minutes to catch new/changed markets.
+  const slugs = await resolveHotSlugsForWs();
+  startMarketWS(slugs);
+  // Keep refreshing background data every 5 minutes to catch new/changed markets.
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
 }
 

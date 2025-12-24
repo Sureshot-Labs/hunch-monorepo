@@ -6,6 +6,7 @@ export type FeedInputs = {
   offset: number;
   minVol: number;
   minLiquidity: number;
+  q?: string;
   venues?: string[];
   category?: string;
   categories?: string[];
@@ -38,6 +39,34 @@ export async function fetchFeedEventIds(
   const eventWhere: string[] = [];
   const safeEventLiquidityExpr =
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
+  const eventVolumeDisplayExpr = `
+    case
+      when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
+      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
+      else null
+    end
+  `;
+  const marketVolumeDisplayExpr = `
+    case
+      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
+      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+      else null
+    end
+  `;
+  const eventLiquidityDisplayExpr = `
+    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
+  `;
+  const marketLiquidityDisplayExpr = `
+    coalesce(
+      nullif(m.liquidity, 0),
+      nullif(m.open_interest, 0),
+      nullif(${safeEventLiquidityExpr}, 0),
+      nullif(e.open_interest, 0)
+    )
+  `;
+  const eventVolumeSortExpr = `
+    coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
+  `;
 
   if (inputs.venues?.length) {
     eventWhere.push(`lower(e.venue) = ANY(${add(inputs.venues)}::text[])`);
@@ -49,6 +78,21 @@ export async function fetchFeedEventIds(
   } else if (inputs.category) {
     eventWhere.push(
       `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
+    );
+  }
+  if (inputs.q) {
+    const search = add(`%${inputs.q}%`);
+    eventWhere.push(
+      `(
+        e.title ilike ${search} or
+        e.description ilike ${search} or
+        e.category ilike ${search} or
+        e.slug ilike ${search} or
+        m.title ilike ${search} or
+        m.description ilike ${search} or
+        m.category ilike ${search} or
+        m.slug ilike ${search}
+      )`,
     );
   }
 
@@ -84,7 +128,7 @@ export async function fetchFeedEventIds(
   const marketQual: string[] = [];
   if (inputs.minLiquidity > 0) {
     marketQual.push(
-      `coalesce(m.liquidity, ${safeEventLiquidityExpr}, 0) >= ${add(inputs.minLiquidity)}`,
+      `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
   if (inputs.minProb != null) {
@@ -105,7 +149,7 @@ export async function fetchFeedEventIds(
   const having: string[] = [];
   if (inputs.minVol > 1e-9) {
     having.push(
-      `coalesce(e.volume_24h, sum(coalesce(m.volume_24h, 0))) >= ${add(inputs.minVol)}`,
+      `${eventVolumeSortExpr} >= ${add(inputs.minVol)}`,
     );
   }
   having.push(`bool_or(${marketQualSql})`);
@@ -114,7 +158,7 @@ export async function fetchFeedEventIds(
   if (inputs.sort === "totalvol")
     eventOrder = "e.volume_total desc nulls last, e.id";
   else if (inputs.sort === "liquidity")
-    eventOrder = `(${safeEventLiquidityExpr}) desc nulls last, e.id`;
+    eventOrder = `(${eventLiquidityDisplayExpr}) desc nulls last, e.id`;
   else if (inputs.filter === "newest")
     eventOrder = "e.start_date desc nulls last, e.id";
   else if (inputs.filter === "endingsoon")
@@ -123,8 +167,8 @@ export async function fetchFeedEventIds(
     const sevenDaysAgo = add(inputs.sevenDaysAgo);
     const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
     eventOrder = `
-      (coalesce(e.volume_24h, 0) * 0.4 +
-       coalesce(${safeEventLiquidityExpr}, 0) * 0.3 +
+      (coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
+       coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= ${sevenDaysAgo} then 1000 else 0 end * 0.2 +
        case when e.end_date <= ${sevenDaysFromNow} then 500 else 0 end * 0.1
       ) desc nulls last, e.id
@@ -157,8 +201,10 @@ export type FeedMarketRow = {
   start_date: unknown;
   end_date: unknown;
   event_liquidity: unknown;
+  event_liquidity_display: unknown;
   event_volume: unknown;
   event_volume_24h: unknown;
+  event_volume_display: unknown;
   event_open_interest: unknown;
   event_slug: string | null;
   event_image: string | null;
@@ -169,8 +215,10 @@ export type FeedMarketRow = {
   market_title: string | null;
   volume_24h: unknown;
   volume_total: unknown;
+  volume_display: unknown;
   open_interest: unknown;
   liquidity: unknown;
+  liquidity_display: unknown;
   best_bid: unknown;
   best_ask: unknown;
   best_bid_yes: unknown;
@@ -198,6 +246,48 @@ export async function fetchFeedMarkets(
   const { params, add } = createParamBuilder();
   const safeEventLiquidityExpr =
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
+  const eventVolumeDisplayExpr = `
+    case
+      when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
+      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
+      else null
+    end
+  `;
+  const marketVolumeDisplayExpr = `
+    case
+      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
+      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+      else null
+    end
+  `;
+  const eventLiquidityDisplayExpr = `
+    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
+  `;
+  const marketLiquidityDisplayExpr = `
+    coalesce(
+      nullif(m.liquidity, 0),
+      nullif(m.open_interest, 0),
+      nullif(${safeEventLiquidityExpr}, 0),
+      nullif(e.open_interest, 0)
+    )
+  `;
+  const eventVolumeWindowExpr = `
+    coalesce(
+      ${eventVolumeDisplayExpr},
+      nullif(sum(coalesce(${marketVolumeDisplayExpr}, 0)) over (partition by e.id), 0)
+    )
+  `;
+  const eventLiquidityWindowExpr = `
+    coalesce(
+      ${eventLiquidityDisplayExpr},
+      nullif(
+        sum(
+          coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0), 0)
+        ) over (partition by e.id),
+        0
+      )
+    )
+  `;
 
   const eventIdsParam = add(eventIds);
   const nowParam = add(inputs.nowParam);
@@ -221,7 +311,7 @@ export async function fetchFeedMarkets(
 
   if (inputs.minLiquidity > 0) {
     marketWhere.push(
-      `coalesce(m.liquidity, ${safeEventLiquidityExpr}, 0) >= ${add(inputs.minLiquidity)}`,
+      `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
 
@@ -236,13 +326,28 @@ export async function fetchFeedMarkets(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
     );
   }
+  if (inputs.q) {
+    const search = add(`%${inputs.q}%`);
+    marketWhere.push(
+      `(
+        e.title ilike ${search} or
+        e.description ilike ${search} or
+        e.category ilike ${search} or
+        e.slug ilike ${search} or
+        m.title ilike ${search} or
+        m.description ilike ${search} or
+        m.category ilike ${search} or
+        m.slug ilike ${search}
+      )`,
+    );
+  }
 
   // Sorting for markets: use same sort as for events, or none
   let marketOrder = "";
   if (inputs.sort === "totalvol")
     marketOrder = "m.volume_total desc nulls last, m.venue_market_id";
   else if (inputs.sort === "liquidity")
-    marketOrder = "m.liquidity desc nulls last, m.venue_market_id";
+    marketOrder = `${marketLiquidityDisplayExpr} desc nulls last, m.venue_market_id`;
   else if (inputs.filter === "newest") {
     // When filtering by newest, sort by event start_date descending (newest first)
     marketOrder = "e.start_date desc nulls last, m.venue_market_id";
@@ -252,8 +357,8 @@ export async function fetchFeedMarkets(
   } else if (inputs.sort == null || inputs.sort === "trending") {
     // Trending algorithm for markets: combines volume, liquidity, and recency
     marketOrder = `
-      (coalesce(m.volume_24h, 0) * 0.4 + 
-       coalesce(m.liquidity, 0) * 0.3 + 
+      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
        case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
        case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) desc nulls last, m.venue_market_id
@@ -268,8 +373,10 @@ export async function fetchFeedMarkets(
       e.start_date,
       e.end_date,
       (${safeEventLiquidityExpr}) as event_liquidity,
+      (${eventLiquidityWindowExpr}) as event_liquidity_display,
       e.volume_total as event_volume,
       e.volume_24h as event_volume_24h,
+      (${eventVolumeWindowExpr}) as event_volume_display,
       e.open_interest as event_open_interest,
       e.slug as event_slug,
       e.image as event_image,
@@ -280,8 +387,10 @@ export async function fetchFeedMarkets(
       m.title as market_title,
       m.volume_24h,
       m.volume_total,
+      (${marketVolumeDisplayExpr}) as volume_display,
       m.open_interest,
       m.liquidity,
+      (${marketLiquidityDisplayExpr}) as liquidity_display,
       m.best_bid,
       m.best_ask,
       yes_top.best_bid as best_bid_yes,
