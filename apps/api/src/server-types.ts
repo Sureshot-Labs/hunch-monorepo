@@ -63,6 +63,7 @@ export type FeedMarket = {
   marketId: string;
   marketTitle: string;
   marketSlug: string | null;
+  marketType?: string | null;
   volume24h: number;
   volumeTotal: number;
   volumeDisplay: number;

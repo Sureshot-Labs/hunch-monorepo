@@ -148,6 +148,19 @@ export const env = {
   baseRpcUrl:
     process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
   baseRpcTimeoutMs: optionalPositiveInt("BASE_RPC_TIMEOUT_MS", 10_000),
+  limitlessApiBase:
+    process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
+  limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",
+  limitlessApiTimeoutMs: optionalPositiveInt("LIMITLESS_API_TIMEOUT_MS", 15_000),
+  limitlessUsdcAddress:
+    process.env.LIMITLESS_USDC_ADDRESS?.trim() ||
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  limitlessClobAddress:
+    process.env.LIMITLESS_CLOB_ADDRESS?.trim() ||
+    "0xa4409D988CA2218d956BeEFD3874100F444f0DC3",
+  limitlessNegRiskAddress:
+    process.env.LIMITLESS_NEGRISK_ADDRESS?.trim() ||
+    "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
   polymarketUsdcAddress:

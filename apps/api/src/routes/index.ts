@@ -10,9 +10,10 @@ import { healthRoutes } from "./health.js";
 import { marketRoutes } from "./markets.js";
 import { metaRoutes } from "./meta.js";
 import { metricsRoutes } from "./metrics.js";
-import { orderRoutes } from "./orders.js";
+import { ordersRoutes } from "./orders.js";
 import { positionsRoutes } from "./positions.js";
 import { pricesSseRoutes } from "./prices-sse.js";
+import { limitlessPrivateRoutes } from "./limitless-private.js";
 import { polymarketPrivateRoutes } from "./polymarket-private.js";
 import { polymarketProxyRoutes } from "./polymarket-proxy.js";
 import { solanaRoutes } from "./solana.js";
@@ -27,6 +28,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(bridgeRoutes);
   await app.register(authRoutes);
   await app.register(polymarketPrivateRoutes, { prefix: "/trade/polymarket" });
+  await app.register(limitlessPrivateRoutes, { prefix: "/trade/limitless" });
   await app.register(dflowPrivateRoutes, { prefix: "/trade/kalshi" });
   await app.register(dflowPrivateRoutes, { prefix: "/trade/dflow" });
   await app.register(polymarketProxyRoutes);
@@ -36,8 +38,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(marketRoutes);
   await app.register(eventRoutes);
   await app.register(executionsRoutes);
+  await app.register(ordersRoutes);
   await app.register(positionsRoutes);
-  await app.register(orderRoutes);
   await app.register(walletsRoutes);
   await app.register(watchlistRoutes);
 }

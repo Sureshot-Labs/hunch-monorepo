@@ -187,6 +187,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           marketId: String(rRow.venue_market_id),
           marketTitle: rRow.market_title ?? "",
           marketSlug: rRow.market_slug ?? null,
+          marketType: rRow.market_type ?? null,
           volume24h: rRow.volume_24h != null ? Number(rRow.volume_24h) : 0,
           volumeTotal:
             rRow.volume_total != null ? Number(rRow.volume_total) : 0,

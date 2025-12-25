@@ -1,163 +1,132 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { createAuthMiddleware } from "../auth.js";
+import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
-import type { Order } from "../order-types.js";
 import {
-  fetchOrderHistoryRows,
-  fetchOrdersForUser,
-  findOrderVenueForUser,
-  storeOrder,
-} from "../repos/orders-repo.js";
-import { VenueOrderManagerFactory } from "../venue-order-manager-factory.js";
+  fetchUnifiedOrderById,
+  fetchUnifiedOrders,
+} from "../repos/unified-orders.js";
 import {
-  orderHistoryQuerySchema,
   orderIdParamsSchema,
-  ordersForWalletParamsSchema,
-  ordersForWalletQuerySchema,
-  ordersListQuerySchema,
-  placeOrderBodySchema,
-  storeOrderBodySchema,
+  orderIdQuerySchema,
+  ordersQuerySchema,
 } from "../schemas/orders.js";
 
-// Legacy/unified orders routes (deprecated). Prefer /polymarket/* for CLOB and
-// /dflow/* for Solana swaps. These will be removed once clients migrate.
-export const orderRoutes: FastifyPluginAsync = async (app) => {
+const toNumber = (value: string | null): number | null => {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const mapUnifiedOrder = (
+  row: Awaited<ReturnType<typeof fetchUnifiedOrders>>["rows"][number],
+) => ({
+  id: row.id,
+  kind: row.kind,
+  venue: row.venue,
+  walletAddress: row.wallet_address,
+  venueOrderId: row.venue_order_id,
+  tokenId: row.token_id,
+  side: row.side,
+  orderType: row.order_type,
+  price: toNumber(row.price),
+  size: toNumber(row.size),
+  status: row.status,
+  filledSize: toNumber(row.filled_size),
+  averageFillPrice: toNumber(row.average_fill_price),
+  expiresAt: row.expires_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  filledAt: row.filled_at,
+  cancelledAt: row.cancelled_at,
+  unifiedMarketId: row.unified_market_id,
+  inputMint: row.input_mint,
+  outputMint: row.output_mint,
+  amountIn: toNumber(row.amount_in),
+  amountOut: toNumber(row.amount_out),
+  txSignature: row.tx_signature,
+});
+
+export const ordersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
-  /**
-   * POST /orders
-   * Place a new order
-   */
-  z.post(
-    "/orders",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { body: placeOrderBodySchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+  const resolveWalletAddresses = async (
+    userId: string,
+    walletAddress: string | undefined,
+    requestedWallets: string[] | undefined,
+  ): Promise<string[]> => {
+    if (requestedWallets && requestedWallets.length) {
+      const wallets = await AuthService.getUserWallets(userId);
+      const walletMap = new Map(
+        wallets.map((wallet) => [
+          wallet.walletAddress.toLowerCase(),
+          wallet.walletAddress,
+        ]),
+      );
+      const resolved = requestedWallets
+        .map((address) => address.trim().toLowerCase())
+        .map((address) => walletMap.get(address))
+        .filter((address): address is string => Boolean(address));
+      return Array.from(new Set(resolved));
+    }
 
-      const body = request.body;
-
-      const l1Headers = {
-        l1Signature: request.headers["poly_signature"] as string,
-        l1Timestamp: request.headers["poly_timestamp"] as string,
-        l1Nonce: request.headers["poly_nonce"] as string,
-      };
-
-      try {
-        const result = await VenueOrderManagerFactory.placeOrder(
-          body.venue,
-          user.id,
-          walletAddress,
-          request.headers,
-          {
-            tokenId: body.tokenId,
-            side: body.side,
-            orderType: body.orderType,
-            price: body.price,
-            size: body.size,
-            expiresAt: body.expiresAt,
-            l1Signature: l1Headers.l1Signature || body.l1Signature,
-            l1Timestamp: l1Headers.l1Timestamp || body.l1Timestamp,
-            l1Nonce: l1Headers.l1Nonce || body.l1Nonce,
-          },
-        );
-
-        if (result.success) {
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            message: "Order placed successfully",
-            orderId: result.orderId,
-            venueOrderId: result.venueOrderId,
-            status: result.status,
-          });
-        }
-
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || "Failed to place order",
-          rawError: result.rawError,
-        });
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id, walletAddress, body },
-          "Failed to place order",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to place order",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
+    if (!walletAddress) return [];
+    return [walletAddress];
+  };
 
   /**
    * GET /orders
-   * Get active orders for the user
+   * List unified orders (orders + swaps) for the current user.
    */
   z.get(
     "/orders",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: ordersListQuerySchema },
+      schema: { querystring: ordersQuerySchema },
     },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
 
       const query = request.query;
-      const venue = query.venue;
 
       try {
-        if (venue) {
-          const result = await VenueOrderManagerFactory.getActiveOrders(
-            venue,
-            user.id,
-            walletAddress,
-          );
-
-          if (result.success) {
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({ orders: result.orders, venue });
-          }
-
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
+          walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
           reply.code(400);
-          return reply.send({
-            error: result.errorMessage || "Failed to fetch orders",
-          });
+          return reply.send({ error: "No wallets available to query." });
         }
 
-        const allOrders: Order[] = [];
-        for (const v of ["polymarket", "kalshi", "limitless"] as const) {
-          try {
-            const result = await VenueOrderManagerFactory.getActiveOrders(
-              v,
-              user.id,
-              walletAddress,
-            );
-            if (result.success) allOrders.push(...result.orders);
-          } catch (error) {
-            app.log.warn(
-              { error, venue: v, userId: user.id },
-              `Failed to fetch orders for ${v}`,
-            );
-          }
-        }
+        const result = await fetchUnifiedOrders(pool, {
+          userId: user.id,
+          walletAddresses,
+          venue: query.venue,
+          status: query.status,
+          type: query.type,
+          limit: query.limit,
+          offset: query.offset,
+        });
+
+        const orders = result.rows.map(mapUnifiedOrder);
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ orders: allOrders });
+        return reply.send({
+          orders,
+          pagination: {
+            total: result.total,
+            limit: query.limit,
+            offset: query.offset,
+            hasMore: query.offset + query.limit < result.total,
+          },
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress },
@@ -174,392 +143,58 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
   /**
    * GET /orders/:id
-   * Get specific order details
+   * Fetch a single unified order by id.
    */
   z.get(
     "/orders/:id",
     {
       preHandler: createAuthMiddleware(),
-      schema: {
-        params: orderIdParamsSchema,
-        querystring: ordersListQuerySchema,
-      },
+      schema: { params: orderIdParamsSchema, querystring: orderIdQuerySchema },
     },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
 
-      const params = request.params;
       const query = request.query;
-      const venueQuery = query.venue;
 
       try {
-        const venueFromDb = await findOrderVenueForUser(pool, {
-          orderId: params.id,
-          userId: user.id,
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
           walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to query." });
+        }
+
+        const row = await fetchUnifiedOrderById(pool, {
+          userId: user.id,
+          walletAddresses,
+          venue: undefined,
+          status: undefined,
+          id: request.params.id,
         });
 
-        if (!venueFromDb) {
+        if (!row) {
           reply.code(404);
           return reply.send({ error: "Order not found" });
         }
 
-        const venueFromDbTyped = venueFromDb as
-          | "polymarket"
-          | "kalshi"
-          | "limitless";
-
-        if (venueQuery && venueQuery !== venueFromDbTyped) {
-          reply.code(400);
-          return reply.send({
-            error: "Venue mismatch for order",
-            venue: venueFromDbTyped,
-          });
-        }
-
-        const venue = venueQuery ?? venueFromDbTyped;
-        const result = await VenueOrderManagerFactory.getOrder(
-          venue,
-          user.id,
-          walletAddress,
-          params.id,
-        );
-
-        if (result.success) {
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({ order: result.order });
-        }
-
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || "Failed to fetch order",
-        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ order: mapUnifiedOrder(row) });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, walletAddress, orderId: params.id },
+          { error, userId: user.id, walletAddress, orderId: request.params.id },
           "Failed to fetch order",
         );
         reply.code(500);
         return reply.send({
           error: "Failed to fetch order",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
-
-  /**
-   * DELETE /orders/:id
-   * Cancel an order
-   */
-  z.delete(
-    "/orders/:id",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { params: orderIdParamsSchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const params = request.params;
-
-      try {
-        const venueFromDb = await findOrderVenueForUser(pool, {
-          orderId: params.id,
-          userId: user.id,
-          walletAddress,
-        });
-
-        if (!venueFromDb) {
-          reply.code(404);
-          return reply.send({ error: "Order not found" });
-        }
-
-        const result = await VenueOrderManagerFactory.cancelOrder(
-          venueFromDb as "polymarket" | "kalshi" | "limitless",
-          user.id,
-          walletAddress,
-          params.id,
-        );
-
-        if (result.success) {
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({ message: "Order cancelled successfully" });
-        }
-
-        reply.code(400);
-        return reply.send({
-          error: result.errorMessage || "Failed to cancel order",
-          rawError: result.rawError,
-        });
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id, walletAddress, orderId: params.id },
-          "Failed to cancel order",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to cancel order",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
-
-  /**
-   * GET /orders/history
-   * Get order history for the user
-   */
-  z.get(
-    "/orders/history",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { querystring: orderHistoryQuerySchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const query = request.query;
-
-      try {
-        const limit = query.limit;
-        const offset = query.offset;
-
-        const rows = await fetchOrderHistoryRows(pool, {
-          userId: user.id,
-          walletAddress,
-          venue: query.venue,
-          status: query.status,
-          limit,
-          offset,
-        });
-
-        const orders = rows.map((row) => ({
-          id: row.id,
-          userId: row.user_id,
-          venue: row.venue,
-          venueOrderId: row.venue_order_id,
-          tokenId: row.token_id,
-          side: row.side,
-          orderType: row.order_type,
-          price: parseFloat(row.price),
-          size: parseFloat(row.size),
-          status: row.status,
-          filledSize: parseFloat(row.filled_size || "0"),
-          averageFillPrice: row.average_fill_price
-            ? parseFloat(row.average_fill_price)
-            : null,
-          expiresAt: row.expires_at,
-          createdAt: row.created_at,
-          updatedAt: row.updated_at,
-          filledAt: row.filled_at,
-          cancelledAt: row.cancelled_at,
-          errorMessage: row.error_message,
-          rawError: row.raw_error,
-        }));
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          orders,
-          pagination: {
-            limit,
-            offset,
-            hasMore: orders.length === limit,
-          },
-        });
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id },
-          "Failed to fetch order history",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to fetch order history",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
-
-  /**
-   * POST /orders/store
-   * Store order data after user performs the order on frontend
-   */
-  z.post(
-    "/orders/store",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: { body: storeOrderBodySchema },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const authedWalletAddress = request.walletAddress;
-      if (!user || !authedWalletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const body = request.body;
-
-      if (
-        body.walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()
-      ) {
-        reply.code(403);
-        return reply.send({
-          error: "walletAddress does not match authenticated session",
-        });
-      }
-
-      try {
-        const result = await storeOrder(pool, {
-          userId: user.id,
-          walletAddress: authedWalletAddress,
-          venue: body.venue ?? "polymarket",
-          venueOrderId: body.orderID,
-          tokenId: body.tokenId ?? null,
-          side: body.side ?? null,
-          orderType: body.orderType ?? "GTC",
-          price: body.price ?? null,
-          size: body.size ?? null,
-          status: body.status || "live",
-          errorMessage: body.errorMsg ?? null,
-          rawError: body.success === false ? JSON.stringify(body) : null,
-        });
-
-        if (result.kind === "exists") {
-          reply.code(409);
-          return reply.send({ error: "Order already exists" });
-        }
-
-        const newOrder = result.order;
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          message: "Order stored successfully",
-          order: {
-            id: newOrder.id,
-            orderID: newOrder.venue_order_id,
-            status: newOrder.status,
-            storedAt: newOrder.posted_at,
-          },
-        });
-      } catch (error) {
-        app.log.error(
-          {
-            error,
-            userId: user.id,
-            walletAddress: body.walletAddress,
-            orderID: body.orderID,
-          },
-          "Failed to store order",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to store order",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
-
-  /**
-   * GET /orders/user/:walletAddress
-   * Get order IDs for a specific wallet address
-   */
-  z.get(
-    "/orders/user/:walletAddress",
-    {
-      preHandler: createAuthMiddleware(),
-      schema: {
-        params: ordersForWalletParamsSchema,
-        querystring: ordersForWalletQuerySchema,
-      },
-    },
-    async (request, reply) => {
-      const user = request.user;
-      const authedWalletAddress = request.walletAddress;
-      if (!user || !authedWalletAddress) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
-
-      const { walletAddress } = request.params;
-      const query = request.query;
-
-      if (walletAddress.toLowerCase() !== authedWalletAddress.toLowerCase()) {
-        reply.code(403);
-        return reply.send({
-          error: "walletAddress does not match authenticated session",
-        });
-      }
-
-      try {
-        const limit = query.limit;
-        const offset = query.offset;
-
-        const result = await fetchOrdersForUser(pool, {
-          userId: user.id,
-          walletAddress: authedWalletAddress,
-          status: query.status,
-          venue: query.venue,
-          limit,
-          offset,
-        });
-
-        const orders = result.rows.map((row) => ({
-          id: row.id,
-          orderID: row.venue_order_id,
-          venue: row.venue,
-          tokenId: row.token_id,
-          side: row.side,
-          orderType: row.order_type,
-          price: row.price ? parseFloat(row.price) : null,
-          size: row.size ? parseFloat(row.size) : null,
-          status: row.status,
-          filledSize: row.filled_size ? parseFloat(row.filled_size) : 0,
-          averageFillPrice: row.average_fill_price
-            ? parseFloat(row.average_fill_price)
-            : null,
-          postedAt: row.posted_at,
-          lastUpdate: row.last_update,
-          filledAt: row.filled_at,
-          cancelledAt: row.cancelled_at,
-        }));
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          walletAddress,
-          orders,
-          pagination: {
-            total: result.total,
-            limit,
-            offset,
-            hasMore: offset + limit < result.total,
-          },
-        });
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id, walletAddress },
-          "Failed to fetch orders for wallet address",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to fetch orders",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

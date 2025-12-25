@@ -59,13 +59,10 @@ export async function fetchFeedEventIds(
     coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
   `;
   const marketLiquidityDisplayExpr = `
-    coalesce(
-      nullif(m.liquidity, 0),
-      nullif(m.open_interest, 0),
-      nullif(${safeEventLiquidityExpr}, 0),
-      nullif(e.open_interest, 0)
-    )
+    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
+  const supportedLimitlessMarketExpr =
+    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
   `;
@@ -190,6 +187,7 @@ export async function fetchFeedEventIds(
       and m.status = 'ACTIVE'
       and (m.expiration_time is null or m.expiration_time > ${nowParam})
       and (m.close_time is null or m.close_time > ${nowParam})
+      and ${supportedLimitlessMarketExpr}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
     having ${having.map((clause) => `(${clause})`).join(" and ")}
@@ -220,6 +218,7 @@ export type FeedMarketRow = {
   venue: string;
   venue_market_id: string;
   market_title: string | null;
+  market_type: string | null;
   volume_24h: unknown;
   volume_total: unknown;
   volume_display: unknown;
@@ -271,13 +270,10 @@ export async function fetchFeedMarkets(
     coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
   `;
   const marketLiquidityDisplayExpr = `
-    coalesce(
-      nullif(m.liquidity, 0),
-      nullif(m.open_interest, 0),
-      nullif(${safeEventLiquidityExpr}, 0),
-      nullif(e.open_interest, 0)
-    )
+    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
+  const supportedLimitlessMarketExpr =
+    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
   const eventVolumeWindowExpr = `
     coalesce(
       ${eventVolumeDisplayExpr},
@@ -314,6 +310,7 @@ export async function fetchFeedMarkets(
     // Use parameterized dates for index usage
     `(m.expiration_time is null or m.expiration_time > ${nowParam})`,
     `(m.close_time is null or m.close_time > ${nowCloseParam})`,
+    supportedLimitlessMarketExpr,
   ];
 
   if (inputs.minLiquidity > 0) {
@@ -392,6 +389,7 @@ export async function fetchFeedMarkets(
       m.venue,
       m.venue_market_id,
       m.title as market_title,
+      m.market_type as market_type,
       m.volume_24h,
       m.volume_total,
       (${marketVolumeDisplayExpr}) as volume_display,
@@ -477,12 +475,7 @@ export async function fetchFeedMarketsDirect(
     coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
   `;
   const marketLiquidityDisplayExpr = `
-    coalesce(
-      nullif(m.liquidity, 0),
-      nullif(m.open_interest, 0),
-      nullif(${safeEventLiquidityExpr}, 0),
-      nullif(e.open_interest, 0)
-    )
+    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
   const eventVolumeWindowExpr = `
     coalesce(
@@ -501,15 +494,18 @@ export async function fetchFeedMarketsDirect(
       )
     )
   `;
+  const supportedLimitlessMarketExpr =
+    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
 
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
   const marketCountSql = `
     select event_id, count(*) as market_count
-    from unified_markets
+    from unified_markets m
     where status = 'ACTIVE'
       and (expiration_time is null or expiration_time > ${nowParam})
       and (close_time is null or close_time > ${nowCloseParam})
+      and ${supportedLimitlessMarketExpr}
     group by event_id
   `;
   const yesMidExpr = `
@@ -525,6 +521,7 @@ export async function fetchFeedMarketsDirect(
     `(m.expiration_time is null or m.expiration_time > ${nowParam})`,
     `(m.close_time is null or m.close_time > ${nowCloseParam})`,
     `(e.end_date is null or e.end_date > ${nowParam})`,
+    supportedLimitlessMarketExpr,
   ];
 
   if (inputs.venues?.length) {
@@ -638,6 +635,7 @@ export async function fetchFeedMarketsDirect(
       m.venue,
       m.venue_market_id,
       m.title as market_title,
+      m.market_type as market_type,
       m.volume_24h,
       m.volume_total,
       (${marketVolumeDisplayExpr}) as volume_display,
@@ -926,6 +924,8 @@ export async function fetchEventDetails(
   eventId: string,
 ): Promise<EventDetailsRow[]> {
   // Query for event details with all associated markets
+  const supportedLimitlessMarketExpr =
+    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
   const eventSql = `
     SELECT
       e.id as event_id,
@@ -988,6 +988,7 @@ export async function fetchEventDetails(
       m.updated_at as market_updated_at
     FROM unified_events e
     LEFT JOIN unified_markets m ON m.event_id = e.id
+      AND ${supportedLimitlessMarketExpr}
     LEFT JOIN LATERAL (
       select
         case
