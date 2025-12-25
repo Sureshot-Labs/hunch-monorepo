@@ -600,6 +600,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       await storeOrder(pool, {
         userId: user.id,
         walletAddress: signer,
+        signerAddress: signer,
         venue: "limitless",
         venueOrderId,
         tokenId: tokenId || null,

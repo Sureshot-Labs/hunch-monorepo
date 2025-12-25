@@ -1,12 +1,31 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+function extractPayloadAddress(
+  payload: unknown,
+  key: "maker" | "signer",
+): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const value = record[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!EVM_ADDRESS_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
+function normalizeAddress(value: string): string {
+  return value.toLowerCase();
+}
+
 export async function findOrderVenueForUser(
   pool: Pool,
   inputs: { orderId: string; userId: string; walletAddress: string },
 ): Promise<string | null> {
   const { rows } = await pool.query<{ venue: string }>(
-    "SELECT venue FROM orders WHERE id = $1 AND user_id = $2 AND (wallet_address IS NULL OR wallet_address = $3)",
+    "SELECT venue FROM orders WHERE id = $1 AND user_id = $2 AND (wallet_address IS NULL OR wallet_address = $3 OR signer_address = $3)",
     [inputs.orderId, inputs.userId, inputs.walletAddress],
   );
 
@@ -29,7 +48,7 @@ export async function fetchOrderHistoryRows(
   let paramCount = 1;
 
   paramCount++;
-  whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount})`;
+  whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount} OR signer_address = $${paramCount})`;
   params.push(inputs.walletAddress);
 
   if (inputs.venue) {
@@ -82,6 +101,7 @@ async function storeOrderInTx(
   inputs: {
     userId: string;
     walletAddress: string;
+    signerAddress?: string | null;
     venue: string;
     venueOrderId: string;
     tokenId: string | null;
@@ -101,24 +121,60 @@ async function storeOrderInTx(
     orderPayload?: unknown | null;
   },
 ): Promise<StoreOrderResult> {
+  const payloadMaker = extractPayloadAddress(inputs.orderPayload, "maker");
+  const payloadSigner = extractPayloadAddress(inputs.orderPayload, "signer");
+  const resolvedWalletAddress =
+    payloadMaker &&
+    normalizeAddress(payloadMaker) !== normalizeAddress(inputs.walletAddress)
+      ? payloadMaker
+      : inputs.walletAddress;
+  const resolvedSignerAddress = inputs.signerAddress ?? payloadSigner ?? null;
+
   const existingOrder = await client.query<{
     id: string;
     wallet_address: string | null;
+    signer_address: string | null;
   }>(
-    `SELECT id, wallet_address
+    `SELECT id, wallet_address, signer_address
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
-       AND (wallet_address IS NULL OR wallet_address = $4)
+       AND (wallet_address IS NULL OR wallet_address = $4 OR signer_address = $5 OR wallet_address = $5)
      LIMIT 1`,
-    [inputs.venue, inputs.venueOrderId, inputs.userId, inputs.walletAddress],
+    [
+      inputs.venue,
+      inputs.venueOrderId,
+      inputs.userId,
+      resolvedWalletAddress,
+      resolvedSignerAddress,
+    ],
   );
 
   if (existingOrder.rows.length > 0) {
     const existing = existingOrder.rows[0];
-    if (!existing.wallet_address) {
+    const updates: string[] = [];
+    const params: PgParams = [];
+    let paramCount = 0;
+    const signerAddress = resolvedSignerAddress;
+
+    if (
+      !existing.wallet_address ||
+      (signerAddress && existing.wallet_address === signerAddress)
+    ) {
+      paramCount += 1;
+      updates.push(`wallet_address = $${paramCount}`);
+      params.push(resolvedWalletAddress);
+    }
+    if (signerAddress && !existing.signer_address) {
+      paramCount += 1;
+      updates.push(`signer_address = $${paramCount}`);
+      params.push(signerAddress);
+    }
+    if (updates.length) {
+      paramCount += 1;
+      params.push(existing.id);
       await client.query(
-        "UPDATE orders SET wallet_address = $1 WHERE id = $2",
-        [inputs.walletAddress, existing.id],
+        `UPDATE orders SET ${updates.join(", ")} WHERE id = $${paramCount}`,
+        params,
       );
     }
     return { kind: "exists" };
@@ -133,18 +189,19 @@ async function storeOrderInTx(
     posted_at: Date;
   }>(
     `INSERT INTO orders (
-        id, user_id, wallet_address, venue, venue_order_id, token_id, side, order_type,
+        id, user_id, wallet_address, signer_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
         order_payload, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline,
         posted_at, last_update
       ) VALUES (
-        gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12,
-        $13, $14, $15, $16, $17, $18, $19,
+        gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13,
+        $14, $15, $16, $17, $18, $19, $20,
         now(), now()
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
       inputs.userId,
-      inputs.walletAddress,
+      resolvedWalletAddress,
+      resolvedSignerAddress,
       inputs.venue,
       inputs.venueOrderId,
       inputs.tokenId,
@@ -173,6 +230,7 @@ export async function storeOrder(
   inputs: {
     userId: string;
     walletAddress: string;
+    signerAddress?: string | null;
     venue: string;
     venueOrderId: string;
     tokenId: string | null;
@@ -224,7 +282,7 @@ export async function fetchOrdersForUser(
     let paramCount = 1;
 
     paramCount++;
-    whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount})`;
+    whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount} OR signer_address = $${paramCount})`;
     params.push(inputs.walletAddress);
 
     if (inputs.status) {

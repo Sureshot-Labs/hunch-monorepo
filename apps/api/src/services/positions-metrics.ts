@@ -23,6 +23,23 @@ type TradeFill = {
   timestamp: Date;
 };
 
+function computeBuyAveragePrice(fills: TradeFill[]): number | null {
+  let shares = 0;
+  let usdc = 0;
+
+  for (const fill of fills) {
+    if (fill.side !== "BUY") continue;
+    shares += fill.shares;
+    usdc += fill.usdc;
+  }
+
+  if (!Number.isFinite(shares) || shares <= 0) return null;
+  if (!Number.isFinite(usdc) || usdc <= 0) return null;
+
+  const average = usdc / shares;
+  return Number.isFinite(average) && average > 0 ? average : null;
+}
+
 type MarkRow = {
   token_id: string;
   best_bid: string | null;
@@ -485,10 +502,15 @@ export async function recomputePositionMetricsForWallet(
     const sizeDelta = Math.abs(position.size - computedSize);
     const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
     const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
+    const fallbackAveragePrice =
+      !reliable && inputs.venue === "polymarket"
+        ? computeBuyAveragePrice(tokenFills)
+        : null;
+    const averagePriceValue = reliable ? averagePrice : fallbackAveragePrice;
 
     return {
       tokenId: position.tokenId,
-      averagePrice: reliable ? averagePrice : null,
+      averagePrice: averagePriceValue,
       realizedPnl: reliable ? realizedPnl : 0,
       unrealizedPnl: reliable ? unrealizedPnl : 0,
     };

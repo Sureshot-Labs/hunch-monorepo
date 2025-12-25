@@ -1288,6 +1288,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const ordersRaw = extractOrderArray(upstream.payload);
+      const funder = creds.funderAddress ?? signer;
 
       let storedNew = 0;
       let alreadyKnown = 0;
@@ -1313,7 +1314,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         const result = await storeOrder(pool, {
           userId: user.id,
-          walletAddress: signer,
+          walletAddress: funder,
+          signerAddress: signer,
           venue: "polymarket",
           venueOrderId,
           tokenId,
@@ -1673,25 +1675,26 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ? upstream.payload.status
           : "submitted";
 
-        const stored = await storeOrder(pool, {
-          userId: user.id,
-          walletAddress: signer,
-          venue: "polymarket",
-          venueOrderId,
-          tokenId,
-          side,
-          orderType,
-          price,
-          size,
-          status: statusRaw,
-          errorMessage: null,
-          rawError: null,
-          orderPayload,
-          orderHash,
-          feeBps,
-          feeAuth: feeAuthStored,
-          feeAuthSig: feeAuthSig || null,
-          feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
+      const stored = await storeOrder(pool, {
+        userId: user.id,
+        walletAddress: funder,
+        signerAddress: signer,
+        venue: "polymarket",
+        venueOrderId,
+        tokenId,
+        side,
+        orderType,
+        price,
+        size,
+        status: statusRaw,
+        errorMessage: null,
+        rawError: null,
+        orderPayload,
+        orderHash,
+        feeBps,
+        feeAuth: feeAuthStored,
+        feeAuthSig: feeAuthSig || null,
+        feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
         feeDeadline,
       });
 
@@ -1775,7 +1778,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               cancelled_at = now(),
               last_update = now()
           where user_id = $1
-            and wallet_address = $2
+            and (wallet_address = $2 or signer_address = $2)
             and venue = 'polymarket'
             and venue_order_id = $3
         `,

@@ -71,11 +71,12 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
 const buildWhereClause = (
   alias: string,
   filterParams: FilterParams,
+  includeSigner: boolean,
 ): string => {
-  const conditions = [
-    `${alias}.user_id = $1`,
-    `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2))`,
-  ];
+  const walletClause = includeSigner
+    ? `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2) or ${alias}.signer_address = ANY($2))`
+    : `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2))`;
+  const conditions = [`${alias}.user_id = $1`, walletClause];
 
   if (filterParams.venueIndex) {
     conditions.push(`${alias}.venue = $${filterParams.venueIndex}`);
@@ -166,8 +167,8 @@ export async function fetchUnifiedOrders(
   }
 
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams);
-  const execWhere = buildWhereClause("e", filterParams);
+  const orderWhere = buildWhereClause("o", filterParams, true);
+  const execWhere = buildWhereClause("e", filterParams, false);
 
   const selects: string[] = [];
   if (includeOrders) selects.push(buildOrdersSelect(orderWhere));
@@ -216,8 +217,8 @@ export async function fetchUnifiedOrderById(
   inputs: FilterInputs & { id: string },
 ): Promise<UnifiedOrderRow | null> {
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams);
-  const execWhere = buildWhereClause("e", filterParams);
+  const orderWhere = buildWhereClause("o", filterParams, true);
+  const execWhere = buildWhereClause("e", filterParams, false);
 
   const params = [...filterParams.params];
   const idIndex = params.length + 1;
