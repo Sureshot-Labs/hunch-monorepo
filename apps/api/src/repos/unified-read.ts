@@ -65,6 +65,17 @@ export async function fetchFeedEventIds(
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
   `;
+  const isPolymarketOnly =
+    inputs.venues?.length === 1 && inputs.venues[0] === "polymarket";
+  const hasMarketFilters =
+    inputs.minLiquidity > 0 ||
+    inputs.minProb != null ||
+    inputs.maxProb != null ||
+    inputs.maxSpread != null;
+  const hasEventScope = inputs.eventScope != null;
+  const hasSearch = Boolean(inputs.q);
+  const useSimpleEventQuery =
+    isPolymarketOnly && !hasMarketFilters && !hasEventScope && !hasSearch;
 
   if (inputs.venues?.length) {
     eventWhere.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -95,24 +106,30 @@ export async function fetchFeedEventIds(
   }
 
   if (inputs.filter === "newest") {
-    eventWhere.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
+    eventWhere.push(
+      `e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
+    );
   } else if (inputs.filter === "endingsoon") {
-    eventWhere.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
+    eventWhere.push(
+      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
+    );
   }
 
   eventWhere.push("e.status = 'ACTIVE'");
 
   const nowParam = add(inputs.nowParam);
-  eventWhere.push(`(e.end_date is null or e.end_date > ${nowParam})`);
+  eventWhere.push(
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
+  );
 
   if (inputs.endWithin) {
     eventWhere.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
     );
   }
   if (inputs.ageSince) {
     eventWhere.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
     );
   }
 
@@ -172,11 +189,69 @@ export async function fetchFeedEventIds(
     eventOrder = `
       (coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
        coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
-       case when e.start_date >= ${sevenDaysAgo} then 1000 else 0 end * 0.2 +
-       case when e.end_date <= ${sevenDaysFromNow} then 500 else 0 end * 0.1
+       case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
+       case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
       ) desc nulls last, e.id
     `;
   } else eventOrder = "e.start_date desc nulls last, e.id";
+
+  if (useSimpleEventQuery) {
+    const eventVolumeSimpleExpr = `coalesce(${eventVolumeDisplayExpr}, 0)`;
+    let eventOrderSimple = "";
+    if (inputs.sort === "totalvol") {
+      eventOrderSimple = "e.volume_total desc nulls last, e.id";
+    } else if (inputs.sort === "liquidity") {
+      eventOrderSimple = `(${eventLiquidityDisplayExpr}) desc nulls last, e.id`;
+    } else if (inputs.filter === "newest") {
+      eventOrderSimple = "e.start_date desc nulls last, e.id";
+    } else if (inputs.filter === "endingsoon") {
+      eventOrderSimple = "e.end_date asc nulls last, e.id";
+    } else if (inputs.sort == null || inputs.sort === "trending") {
+      const sevenDaysAgo = add(inputs.sevenDaysAgo);
+      const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
+      eventOrderSimple = `
+        (coalesce(${eventVolumeSimpleExpr}, 0) * 0.4 +
+         coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
+         case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
+         case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
+        ) desc nulls last, e.id
+      `;
+    } else {
+      eventOrderSimple = "e.start_date desc nulls last, e.id";
+    }
+
+    const simpleHaving: string[] = [];
+    if (inputs.minVol > 1e-9) {
+      simpleHaving.push(
+        `${eventVolumeSimpleExpr} >= ${add(inputs.minVol)}`,
+      );
+    }
+
+    const eventSqlSimple = `
+      select
+        e.id
+      from unified_events e
+      ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
+      ${simpleHaving.length ? `and ${simpleHaving.join(" and ")}` : ""}
+      and exists (
+        select 1
+        from unified_markets m
+        where m.event_id = e.id
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+      )
+      ${eventOrderSimple ? `order by ${eventOrderSimple}` : ""}
+      limit ${inputs.limit} offset ${inputs.offset}
+    `;
+
+    const { rows } = await pool.query<{ id: string }>(
+      eventSqlSimple,
+      params,
+    );
+    return rows;
+  }
 
   const eventSql = `
     select
@@ -184,8 +259,8 @@ export async function fetchFeedEventIds(
     from unified_events e
     join unified_markets m on m.event_id = e.id
       and m.status = 'ACTIVE'
-      and (m.expiration_time is null or m.expiration_time > ${nowParam})
-      and (m.close_time is null or m.close_time > ${nowParam})
+      and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+      and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
@@ -308,8 +383,8 @@ export async function fetchFeedMarkets(
     // Critical: Exclude expired or closed markets based on time
     // This ensures we don't show expired/closed markets even if status hasn't been updated yet
     // Use parameterized dates for index usage
-    `(m.expiration_time is null or m.expiration_time > ${nowParam})`,
-    `(m.close_time is null or m.close_time > ${nowCloseParam})`,
+    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
+    `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
   ];
 
@@ -330,45 +405,8 @@ export async function fetchFeedMarkets(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
     );
   }
-  const extraMarketWhere: string[] = [];
-  if (inputs.q) {
-    const search = add(`%${inputs.q}%`);
-    extraMarketWhere.push(
-      `(
-        e.title ilike ${search} or
-        e.description ilike ${search} or
-        e.category ilike ${search} or
-        e.slug ilike ${search} or
-        m.title ilike ${search} or
-        m.description ilike ${search} or
-        m.category ilike ${search} or
-        m.slug ilike ${search}
-      )`,
-    );
-  }
 
-  // Sorting for markets: use same sort as for events, or none
-  let marketOrder = "";
-  if (inputs.sort === "totalvol")
-    marketOrder = "m.volume_total desc nulls last, m.venue_market_id";
-  else if (inputs.sort === "liquidity")
-    marketOrder = `${marketLiquidityDisplayExpr} desc nulls last, m.venue_market_id`;
-  else if (inputs.filter === "newest") {
-    // When filtering by newest, sort by event start_date descending (newest first)
-    marketOrder = "e.start_date desc nulls last, m.venue_market_id";
-  } else if (inputs.filter === "endingsoon") {
-    // When filtering by ending soon, sort by event end_date ascending (ending soonest first)
-    marketOrder = "e.end_date asc nulls last, m.venue_market_id";
-  } else if (inputs.sort == null || inputs.sort === "trending") {
-    // Trending algorithm for markets: combines volume, liquidity, and recency
-    marketOrder = `
-      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
-       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
-       case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
-       case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
-      ) desc nulls last, m.venue_market_id
-    `;
-  } else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
+  const marketOrder = "eo.ord, m.market_rank, m.venue_market_id";
 
   const marketRankExpr = `
     row_number() over (
@@ -402,27 +440,18 @@ export async function fetchFeedMarkets(
       end as resolved_token_no
     from (${rankedMarketSql}) m
     where m.market_rank <= ${add(perEventMarketLimit)}
-    ${extraMarketWhere.length ? `and ${extraMarketWhere.join(" and ")}` : ""}
   `;
 
-  const tokenIdsSql = `
-    select market_base.resolved_token_yes as token_id from market_base where market_base.resolved_token_yes is not null
-    union
-    select market_base.resolved_token_no as token_id from market_base where market_base.resolved_token_no is not null
+  const eventOrderSql = `
+    select
+      event_id,
+      ord
+    from unnest(${eventIdsParam}::text[]) with ordinality as t(event_id, ord)
   `;
-
-  const latestBookSql = `
-    select distinct on (token_id) token_id, best_bid, best_ask
-    from unified_book_top
-    where token_id in (select token_id from token_ids)
-    order by token_id, ts desc
-  `;
-
   const marketSql = `
     with
-      market_base as (${marketBaseSql}),
-      token_ids as (${tokenIdsSql}),
-      latest_book as (${latestBookSql})
+      event_order as (${eventOrderSql}),
+      market_base as (${marketBaseSql})
     select
       e.id as event_id,
       e.title as event_title,
@@ -466,10 +495,23 @@ export async function fetchFeedMarkets(
       m.image as market_image,
       m.icon as market_icon,
       m.updated_at as last_update
-    from unified_events e
+    from event_order eo
+    join unified_events e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
-    left join latest_book yes_top on yes_top.token_id = m.resolved_token_yes
-    left join latest_book no_top on no_top.token_id = m.resolved_token_no
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = m.resolved_token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = m.resolved_token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
@@ -529,8 +571,8 @@ export async function fetchFeedMarketsDirect(
     select event_id, count(*) as market_count
     from unified_markets m
     where status = 'ACTIVE'
-      and (expiration_time is null or expiration_time > ${nowParam})
-      and (close_time is null or close_time > ${nowCloseParam})
+      and (expiration_time is null or expiration_time > ${nowParam}::timestamptz)
+      and (close_time is null or close_time > ${nowCloseParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
     group by event_id
   `;
@@ -544,9 +586,9 @@ export async function fetchFeedMarketsDirect(
   const where: string[] = [
     "m.status = 'ACTIVE'",
     "e.status = 'ACTIVE'",
-    `(m.expiration_time is null or m.expiration_time > ${nowParam})`,
-    `(m.close_time is null or m.close_time > ${nowCloseParam})`,
-    `(e.end_date is null or e.end_date > ${nowParam})`,
+    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
+    `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
   ];
 
@@ -675,25 +717,10 @@ export async function fetchFeedMarketsDirect(
     join market_candidates mc on mc.id = m.id
   `;
 
-  const tokenIdsSql = `
-    select resolved_token_yes as token_id from market_base where resolved_token_yes is not null
-    union
-    select resolved_token_no as token_id from market_base where resolved_token_no is not null
-  `;
-
-  const latestBookSql = `
-    select distinct on (token_id) token_id, best_bid, best_ask
-    from unified_book_top
-    where token_id in (select token_id from token_ids)
-    order by token_id, ts desc
-  `;
-
   const marketSql = `
     with
       market_candidates as (${marketCandidatesSql}),
-      market_base as (${marketBaseSql}),
-      token_ids as (${tokenIdsSql}),
-      latest_book as (${latestBookSql})
+      market_base as (${marketBaseSql})
     select
       e.id as event_id,
       e.title as event_title,
@@ -739,8 +766,20 @@ export async function fetchFeedMarketsDirect(
       m.updated_at as last_update
     from unified_events e
     join market_base m on m.event_id = e.id
-    left join latest_book yes_top on yes_top.token_id = m.resolved_token_yes
-    left join latest_book no_top on no_top.token_id = m.resolved_token_no
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = m.resolved_token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = m.resolved_token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
     ${marketOrder ? `order by ${marketOrder}` : ""}
     limit ${limitParam} offset ${offsetParam}
   `;
