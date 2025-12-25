@@ -64,18 +64,7 @@ export async function fetchFeedEventIds(
   const supportedLimitlessMarketExpr = "true";
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
-  `;
-  const isPolymarketOnly =
-    inputs.venues?.length === 1 && inputs.venues[0] === "polymarket";
-  const hasMarketFilters =
-    inputs.minLiquidity > 0 ||
-    inputs.minProb != null ||
-    inputs.maxProb != null ||
-    inputs.maxSpread != null;
-  const hasEventScope = inputs.eventScope != null;
-  const hasSearch = Boolean(inputs.q);
-  const useSimpleEventQuery =
-    isPolymarketOnly && !hasMarketFilters && !hasEventScope && !hasSearch;
+  `; 
 
   if (inputs.venues?.length) {
     eventWhere.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -194,64 +183,6 @@ export async function fetchFeedEventIds(
       ) desc nulls last, e.id
     `;
   } else eventOrder = "e.start_date desc nulls last, e.id";
-
-  if (useSimpleEventQuery) {
-    const eventVolumeSimpleExpr = `coalesce(${eventVolumeDisplayExpr}, 0)`;
-    let eventOrderSimple = "";
-    if (inputs.sort === "totalvol") {
-      eventOrderSimple = "e.volume_total desc nulls last, e.id";
-    } else if (inputs.sort === "liquidity") {
-      eventOrderSimple = `(${eventLiquidityDisplayExpr}) desc nulls last, e.id`;
-    } else if (inputs.filter === "newest") {
-      eventOrderSimple = "e.start_date desc nulls last, e.id";
-    } else if (inputs.filter === "endingsoon") {
-      eventOrderSimple = "e.end_date asc nulls last, e.id";
-    } else if (inputs.sort == null || inputs.sort === "trending") {
-      const sevenDaysAgo = add(inputs.sevenDaysAgo);
-      const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
-      eventOrderSimple = `
-        (coalesce(${eventVolumeSimpleExpr}, 0) * 0.4 +
-         coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
-         case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
-         case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
-        ) desc nulls last, e.id
-      `;
-    } else {
-      eventOrderSimple = "e.start_date desc nulls last, e.id";
-    }
-
-    const simpleHaving: string[] = [];
-    if (inputs.minVol > 1e-9) {
-      simpleHaving.push(
-        `${eventVolumeSimpleExpr} >= ${add(inputs.minVol)}`,
-      );
-    }
-
-    const eventSqlSimple = `
-      select
-        e.id
-      from unified_events e
-      ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
-      ${simpleHaving.length ? `and ${simpleHaving.join(" and ")}` : ""}
-      and exists (
-        select 1
-        from unified_markets m
-        where m.event_id = e.id
-          and m.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-      )
-      ${eventOrderSimple ? `order by ${eventOrderSimple}` : ""}
-      limit ${inputs.limit} offset ${inputs.offset}
-    `;
-
-    const { rows } = await pool.query<{ id: string }>(
-      eventSqlSimple,
-      params,
-    );
-    return rows;
-  }
 
   const eventSql = `
     select
@@ -502,6 +433,7 @@ export async function fetchFeedMarkets(
       select best_bid, best_ask
       from unified_book_top
       where token_id = m.resolved_token_yes
+        and ts > (${nowParam}::timestamptz - interval '7 days')
       order by ts desc
       limit 1
     ) yes_top on true
@@ -509,6 +441,7 @@ export async function fetchFeedMarkets(
       select best_bid, best_ask
       from unified_book_top
       where token_id = m.resolved_token_no
+        and ts > (${nowParam}::timestamptz - interval '7 days')
       order by ts desc
       limit 1
     ) no_top on true
@@ -770,6 +703,7 @@ export async function fetchFeedMarketsDirect(
       select best_bid, best_ask
       from unified_book_top
       where token_id = m.resolved_token_yes
+        and ts > (${nowParam}::timestamptz - interval '7 days')
       order by ts desc
       limit 1
     ) yes_top on true
@@ -777,6 +711,7 @@ export async function fetchFeedMarketsDirect(
       select best_bid, best_ask
       from unified_book_top
       where token_id = m.resolved_token_no
+        and ts > (${nowParam}::timestamptz - interval '7 days')
       order by ts desc
       limit 1
     ) no_top on true
