@@ -7,10 +7,12 @@ import { markHotTokens } from "../lib/hot-tokens.js";
 import {
   fetchPositionsForUserWallet,
   fetchPositionsForUserWalletByTokenIds,
+  setPositionHidden,
 } from "../repos/positions-repo.js";
 import { syncPositionsForUserWallet } from "../services/positions-sync.js";
 import { getRedis } from "../redis.js";
 import {
+  positionVisibilitySchema,
   positionsByTokenQuerySchema,
   positionsQuerySchema,
 } from "../schemas/positions.js";
@@ -122,6 +124,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           walletAddresses,
           venue,
           includeHidden: query.includeHidden,
+          minSize: query.minSize,
         });
 
         if (positions.length) {
@@ -185,6 +188,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           tokenIds: query.tokenIds,
           venue: query.venue,
           includeHidden: query.includeHidden,
+          minSize: query.minSize,
         });
 
         if (positions.length) {
@@ -204,6 +208,55 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch positions by token",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /positions/hide
+   * Manually hide/unhide a position
+   */
+  z.post(
+    "/positions/hide",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: positionVisibilitySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const body = request.body;
+      try {
+        const updated = await setPositionHidden(pool, {
+          userId: user.id,
+          walletAddress: body.walletAddress,
+          venue: body.venue,
+          tokenId: body.tokenId,
+          hidden: body.hidden,
+          reason: body.hidden ? "user" : null,
+        });
+
+        if (!updated) {
+          reply.code(404);
+          return reply.send({ error: "Position not found" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, hidden: body.hidden });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, body },
+          "Failed to update position visibility",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to update position visibility",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

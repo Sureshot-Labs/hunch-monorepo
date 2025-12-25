@@ -119,6 +119,7 @@ export async function fetchPositionsForUserWallet(
     walletAddresses: string[];
     venue?: string;
     includeHidden?: boolean;
+    minSize?: number;
   },
 ): Promise<Position[]> {
   const shouldExpandFunders = !inputs.venue || inputs.venue === "polymarket";
@@ -137,6 +138,12 @@ export async function fetchPositionsForUserWallet(
 
   if (!inputs.includeHidden) {
     whereClause += " and (is_hidden is null or is_hidden = false)";
+  }
+
+  if (inputs.minSize != null) {
+    paramCount += 1;
+    whereClause += ` and size >= $${paramCount}`;
+    params.push(inputs.minSize);
   }
 
   if (inputs.venue) {
@@ -166,7 +173,7 @@ export async function fetchPositionsForUserWallet(
         updated_at
       from positions
       ${whereClause}
-      order by last_updated_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
     `,
     params,
   );
@@ -182,6 +189,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
     tokenIds: string[];
     venue?: string;
     includeHidden?: boolean;
+    minSize?: number;
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
@@ -207,6 +215,12 @@ export async function fetchPositionsForUserWalletByTokenIds(
     whereClause += " and (is_hidden is null or is_hidden = false)";
   }
 
+  if (inputs.minSize != null) {
+    paramCount += 1;
+    whereClause += ` and size >= $${paramCount}`;
+    params.push(inputs.minSize);
+  }
+
   if (inputs.venue) {
     paramCount += 1;
     whereClause += ` and venue = $${paramCount}`;
@@ -234,12 +248,53 @@ export async function fetchPositionsForUserWalletByTokenIds(
         updated_at
       from positions
       ${whereClause}
-      order by last_updated_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
     `,
     params,
   );
 
   return rows.map((row) => mapPositionRow(row));
+}
+
+export async function setPositionHidden(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: Position["venue"];
+    tokenId: string;
+    hidden: boolean;
+    reason?: string | null;
+  },
+): Promise<number> {
+  const walletClause = isEthAddress(inputs.walletAddress)
+    ? "lower(wallet_address) = lower($6)"
+    : "wallet_address = $6";
+
+  const result = await pool.query(
+    `
+      update positions
+      set
+        is_hidden = $1,
+        hidden_reason = $2,
+        hidden_at = case when $1 then now() else null end,
+        updated_at = now()
+      where user_id = $3
+        and venue = $4
+        and token_id = $5
+        and ${walletClause}
+    `,
+    [
+      inputs.hidden,
+      inputs.hidden ? inputs.reason ?? "user" : null,
+      inputs.userId,
+      inputs.venue,
+      inputs.tokenId,
+      inputs.walletAddress,
+    ],
+  );
+
+  return result.rowCount ?? 0;
 }
 
 export type WalletTokenBalance = {
