@@ -1170,6 +1170,9 @@ export async function fetchMarketsByTokenIds(
       ) token_map
       where m.venue = 'polymarket'
         and m.clob_token_ids is not null
+        and m.clob_token_ids <> ''
+        and m.clob_token_ids <> '[]'
+        and (m.clob_token_ids::jsonb ?| $1::text[])
     )
     select
       tm.token_id,
