@@ -61,14 +61,13 @@ export async function fetchFeedEventIds(
   const marketLiquidityDisplayExpr = `
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
-  const supportedLimitlessMarketExpr =
-    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
+  const supportedLimitlessMarketExpr = "true";
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
   `;
 
   if (inputs.venues?.length) {
-    eventWhere.push(`lower(e.venue) = ANY(${add(inputs.venues)}::text[])`);
+    eventWhere.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
   }
   if (inputs.categories?.length) {
     eventWhere.push(
@@ -250,6 +249,8 @@ export async function fetchFeedMarkets(
   eventIds: string[],
 ): Promise<FeedMarketRow[]> {
   const { params, add } = createParamBuilder();
+  // Cap markets per event in feed responses to avoid timeouts on large events.
+  const perEventMarketLimit = 100;
   const safeEventLiquidityExpr =
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
   const eventVolumeDisplayExpr = `
@@ -272,8 +273,7 @@ export async function fetchFeedMarkets(
   const marketLiquidityDisplayExpr = `
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
-  const supportedLimitlessMarketExpr =
-    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
+  const supportedLimitlessMarketExpr = "true";
   const eventVolumeWindowExpr = `
     coalesce(
       ${eventVolumeDisplayExpr},
@@ -330,9 +330,10 @@ export async function fetchFeedMarkets(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
     );
   }
+  const extraMarketWhere: string[] = [];
   if (inputs.q) {
     const search = add(`%${inputs.q}%`);
-    marketWhere.push(
+    extraMarketWhere.push(
       `(
         e.title ilike ${search} or
         e.description ilike ${search} or
@@ -369,7 +370,59 @@ export async function fetchFeedMarkets(
     `;
   } else marketOrder = "e.start_date desc nulls last, m.venue_market_id"; // fallback
 
+  const marketRankExpr = `
+    row_number() over (
+      partition by m.event_id
+      order by
+        coalesce(${marketVolumeDisplayExpr}, 0) desc nulls last,
+        coalesce(${marketLiquidityDisplayExpr}, 0) desc nulls last,
+        m.venue_market_id
+    ) as market_rank
+  `;
+  const rankedMarketSql = `
+    select
+      m.*,
+      ${marketRankExpr}
+    from unified_markets m
+    where ${marketWhere.join(" and ")}
+  `;
+
+  const marketBaseSql = `
+    select
+      m.*,
+      case
+        when m.venue = 'polymarket' and m.clob_token_ids is not null
+          then (m.clob_token_ids::jsonb->>0)
+        else m.token_yes
+      end as resolved_token_yes,
+      case
+        when m.venue = 'polymarket' and m.clob_token_ids is not null
+          then (m.clob_token_ids::jsonb->>1)
+        else m.token_no
+      end as resolved_token_no
+    from (${rankedMarketSql}) m
+    where m.market_rank <= ${add(perEventMarketLimit)}
+    ${extraMarketWhere.length ? `and ${extraMarketWhere.join(" and ")}` : ""}
+  `;
+
+  const tokenIdsSql = `
+    select market_base.resolved_token_yes as token_id from market_base where market_base.resolved_token_yes is not null
+    union
+    select market_base.resolved_token_no as token_id from market_base where market_base.resolved_token_no is not null
+  `;
+
+  const latestBookSql = `
+    select distinct on (token_id) token_id, best_bid, best_ask
+    from unified_book_top
+    where token_id in (select token_id from token_ids)
+    order by token_id, ts desc
+  `;
+
   const marketSql = `
+    with
+      market_base as (${marketBaseSql}),
+      token_ids as (${tokenIdsSql}),
+      latest_book as (${latestBookSql})
     select
       e.id as event_id,
       e.title as event_title,
@@ -404,8 +457,8 @@ export async function fetchFeedMarkets(
       no_top.best_ask as best_ask_no,
       m.last_price,
       m.outcomes,
-      mt.token_yes,
-      mt.token_no,
+      m.resolved_token_yes as token_yes,
+      m.resolved_token_no as token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -414,35 +467,9 @@ export async function fetchFeedMarkets(
       m.icon as market_icon,
       m.updated_at as last_update
     from unified_events e
-    join unified_markets m on m.event_id = e.id
-    cross join lateral (
-      select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
-    ) mt
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_yes
-      order by ts desc
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_no
-      order by ts desc
-      limit 1
-    ) no_top on true
-    where ${marketWhere.join(" and ")}
+    join market_base m on m.event_id = e.id
+    left join latest_book yes_top on yes_top.token_id = m.resolved_token_yes
+    left join latest_book no_top on no_top.token_id = m.resolved_token_no
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
@@ -494,8 +521,7 @@ export async function fetchFeedMarketsDirect(
       )
     )
   `;
-  const supportedLimitlessMarketExpr =
-    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
+  const supportedLimitlessMarketExpr = "true";
 
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
@@ -525,7 +551,7 @@ export async function fetchFeedMarketsDirect(
   ];
 
   if (inputs.venues?.length) {
-    where.push(`lower(m.venue) = ANY(${add(inputs.venues)}::text[])`);
+    where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
   }
   if (inputs.categories?.length) {
     where.push(
@@ -614,8 +640,60 @@ export async function fetchFeedMarketsDirect(
 
   const limitParam = add(inputs.limit);
   const offsetParam = add(inputs.offset);
+  const needsMarketCount =
+    inputs.eventScope === "grouped" || inputs.eventScope === "single";
+  const marketCountJoin = needsMarketCount
+    ? `join (${marketCountSql}) emc on emc.event_id = m.event_id`
+    : "";
+
+  const marketCandidatesSql = `
+    select
+      m.id,
+      m.event_id
+    from unified_markets m
+    join unified_events e on e.id = m.event_id
+    ${marketCountJoin}
+    where ${where.join(" and ")}
+    ${marketOrder ? `order by ${marketOrder}` : ""}
+    limit ${limitParam} offset ${offsetParam}
+  `;
+
+  const marketBaseSql = `
+    select
+      m.*,
+      case
+        when m.venue = 'polymarket' and m.clob_token_ids is not null
+          then (m.clob_token_ids::jsonb->>0)
+        else m.token_yes
+      end as resolved_token_yes,
+      case
+        when m.venue = 'polymarket' and m.clob_token_ids is not null
+          then (m.clob_token_ids::jsonb->>1)
+        else m.token_no
+      end as resolved_token_no
+    from unified_markets m
+    join market_candidates mc on mc.id = m.id
+  `;
+
+  const tokenIdsSql = `
+    select resolved_token_yes as token_id from market_base where resolved_token_yes is not null
+    union
+    select resolved_token_no as token_id from market_base where resolved_token_no is not null
+  `;
+
+  const latestBookSql = `
+    select distinct on (token_id) token_id, best_bid, best_ask
+    from unified_book_top
+    where token_id in (select token_id from token_ids)
+    order by token_id, ts desc
+  `;
 
   const marketSql = `
+    with
+      market_candidates as (${marketCandidatesSql}),
+      market_base as (${marketBaseSql}),
+      token_ids as (${tokenIdsSql}),
+      latest_book as (${latestBookSql})
     select
       e.id as event_id,
       e.title as event_title,
@@ -650,8 +728,8 @@ export async function fetchFeedMarketsDirect(
       no_top.best_ask as best_ask_no,
       m.last_price,
       m.outcomes,
-      mt.token_yes,
-      mt.token_no,
+      m.resolved_token_yes as token_yes,
+      m.resolved_token_no as token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -660,36 +738,9 @@ export async function fetchFeedMarketsDirect(
       m.icon as market_icon,
       m.updated_at as last_update
     from unified_events e
-    join unified_markets m on m.event_id = e.id
-    join (${marketCountSql}) emc on emc.event_id = e.id
-    cross join lateral (
-      select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
-    ) mt
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_yes
-      order by ts desc
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_no
-      order by ts desc
-      limit 1
-    ) no_top on true
-    where ${where.join(" and ")}
+    join market_base m on m.event_id = e.id
+    left join latest_book yes_top on yes_top.token_id = m.resolved_token_yes
+    left join latest_book no_top on no_top.token_id = m.resolved_token_no
     ${marketOrder ? `order by ${marketOrder}` : ""}
     limit ${limitParam} offset ${offsetParam}
   `;
