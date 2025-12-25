@@ -22,6 +22,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     userId: string,
     walletAddress: string | undefined,
     requestedWallets: string[] | undefined,
+    venue: string | undefined,
   ): Promise<string[]> => {
     if (requestedWallets && requestedWallets.length) {
       const wallets = await AuthService.getUserWallets(userId);
@@ -35,7 +36,48 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         .map((address) => address.trim().toLowerCase())
         .map((address) => walletMap.get(address))
         .filter((address): address is string => Boolean(address));
-      return Array.from(new Set(resolved));
+      const uniqueResolved = Array.from(new Set(resolved));
+
+      const relevantWallets = venue
+        ? venue === "kalshi"
+          ? wallets.filter((wallet) => wallet.walletType === "solana")
+          : wallets.filter((wallet) => wallet.walletType !== "solana")
+        : wallets;
+      const relevantSet = new Set(
+        relevantWallets
+          .map((wallet) => wallet.walletAddress.toLowerCase())
+          .filter(Boolean),
+      );
+      const resolvedSet = new Set(
+        uniqueResolved.map((address) => address.toLowerCase()),
+      );
+      const isAllRelevantWallets =
+        relevantSet.size > 0 &&
+        resolvedSet.size === relevantSet.size &&
+        Array.from(relevantSet).every((address) => resolvedSet.has(address));
+
+      if (!isAllRelevantWallets) {
+        return uniqueResolved;
+      }
+
+      if (!venue || venue === "polymarket") {
+        const { rows } = await pool.query<{ wallet_address: string | null }>(
+          `
+            select distinct wallet_address
+            from positions
+            where user_id = $1
+              and venue = 'polymarket'
+              and wallet_address is not null
+          `,
+          [userId],
+        );
+        const extra = rows
+          .map((row) => row.wallet_address)
+          .filter((address): address is string => Boolean(address));
+        return Array.from(new Set([...uniqueResolved, ...extra]));
+      }
+
+      return uniqueResolved;
     }
 
     if (!walletAddress) return [];
@@ -68,6 +110,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          venue,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -129,6 +172,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          query.venue,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -205,6 +249,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          query.venue,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);

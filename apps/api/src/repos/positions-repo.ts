@@ -22,6 +22,64 @@ type PositionRow = {
   updated_at: Date;
 };
 
+const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+function isEthAddress(address: string | null | undefined): address is string {
+  if (!address) return false;
+  return ETH_ADDRESS_RE.test(address);
+}
+
+function normalizeWalletKey(address: string): string {
+  const trimmed = address.trim();
+  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
+  return trimmed;
+}
+
+async function expandPolymarketWallets(
+  pool: Pool,
+  inputs: { userId: string; walletAddresses: string[] },
+): Promise<string[]> {
+  if (inputs.walletAddresses.length === 0) return [];
+  const evmWallets = inputs.walletAddresses
+    .filter(isEthAddress)
+    .map((address) => address.toLowerCase());
+  if (evmWallets.length === 0) {
+    return Array.from(
+      new Map(
+        inputs.walletAddresses.map((address) => [
+          normalizeWalletKey(address),
+          address,
+        ]),
+      ).values(),
+    );
+  }
+  const { rows } = await pool.query<{ funder_address: string | null }>(
+    `
+      select distinct funder_address
+      from user_venue_credentials
+      where user_id = $1
+        and lower(wallet_address) = any($2::text[])
+        and venue = 'polymarket'
+        and is_active = true
+        and funder_address is not null
+    `,
+    [inputs.userId, evmWallets],
+  );
+
+  const merged = new Map<string, string>();
+  for (const address of inputs.walletAddresses) {
+    const key = normalizeWalletKey(address);
+    if (key) merged.set(key, address);
+  }
+  for (const row of rows) {
+    const funder = row.funder_address;
+    if (!isEthAddress(funder)) continue;
+    const key = normalizeWalletKey(funder);
+    if (key) merged.set(key, funder);
+  }
+  return Array.from(merged.values());
+}
+
 function mapPositionRow(row: PositionRow): Position {
   const size = parseFloat(row.size);
   const averagePrice =
@@ -63,11 +121,18 @@ export async function fetchPositionsForUserWallet(
     includeHidden?: boolean;
   },
 ): Promise<Position[]> {
-  if (inputs.walletAddresses.length === 0) return [];
+  const shouldExpandFunders = !inputs.venue || inputs.venue === "polymarket";
+  const walletAddresses = shouldExpandFunders
+    ? await expandPolymarketWallets(pool, {
+        userId: inputs.userId,
+        walletAddresses: inputs.walletAddresses,
+      })
+    : inputs.walletAddresses;
+  if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and (wallet_address is null or wallet_address = any($2::text[]))";
-  const params: PgParams = [inputs.userId, inputs.walletAddresses];
+    "where user_id = $1 and wallet_address = any($2::text[])";
+  const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
   if (!inputs.includeHidden) {
@@ -82,33 +147,6 @@ export async function fetchPositionsForUserWallet(
 
   const { rows } = await pool.query<PositionRow>(
     `
-      with wallet_positions as (
-        select distinct on (venue, token_id)
-          id,
-          user_id,
-          wallet_address,
-          venue,
-          token_id,
-          side,
-          size,
-          average_price,
-          unrealized_pnl,
-          realized_pnl,
-          is_hidden,
-          hidden_reason,
-          hidden_at,
-          last_updated_at,
-          created_at,
-          updated_at
-        from positions
-        ${whereClause}
-        order by
-          venue asc,
-          token_id asc,
-          (wallet_address is null) asc,
-          last_updated_at desc nulls last,
-          updated_at desc nulls last
-      )
       select
         id,
         user_id,
@@ -126,8 +164,9 @@ export async function fetchPositionsForUserWallet(
         last_updated_at,
         created_at,
         updated_at
-      from wallet_positions
-      order by last_updated_at desc nulls last, venue asc, token_id asc
+      from positions
+      ${whereClause}
+      order by last_updated_at desc nulls last, venue asc, token_id asc, wallet_address asc
     `,
     params,
   );
@@ -146,11 +185,18 @@ export async function fetchPositionsForUserWalletByTokenIds(
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
-  if (inputs.walletAddresses.length === 0) return [];
+  const shouldExpandFunders = !inputs.venue || inputs.venue === "polymarket";
+  const walletAddresses = shouldExpandFunders
+    ? await expandPolymarketWallets(pool, {
+        userId: inputs.userId,
+        walletAddresses: inputs.walletAddresses,
+      })
+    : inputs.walletAddresses;
+  if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and (wallet_address is null or wallet_address = any($2::text[]))";
-  const params: PgParams = [inputs.userId, inputs.walletAddresses];
+    "where user_id = $1 and wallet_address = any($2::text[])";
+  const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
   paramCount += 1;
@@ -169,33 +215,6 @@ export async function fetchPositionsForUserWalletByTokenIds(
 
   const { rows } = await pool.query<PositionRow>(
     `
-      with wallet_positions as (
-        select distinct on (venue, token_id)
-          id,
-          user_id,
-          wallet_address,
-          venue,
-          token_id,
-          side,
-          size,
-          average_price,
-          unrealized_pnl,
-          realized_pnl,
-          is_hidden,
-          hidden_reason,
-          hidden_at,
-          last_updated_at,
-          created_at,
-          updated_at
-        from positions
-        ${whereClause}
-        order by
-          venue asc,
-          token_id asc,
-          (wallet_address is null) asc,
-          last_updated_at desc nulls last,
-          updated_at desc nulls last
-      )
       select
         id,
         user_id,
@@ -213,8 +232,9 @@ export async function fetchPositionsForUserWalletByTokenIds(
         last_updated_at,
         created_at,
         updated_at
-      from wallet_positions
-      order by last_updated_at desc nulls last, venue asc, token_id asc
+      from positions
+      ${whereClause}
+      order by last_updated_at desc nulls last, venue asc, token_id asc, wallet_address asc
     `,
     params,
   );

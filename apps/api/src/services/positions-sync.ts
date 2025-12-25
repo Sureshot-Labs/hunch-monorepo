@@ -71,8 +71,9 @@ async function backfillPolymarketUnifiedTokens(
 
 async function fetchPolymarketCandidateTokenIds(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string; limit: number },
+  inputs: { userId: string; walletAddresses: string[]; limit: number },
 ): Promise<string[]> {
+  if (inputs.walletAddresses.length === 0) return [];
   const { rows } = await pool.query<{ token_id: string }>(
     `
       with watchlist_tokens as (
@@ -89,7 +90,7 @@ async function fetchPolymarketCandidateTokenIds(
         select token_id
         from orders
         where user_id = $1
-          and (wallet_address is null or wallet_address = $2)
+          and (wallet_address is null or wallet_address = any($2::text[]))
           and venue = 'polymarket'
           and token_id is not null
       ),
@@ -97,7 +98,7 @@ async function fetchPolymarketCandidateTokenIds(
         select token_id
         from positions
         where user_id = $1
-          and wallet_address = $2
+          and wallet_address = any($2::text[])
           and venue = 'polymarket'
       )
       select distinct token_id
@@ -113,7 +114,7 @@ async function fetchPolymarketCandidateTokenIds(
         and token_id ~ '^[0-9]+$'
       limit $3
     `,
-    [inputs.userId, inputs.walletAddress, inputs.limit],
+    [inputs.userId, inputs.walletAddresses, inputs.limit],
   );
 
   return rows
@@ -217,9 +218,20 @@ async function syncPolymarketPositionsFromPolygon(
   pool: Pool,
   inputs: { userId: string; walletAddress: string },
 ): Promise<PositionsSyncResult> {
+  const funder =
+    (await fetchPolymarketFunderAddress(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+    })) ?? inputs.walletAddress;
+  const ownerCandidates = [funder, inputs.walletAddress].filter(Boolean);
+  const owners = Array.from(
+    new Map(
+      ownerCandidates.map((address) => [address.toLowerCase(), address]),
+    ).values(),
+  );
   const tokenIds = await fetchPolymarketCandidateTokenIds(pool, {
     userId: inputs.userId,
-    walletAddress: inputs.walletAddress,
+    walletAddresses: owners,
     limit: 1000,
   });
 
@@ -238,77 +250,90 @@ async function syncPolymarketPositionsFromPolygon(
     process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
-  const funder =
-    (await fetchPolymarketFunderAddress(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-    })) ?? inputs.walletAddress;
-
-  const held: Array<{ tokenId: string; size: string }> = [];
+  const heldByOwner = new Map<string, Array<{ tokenId: string; size: string }>>();
+  const allHeldTokens = new Set<string>();
   const chunkSize = 200;
-  for (let i = 0; i < tokenIds.length; i += chunkSize) {
-    const chunk = tokenIds.slice(i, i + chunkSize);
-    const balances = await fetchErc1155BalancesByOwner({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      contractAddress: conditionalTokensAddress,
-      owner: funder,
-      tokenIds: chunk,
-    });
+  for (const owner of owners) {
+    const held: Array<{ tokenId: string; size: string }> = [];
+    for (let i = 0; i < tokenIds.length; i += chunkSize) {
+      const chunk = tokenIds.slice(i, i + chunkSize);
+      const balances = await fetchErc1155BalancesByOwner({
+        rpcUrl: env.polygonRpcUrl,
+        timeoutMs: env.polygonRpcTimeoutMs,
+        contractAddress: conditionalTokensAddress,
+        owner,
+        tokenIds: chunk,
+      });
 
-  for (const tokenId of chunk) {
-      const balance = balances.get(tokenId) ?? 0n;
-      if (balance <= 0n) continue;
-      held.push({ tokenId, size: ethers.formatUnits(balance, 6) });
+      for (const tokenId of chunk) {
+        const balance = balances.get(tokenId) ?? 0n;
+        if (balance <= 0n) continue;
+        held.push({ tokenId, size: ethers.formatUnits(balance, 6) });
+      }
+    }
+    for (const item of held) {
+      allHeldTokens.add(item.tokenId);
+    }
+    heldByOwner.set(owner, held);
+  }
+
+  if (allHeldTokens.size > 0) {
+    await backfillPolymarketUnifiedTokens(pool, Array.from(allHeldTokens));
+  }
+
+  let heldTokens = 0;
+  let knownTokens = 0;
+  let upsertedPositions = 0;
+  let flattenedPositions = 0;
+
+  for (const owner of owners) {
+    const held = heldByOwner.get(owner) ?? [];
+    const result = await syncWalletPositionsFromTokenBalances(pool, {
+      userId: inputs.userId,
+      walletAddress: owner,
+      venue: "polymarket",
+      tokenBalances: held,
+    });
+    heldTokens += result.heldTokens;
+    knownTokens += result.knownTokens;
+    upsertedPositions += result.upsertedPositions;
+    flattenedPositions += result.flattenedPositions;
+
+    try {
+      await recomputePositionMetricsForWallet(pool, {
+        userId: inputs.userId,
+        walletAddress: owner,
+        venue: "polymarket",
+      });
+    } catch (error) {
+      console.error("Polymarket position metrics update failed", error);
+    }
+
+    try {
+      await autoHideResolvedLosingPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: owner,
+        venue: "polymarket",
+      });
+    } catch (error) {
+      console.error("Polymarket position hide update failed", error);
     }
   }
 
-  await backfillPolymarketUnifiedTokens(
-    pool,
-    held.map((item) => item.tokenId),
-  );
-
-  const result = await syncWalletPositionsFromTokenBalances(pool, {
-    userId: inputs.userId,
-    walletAddress: inputs.walletAddress,
-    venue: "polymarket",
-    tokenBalances: held,
-  });
-
-  if (held.length) {
+  if (allHeldTokens.size) {
     void markHotTokens({
-      tokenIds: held.map((item) => item.tokenId),
+      tokenIds: Array.from(allHeldTokens),
       venue: "polymarket",
     });
-  }
-
-  try {
-    await recomputePositionMetricsForWallet(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "polymarket",
-    });
-  } catch (error) {
-    console.error("Polymarket position metrics update failed", error);
-  }
-
-  try {
-    await autoHideResolvedLosingPositions(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "polymarket",
-    });
-  } catch (error) {
-    console.error("Polymarket position hide update failed", error);
   }
 
   return {
     venue: "polymarket",
     walletAddress: inputs.walletAddress,
-    heldTokens: result.heldTokens,
-    knownTokens: result.knownTokens,
-    upsertedPositions: result.upsertedPositions,
-    flattenedPositions: result.flattenedPositions,
+    heldTokens,
+    knownTokens,
+    upsertedPositions,
+    flattenedPositions,
   };
 }
 

@@ -16,4 +16,5 @@ export const walletVenueStatusQuerySchema = z.object({
   walletAddress: z.string().optional(),
   wallets: zCsvString("wallets is required").optional(),
   includeAllWallets: zOptionalBool.optional(),
+  refresh: zOptionalBool.optional(),
 });

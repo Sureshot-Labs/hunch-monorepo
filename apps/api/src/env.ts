@@ -129,7 +129,7 @@ export const env = {
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
-    45,
+    15,
   ),
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
@@ -145,9 +145,15 @@ export const env = {
   polygonRpcUrl:
     process.env.POLYGON_RPC_URL?.trim() || "https://polygon-rpc.com",
   polygonRpcTimeoutMs: optionalPositiveInt("POLYGON_RPC_TIMEOUT_MS", 10_000),
+  polygonMulticallAddress:
+    process.env.POLYGON_MULTICALL_ADDRESS?.trim() ||
+    "0xca11bde05977b3631167028862be2a173976ca11",
   baseRpcUrl:
     process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
   baseRpcTimeoutMs: optionalPositiveInt("BASE_RPC_TIMEOUT_MS", 10_000),
+  baseMulticallAddress:
+    process.env.BASE_MULTICALL_ADDRESS?.trim() ||
+    "0xca11bde05977b3631167028862be2a173976ca11",
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",

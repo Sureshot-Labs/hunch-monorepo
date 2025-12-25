@@ -6,11 +6,8 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { storeOrder } from "../repos/orders-repo.js";
-import {
-  fetchErc20Allowance,
-  fetchErc20BalanceOf,
-  fetchEvmCode,
-} from "../services/polygon-rpc.js";
+import { fetchEvmCode } from "../services/polygon-rpc.js";
+import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -403,38 +400,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const profile = extractProfile(credsInfo?.additionalData ?? null);
 
       try {
-        const [code, usdcBalance, allowanceClob, allowanceNegRisk] =
-          await Promise.all([
-            fetchEvmCode({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              address: signer,
-            }),
-            fetchErc20BalanceOf({
-              rpcUrl: env.baseRpcUrl,
-              timeoutMs: env.baseRpcTimeoutMs,
-              tokenAddress: env.limitlessUsdcAddress,
-              owner: signer,
-            }),
-            env.limitlessClobAddress
-              ? fetchErc20Allowance({
-                  rpcUrl: env.baseRpcUrl,
-                  timeoutMs: env.baseRpcTimeoutMs,
-                  tokenAddress: env.limitlessUsdcAddress,
-                  owner: signer,
-                  spender: env.limitlessClobAddress,
-                })
-              : Promise.resolve(null),
-            env.limitlessNegRiskAddress
-              ? fetchErc20Allowance({
-                  rpcUrl: env.baseRpcUrl,
-                  timeoutMs: env.baseRpcTimeoutMs,
-                  tokenAddress: env.limitlessUsdcAddress,
-                  owner: signer,
-                  spender: env.limitlessNegRiskAddress,
-                })
-              : Promise.resolve(null),
-          ]);
+        const [code, snapshot] = await Promise.all([
+          fetchEvmCode({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            address: signer,
+          }),
+          fetchLimitlessOnchainSnapshot({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            owner: signer,
+            clobAddress: env.limitlessClobAddress,
+            negRiskAddress: env.limitlessNegRiskAddress,
+          }),
+        ]);
+
+        const usdcBalance = snapshot.usdcBalance;
+        const allowanceClob = snapshot.allowanceClob;
+        const allowanceNegRisk = snapshot.allowanceNegRisk;
 
         const isContract = typeof code === "string" && code.length > 2;
 

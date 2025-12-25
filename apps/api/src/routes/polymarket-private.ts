@@ -20,13 +20,10 @@ import {
   polymarketQuoteBodySchema,
 } from "../schemas/polymarket-private.js";
 import {
-  fetchErc1155IsApprovedForAll,
-  fetchErc20Allowance,
-  fetchErc20BalanceOf,
-  fetchFeeCollectorNonce,
   fetchEvmCode,
   fetchPolymarketOrderHash,
 } from "../services/polygon-rpc.js";
+import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import {
@@ -1112,93 +1109,32 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
         const negRiskAdapterAddress =
           env.polymarketNegRiskAdapterAddress?.trim() || "";
-        const [
-          code,
-          usdcBalance,
-          allowanceExchange,
-          allowanceNegRisk,
-          okExchange,
-          okNegRisk,
-          okNegRiskAdapter,
-          allowanceNegRiskAdapter,
-          allowanceFeeCollector,
-          feeCollectorNonce,
-        ] = await Promise.all([
-            fetchEvmCode({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              address: funder,
-            }),
-            fetchErc20BalanceOf({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              tokenAddress: env.polymarketUsdcAddress,
-              owner: funder,
-            }),
-            fetchErc20Allowance({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              tokenAddress: env.polymarketUsdcAddress,
-              owner: funder,
-              spender: env.polymarketExchangeAddress,
-            }),
-            fetchErc20Allowance({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              tokenAddress: env.polymarketUsdcAddress,
-              owner: funder,
-              spender: env.polymarketNegRiskExchangeAddress,
-            }),
-            fetchErc1155IsApprovedForAll({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              contractAddress: env.polymarketConditionalTokensAddress,
-              owner: funder,
-              operator: env.polymarketExchangeAddress,
-            }),
-            fetchErc1155IsApprovedForAll({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              contractAddress: env.polymarketConditionalTokensAddress,
-              owner: funder,
-              operator: env.polymarketNegRiskExchangeAddress,
-            }),
-            negRiskAdapterAddress
-              ? fetchErc1155IsApprovedForAll({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  contractAddress: env.polymarketConditionalTokensAddress,
-                  owner: funder,
-                  operator: negRiskAdapterAddress,
-                })
-              : Promise.resolve(null),
-            negRiskAdapterAddress
-              ? fetchErc20Allowance({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  tokenAddress: env.polymarketUsdcAddress,
-                  owner: funder,
-                  spender: negRiskAdapterAddress,
-                })
-              : Promise.resolve(null),
-            feeCollectorAddress
-              ? fetchErc20Allowance({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  tokenAddress: env.polymarketUsdcAddress,
-                  owner: funder,
-                  spender: feeCollectorAddress,
-                })
-              : Promise.resolve(null),
-            feeCollectorAddress
-              ? fetchFeeCollectorNonce({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  collectorAddress: feeCollectorAddress,
-                  signer,
-                })
-              : Promise.resolve(null),
-          ]);
+        const [code, snapshot] = await Promise.all([
+          fetchEvmCode({
+            rpcUrl: env.polygonRpcUrl,
+            timeoutMs: env.polygonRpcTimeoutMs,
+            address: funder,
+          }),
+          fetchPolymarketOnchainSnapshot({
+            rpcUrl: env.polygonRpcUrl,
+            timeoutMs: env.polygonRpcTimeoutMs,
+            signer,
+            funder,
+            includeFeeCollectorNonce: true,
+            negRiskAdapterAddress,
+            feeCollectorAddress,
+          }),
+        ]);
+
+        const usdcBalance = snapshot.usdcBalance;
+        const allowanceExchange = snapshot.allowanceExchange;
+        const allowanceNegRisk = snapshot.allowanceNegRisk;
+        const okExchange = snapshot.okExchange;
+        const okNegRisk = snapshot.okNegRisk;
+        const okNegRiskAdapter = snapshot.okNegRiskAdapter;
+        const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
+        const allowanceFeeCollector = snapshot.allowanceFeeCollector;
+        const feeCollectorNonce = snapshot.feeCollectorNonce;
 
         const isContract = typeof code === "string" && code.length > 2;
 

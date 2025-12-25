@@ -7,12 +7,11 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchSolanaBalanceLamports, fetchSolanaMintDecimals, fetchSolanaTokenBalanceByOwnerAndMint, formatUiAmount } from "../services/solana-rpc.js";
 import {
-  fetchErc1155IsApprovedForAll,
-  fetchErc20Allowance,
   fetchErc20BalanceOf,
   fetchEvmBalance,
   fetchEvmCode,
 } from "../services/polygon-rpc.js";
+import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
   walletBalancesQuerySchema,
   walletVenueStatusQuerySchema,
@@ -38,12 +37,62 @@ type TokenMeta = {
   tags?: unknown;
 };
 
+type WalletVenueStatus = Record<string, unknown>;
+
 const SOLANA_CHAIN_ID = "7565164";
 const POLYGON_CHAIN_ID = "137";
 const BASE_CHAIN_ID = "8453";
 const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const VENUE_STATUS_TTL_MS = 15_000;
+
+type VenueStatusCacheEntry = {
+  value: WalletVenueStatus;
+  expiresAt: number;
+};
+
+const venueStatusCache = new Map<string, VenueStatusCacheEntry>();
+const venueStatusInflight = new Map<string, Promise<WalletVenueStatus>>();
+
+function getVenueStatusCacheKey(inputs: {
+  userId: string;
+  walletAddress: string;
+  walletType: string;
+  funder?: string | null;
+  funderUpdatedAt?: string | null;
+  relayerEnabled: boolean;
+}) {
+  const funderKey = inputs.funder?.toLowerCase() ?? "none";
+  const funderUpdatedAt = inputs.funderUpdatedAt ?? "none";
+  return [
+    inputs.userId,
+    inputs.walletAddress.toLowerCase(),
+    inputs.walletType,
+    funderKey,
+    funderUpdatedAt,
+    inputs.relayerEnabled ? "relayer:1" : "relayer:0",
+  ].join("|");
+}
+
+function readVenueStatusCache(key: string): WalletVenueStatus | null {
+  if (VENUE_STATUS_TTL_MS <= 0) return null;
+  const entry = venueStatusCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    venueStatusCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function writeVenueStatusCache(key: string, value: WalletVenueStatus) {
+  if (VENUE_STATUS_TTL_MS <= 0) return;
+  venueStatusCache.set(key, {
+    value,
+    expiresAt: Date.now() + VENUE_STATUS_TTL_MS,
+  });
+}
 
 const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
   [POLYGON_CHAIN_ID]: {
@@ -465,6 +514,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
       const query = request.query;
       const includeAll = Boolean(query.includeAllWallets);
+      const refresh = Boolean(query.refresh);
 
       let walletList = [] as Awaited<
         ReturnType<typeof AuthService.getUserWallets>
@@ -536,6 +586,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               );
               const funder = creds?.funderAddress ?? walletAddress;
               const funderSource = creds?.funderAddress ? "credentials" : "signer";
+              const funderUpdatedAtValue =
+                creds?.funderUpdatedAt instanceof Date
+                  ? creds.funderUpdatedAt.toISOString()
+                  : creds?.funderUpdatedAt ?? null;
               const signerNormalized = walletAddress.toLowerCase();
               const funderNormalized = funder.toLowerCase();
               const shouldFetchSignerUsdc = signerNormalized !== funderNormalized;
@@ -544,219 +598,198 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               const negRiskAdapterAddress =
                 env.polymarketNegRiskAdapterAddress?.trim() || "";
 
-              const [
-                signerCode,
-                funderCode,
-                usdcBalance,
-                signerUsdcBalance,
-                allowanceExchange,
-                allowanceNegRisk,
-                okExchange,
-                okNegRisk,
-                okNegRiskAdapter,
-                allowanceNegRiskAdapter,
-                allowanceFeeCollector,
-              ] = await Promise.all([
-                fetchEvmCode({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  address: walletAddress,
-                }),
-                fetchEvmCode({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  address: funder,
-                }),
-                fetchErc20BalanceOf({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  tokenAddress: env.polymarketUsdcAddress,
-                  owner: funder,
-                }),
-                shouldFetchSignerUsdc
-                  ? fetchErc20BalanceOf({
-                      rpcUrl: env.polygonRpcUrl,
-                      timeoutMs: env.polygonRpcTimeoutMs,
-                      tokenAddress: env.polymarketUsdcAddress,
-                      owner: walletAddress,
-                    })
-                  : Promise.resolve(null),
-                fetchErc20Allowance({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  tokenAddress: env.polymarketUsdcAddress,
-                  owner: funder,
-                  spender: env.polymarketExchangeAddress,
-                }),
-                fetchErc20Allowance({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  tokenAddress: env.polymarketUsdcAddress,
-                  owner: funder,
-                  spender: env.polymarketNegRiskExchangeAddress,
-                }),
-                fetchErc1155IsApprovedForAll({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  contractAddress: env.polymarketConditionalTokensAddress,
-                  owner: funder,
-                  operator: env.polymarketExchangeAddress,
-                }),
-                fetchErc1155IsApprovedForAll({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  contractAddress: env.polymarketConditionalTokensAddress,
-                  owner: funder,
-                  operator: env.polymarketNegRiskExchangeAddress,
-                }),
-                negRiskAdapterAddress
-                  ? fetchErc1155IsApprovedForAll({
-                      rpcUrl: env.polygonRpcUrl,
-                      timeoutMs: env.polygonRpcTimeoutMs,
-                      contractAddress: env.polymarketConditionalTokensAddress,
-                      owner: funder,
-                      operator: negRiskAdapterAddress,
-                    })
-                  : Promise.resolve(null),
-                negRiskAdapterAddress
-                  ? fetchErc20Allowance({
-                      rpcUrl: env.polygonRpcUrl,
-                      timeoutMs: env.polygonRpcTimeoutMs,
-                      tokenAddress: env.polymarketUsdcAddress,
-                      owner: funder,
-                      spender: negRiskAdapterAddress,
-                    })
-                  : Promise.resolve(null),
-                feeCollectorAddress
-                  ? fetchErc20Allowance({
-                      rpcUrl: env.polygonRpcUrl,
-                      timeoutMs: env.polygonRpcTimeoutMs,
-                      tokenAddress: env.polymarketUsdcAddress,
-                      owner: funder,
-                      spender: feeCollectorAddress,
-                    })
-                  : Promise.resolve(null),
-              ]);
-
-              const signerIsContract =
-                typeof signerCode === "string" && signerCode.length > 2;
-              const funderIsContract =
-                typeof funderCode === "string" && funderCode.length > 2;
-              const signerUsdcBalanceResolved =
-                shouldFetchSignerUsdc && signerUsdcBalance != null
-                  ? signerUsdcBalance
-                  : usdcBalance;
-
-              const reasons: string[] = [];
-              if (!creds) reasons.push("missing_credentials");
-              if (funderIsContract && !relayerEnabled) {
-                reasons.push("relayer_disabled");
-              }
-              if (usdcBalance <= 0n) reasons.push("insufficient_usdc");
-              if (allowanceExchange <= 0n) reasons.push("allowance_exchange");
-              if (!okExchange) reasons.push("approval_exchange");
-
-              const negRiskReasons: string[] = [];
-              if (!creds) negRiskReasons.push("missing_credentials");
-              if (funderIsContract && !relayerEnabled) {
-                negRiskReasons.push("relayer_disabled");
-              }
-              if (allowanceNegRisk <= 0n) negRiskReasons.push("allowance_neg_risk");
-              if (!okNegRisk) negRiskReasons.push("approval_neg_risk");
-              if (negRiskAdapterAddress && !okNegRiskAdapter) {
-                negRiskReasons.push("approval_neg_risk_adapter");
-              }
-              if (
-                negRiskAdapterAddress &&
-                (allowanceNegRiskAdapter ?? 0n) <= 0n
-              ) {
-                negRiskReasons.push("allowance_neg_risk_adapter");
-              }
-
-              response.polymarket = {
-                supported: true,
-                ready: reasons.length === 0,
-                readyNegRisk: negRiskReasons.length === 0,
-                reasons,
-                negRiskReasons,
-                hasCredentials: Boolean(creds),
-                signerIsContract,
+              const cacheKey = getVenueStatusCacheKey({
+                userId: user.id,
+                walletAddress,
+                walletType,
                 funder,
-                funderSource,
-                funderIsContract,
+                funderUpdatedAt: funderUpdatedAtValue,
                 relayerEnabled,
-                usdc: {
-                  tokenAddress: env.polymarketUsdcAddress,
-                  decimals: 6,
-                  balance: ethers.formatUnits(usdcBalance, 6),
-                  balanceRaw: usdcBalance.toString(),
-                  allowance: {
-                    exchange: {
-                      spender: env.polymarketExchangeAddress,
-                      allowance: ethers.formatUnits(allowanceExchange, 6),
-                      allowanceRaw: allowanceExchange.toString(),
-                    },
-                    negRiskExchange: {
-                      spender: env.polymarketNegRiskExchangeAddress,
-                      allowance: ethers.formatUnits(allowanceNegRisk, 6),
-                      allowanceRaw: allowanceNegRisk.toString(),
-                    },
-                    ...(negRiskAdapterAddress
-                      ? {
-                          negRiskAdapter: {
-                            spender: negRiskAdapterAddress,
-                            allowance: ethers.formatUnits(
-                              allowanceNegRiskAdapter ?? 0n,
-                              6,
-                            ),
-                            allowanceRaw: (
-                              allowanceNegRiskAdapter ?? 0n
-                            ).toString(),
-                          },
-                        }
-                      : {}),
-                    ...(feeCollectorAddress
-                      ? {
-                          feeCollector: {
-                            spender: feeCollectorAddress,
-                            allowance: ethers.formatUnits(
-                              allowanceFeeCollector ?? 0n,
-                              6,
-                            ),
-                            allowanceRaw: (
-                              allowanceFeeCollector ?? 0n
-                            ).toString(),
-                          },
-                        }
-                      : {}),
-                  },
-                },
-                ...(funderIsContract
-                  ? {
-                      signerUsdc: {
-                        tokenAddress: env.polymarketUsdcAddress,
-                        decimals: 6,
-                        balance: ethers.formatUnits(
-                          signerUsdcBalanceResolved ?? 0n,
-                          6,
-                        ),
-                        balanceRaw: (
-                          signerUsdcBalanceResolved ?? 0n
-                        ).toString(),
+              });
+
+              if (!refresh) {
+                const cached = readVenueStatusCache(cacheKey);
+                if (cached) {
+                  return cached;
+                }
+
+                const inflight = venueStatusInflight.get(cacheKey);
+                if (inflight) {
+                  return await inflight;
+                }
+              }
+
+              const computePromise = (async () => {
+                const [signerCode, funderCode, snapshot] = await Promise.all([
+                  fetchEvmCode({
+                    rpcUrl: env.polygonRpcUrl,
+                    timeoutMs: env.polygonRpcTimeoutMs,
+                    address: walletAddress,
+                  }),
+                  fetchEvmCode({
+                    rpcUrl: env.polygonRpcUrl,
+                    timeoutMs: env.polygonRpcTimeoutMs,
+                    address: funder,
+                  }),
+                  fetchPolymarketOnchainSnapshot({
+                    rpcUrl: env.polygonRpcUrl,
+                    timeoutMs: env.polygonRpcTimeoutMs,
+                    signer: walletAddress,
+                    funder,
+                    includeSignerUsdc: shouldFetchSignerUsdc,
+                    negRiskAdapterAddress,
+                    feeCollectorAddress,
+                  }),
+                ]);
+
+                const usdcBalance = snapshot.usdcBalance;
+                const signerUsdcBalance = snapshot.signerUsdcBalance;
+                const allowanceExchange = snapshot.allowanceExchange;
+                const allowanceNegRisk = snapshot.allowanceNegRisk;
+                const okExchange = snapshot.okExchange;
+                const okNegRisk = snapshot.okNegRisk;
+                const okNegRiskAdapter = snapshot.okNegRiskAdapter;
+                const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
+                const allowanceFeeCollector = snapshot.allowanceFeeCollector;
+
+                const signerIsContract =
+                  typeof signerCode === "string" && signerCode.length > 2;
+                const funderIsContract =
+                  typeof funderCode === "string" && funderCode.length > 2;
+                const signerUsdcBalanceResolved =
+                  shouldFetchSignerUsdc && signerUsdcBalance != null
+                    ? signerUsdcBalance
+                    : usdcBalance;
+
+                const reasons: string[] = [];
+                if (!creds) reasons.push("missing_credentials");
+                if (funderIsContract && !relayerEnabled) {
+                  reasons.push("relayer_disabled");
+                }
+                if (usdcBalance <= 0n) reasons.push("insufficient_usdc");
+                if (allowanceExchange <= 0n) reasons.push("allowance_exchange");
+                if (!okExchange) reasons.push("approval_exchange");
+
+                const negRiskReasons: string[] = [];
+                if (!creds) negRiskReasons.push("missing_credentials");
+                if (funderIsContract && !relayerEnabled) {
+                  negRiskReasons.push("relayer_disabled");
+                }
+                if (allowanceNegRisk <= 0n) {
+                  negRiskReasons.push("allowance_neg_risk");
+                }
+                if (!okNegRisk) negRiskReasons.push("approval_neg_risk");
+                if (negRiskAdapterAddress && !okNegRiskAdapter) {
+                  negRiskReasons.push("approval_neg_risk_adapter");
+                }
+                if (
+                  negRiskAdapterAddress &&
+                  (allowanceNegRiskAdapter ?? 0n) <= 0n
+                ) {
+                  negRiskReasons.push("allowance_neg_risk_adapter");
+                }
+
+                response.polymarket = {
+                  supported: true,
+                  ready: reasons.length === 0,
+                  readyNegRisk: negRiskReasons.length === 0,
+                  reasons,
+                  negRiskReasons,
+                  hasCredentials: Boolean(creds),
+                  signerIsContract,
+                  funder,
+                  funderSource,
+                  funderIsContract,
+                  relayerEnabled,
+                  usdc: {
+                    tokenAddress: env.polymarketUsdcAddress,
+                    decimals: 6,
+                    balance: ethers.formatUnits(usdcBalance, 6),
+                    balanceRaw: usdcBalance.toString(),
+                    allowance: {
+                      exchange: {
+                        spender: env.polymarketExchangeAddress,
+                        allowance: ethers.formatUnits(allowanceExchange, 6),
+                        allowanceRaw: allowanceExchange.toString(),
                       },
-                    }
-                  : {}),
-                conditionalTokens: {
-                  contractAddress: env.polymarketConditionalTokensAddress,
-                  isApprovedForAll: {
-                    exchange: okExchange,
-                    negRiskExchange: okNegRisk,
-                    ...(negRiskAdapterAddress
-                      ? { negRiskAdapter: okNegRiskAdapter }
-                      : {}),
+                      negRiskExchange: {
+                        spender: env.polymarketNegRiskExchangeAddress,
+                        allowance: ethers.formatUnits(allowanceNegRisk, 6),
+                        allowanceRaw: allowanceNegRisk.toString(),
+                      },
+                      ...(negRiskAdapterAddress
+                        ? {
+                            negRiskAdapter: {
+                              spender: negRiskAdapterAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceNegRiskAdapter ?? 0n,
+                                6,
+                              ),
+                              allowanceRaw: (
+                                allowanceNegRiskAdapter ?? 0n
+                              ).toString(),
+                            },
+                          }
+                        : {}),
+                      ...(feeCollectorAddress
+                        ? {
+                            feeCollector: {
+                              spender: feeCollectorAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceFeeCollector ?? 0n,
+                                6,
+                              ),
+                              allowanceRaw: (
+                                allowanceFeeCollector ?? 0n
+                              ).toString(),
+                            },
+                          }
+                        : {}),
+                    },
                   },
-                },
-              };
+                  ...(funderIsContract
+                    ? {
+                        signerUsdc: {
+                          tokenAddress: env.polymarketUsdcAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(
+                            signerUsdcBalanceResolved ?? 0n,
+                            6,
+                          ),
+                          balanceRaw: (
+                            signerUsdcBalanceResolved ?? 0n
+                          ).toString(),
+                        },
+                      }
+                    : {}),
+                  conditionalTokens: {
+                    contractAddress: env.polymarketConditionalTokensAddress,
+                    isApprovedForAll: {
+                      exchange: okExchange,
+                      negRiskExchange: okNegRisk,
+                      ...(negRiskAdapterAddress
+                        ? { negRiskAdapter: okNegRiskAdapter }
+                        : {}),
+                    },
+                  },
+                };
+
+                return response as WalletVenueStatus;
+              })();
+
+              if (!refresh) {
+                venueStatusInflight.set(cacheKey, computePromise);
+              }
+
+              try {
+                const computed = await computePromise;
+                if (!refresh) {
+                  writeVenueStatusCache(cacheKey, computed);
+                }
+                return computed;
+              } finally {
+                venueStatusInflight.delete(cacheKey);
+              }
             } catch (error) {
               response.polymarket = {
                 supported: true,

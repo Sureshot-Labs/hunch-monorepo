@@ -24,6 +24,56 @@ const erc20Iface = new Interface([
 
 const polymarketExchangeIface = new Interface(abis.IPolymarketExchange);
 const feeCollectorIface = new Interface(abis.PolymarketFeeCollector);
+const multicallIface = new Interface([
+  "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
+]);
+
+const CODE_CACHE_TTL_MS = 60_000;
+const APPROVAL_CACHE_TTL_MS = 30_000;
+
+type CacheEntry<T> = { value: T; expiresAt: number };
+
+function createTimedCache<T>(ttlMs: number) {
+  const store = new Map<string, CacheEntry<T>>();
+  const inflight = new Map<string, Promise<T>>();
+
+  function get(key: string): T | null {
+    const entry = store.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      store.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  function set(key: string, value: T) {
+    store.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+
+  async function load(key: string, loader: () => Promise<T>): Promise<T> {
+    if (ttlMs <= 0) return loader();
+    const cached = get(key);
+    if (cached != null) return cached;
+    const pending = inflight.get(key);
+    if (pending) return pending;
+    const promise = loader()
+      .then((value) => {
+        set(key, value);
+        return value;
+      })
+      .finally(() => {
+        inflight.delete(key);
+      });
+    inflight.set(key, promise);
+    return promise;
+  }
+
+  return { load };
+}
+
+const codeCache = createTimedCache<string>(CODE_CACHE_TTL_MS);
+const approvalCache = createTimedCache<boolean>(APPROVAL_CACHE_TTL_MS);
 
 async function ethRpcRequest<T>(inputs: {
   rpcUrl: string;
@@ -123,12 +173,15 @@ export async function fetchEvmCode(inputs: {
   address: string;
 }): Promise<string> {
   const address = ethers.getAddress(inputs.address);
-  return ethRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    method: "eth_getCode",
-    params: [address, "latest"],
-  });
+  const cacheKey = `${inputs.rpcUrl}:${address}`.toLowerCase();
+  return codeCache.load(cacheKey, () =>
+    ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_getCode",
+      params: [address, "latest"],
+    }),
+  );
 }
 
 export async function fetchEvmCall(inputs: {
@@ -299,25 +352,74 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
   const contractAddress = ethers.getAddress(inputs.contractAddress);
   const owner = ethers.getAddress(inputs.owner);
   const operator = ethers.getAddress(inputs.operator);
+  const cacheKey = `${inputs.rpcUrl}:${contractAddress}:${owner}:${operator}`.toLowerCase();
+  return approvalCache.load(cacheKey, async () => {
+    const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
+      owner,
+      operator,
+    ]);
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_call",
+      params: [{ to: contractAddress, data }, "latest"],
+    });
 
-  const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
-    owner,
-    operator,
+    const decoded = erc1155Iface.decodeFunctionResult(
+      "isApprovedForAll",
+      result,
+    ) as unknown;
+    const value = Array.isArray(decoded) ? decoded[0] : null;
+    if (typeof value !== "boolean") {
+      throw new Error("Polygon RPC: invalid isApprovedForAll result");
+    }
+    return value;
+  });
+}
+
+export async function fetchEvmMulticall(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  multicallAddress: string;
+  calls: Array<{ target: string; callData: string; allowFailure?: boolean }>;
+}): Promise<Array<{ success: boolean; returnData: string }>> {
+  if (inputs.calls.length === 0) return [];
+
+  const multicallAddress = ethers.getAddress(inputs.multicallAddress);
+  const normalizedCalls = inputs.calls.map((call) => ({
+    target: ethers.getAddress(call.target),
+    allowFailure: call.allowFailure ?? true,
+    callData: call.callData,
+  }));
+
+  const data = multicallIface.encodeFunctionData("aggregate3", [
+    normalizedCalls,
   ]);
   const result = await ethRpcRequest<string>({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
     method: "eth_call",
-    params: [{ to: contractAddress, data }, "latest"],
+    params: [{ to: multicallAddress, data }, "latest"],
   });
 
-  const decoded = erc1155Iface.decodeFunctionResult(
-    "isApprovedForAll",
+  const decoded = multicallIface.decodeFunctionResult(
+    "aggregate3",
     result,
   ) as unknown;
-  const value = Array.isArray(decoded) ? decoded[0] : null;
-  if (typeof value !== "boolean") {
-    throw new Error("Polygon RPC: invalid isApprovedForAll result");
+  const rows = Array.isArray(decoded) ? decoded[0] : null;
+  if (!Array.isArray(rows)) {
+    throw new Error("Polygon RPC: invalid multicall result");
   }
-  return value;
+
+  return rows.map((row) => {
+    if (!row || typeof row !== "object") {
+      return { success: false, returnData: "0x" };
+    }
+    const entry = row as { success?: unknown; returnData?: unknown };
+    return {
+      success: entry.success === true,
+      returnData:
+        typeof entry.returnData === "string" ? entry.returnData : "0x",
+    };
+  });
 }
