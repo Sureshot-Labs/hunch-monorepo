@@ -10,11 +10,27 @@ import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
+import { AuthService } from "../auth.js";
+import { fetchPolymarketTrades } from "./polymarket-clob-l2.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 function isEthAddress(address: string): boolean {
   return ETH_ADDRESS_RE.test(address);
+}
+
+function parseNumber(value: string | number | null | undefined): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function normalizeFillSide(value: string | null | undefined): "BUY" | "SELL" | null {
+  if (!value) return null;
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "BUY" || normalized === "SELL") return normalized;
+  return null;
 }
 
 async function backfillPolymarketUnifiedTokens(
@@ -144,6 +160,221 @@ async function fetchPolymarketFunderAddress(
   return funder;
 }
 
+async function syncPolymarketTradesForSigner(
+  pool: Pool,
+  inputs: { userId: string; signerAddress: string },
+): Promise<void> {
+  const creds = await AuthService.getVenueCredentials(
+    inputs.userId,
+    "polymarket",
+    inputs.signerAddress,
+  );
+  if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+    return;
+  }
+
+  const { rows } = await pool.query<{ last_filled_at: Date | null }>(
+    `
+      select max(of.filled_at) as last_filled_at
+      from order_fills of
+      join orders o on o.id = of.order_id
+      where o.user_id = $1
+        and o.venue = 'polymarket'
+        and (o.signer_address = $2 or o.wallet_address = $2)
+    `,
+    [inputs.userId, inputs.signerAddress],
+  );
+  const lastFilledAt = rows[0]?.last_filled_at ?? null;
+  const afterSec =
+    lastFilledAt != null
+      ? Math.max(0, Math.floor(lastFilledAt.getTime() / 1000) - 1)
+      : null;
+
+  const tradesResponse = await fetchPolymarketTrades({
+    baseUrl: env.polymarketClobBase,
+    timeoutMs: 10_000,
+    address: inputs.signerAddress,
+    creds: {
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      apiPassphrase: creds.apiPassphrase,
+    },
+    query: afterSec != null ? { after: afterSec } : undefined,
+  });
+
+  if (!tradesResponse.ok) {
+    console.error("Polymarket trades sync failed", tradesResponse.payload);
+    return;
+  }
+
+  const trades = tradesResponse.trades;
+  if (!trades.length) return;
+
+  const orderIds = new Set<string>();
+  for (const trade of trades) {
+    if (trade.takerOrderId) orderIds.add(trade.takerOrderId);
+    for (const maker of trade.makerOrders ?? []) {
+      if (maker.orderId) orderIds.add(maker.orderId);
+    }
+  }
+
+  if (!orderIds.size) return;
+
+  const { rows: orderRows } = await pool.query<{
+    id: string;
+    venue_order_id: string;
+  }>(
+    `
+      select id, venue_order_id
+      from orders
+      where user_id = $1
+        and venue = 'polymarket'
+        and venue_order_id = any($2::text[])
+    `,
+    [inputs.userId, Array.from(orderIds)],
+  );
+
+  if (!orderRows.length) return;
+
+  const orderMap = new Map<string, string>();
+  for (const row of orderRows) {
+    if (row.venue_order_id) {
+      orderMap.set(row.venue_order_id, row.id);
+    }
+  }
+
+  const fillKeySet = new Set<string>();
+  const fillOrderIds: string[] = [];
+  const fillVenueIds: string[] = [];
+  const fillSizes: number[] = [];
+  const fillPrices: number[] = [];
+  const fillSides: string[] = [];
+  const fillTimes: Date[] = [];
+  const fillTradeIds: string[] = [];
+  const fillFees: number[] = [];
+
+  for (const trade of trades) {
+    const tradeId = trade.id;
+    const matchTime = parseNumber(trade.matchTime) ?? parseNumber(trade.lastUpdate);
+    if (!tradeId || matchTime == null) continue;
+    const filledAt = new Date(matchTime * 1000);
+
+    const takerOrderId = trade.takerOrderId;
+    if (takerOrderId && orderMap.has(takerOrderId)) {
+      const side = normalizeFillSide(trade.side);
+      const size = parseNumber(trade.size);
+      const price = parseNumber(trade.price);
+      if (side && size != null && size > 0 && price != null && price > 0) {
+        const internalOrderId = orderMap.get(takerOrderId);
+        if (!internalOrderId) continue;
+        const venueFillId = `${tradeId}:taker`;
+        const key = `${internalOrderId}:${venueFillId}`;
+        if (!fillKeySet.has(key)) {
+          fillKeySet.add(key);
+          fillOrderIds.push(internalOrderId);
+          fillVenueIds.push(venueFillId);
+          fillSizes.push(size);
+          fillPrices.push(price);
+          fillSides.push(side);
+          fillTimes.push(filledAt);
+          fillTradeIds.push(tradeId);
+          fillFees.push(0);
+        }
+      }
+    }
+
+    for (const maker of trade.makerOrders ?? []) {
+      if (!maker.orderId || !orderMap.has(maker.orderId)) continue;
+      const side = normalizeFillSide(maker.side);
+      const size = parseNumber(maker.matchedAmount);
+      const price = parseNumber(maker.price);
+      if (side && size != null && size > 0 && price != null && price > 0) {
+        const internalOrderId = orderMap.get(maker.orderId);
+        if (!internalOrderId) continue;
+        const venueFillId = `${tradeId}:${maker.orderId}`;
+        const key = `${internalOrderId}:${venueFillId}`;
+        if (!fillKeySet.has(key)) {
+          fillKeySet.add(key);
+          fillOrderIds.push(internalOrderId);
+          fillVenueIds.push(venueFillId);
+          fillSizes.push(size);
+          fillPrices.push(price);
+          fillSides.push(side);
+          fillTimes.push(filledAt);
+          fillTradeIds.push(tradeId);
+          fillFees.push(0);
+        }
+      }
+    }
+  }
+
+  if (!fillOrderIds.length) return;
+
+  await pool.query(
+    `
+      with input as (
+        select *
+        from unnest(
+          $1::uuid[],
+          $2::text[],
+          $3::numeric[],
+          $4::numeric[],
+          $5::text[],
+          $6::timestamptz[],
+          $7::text[],
+          $8::numeric[]
+        ) as t(order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees)
+      )
+      insert into order_fills (
+        order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees
+      )
+      select
+        t.order_id, t.venue_fill_id, t.fill_size, t.fill_price, t.fill_side, t.filled_at, t.venue_trade_id, t.fees
+      from input t
+      where not exists (
+        select 1
+        from order_fills of
+        where of.order_id = t.order_id
+          and of.venue_fill_id = t.venue_fill_id
+      )
+    `,
+    [
+      fillOrderIds,
+      fillVenueIds,
+      fillSizes,
+      fillPrices,
+      fillSides,
+      fillTimes,
+      fillTradeIds,
+      fillFees,
+    ],
+  );
+
+  await pool.query(
+    `
+      with agg as (
+        select order_id,
+               sum(fill_size) as filled_size,
+               case when sum(fill_size) > 0
+                    then sum(fill_size * fill_price) / sum(fill_size)
+                    else null end as average_fill_price,
+               max(filled_at) as filled_at
+        from order_fills
+        where order_id = any($1::uuid[])
+        group by order_id
+      )
+      update orders o
+      set filled_size = agg.filled_size,
+          average_fill_price = agg.average_fill_price,
+          filled_at = agg.filled_at,
+          last_update = now()
+      from agg
+      where o.id = agg.order_id
+    `,
+    [Array.from(new Set(fillOrderIds))],
+  );
+}
+
 export type PositionsSyncResult = {
   venue: Position["venue"];
   walletAddress: string;
@@ -218,6 +449,15 @@ async function syncPolymarketPositionsFromPolygon(
   pool: Pool,
   inputs: { userId: string; walletAddress: string },
 ): Promise<PositionsSyncResult> {
+  try {
+    await syncPolymarketTradesForSigner(pool, {
+      userId: inputs.userId,
+      signerAddress: inputs.walletAddress,
+    });
+  } catch (error) {
+    console.error("Polymarket trade sync failed", error);
+  }
+
   const funder =
     (await fetchPolymarketFunderAddress(pool, {
       userId: inputs.userId,
