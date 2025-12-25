@@ -10,6 +10,7 @@
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
     "delete-closed": "tsx src/delete-closed-markets.ts",
     "fees:collect": "tsx src/collect-fees.ts",
+    "polycurl": "tsx src/polyclob.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
