@@ -9,6 +9,7 @@ export type UnifiedOrderRow = {
   venue_order_id: string | null;
   token_id: string | null;
   side: string | null;
+  outcome: string | null;
   order_type: string | null;
   price: string | null;
   size: string | null;
@@ -98,6 +99,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.venue_order_id,
     o.token_id,
     o.side,
+    null::text as outcome,
     o.order_type,
     o.price::text as price,
     o.size::text as size,
@@ -109,19 +111,16 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.last_update as updated_at,
     o.filled_at,
     o.cancelled_at,
-    case
-      when m.market_id is not null
-        then o.venue || ':' || m.market_id
-      else null
-    end as unified_market_id,
+    ut.market_id as unified_market_id,
     null::text as input_mint,
     null::text as output_mint,
     null::text as amount_in,
     null::text as amount_out,
     null::text as tx_signature
   from orders o
-  left join tokens t on t.token_id = o.token_id
-  left join markets m on m.id = t.market_id
+  left join unified_tokens ut
+    on ut.token_id = o.token_id
+    and ut.venue = o.venue
   ${whereClause}
 `;
 
@@ -134,6 +133,7 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.venue_order_id,
     null::text as token_id,
     e.side,
+    e.outcome,
     null::text as order_type,
     null::text as price,
     null::text as size,

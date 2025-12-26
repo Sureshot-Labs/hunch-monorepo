@@ -28,6 +28,7 @@ const mapUnifiedOrder = (
   venueOrderId: row.venue_order_id,
   tokenId: row.token_id,
   side: row.side,
+  outcome: row.outcome,
   orderType: row.order_type,
   price: toNumber(row.price),
   size: toNumber(row.size),

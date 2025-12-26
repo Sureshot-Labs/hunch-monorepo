@@ -1,9 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
-import {
-  autoHideResolvedLosingPositions,
-  syncWalletPositionsFromTokenBalances,
-} from "../repos/positions-repo.js";
+import { syncWalletPositionsFromTokenBalances } from "../repos/positions-repo.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
@@ -425,16 +422,6 @@ async function syncKalshiPositionsFromSolana(
     console.error("Kalshi position metrics update failed", error);
   }
 
-  try {
-    await autoHideResolvedLosingPositions(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "kalshi",
-    });
-  } catch (error) {
-    console.error("Kalshi position hide update failed", error);
-  }
-
   return {
     venue: "kalshi",
     walletAddress: inputs.walletAddress,
@@ -549,15 +536,6 @@ async function syncPolymarketPositionsFromPolygon(
       console.error("Polymarket position metrics update failed", error);
     }
 
-    try {
-      await autoHideResolvedLosingPositions(pool, {
-        userId: inputs.userId,
-        walletAddress: owner,
-        venue: "polymarket",
-      });
-    } catch (error) {
-      console.error("Polymarket position hide update failed", error);
-    }
   }
 
   if (allHeldTokens.size) {
