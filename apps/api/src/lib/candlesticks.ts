@@ -179,8 +179,12 @@ export function parseLimitlessCandlesticks(
   let entries: unknown[] = [];
   if (Array.isArray(payload)) {
     entries = payload;
-  } else if (isRecord(payload) && Array.isArray(payload.data)) {
-    entries = payload.data;
+  } else if (isRecord(payload)) {
+    if (Array.isArray(payload.data)) {
+      entries = payload.data;
+    } else if (Array.isArray(payload.prices)) {
+      entries = [payload];
+    }
   }
 
   const outcomeEntries = entries.filter(isRecord);
