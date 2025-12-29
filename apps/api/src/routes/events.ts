@@ -6,11 +6,16 @@ import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import {
   aggregateKalshiCandlesticks,
+  deriveNoCandlesticksFromYes,
   formatKalshiCandlesticks,
   parseKalshiCandlesticks,
   parseLimitlessCandlesticks,
+  parseLimitlessCandlesticksBySide,
+  parsePolymarketCandlesticks,
+  resolveBaseIntervalWithCap,
   resolveKalshiBaseInterval,
   resolveLimitlessBaseInterval,
+  resolveRequestedIntervalMinutes,
   shouldAggregateKalshiCandles,
   shouldAggregateLimitlessCandles,
 } from "../lib/candlesticks.js";
@@ -117,6 +122,58 @@ function selectPolymarketRepresentative(
   );
 
   return active ?? eligible[0];
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function clampProbability(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function resolveYesProbability(row: EventDetailsRow): {
+  value: number | null;
+  source: string | null;
+} {
+  const yesBid = toNumber(row.best_bid_yes);
+  const yesAsk = toNumber(row.best_ask_yes);
+  const lastPrice = toNumber(row.last_price);
+
+  if (yesBid != null && yesAsk != null) {
+    return { value: clampProbability((yesBid + yesAsk) / 2), source: "mid" };
+  }
+  if (yesBid != null) {
+    return { value: clampProbability(yesBid), source: "bid" };
+  }
+  if (yesAsk != null) {
+    return { value: clampProbability(yesAsk), source: "ask" };
+  }
+  if (lastPrice != null) {
+    return { value: clampProbability(lastPrice), source: "last" };
+  }
+
+  const noBid = toNumber(row.best_bid_no);
+  const noAsk = toNumber(row.best_ask_no);
+  if (noBid != null && noAsk != null) {
+    return {
+      value: clampProbability(1 - (noBid + noAsk) / 2),
+      source: "no-mid",
+    };
+  }
+  if (noBid != null) {
+    return { value: clampProbability(1 - noBid), source: "no-bid" };
+  }
+  if (noAsk != null) {
+    return { value: clampProbability(1 - noAsk), source: "no-ask" };
+  }
+
+  return { value: null, source: null };
 }
 
 export const eventRoutes: FastifyPluginAsync = async (app) => {
@@ -378,8 +435,17 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const { eventId } = request.params;
-      const { startTs, endTs, periodInterval, interval, fidelity, side } =
-        request.query;
+      const {
+        startTs,
+        endTs,
+        periodInterval,
+        interval,
+        fidelity,
+        side,
+        sides,
+        format,
+        limit,
+      } = request.query;
 
       const clientIp = request.ip || "unknown";
       const rateLimitKey = `candlesticks:event:${clientIp}`;
@@ -391,7 +457,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const cacheKey = `candlesticks:event:${eventId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}:${interval ?? ""}:${fidelity ?? ""}:${side ?? ""}`;
+      const cacheKey = `candlesticks:event:${eventId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}:${interval ?? ""}:${fidelity ?? ""}:${side ?? ""}:${sides ?? ""}:${format ?? ""}:${limit ?? ""}`;
       const r = await getRedis();
       if (r) {
         const cached = await r.get(cacheKey);
@@ -414,6 +480,333 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const event = rows[0];
+        const isExtended = format === "extended";
+        if (isExtended) {
+          const requestedMinutes = resolveRequestedIntervalMinutes({
+            periodInterval,
+            interval,
+            fidelity,
+          });
+          const requestedSides = sides ?? side ?? "YES";
+          const includeYes =
+            requestedSides === "YES" || requestedSides === "BOTH";
+          const includeNo = requestedSides === "NO" || requestedSides === "BOTH";
+          const resolvedLimit = Math.min(Math.max(limit ?? 5, 1), 10);
+
+          const fallbackStartTs = parseTimestampSeconds(event.start_date);
+          const resolvedStartTs =
+            startTs ??
+            fallbackStartTs ??
+            rows
+              .map((row) => parseTimestampSeconds(row.open_time))
+              .filter((value): value is number => value != null)
+              .sort((a, b) => a - b)[0] ??
+            null;
+          const resolvedEndTs = endTs ?? Math.floor(Date.now() / 1000);
+
+          if (resolvedStartTs == null || resolvedEndTs == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs and endTs are required.",
+            });
+          }
+          if (resolvedEndTs <= resolvedStartTs) {
+            reply.code(400);
+            return reply.send({ error: "endTs must be greater than startTs." });
+          }
+
+          if (
+            (event.event_venue === "kalshi" ||
+              event.event_venue === "limitless") &&
+            requestedMinutes == null
+          ) {
+            reply.code(400);
+            return reply.send({
+              error: "periodInterval or interval is required.",
+            });
+          }
+          if (
+            event.event_venue === "kalshi" &&
+            env.dflowRequireApiKey &&
+            !env.dflowApiKey
+          ) {
+            reply.code(400);
+            return reply.send({ error: "Missing DFLOW_API_KEY" });
+          }
+
+          const intervalInfo =
+            event.event_venue === "kalshi"
+              ? resolveBaseIntervalWithCap({
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  requestedMinutes,
+                  supportedMinutes: [1, 60, 1440],
+                })
+              : event.event_venue === "limitless"
+                ? resolveBaseIntervalWithCap({
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    requestedMinutes,
+                    supportedMinutes: [1, 60, 360, 1440, 10080],
+                  })
+                : resolveBaseIntervalWithCap({
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    requestedMinutes,
+                  });
+
+          const ranked = rows
+            .filter((row) => row.market_id)
+            .map((row) => ({
+              row,
+              probability: resolveYesProbability(row),
+            }))
+            .sort((a, b) => {
+              const aValue = a.probability.value;
+              const bValue = b.probability.value;
+              if (aValue == null && bValue == null) return 0;
+              if (aValue == null) return 1;
+              if (bValue == null) return -1;
+              return bValue - aValue;
+            })
+            .slice(0, resolvedLimit);
+
+          const markets = await Promise.all(
+            ranked.map(async ({ row, probability }) => {
+              const tokens = resolveTokenPair(row);
+              const venueMarketId = row.venue_market_id ?? null;
+              const marketSlug = row.market_slug ?? null;
+              const base = {
+                marketId: row.market_id,
+                marketTitle: row.market_title ?? null,
+                venueMarketId,
+                marketSlug,
+                probability: probability.value,
+                probabilitySource: probability.source,
+                tokens,
+              };
+
+              if (row.market_venue === "kalshi") {
+                if (!venueMarketId) {
+                  return { ...base, series: {} };
+                }
+
+                const upstream = await dflowRequest({
+                  baseUrl: env.dflowPredictionMarketsBase,
+                  timeoutMs: 15_000,
+                  method: "GET",
+                  requestPath: `/api/v1/market/${encodeURIComponent(
+                    venueMarketId,
+                  )}/candlesticks`,
+                  apiKey: env.dflowApiKey,
+                  query: {
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    periodInterval: intervalInfo.baseMinutes,
+                  },
+                });
+
+                if (!upstream.ok) {
+                  return { ...base, series: {} };
+                }
+
+                const rawCandles = parseKalshiCandlesticks(upstream.payload);
+                const normalizedCandles =
+                  intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
+                    ? rawCandles.filter(
+                        (candle) =>
+                          candle.t >= resolvedStartTs &&
+                          candle.t <= resolvedEndTs,
+                      )
+                    : aggregateKalshiCandlesticks(
+                        rawCandles,
+                        intervalInfo.normalizedMinutes,
+                        resolvedStartTs,
+                        resolvedEndTs,
+                      );
+
+                const series: Record<string, unknown> = {};
+                if (includeYes) {
+                  series.YES = {
+                    tokenId: tokens.yes ?? null,
+                    candles: normalizedCandles,
+                  };
+                }
+                if (includeNo) {
+                  series.NO = {
+                    tokenId: tokens.no ?? null,
+                    candles: deriveNoCandlesticksFromYes(normalizedCandles),
+                    derived: true,
+                  };
+                }
+
+                return { ...base, series };
+              }
+
+              if (row.market_venue === "limitless") {
+                const slug = marketSlug ?? venueMarketId;
+                if (!slug) {
+                  return { ...base, series: {} };
+                }
+
+                const baseInterval = resolveLimitlessBaseInterval(
+                  intervalInfo.baseMinutes,
+                );
+                const query = new URLSearchParams({
+                  from: new Date(resolvedStartTs * 1000).toISOString(),
+                  to: new Date(resolvedEndTs * 1000).toISOString(),
+                  interval: baseInterval.interval,
+                });
+
+                const upstream = await limitlessRequest({
+                  method: "GET",
+                  requestPath: `/markets/${encodeURIComponent(
+                    slug,
+                  )}/historical-price?${query.toString()}`,
+                });
+
+                if (!upstream.ok) {
+                  return { ...base, series: {} };
+                }
+
+                const parsedBySide = parseLimitlessCandlesticksBySide(
+                  upstream.payload,
+                );
+                const normalize = (candles: typeof parsedBySide.YES) =>
+                  intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
+                    ? candles.filter(
+                        (candle) =>
+                          candle.t >= resolvedStartTs &&
+                          candle.t <= resolvedEndTs,
+                      )
+                    : aggregateKalshiCandlesticks(
+                        candles,
+                        intervalInfo.normalizedMinutes,
+                        resolvedStartTs,
+                        resolvedEndTs,
+                      );
+
+                const yesCandles = normalize(parsedBySide.YES);
+                const noCandles = normalize(parsedBySide.NO);
+                const series: Record<string, unknown> = {};
+                if (includeYes) {
+                  series.YES = {
+                    tokenId: tokens.yes ?? null,
+                    candles: yesCandles,
+                  };
+                }
+                if (includeNo) {
+                  series.NO = {
+                    tokenId: tokens.no ?? null,
+                    candles: noCandles,
+                  };
+                }
+
+                return { ...base, series };
+              }
+
+              if (row.market_venue === "polymarket") {
+                const historyBySide: { YES?: unknown; NO?: unknown } = {};
+                const fetches: Array<Promise<void>> = [];
+
+                if (includeYes && tokens.yes) {
+                  fetches.push(
+                    polymarketClient
+                      .getPriceHistory(tokens.yes, {
+                        startTs: resolvedStartTs,
+                        endTs: resolvedEndTs,
+                        interval: "max",
+                        fidelity: intervalInfo.baseMinutes,
+                      })
+                      .then((history) => {
+                        historyBySide.YES = history;
+                      }),
+                  );
+                }
+
+                if (includeNo && tokens.no) {
+                  fetches.push(
+                    polymarketClient
+                      .getPriceHistory(tokens.no, {
+                        startTs: resolvedStartTs,
+                        endTs: resolvedEndTs,
+                        interval: "max",
+                        fidelity: intervalInfo.baseMinutes,
+                      })
+                      .then((history) => {
+                        historyBySide.NO = history;
+                      }),
+                  );
+                }
+
+                await Promise.all(fetches);
+
+                const normalize = (payload: unknown) => {
+                  const rawCandles = parsePolymarketCandlesticks(payload);
+                  if (
+                    intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
+                  ) {
+                    return rawCandles;
+                  }
+                  return aggregateKalshiCandlesticks(
+                    rawCandles,
+                    intervalInfo.normalizedMinutes,
+                    resolvedStartTs,
+                    resolvedEndTs,
+                  );
+                };
+
+                const series: Record<string, unknown> = {};
+                if (includeYes && historyBySide.YES) {
+                  series.YES = {
+                    tokenId: tokens.yes ?? null,
+                    candles: normalize(historyBySide.YES),
+                  };
+                }
+                if (includeNo && historyBySide.NO) {
+                  series.NO = {
+                    tokenId: tokens.no ?? null,
+                    candles: normalize(historyBySide.NO),
+                  };
+                }
+
+                return { ...base, series };
+              }
+
+              return { ...base, series: {} };
+            }),
+          );
+
+          const response = {
+            ok: true,
+            venue: event.event_venue,
+            eventId: event.event_id,
+            interval: {
+              requestedMinutes: intervalInfo.requestedMinutes,
+              normalizedMinutes: intervalInfo.normalizedMinutes,
+              baseMinutes: intervalInfo.baseMinutes,
+              startTs: resolvedStartTs,
+              endTs: resolvedEndTs,
+            },
+            limit: resolvedLimit,
+            rankedBy: "yesProbability",
+            markets,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
         if (event.event_venue === "kalshi") {
           if (startTs == null || endTs == null || periodInterval == null) {
             reply.code(400);

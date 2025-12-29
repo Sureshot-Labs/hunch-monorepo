@@ -58,6 +58,24 @@ const refreshMinutes = Math.max(
   Number.isFinite(refreshMinutesRaw) ? refreshMinutesRaw : 5,
 );
 
+const httpDelayRaw = Number(process.env.LIMITLESS_HTTP_MIN_DELAY_MS ?? "500");
+const limitlessHttpMinDelayMs = Math.max(
+  0,
+  Number.isFinite(httpDelayRaw) ? httpDelayRaw : 500,
+);
+
+const httpRetriesRaw = Number(process.env.LIMITLESS_HTTP_MAX_RETRIES ?? "2");
+const limitlessHttpMaxRetries = Math.max(
+  0,
+  Number.isFinite(httpRetriesRaw) ? httpRetriesRaw : 2,
+);
+
+const httpBackoffRaw = Number(process.env.LIMITLESS_HTTP_BACKOFF_MS ?? "750");
+const limitlessHttpBackoffMs = Math.max(
+  0,
+  Number.isFinite(httpBackoffRaw) ? httpBackoffRaw : 750,
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -74,6 +92,10 @@ export const env = {
   bootstrapMaxPages,
   // minutes between refreshes
   refreshMinutes,
+
+  limitlessHttpMinDelayMs,
+  limitlessHttpMaxRetries,
+  limitlessHttpBackoffMs,
 
   // AMM prices are % (0..100) in /markets/active; CLOB prices are 0..1.
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",

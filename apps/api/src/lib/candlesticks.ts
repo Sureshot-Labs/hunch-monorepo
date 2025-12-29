@@ -8,6 +8,7 @@ type CandleValues = {
   c: number;
 };
 
+const DEFAULT_MAX_CANDLE_POINTS = 2000;
 const SUPPORTED_PERIOD_MINUTES = new Set([1, 60, 1440]);
 const LIMITLESS_INTERVALS = [
   { interval: "1m", minutes: 1 },
@@ -18,6 +19,23 @@ const LIMITLESS_INTERVALS = [
 ] as const;
 type LimitlessInterval = (typeof LIMITLESS_INTERVALS)[number]["interval"];
 
+const INTERVAL_MINUTES: Record<string, number> = {
+  "1m": 1,
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "6h": 360,
+  "12h": 720,
+  "1d": 1440,
+  "1w": 10080,
+  "1M": 43200,
+  "6M": 259200,
+  "1Y": 525600,
+};
+
 function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -25,6 +43,81 @@ function toNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+export function parseIntervalMinutes(interval: string | undefined): number | null {
+  if (!interval) return null;
+  const trimmed = interval.trim();
+  if (!trimmed) return null;
+  if (INTERVAL_MINUTES[trimmed] != null) return INTERVAL_MINUTES[trimmed];
+  const lower = trimmed.toLowerCase();
+  if (INTERVAL_MINUTES[lower] != null) return INTERVAL_MINUTES[lower];
+  return null;
+}
+
+export function resolveRequestedIntervalMinutes(inputs: {
+  periodInterval?: number;
+  interval?: string;
+  fidelity?: number;
+}): number | null {
+  const period =
+    typeof inputs.periodInterval === "number" && inputs.periodInterval > 0
+      ? Math.floor(inputs.periodInterval)
+      : null;
+  if (period != null) return period;
+  const parsed = parseIntervalMinutes(inputs.interval);
+  if (parsed != null) return parsed;
+  const fidelity =
+    typeof inputs.fidelity === "number" && inputs.fidelity > 0
+      ? Math.floor(inputs.fidelity)
+      : null;
+  return fidelity;
+}
+
+export function resolveBaseIntervalWithCap(inputs: {
+  startTs: number;
+  endTs: number;
+  requestedMinutes: number | null;
+  supportedMinutes?: number[];
+  maxPoints?: number;
+}): {
+  baseMinutes: number;
+  normalizedMinutes: number;
+  requestedMinutes: number | null;
+  minIntervalMinutes: number;
+} {
+  const maxPoints =
+    inputs.maxPoints && inputs.maxPoints > 0
+      ? Math.floor(inputs.maxPoints)
+      : DEFAULT_MAX_CANDLE_POINTS;
+  const rangeSeconds = Math.max(0, inputs.endTs - inputs.startTs);
+  const durationMinutes = Math.max(1, Math.ceil(rangeSeconds / 60));
+  const minIntervalMinutes = Math.max(
+    1,
+    Math.ceil(durationMinutes / maxPoints),
+  );
+
+  const supported =
+    inputs.supportedMinutes && inputs.supportedMinutes.length
+      ? [...inputs.supportedMinutes].sort((a, b) => a - b)
+      : null;
+  const baseMinutes = supported
+    ? supported.find((minutes) => minutes >= minIntervalMinutes) ??
+      supported[supported.length - 1]
+    : minIntervalMinutes;
+
+  const requestedMinutes =
+    inputs.requestedMinutes && inputs.requestedMinutes > 0
+      ? Math.floor(inputs.requestedMinutes)
+      : null;
+  const normalizedMinutes = Math.max(requestedMinutes ?? baseMinutes, baseMinutes);
+
+  return {
+    baseMinutes,
+    normalizedMinutes,
+    requestedMinutes,
+    minIntervalMinutes,
+  };
 }
 
 function parseTimestampSeconds(value: unknown): number | null {
@@ -228,6 +321,52 @@ export function parseLimitlessCandlesticks(
   }
 
   return candles.sort((a, b) => a.t - b.t);
+}
+
+export function parseLimitlessCandlesticksBySide(payload: unknown): {
+  YES: CandleValues[];
+  NO: CandleValues[];
+} {
+  return {
+    YES: parseLimitlessCandlesticks(payload, "YES"),
+    NO: parseLimitlessCandlesticks(payload, "NO"),
+  };
+}
+
+export function parsePolymarketCandlesticks(payload: unknown): CandleValues[] {
+  const history = isRecord(payload) ? payload.history : undefined;
+  if (!Array.isArray(history)) return [];
+
+  const candles: CandleValues[] = [];
+  for (const entry of history) {
+    if (!isRecord(entry)) continue;
+    const t =
+      toNumber(entry.t) ??
+      toNumber(entry.ts) ??
+      toNumber(entry.time) ??
+      toNumber(entry.timestamp);
+    const price =
+      toNumber(entry.p) ??
+      toNumber(entry.price) ??
+      toNumber(entry.c) ??
+      toNumber(entry.close);
+    if (t == null || price == null) continue;
+    candles.push({ t, o: price, h: price, l: price, c: price });
+  }
+
+  return candles.sort((a, b) => a.t - b.t);
+}
+
+export function deriveNoCandlesticksFromYes(
+  candles: CandleValues[],
+): CandleValues[] {
+  return candles.map((candle) => ({
+    t: candle.t,
+    o: 1 - candle.o,
+    h: 1 - candle.l,
+    l: 1 - candle.h,
+    c: 1 - candle.c,
+  }));
 }
 
 export function aggregateKalshiCandlesticks(

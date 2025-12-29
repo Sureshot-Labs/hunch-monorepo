@@ -1,3 +1,5 @@
+import PQueue from "p-queue";
+
 import { env } from "./env.js";
 import {
   LimitlessActiveResponse,
@@ -5,25 +7,56 @@ import {
   LimitlessOrderbook,
   TLimitlessMarket,
 } from "./types.js";
-
 const defaultHeaders = {
   accept: "application/json",
   "X-API-Version": "v1",
   "user-agent": "hunch-indexer/limitless",
 };
 
+const requestQueue = new PQueue({
+  concurrency: 1,
+  interval: env.limitlessHttpMinDelayMs,
+  intervalCap: 1,
+});
+
+function sleep(ms: number) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetry(status: number) {
+  return status === 429 || status === 403 || status === 503;
+}
+
 async function getJson(url: string) {
-  const r = await fetch(url, { headers: defaultHeaders });
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    const snippet = body.trim();
-    const details =
-      snippet.length > 0
-        ? `: ${snippet.slice(0, 800)}${snippet.length > 800 ? "…" : ""}`
-        : "";
-    throw new Error(`Limitless ${r.status} ${url}${details}`);
-  }
-  return r.json();
+  return requestQueue.add(async () => {
+    let attempt = 0;
+    while (true) {
+      const r = await fetch(url, { headers: defaultHeaders });
+      if (r.ok) {
+        return r.json();
+      }
+
+      const body = await r.text().catch(() => "");
+      const snippet = body.trim();
+      const details =
+        snippet.length > 0
+          ? `: ${snippet.slice(0, 800)}${snippet.length > 800 ? "…" : ""}`
+          : "";
+      const message = `Limitless ${r.status} ${url}${details}`;
+
+      if (shouldRetry(r.status) && attempt < env.limitlessHttpMaxRetries) {
+        const backoff =
+          env.limitlessHttpBackoffMs * 2 ** attempt +
+          Math.floor(Math.random() * 250);
+        attempt += 1;
+        await sleep(backoff);
+        continue;
+      }
+
+      throw new Error(message);
+    }
+  });
 }
 
 export async function fetchActivePage(

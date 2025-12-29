@@ -159,10 +159,13 @@ export async function bootstrapLimitless() {
 
   for (const lm of markets) {
     try {
-      const detail =
-        lm.marketType === "group" || lm.tradeType?.toLowerCase() === "clob"
-          ? await getMarketDetail(lm.slug)
-          : null;
+      const needsDetail =
+        lm.marketType === "group"
+          ? !lm.markets?.length
+          : lm.tradeType?.toLowerCase() === "clob"
+            ? !lm.tokens?.yes || !lm.tokens?.no
+            : false;
+      const detail = needsDetail ? await getMarketDetail(lm.slug) : null;
       const mergedTop = mergeMarket(lm, detail);
 
       // Store the main event
