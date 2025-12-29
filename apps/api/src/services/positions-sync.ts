@@ -1,14 +1,22 @@
 import type { Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
-import { syncWalletPositionsFromTokenBalances } from "../repos/positions-repo.js";
+import {
+  syncWalletPositionsFromTokenBalances,
+  type WalletTokenBalance,
+} from "../repos/positions-repo.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { isRecord } from "../lib/type-guards.js";
 import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 import { AuthService } from "../auth.js";
 import { fetchPolymarketTrades } from "./polymarket-clob-l2.js";
+import {
+  extractLimitlessMessage,
+  limitlessRequest,
+} from "./limitless-client.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -28,6 +36,143 @@ function normalizeFillSide(value: string | null | undefined): "BUY" | "SELL" | n
   const normalized = value.trim().toUpperCase();
   if (normalized === "BUY" || normalized === "SELL") return normalized;
   return null;
+}
+
+function parseBalanceString(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toString();
+  }
+  if (typeof value === "bigint") return value.toString();
+  return null;
+}
+
+function normalizeLimitlessTokenId(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("limitless:") ? trimmed : `limitless:${trimmed}`;
+}
+
+function extractPositionIds(value: unknown): string[] {
+  const output: string[] = [];
+  const visit = (input: unknown) => {
+    if (Array.isArray(input)) {
+      for (const entry of input) visit(entry);
+      return;
+    }
+    if (typeof input === "string" || typeof input === "number") {
+      const text = String(input).trim();
+      if (text) output.push(text);
+    }
+  };
+  visit(value);
+  return output;
+}
+
+function addTokenBalance(
+  output: WalletTokenBalance[],
+  seen: Set<string>,
+  tokenId: string,
+  size: string,
+) {
+  if (!tokenId || !size) return;
+  const normalized = normalizeLimitlessTokenId(tokenId);
+  if (seen.has(normalized)) return;
+  const numeric = Number(size);
+  if (!Number.isFinite(numeric) || numeric <= 0) return;
+  seen.add(normalized);
+  output.push({ tokenId: normalized, size });
+}
+
+function extractTokenBalancesFromMap(
+  output: WalletTokenBalance[],
+  seen: Set<string>,
+  tokenBalances: Record<string, unknown>,
+  yesToken: string | null,
+  noToken: string | null,
+) {
+  const yesValue = parseBalanceString(tokenBalances.yes);
+  const noValue = parseBalanceString(tokenBalances.no);
+  if (yesValue && yesToken) {
+    addTokenBalance(output, seen, yesToken, yesValue);
+  }
+  if (noValue && noToken) {
+    addTokenBalance(output, seen, noToken, noValue);
+  }
+
+  for (const [key, value] of Object.entries(tokenBalances)) {
+    if (key === "yes" || key === "no") continue;
+    const size = parseBalanceString(value);
+    if (!size) continue;
+    addTokenBalance(output, seen, key, size);
+  }
+}
+
+function extractTokenBalancesFromArray(
+  output: WalletTokenBalance[],
+  seen: Set<string>,
+  tokenBalances: unknown[],
+) {
+  for (const entry of tokenBalances) {
+    if (!isRecord(entry)) continue;
+    const tokenId =
+      typeof entry.tokenId === "string"
+        ? entry.tokenId
+        : typeof entry.token_id === "string"
+          ? entry.token_id
+          : typeof entry.positionId === "string"
+            ? entry.positionId
+            : typeof entry.id === "string"
+              ? entry.id
+              : null;
+    const size = parseBalanceString(
+      entry.balance ?? entry.amount ?? entry.size ?? entry.value,
+    );
+    if (!tokenId || !size) continue;
+    addTokenBalance(output, seen, tokenId, size);
+  }
+}
+
+function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
+  if (!isRecord(payload)) return [];
+  const clob = Array.isArray(payload.clob)
+    ? payload.clob
+    : Array.isArray(payload.positions)
+      ? payload.positions
+      : [];
+  if (!Array.isArray(clob)) return [];
+
+  const output: WalletTokenBalance[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of clob) {
+    if (!isRecord(entry)) continue;
+    const market = isRecord(entry.market) ? entry.market : null;
+    const positionIdsRaw =
+      (market && (market.position_ids ?? market.positionIds)) ?? null;
+    const positionIds = extractPositionIds(positionIdsRaw);
+    const yesToken =
+      market && isRecord(market.tokens) && typeof market.tokens.yes === "string"
+        ? market.tokens.yes
+        : positionIds[0] ?? null;
+    const noToken =
+      market && isRecord(market.tokens) && typeof market.tokens.no === "string"
+        ? market.tokens.no
+        : positionIds[1] ?? null;
+
+    const tokenBalances = entry.tokensBalance ?? entry.tokens_balance ?? null;
+    if (Array.isArray(tokenBalances)) {
+      extractTokenBalancesFromArray(output, seen, tokenBalances);
+      continue;
+    }
+    if (isRecord(tokenBalances)) {
+      extractTokenBalancesFromMap(output, seen, tokenBalances, yesToken, noToken);
+    }
+  }
+
+  return output;
 }
 
 async function backfillPolymarketUnifiedTokens(
@@ -555,6 +700,61 @@ async function syncPolymarketPositionsFromPolygon(
   };
 }
 
+async function syncLimitlessPositionsFromPortfolio(
+  pool: Pool,
+  inputs: { userId: string; walletAddress: string },
+): Promise<PositionsSyncResult> {
+  const creds = await AuthService.getVenueCredentials(
+    inputs.userId,
+    "limitless",
+    inputs.walletAddress,
+  );
+  const sessionCookie = creds?.apiSecret?.trim();
+  if (!sessionCookie) {
+    throw new Error("Limitless session not found (connect first).");
+  }
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: "/portfolio/positions",
+    sessionCookie,
+  });
+
+  if (!upstream.ok) {
+    const message = extractLimitlessMessage(upstream.payload);
+    throw new Error(
+      message
+        ? `Limitless positions sync failed: ${message}`
+        : "Limitless positions sync failed.",
+    );
+  }
+
+  const tokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  if (tokenBalances.length) {
+    void markHotTokens({
+      tokenIds: tokenBalances.map((balance) => balance.tokenId),
+      venue: "limitless",
+    });
+  }
+
+  const result = await syncWalletPositionsFromTokenBalances(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "limitless",
+    tokenBalances,
+    tokenIdLike: "limitless:%",
+  });
+
+  return {
+    venue: "limitless",
+    walletAddress: inputs.walletAddress,
+    heldTokens: result.heldTokens,
+    knownTokens: result.knownTokens,
+    upsertedPositions: result.upsertedPositions,
+    flattenedPositions: result.flattenedPositions,
+  };
+}
+
 export async function syncPositionsForUserWallet(
   pool: Pool,
   inputs: {
@@ -568,7 +768,8 @@ export async function syncPositionsForUserWallet(
   if (
     requestedVenue &&
     requestedVenue !== "kalshi" &&
-    requestedVenue !== "polymarket"
+    requestedVenue !== "polymarket" &&
+    requestedVenue !== "limitless"
   ) {
     throw new Error(
       `Positions sync is not implemented yet for venue=${requestedVenue}`,
@@ -581,15 +782,21 @@ export async function syncPositionsForUserWallet(
         "Selected wallet looks like an EVM address; select a Solana wallet to sync Kalshi positions.",
       );
     }
+    if (requestedVenue === "limitless") {
+      return syncLimitlessPositionsFromPortfolio(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+      });
+    }
     return syncPolymarketPositionsFromPolygon(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
     });
   }
 
-  if (requestedVenue === "polymarket") {
+  if (requestedVenue === "polymarket" || requestedVenue === "limitless") {
     throw new Error(
-      "Selected wallet looks like a Solana address; select an EVM wallet to sync Polymarket positions.",
+      "Selected wallet looks like a Solana address; select an EVM wallet to sync positions.",
     );
   }
 

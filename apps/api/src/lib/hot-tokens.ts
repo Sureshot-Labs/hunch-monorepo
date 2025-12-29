@@ -1,12 +1,13 @@
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 
-export type HotVenue = "polymarket" | "kalshi" | "dflow";
+export type HotVenue = "polymarket" | "kalshi" | "dflow" | "limitless";
 
 const HOT_KEYS: Record<HotVenue, string> = {
   polymarket: "hot:tokens:polymarket",
   kalshi: "hot:tokens:kalshi",
   dflow: "hot:tokens:dflow",
+  limitless: "hot:tokens:limitless",
 };
 
 function normalizeTokenId(value: string): string | null {
@@ -17,6 +18,7 @@ function normalizeTokenId(value: string): string | null {
 function inferVenue(tokenId: string): HotVenue | null {
   if (tokenId.startsWith("sol:")) return "dflow";
   if (tokenId.startsWith("kalshi:")) return "kalshi";
+  if (tokenId.startsWith("limitless:")) return "limitless";
   if (/^\d+$/.test(tokenId)) return "polymarket";
   return null;
 }

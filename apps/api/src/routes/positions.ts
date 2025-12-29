@@ -391,7 +391,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         const statusCode = messageLower.includes("not implemented")
           ? 501
           : messageLower.includes("select a solana") ||
-              messageLower.includes("evm address")
+              messageLower.includes("evm address") ||
+              messageLower.includes("connect first") ||
+              messageLower.includes("session not found")
             ? 400
             : 500;
 

@@ -112,6 +112,124 @@ function deriveSize(
   return shares / 1_000_000;
 }
 
+function readOrderField(
+  record: Record<string, unknown>,
+  keys: string[],
+): unknown | null {
+  for (const key of keys) {
+    if (record[key] != null) return record[key];
+  }
+  if (isRecord(record.order)) {
+    for (const key of keys) {
+      if (record.order[key] != null) return record.order[key];
+    }
+  }
+  return null;
+}
+
+function extractLimitlessOrders(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) {
+    return payload.filter(isRecord);
+  }
+  if (isRecord(payload)) {
+    const collection =
+      payload.orders ?? payload.data ?? payload.items ?? payload.results;
+    if (Array.isArray(collection)) {
+      return collection.filter(isRecord);
+    }
+    if (isRecord(collection)) {
+      return [collection];
+    }
+    if (payload.id || payload.orderId || payload.order_id) {
+      return [payload];
+    }
+  }
+  return [];
+}
+
+function normalizeOrderId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toString();
+  }
+  return null;
+}
+
+function extractLimitlessOrderId(record: Record<string, unknown>): string | null {
+  return normalizeOrderId(readOrderField(record, ["id", "orderId", "order_id"]));
+}
+
+function extractLimitlessTokenId(
+  record: Record<string, unknown>,
+): string | null {
+  return normalizeOrderId(
+    readOrderField(record, ["tokenId", "token_id", "outcomeTokenId"]),
+  );
+}
+
+function extractLimitlessOrderSide(
+  record: Record<string, unknown>,
+): "BUY" | "SELL" | null {
+  return normalizeOrderSide(readOrderField(record, ["side", "orderSide"]));
+}
+
+function extractLimitlessOrderType(
+  record: Record<string, unknown>,
+): "GTC" | "FOK" | null {
+  const value = readOrderField(record, ["orderType", "type"]);
+  if (typeof value === "string") {
+    const upper = value.trim().toUpperCase();
+    if (upper === "GTC" || upper === "FOK") return upper;
+  }
+  return null;
+}
+
+function extractLimitlessOrderStatus(record: Record<string, unknown>): string {
+  const value = readOrderField(record, ["status", "orderStatus"]);
+  if (typeof value === "string" && value.trim()) {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "open" || normalized === "active" || normalized === "live") {
+      return "live";
+    }
+    if (normalized === "cancelled" || normalized === "canceled") {
+      return "cancelled";
+    }
+    if (normalized === "filled" || normalized === "complete") {
+      return "filled";
+    }
+    return normalized;
+  }
+  return "live";
+}
+
+function extractLimitlessCanceledIds(
+  payload: unknown,
+  fallback: string[],
+): string[] {
+  if (!isRecord(payload)) return fallback;
+  const candidates =
+    payload.canceled ??
+    payload.cancelled ??
+    payload.canceledOrders ??
+    payload.cancelledOrders;
+  if (!Array.isArray(candidates)) return fallback;
+  const ids = candidates
+    .map((entry) => {
+      if (typeof entry === "string") return entry.trim();
+      if (isRecord(entry)) {
+        return normalizeOrderId(
+          entry.orderId ?? entry.order_id ?? entry.id ?? null,
+        );
+      }
+      return null;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+  return ids.length ? ids : fallback;
+}
+
 export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -624,6 +742,107 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * POST /orders/sync
+   * Fetch open orders from Limitless and upsert them into `orders`.
+   */
+  z.post(
+    "/orders/sync",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessOpenOrdersQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const creds = await AuthService.getVenueCredentials(
+        user.id,
+        "limitless",
+        signer,
+      );
+      const sessionCookie = creds?.apiSecret?.trim();
+      if (!sessionCookie) {
+        reply.code(400);
+        return reply.send({
+          error: "Limitless session not found (connect first)",
+        });
+      }
+
+      const upstream = await limitlessRequest({
+        method: "GET",
+        requestPath: `/markets/${encodeURIComponent(
+          request.query.slug,
+        )}/user-orders`,
+        sessionCookie,
+      });
+
+      if (!upstream.ok) {
+        reply.code(502);
+        return reply.send({
+          error: "Limitless orders sync failed",
+          status: upstream.status,
+          payload: upstream.payload,
+        });
+      }
+
+      const ordersRaw = extractLimitlessOrders(upstream.payload);
+      let storedNew = 0;
+      let alreadyKnown = 0;
+      let skippedNoId = 0;
+      const orderIds: string[] = [];
+
+      for (const order of ordersRaw) {
+        const venueOrderId = extractLimitlessOrderId(order);
+        if (!venueOrderId) {
+          skippedNoId += 1;
+          continue;
+        }
+        orderIds.push(venueOrderId);
+
+        const tokenId = extractLimitlessTokenId(order);
+        const side = extractLimitlessOrderSide(order);
+        const orderType = extractLimitlessOrderType(order);
+        const status = extractLimitlessOrderStatus(order);
+
+        const result = await storeOrder(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          signerAddress: signer,
+          venue: "limitless",
+          venueOrderId,
+          tokenId: tokenId ?? null,
+          side,
+          orderType: orderType ?? undefined,
+          price: null,
+          size: null,
+          status,
+          errorMessage: null,
+          rawError: null,
+        });
+
+        if (result.kind === "stored") storedNew += 1;
+        if (result.kind === "exists") alreadyKnown += 1;
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        venue: "limitless",
+        walletAddress: signer,
+        fetched: ordersRaw.length,
+        storedNew,
+        alreadyKnown,
+        skippedNoId,
+        sampleVenueOrderIds: orderIds.slice(0, 10),
+      });
+    },
+  );
+
+  /**
    * GET /orders/:orderId
    */
   z.get(
@@ -718,6 +937,20 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      await pool.query(
+        `
+          update orders
+          set status = 'cancelled',
+              cancelled_at = now(),
+              last_update = now()
+          where user_id = $1
+            and (wallet_address = $2 or signer_address = $2)
+            and venue = 'limitless'
+            and venue_order_id = $3
+        `,
+        [user.id, signer, request.params.orderId],
+      );
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, payload: upstream.payload });
     },
@@ -769,6 +1002,26 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const cancelledIds = extractLimitlessCanceledIds(
+        upstream.payload,
+        request.body.orderIds,
+      );
+      if (cancelledIds.length) {
+        await pool.query(
+          `
+            update orders
+            set status = 'cancelled',
+                cancelled_at = now(),
+                last_update = now()
+            where user_id = $1
+              and (wallet_address = $2 or signer_address = $2)
+              and venue = 'limitless'
+              and venue_order_id = ANY($3::text[])
+          `,
+          [user.id, signer, cancelledIds],
+        );
+      }
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, payload: upstream.payload });
     },
@@ -804,6 +1057,29 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      let openOrderIds: string[] = [];
+      const openOrders = await limitlessRequest({
+        method: "GET",
+        requestPath: `/markets/${encodeURIComponent(
+          request.params.slug,
+        )}/user-orders`,
+        sessionCookie,
+      });
+      if (openOrders.ok) {
+        openOrderIds = extractLimitlessOrders(openOrders.payload)
+          .map((order) => extractLimitlessOrderId(order))
+          .filter((orderId): orderId is string => Boolean(orderId));
+      } else {
+        app.log.warn(
+          {
+            status: openOrders.status,
+            payload: openOrders.payload,
+            slug: request.params.slug,
+          },
+          "Limitless cancel all: failed to fetch open orders",
+        );
+      }
+
       const upstream = await limitlessRequest({
         method: "DELETE",
         requestPath: `/orders/all/${request.params.slug}`,
@@ -817,6 +1093,26 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           status: upstream.status,
           payload: upstream.payload,
         });
+      }
+
+      const cancelledIds = extractLimitlessCanceledIds(
+        upstream.payload,
+        openOrderIds,
+      );
+      if (cancelledIds.length) {
+        await pool.query(
+          `
+            update orders
+            set status = 'cancelled',
+                cancelled_at = now(),
+                last_update = now()
+            where user_id = $1
+              and (wallet_address = $2 or signer_address = $2)
+              and venue = 'limitless'
+              and venue_order_id = ANY($3::text[])
+          `,
+          [user.id, signer, cancelledIds],
+        );
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
