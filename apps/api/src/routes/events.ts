@@ -11,11 +11,100 @@ import {
   resolveKalshiBaseInterval,
   shouldAggregateKalshiCandles,
 } from "../lib/candlesticks.js";
-import { fetchEventDetails } from "../repos/unified-read.js";
+import { fetchEventDetails, type EventDetailsRow } from "../repos/unified-read.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import { eventParamsSchema } from "../schemas/event.js";
 import type { TokenPair } from "../server-types.js";
+
+type PolymarketRepresentative = {
+  row: EventDetailsRow;
+  tokens: TokenPair;
+};
+
+function parseTimestampSeconds(value: unknown): number | null {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    const time = value.getTime();
+    return Number.isFinite(time) ? Math.floor(time / 1000) : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const seconds = value > 1_000_000_000_000 ? value / 1000 : value;
+    return Math.floor(seconds);
+  }
+  const parsed = Date.parse(String(value));
+  if (Number.isNaN(parsed)) return null;
+  return Math.floor(parsed / 1000);
+}
+
+function resolveTokenPair(row: EventDetailsRow): TokenPair {
+  const tokens: TokenPair = {
+    yes: row.token_yes != null ? String(row.token_yes) : null,
+    no: row.token_no != null ? String(row.token_no) : null,
+  };
+
+  if ((!tokens.yes || !tokens.no) && row.clob_token_ids) {
+    const raw = row.clob_token_ids;
+    let parsed: unknown;
+    if (Array.isArray(raw)) {
+      parsed = raw;
+    } else {
+      try {
+        parsed = JSON.parse(String(raw));
+      } catch {
+        parsed = null;
+      }
+    }
+    if (Array.isArray(parsed)) {
+      if (!tokens.yes && parsed[0] != null) {
+        tokens.yes = String(parsed[0]);
+      }
+      if (!tokens.no && parsed[1] != null) {
+        tokens.no = String(parsed[1]);
+      }
+    }
+  }
+
+  return tokens;
+}
+
+function isAcceptingOrders(row: EventDetailsRow): boolean {
+  if (row.pm_accepting_orders != null) {
+    return Boolean(row.pm_accepting_orders);
+  }
+  if (row.market_status !== "ACTIVE") return false;
+
+  const now = Math.floor(Date.now() / 1000);
+  const closeTs = parseTimestampSeconds(row.close_time);
+  if (closeTs != null && closeTs <= now) return false;
+  const expirationTs = parseTimestampSeconds(row.expiration_time);
+  if (expirationTs != null && expirationTs <= now) return false;
+
+  return true;
+}
+
+function selectPolymarketRepresentative(
+  rows: EventDetailsRow[],
+  side: "YES" | "NO",
+): PolymarketRepresentative | null {
+  const candidates = rows
+    .filter((row) => row.market_venue === "polymarket")
+    .map((row) => ({ row, tokens: resolveTokenPair(row) }))
+    .filter((candidate) => candidate.tokens.yes || candidate.tokens.no);
+
+  if (candidates.length === 0) return null;
+
+  const sideCandidates = candidates.filter((candidate) =>
+    side === "NO" ? candidate.tokens.no : candidate.tokens.yes,
+  );
+  const eligible = sideCandidates.length ? sideCandidates : candidates;
+  const active = eligible.find((candidate) =>
+    isAcceptingOrders(candidate.row),
+  );
+
+  return active ?? eligible[0];
+}
 
 export const eventRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -276,7 +365,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const { eventId } = request.params;
-      const { startTs, endTs, periodInterval } = request.query;
+      const { startTs, endTs, periodInterval, interval, fidelity, side } =
+        request.query;
 
       const clientIp = request.ip || "unknown";
       const rateLimitKey = `candlesticks:event:${clientIp}`;
@@ -288,7 +378,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const cacheKey = `candlesticks:event:${eventId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}`;
+      const cacheKey = `candlesticks:event:${eventId}:${startTs ?? ""}:${endTs ?? ""}:${periodInterval ?? ""}:${interval ?? ""}:${fidelity ?? ""}:${side ?? ""}`;
       const r = await getRedis();
       if (r) {
         const cached = await r.get(cacheKey);
@@ -375,6 +465,65 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             eventId: event.event_id,
             ticker: event.venue_event_id,
             data,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (event.event_venue === "polymarket") {
+          const resolvedSide = side ?? "YES";
+          const candidate = selectPolymarketRepresentative(rows, resolvedSide);
+          if (!candidate) {
+            reply.code(400);
+            return reply.send({
+              error: "No Polymarket markets available for this event.",
+            });
+          }
+
+          const tokenId =
+            resolvedSide === "NO"
+              ? candidate.tokens.no
+              : candidate.tokens.yes;
+          if (!tokenId) {
+            reply.code(400);
+            return reply.send({
+              error: `Missing Polymarket token for side ${resolvedSide}.`,
+            });
+          }
+
+          const fallbackStart =
+            parseTimestampSeconds(candidate.row.open_time) ??
+            parseTimestampSeconds(event.start_date);
+          const resolvedStartTs = startTs ?? fallbackStart ?? undefined;
+          const resolvedEndTs = endTs ?? Math.floor(Date.now() / 1000);
+          const resolvedFidelity = fidelity ?? periodInterval;
+
+          const history = await polymarketClient.getPriceHistory(tokenId, {
+            startTs: resolvedStartTs,
+            endTs: resolvedEndTs,
+            interval: interval ?? "max",
+            fidelity: resolvedFidelity,
+          });
+
+          const response = {
+            ok: true,
+            venue: "polymarket",
+            eventId: event.event_id,
+            marketId: candidate.row.market_id,
+            tokenId,
+            side: resolvedSide,
+            data: history,
           };
           const responseBody = JSON.stringify(response);
 
