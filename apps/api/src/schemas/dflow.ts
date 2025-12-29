@@ -45,6 +45,8 @@ export const dflowExecutionBodySchema = z.object({
   outputMint: zRequiredString("outputMint is required"),
   amountIn: zNumberish.optional(),
   amountOut: zNumberish.optional(),
+  inputDecimals: z.coerce.number().int().min(0).max(18).optional(),
+  outputDecimals: z.coerce.number().int().min(0).max(18).optional(),
   quoteId: z.string().optional(),
   txSignature: zRequiredString("txSignature is required"),
   status: z.string().optional(),

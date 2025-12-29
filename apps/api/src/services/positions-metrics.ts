@@ -195,6 +195,8 @@ function buildDflowFill(row: {
   output_mint: string | null;
   amount_in: string | null;
   amount_out: string | null;
+  input_decimals: number | null;
+  output_decimals: number | null;
   created_at: Date;
 }): TradeFill | null {
   const side = normalizeSide(row.side);
@@ -203,17 +205,19 @@ function buildDflowFill(row: {
   let tokenId: string | null = null;
   let sharesRaw: number | null = null;
   let usdcRaw: number | null = null;
+  const inputDecimals = row.input_decimals ?? USDC_DECIMALS;
+  const outputDecimals = row.output_decimals ?? USDC_DECIMALS;
 
   if (side === "BUY") {
     if (!row.output_mint) return null;
     tokenId = `sol:${row.output_mint}`;
-    sharesRaw = parseRawAmount(row.amount_out);
-    usdcRaw = parseRawAmount(row.amount_in);
+    sharesRaw = parseRawAmount(row.amount_out, outputDecimals);
+    usdcRaw = parseRawAmount(row.amount_in, inputDecimals);
   } else {
     if (!row.input_mint) return null;
     tokenId = `sol:${row.input_mint}`;
-    sharesRaw = parseRawAmount(row.amount_in);
-    usdcRaw = parseRawAmount(row.amount_out);
+    sharesRaw = parseRawAmount(row.amount_in, inputDecimals);
+    usdcRaw = parseRawAmount(row.amount_out, outputDecimals);
   }
 
   if (tokenId == null || sharesRaw == null || usdcRaw == null) return null;
@@ -432,6 +436,8 @@ async function fetchDflowFills(
     output_mint: string | null;
     amount_in: string | null;
     amount_out: string | null;
+    input_decimals: number | null;
+    output_decimals: number | null;
     created_at: Date;
   }>(
     `
@@ -441,6 +447,8 @@ async function fetchDflowFills(
         output_mint,
         amount_in,
         amount_out,
+        input_decimals,
+        output_decimals,
         created_at
       from executions
       where user_id = $1

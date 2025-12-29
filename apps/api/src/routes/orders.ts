@@ -45,6 +45,8 @@ const mapUnifiedOrder = (
   outputMint: row.output_mint,
   amountIn: toNumber(row.amount_in),
   amountOut: toNumber(row.amount_out),
+  inputDecimals: toNumber(row.input_decimals),
+  outputDecimals: toNumber(row.output_decimals),
   txSignature: row.tx_signature,
 });
 

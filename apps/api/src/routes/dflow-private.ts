@@ -436,6 +436,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           outputMint: body.outputMint ?? null,
           amountIn: body.amountIn ?? null,
           amountOut: body.amountOut ?? null,
+          inputDecimals: body.inputDecimals ?? null,
+          outputDecimals: body.outputDecimals ?? null,
           quoteId: body.quoteId ?? null,
           txSignature: body.txSignature ?? null,
           status: body.status ?? null,
@@ -457,6 +459,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
               execution.amount_in != null ? Number(execution.amount_in) : null,
             amountOut:
               execution.amount_out != null ? Number(execution.amount_out) : null,
+            inputDecimals: execution.input_decimals ?? null,
+            outputDecimals: execution.output_decimals ?? null,
             quoteId: execution.quote_id,
             txSignature: execution.tx_signature,
             venueOrderId: execution.venue_order_id,

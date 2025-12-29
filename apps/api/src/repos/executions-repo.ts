@@ -13,6 +13,8 @@ export type ExecutionRow = {
   output_mint: string | null;
   amount_in: string | null;
   amount_out: string | null;
+  input_decimals: number | null;
+  output_decimals: number | null;
   quote_id: string | null;
   tx_signature: string | null;
   venue_order_id: string | null;
@@ -35,6 +37,8 @@ export async function storeExecution(
     outputMint?: string | null;
     amountIn?: string | number | null;
     amountOut?: string | number | null;
+    inputDecimals?: number | null;
+    outputDecimals?: number | null;
     quoteId?: string | null;
     txSignature?: string | null;
     venueOrderId?: string | null;
@@ -61,6 +65,8 @@ export async function storeExecution(
         output_mint,
         amount_in,
         amount_out,
+        input_decimals,
+        output_decimals,
         quote_id,
         tx_signature,
         venue_order_id,
@@ -72,7 +78,7 @@ export async function storeExecution(
       values (
         gen_random_uuid(),
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15,
+        $10, $11, $12, $13, $14, $15, $16, $17,
         now(), now()
       )
       on conflict on constraint executions_user_id_wallet_address_venue_tx_signature_key
@@ -84,6 +90,8 @@ export async function storeExecution(
         output_mint = coalesce(excluded.output_mint, executions.output_mint),
         amount_in = coalesce(excluded.amount_in, executions.amount_in),
         amount_out = coalesce(excluded.amount_out, executions.amount_out),
+        input_decimals = coalesce(excluded.input_decimals, executions.input_decimals),
+        output_decimals = coalesce(excluded.output_decimals, executions.output_decimals),
         quote_id = coalesce(excluded.quote_id, executions.quote_id),
         venue_order_id = coalesce(excluded.venue_order_id, executions.venue_order_id),
         status = coalesce(excluded.status, executions.status),
@@ -101,6 +109,8 @@ export async function storeExecution(
         output_mint,
         amount_in,
         amount_out,
+        input_decimals,
+        output_decimals,
         quote_id,
         tx_signature,
         venue_order_id,
@@ -120,6 +130,8 @@ export async function storeExecution(
       inputs.outputMint ?? null,
       amountIn,
       amountOut,
+      inputs.inputDecimals ?? null,
+      inputs.outputDecimals ?? null,
       inputs.quoteId ?? null,
       inputs.txSignature ?? null,
       inputs.venueOrderId ?? null,
@@ -180,6 +192,8 @@ export async function fetchExecutionsForUserWallet(
         output_mint,
         amount_in,
         amount_out,
+        input_decimals,
+        output_decimals,
         quote_id,
         tx_signature,
         venue_order_id,

@@ -26,6 +26,8 @@ export type UnifiedOrderRow = {
   output_mint: string | null;
   amount_in: string | null;
   amount_out: string | null;
+  input_decimals: string | null;
+  output_decimals: string | null;
   tx_signature: string | null;
 };
 
@@ -116,6 +118,8 @@ const buildOrdersSelect = (whereClause: string): string => `
     null::text as output_mint,
     null::text as amount_in,
     null::text as amount_out,
+    null::text as input_decimals,
+    null::text as output_decimals,
     null::text as tx_signature
   from orders o
   left join unified_tokens ut
@@ -150,6 +154,8 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.output_mint,
     e.amount_in::text as amount_in,
     e.amount_out::text as amount_out,
+    e.input_decimals::text as input_decimals,
+    e.output_decimals::text as output_decimals,
     e.tx_signature
   from executions e
   ${whereClause}
