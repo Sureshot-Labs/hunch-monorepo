@@ -5,6 +5,13 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import {
+  aggregateKalshiCandlesticks,
+  formatKalshiCandlesticks,
+  parseKalshiCandlesticks,
+  resolveKalshiBaseInterval,
+  shouldAggregateKalshiCandles,
+} from "../lib/candlesticks.js";
 import { fetchMarketDetails, fetchMarketsByTokenIds } from "../repos/unified-read.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
@@ -471,6 +478,12 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             return reply.send({ error: "Missing DFLOW_API_KEY" });
           }
 
+          const requestedInterval = periodInterval;
+          const shouldAggregate = shouldAggregateKalshiCandles(requestedInterval);
+          const baseInterval = shouldAggregate
+            ? resolveKalshiBaseInterval(requestedInterval)
+            : requestedInterval;
+
           const upstream = await dflowRequest({
             baseUrl: env.dflowPredictionMarketsBase,
             timeoutMs: 15_000,
@@ -482,7 +495,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             query: {
               startTs,
               endTs,
-              periodInterval,
+              periodInterval: baseInterval,
             },
           });
 
@@ -496,12 +509,23 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             });
           }
 
+          const data = shouldAggregate
+            ? formatKalshiCandlesticks(
+                aggregateKalshiCandlesticks(
+                  parseKalshiCandlesticks(upstream.payload),
+                  requestedInterval,
+                  startTs,
+                  endTs,
+                ),
+              )
+            : upstream.payload;
+
           const response = {
             ok: true,
             venue: "kalshi",
             marketId: market.market_id,
             ticker: market.venue_market_id,
-            data: upstream.payload,
+            data,
           };
           const responseBody = JSON.stringify(response);
 

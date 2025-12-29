@@ -182,12 +182,17 @@ export class PolymarketRateLimiter {
 class PriceHistoryProcessor {
   // Frontend-friendly time intervals in milliseconds
   private static readonly TIME_INTERVALS = {
+    "1m": 60 * 1000, // 1 minute
+    "30m": 30 * 60 * 1000, // 30 minutes
     "1h": 60 * 60 * 1000, // 1 hour
+    "4h": 4 * 60 * 60 * 1000, // 4 hours
     "6h": 6 * 60 * 60 * 1000, // 6 hours
     "1d": 24 * 60 * 60 * 1000, // 1 day
     "1w": 7 * 24 * 60 * 60 * 1000, // 1 week
-    "1m": 30 * 24 * 60 * 60 * 1000, // 1 month
-    "6m": 6 * 30 * 24 * 60 * 60 * 1000, // 6 months
+    "1M": 30 * 24 * 60 * 60 * 1000, // 1 month
+    "6m": 6 * 30 * 24 * 60 * 60 * 1000, // 6 months (legacy)
+    "6M": 6 * 30 * 24 * 60 * 60 * 1000, // 6 months
+    "1Y": 365 * 24 * 60 * 60 * 1000, // 1 year
     max: Infinity, // All available data
   };
 
@@ -196,6 +201,7 @@ class PriceHistoryProcessor {
     requestedInterval: string,
     startTs?: number,
     endTs?: number,
+    fidelityOverride?: number,
   ): PriceHistoryData {
     const historyRaw = rawData.history;
     if (!Array.isArray(historyRaw)) return rawData;
@@ -206,44 +212,45 @@ class PriceHistoryProcessor {
     const now = Date.now() / 1000; // Convert to Unix timestamp
 
     // Determine the actual time range to return
-    let actualStartTs: number;
-    let actualEndTs: number = now;
+    const intervalMs =
+      PriceHistoryProcessor.TIME_INTERVALS[
+        requestedInterval as keyof typeof PriceHistoryProcessor.TIME_INTERVALS
+      ];
+    const resolvedEndTs = endTs ?? now;
+    let actualStartTs: number | null = startTs ?? null;
+    const actualEndTs: number = resolvedEndTs;
 
-    if (startTs && endTs) {
-      // Use explicit time range
-      actualStartTs = startTs;
-      actualEndTs = endTs;
-    } else {
-      // Use interval-based calculation
-      const intervalMs =
-        PriceHistoryProcessor.TIME_INTERVALS[
-          requestedInterval as keyof typeof PriceHistoryProcessor.TIME_INTERVALS
-        ];
+    if (actualStartTs == null) {
       if (intervalMs === undefined) {
-        // Invalid interval, return all data
+        // Unknown interval and no explicit start; return all data.
         return rawData;
       }
-
       if (intervalMs === Infinity) {
-        // Max interval, return all data
-        return rawData;
+        actualStartTs = history[0]?.t ?? resolvedEndTs;
+      } else {
+        actualStartTs = resolvedEndTs - intervalMs / 1000;
       }
-
-      actualStartTs = now - intervalMs / 1000; // Convert to seconds
     }
 
     // Filter and slice the data
     const filteredHistory = history.filter((point) => {
       const timestamp = point.t;
-      return timestamp >= actualStartTs && timestamp <= actualEndTs;
+      return (
+        actualStartTs != null &&
+        timestamp >= actualStartTs &&
+        timestamp <= actualEndTs
+      );
     });
 
     // Apply fidelity (downsampling) if needed
-    const fidelity = PriceHistoryProcessor.calculateFidelity(
-      actualStartTs,
-      actualEndTs,
-      requestedInterval,
-    );
+    const fidelity =
+      typeof fidelityOverride === "number" && fidelityOverride > 0
+        ? fidelityOverride
+        : PriceHistoryProcessor.calculateFidelity(
+            actualStartTs ?? resolvedEndTs,
+            actualEndTs,
+            requestedInterval,
+          );
     const downsampledHistory = PriceHistoryProcessor.downsampleData(
       filteredHistory,
       fidelity,
@@ -273,18 +280,27 @@ class PriceHistoryProcessor {
 
     // Determine appropriate fidelity based on interval and duration
     switch (interval) {
+      case "1m":
+        return 1;
+      case "30m":
+        return 1;
       case "1h":
         return 1; // 1 minute fidelity for 1 hour
+      case "4h":
+        return 5; // 5 minute fidelity for 4 hours
       case "6h":
         return 5; // 5 minute fidelity for 6 hours
       case "1d":
         return 15; // 15 minute fidelity for 1 day
       case "1w":
         return 60; // 1 hour fidelity for 1 week
-      case "1m":
+      case "1M":
         return 240; // 4 hour fidelity for 1 month
       case "6m":
+      case "6M":
         return 1440; // 1 day fidelity for 6 months
+      case "1Y":
+        return 1440; // 1 day fidelity for 1 year
       default:
         return Math.max(1, Math.floor(durationMs / (1000 * 60 * 100))); // Dynamic based on duration
     }
@@ -364,6 +380,7 @@ export class PolymarketClient {
         options.interval || "max",
         options.startTs,
         options.endTs,
+        options.fidelity,
       );
     }
 
@@ -391,6 +408,7 @@ export class PolymarketClient {
       options.interval || "max",
       options.startTs,
       options.endTs,
+      options.fidelity,
     );
   }
 

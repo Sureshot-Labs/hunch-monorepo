@@ -4,6 +4,13 @@ import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import {
+  aggregateKalshiCandlesticks,
+  formatKalshiCandlesticks,
+  parseKalshiCandlesticks,
+  resolveKalshiBaseInterval,
+  shouldAggregateKalshiCandles,
+} from "../lib/candlesticks.js";
 import { fetchEventDetails } from "../repos/unified-read.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
@@ -320,6 +327,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             return reply.send({ error: "Missing DFLOW_API_KEY" });
           }
 
+          const requestedInterval = periodInterval;
+          const shouldAggregate = shouldAggregateKalshiCandles(requestedInterval);
+          const baseInterval = shouldAggregate
+            ? resolveKalshiBaseInterval(requestedInterval)
+            : requestedInterval;
+
           const upstream = await dflowRequest({
             baseUrl: env.dflowPredictionMarketsBase,
             timeoutMs: 15_000,
@@ -331,7 +344,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             query: {
               startTs,
               endTs,
-              periodInterval,
+              periodInterval: baseInterval,
             },
           });
 
@@ -345,12 +358,23 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             });
           }
 
+          const data = shouldAggregate
+            ? formatKalshiCandlesticks(
+                aggregateKalshiCandlesticks(
+                  parseKalshiCandlesticks(upstream.payload),
+                  requestedInterval,
+                  startTs,
+                  endTs,
+                ),
+              )
+            : upstream.payload;
+
           const response = {
             ok: true,
             venue: "kalshi",
             eventId: event.event_id,
             ticker: event.venue_event_id,
-            data: upstream.payload,
+            data,
           };
           const responseBody = JSON.stringify(response);
 
