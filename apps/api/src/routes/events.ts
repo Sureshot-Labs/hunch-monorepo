@@ -8,6 +8,7 @@ import {
   aggregateKalshiCandlesticks,
   deriveNoCandlesticksFromYes,
   formatKalshiCandlesticks,
+  isLimitlessSingleSeriesPayload,
   parseKalshiCandlesticks,
   parseLimitlessCandlesticks,
   parseLimitlessCandlesticksBySide,
@@ -687,6 +688,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 const parsedBySide = parseLimitlessCandlesticksBySide(
                   upstream.payload,
                 );
+                const shouldDeriveNo =
+                  isLimitlessSingleSeriesPayload(upstream.payload) &&
+                  parsedBySide.YES.length > 0;
                 const normalize = (candles: typeof parsedBySide.YES) =>
                   intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
                     ? candles.filter(
@@ -702,7 +706,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                       );
 
                 const yesCandles = normalize(parsedBySide.YES);
-                const noCandles = normalize(parsedBySide.NO);
+                const rawNoCandles = normalize(parsedBySide.NO);
+                const noCandles = shouldDeriveNo
+                  ? deriveNoCandlesticksFromYes(yesCandles)
+                  : rawNoCandles;
                 const series: Record<string, unknown> = {};
                 if (includeYes) {
                   series.YES = {
@@ -714,6 +721,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                   series.NO = {
                     tokenId: tokens.no ?? null,
                     candles: noCandles,
+                    ...(shouldDeriveNo ? { derived: true } : {}),
                   };
                 }
 
@@ -959,17 +967,31 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
           const rawCandles = parseLimitlessCandlesticks(
             upstream.payload,
-            side ?? "YES",
+            "YES",
           );
-          const data = formatKalshiCandlesticks(
-            shouldAggregate
+          const shouldDeriveNo =
+            isLimitlessSingleSeriesPayload(upstream.payload) &&
+            rawCandles.length > 0;
+          const yesCandles = shouldAggregate
+            ? aggregateKalshiCandlesticks(
+                rawCandles,
+                requestedInterval,
+                startTs,
+                endTs,
+              )
+            : rawCandles;
+          const noCandles = shouldDeriveNo
+            ? deriveNoCandlesticksFromYes(yesCandles)
+            : shouldAggregate
               ? aggregateKalshiCandlesticks(
-                  rawCandles,
+                  parseLimitlessCandlesticks(upstream.payload, "NO"),
                   requestedInterval,
                   startTs,
                   endTs,
                 )
-              : rawCandles,
+              : parseLimitlessCandlesticks(upstream.payload, "NO");
+          const data = formatKalshiCandlesticks(
+            (side ?? "YES") === "NO" ? noCandles : yesCandles,
           );
 
           const response = {

@@ -333,6 +333,12 @@ export function parseLimitlessCandlesticksBySide(payload: unknown): {
   };
 }
 
+export function isLimitlessSingleSeriesPayload(payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  if (Array.isArray(payload.data)) return false;
+  return Array.isArray(payload.prices);
+}
+
 export function parsePolymarketCandlesticks(payload: unknown): CandleValues[] {
   const history = isRecord(payload) ? payload.history : undefined;
   if (!Array.isArray(history)) return [];
