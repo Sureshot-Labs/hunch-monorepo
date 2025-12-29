@@ -8,11 +8,15 @@ import {
   aggregateKalshiCandlesticks,
   formatKalshiCandlesticks,
   parseKalshiCandlesticks,
+  parseLimitlessCandlesticks,
   resolveKalshiBaseInterval,
+  resolveLimitlessBaseInterval,
   shouldAggregateKalshiCandles,
+  shouldAggregateLimitlessCandles,
 } from "../lib/candlesticks.js";
 import { fetchEventDetails, type EventDetailsRow } from "../repos/unified-read.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import { extractLimitlessMessage, limitlessRequest } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import { eventParamsSchema } from "../schemas/event.js";
@@ -82,6 +86,15 @@ function isAcceptingOrders(row: EventDetailsRow): boolean {
   if (expirationTs != null && expirationTs <= now) return false;
 
   return true;
+}
+
+function selectLimitlessRepresentative(
+  rows: EventDetailsRow[],
+): EventDetailsRow | null {
+  const candidates = rows.filter((row) => row.market_venue === "limitless");
+  if (candidates.length === 0) return null;
+  const active = candidates.find((row) => isAcceptingOrders(row));
+  return active ?? candidates[0];
 }
 
 function selectPolymarketRepresentative(
@@ -401,7 +414,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const event = rows[0];
-        if (event.event_venue === "kalshi" || event.event_venue === "limitless") {
+        if (event.event_venue === "kalshi") {
           if (startTs == null || endTs == null || periodInterval == null) {
             reply.code(400);
             return reply.send({
@@ -464,6 +477,99 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             venue: "kalshi",
             eventId: event.event_id,
             ticker: event.venue_event_id,
+            data,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (event.event_venue === "limitless") {
+          if (startTs == null || endTs == null || periodInterval == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+
+          const representative = selectLimitlessRepresentative(rows);
+          if (!representative) {
+            reply.code(400);
+            return reply.send({
+              error: "No Limitless markets available for this event.",
+            });
+          }
+
+          const slug =
+            representative.market_slug ??
+            representative.venue_market_id ??
+            null;
+          if (!slug) {
+            reply.code(400);
+            return reply.send({ error: "Missing Limitless market slug." });
+          }
+
+          const requestedInterval = periodInterval;
+          const baseInterval = resolveLimitlessBaseInterval(requestedInterval);
+          const shouldAggregate = shouldAggregateLimitlessCandles(
+            requestedInterval,
+            baseInterval.minutes,
+          );
+
+          const query = new URLSearchParams({
+            from: new Date(startTs * 1000).toISOString(),
+            to: new Date(endTs * 1000).toISOString(),
+            interval: baseInterval.interval,
+          });
+
+          const upstream = await limitlessRequest({
+            method: "GET",
+            requestPath: `/markets/${encodeURIComponent(
+              slug,
+            )}/historical-price?${query.toString()}`,
+          });
+
+          if (!upstream.ok) {
+            reply.code(502);
+            return reply.send({
+              error: "Limitless candlesticks fetch failed",
+              status: upstream.status,
+              message: extractLimitlessMessage(upstream.payload),
+              payload: upstream.payload,
+            });
+          }
+
+          const rawCandles = parseLimitlessCandlesticks(
+            upstream.payload,
+            side ?? "YES",
+          );
+          const data = formatKalshiCandlesticks(
+            shouldAggregate
+              ? aggregateKalshiCandlesticks(
+                  rawCandles,
+                  requestedInterval,
+                  startTs,
+                  endTs,
+                )
+              : rawCandles,
+          );
+
+          const response = {
+            ok: true,
+            venue: "limitless",
+            eventId: event.event_id,
+            marketId: representative.market_id,
+            ticker: slug,
             data,
           };
           const responseBody = JSON.stringify(response);

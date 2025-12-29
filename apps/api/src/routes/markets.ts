@@ -9,11 +9,15 @@ import {
   aggregateKalshiCandlesticks,
   formatKalshiCandlesticks,
   parseKalshiCandlesticks,
+  parseLimitlessCandlesticks,
   resolveKalshiBaseInterval,
+  resolveLimitlessBaseInterval,
   shouldAggregateKalshiCandles,
+  shouldAggregateLimitlessCandles,
 } from "../lib/candlesticks.js";
 import { fetchMarketDetails, fetchMarketsByTokenIds } from "../repos/unified-read.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import { extractLimitlessMessage, limitlessRequest } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
@@ -462,7 +466,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const market = rows[0];
-        if (market.venue === "kalshi" || market.venue === "limitless") {
+        if (market.venue === "kalshi") {
           if (startTs == null || endTs == null || periodInterval == null) {
             reply.code(400);
             return reply.send({
@@ -525,6 +529,87 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             venue: "kalshi",
             marketId: market.market_id,
             ticker: market.venue_market_id,
+            data,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (market.venue === "limitless") {
+          if (startTs == null || endTs == null || periodInterval == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+
+          const slug = market.slug ?? market.venue_market_id ?? null;
+          if (!slug) {
+            reply.code(400);
+            return reply.send({ error: "Missing Limitless market slug." });
+          }
+
+          const requestedInterval = periodInterval;
+          const baseInterval = resolveLimitlessBaseInterval(requestedInterval);
+          const shouldAggregate = shouldAggregateLimitlessCandles(
+            requestedInterval,
+            baseInterval.minutes,
+          );
+
+          const query = new URLSearchParams({
+            from: new Date(startTs * 1000).toISOString(),
+            to: new Date(endTs * 1000).toISOString(),
+            interval: baseInterval.interval,
+          });
+
+          const upstream = await limitlessRequest({
+            method: "GET",
+            requestPath: `/markets/${encodeURIComponent(
+              slug,
+            )}/historical-price?${query.toString()}`,
+          });
+
+          if (!upstream.ok) {
+            reply.code(502);
+            return reply.send({
+              error: "Limitless candlesticks fetch failed",
+              status: upstream.status,
+              message: extractLimitlessMessage(upstream.payload),
+              payload: upstream.payload,
+            });
+          }
+
+          const rawCandles = parseLimitlessCandlesticks(
+            upstream.payload,
+            side ?? "YES",
+          );
+          const data = formatKalshiCandlesticks(
+            shouldAggregate
+              ? aggregateKalshiCandlesticks(
+                  rawCandles,
+                  requestedInterval,
+                  startTs,
+                  endTs,
+                )
+              : rawCandles,
+          );
+
+          const response = {
+            ok: true,
+            venue: "limitless",
+            marketId: market.market_id,
+            ticker: slug,
             data,
           };
           const responseBody = JSON.stringify(response);
