@@ -264,12 +264,27 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           markets: [] as Record<string, unknown>[],
         };
 
-        // Process markets
-        for (const row of rows) {
-          // Skip if no market data (event exists but has no markets)
-          if (!row.market_id) {
-            continue;
-          }
+        const marketRows = rows
+          .map((row, index) => ({ row, index }))
+          .filter((item) => item.row.market_id)
+          .map((item) => ({
+            row: item.row,
+            index: item.index,
+            probability: resolveYesProbability(item.row).value,
+          }))
+          .sort((a, b) => {
+            const aValue = a.probability;
+            const bValue = b.probability;
+            if (aValue == null && bValue == null) return a.index - b.index;
+            if (aValue == null) return 1;
+            if (bValue == null) return -1;
+            if (bValue === aValue) return a.index - b.index;
+            return bValue - aValue;
+          })
+          .map((item) => item.row);
+
+        // Process markets (sorted by YES probability desc)
+        for (const row of marketRows) {
 
           // Parse token IDs based on venue
           let tokens: TokenPair = { yes: null, no: null };
