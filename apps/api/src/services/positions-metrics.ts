@@ -86,6 +86,22 @@ function parseRawAmount(value: unknown, decimals = USDC_DECIMALS): number | null
   return Number(raw) / scale;
 }
 
+function parseLimitlessAmount(value: unknown): number | null {
+  const parsed = parseNumber(value);
+  if (parsed == null) return null;
+  return parsed > RAW_DECIMALS ? parsed / RAW_DECIMALS : parsed;
+}
+
+function normalizeLimitlessPrice(value: unknown): number | null {
+  const parsed = parseNumber(value);
+  if (parsed == null) return null;
+  const normalized = parsed > 1 ? parsed / 100 : parsed;
+  if (!Number.isFinite(normalized) || normalized <= 0 || normalized > 1) {
+    return null;
+  }
+  return normalized;
+}
+
 function normalizeSide(value: unknown): "BUY" | "SELL" | null {
   if (typeof value === "string") {
     const upper = value.toUpperCase();
@@ -230,6 +246,73 @@ function buildDflowFill(row: {
     shares: sharesRaw,
     usdc: usdcRaw,
     timestamp: row.created_at ?? new Date(0),
+  };
+}
+
+function buildLimitlessFill(row: {
+  token_id: string | null;
+  side: string | null;
+  status: string | null;
+  price: string | number | null;
+  size: string | number | null;
+  order_payload: unknown;
+  filled_at: Date | null;
+  posted_at: Date | null;
+  last_update: Date | null;
+}): TradeFill | null {
+  if (!row.token_id) return null;
+  const payload = normalizePayload(row.order_payload);
+  const side = normalizeSide(row.side ?? payload?.side);
+  if (!side) return null;
+
+  const status = row.status?.toLowerCase() ?? "";
+  const hasFill =
+    (parseNumber(row.size) ?? 0) > 0 && (parseNumber(row.price) ?? 0) > 0;
+  if (!hasFill && !EXECUTED_STATUSES.has(status) && status !== "filled") {
+    return null;
+  }
+
+  let shares: number | null = null;
+  let usdc: number | null = null;
+
+  const size = parseNumber(row.size);
+  const price = normalizeLimitlessPrice(row.price);
+  if (size != null && size > 0 && price != null) {
+    shares = size;
+    usdc = size * price;
+  } else {
+    const outcomeAmount = parseLimitlessAmount(
+      payload?.outcomeTokenAmount ?? payload?.outcome_token_amount,
+    );
+    const outcomePrice = normalizeLimitlessPrice(
+      payload?.outcomeTokenPrice ?? payload?.outcome_token_price,
+    );
+    if (outcomeAmount != null && outcomeAmount > 0 && outcomePrice != null) {
+      shares = outcomeAmount;
+      usdc = outcomeAmount * outcomePrice;
+    } else {
+      const collateral = parseLimitlessAmount(
+        payload?.collateralAmount ?? payload?.collateral_amount,
+      );
+      if (collateral != null && collateral > 0 && price != null) {
+        shares = collateral / price;
+        usdc = collateral;
+      }
+    }
+  }
+
+  if (!Number.isFinite(shares) || shares == null || shares <= 0) return null;
+  if (!Number.isFinite(usdc) || usdc == null || usdc <= 0) return null;
+
+  const timestamp =
+    row.filled_at ?? row.posted_at ?? row.last_update ?? new Date(0);
+
+  return {
+    tokenId: row.token_id,
+    side,
+    shares,
+    usdc,
+    timestamp,
   };
 }
 
@@ -467,9 +550,55 @@ async function fetchDflowFills(
     .filter((fill): fill is TradeFill => Boolean(fill));
 }
 
+async function fetchLimitlessFills(
+  pool: Pool,
+  inputs: { userId: string; walletAddress: string; tokenIds: string[] },
+): Promise<TradeFill[]> {
+  if (inputs.tokenIds.length === 0) return [];
+
+  const { rows } = await pool.query<{
+    token_id: string | null;
+    side: string | null;
+    status: string | null;
+    price: string | null;
+    size: string | null;
+    order_payload: unknown;
+    filled_at: Date | null;
+    posted_at: Date | null;
+    last_update: Date | null;
+  }>(
+    `
+      select
+        token_id,
+        side,
+        status,
+        price,
+        size,
+        order_payload,
+        filled_at,
+        posted_at,
+        last_update
+      from orders
+      where user_id = $1
+        and (wallet_address is null or wallet_address = $2)
+        and venue = 'limitless'
+        and token_id = any($3::text[])
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.tokenIds],
+  );
+
+  return rows
+    .map((row) => buildLimitlessFill(row))
+    .filter((fill): fill is TradeFill => Boolean(fill));
+}
+
 export async function recomputePositionMetricsForWallet(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string; venue: "polymarket" | "kalshi" },
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: "polymarket" | "kalshi" | "limitless";
+  },
 ): Promise<void> {
   const positions = await fetchPositionSnapshots(pool, inputs);
   if (positions.length === 0) return;
@@ -483,6 +612,12 @@ export async function recomputePositionMetricsForWallet(
           walletAddress: inputs.walletAddress,
           tokenIds,
         })
+      : inputs.venue === "limitless"
+        ? fetchLimitlessFills(pool, {
+            userId: inputs.userId,
+            walletAddress: inputs.walletAddress,
+            tokenIds,
+          })
       : fetchDflowFills(pool, {
           userId: inputs.userId,
           walletAddress: inputs.walletAddress,
@@ -511,7 +646,8 @@ export async function recomputePositionMetricsForWallet(
     const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
     const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
     const fallbackAveragePrice =
-      !reliable && inputs.venue === "polymarket"
+      !reliable &&
+      (inputs.venue === "polymarket" || inputs.venue === "limitless")
         ? computeBuyAveragePrice(tokenFills)
         : null;
     const averagePriceValue = reliable ? averagePrice : fallbackAveragePrice;

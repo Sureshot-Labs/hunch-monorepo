@@ -106,7 +106,7 @@ async function storeOrderInTx(
     venueOrderId: string;
     tokenId: string | null;
     side: string | null;
-    orderType?: "GTC" | "GTD" | "FAK" | "FOK";
+    orderType?: "GTC" | "GTD" | "FAK" | "FOK" | null;
     price: number | null;
     size: number | null;
     status: string;
@@ -119,6 +119,10 @@ async function storeOrderInTx(
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
     orderPayload?: unknown | null;
+    postedAt?: Date | null;
+    lastUpdate?: Date | null;
+    filledAt?: Date | null;
+    cancelledAt?: Date | null;
   },
 ): Promise<StoreOrderResult> {
   const payloadMaker = extractPayloadAddress(inputs.orderPayload, "maker");
@@ -180,7 +184,7 @@ async function storeOrderInTx(
     return { kind: "exists" };
   }
 
-  const orderType = inputs.orderType ?? "GTC";
+  const orderType = inputs.orderType === undefined ? "GTC" : inputs.orderType;
 
   const result = await client.query<{
     id: string;
@@ -192,11 +196,11 @@ async function storeOrderInTx(
         id, user_id, wallet_address, signer_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
         order_payload, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline,
-        posted_at, last_update
+        filled_at, cancelled_at, posted_at, last_update
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13,
         $14, $15, $16, $17, $18, $19, $20,
-        now(), now()
+        $21, $22, COALESCE($23, now()), COALESCE($24, now())
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
       inputs.userId,
@@ -219,6 +223,10 @@ async function storeOrderInTx(
       inputs.feeAuthSig ?? null,
       inputs.feeCollectorAddress ?? null,
       inputs.feeDeadline ?? null,
+      inputs.filledAt ?? null,
+      inputs.cancelledAt ?? null,
+      inputs.postedAt ?? null,
+      inputs.lastUpdate ?? null,
     ],
   );
 
@@ -235,7 +243,7 @@ export async function storeOrder(
     venueOrderId: string;
     tokenId: string | null;
     side: string | null;
-    orderType?: "GTC" | "GTD" | "FAK" | "FOK";
+    orderType?: "GTC" | "GTD" | "FAK" | "FOK" | null;
     price: number | null;
     size: number | null;
     status: string;
@@ -248,6 +256,10 @@ export async function storeOrder(
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
     orderPayload?: unknown | null;
+    postedAt?: Date | null;
+    lastUpdate?: Date | null;
+    filledAt?: Date | null;
+    cancelledAt?: Date | null;
   },
 ): Promise<StoreOrderResult> {
   const client = await pool.connect();

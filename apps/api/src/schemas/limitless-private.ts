@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { zEthAddress, zEthAddressRequired, zRequiredString } from "./common.js";
+import {
+  zCsvString,
+  zEthAddress,
+  zEthAddressRequired,
+  zRequiredString,
+} from "./common.js";
 
 const zNumberish = z.union([z.string(), z.number()]);
 
@@ -12,6 +17,9 @@ const zOrderType = z.preprocess(
   (v) => (typeof v === "string" ? v.toUpperCase() : v),
   z.enum(["GTC", "FOK"]),
 );
+
+const zPage = z.coerce.number().int().min(1).catch(1);
+const zLimit = z.coerce.number().int().min(1).max(200).catch(100);
 
 const limitlessOrderSchema = z
   .object({
@@ -55,6 +63,14 @@ export const limitlessOrderIdParamsSchema = z.object({
 
 export const limitlessOpenOrdersQuerySchema = z.object({
   slug: zRequiredString("slug is required"),
+});
+
+export const limitlessHistoryQuerySchema = z.object({
+  page: zPage,
+  limit: zLimit,
+  from: z.string().optional(),
+  to: z.string().optional(),
+  wallets: zCsvString("wallets is required").optional(),
 });
 
 export const limitlessSlugParamsSchema = z.object({

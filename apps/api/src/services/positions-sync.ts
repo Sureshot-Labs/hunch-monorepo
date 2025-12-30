@@ -17,6 +17,7 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./limitless-client.js";
+import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -744,6 +745,28 @@ async function syncLimitlessPositionsFromPortfolio(
     tokenBalances,
     tokenIdLike: "limitless:%",
   });
+
+  try {
+    await syncLimitlessHistoryForWallet(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      sessionCookie,
+      page: 1,
+      limit: 50,
+    });
+  } catch (error) {
+    console.error("Limitless history sync failed", error);
+  }
+
+  try {
+    await recomputePositionMetricsForWallet(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "limitless",
+    });
+  } catch (error) {
+    console.error("Limitless position metrics update failed", error);
+  }
 
   return {
     venue: "limitless",

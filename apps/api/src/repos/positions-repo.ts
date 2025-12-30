@@ -118,11 +118,17 @@ export async function fetchPositionsForUserWallet(
     userId: string;
     walletAddresses: string[];
     venue?: string;
+    venues?: string[];
     includeHidden?: boolean;
     minSize?: number;
   },
 ): Promise<Position[]> {
-  const shouldExpandFunders = !inputs.venue || inputs.venue === "polymarket";
+  const venueList = inputs.venues?.length
+    ? Array.from(new Set(inputs.venues))
+    : inputs.venue
+      ? [inputs.venue]
+      : undefined;
+  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
         userId: inputs.userId,
@@ -146,10 +152,10 @@ export async function fetchPositionsForUserWallet(
     params.push(inputs.minSize);
   }
 
-  if (inputs.venue) {
+  if (venueList?.length) {
     paramCount += 1;
-    whereClause += ` and venue = $${paramCount}`;
-    params.push(inputs.venue);
+    whereClause += ` and venue = any($${paramCount}::text[])`;
+    params.push(venueList);
   }
 
   const { rows } = await pool.query<PositionRow>(
@@ -188,12 +194,18 @@ export async function fetchPositionsForUserWalletByTokenIds(
     walletAddresses: string[];
     tokenIds: string[];
     venue?: string;
+    venues?: string[];
     includeHidden?: boolean;
     minSize?: number;
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
-  const shouldExpandFunders = !inputs.venue || inputs.venue === "polymarket";
+  const venueList = inputs.venues?.length
+    ? Array.from(new Set(inputs.venues))
+    : inputs.venue
+      ? [inputs.venue]
+      : undefined;
+  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
         userId: inputs.userId,
@@ -221,10 +233,10 @@ export async function fetchPositionsForUserWalletByTokenIds(
     params.push(inputs.minSize);
   }
 
-  if (inputs.venue) {
+  if (venueList?.length) {
     paramCount += 1;
-    whereClause += ` and venue = $${paramCount}`;
-    params.push(inputs.venue);
+    whereClause += ` and venue = any($${paramCount}::text[])`;
+    params.push(venueList);
   }
 
   const { rows } = await pool.query<PositionRow>(

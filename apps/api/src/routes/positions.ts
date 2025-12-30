@@ -20,11 +20,52 @@ import {
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
+  const normalizeVenues = (
+    venue: string | undefined,
+    venues: string[] | undefined,
+  ): string[] | undefined => {
+    if (venues && venues.length) return Array.from(new Set(venues));
+    if (venue) return [venue];
+    return undefined;
+  };
+
+  const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+  const isEthAddress = (address: string): boolean => ETH_ADDRESS_RE.test(address);
+
+  const filterWalletsByVenueCredentials = async (
+    userId: string,
+    venue: "polymarket" | "kalshi" | "limitless",
+    walletAddresses: string[],
+  ): Promise<string[]> => {
+    if (walletAddresses.length === 0) return [];
+    const normalized = walletAddresses.map((address) => address.toLowerCase());
+    const { rows } = await pool.query<{ wallet_address: string }>(
+      `
+        select wallet_address
+        from user_venue_credentials
+        where user_id = $1
+          and venue = $2
+          and is_active = true
+          and lower(wallet_address) = any($3::text[])
+      `,
+      [userId, venue, normalized],
+    );
+    const allowed = new Set(
+      rows.map((row) => row.wallet_address.toLowerCase()),
+    );
+    return walletAddresses.filter((address) =>
+      allowed.has(address.toLowerCase()),
+    );
+  };
+
   const resolveWalletAddresses = async (
     userId: string,
     walletAddress: string | undefined,
     requestedWallets: string[] | undefined,
     venue: string | undefined,
+    venues: string[] | undefined,
+    expandPolymarketFunders = true,
   ): Promise<string[]> => {
     if (requestedWallets && requestedWallets.length) {
       const wallets = await AuthService.getUserWallets(userId);
@@ -39,12 +80,17 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         .map((address) => walletMap.get(address))
         .filter((address): address is string => Boolean(address));
       const uniqueResolved = Array.from(new Set(resolved));
-
-      const relevantWallets = venue
-        ? venue === "kalshi"
-          ? wallets.filter((wallet) => wallet.walletType === "solana")
-          : wallets.filter((wallet) => wallet.walletType !== "solana")
-        : wallets;
+      const venueList = normalizeVenues(venue, venues);
+      const relevantWallets = (() => {
+        if (!venueList?.length) return wallets;
+        const hasKalshi = venueList.includes("kalshi");
+        const hasEvmVenue = venueList.some((item) => item !== "kalshi");
+        if (hasKalshi && hasEvmVenue) return wallets;
+        if (hasKalshi) {
+          return wallets.filter((wallet) => wallet.walletType === "solana");
+        }
+        return wallets.filter((wallet) => wallet.walletType !== "solana");
+      })();
       const relevantSet = new Set(
         relevantWallets
           .map((wallet) => wallet.walletAddress.toLowerCase())
@@ -62,7 +108,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         return uniqueResolved;
       }
 
-      if (!venue || venue === "polymarket") {
+      if (
+        expandPolymarketFunders &&
+        (!venueList || venueList.includes("polymarket"))
+      ) {
         const { rows } = await pool.query<{ wallet_address: string | null }>(
           `
             select distinct wallet_address
@@ -106,6 +155,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
       const query = request.query;
       const venue = query.venue;
+      const venues = query.venues;
+      const responseVenue =
+        venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
       try {
         const walletAddresses = await resolveWalletAddresses(
@@ -113,6 +165,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           walletAddress,
           query.wallets,
           venue,
+          query.venues,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -123,6 +176,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddresses,
           venue,
+          venues,
           includeHidden: query.includeHidden,
           minSize: query.minSize,
         });
@@ -134,7 +188,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (venue) return reply.send({ positions, venue });
+        if (responseVenue) return reply.send({ positions, venue: responseVenue });
         return reply.send({ positions });
       } catch (error) {
         app.log.error(
@@ -169,13 +223,18 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      const venue = query.venue;
+      const venues = query.venues;
+      const responseVenue =
+        venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
       try {
         const walletAddresses = await resolveWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
-          query.venue,
+          venue,
+          venues,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -186,7 +245,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddresses,
           tokenIds: query.tokenIds,
-          venue: query.venue,
+          venue,
+          venues,
           includeHidden: query.includeHidden,
           minSize: query.minSize,
         });
@@ -198,7 +258,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (query.venue) return reply.send({ positions, venue: query.venue });
+        if (responseVenue) return reply.send({ positions, venue: responseVenue });
         return reply.send({ positions });
       } catch (error) {
         app.log.error(
@@ -282,29 +342,48 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      const venues = query.venues;
+      const usingVenueList = Boolean(venues && venues.length);
 
       try {
         if (!query.wallets || query.wallets.length === 0) {
-          const result = await syncPositionsForUserWallet(pool, {
-            userId: user.id,
-            walletAddress,
-            venue: query.venue,
-          });
+          if (usingVenueList) {
+            // Fall through to multi-venue sync below.
+          } else {
+            const result = await syncPositionsForUserWallet(pool, {
+              userId: user.id,
+              walletAddress,
+              venue: query.venue,
+            });
 
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            message: "Positions synced",
-            ...result,
-          });
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send({
+              message: "Positions synced",
+              ...result,
+            });
+          }
         }
 
-        const walletAddresses = await resolveWalletAddresses(
-          user.id,
-          walletAddress,
-          query.wallets,
-          query.venue,
-        );
-        if (walletAddresses.length === 0) {
+        const baseWalletAddresses = query.wallets?.length
+          ? await resolveWalletAddresses(
+              user.id,
+              walletAddress,
+              query.wallets,
+              query.venue,
+              query.venues,
+              false,
+            )
+          : [walletAddress];
+        const expandedWalletAddresses = query.wallets?.length
+          ? await resolveWalletAddresses(
+              user.id,
+              walletAddress,
+              query.wallets,
+              query.venue,
+              query.venues,
+            )
+          : baseWalletAddresses;
+        if (baseWalletAddresses.length === 0) {
           reply.code(400);
           return reply.send({ error: "No wallets available to sync." });
         }
@@ -328,53 +407,152 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         let skipped = 0;
         let errors = 0;
 
-        for (const wallet of walletAddresses) {
-          if (r && cooldownSec > 0) {
-            const key = `positions:sync:${user.id}:${wallet}:${
-              query.venue ?? "all"
-            }`;
-            const locked = await r.set(key, Date.now().toString(), {
-              NX: true,
-              EX: cooldownSec,
-            });
-            if (!locked) {
-              skipped += 1;
+        if (!usingVenueList) {
+          for (const wallet of expandedWalletAddresses) {
+            if (r && cooldownSec > 0) {
+              const key = `positions:sync:${user.id}:${wallet}:${
+                query.venue ?? "all"
+              }`;
+              const locked = await r.set(key, Date.now().toString(), {
+                NX: true,
+                EX: cooldownSec,
+              });
+              if (!locked) {
+                skipped += 1;
+                results.push({
+                  walletAddress: wallet,
+                  venue: query.venue ?? null,
+                  status: "skipped",
+                  skippedReason: "cooldown",
+                });
+                continue;
+              }
+            }
+
+            try {
+              const result = await syncPositionsForUserWallet(pool, {
+                userId: user.id,
+                walletAddress: wallet,
+                venue: query.venue,
+              });
+              synced += 1;
+              results.push({
+                walletAddress: wallet,
+                venue: result.venue,
+                status: "ok",
+                heldTokens: result.heldTokens,
+                knownTokens: result.knownTokens,
+                upsertedPositions: result.upsertedPositions,
+                flattenedPositions: result.flattenedPositions,
+              });
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "Unknown error";
+              errors += 1;
               results.push({
                 walletAddress: wallet,
                 venue: query.venue ?? null,
-                status: "skipped",
-                skippedReason: "cooldown",
+                status: "error",
+                error: message,
               });
-              continue;
             }
           }
+        } else {
+          const venuesToSync = venues ?? [];
+          const baseSolanaWallets = baseWalletAddresses.filter(
+            (wallet) => !isEthAddress(wallet),
+          );
+          const baseEvmWallets = baseWalletAddresses.filter((wallet) =>
+            isEthAddress(wallet),
+          );
 
-          try {
-            const result = await syncPositionsForUserWallet(pool, {
-              userId: user.id,
-              walletAddress: wallet,
-              venue: query.venue,
-            });
-            synced += 1;
-            results.push({
-              walletAddress: wallet,
-              venue: result.venue,
-              status: "ok",
-              heldTokens: result.heldTokens,
-              knownTokens: result.knownTokens,
-              upsertedPositions: result.upsertedPositions,
-              flattenedPositions: result.flattenedPositions,
-            });
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : "Unknown error";
-            errors += 1;
-            results.push({
-              walletAddress: wallet,
-              venue: query.venue ?? null,
-              status: "error",
-              error: message,
-            });
+          const polymarketWallets = venuesToSync.includes("polymarket")
+            ? await resolveWalletAddresses(
+                user.id,
+                walletAddress,
+                query.wallets,
+                "polymarket",
+                undefined,
+              )
+            : [];
+          const kalshiWallets = venuesToSync.includes("kalshi")
+            ? baseSolanaWallets
+            : [];
+          const limitlessWalletsBase = venuesToSync.includes("limitless")
+            ? baseEvmWallets
+            : [];
+          const limitlessWallets = venuesToSync.includes("limitless")
+            ? await filterWalletsByVenueCredentials(
+                user.id,
+                "limitless",
+                limitlessWalletsBase,
+              )
+            : [];
+
+          const syncByVenue = async (
+            venue: "polymarket" | "kalshi" | "limitless",
+            wallets: string[],
+          ) => {
+            for (const wallet of wallets) {
+              if (r && cooldownSec > 0) {
+                const key = `positions:sync:${user.id}:${wallet}:${venue}`;
+                const locked = await r.set(key, Date.now().toString(), {
+                  NX: true,
+                  EX: cooldownSec,
+                });
+                if (!locked) {
+                  skipped += 1;
+                  results.push({
+                    walletAddress: wallet,
+                    venue,
+                    status: "skipped",
+                    skippedReason: "cooldown",
+                  });
+                  continue;
+                }
+              }
+
+              try {
+                const result = await syncPositionsForUserWallet(pool, {
+                  userId: user.id,
+                  walletAddress: wallet,
+                  venue,
+                });
+                synced += 1;
+                results.push({
+                  walletAddress: wallet,
+                  venue: result.venue ?? venue,
+                  status: "ok",
+                  heldTokens: result.heldTokens,
+                  knownTokens: result.knownTokens,
+                  upsertedPositions: result.upsertedPositions,
+                  flattenedPositions: result.flattenedPositions,
+                });
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : "Unknown error";
+                errors += 1;
+                results.push({
+                  walletAddress: wallet,
+                  venue,
+                  status: "error",
+                  error: message,
+                });
+              }
+            }
+          };
+
+          if (venuesToSync.includes("polymarket")) {
+            const polymarketEvmWallets = polymarketWallets.filter((wallet) =>
+              isEthAddress(wallet),
+            );
+            await syncByVenue("polymarket", polymarketEvmWallets);
+          }
+          if (venuesToSync.includes("kalshi")) {
+            await syncByVenue("kalshi", kalshiWallets);
+          }
+          if (venuesToSync.includes("limitless")) {
+            await syncByVenue("limitless", limitlessWallets);
           }
         }
 
@@ -399,7 +577,13 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
         if (statusCode >= 500) {
           app.log.error(
-            { error, userId: user.id, walletAddress, venue: query.venue },
+            {
+              error,
+              userId: user.id,
+              walletAddress,
+              venue: query.venue,
+              venues: query.venues,
+            },
             "Failed to sync positions",
           );
         }

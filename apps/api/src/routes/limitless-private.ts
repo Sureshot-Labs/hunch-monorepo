@@ -12,9 +12,14 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
+import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
+import {
+  syncLimitlessHistoryForWallet,
+} from "../services/limitless-history.js";
 import {
   limitlessAuthLoginBodySchema,
   limitlessCancelBatchBodySchema,
+  limitlessHistoryQuerySchema,
   limitlessOpenOrdersQuerySchema,
   limitlessOrderBodySchema,
   limitlessOrderIdParamsSchema,
@@ -158,6 +163,13 @@ function normalizeOrderId(value: unknown): string | null {
   return null;
 }
 
+function normalizeLimitlessTokenId(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("limitless:") ? trimmed : `limitless:${trimmed}`;
+}
+
 function extractLimitlessOrderId(record: Record<string, unknown>): string | null {
   return normalizeOrderId(readOrderField(record, ["id", "orderId", "order_id"]));
 }
@@ -165,9 +177,10 @@ function extractLimitlessOrderId(record: Record<string, unknown>): string | null
 function extractLimitlessTokenId(
   record: Record<string, unknown>,
 ): string | null {
-  return normalizeOrderId(
+  const raw = normalizeOrderId(
     readOrderField(record, ["tokenId", "token_id", "outcomeTokenId"]),
   );
+  return normalizeLimitlessTokenId(raw);
 }
 
 function extractLimitlessOrderSide(
@@ -232,6 +245,30 @@ function extractLimitlessCanceledIds(
 
 export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  const resolveWalletAddresses = async (
+    userId: string,
+    walletAddress: string | undefined,
+    requestedWallets: string[] | undefined,
+  ): Promise<string[]> => {
+    if (requestedWallets && requestedWallets.length) {
+      const wallets = await AuthService.getUserWallets(userId);
+      const walletMap = new Map(
+        wallets.map((wallet) => [
+          wallet.walletAddress.toLowerCase(),
+          wallet.walletAddress,
+        ]),
+      );
+      const resolved = requestedWallets
+        .map((address) => address.trim().toLowerCase())
+        .map((address) => walletMap.get(address))
+        .filter((address): address is string => Boolean(address));
+      return Array.from(new Set(resolved));
+    }
+
+    if (!walletAddress) return [];
+    return [walletAddress];
+  };
 
   /**
    * GET /auth/signing-message
@@ -700,10 +737,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const tokenId =
+      const tokenId = normalizeLimitlessTokenId(
         typeof order.tokenId === "string"
           ? order.tokenId
-          : String(order.tokenId ?? "");
+          : String(order.tokenId ?? ""),
+      );
       const makerAmount = parseNumberish(order.makerAmount);
       const takerAmount = parseNumberish(order.takerAmount);
       const price = parseNumberish(order.price);
@@ -721,7 +759,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         signerAddress: signer,
         venue: "limitless",
         venueOrderId,
-        tokenId: tokenId || null,
+        tokenId: tokenId ?? null,
         side,
         orderType: request.body.orderType,
         price,
@@ -838,6 +876,151 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         alreadyKnown,
         skippedNoId,
         sampleVenueOrderIds: orderIds.slice(0, 10),
+      });
+    },
+  );
+
+  /**
+   * POST /orders/history/sync
+   * Fetch portfolio history from Limitless and upsert into `orders`.
+   */
+  z.post(
+    "/orders/history/sync",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessHistoryQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const walletAddresses = await resolveWalletAddresses(
+        user.id,
+        signer,
+        query.wallets,
+      );
+
+      if (walletAddresses.length === 0) {
+        reply.code(400);
+        return reply.send({ error: "No wallets available to sync." });
+      }
+
+      const results: Array<{
+        walletAddress: string;
+        status: "ok" | "error" | "skipped";
+        fetched?: number;
+        storedNew?: number;
+        alreadyKnown?: number;
+        skippedNoId?: number;
+        skippedNoSide?: number;
+        skippedNoOutcome?: number;
+        skippedNoMarket?: number;
+        skippedNoToken?: number;
+        error?: string;
+        sampleVenueOrderIds?: string[];
+      }> = [];
+
+      let synced = 0;
+      let skipped = 0;
+      let errors = 0;
+
+      for (const wallet of walletAddresses) {
+        if (!isEvmWallet(wallet)) {
+          skipped += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "skipped",
+            error: "EVM wallet required for Limitless.",
+          });
+          continue;
+        }
+
+        const creds = await AuthService.getVenueCredentials(
+          user.id,
+          "limitless",
+          wallet,
+        );
+        const sessionCookie = creds?.apiSecret?.trim();
+        if (!sessionCookie) {
+          errors += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "error",
+            error: "Limitless session not found (connect first).",
+          });
+          continue;
+        }
+
+        let stats;
+        try {
+          stats = await syncLimitlessHistoryForWallet(pool, {
+            userId: user.id,
+            walletAddress: wallet,
+            sessionCookie,
+            page: query.page,
+            limit: query.limit,
+            from: query.from,
+            to: query.to,
+          });
+        } catch (error) {
+          errors += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "error",
+            error:
+              error instanceof Error
+                ? error.message
+                : "Limitless history sync failed.",
+          });
+          continue;
+        }
+
+        try {
+          await recomputePositionMetricsForWallet(pool, {
+            userId: user.id,
+            walletAddress: wallet,
+            venue: "limitless",
+          });
+        } catch (error) {
+          app.log.error(
+            { error, userId: user.id, walletAddress: wallet },
+            "Limitless position metrics update failed",
+          );
+        }
+
+        synced += 1;
+        results.push({
+          walletAddress: wallet,
+          status: "ok",
+          fetched: stats.fetched,
+          storedNew: stats.storedNew,
+          alreadyKnown: stats.alreadyKnown,
+          skippedNoId: stats.skippedNoId,
+          skippedNoSide: stats.skippedNoSide,
+          skippedNoOutcome: stats.skippedNoOutcome,
+          skippedNoMarket: stats.skippedNoMarket,
+          skippedNoToken: stats.skippedNoToken,
+          sampleVenueOrderIds: stats.sampleVenueOrderIds,
+        });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        venue: "limitless",
+        page: query.page,
+        limit: query.limit,
+        results,
+        summary: {
+          synced,
+          skipped,
+          errors,
+        },
       });
     },
   );
