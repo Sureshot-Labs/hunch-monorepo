@@ -257,6 +257,11 @@ function resolveAffiliateDefaults(inputs: {
   };
 }
 
+function resolveReferralCode(referralCode?: number): number | undefined {
+  if (referralCode != null && referralCode > 0) return referralCode;
+  return env.debridgeReferralCode > 0 ? env.debridgeReferralCode : undefined;
+}
+
 function buildDebridgeCreateTxQuery(inputs: DebridgeOrderInputs) {
   const senderAddress = inputs.senderAddress;
   const recipientAddress = inputs.recipientAddress;
@@ -456,6 +461,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         affiliateFeePercent: query.affiliateFeePercent,
         affiliateFeeRecipient: query.affiliateFeeRecipient,
       });
+      const referralCode = resolveReferralCode(query.referralCode);
 
       const upstream =
         swapType === "same_chain"
@@ -493,7 +499,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 dstChainTokenOutAmount: query.dstChainTokenOutAmount,
                 slippage: query.slippage,
                 additionalTakerRewardBps: query.additionalTakerRewardBps,
-                referralCode: query.referralCode,
+                referralCode,
                 affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
                 affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: query.deBridgeApp,
@@ -574,6 +580,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         affiliateFeePercent: body.affiliateFeePercent,
         affiliateFeeRecipient: body.affiliateFeeRecipient,
       });
+      const referralCode = resolveReferralCode(body.referralCode);
 
       const upstream =
         swapType === "same_chain"
@@ -611,7 +618,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 dstChainTokenOutAmount: body.dstChainTokenOutAmount,
                 slippage: body.slippage,
                 additionalTakerRewardBps: body.additionalTakerRewardBps,
-                referralCode: body.referralCode,
+                referralCode,
                 affiliateFeePercent: affiliateDefaults.affiliateFeePercent,
                 affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: body.deBridgeApp,

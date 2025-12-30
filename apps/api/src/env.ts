@@ -221,6 +221,7 @@ export const env = {
   ),
   debridgeAffiliateFeeRecipients:
     process.env.DEBRIDGE_AFFILIATE_FEE_RECIPIENTS?.trim() || "",
+  debridgeReferralCode: optionalNonNegativeInt("DEBRIDGE_REFERRAL_CODE", 0),
 
   polymarketBuilderApiKey:
     process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
