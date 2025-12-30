@@ -136,20 +136,47 @@ function extractTokenBalancesFromArray(
   }
 }
 
-function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
+function extractLimitlessClobEntries(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
   if (!isRecord(payload)) return [];
-  const clob = Array.isArray(payload.clob)
-    ? payload.clob
-    : Array.isArray(payload.positions)
-      ? payload.positions
-      : [];
-  if (!Array.isArray(clob)) return [];
+
+  const roots: unknown[] = [payload];
+  if (payload.data) {
+    roots.push(payload.data);
+    if (isRecord(payload.data) && payload.data.data) {
+      roots.push(payload.data.data);
+    }
+  }
+
+  const keys = [
+    "clob",
+    "positions",
+    "clobPositions",
+    "clob_positions",
+    "clobPosition",
+    "clob_position",
+  ];
+
+  for (const root of roots) {
+    if (Array.isArray(root)) return root;
+    if (!isRecord(root)) continue;
+    for (const key of keys) {
+      const value = root[key];
+      if (Array.isArray(value)) return value;
+    }
+  }
+
+  return [];
+}
+
+function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
+  const clob = extractLimitlessClobEntries(payload).filter(isRecord);
+  if (!clob.length) return [];
 
   const output: WalletTokenBalance[] = [];
   const seen = new Set<string>();
 
   for (const entry of clob) {
-    if (!isRecord(entry)) continue;
     const market = isRecord(entry.market) ? entry.market : null;
     const positionIdsRaw =
       (market && (market.position_ids ?? market.positionIds)) ?? null;
@@ -157,13 +184,23 @@ function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
     const yesToken =
       market && isRecord(market.tokens) && typeof market.tokens.yes === "string"
         ? market.tokens.yes
+        : market && isRecord(market.token) && typeof market.token.yes === "string"
+          ? market.token.yes
         : positionIds[0] ?? null;
     const noToken =
       market && isRecord(market.tokens) && typeof market.tokens.no === "string"
         ? market.tokens.no
+        : market && isRecord(market.token) && typeof market.token.no === "string"
+          ? market.token.no
         : positionIds[1] ?? null;
 
-    const tokenBalances = entry.tokensBalance ?? entry.tokens_balance ?? null;
+    const tokenBalances =
+      entry.tokensBalance ??
+      entry.tokens_balance ??
+      entry.tokenBalances ??
+      entry.token_balances ??
+      entry.tokens ??
+      null;
     if (Array.isArray(tokenBalances)) {
       extractTokenBalancesFromArray(output, seen, tokenBalances);
       continue;

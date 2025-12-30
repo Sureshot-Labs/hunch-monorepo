@@ -276,6 +276,118 @@ export async function storeOrder(
   }
 }
 
+export async function findLimitlessHistoryMatch(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    tokenId: string;
+    side: string;
+    orderType: string | null;
+    postedAt: Date;
+    windowMs?: number;
+  },
+): Promise<{ id: string; postedAt: Date | null } | null> {
+  const windowMs = inputs.windowMs ?? 2 * 60 * 1000;
+  const from = new Date(inputs.postedAt.getTime() - windowMs);
+  const to = new Date(inputs.postedAt.getTime() + windowMs);
+
+  const { rows } = await pool.query<{
+    id: string;
+    posted_at: Date | null;
+  }>(
+    `
+      select id, posted_at
+      from orders
+      where user_id = $1
+        and venue = 'limitless'
+        and token_id = $2
+        and side = $3
+        and (wallet_address is null or wallet_address = $4 or signer_address = $4)
+        and ($5::text is null or order_type is null or order_type = $5)
+        and status in ('submitted', 'open', 'pending', 'matched', 'filled')
+        and (venue_order_id is null or venue_order_id not like 'history:%')
+        and posted_at between $6 and $7
+      order by posted_at desc nulls last
+      limit 2
+    `,
+    [
+      inputs.userId,
+      inputs.tokenId,
+      inputs.side,
+      inputs.walletAddress,
+      inputs.orderType,
+      from,
+      to,
+    ],
+  );
+
+  if (rows.length !== 1) return null;
+  return { id: rows[0].id, postedAt: rows[0].posted_at ?? null };
+}
+
+export async function deleteHistoryOrder(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    venue: string;
+    venueOrderId: string;
+  },
+): Promise<void> {
+  await pool.query(
+    `
+      delete from orders
+      where user_id = $1
+        and venue = $2
+        and venue_order_id = $3
+        and venue_order_id like 'history:%'
+    `,
+    [inputs.userId, inputs.venue, inputs.venueOrderId],
+  );
+}
+
+export async function updateOrderFromHistory(
+  pool: Pool,
+  inputs: {
+    id: string;
+    status: string;
+    price: number | null;
+    size: number | null;
+    filledAt: Date | null;
+    lastUpdate: Date | null;
+    orderHash: string | null;
+    orderPayload?: unknown | null;
+  },
+): Promise<void> {
+  const filledSize = inputs.size;
+  await pool.query(
+    `
+      update orders
+      set
+        status = $2,
+        price = coalesce($3, price),
+        size = coalesce($4, size),
+        filled_size = coalesce($5, filled_size),
+        filled_at = coalesce($6, filled_at),
+        last_update = coalesce($7, last_update),
+        order_hash = coalesce($8, order_hash),
+        order_payload = coalesce(order_payload, $9)
+      where id = $1
+    `,
+    [
+      inputs.id,
+      inputs.status,
+      inputs.price,
+      inputs.size,
+      filledSize,
+      inputs.filledAt,
+      inputs.lastUpdate,
+      inputs.orderHash,
+      inputs.orderPayload ?? null,
+    ],
+  );
+}
+
 export async function fetchOrdersForUser(
   pool: Pool,
   inputs: {

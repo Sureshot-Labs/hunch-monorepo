@@ -1,5 +1,10 @@
 import type { Pool } from "@hunch/infra";
-import { storeOrder } from "../repos/orders-repo.js";
+import {
+  deleteHistoryOrder,
+  findLimitlessHistoryMatch,
+  storeOrder,
+  updateOrderFromHistory,
+} from "../repos/orders-repo.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   extractLimitlessMessage,
@@ -344,6 +349,37 @@ export async function syncLimitlessHistoryForWallet(
       entry.blockTimestamp ?? entry.block_timestamp ?? entry.timestamp,
     );
     const orderType = normalizeHistoryOrderType(strategy);
+    const orderHash = extractHistoryTxHash(entry);
+
+    if (timestamp) {
+      const match = await findLimitlessHistoryMatch(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        tokenId,
+        side,
+        orderType: orderType ?? null,
+        postedAt: timestamp,
+      });
+      if (match) {
+        await updateOrderFromHistory(pool, {
+          id: match.id,
+          status: "filled",
+          price,
+          size,
+          filledAt: timestamp,
+          lastUpdate: timestamp,
+          orderHash,
+          orderPayload: entry,
+        });
+        await deleteHistoryOrder(pool, {
+          userId: inputs.userId,
+          venue: "limitless",
+          venueOrderId,
+        });
+        alreadyKnown += 1;
+        continue;
+      }
+    }
 
     const result = await storeOrder(pool, {
       userId: inputs.userId,
@@ -360,6 +396,7 @@ export async function syncLimitlessHistoryForWallet(
       errorMessage: null,
       rawError: null,
       orderPayload: entry,
+      orderHash,
       postedAt: timestamp,
       lastUpdate: timestamp,
       filledAt: timestamp,

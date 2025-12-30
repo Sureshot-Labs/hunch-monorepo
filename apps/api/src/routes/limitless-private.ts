@@ -37,6 +37,19 @@ function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function parseFeeRateBps(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return undefined;
+}
+
 function parseNumberish(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -46,6 +59,24 @@ function parseNumberish(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  const payload = parts[1];
+  if (!payload) return null;
+  const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.length % 4;
+  const padded =
+    padding === 0 ? normalized : `${normalized}${"=".repeat(4 - padding)}`;
+  try {
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeOrderSide(value: unknown): "BUY" | "SELL" | null {
@@ -63,29 +94,127 @@ function normalizeOrderSide(value: unknown): "BUY" | "SELL" | null {
   return null;
 }
 
+function coerceOrderNumber(
+  value: unknown,
+  field: string,
+  options: { allowFloat?: boolean } = {},
+): number | null {
+  if (value == null) return null;
+  const raw =
+    typeof value === "string" ? value.trim() : typeof value === "number" ? value : null;
+  if (raw == null || raw === "") return null;
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Order ${field} must be a valid number.`);
+  }
+  if (!options.allowFloat && !Number.isSafeInteger(parsed)) {
+    throw new Error(`Order ${field} must be a safe integer.`);
+  }
+  return parsed;
+}
+
 function extractProfile(value: unknown): LimitlessProfile | null {
   if (!isRecord(value)) return null;
   const profileRaw = isRecord(value.profile) ? value.profile : value;
   if (!isRecord(profileRaw)) return null;
-  const id = typeof profileRaw.id === "number" ? profileRaw.id : null;
+  const idCandidate =
+    profileRaw.id ??
+    profileRaw.userId ??
+    profileRaw.user_id ??
+    profileRaw.profileId ??
+    profileRaw.profile_id;
+  const idFromString =
+    typeof idCandidate === "string" && idCandidate.trim()
+      ? Number.parseInt(idCandidate, 10)
+      : null;
+  const id =
+    typeof idCandidate === "number"
+      ? idCandidate
+      : typeof idFromString === "number" && Number.isFinite(idFromString)
+        ? idFromString
+        : null;
   const account =
-    typeof profileRaw.account === "string" ? profileRaw.account : null;
+    typeof profileRaw.account === "string"
+      ? profileRaw.account
+      : typeof profileRaw.address === "string"
+        ? profileRaw.address
+        : typeof profileRaw.walletAddress === "string"
+          ? profileRaw.walletAddress
+          : typeof profileRaw.wallet_address === "string"
+            ? profileRaw.wallet_address
+            : null;
   const client =
-    typeof profileRaw.client === "string" ? profileRaw.client : null;
+    typeof profileRaw.client === "string"
+      ? profileRaw.client
+      : typeof profileRaw.clientType === "string"
+        ? profileRaw.clientType
+        : typeof profileRaw.client_type === "string"
+          ? profileRaw.client_type
+          : null;
   const rankRaw = isRecord(profileRaw.rank) ? profileRaw.rank : null;
-  const rank = rankRaw
-    ? {
-        feeRateBps:
-          typeof rankRaw.feeRateBps === "number"
-            ? rankRaw.feeRateBps
-            : undefined,
-        name: typeof rankRaw.name === "string" ? rankRaw.name : undefined,
-      }
-    : undefined;
+  const rankFeeRateBps =
+    parseFeeRateBps(rankRaw?.feeRateBps) ??
+    parseFeeRateBps(rankRaw?.fee_rate_bps) ??
+    parseFeeRateBps(rankRaw?.feeRate) ??
+    parseFeeRateBps(rankRaw?.fee_rate) ??
+    parseFeeRateBps(profileRaw.feeRateBps) ??
+    parseFeeRateBps(profileRaw.fee_rate_bps) ??
+    parseFeeRateBps(profileRaw.feeRate) ??
+    parseFeeRateBps(profileRaw.fee_rate) ??
+    parseFeeRateBps(profileRaw.rankFeeRateBps) ??
+    parseFeeRateBps(profileRaw.rank_fee_rate_bps);
+  const rankName =
+    (typeof rankRaw?.name === "string" && rankRaw.name) ||
+    (typeof profileRaw.rank === "string" && profileRaw.rank) ||
+    (typeof profileRaw.rankName === "string" && profileRaw.rankName) ||
+    (typeof profileRaw.rank_name === "string" && profileRaw.rank_name) ||
+    undefined;
+  const rank =
+    rankFeeRateBps != null || rankName
+      ? {
+          ...(rankFeeRateBps != null ? { feeRateBps: rankFeeRateBps } : {}),
+          ...(rankName ? { name: rankName } : {}),
+        }
+      : undefined;
   return {
     ...(id != null ? { id } : {}),
     ...(account ? { account } : {}),
     ...(client ? { client } : {}),
+    ...(rank ? { rank } : {}),
+  };
+}
+
+function extractProfileFromSessionCookie(
+  sessionCookie: string | null | undefined,
+): LimitlessProfile | null {
+  if (!sessionCookie) return null;
+  const payload = decodeJwtPayload(sessionCookie);
+  if (!payload) return null;
+  return extractProfile(payload);
+}
+
+function mergeProfiles(
+  base: LimitlessProfile | null,
+  extra: LimitlessProfile | null,
+): LimitlessProfile | null {
+  if (!base && !extra) return null;
+  const rankFeeRateBps = base?.rank?.feeRateBps ?? extra?.rank?.feeRateBps;
+  const rankName = base?.rank?.name ?? extra?.rank?.name;
+  const rank =
+    rankFeeRateBps != null || rankName
+      ? {
+          ...(rankFeeRateBps != null ? { feeRateBps: rankFeeRateBps } : {}),
+          ...(rankName ? { name: rankName } : {}),
+        }
+      : undefined;
+  return {
+    ...(base?.id ?? extra?.id ? { id: base?.id ?? extra?.id } : {}),
+    ...(base?.account ?? extra?.account
+      ? { account: base?.account ?? extra?.account }
+      : {}),
+    ...(base?.client ?? extra?.client
+      ? { client: base?.client ?? extra?.client }
+      : {}),
     ...(rank ? { rank } : {}),
   };
 }
@@ -547,12 +676,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const credsInfo = await AuthService.getVenueCredentialsInfo(
+      const creds = await AuthService.getVenueCredentials(
         user.id,
         "limitless",
         signer,
       );
-      const profile = extractProfile(credsInfo?.additionalData ?? null);
+      const sessionProfile = extractProfileFromSessionCookie(
+        creds?.apiSecret?.trim(),
+      );
+      const profile = mergeProfiles(
+        extractProfile(creds?.additionalData ?? null),
+        sessionProfile,
+      );
 
       try {
         const [code, snapshot] = await Promise.all([
@@ -611,7 +746,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             },
           },
           profile: profile ?? null,
-          hasCredentials: Boolean(credsInfo),
+          hasCredentials: Boolean(creds),
         });
       } catch (error) {
         app.log.error(
@@ -664,7 +799,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const profile = extractProfile(creds?.additionalData ?? null);
+      const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
+      const profile = mergeProfiles(
+        extractProfile(creds?.additionalData ?? null),
+        sessionProfile,
+      );
       const ownerId = request.body.ownerId ?? profile?.id;
       if (!ownerId) {
         reply.code(400);
@@ -699,8 +838,97 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      let orderForUpstream: Record<string, unknown>;
+      let coercedTakerAmount: number | null = null;
+      let coercedNonce: number | null = null;
+      let coercedPrice: number | null = null;
+      try {
+        const salt = coerceOrderNumber(order.salt, "salt");
+        const makerAmount = coerceOrderNumber(order.makerAmount, "makerAmount");
+        const takerAmount = coerceOrderNumber(order.takerAmount, "takerAmount");
+        const expirationValue = order.expiration;
+        const expiration =
+          typeof expirationValue === "string"
+            ? expirationValue.trim()
+            : expirationValue == null
+              ? null
+              : String(expirationValue);
+        const nonce = coerceOrderNumber(order.nonce, "nonce");
+        const feeRateBps = coerceOrderNumber(
+          order.feeRateBps ?? 0,
+          "feeRateBps",
+        );
+        const sideValue = coerceOrderNumber(order.side, "side");
+        const signatureType = coerceOrderNumber(
+          order.signatureType,
+          "signatureType",
+        );
+        const price =
+          order.price == null
+            ? null
+            : coerceOrderNumber(order.price, "price", { allowFloat: true });
+
+        if (
+          salt == null ||
+          makerAmount == null ||
+          takerAmount == null ||
+          expiration == null ||
+          expiration === "" ||
+          nonce == null ||
+          sideValue == null ||
+          signatureType == null
+        ) {
+          reply.code(400);
+          return reply.send({
+            error: "Order numeric fields are required.",
+          });
+        }
+
+        coercedTakerAmount = takerAmount;
+        coercedNonce = nonce;
+        coercedPrice = price;
+        orderForUpstream = {
+          ...order,
+          salt,
+          makerAmount,
+          takerAmount,
+          expiration,
+          nonce,
+          feeRateBps,
+          side: sideValue,
+          signatureType,
+          ...(price == null ? {} : { price }),
+        };
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error: error instanceof Error ? error.message : "Invalid order data.",
+        });
+      }
+
+      if (request.body.orderType === "FOK") {
+        if (coercedTakerAmount !== 1) {
+          reply.code(400);
+          return reply.send({
+            error: "FOK orders require takerAmount to equal 1.",
+          });
+        }
+        if (coercedNonce !== 0) {
+          reply.code(400);
+          return reply.send({
+            error: "FOK orders require nonce to equal 0.",
+          });
+        }
+        if (coercedPrice != null) {
+          reply.code(400);
+          return reply.send({
+            error: "FOK orders must not include price.",
+          });
+        }
+      }
+
       const orderPayload = {
-        order: request.body.order,
+        order: orderForUpstream,
         orderType: request.body.orderType,
         marketSlug: request.body.marketSlug,
         ownerId,

@@ -32,7 +32,7 @@ const limitlessOrderSchema = z
     takerAmount: zNumberish,
     expiration: zNumberish,
     nonce: zNumberish,
-    feeRateBps: zNumberish,
+    feeRateBps: zNumberish.optional().default(0),
     side: zNumberish,
     signatureType: zNumberish,
     signature: zRequiredString("signature is required"),

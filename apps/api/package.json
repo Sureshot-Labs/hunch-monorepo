@@ -11,6 +11,7 @@
     "delete-closed": "tsx src/delete-closed-markets.ts",
     "fees:collect": "tsx src/collect-fees.ts",
     "polycurl": "tsx src/polyclob.ts",
+    "limitlesscurl": "tsx src/limitlesscurl.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
