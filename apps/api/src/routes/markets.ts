@@ -5,6 +5,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { isRecord } from "../lib/type-guards.js";
 import {
   aggregateKalshiCandlesticks,
   deriveNoCandlesticksFromYes,
@@ -43,6 +44,56 @@ function parseTimestampSeconds(value: unknown): number | null {
   return Math.floor(parsed / 1000);
 }
 
+type LimitlessMeta = {
+  negRiskRequestId?: string;
+  negRiskMarketId?: string;
+  venueAdapter?: string;
+  venueExchange?: string;
+};
+
+function parseMetadata(input: unknown): Record<string, unknown> | null {
+  if (!input) return null;
+  if (isRecord(input)) return input;
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function pickString(
+  obj: Record<string, unknown> | null,
+  key: string,
+): string | undefined {
+  if (!obj) return undefined;
+  const value = obj[key];
+  return typeof value === "string" && value.trim().length
+    ? value
+    : undefined;
+}
+
+function extractLimitlessMeta(
+  marketMeta: unknown,
+  eventMeta: unknown,
+): LimitlessMeta {
+  const market = parseMetadata(marketMeta);
+  const event = parseMetadata(eventMeta);
+
+  return {
+    negRiskRequestId: pickString(market, "negRiskRequestId"),
+    negRiskMarketId:
+      pickString(market, "negRiskMarketId") ?? pickString(event, "negRiskMarketId"),
+    venueAdapter:
+      pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
+    venueExchange:
+      pickString(market, "venueExchange") ?? pickString(event, "venueExchange"),
+  };
+}
+
 export const marketRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -54,7 +105,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
     "/markets/by-token",
     { schema: { querystring: marketsByTokenQuerySchema } },
     async (request, reply) => {
-      const { tokenIds, venue } = request.query;
+      const { tokenIds, venue, includeTop } = request.query;
 
       if (tokenIds.length > 200) {
         reply.code(400);
@@ -65,10 +116,38 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const rows = await fetchMarketsByTokenIds(pool, { tokenIds, venue });
+        const startedAt = Date.now();
+        const rows = await fetchMarketsByTokenIds(pool, {
+          tokenIds,
+          venue,
+          includeTop,
+        });
+        const durationMs = Date.now() - startedAt;
+        if (durationMs > 2000) {
+          app.log.warn(
+            {
+              durationMs,
+              tokenCount: tokenIds.length,
+              tokenSample: tokenIds.slice(0, 8),
+              venue,
+            },
+            "Markets by token slow",
+          );
+        }
         const now = new Date();
 
         const response = rows.map((row) => {
+          const limitlessMeta =
+            row.venue === "limitless"
+              ? extractLimitlessMeta(row.market_metadata, row.event_metadata)
+              : null;
+          const isLimitlessNegRisk = Boolean(
+            limitlessMeta?.negRiskRequestId ||
+              limitlessMeta?.negRiskMarketId ||
+              limitlessMeta?.venueAdapter ||
+              limitlessMeta?.venueExchange,
+          );
+
           let tokens = { yes: null as string | null, no: null as string | null };
           if (row.venue === "polymarket" && row.clob_token_ids) {
             try {
@@ -167,11 +246,34 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
                   ? Number(row.resolved_outcome_pct)
                   : null,
               acceptingOrders,
-              negRisk: row.pm_neg_risk != null ? Boolean(row.pm_neg_risk) : null,
-              negRiskMarketId: row.pm_neg_risk_market_id || null,
+              negRisk:
+                row.venue === "polymarket"
+                  ? row.pm_neg_risk != null
+                    ? Boolean(row.pm_neg_risk)
+                    : null
+                  : row.venue === "limitless"
+                    ? isLimitlessNegRisk
+                    : null,
+              negRiskMarketId:
+                row.venue === "limitless"
+                  ? limitlessMeta?.negRiskMarketId ?? null
+                  : row.pm_neg_risk_market_id || null,
               negRiskParentConditionId:
-                row.pm_neg_risk_parent_condition_id || null,
-              negRiskRequestId: row.pm_neg_risk_request_id || null,
+                row.venue === "polymarket"
+                  ? row.pm_neg_risk_parent_condition_id || null
+                  : null,
+              negRiskRequestId:
+                row.venue === "limitless"
+                  ? limitlessMeta?.negRiskRequestId ?? null
+                  : row.pm_neg_risk_request_id || null,
+              negRiskAdapter:
+                row.venue === "limitless"
+                  ? limitlessMeta?.venueAdapter ?? null
+                  : null,
+              negRiskExchange:
+                row.venue === "limitless"
+                  ? limitlessMeta?.venueExchange ?? null
+                  : null,
               event: {
                 eventId: row.event_id,
                 venue: row.event_venue,
@@ -201,6 +303,14 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
                 eventSlug: row.event_slug || null,
                 image: row.event_image || null,
                 icon: row.event_icon || null,
+                negRiskMarketId:
+                  row.venue === "limitless"
+                    ? limitlessMeta?.negRiskMarketId ?? null
+                    : null,
+                negRiskAdapter:
+                  row.venue === "limitless"
+                    ? limitlessMeta?.venueAdapter ?? null
+                    : null,
               },
             },
           };
@@ -213,9 +323,19 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ data: response });
       } catch (error) {
+        const err = error as { code?: unknown } | null;
+        const timeout = err?.code === "57014";
         app.log.error(
-          { error, tokenIds, venue },
-          "Markets by token fetch failed",
+          {
+            error,
+            tokenCount: tokenIds.length,
+            tokenSample: tokenIds.slice(0, 8),
+            venue,
+            timeout,
+          },
+          timeout
+            ? "Markets by token timed out"
+            : "Markets by token fetch failed",
         );
         reply.code(500);
         return reply.send({
@@ -275,6 +395,19 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const market = rows[0];
+        const limitlessMeta =
+          market.venue === "limitless"
+            ? extractLimitlessMeta(
+                market.market_metadata,
+                market.event_metadata,
+              )
+            : null;
+        const isLimitlessNegRisk = Boolean(
+          limitlessMeta?.negRiskRequestId ||
+            limitlessMeta?.negRiskMarketId ||
+            limitlessMeta?.venueAdapter ||
+            limitlessMeta?.venueExchange,
+        );
 
         const clobTokenIdsRaw =
           market.clob_token_ids ??
@@ -362,11 +495,33 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               ? Boolean(market.pm_accepting_orders)
               : null,
           negRisk:
-            market.pm_neg_risk != null ? Boolean(market.pm_neg_risk) : null,
-          negRiskMarketId: market.pm_neg_risk_market_id || null,
+            market.venue === "polymarket"
+              ? market.pm_neg_risk != null
+                ? Boolean(market.pm_neg_risk)
+                : null
+              : market.venue === "limitless"
+                ? isLimitlessNegRisk
+                : null,
+          negRiskMarketId:
+            market.venue === "limitless"
+              ? limitlessMeta?.negRiskMarketId ?? null
+              : market.pm_neg_risk_market_id || null,
           negRiskParentConditionId:
-            market.pm_neg_risk_parent_condition_id || null,
-          negRiskRequestId: market.pm_neg_risk_request_id || null,
+            market.venue === "polymarket"
+              ? market.pm_neg_risk_parent_condition_id || null
+              : null,
+          negRiskRequestId:
+            market.venue === "limitless"
+              ? limitlessMeta?.negRiskRequestId ?? null
+              : market.pm_neg_risk_request_id || null,
+          negRiskAdapter:
+            market.venue === "limitless"
+              ? limitlessMeta?.venueAdapter ?? null
+              : null,
+          negRiskExchange:
+            market.venue === "limitless"
+              ? limitlessMeta?.venueExchange ?? null
+              : null,
           marketLedger: market.market_ledger ?? null,
           settlementMint: market.settlement_mint ?? null,
           isInitialized:
@@ -402,6 +557,14 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               market.event_volume != null ? Number(market.event_volume) : 0,
             eventImage: market.event_image || null,
             eventIcon: market.event_icon || null,
+            negRiskMarketId:
+              market.venue === "limitless"
+                ? limitlessMeta?.negRiskMarketId ?? null
+                : null,
+            negRiskAdapter:
+              market.venue === "limitless"
+                ? limitlessMeta?.venueAdapter ?? null
+                : null,
           },
         };
 

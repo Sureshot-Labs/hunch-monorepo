@@ -6,8 +6,12 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { storeOrder } from "../repos/orders-repo.js";
-import { fetchEvmCode } from "../services/polygon-rpc.js";
+import {
+  fetchEvmCode,
+  fetchErc1155IsApprovedForAll,
+} from "../services/polygon-rpc.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
+import { fetchConditionalTokensPayouts } from "../services/limitless-redemption.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -23,6 +27,7 @@ import {
   limitlessOpenOrdersQuerySchema,
   limitlessOrderBodySchema,
   limitlessOrderIdParamsSchema,
+  limitlessRedemptionQuerySchema,
   limitlessSlugParamsSchema,
 } from "../schemas/limitless-private.js";
 
@@ -231,6 +236,10 @@ function getHeaderValue(
 
 function isEvmWallet(address: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+function isBytes32(value: string): boolean {
+  return /^0x[a-fA-F0-9]{64}$/.test(value);
 }
 
 function deriveSize(
@@ -690,7 +699,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       );
 
       try {
-        const [code, snapshot] = await Promise.all([
+        const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
+        const [code, snapshot, approvedClob, approvedNegRisk] =
+          await Promise.all([
           fetchEvmCode({
             rpcUrl: env.baseRpcUrl,
             timeoutMs: env.baseRpcTimeoutMs,
@@ -703,6 +714,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             clobAddress: env.limitlessClobAddress,
             negRiskAddress: env.limitlessNegRiskAddress,
           }),
+          env.limitlessClobAddress
+            ? fetchErc1155IsApprovedForAll({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                operator: env.limitlessClobAddress,
+              })
+            : Promise.resolve(null),
+          env.limitlessNegRiskAddress
+            ? fetchErc1155IsApprovedForAll({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                operator: env.limitlessNegRiskAddress,
+              })
+            : Promise.resolve(null),
         ]);
 
         const usdcBalance = snapshot.usdcBalance;
@@ -745,6 +774,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 : {}),
             },
           },
+          conditionalTokens: {
+            contractAddress: conditionalTokensAddress,
+            isApprovedForAll: {
+              ...(env.limitlessClobAddress
+                ? { clob: approvedClob ?? false }
+                : {}),
+              ...(env.limitlessNegRiskAddress
+                ? { negRisk: approvedNegRisk ?? false }
+                : {}),
+            },
+          },
           profile: profile ?? null,
           hasCredentials: Boolean(creds),
         });
@@ -756,6 +796,85 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Limitless account snapshot",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /redemption/status
+   * Returns payout readiness for one or more Limitless conditions.
+   */
+  z.get(
+    "/redemption/status",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessRedemptionQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Limitless redemption requires an EVM wallet address",
+        });
+      }
+
+      const conditionIds = request.query.conditionIds
+        .map((value) => value.trim())
+        .filter((value) => isBytes32(value));
+
+      if (conditionIds.length === 0) {
+        reply.code(400);
+        return reply.send({ error: "No valid conditionIds provided." });
+      }
+
+      const adapter =
+        typeof request.query.adapter === "string"
+          ? request.query.adapter.trim()
+          : null;
+
+      try {
+        const [payouts, adapterApproved] = await Promise.all([
+          fetchConditionalTokensPayouts({ conditionIds }),
+          adapter && isEvmWallet(adapter)
+            ? fetchErc1155IsApprovedForAll({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: env.limitlessConditionalTokensAddress,
+                owner: signer,
+                operator: adapter,
+              })
+            : Promise.resolve(null),
+        ]);
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          venue: "limitless",
+          signer,
+          conditionalTokens: {
+            contractAddress: env.limitlessConditionalTokensAddress,
+          },
+          adapter: adapter ?? null,
+          adapterApproved,
+          conditions: payouts,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to fetch Limitless redemption status",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Failed to fetch Limitless redemption status",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

@@ -4,6 +4,7 @@ import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import { isRecord } from "../lib/type-guards.js";
 import {
   aggregateKalshiCandlesticks,
   deriveNoCandlesticksFromYes,
@@ -46,6 +47,56 @@ function parseTimestampSeconds(value: unknown): number | null {
   const parsed = Date.parse(String(value));
   if (Number.isNaN(parsed)) return null;
   return Math.floor(parsed / 1000);
+}
+
+type LimitlessMeta = {
+  negRiskRequestId?: string;
+  negRiskMarketId?: string;
+  venueAdapter?: string;
+  venueExchange?: string;
+};
+
+function parseMetadata(input: unknown): Record<string, unknown> | null {
+  if (!input) return null;
+  if (isRecord(input)) return input;
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function pickString(
+  obj: Record<string, unknown> | null,
+  key: string,
+): string | undefined {
+  if (!obj) return undefined;
+  const value = obj[key];
+  return typeof value === "string" && value.trim().length
+    ? value
+    : undefined;
+}
+
+function extractLimitlessMeta(
+  marketMeta: unknown,
+  eventMeta: unknown,
+): LimitlessMeta {
+  const market = parseMetadata(marketMeta);
+  const event = parseMetadata(eventMeta);
+
+  return {
+    negRiskRequestId: pickString(market, "negRiskRequestId"),
+    negRiskMarketId:
+      pickString(market, "negRiskMarketId") ?? pickString(event, "negRiskMarketId"),
+    venueAdapter:
+      pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
+    venueExchange:
+      pickString(market, "venueExchange") ?? pickString(event, "venueExchange"),
+  };
 }
 
 function resolveTokenPair(row: EventDetailsRow): TokenPair {
@@ -230,6 +281,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
         const firstRow = rows[0];
 
+        const eventLimitlessMeta =
+          firstRow.event_venue === "limitless"
+            ? extractLimitlessMeta(null, firstRow.event_metadata)
+            : null;
+
         // Build event object
         const event = {
           eventId: firstRow.event_id,
@@ -262,6 +318,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           icon: firstRow.event_icon || null,
           createdAt: firstRow.event_created_at,
           updatedAt: firstRow.event_updated_at,
+          negRiskMarketId: eventLimitlessMeta?.negRiskMarketId ?? null,
+          negRiskAdapter: eventLimitlessMeta?.venueAdapter ?? null,
+          negRiskExchange: eventLimitlessMeta?.venueExchange ?? null,
           markets: [] as Record<string, unknown>[],
         };
 
@@ -286,6 +345,16 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
         // Process markets (sorted by YES probability desc)
         for (const row of marketRows) {
+          const limitlessMeta =
+            row.market_venue === "limitless"
+              ? extractLimitlessMeta(row.market_metadata, row.event_metadata)
+              : null;
+          const isLimitlessNegRisk = Boolean(
+            limitlessMeta?.negRiskRequestId ||
+              limitlessMeta?.negRiskMarketId ||
+              limitlessMeta?.venueAdapter ||
+              limitlessMeta?.venueExchange,
+          );
 
           // Parse token IDs based on venue
           let tokens: TokenPair = { yes: null, no: null };
@@ -373,6 +442,34 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketImage: row.market_image || null,
             marketIcon: row.market_icon || null,
             acceptingOrders,
+            negRisk:
+              row.market_venue === "polymarket"
+                ? row.pm_neg_risk != null
+                  ? Boolean(row.pm_neg_risk)
+                  : null
+                : row.market_venue === "limitless"
+                  ? isLimitlessNegRisk
+                  : null,
+            negRiskMarketId:
+              row.market_venue === "limitless"
+                ? limitlessMeta?.negRiskMarketId ?? null
+                : row.pm_neg_risk_market_id || null,
+            negRiskParentConditionId:
+              row.market_venue === "polymarket"
+                ? row.pm_neg_risk_parent_condition_id || null
+                : null,
+            negRiskRequestId:
+              row.market_venue === "limitless"
+                ? limitlessMeta?.negRiskRequestId ?? null
+                : row.pm_neg_risk_request_id || null,
+            negRiskAdapter:
+              row.market_venue === "limitless"
+                ? limitlessMeta?.venueAdapter ?? null
+                : null,
+            negRiskExchange:
+              row.market_venue === "limitless"
+                ? limitlessMeta?.venueExchange ?? null
+                : null,
             top: {
               yesBid:
                 row.best_bid_yes != null

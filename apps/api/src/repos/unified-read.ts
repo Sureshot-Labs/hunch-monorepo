@@ -734,6 +734,7 @@ export type MarketDetailsRow = {
   event_volume: unknown;
   event_image: string | null;
   event_icon: string | null;
+  event_metadata: unknown;
   market_id: string;
   venue: string;
   venue_market_id: string;
@@ -777,6 +778,7 @@ export type MarketDetailsRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -798,6 +800,7 @@ export async function fetchMarketDetails(
       e.volume_total as event_volume,
       e.image as event_image,
       e.icon as event_icon,
+      e.metadata as event_metadata,
       m.id as market_id,
       m.venue,
       m.venue_market_id,
@@ -841,6 +844,7 @@ export async function fetchMarketDetails(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       m.created_at,
       m.updated_at
     FROM unified_events e
@@ -862,6 +866,8 @@ export async function fetchMarketDetails(
       select best_bid, best_ask
       from unified_book_top
       where token_id = mt.token_yes
+        and m.status = 'ACTIVE'
+        and ts > now() - interval '7 days'
       order by ts desc
       limit 1
     ) yes_top on true
@@ -869,6 +875,8 @@ export async function fetchMarketDetails(
       select best_bid, best_ask
       from unified_book_top
       where token_id = mt.token_no
+        and m.status = 'ACTIVE'
+        and ts > now() - interval '7 days'
       order by ts desc
       limit 1
     ) no_top on true
@@ -900,6 +908,7 @@ export type EventDetailsRow = {
   event_slug: string | null;
   event_image: string | null;
   event_icon: string | null;
+  event_metadata: unknown;
   event_created_at: unknown;
   event_updated_at: unknown;
   market_id: string | null;
@@ -940,6 +949,7 @@ export type EventDetailsRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   market_created_at: unknown;
   market_updated_at: unknown;
 };
@@ -969,6 +979,7 @@ export async function fetchEventDetails(
       e.slug as event_slug,
       e.image as event_image,
       e.icon as event_icon,
+      e.metadata as event_metadata,
       e.created_at as event_created_at,
       e.updated_at as event_updated_at,
       m.id as market_id,
@@ -1009,6 +1020,7 @@ export async function fetchEventDetails(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       m.created_at as market_created_at,
       m.updated_at as market_updated_at
     FROM unified_events e
@@ -1098,6 +1110,7 @@ export type MarketByTokenRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   created_at: unknown;
   updated_at: unknown;
   event_id: string | null;
@@ -1116,11 +1129,12 @@ export type MarketByTokenRow = {
   event_slug: string | null;
   event_image: string | null;
   event_icon: string | null;
+  event_metadata: unknown;
 };
 
 export async function fetchMarketsByTokenIds(
   pool: Pool,
-  inputs: { tokenIds: string[]; venue?: string },
+  inputs: { tokenIds: string[]; venue?: string; includeTop?: boolean },
 ): Promise<MarketByTokenRow[]> {
   if (inputs.tokenIds.length === 0) return [];
 
@@ -1131,8 +1145,45 @@ export async function fetchMarketsByTokenIds(
     venueClause = `and m.venue = $${params.length}`;
   }
 
+  const includeTop = inputs.includeTop ?? true;
+  const topSelect = includeTop
+    ? `yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,`
+    : `null::numeric as best_bid_yes,
+      null::numeric as best_ask_yes,
+      null::numeric as best_bid_no,
+      null::numeric as best_ask_no,`;
+  const topJoins = includeTop
+    ? `left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+        and m.status = 'ACTIVE'
+        and ts > now() - interval '7 days'
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+        and m.status = 'ACTIVE'
+        and ts > now() - interval '7 days'
+      order by ts desc
+      limit 1
+    ) no_top on true`
+    : "";
+
   const sql = `
-    with market_tokens as (
+    with input_tokens as (
+      select token_id, min(ordinality) as ordinality
+      from unnest($1::text[]) with ordinality as t(token_id, ordinality)
+      where token_id is not null and token_id <> ''
+      group by token_id
+    ),
+    market_tokens as (
       select
         m.id as market_id,
         case
@@ -1147,32 +1198,43 @@ export async function fetchMarketsByTokenIds(
         end as token_no
       from unified_markets m
     ),
-    token_matches as (
+    token_matches_raw as (
       select
-        ut.token_id,
+        t.token_id,
         ut.side,
-        ut.market_id
-      from unified_tokens ut
-      where ut.token_id = any($1::text[])
+        ut.market_id,
+        t.ordinality
+      from input_tokens t
+      join unified_tokens ut on ut.token_id = t.token_id
 
-      union
+      union all
 
       select
-        token_map.token_id,
-        case when token_map.ordinality = 1 then 'YES' else 'NO' end as side,
-        m.id as market_id
-      from unified_markets m
-      cross join lateral (
-        select elem.token_id, elem.ordinality
-        from jsonb_array_elements_text(m.clob_token_ids::jsonb)
-          with ordinality as elem(token_id, ordinality)
-        where elem.token_id = any($1::text[])
-      ) token_map
-      where m.venue = 'polymarket'
-        and m.clob_token_ids is not null
-        and m.clob_token_ids <> ''
-        and m.clob_token_ids <> '[]'
-        and (m.clob_token_ids::jsonb ?| $1::text[])
+        t.token_id,
+        case
+          when (m.clob_token_ids::jsonb->>0) = t.token_id then 'YES'
+          when (m.clob_token_ids::jsonb->>1) = t.token_id then 'NO'
+          else null
+        end as side,
+        m.id as market_id,
+        t.ordinality
+      from input_tokens t
+      join unified_markets m
+        on m.venue = 'polymarket'
+       and m.clob_token_ids is not null
+       and m.clob_token_ids <> ''
+       and m.clob_token_ids <> '[]'
+       and (m.clob_token_ids::jsonb ? t.token_id)
+    ),
+    token_matches as (
+      select distinct on (token_id)
+        token_id,
+        side,
+        market_id,
+        ordinality
+      from token_matches_raw
+      where side is not null
+      order by token_id, ordinality
     )
     select
       tm.token_id,
@@ -1199,10 +1261,7 @@ export async function fetchMarketsByTokenIds(
       m.liquidity,
       m.best_bid,
       m.best_ask,
-      yes_top.best_bid as best_bid_yes,
-      yes_top.best_ask as best_ask_yes,
-      no_top.best_bid as best_bid_no,
-      no_top.best_ask as best_ask_no,
+      ${topSelect}
       m.last_price,
       m.outcomes,
       mt.token_yes,
@@ -1219,6 +1278,7 @@ export async function fetchMarketsByTokenIds(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       m.created_at,
       m.updated_at,
       e.id as event_id,
@@ -1236,31 +1296,19 @@ export async function fetchMarketsByTokenIds(
       e.open_interest as event_open_interest,
       e.slug as event_slug,
       e.image as event_image,
-      e.icon as event_icon
+      e.icon as event_icon,
+      e.metadata as event_metadata
     from token_matches tm
     join unified_markets m on m.id = tm.market_id
     join market_tokens mt on mt.market_id = m.id
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_yes
-      order by ts desc
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = mt.token_no
-      order by ts desc
-      limit 1
-    ) no_top on true
+    ${topJoins}
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
     left join polymarket_markets pm_parent
       on pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')
     left join unified_events e on e.id = m.event_id
     ${venueClause}
-    order by array_position($1::text[], tm.token_id)
+    order by tm.ordinality
   `;
 
   const { rows } = await pool.query<MarketByTokenRow>(sql, params);

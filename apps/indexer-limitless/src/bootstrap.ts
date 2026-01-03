@@ -81,6 +81,11 @@ function mergeMarket(
   const merged: TLimitlessMarket = {
     ...(detail ?? {}),
     ...(base as TLimitlessMarket),
+    venue: (base as TLimitlessMarket).venue ?? detail?.venue,
+    negRiskRequestId:
+      (base as TLimitlessMarket).negRiskRequestId ?? detail?.negRiskRequestId,
+    negRiskMarketId:
+      (base as TLimitlessMarket).negRiskMarketId ?? detail?.negRiskMarketId,
     prices: (base as TLimitlessMarket).prices ?? detail?.prices,
     tokens: detail?.tokens ?? (base as TLimitlessMarket).tokens,
     markets: detail?.markets ?? (base as TLimitlessMarket).markets,
@@ -165,7 +170,13 @@ export async function bootstrapLimitless() {
           : lm.tradeType?.toLowerCase() === "clob"
             ? !lm.tokens?.yes || !lm.tokens?.no
             : false;
-      const detail = needsDetail ? await getMarketDetail(lm.slug) : null;
+      const shouldFetchNegRiskDetail = Boolean(
+        lm.negRiskRequestId || lm.negRiskMarketId,
+      );
+      const detail =
+        needsDetail || shouldFetchNegRiskDetail
+          ? await getMarketDetail(lm.slug)
+          : null;
       const mergedTop = mergeMarket(lm, detail);
 
       // Store the main event
@@ -237,6 +248,9 @@ export async function bootstrapLimitless() {
             subDetail,
             mergedTop.tradeType ?? "clob",
           );
+          if (!mergedSub.venue && mergedTop.venue) {
+            mergedSub.venue = mergedTop.venue;
+          }
           const marketRow = mapLimitlessMarketRow(eventId, mergedSub);
           await upsertLimitlessMarket(marketRow);
           marketCount++;

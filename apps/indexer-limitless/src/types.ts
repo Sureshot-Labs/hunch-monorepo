@@ -52,6 +52,14 @@ const Tokens = z.object({
   yes: z.string(),
 });
 
+const Venue = z
+  .object({
+    exchange: z.string().nullable().optional(),
+    adapter: z.string().nullable().optional(),
+  })
+  .nullable()
+  .optional();
+
 const PositionIds = z.array(z.union([z.string(), z.array(z.string())]));
 
 const FeedEvent = z
@@ -99,6 +107,7 @@ const LimitlessMarketItem = z
     collateralToken: CollateralToken,
     volumeFormatted: z.string(),
     negRiskRequestId: z.string().nullable().optional(),
+    venue: Venue,
     expirationTimestamp: z.number(),
     winningOutcomeIndex: z.number().nullable().optional(),
     positionIds: PositionIds.optional(),
@@ -145,12 +154,13 @@ export const LimitlessMarket = z
     negRiskRequestId: z.string().nullable().optional(),
     expirationTimestamp: z.number().optional(),
     winningOutcomeIndex: z.number().nullable().optional(),
+    venue: Venue,
     // Group market specific fields
     markets: z.array(LimitlessMarketItem).optional(), // Only for group markets
     ogImageURI: z.string().nullable().optional(),
     dailyReward: z.string().optional(),
     outcomeTokens: z.array(z.string()).optional(),
-    negRiskMarketId: z.string().optional(),
+    negRiskMarketId: z.string().nullable().optional(),
     positionIds: PositionIds.optional(),
   })
   .passthrough();

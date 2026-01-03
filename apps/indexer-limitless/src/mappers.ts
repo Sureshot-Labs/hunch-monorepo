@@ -92,6 +92,19 @@ function pickIcon(input: {
   return input.creator?.imageURI ?? input.logo ?? undefined;
 }
 
+function extractVenueInfo(
+  market: TLimitlessMarketItem | TLimitlessMarket,
+): { exchange?: string; adapter?: string } | undefined {
+  const venue = (market as { venue?: { exchange?: unknown; adapter?: unknown } })
+    .venue;
+  if (!venue) return undefined;
+  const exchange =
+    typeof venue.exchange === "string" ? venue.exchange : undefined;
+  const adapter = typeof venue.adapter === "string" ? venue.adapter : undefined;
+  if (!exchange && !adapter) return undefined;
+  return { exchange, adapter };
+}
+
 function prefixLimitlessToken(tokenId?: string | null): string | undefined {
   if (!tokenId) return undefined;
   return tokenId.startsWith("limitless:") ? tokenId : `limitless:${tokenId}`;
@@ -341,6 +354,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     : undefined;
   const image = pickImage(lm);
   const icon = pickIcon(lm);
+  const venueInfo = extractVenueInfo(lm);
 
   return {
     id: `limitless:${lm.id}`,
@@ -360,6 +374,10 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
       tradeType: lm.tradeType ?? "clob",
       marketType: lm.marketType,
       address: lm.address ?? undefined,
+      negRiskRequestId: lm.negRiskRequestId ?? undefined,
+      negRiskMarketId: lm.negRiskMarketId ?? undefined,
+      venueExchange: venueInfo?.exchange,
+      venueAdapter: venueInfo?.adapter,
     },
     slug: lm.slug || undefined,
     image,
@@ -408,6 +426,7 @@ export function mapToUnifiedMarket(
   const outcomeTokens = resolveOutcomeTokens(market);
   const image = pickImage(market);
   const icon = pickIcon(market);
+  const venueInfo = extractVenueInfo(market);
 
   return {
     id: `limitless:${market.id}`,
@@ -433,6 +452,11 @@ export function mapToUnifiedMarket(
       tradeType,
       marketType: market.marketType,
       address: market.address ?? undefined,
+      negRiskRequestId: market.negRiskRequestId ?? undefined,
+      negRiskMarketId: (market as { negRiskMarketId?: string | null })
+        .negRiskMarketId ?? undefined,
+      venueExchange: venueInfo?.exchange,
+      venueAdapter: venueInfo?.adapter,
     },
     outcomes: JSON.stringify(["YES", "NO"]), // Limitless markets are binary
     token_yes: prefixLimitlessToken(outcomeTokens.yes),

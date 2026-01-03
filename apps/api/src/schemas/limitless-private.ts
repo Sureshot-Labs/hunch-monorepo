@@ -80,3 +80,8 @@ export const limitlessSlugParamsSchema = z.object({
 export const limitlessCancelBatchBodySchema = z.object({
   orderIds: z.array(z.string().min(1, "orderId is required")).min(1, "orderIds is required"),
 });
+
+export const limitlessRedemptionQuerySchema = z.object({
+  conditionIds: zCsvString("conditionIds is required"),
+  adapter: zEthAddress.optional(),
+});
