@@ -318,6 +318,107 @@ async function fetchPolymarketCandidateTokenIds(
     .filter((tokenId): tokenId is string => Boolean(tokenId));
 }
 
+async function fetchLimitlessCandidateTokenIds(
+  pool: Pool,
+  inputs: { userId: string; walletAddresses: string[]; limit: number },
+): Promise<string[]> {
+  if (inputs.walletAddresses.length === 0) return [];
+  const { rows } = await pool.query<{ token_id: string }>(
+    `
+      with watchlist_tokens as (
+        select m.token_yes as token_id
+        from user_watchlist w
+        join unified_markets m
+          on m.id = w.market_id
+        where w.user_id = $1
+          and m.venue = 'limitless'
+          and m.token_yes is not null
+          and m.token_yes <> ''
+        union all
+        select m.token_no as token_id
+        from user_watchlist w
+        join unified_markets m
+          on m.id = w.market_id
+        where w.user_id = $1
+          and m.venue = 'limitless'
+          and m.token_no is not null
+          and m.token_no <> ''
+      ),
+      order_tokens as (
+        select token_id
+        from orders
+        where user_id = $1
+          and (wallet_address is null or wallet_address = any($2::text[]))
+          and venue = 'limitless'
+          and token_id is not null
+      ),
+      position_tokens as (
+        select token_id
+        from positions
+        where user_id = $1
+          and wallet_address = any($2::text[])
+          and venue = 'limitless'
+      )
+      select distinct regexp_replace(token_id, '^limitless:', '') as token_id
+      from (
+        select token_id from watchlist_tokens
+        union all
+        select token_id from order_tokens
+        union all
+        select token_id from position_tokens
+      ) t
+      where token_id is not null
+        and token_id <> ''
+        and regexp_replace(token_id, '^limitless:', '') ~ '^[0-9]+$'
+      limit $3
+    `,
+    [inputs.userId, inputs.walletAddresses, inputs.limit],
+  );
+
+  return rows
+    .map((row) => row.token_id)
+    .filter((tokenId): tokenId is string => Boolean(tokenId));
+}
+
+async function fetchLimitlessOnchainTokenBalances(
+  pool: Pool,
+  inputs: { userId: string; walletAddress: string; limit?: number },
+): Promise<WalletTokenBalance[]> {
+  const tokenIds = await fetchLimitlessCandidateTokenIds(pool, {
+    userId: inputs.userId,
+    walletAddresses: [inputs.walletAddress],
+    limit: inputs.limit ?? 1000,
+  });
+
+  if (tokenIds.length === 0) return [];
+
+  const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
+
+  const balances: WalletTokenBalance[] = [];
+  const chunkSize = 200;
+  for (let i = 0; i < tokenIds.length; i += chunkSize) {
+    const chunk = tokenIds.slice(i, i + chunkSize);
+    const chunkBalances = await fetchErc1155BalancesByOwner({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      contractAddress: conditionalTokensAddress,
+      owner: inputs.walletAddress,
+      tokenIds: chunk,
+    });
+
+    for (const tokenId of chunk) {
+      const balance = chunkBalances.get(tokenId) ?? 0n;
+      if (balance <= 0n) continue;
+      balances.push({
+        tokenId: normalizeLimitlessTokenId(tokenId),
+        size: ethers.formatUnits(balance, 6),
+      });
+    }
+  }
+
+  return balances;
+}
+
 async function fetchPolymarketFunderAddress(
   pool: Pool,
   inputs: { userId: string; walletAddress: string },
@@ -767,7 +868,26 @@ async function syncLimitlessPositionsFromPortfolio(
     );
   }
 
-  const tokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  try {
+    await syncLimitlessHistoryForWallet(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      sessionCookie,
+      page: 1,
+      limit: 50,
+    });
+  } catch (error) {
+    console.error("Limitless history sync failed", error);
+  }
+
+  let tokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  if (tokenBalances.length === 0) {
+    tokenBalances = await fetchLimitlessOnchainTokenBalances(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+    });
+  }
+
   if (tokenBalances.length) {
     void markHotTokens({
       tokenIds: tokenBalances.map((balance) => balance.tokenId),
@@ -782,18 +902,6 @@ async function syncLimitlessPositionsFromPortfolio(
     tokenBalances,
     tokenIdLike: "limitless:%",
   });
-
-  try {
-    await syncLimitlessHistoryForWallet(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      sessionCookie,
-      page: 1,
-      limit: 50,
-    });
-  } catch (error) {
-    console.error("Limitless history sync failed", error);
-  }
 
   try {
     await recomputePositionMetricsForWallet(pool, {

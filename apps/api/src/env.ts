@@ -161,6 +161,9 @@ export const env = {
   limitlessUsdcAddress:
     process.env.LIMITLESS_USDC_ADDRESS?.trim() ||
     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  limitlessConditionalTokensAddress:
+    process.env.LIMITLESS_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
+    "0xc9c98965297bc527861c898329ee280632b76e18",
   limitlessClobAddress:
     process.env.LIMITLESS_CLOB_ADDRESS?.trim() ||
     "0xa4409D988CA2218d956BeEFD3874100F444f0DC3",
