@@ -501,6 +501,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         (typeof body.r === "string" && body.r.trim()) ||
         undefined;
 
+      const clientType = body.client ?? "eoa";
+
       const upstream = await limitlessRequest({
         method: "POST",
         requestPath: "/auth/login",
@@ -510,7 +512,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           "x-signature": signature,
         },
         body: {
-          client: body.client ?? "eoa",
+          client: clientType,
           ...(body.smartWallet ? { smartWallet: body.smartWallet } : {}),
           ...(referralCode ? { r: referralCode } : {}),
         },
@@ -537,8 +539,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const profile = extractProfile(upstream.payload);
       const profileSafe: LimitlessProfile | null = profile
-        ? profile
-        : { account };
+        ? { ...profile, client: profile.client ?? clientType }
+        : { account, client: clientType };
 
       try {
         await AuthService.createOrUpdateVenueCredentials(

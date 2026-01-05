@@ -166,10 +166,10 @@ export const env = {
     "0xc9c98965297bc527861c898329ee280632b76e18",
   limitlessClobAddress:
     process.env.LIMITLESS_CLOB_ADDRESS?.trim() ||
-    "0xa4409D988CA2218d956BeEFD3874100F444f0DC3",
+    "0x05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5",
   limitlessNegRiskAddress:
     process.env.LIMITLESS_NEGRISK_ADDRESS?.trim() ||
-    "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
+    "0xe3E00BA3a9888d1DE4834269f62ac008b4BB5C47",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
   polymarketUsdcAddress:
