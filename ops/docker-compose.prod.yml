@@ -1,0 +1,168 @@
+networks:
+  hunch-net:
+    driver: bridge
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.14.2-pg16
+    container_name: hunch-postgres
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    environment:
+      POSTGRES_USER: ${PGUSER:-hunch}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-hunch}
+      POSTGRES_DB: ${PGDATABASE:-hunch}
+    ports:
+      - "127.0.0.1:${PGPORT:-5432}:5432"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${PGUSER:-hunch} -d ${PGDATABASE:-hunch}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ${PGDATA_DIR:-/opt/hunch-data/postgres}:/var/lib/postgresql/data
+    shm_size: 256mb
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=100
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - statement_timeout=30000
+
+  redis:
+    image: redis:7-alpine
+    container_name: hunch-redis
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    command:
+      - redis-server
+      - "--save"
+      - "60"
+      - "1"
+      - "--loglevel"
+      - warning
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ${REDIS_DATA_DIR:-/opt/hunch-data/redis}:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-api
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-3001}
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    ports:
+      - "127.0.0.1:${PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/server.js"]
+
+  indexer-polymarket:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-indexer-polymarket
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/indexer-polymarket/dist/main.js"]
+
+  indexer-limitless:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-indexer-limitless
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/indexer-limitless/dist/main.js"]
+
+  indexer-dflow:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-indexer-dflow
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/indexer-dflow/dist/main.js"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: hunch-nginx
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    environment:
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
+      NGINX_PROXY_READ_TIMEOUT: ${NGINX_PROXY_READ_TIMEOUT:-3600}
+      NGINX_PROXY_SEND_TIMEOUT: ${NGINX_PROXY_SEND_TIMEOUT:-3600}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./ops/nginx/entrypoint.sh:/etc/nginx/entrypoint.sh:ro
+      - ${NGINX_LOG_DIR:-/opt/hunch-data/nginx}:/var/log/nginx
+    depends_on:
+      api:
+        condition: service_started
+    command: ["/bin/sh", "/etc/nginx/entrypoint.sh"]
