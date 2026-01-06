@@ -22,6 +22,8 @@ import {
 } from "../services/limitless-history.js";
 import {
   limitlessAuthLoginBodySchema,
+  limitlessAccountQuerySchema,
+  limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessHistoryQuerySchema,
   limitlessOpenOrdersQuerySchema,
@@ -671,7 +673,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/account",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessAccountQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const signer = request.walletAddress;
@@ -701,9 +706,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       );
 
       try {
+        const clobSpender =
+          request.query.clobSpender ?? env.limitlessClobAddress;
+        const negRiskSpender =
+          request.query.negRiskSpender ?? env.limitlessNegRiskAddress;
+        const ammSpender = request.query.ammSpender ?? null;
         const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
-        const [code, snapshot, approvedClob, approvedNegRisk] =
-          await Promise.all([
+        const [
+          code,
+          snapshot,
+          approvedClob,
+          approvedNegRisk,
+          approvedAmm,
+        ] = await Promise.all([
           fetchEvmCode({
             rpcUrl: env.baseRpcUrl,
             timeoutMs: env.baseRpcTimeoutMs,
@@ -713,25 +728,35 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             rpcUrl: env.baseRpcUrl,
             timeoutMs: env.baseRpcTimeoutMs,
             owner: signer,
-            clobAddress: env.limitlessClobAddress,
-            negRiskAddress: env.limitlessNegRiskAddress,
+            clobAddress: clobSpender,
+            negRiskAddress: negRiskSpender,
+            ammAddress: ammSpender,
           }),
-          env.limitlessClobAddress
+          clobSpender
             ? fetchErc1155IsApprovedForAll({
                 rpcUrl: env.baseRpcUrl,
                 timeoutMs: env.baseRpcTimeoutMs,
                 contractAddress: conditionalTokensAddress,
                 owner: signer,
-                operator: env.limitlessClobAddress,
+                operator: clobSpender,
               })
             : Promise.resolve(null),
-          env.limitlessNegRiskAddress
+          negRiskSpender
             ? fetchErc1155IsApprovedForAll({
                 rpcUrl: env.baseRpcUrl,
                 timeoutMs: env.baseRpcTimeoutMs,
                 contractAddress: conditionalTokensAddress,
                 owner: signer,
-                operator: env.limitlessNegRiskAddress,
+                operator: negRiskSpender,
+              })
+            : Promise.resolve(null),
+          ammSpender
+            ? fetchErc1155IsApprovedForAll({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                operator: ammSpender,
               })
             : Promise.resolve(null),
         ]);
@@ -739,6 +764,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         const usdcBalance = snapshot.usdcBalance;
         const allowanceClob = snapshot.allowanceClob;
         const allowanceNegRisk = snapshot.allowanceNegRisk;
+        const allowanceAmm = snapshot.allowanceAmm;
 
         const isContract = typeof code === "string" && code.length > 2;
 
@@ -756,34 +782,46 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             balance: ethers.formatUnits(usdcBalance, 6),
             balanceRaw: usdcBalance.toString(),
             allowance: {
-              ...(env.limitlessClobAddress
+              ...(clobSpender
                 ? {
-                    clob: {
-                      spender: env.limitlessClobAddress,
-                      allowance: ethers.formatUnits(allowanceClob ?? 0n, 6),
-                      allowanceRaw: (allowanceClob ?? 0n).toString(),
-                    },
-                  }
+                  clob: {
+                    spender: clobSpender,
+                    allowance: ethers.formatUnits(allowanceClob ?? 0n, 6),
+                    allowanceRaw: (allowanceClob ?? 0n).toString(),
+                  },
+                }
                 : {}),
-              ...(env.limitlessNegRiskAddress
+              ...(negRiskSpender
                 ? {
-                    negRisk: {
-                      spender: env.limitlessNegRiskAddress,
-                      allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
-                      allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
-                    },
-                  }
+                  negRisk: {
+                    spender: negRiskSpender,
+                    allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
+                    allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
+                  },
+                }
+                : {}),
+              ...(ammSpender
+                ? {
+                  amm: {
+                    spender: ammSpender,
+                    allowance: ethers.formatUnits(allowanceAmm ?? 0n, 6),
+                    allowanceRaw: (allowanceAmm ?? 0n).toString(),
+                  },
+                }
                 : {}),
             },
           },
           conditionalTokens: {
             contractAddress: conditionalTokensAddress,
             isApprovedForAll: {
-              ...(env.limitlessClobAddress
+              ...(clobSpender
                 ? { clob: approvedClob ?? false }
                 : {}),
-              ...(env.limitlessNegRiskAddress
+              ...(negRiskSpender
                 ? { negRisk: approvedNegRisk ?? false }
+                : {}),
+              ...(ammSpender
+                ? { amm: approvedAmm ?? false }
                 : {}),
             },
           },
@@ -1125,6 +1163,82 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderId: venueOrderId,
         payload: upstream.payload,
       });
+    },
+  );
+
+  /**
+   * POST /orders/amm
+   * Store on-chain AMM executions as filled orders for portfolio/position sync.
+   */
+  z.post(
+    "/orders/amm",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessAmmOrderBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Limitless AMM order requires an EVM wallet address",
+        });
+      }
+
+      const tokenId = normalizeLimitlessTokenId(request.body.tokenId);
+      if (!tokenId) {
+        reply.code(400);
+        return reply.send({ error: "tokenId is required" });
+      }
+
+      const side = request.body.side;
+      const size = request.body.size;
+      const amountUsd = request.body.amountUsd ?? null;
+      let price = request.body.price ?? null;
+      if (price == null && amountUsd != null && size > 0) {
+        price = amountUsd / size;
+      }
+      if (price != null && (!Number.isFinite(price) || price <= 0)) {
+        price = null;
+      }
+
+      const txHash = request.body.txHash;
+      const venueOrderId = `amm:${txHash}:${tokenId}`;
+      const now = new Date();
+
+      await storeOrder(pool, {
+        userId: user.id,
+        walletAddress: signer,
+        signerAddress: signer,
+        venue: "limitless",
+        venueOrderId,
+        tokenId,
+        side,
+        orderType: "FOK",
+        price,
+        size,
+        status: "filled",
+        errorMessage: null,
+        rawError: null,
+        orderPayload: {
+          ...request.body,
+          tokenId,
+          price,
+        },
+        orderHash: txHash,
+        postedAt: now,
+        lastUpdate: now,
+        filledAt: now,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, orderId: venueOrderId });
     },
   );
 

@@ -33,14 +33,17 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   owner: string;
   clobAddress?: string | null;
   negRiskAddress?: string | null;
+  ammAddress?: string | null;
 }): Promise<{
   usdcBalance: bigint;
   allowanceClob: bigint | null;
   allowanceNegRisk: bigint | null;
+  allowanceAmm: bigint | null;
 }> {
   const owner = ethers.getAddress(inputs.owner);
   const clobAddress = inputs.clobAddress?.trim() || "";
   const negRiskAddress = inputs.negRiskAddress?.trim() || "";
+  const ammAddress = inputs.ammAddress?.trim() || "";
 
   const entries: Array<MulticallEntry<unknown>> = [
     {
@@ -75,6 +78,18 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
     });
   }
 
+  if (ammAddress) {
+    entries.push({
+      target: env.limitlessUsdcAddress,
+      callData: erc20Iface.encodeFunctionData("allowance", [
+        owner,
+        ammAddress,
+      ]),
+      decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
+      fallback: 0n,
+    });
+  }
+
   const results = await fetchEvmMulticall({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
@@ -100,10 +115,12 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   const usdcBalance = decoded[cursor++] as bigint;
   const allowanceClob = clobAddress ? (decoded[cursor++] as bigint) : null;
   const allowanceNegRisk = negRiskAddress ? (decoded[cursor++] as bigint) : null;
+  const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
 
   return {
     usdcBalance,
     allowanceClob,
     allowanceNegRisk,
+    allowanceAmm,
   };
 }

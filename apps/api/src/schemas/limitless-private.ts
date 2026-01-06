@@ -81,7 +81,26 @@ export const limitlessCancelBatchBodySchema = z.object({
   orderIds: z.array(z.string().min(1, "orderId is required")).min(1, "orderIds is required"),
 });
 
+export const limitlessAmmOrderBodySchema = z.object({
+  tokenId: zRequiredString("tokenId is required"),
+  side: z.enum(["BUY", "SELL"]),
+  size: z.number().positive("size is required"),
+  price: z.number().positive().optional(),
+  amountUsd: z.number().positive().optional(),
+  marketSlug: z.string().optional(),
+  txHash: z
+    .string()
+    .min(1, "txHash is required")
+    .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format"),
+});
+
 export const limitlessRedemptionQuerySchema = z.object({
   conditionIds: zCsvString("conditionIds is required"),
   adapter: zEthAddress.optional(),
+});
+
+export const limitlessAccountQuerySchema = z.object({
+  clobSpender: zEthAddress.optional(),
+  negRiskSpender: zEthAddress.optional(),
+  ammSpender: zEthAddress.optional(),
 });

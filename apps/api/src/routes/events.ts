@@ -355,6 +355,15 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               limitlessMeta?.venueAdapter ||
               limitlessMeta?.venueExchange,
           );
+          const marketMeta = parseMetadata(row.market_metadata);
+          const tradeType =
+            row.market_venue === "limitless"
+              ? pickString(marketMeta, "tradeType") ?? null
+              : null;
+          const marketAddress =
+            row.market_venue === "limitless"
+              ? pickString(marketMeta, "address") ?? null
+              : null;
 
           // Parse token IDs based on venue
           let tokens: TokenPair = { yes: null, no: null };
@@ -409,6 +418,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketTitle: row.market_title,
             marketDescription: row.market_description || null,
             marketType: row.market_type,
+            tradeType,
             status: row.market_status,
             volume24h: row.volume_24h != null ? Number(row.volume_24h) : 0,
             volumeTotal:
@@ -441,7 +451,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketSlug: row.market_slug || null,
             marketImage: row.market_image || null,
             marketIcon: row.market_icon || null,
-            acceptingOrders,
+            acceptingOrders:
+              acceptingOrders,
             negRisk:
               row.market_venue === "polymarket"
                 ? row.pm_neg_risk != null
@@ -470,6 +481,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               row.market_venue === "limitless"
                 ? limitlessMeta?.venueExchange ?? null
                 : null,
+            marketAddress,
             top: {
               yesBid:
                 row.best_bid_yes != null

@@ -246,6 +246,10 @@ export type FeedMarketRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  venue_exchange: string | null;
+  venue_adapter: string | null;
+  market_address: string | null;
+  trade_type: string | null;
   last_update: unknown;
 };
 
@@ -425,6 +429,10 @@ export async function fetchFeedMarkets(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata->>'venueExchange' as venue_exchange,
+      m.metadata->>'venueAdapter' as venue_adapter,
+      m.metadata->>'address' as market_address,
+      m.metadata->>'tradeType' as trade_type,
       m.updated_at as last_update
     from event_order eo
     join unified_events e on e.id = eo.event_id
@@ -696,6 +704,10 @@ export async function fetchFeedMarketsDirect(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata->>'venueExchange' as venue_exchange,
+      m.metadata->>'venueAdapter' as venue_adapter,
+      m.metadata->>'address' as market_address,
+      m.metadata->>'tradeType' as trade_type,
       m.updated_at as last_update
     from unified_events e
     join market_base m on m.event_id = e.id
@@ -959,8 +971,7 @@ export async function fetchEventDetails(
   eventId: string,
 ): Promise<EventDetailsRow[]> {
   // Query for event details with all associated markets
-  const supportedLimitlessMarketExpr =
-    "(m.venue <> 'limitless' or coalesce(lower(m.metadata->>'tradeType'), 'clob') <> 'amm')";
+  const supportedLimitlessMarketExpr = "true";
   const eventSql = `
     SELECT
       e.id as event_id,

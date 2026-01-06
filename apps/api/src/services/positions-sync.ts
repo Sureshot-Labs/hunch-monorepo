@@ -150,6 +150,7 @@ function extractLimitlessClobEntries(payload: unknown): unknown[] {
 
   const keys = [
     "clob",
+    "amm",
     "positions",
     "clobPositions",
     "clob_positions",
@@ -157,16 +158,23 @@ function extractLimitlessClobEntries(payload: unknown): unknown[] {
     "clob_position",
   ];
 
+  const output: unknown[] = [];
+
   for (const root of roots) {
-    if (Array.isArray(root)) return root;
+    if (Array.isArray(root)) {
+      output.push(...root);
+      continue;
+    }
     if (!isRecord(root)) continue;
     for (const key of keys) {
       const value = root[key];
-      if (Array.isArray(value)) return value;
+      if (Array.isArray(value)) {
+        output.push(...value);
+      }
     }
   }
 
-  return [];
+  return output;
 }
 
 function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {

@@ -182,6 +182,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
+        const negRiskExchange =
+          rRow.venue === "limitless" ? rRow.venue_exchange ?? null : null;
+        const negRiskAdapter =
+          rRow.venue === "limitless" ? rRow.venue_adapter ?? null : null;
+        const tradeType =
+          rRow.venue === "limitless" ? rRow.trade_type ?? null : null;
+        const marketAddress =
+          rRow.venue === "limitless" ? rRow.market_address ?? null : null;
+
         return {
           venue: String(rRow.venue),
           marketId: String(rRow.venue_market_id),
@@ -200,9 +209,13 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             rRow.liquidity_display != null
               ? Number(rRow.liquidity_display)
               : 0,
-          acceptingOrders: true, // Always true for active markets in unified table
+          acceptingOrders: true,
           tokens,
           outcomes,
+          negRiskExchange,
+          negRiskAdapter,
+          tradeType,
+          marketAddress,
           conditionId: (rRow.condition_id as string | null) || null,
           category: rRow.market_category ?? null,
           image: rRow.market_image ?? null,
