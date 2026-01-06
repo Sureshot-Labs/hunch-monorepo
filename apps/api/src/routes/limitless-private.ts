@@ -501,7 +501,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const referralCode =
         (typeof body.referralCode === "string" && body.referralCode.trim()) ||
         (typeof body.r === "string" && body.r.trim()) ||
-        undefined;
+        (env.limitlessReferralCode || undefined);
 
       const clientType = body.client ?? "eoa";
 
