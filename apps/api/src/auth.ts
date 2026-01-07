@@ -26,6 +26,7 @@ export interface User {
   username?: string;
   displayName?: string;
   avatarUrl?: string;
+  isAdmin: boolean;
   isActive: boolean;
   isVerified: boolean;
   createdAt: Date;
@@ -40,6 +41,7 @@ type UserRow = {
   username: string | null;
   display_name: string | null;
   avatar_url: string | null;
+  is_admin: boolean | null;
   is_active: boolean;
   is_verified: boolean;
   created_at: Date;
@@ -55,6 +57,7 @@ function mapUserRow(row: UserRow): User {
     username: row.username ?? undefined,
     displayName: row.display_name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
+    isAdmin: Boolean(row.is_admin),
     isActive: row.is_active,
     isVerified: row.is_verified,
     createdAt: row.created_at,
@@ -557,7 +560,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -670,7 +673,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -690,7 +693,7 @@ export class AuthService {
    */
   static async getUserById(userId: string): Promise<User | null> {
     const result = await pool.query<UserRow>(
-      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -1370,5 +1373,17 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     request.session = session;
 
     return;
+  };
+}
+
+export function createAdminMiddleware(options: AuthMiddlewareOptions = {}) {
+  const auth = createAuthMiddleware(options);
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    await auth(request, reply);
+    if (reply.sent) return;
+    if (!request.user?.isAdmin) {
+      reply.code(403);
+      return reply.send({ error: "Admin access required" });
+    }
   };
 }

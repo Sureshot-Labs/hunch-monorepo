@@ -7,6 +7,7 @@ import {
   WalletAlreadyExistsError,
   createAuthMiddleware,
 } from "../auth.js";
+import { pool } from "../db.js";
 import { env } from "../env.js";
 import { PrivyService } from "../privy-service.js";
 import {
@@ -19,6 +20,7 @@ import {
   polymarketRelayerSignBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
+import { attachReferralCode } from "../services/rewards.js";
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -66,6 +68,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           userAgent,
         );
 
+        if (typeof body.referralCode === "string" && body.referralCode.trim()) {
+          try {
+            await attachReferralCode(pool, {
+              userId: user.id,
+              referralCode: body.referralCode,
+            });
+          } catch (error) {
+            app.log.warn(
+              { error, userId: user.id },
+              "Failed to attach referral code",
+            );
+          }
+        }
+
         await AuthService.recordAuthAttempt(
           primaryWalletAddress,
           "privy-auth",
@@ -82,6 +98,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             username: user.username,
             displayName: user.displayName,
             avatarUrl: user.avatarUrl,
+            isAdmin: user.isAdmin,
             isActive: user.isActive,
             isVerified: user.isVerified,
             createdAt: user.createdAt,
@@ -175,6 +192,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             username: user.username,
             displayName: user.displayName,
             avatarUrl: user.avatarUrl,
+            isAdmin: user.isAdmin,
             isActive: user.isActive,
             isVerified: user.isVerified,
             createdAt: user.createdAt,

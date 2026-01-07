@@ -6,6 +6,9 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 
 type FeeOrderRow = {
+  user_id: string;
+  wallet_address: string | null;
+  signer_address: string | null;
   id: string;
   status: string | null;
   filled_size: string | number | null;
@@ -57,6 +60,7 @@ type ScriptOptions = {
 const DEFAULT_LIMIT = 25;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_DUST_REMAINING = 1000n;
+const USDC_DECIMALS = 6n;
 
 function parseArgs(): ScriptOptions {
   const args = process.argv.slice(2);
@@ -238,6 +242,59 @@ function truncateError(value: string, max = 500): string {
   return `${value.slice(0, max - 3)}...`;
 }
 
+function formatUsdcAmount(raw: bigint): string {
+  const divisor = 10n ** USDC_DECIMALS;
+  const integer = raw / divisor;
+  const fraction = raw % divisor;
+  const fractionStr = fraction.toString().padStart(Number(USDC_DECIMALS), "0");
+  return `${integer.toString()}.${fractionStr}`;
+}
+
+async function insertFeeEvent(inputs: {
+  userId: string;
+  walletAddress: string | null;
+  orderHash: string;
+  feeAmount: bigint;
+  txHash: string;
+}) {
+  const amount = formatUsdcAmount(inputs.feeAmount);
+  await pool.query(
+    `
+      insert into fee_events (
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        chain_id,
+        source_type,
+        source_id,
+        fee_amount,
+        fee_asset,
+        fee_usd,
+        tx_hash,
+        collected_at,
+        status,
+        created_at,
+        updated_at
+      )
+      values (
+        gen_random_uuid(),
+        $1, $2, 'polymarket', '137', 'order', $3,
+        $4, 'USDC', $4, $5, now(), 'collected', now(), now()
+      )
+      on conflict (user_id, source_type, source_id)
+      do update set
+        fee_amount = excluded.fee_amount,
+        fee_usd = excluded.fee_usd,
+        tx_hash = excluded.tx_hash,
+        collected_at = excluded.collected_at,
+        status = excluded.status,
+        updated_at = now()
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.orderHash, amount, inputs.txHash],
+  );
+}
+
 function rowLabel(row: FeeOrderRow, orderHash?: string): string {
   const hash =
     orderHash ??
@@ -274,6 +331,9 @@ async function fetchPendingOrders(
 
   const query = `
     SELECT
+      user_id,
+      wallet_address,
+      signer_address,
       id,
       status,
       filled_size,
@@ -370,6 +430,7 @@ async function main() {
     abis.PolymarketFeeCollector,
     wallet ?? provider,
   );
+  const collectorIface = new ethers.Interface(abis.PolymarketFeeCollector);
 
   const orders = await fetchPendingOrders(options, feeCollectorAddress);
   console.log(
@@ -471,7 +532,15 @@ async function main() {
         const reason = `Fee auth deadline expired (deadline=${row.fee_deadline}, now=${nowSec})`;
         console.log(`Skip ${label}: ${reason}`);
         skippedError += 1;
-        await updateFeeError(row.id, attempts, "Fee auth deadline expired");
+        if (options.archiveLegacy) {
+          await archiveFeeError(
+            row.id,
+            attempts,
+            "Fee auth deadline expired (archived)",
+          );
+        } else {
+          await updateFeeError(row.id, attempts, "Fee auth deadline expired");
+        }
         continue;
       }
     }
@@ -558,7 +627,38 @@ async function main() {
     try {
       const tx = await collector.collectFee(order, feeAuth, feeAuthSig);
       console.log(`collectFee tx ${tx.hash} for ${orderHash}`);
-      await tx.wait();
+      const receipt = await tx.wait();
+      if (receipt) {
+        let feeAmount: bigint | null = null;
+        for (const log of receipt.logs) {
+          try {
+            const parsed = collectorIface.parseLog(log);
+            if (!parsed || parsed.name !== "FeeCollected") continue;
+            const rawOrderHash = parsed.args.orderHash;
+            const eventOrderHash =
+              typeof rawOrderHash === "string" ? normalizeHex(rawOrderHash) : "";
+            if (eventOrderHash && eventOrderHash !== orderHash) continue;
+            feeAmount = BigInt(parsed.args.feeAmount);
+            break;
+          } catch {
+            // ignore unrelated logs
+          }
+        }
+
+        if (feeAmount != null) {
+          const wallet =
+            row.wallet_address ??
+            row.signer_address ??
+            (typeof feeAuth.signer === "string" ? feeAuth.signer : null);
+          await insertFeeEvent({
+            userId: row.user_id,
+            walletAddress: wallet,
+            orderHash,
+            feeAmount,
+            txHash: tx.hash,
+          });
+        }
+      }
       await updateFeeSuccess(row.id, attempts, tx.hash);
       collected += 1;
     } catch (error) {

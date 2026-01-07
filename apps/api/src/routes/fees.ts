@@ -1,7 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
+import { pool } from "../db.js";
 import { env } from "../env.js";
+import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
 
 const MAX_FEE_BPS = 10_000;
@@ -40,10 +42,15 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const venue = request.query.venue;
+      const activePolicy = await fetchActiveFeePolicy(pool, venue);
       const feeBpsRaw =
-        venue === "polymarket" ? env.feeBpsPolymarket : env.feeBpsKalshi;
+        activePolicy?.fee_bps ??
+        (venue === "polymarket" ? env.feeBpsPolymarket : env.feeBpsKalshi);
       const feeBps = clampFeeBps(feeBpsRaw);
-      const feeScaleRaw = venue === "kalshi" ? env.feeScaleKalshi : 0;
+      const feeScaleRaw =
+        venue === "kalshi"
+          ? activePolicy?.fee_scale ?? env.feeScaleKalshi
+          : 0;
       const feeScale = clampFeeScale(feeScaleRaw);
 
       const ttlMs = env.feePolicyTtlSec * MS_PER_SEC;

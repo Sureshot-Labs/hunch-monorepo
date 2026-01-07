@@ -8,6 +8,7 @@ import { storeExecution } from "../repos/executions-repo.js";
 import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
 import {
   fetchSolanaBalanceLamports,
+  fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
   formatUiAmount,
   sendSolanaRawTransaction,
@@ -21,6 +22,12 @@ import {
 } from "../schemas/dflow.js";
 
 const SOL_DECIMALS = 9;
+const DEFAULT_USDC_DECIMALS = 6;
+
+type FeeExtractionResult = {
+  amountRaw: string;
+  feeAccount?: string | null;
+};
 
 function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
@@ -32,6 +39,104 @@ function ensureDflowReady(reply: { code: (status: number) => void; send: (payloa
   reply.code(400);
   reply.send({ error: "Missing DFLOW_API_KEY" });
   return false;
+}
+
+function parseNumberish(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value).toString();
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    return trimmed;
+  }
+  return null;
+}
+
+function parseBigInt(value: string): bigint | null {
+  try {
+    if (!/^\d+$/.test(value)) return null;
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function extractFeeFromObject(value: unknown): FeeExtractionResult | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const amountKeys = [
+    "platformFeeAmount",
+    "platform_fee_amount",
+    "feeAmount",
+    "fee_amount",
+  ];
+
+  for (const key of amountKeys) {
+    const raw = record[key];
+    const amount = parseNumberish(raw);
+    if (amount) return { amountRaw: amount, feeAccount: null };
+  }
+
+  const objectKeys = ["platformFee", "platform_fee", "fee"];
+  for (const key of objectKeys) {
+    const raw = record[key];
+    if (!raw || typeof raw !== "object") continue;
+    const nested = raw as Record<string, unknown>;
+    const nestedAmount =
+      parseNumberish(nested.amount) ??
+      parseNumberish(nested.feeAmount) ??
+      parseNumberish(nested.platformFeeAmount);
+    if (nestedAmount) {
+      const feeAccount =
+        (typeof nested.feeAccount === "string" && nested.feeAccount.trim()) ||
+        (typeof nested.fee_account === "string" && nested.fee_account.trim()) ||
+        null;
+      return { amountRaw: nestedAmount, feeAccount };
+    }
+  }
+
+  const nestedKeys = [
+    "data",
+    "quote",
+    "order",
+    "result",
+    "swap",
+    "route",
+  ];
+  for (const key of nestedKeys) {
+    const nested = record[key];
+    const result = extractFeeFromObject(nested);
+    if (result) return result;
+  }
+
+  return null;
+}
+
+function extractDflowFeeAmount(raw: unknown): FeeExtractionResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const order = record.order ?? record.quote ?? record;
+  return extractFeeFromObject(order);
+}
+
+function computeFeeFromBps(inputs: {
+  amountRaw: string;
+  decimals: number;
+  feeBps: number;
+}): string | null {
+  if (!inputs.amountRaw) return null;
+  if (!Number.isFinite(inputs.feeBps) || inputs.feeBps <= 0) return null;
+  const amountBig = parseBigInt(inputs.amountRaw);
+  if (amountBig != null) {
+    const feeRaw = (amountBig * BigInt(inputs.feeBps)) / 10_000n;
+    return formatUiAmount(feeRaw, inputs.decimals);
+  }
+
+  const amountNum = Number(inputs.amountRaw);
+  if (!Number.isFinite(amountNum)) return null;
+  const feeNum = (amountNum * inputs.feeBps) / 10_000;
+  return (feeNum / Math.pow(10, inputs.decimals)).toString();
 }
 
 // Mounted under /trade/kalshi and /trade/dflow (alias).
@@ -443,6 +548,166 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           status: body.status ?? null,
           raw: body.raw ?? null,
         });
+
+        const usdcMint = env.solanaUsdcMint;
+        let notionalUsd: number | null = null;
+        if (body.inputMint === usdcMint && body.amountIn != null) {
+          const decimals = body.inputDecimals ?? 6;
+          notionalUsd = Number(body.amountIn) / Math.pow(10, decimals);
+        } else if (body.outputMint === usdcMint && body.amountOut != null) {
+          const decimals = body.outputDecimals ?? 6;
+          notionalUsd = Number(body.amountOut) / Math.pow(10, decimals);
+        }
+
+        if (notionalUsd != null && Number.isFinite(notionalUsd) && notionalUsd > 0) {
+          await pool.query(
+            `
+              insert into volume_events (
+                id,
+                user_id,
+                wallet_address,
+                venue,
+                source_type,
+                source_id,
+                notional_usd,
+                created_at
+              )
+              values (
+                gen_random_uuid(),
+                $1, $2, 'kalshi', 'execution', $3, $4, now()
+              )
+              on conflict (user_id, source_type, source_id) do nothing
+            `,
+            [user.id, walletAddress, execution.id, notionalUsd],
+          );
+        }
+
+        const feeAccount = env.dflowFeeAccount?.trim() || null;
+        const feeBps = env.feeBpsKalshi;
+        const feeScale = env.feeScaleKalshi;
+        const hasFeeBps = Number.isFinite(feeBps) && feeBps > 0;
+        const hasFeeScale = Number.isFinite(feeScale) && feeScale > 0;
+        const feeConfigActive = Boolean(feeAccount) && (hasFeeBps || hasFeeScale);
+
+        if (feeConfigActive) {
+          const rawFee = extractDflowFeeAmount(body.raw);
+          const rawFeeAccount = rawFee?.feeAccount ?? null;
+          if (rawFeeAccount && feeAccount && rawFeeAccount !== feeAccount) {
+            app.log.warn(
+              { rawFeeAccount, feeAccount, userId: user.id },
+              "Skipping DFlow fee event (fee account mismatch)",
+            );
+          } else {
+            const inputDecimals = body.inputDecimals ?? DEFAULT_USDC_DECIMALS;
+            const outputDecimals = body.outputDecimals ?? inputDecimals;
+            const isInputUsdc = body.inputMint === env.solanaUsdcMint;
+            const isOutputUsdc = body.outputMint === env.solanaUsdcMint;
+            const feeDecimals = isInputUsdc
+              ? inputDecimals
+              : isOutputUsdc
+                ? outputDecimals
+                : DEFAULT_USDC_DECIMALS;
+            let feeAmountUi: string | null = null;
+
+            if (rawFee?.amountRaw) {
+              const trimmed = rawFee.amountRaw.trim();
+              if (trimmed.includes(".")) {
+                feeAmountUi = trimmed;
+              } else {
+                const feeBig = parseBigInt(trimmed);
+                if (feeBig != null) {
+                  feeAmountUi = formatUiAmount(feeBig, feeDecimals);
+                } else {
+                  const feeNum = Number(trimmed);
+                  if (Number.isFinite(feeNum)) {
+                    feeAmountUi = (
+                      feeNum / Math.pow(10, feeDecimals)
+                    ).toString();
+                  }
+                }
+              }
+            }
+
+            if (!feeAmountUi && hasFeeBps && !hasFeeScale) {
+              const baseAmountRaw = isInputUsdc
+                ? parseNumberish(body.amountIn)
+                : isOutputUsdc
+                  ? parseNumberish(body.amountOut)
+                  : null;
+              if (baseAmountRaw) {
+                feeAmountUi = computeFeeFromBps({
+                  amountRaw: baseAmountRaw,
+                  decimals: feeDecimals,
+                  feeBps,
+                });
+              }
+            }
+
+            const feeAmountNumber =
+              feeAmountUi != null ? Number(feeAmountUi) : NaN;
+            if (Number.isFinite(feeAmountNumber) && feeAmountNumber > 0) {
+              const signature = body.txSignature?.trim() || "";
+              const statusResult = signature
+                ? await fetchSolanaSignatureStatus({
+                    rpcUrls: env.solanaRpcUrls,
+                    signature,
+                    timeoutMs: env.solanaRpcTimeoutMs,
+                  })
+                : null;
+              const status =
+                statusResult?.status === "fulfilled"
+                  ? "collected"
+                  : statusResult?.status === "failed"
+                    ? "failed"
+                    : "pending";
+              const collectedAt = status === "collected" ? new Date() : null;
+
+              await pool.query(
+                `
+                  insert into fee_events (
+                    id,
+                    user_id,
+                    wallet_address,
+                    venue,
+                    chain_id,
+                    source_type,
+                    source_id,
+                    fee_amount,
+                    fee_asset,
+                    fee_usd,
+                    tx_hash,
+                    collected_at,
+                    status,
+                    created_at,
+                    updated_at
+                  )
+                  values (
+                    gen_random_uuid(),
+                    $1, $2, 'kalshi', 'solana', 'execution', $3,
+                    $4, 'USDC', $4, $5, $6, $7, now(), now()
+                  )
+                  on conflict (user_id, source_type, source_id)
+                  do update set
+                    fee_amount = excluded.fee_amount,
+                    fee_usd = excluded.fee_usd,
+                    tx_hash = excluded.tx_hash,
+                    collected_at = excluded.collected_at,
+                    status = excluded.status,
+                    updated_at = now()
+                `,
+                [
+                  user.id,
+                  walletAddress,
+                  execution.id,
+                  feeAmountUi,
+                  signature || null,
+                  collectedAt,
+                  status,
+                ],
+              );
+            }
+          }
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({

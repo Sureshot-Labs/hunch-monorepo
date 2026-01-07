@@ -8,6 +8,7 @@ import {
 
 export const authPrivyBodySchema = z.object({
   accessToken: zRequiredString("accessToken is required"),
+  referralCode: z.string().trim().min(1).max(32).optional(),
 });
 
 export const venueCredentialsBodySchema = z.object({

@@ -214,6 +214,14 @@ export const env = {
   feeCollectorPrivateKey:
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
+  rewardsPayoutPrivateKey:
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
+  rewardsUsdcPolygon:
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() || "",
+  rewardsUsdcBase:
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
+  rewardsSolanaSecretKey:
+    process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
 
   debridgeDlnBase:
     process.env.DEBRIDGE_DLN_BASE?.trim() || "https://dln.debridge.finance/v1.0",

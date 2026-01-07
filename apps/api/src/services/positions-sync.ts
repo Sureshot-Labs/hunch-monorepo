@@ -541,6 +541,9 @@ async function syncPolymarketTradesForSigner(
   const fillTimes: Date[] = [];
   const fillTradeIds: string[] = [];
   const fillFees: number[] = [];
+  const volumeSourceIds: string[] = [];
+  const volumeNotionals: number[] = [];
+  const volumeTimes: Date[] = [];
 
   for (const trade of trades) {
     const tradeId = trade.id;
@@ -568,6 +571,9 @@ async function syncPolymarketTradesForSigner(
           fillTimes.push(filledAt);
           fillTradeIds.push(tradeId);
           fillFees.push(0);
+          volumeSourceIds.push(venueFillId);
+          volumeNotionals.push(size * price);
+          volumeTimes.push(filledAt);
         }
       }
     }
@@ -592,6 +598,9 @@ async function syncPolymarketTradesForSigner(
           fillTimes.push(filledAt);
           fillTradeIds.push(tradeId);
           fillFees.push(0);
+          volumeSourceIds.push(venueFillId);
+          volumeNotionals.push(size * price);
+          volumeTimes.push(filledAt);
         }
       }
     }
@@ -638,6 +647,50 @@ async function syncPolymarketTradesForSigner(
       fillFees,
     ],
   );
+
+  if (volumeSourceIds.length) {
+    await pool.query(
+      `
+        with input as (
+          select *
+          from unnest(
+            $1::uuid[],
+            $2::text[],
+            $3::numeric[],
+            $4::timestamptz[]
+          ) as t(user_id, source_id, notional_usd, created_at)
+        )
+        insert into volume_events (
+          id,
+          user_id,
+          wallet_address,
+          venue,
+          source_type,
+          source_id,
+          notional_usd,
+          created_at
+        )
+        select
+          gen_random_uuid(),
+          t.user_id,
+          $5,
+          'polymarket',
+          'order',
+          t.source_id,
+          t.notional_usd,
+          t.created_at
+        from input t
+        on conflict (user_id, source_type, source_id) do nothing
+      `,
+      [
+        Array(volumeSourceIds.length).fill(inputs.userId),
+        volumeSourceIds,
+        volumeNotionals,
+        volumeTimes,
+        inputs.signerAddress,
+      ],
+    );
+  }
 
   await pool.query(
     `

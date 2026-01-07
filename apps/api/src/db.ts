@@ -1,4 +1,6 @@
 import { createPgPool, type Pool } from "@hunch/infra";
+
+export type DbQuery = Pick<Pool, "query">;
 import { env } from "./env.js";
 
 export const pool: Pool = createPgPool({

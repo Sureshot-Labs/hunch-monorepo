@@ -332,6 +332,99 @@ If you need to modify the database schema:
 
 ---
 
+## Admin + Debug Utilities
+
+These helpers live in `apps/api` and load the repo root `.env` automatically.
+
+### Admin user helper
+
+Grant/revoke admin access and inspect users:
+
+```bash
+# Grant admin by wallet address
+pnpm -C hunch-monorepo -F api run admin:user -- --wallet 0x... --grant
+
+# Revoke admin by user id
+pnpm -C hunch-monorepo -F api run admin:user -- --user-id <uuid> --revoke
+
+# Show a user record
+pnpm -C hunch-monorepo -F api run admin:user -- --user-id <uuid> --show
+
+# List all admins
+pnpm -C hunch-monorepo -F api run admin:user -- --list-admins
+```
+
+If a wallet maps to multiple users, pass `--user-id` to disambiguate.
+
+### Admin points helper
+
+Add manual clout points by inserting a `volume_events` row:
+
+```bash
+# Add 500 points to a user
+pnpm -C hunch-monorepo -F api run admin:points -- --user-id <uuid> --amount 500
+
+# Add points by wallet lookup (uses that wallet as the event wallet)
+pnpm -C hunch-monorepo -F api run admin:points -- --wallet 0x... --amount 250
+```
+
+Optional flags: `--source-id`, `--source-type order|execution`, `--venue`, `--wallet-address`, `--dry-run`.
+
+### Polymarket CLOB curl helper
+
+Use it to query the Polymarket CLOB API with your L2 credentials:
+
+```bash
+# Use env creds (POLYMARKET_L2_* and optional POLYMARKET_L2_ADDRESS)
+pnpm -C hunch-monorepo -F api run polycurl -- 0x... /data/trades?maker=0x...&after=1710000000
+
+# Use DB creds (requires DATABASE_URL + CREDENTIALS_ENCRYPTION_KEY)
+pnpm -C hunch-monorepo -F api run polycurl -- --use-db 0x... /data/orders
+```
+
+Optional flags: `--method`, `--body`, `--user-id`.
+
+### Limitless curl helper
+
+Use it to query Limitless endpoints with a session cookie:
+
+```bash
+# Use env session (LIMITLESS_SESSION and optional LIMITLESS_WALLET_ADDRESS)
+pnpm -C hunch-monorepo -F api run limitlesscurl -- /portfolio/positions
+
+# Use DB session (requires DATABASE_URL + CREDENTIALS_ENCRYPTION_KEY)
+pnpm -C hunch-monorepo -F api run limitlesscurl -- --use-db 0x... /portfolio/positions
+```
+
+Optional flags: `--method`, `--body`, `--user-id`, `--base-url`.
+
+### Fees + rewards operations
+
+```bash
+# Collect Polymarket fees (fee collector wallet signs)
+pnpm -C hunch-monorepo -F api run fees:collect
+
+# Collect fees and archive expired fee auths (prevents repeat skips)
+pnpm -C hunch-monorepo -F api run fees:collect -- --archive-legacy
+
+# Reconcile pending Solana fee events
+pnpm -C hunch-monorepo -F api run fees:reconcile -- --limit 25 --min-age-sec 60
+
+# Payout rewards (EVM + Solana)
+pnpm -C hunch-monorepo -F api run rewards:payout -- --dry-run --chain solana
+
+# Fail pending claims (no payout)
+pnpm -C hunch-monorepo -F api run rewards:payout -- --fail-pending --chain solana
+```
+
+Required env depends on venue:
+
+- `HUNCH_FEE_BPS_POLYMARKET`, `HUNCH_FEE_COLLECTOR_PRIVATE_KEY` (Polymarket fee collector)
+- `HUNCH_FEE_BPS_KALSHI`, `HUNCH_FEE_SCALE_KALSHI`, `DFLOW_USDC_FEE_ACCOUNT` (DFlow/Kalshi fees)
+- `HUNCH_REWARDS_PAYOUT_PRIVATE_KEY` / `HUNCH_REWARDS_SOLANA_SECRET_KEY` (reward payouts)
+
+---
+
 ## External Documentation
 
 - [Fastify Documentation](https://www.fastify.io/docs/latest/)
