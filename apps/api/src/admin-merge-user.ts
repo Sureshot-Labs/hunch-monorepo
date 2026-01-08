@@ -6,6 +6,8 @@ import { mergeUsersById, type MergeOptions } from "./admin-merge-user-core.js";
 type ScriptOptions = MergeOptions & {
   sourceUserId?: string;
   targetUserId?: string;
+  sourceWallet?: string;
+  targetWallet?: string;
 };
 
 function parseArgs(): ScriptOptions {
@@ -21,18 +23,51 @@ function parseArgs(): ScriptOptions {
   return {
     sourceUserId: getValue("--source") ?? getValue("--source-user"),
     targetUserId: getValue("--target") ?? getValue("--target-user"),
+    sourceWallet: getValue("--source-wallet"),
+    targetWallet: getValue("--target-wallet"),
     dryRun: hasFlag("--dry-run"),
     keepSource: hasFlag("--keep-source"),
   };
 }
 
+const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+async function resolveUserIdByWallet(wallet: string): Promise<string | null> {
+  const trimmed = wallet.trim();
+  if (!trimmed) return null;
+
+  const match = ETH_ADDRESS_RE.test(trimmed)
+    ? "lower(wallet_address) = lower($1)"
+    : "wallet_address = $1";
+
+  const { rows } = await pool.query<{ user_id: string }>(
+    `select user_id from user_wallets where ${match} limit 2`,
+    [trimmed],
+  );
+
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    throw new Error(`Multiple users found for wallet ${trimmed}`);
+  }
+  return rows[0].user_id;
+}
+
 async function main() {
   const options = parseArgs();
-  const sourceId = options.sourceUserId?.trim();
-  const targetId = options.targetUserId?.trim();
+  let sourceId = options.sourceUserId?.trim();
+  let targetId = options.targetUserId?.trim();
+
+  if (!sourceId && options.sourceWallet) {
+    sourceId = (await resolveUserIdByWallet(options.sourceWallet)) ?? undefined;
+  }
+  if (!targetId && options.targetWallet) {
+    targetId = (await resolveUserIdByWallet(options.targetWallet)) ?? undefined;
+  }
 
   if (!sourceId || !targetId) {
-    throw new Error("Provide --source and --target user IDs");
+    throw new Error(
+      "Provide --source/--target user IDs or --source-wallet/--target-wallet",
+    );
   }
   if (sourceId === targetId) {
     throw new Error("Source and target must be different users");

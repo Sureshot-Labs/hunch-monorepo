@@ -11,6 +11,7 @@ type ScriptOptions = {
   sourceId?: string;
   sourceType?: "order" | "execution";
   venue?: string;
+  walletType?: "ethereum" | "solana";
   dryRun: boolean;
 };
 
@@ -36,15 +37,31 @@ function parseArgs(): ScriptOptions {
         ? sourceType
         : undefined,
     venue: getValue("--venue"),
+    walletType:
+      getValue("--wallet-type") === "solana" ? "solana" : "ethereum",
     dryRun: hasFlag("--dry-run"),
   };
 }
 
-function normalizeWallet(value: string): string {
-  return value.trim().toLowerCase();
+const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+function normalizeWallet(value: string, walletType?: "ethereum" | "solana") {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (walletType === "solana") return trimmed;
+  if (walletType === "ethereum") return trimmed.toLowerCase();
+  return ETH_ADDRESS_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
 }
 
-async function fetchUsersByWallet(wallet: string) {
+async function fetchUsersByWallet(
+  wallet: string,
+  walletType?: "ethereum" | "solana",
+) {
+  const match =
+    walletType === "solana"
+      ? "w.wallet_address = $1"
+      : "lower(w.wallet_address) = $1";
+  const normalized = normalizeWallet(wallet, walletType);
   const { rows } = await pool.query<{
     id: string;
     email: string | null;
@@ -62,10 +79,10 @@ async function fetchUsersByWallet(wallet: string) {
              w.is_primary
       from users u
       join user_wallets w on w.user_id = u.id
-      where lower(w.wallet_address) = $1
+      where ${match}
       order by w.is_primary desc, u.last_login_at desc nulls last
     `,
-    [normalizeWallet(wallet)],
+    [normalized],
   );
   return rows;
 }
@@ -115,7 +132,9 @@ async function main() {
       throw new Error("Provide --amount (positive number)");
     }
 
-    const users = targetWallet ? await fetchUsersByWallet(targetWallet) : [];
+    const users = targetWallet
+      ? await fetchUsersByWallet(targetWallet, options.walletType)
+      : [];
     const user = targetUserId
       ? await fetchUserById(targetUserId)
       : users[0] ?? null;

@@ -56,6 +56,31 @@ type ReferralBonus = {
   bonusBps: number;
 };
 
+function clampBps(value: number, max = 10_000): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(max, Math.max(0, value));
+}
+
+function maxBps(values: number[]): number {
+  if (!values.length) return 0;
+  return Math.max(...values.map((value) => (Number.isFinite(value) ? value : 0)));
+}
+
+function resolveEffectiveBps(
+  policy: RewardsPolicy,
+  tierBps: number,
+  bonusBps: number,
+) {
+  const maxCashbackBps = maxBps(policy.tiers.map((tier) => tier.cashbackBps));
+  const cappedCashbackBps = clampBps(tierBps);
+  const maxReferralCap = Math.max(0, 10_000 - maxCashbackBps);
+  const cappedBonusBps = clampBps(bonusBps, maxReferralCap);
+  return {
+    cappedCashbackBps,
+    cappedBonusBps,
+  };
+}
+
 export type RewardsPolicy = {
   effectiveAt: Date | null;
   tiers: RewardsTier[];
@@ -290,6 +315,11 @@ export async function getRewardsSummary(
   });
   const bonus = resolveReferralBonus(qualifiedCount, policy.referralBonus);
   const bonusBps = bonus?.bonusBps ?? 0;
+  const { cappedCashbackBps, cappedBonusBps } = resolveEffectiveBps(
+    policy,
+    tier.cashbackBps,
+    bonusBps,
+  );
   const referralFeeTotalsByChain = await fetchReferralFeeTotalsByChain(pool, {
     userId: inputs.userId,
   });
@@ -328,11 +358,13 @@ export async function getRewardsSummary(
     const claimed = claimedTotalsByChain[chainId] ?? 0;
 
     const cashbackPending =
-      (feeTotals.pending * tier.cashbackBps) / 10_000;
+      (feeTotals.pending * cappedCashbackBps) / 10_000;
     const cashbackCollected =
-      (feeTotals.collected * tier.cashbackBps) / 10_000;
-    const referralPending = (referralTotals.pending * bonusBps) / 10_000;
-    const referralCollected = (referralTotals.collected * bonusBps) / 10_000;
+      (feeTotals.collected * cappedCashbackBps) / 10_000;
+    const referralPending =
+      (referralTotals.pending * cappedBonusBps) / 10_000;
+    const referralCollected =
+      (referralTotals.collected * cappedBonusBps) / 10_000;
 
     const totalCollected = cashbackCollected + referralCollected;
     const claimable = Math.max(0, totalCollected - claimed);
@@ -368,12 +400,12 @@ export async function getRewardsSummary(
       pending: totalPending,
       collected: totalCollected,
       claimable: totalClaimable,
-      bps: tier.cashbackBps,
+      bps: cappedCashbackBps,
       byChain: cashbackByChain,
     },
     referralBonus: {
       qualifiedCount,
-      bonusBps,
+      bonusBps: cappedBonusBps,
       pending: totalReferralPending,
       collected: totalReferralCollected,
       byChain: referralByChain,

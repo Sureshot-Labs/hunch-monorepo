@@ -29,6 +29,23 @@ export const adminRewardsPolicySchema = z.object({
       }),
     )
     .min(1),
+}).superRefine((value, ctx) => {
+  const maxCashbackBps = Math.max(
+    0,
+    ...value.tiers.map((tier) => Number(tier.cashbackBps) || 0),
+  );
+  const maxReferralBps = Math.max(
+    0,
+    ...value.referralBonus.map((bonus) => Number(bonus.bonusBps) || 0),
+  );
+  if (maxCashbackBps + maxReferralBps > 10_000) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["referralBonus"],
+      message:
+        "Max cashback + referral bonus exceeds 100% of fees. Reduce referral bonus or cashback tiers.",
+    });
+  }
 });
 
 export const adminPointsSchema = z
