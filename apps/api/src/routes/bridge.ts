@@ -5,6 +5,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
 import {
@@ -221,10 +222,58 @@ function parseAffiliateRecipientMap(raw: string): Record<string, string> {
   return map;
 }
 
+type DebridgeConfig = {
+  dlnBase: string;
+  statsBase: string;
+  affiliateFeePercent: number;
+  affiliateFeeRecipients: Record<string, string>;
+  referralCode: number;
+};
+
+const DEBRIDGE_CONFIG_TTL_MS = 30_000;
+let cachedDebridgeConfig: { value: DebridgeConfig; expiresAt: number } | null =
+  null;
+let debridgeConfigInflight: Promise<DebridgeConfig> | null = null;
+
+async function getDebridgeConfig(): Promise<DebridgeConfig> {
+  const now = Date.now();
+  if (cachedDebridgeConfig && cachedDebridgeConfig.expiresAt > now) {
+    return cachedDebridgeConfig.value;
+  }
+  if (debridgeConfigInflight) return debridgeConfigInflight;
+
+  const load = async () => {
+    const row = await fetchActiveDebridgeConfig(pool);
+    const config: DebridgeConfig = {
+      dlnBase: row?.dln_base?.trim() || env.debridgeDlnBase,
+      statsBase: row?.stats_base?.trim() || env.debridgeStatsBase,
+      affiliateFeePercent:
+        row?.affiliate_fee_percent != null
+          ? Number(row.affiliate_fee_percent)
+          : env.debridgeAffiliateFeePercent,
+      affiliateFeeRecipients:
+        row?.affiliate_fee_recipients ??
+        parseAffiliateRecipientMap(env.debridgeAffiliateFeeRecipients || ""),
+      referralCode:
+        row?.referral_code != null
+          ? Number(row.referral_code)
+          : env.debridgeReferralCode,
+    };
+    cachedDebridgeConfig = { value: config, expiresAt: now + DEBRIDGE_CONFIG_TTL_MS };
+    return config;
+  };
+
+  debridgeConfigInflight = load().finally(() => {
+    debridgeConfigInflight = null;
+  });
+  return debridgeConfigInflight;
+}
+
 function resolveAffiliateDefaults(inputs: {
   swapType: BridgeSwapType;
   srcChainId: string;
   dstChainId: string;
+  config: DebridgeConfig;
   affiliateFeePercent?: number;
   affiliateFeeRecipient?: string;
 }): AffiliateDefaults {
@@ -239,12 +288,10 @@ function resolveAffiliateDefaults(inputs: {
     };
   }
 
-  const percent = env.debridgeAffiliateFeePercent;
+  const percent = inputs.config.affiliateFeePercent;
   if (!percent || percent <= 0) return {};
 
-  const recipients = parseAffiliateRecipientMap(
-    env.debridgeAffiliateFeeRecipients,
-  );
+  const recipients = inputs.config.affiliateFeeRecipients;
   const chainId = inputs.srcChainId;
   const recipient = recipients[chainId];
   if (!recipient) return {};
@@ -257,9 +304,12 @@ function resolveAffiliateDefaults(inputs: {
   };
 }
 
-function resolveReferralCode(referralCode?: number): number | undefined {
+function resolveReferralCode(
+  config: DebridgeConfig,
+  referralCode?: number,
+): number | undefined {
   if (referralCode != null && referralCode > 0) return referralCode;
-  return env.debridgeReferralCode > 0 ? env.debridgeReferralCode : undefined;
+  return config.referralCode > 0 ? config.referralCode : undefined;
 }
 
 function buildDebridgeCreateTxQuery(inputs: DebridgeOrderInputs) {
@@ -394,8 +444,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unsupported bridge provider" });
       }
 
+      const debridgeConfig = await getDebridgeConfig();
       const upstream = await debridgeRequest({
-        baseUrl: env.debridgeDlnBase,
+        baseUrl: debridgeConfig.dlnBase,
         timeoutMs: 10_000,
         method: "GET",
         requestPath: "/supported-chains-info",
@@ -454,19 +505,24 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const debridgeConfig = await getDebridgeConfig();
       const affiliateDefaults = resolveAffiliateDefaults({
         swapType,
         srcChainId: query.srcChainId,
         dstChainId: query.dstChainId,
+        config: debridgeConfig,
         affiliateFeePercent: query.affiliateFeePercent,
         affiliateFeeRecipient: query.affiliateFeeRecipient,
       });
-      const referralCode = resolveReferralCode(query.referralCode);
+      const referralCode = resolveReferralCode(
+        debridgeConfig,
+        query.referralCode,
+      );
 
       const upstream =
         swapType === "same_chain"
           ? await debridgeRequest({
-              baseUrl: env.debridgeDlnBase,
+              baseUrl: debridgeConfig.dlnBase,
               timeoutMs: 15_000,
               method: "GET",
               requestPath: "/chain/transaction",
@@ -484,7 +540,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               }),
             })
           : await debridgeRequest({
-              baseUrl: env.debridgeDlnBase,
+              baseUrl: debridgeConfig.dlnBase,
               timeoutMs: 15_000,
               method: "GET",
               requestPath: "/dln/order/create-tx",
@@ -573,19 +629,24 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const debridgeConfig = await getDebridgeConfig();
       const affiliateDefaults = resolveAffiliateDefaults({
         swapType,
         srcChainId: body.srcChainId,
         dstChainId: body.dstChainId,
+        config: debridgeConfig,
         affiliateFeePercent: body.affiliateFeePercent,
         affiliateFeeRecipient: body.affiliateFeeRecipient,
       });
-      const referralCode = resolveReferralCode(body.referralCode);
+      const referralCode = resolveReferralCode(
+        debridgeConfig,
+        body.referralCode,
+      );
 
       const upstream =
         swapType === "same_chain"
           ? await debridgeRequest({
-              baseUrl: env.debridgeDlnBase,
+              baseUrl: debridgeConfig.dlnBase,
               timeoutMs: 20_000,
               method: "GET",
               requestPath: "/chain/transaction",
@@ -603,7 +664,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               }),
             })
           : await debridgeRequest({
-              baseUrl: env.debridgeDlnBase,
+              baseUrl: debridgeConfig.dlnBase,
               timeoutMs: 20_000,
               method: "GET",
               requestPath: "/dln/order/create-tx",
@@ -753,6 +814,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unsupported bridge provider" });
       }
 
+      const debridgeConfig = await getDebridgeConfig();
       const orderId = query.orderId?.trim();
       const txHash = query.txHash?.trim();
       if (!orderId && !txHash) {
@@ -800,7 +862,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const orderRes = await debridgeRequest({
-          baseUrl: env.debridgeStatsBase,
+          baseUrl: debridgeConfig.statsBase,
           timeoutMs: 15_000,
           method: "GET",
           requestPath: `/SameChainSwap/${resolvedChainId}/tx/${txHash}`,
@@ -947,7 +1009,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
 
       if (!orderId && txHash) {
         const lookup = await debridgeRequest({
-          baseUrl: env.debridgeStatsBase,
+          baseUrl: debridgeConfig.statsBase,
           timeoutMs: 15_000,
           method: "GET",
           requestPath: `/Transaction/${txHash}/orderIds`,
@@ -976,7 +1038,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       const orders: Array<{ orderId: string; payload: unknown }> = [];
       for (const id of orderIds) {
         const orderRes = await debridgeRequest({
-          baseUrl: env.debridgeStatsBase,
+          baseUrl: debridgeConfig.statsBase,
           timeoutMs: 15_000,
           method: "GET",
           requestPath: `/Orders/${id}`,
@@ -1115,6 +1177,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({ error: "Sync only supported for debridge" });
       }
+
+      const debridgeConfig = await getDebridgeConfig();
       const countParams: Array<string | number> = [user.id];
       const countProviderClause = provider ? `and provider = $2` : "";
       if (provider) countParams.push(provider);
@@ -1184,7 +1248,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             if (row.swap_type === "same_chain") {
               if (!row.tx_hash_src) continue;
               const orderRes = await debridgeRequest({
-                baseUrl: env.debridgeStatsBase,
+                baseUrl: debridgeConfig.statsBase,
                 timeoutMs: 15_000,
                 method: "GET",
                 requestPath: `/SameChainSwap/${row.src_chain_id}/tx/${row.tx_hash_src}`,
@@ -1250,7 +1314,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             let resolvedOrderId = row.order_id;
             if (!resolvedOrderId && row.tx_hash_src) {
               const lookup = await debridgeRequest({
-                baseUrl: env.debridgeStatsBase,
+                baseUrl: debridgeConfig.statsBase,
                 timeoutMs: 15_000,
                 method: "GET",
                 requestPath: `/Transaction/${row.tx_hash_src}/orderIds`,
@@ -1278,7 +1342,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
 
             if (!resolvedOrderId) continue;
             const orderRes = await debridgeRequest({
-              baseUrl: env.debridgeStatsBase,
+              baseUrl: debridgeConfig.statsBase,
               timeoutMs: 15_000,
               method: "GET",
               requestPath: `/Orders/${resolvedOrderId}`,
@@ -1495,8 +1559,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unsupported bridge provider" });
       }
 
+      const debridgeConfig = await getDebridgeConfig();
       const upstream = await debridgeRequest({
-        baseUrl: env.debridgeDlnBase,
+        baseUrl: debridgeConfig.dlnBase,
         timeoutMs: 15_000,
         method: "GET",
         requestPath: "/token-list",

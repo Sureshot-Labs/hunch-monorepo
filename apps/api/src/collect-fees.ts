@@ -472,7 +472,11 @@ async function main() {
       const reason = "Missing order_hash";
       console.log(`Skip ${label}: ${reason}`);
       skippedError += 1;
-      await updateFeeError(row.id, attempts, reason);
+      if (options.archiveLegacy) {
+        await archiveFeeError(row.id, attempts, `${reason} (archived)`);
+      } else {
+        await updateFeeError(row.id, attempts, reason);
+      }
       continue;
     }
 
@@ -481,7 +485,11 @@ async function main() {
       const reason = "Invalid order_payload";
       console.log(`Skip ${label}: ${reason}`);
       skippedError += 1;
-      await updateFeeError(row.id, attempts, reason);
+      if (options.archiveLegacy) {
+        await archiveFeeError(row.id, attempts, `${reason} (archived)`);
+      } else {
+        await updateFeeError(row.id, attempts, reason);
+      }
       continue;
     }
 
@@ -523,7 +531,11 @@ async function main() {
       const reason = "Missing fee_auth_sig";
       console.log(`Skip ${label}: ${reason}`);
       skippedError += 1;
-      await updateFeeError(row.id, attempts, reason);
+      if (options.archiveLegacy) {
+        await archiveFeeError(row.id, attempts, `${reason} (archived)`);
+      } else {
+        await updateFeeError(row.id, attempts, reason);
+      }
       continue;
     }
 

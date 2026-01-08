@@ -426,6 +426,36 @@ export async function fetchSolanaTokenAccountInfo(inputs: {
   return { mint, owner };
 }
 
+export async function fetchSolanaTokenAccountBalance(inputs: {
+  rpcUrls: string[];
+  account: string;
+  timeoutMs: number;
+}): Promise<{ amount: bigint; decimals: number } | null> {
+  const result = await solanaRpcRequest<{ value?: unknown }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenAccountBalance",
+    params: [inputs.account],
+  });
+
+  const value = (result as { value?: unknown }).value;
+  if (!isRecord(value)) return null;
+  const amountRaw = value.amount;
+  const decimalsRaw = value.decimals;
+  if (typeof amountRaw !== "string" || amountRaw.trim().length === 0)
+    return null;
+  if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw))
+    return null;
+
+  try {
+    const amount = BigInt(amountRaw);
+    const decimals = Math.max(0, Math.trunc(decimalsRaw));
+    return { amount, decimals };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchSolanaSignatureStatus(inputs: {
   rpcUrls: string[];
   signature: string;

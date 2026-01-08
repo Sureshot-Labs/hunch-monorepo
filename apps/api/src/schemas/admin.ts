@@ -9,6 +9,15 @@ export const adminFeePolicySchema = z.object({
   effectiveAt: z.string().datetime().optional(),
 });
 
+export const adminDebridgeConfigSchema = z.object({
+  dlnBase: z.string().url().optional(),
+  statsBase: z.string().url().optional(),
+  affiliateFeePercent: z.coerce.number().min(0).max(100).optional(),
+  affiliateFeeRecipients: z.string().optional(),
+  referralCode: z.coerce.number().int().min(0).optional(),
+  effectiveAt: z.string().datetime().optional(),
+});
+
 export const adminRewardsPolicySchema = z.object({
   effectiveAt: z.string().datetime().optional(),
   tiers: z
@@ -48,6 +57,54 @@ export const adminRewardsPolicySchema = z.object({
   }
 });
 
+export const adminUsersQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminUserParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const adminUserActivityQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+
+export const adminUserAdminSchema = z.object({
+  isAdmin: z.coerce.boolean(),
+});
+
+export const adminUserActiveSchema = z.object({
+  isActive: z.coerce.boolean(),
+});
+
+export const adminUserMergeSchema = z
+  .object({
+    sourceId: z.string().uuid().optional(),
+    targetId: z.string().uuid().optional(),
+    sourceWallet: z.string().min(1).optional(),
+    targetWallet: z.string().min(1).optional(),
+    dryRun: z.coerce.boolean().optional(),
+    keepSource: z.coerce.boolean().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.sourceId && !value.sourceWallet) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sourceId"],
+        message: "Provide sourceId or sourceWallet",
+      });
+    }
+    if (!value.targetId && !value.targetWallet) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetId"],
+        message: "Provide targetId or targetWallet",
+      });
+    }
+  });
+
 export const adminPointsSchema = z
   .object({
     userId: z.string().uuid().optional(),
@@ -67,5 +124,14 @@ export const adminPointsSchema = z
   });
 
 export type AdminFeePolicyBody = z.infer<typeof adminFeePolicySchema>;
+export type AdminDebridgeConfigBody = z.infer<typeof adminDebridgeConfigSchema>;
 export type AdminRewardsPolicyBody = z.infer<typeof adminRewardsPolicySchema>;
+export type AdminUsersQuery = z.infer<typeof adminUsersQuerySchema>;
+export type AdminUserParams = z.infer<typeof adminUserParamsSchema>;
+export type AdminUserActivityQuery = z.infer<
+  typeof adminUserActivityQuerySchema
+>;
+export type AdminUserAdminBody = z.infer<typeof adminUserAdminSchema>;
+export type AdminUserActiveBody = z.infer<typeof adminUserActiveSchema>;
+export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
