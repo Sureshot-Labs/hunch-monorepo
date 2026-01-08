@@ -78,8 +78,20 @@ export interface UserWallet {
 }
 
 export class WalletAlreadyExistsError extends Error {
-  constructor() {
-    super("Wallet address already exists");
+  constructor(message = "Wallet address already exists") {
+    super(message);
+  }
+}
+
+export class WalletNotFoundError extends Error {
+  constructor(message = "Wallet not found") {
+    super(message);
+  }
+}
+
+export class WalletUnlinkNotAllowedError extends Error {
+  constructor(message = "Cannot unlink the only wallet") {
+    super(message);
   }
 }
 
@@ -425,6 +437,28 @@ export class AuthService {
           return trimmed;
         };
 
+        for (const wallet of privyWallets) {
+          const match =
+            wallet.walletType === "ethereum"
+              ? "lower(wallet_address) = lower($2)"
+              : "wallet_address = $2";
+          const conflict = await client.query<{ user_id: string }>(
+            `SELECT user_id
+             FROM user_wallets
+             WHERE wallet_type = $1
+               AND ${match}
+               AND user_id <> $3
+             LIMIT 1`,
+            [wallet.walletType, wallet.address, userId],
+          );
+
+          if (conflict.rows.length > 0) {
+            throw new WalletAlreadyExistsError(
+              "Wallet address already linked to another account",
+            );
+          }
+        }
+
         // Update user data (and persist Privy DID for stable identity).
         await client.query(
           `UPDATE users SET
@@ -592,8 +626,12 @@ export class AuthService {
       await client.query("BEGIN");
 
       // Check if user exists with this wallet
+      const isEth = ETH_ADDRESS_RE.test(walletAddress);
+      const walletMatch = isEth
+        ? "lower(wallet_address) = lower($1)"
+        : "wallet_address = $1";
       const walletResult = await client.query(
-        "SELECT user_id FROM user_wallets WHERE wallet_address = $1",
+        `SELECT user_id FROM user_wallets WHERE ${walletMatch}`,
         [walletAddress],
       );
 
@@ -774,9 +812,13 @@ export class AuthService {
     try {
       await client.query("BEGIN");
 
+      const isEth = ETH_ADDRESS_RE.test(input.walletAddress);
+      const match = isEth
+        ? "lower(wallet_address) = lower($2)"
+        : "wallet_address = $2";
       const existingWallet = await client.query<{ id: string }>(
-        "SELECT id FROM user_wallets WHERE wallet_address = $1",
-        [input.walletAddress],
+        `SELECT id FROM user_wallets WHERE wallet_type = $1 AND ${match}`,
+        [input.walletType, input.walletAddress],
       );
 
       if (existingWallet.rows.length > 0) {
@@ -808,6 +850,121 @@ export class AuthService {
         isVerified: row.is_verified,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async removeWallet(
+    userId: string,
+    walletAddress: string,
+  ): Promise<{
+    removed: UserWallet;
+    nextPrimaryWalletAddress: string | null;
+    remainingWallets: UserWallet[];
+  }> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const normalized = walletAddress.trim();
+      const isEth = ETH_ADDRESS_RE.test(normalized);
+      const match = isEth
+        ? "lower(wallet_address) = lower($2)"
+        : "wallet_address = $2";
+
+      const targetResult = await client.query<UserWalletRow>(
+        `SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at
+         FROM user_wallets
+         WHERE user_id = $1 AND ${match}
+         LIMIT 1`,
+        [userId, normalized],
+      );
+      const target = targetResult.rows[0];
+      if (!target) {
+        throw new WalletNotFoundError();
+      }
+
+      const walletsResult = await client.query<UserWalletRow>(
+        `SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at
+         FROM user_wallets
+         WHERE user_id = $1
+         ORDER BY is_primary DESC, created_at ASC`,
+        [userId],
+      );
+
+      if (walletsResult.rows.length <= 1) {
+        throw new WalletUnlinkNotAllowedError();
+      }
+
+      const remainingRows = walletsResult.rows.filter(
+        (row) => row.id !== target.id,
+      );
+      let nextPrimary = remainingRows.find((row) => row.is_primary);
+      if (!nextPrimary) {
+        nextPrimary = remainingRows[0];
+      }
+
+      const hasPrimary = remainingRows.some((row) => row.is_primary);
+      if (target.is_primary || !hasPrimary) {
+        await client.query(
+          "UPDATE user_wallets SET is_primary = false WHERE user_id = $1",
+          [userId],
+        );
+        await client.query(
+          "UPDATE user_wallets SET is_primary = true WHERE id = $1",
+          [nextPrimary.id],
+        );
+      }
+
+      await client.query(
+        `DELETE FROM user_venue_credentials
+         WHERE user_id = $1 AND wallet_address = $2`,
+        [userId, target.wallet_address],
+      );
+      await client.query(
+        "DELETE FROM user_wallets WHERE user_id = $1 AND id = $2",
+        [userId, target.id],
+      );
+      await client.query(
+        `UPDATE user_sessions
+         SET wallet_address = $3
+         WHERE user_id = $1 AND wallet_address = $2`,
+        [userId, target.wallet_address, nextPrimary.wallet_address],
+      );
+
+      await client.query("COMMIT");
+
+      const removed: UserWallet = {
+        id: target.id,
+        userId: target.user_id,
+        walletAddress: target.wallet_address,
+        walletType: target.wallet_type,
+        isPrimary: target.is_primary,
+        isVerified: target.is_verified,
+        createdAt: target.created_at,
+        updatedAt: target.updated_at,
+      };
+
+      const remainingWallets: UserWallet[] = remainingRows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        walletAddress: row.wallet_address,
+        walletType: row.wallet_type,
+        isPrimary: row.id === nextPrimary.id,
+        isVerified: row.is_verified,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+
+      return {
+        removed,
+        nextPrimaryWalletAddress: nextPrimary.wallet_address,
+        remainingWallets,
       };
     } catch (error) {
       await client.query("ROLLBACK");

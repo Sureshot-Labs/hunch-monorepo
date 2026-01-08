@@ -5,6 +5,8 @@ import { z as zod } from "zod";
 import {
   AuthService,
   WalletAlreadyExistsError,
+  WalletNotFoundError,
+  WalletUnlinkNotAllowedError,
   createAuthMiddleware,
 } from "../auth.js";
 import { pool } from "../db.js";
@@ -18,6 +20,7 @@ import {
   polymarketFunderBodySchema,
   polymarketRelayerStatusResponseSchema,
   polymarketRelayerSignBodySchema,
+  removeWalletBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 import { attachReferralCode } from "../services/rewards.js";
@@ -799,6 +802,69 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to add wallet",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * DELETE /auth/wallets
+   * Remove a wallet from the user account (no data transfer; use admin merge for that).
+   */
+  z.delete(
+    "/auth/wallets",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: removeWalletBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const body = request.body;
+
+      try {
+        const result = await AuthService.removeWallet(
+          user.id,
+          body.walletAddress,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          removed: result.removed.walletAddress,
+          nextPrimaryWalletAddress: result.nextPrimaryWalletAddress,
+          remainingWallets: result.remainingWallets.map((wallet) => ({
+            id: wallet.id,
+            walletAddress: wallet.walletAddress,
+            walletType: wallet.walletType,
+            isPrimary: wallet.isPrimary,
+            isVerified: wallet.isVerified,
+            createdAt: wallet.createdAt,
+            updatedAt: wallet.updatedAt,
+          })),
+        });
+      } catch (error) {
+        if (error instanceof WalletNotFoundError) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+        if (error instanceof WalletUnlinkNotAllowedError) {
+          reply.code(400);
+          return reply.send({ error: error.message });
+        }
+
+        app.log.error(
+          { error, userId: user.id, walletAddress: body.walletAddress },
+          "Failed to remove wallet",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to remove wallet",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }

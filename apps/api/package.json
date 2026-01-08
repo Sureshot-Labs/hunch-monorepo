@@ -11,6 +11,8 @@
     "delete-closed": "tsx src/delete-closed-markets.ts",
     "admin:user": "tsx src/admin-user.ts",
     "admin:points": "tsx src/admin-points.ts",
+    "admin:merge-user": "tsx src/admin-merge-user.ts",
+    "admin:wallets:duplicates": "tsx src/admin-wallet-duplicates.ts",
     "fees:collect": "tsx src/collect-fees.ts",
     "fees:reconcile": "tsx src/reconcile-fees.ts",
     "rewards:payout": "tsx src/rewards-payout.ts",
