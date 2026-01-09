@@ -110,6 +110,11 @@ function prefixLimitlessToken(tokenId?: string | null): string | undefined {
   return tokenId.startsWith("limitless:") ? tokenId : `limitless:${tokenId}`;
 }
 
+function normalizeOutcomeTokenId(value?: string | null): string | null {
+  if (!value) return null;
+  return value.startsWith("limitless:") ? value.slice(10) : value;
+}
+
 function resolveOutcomeTokens(market: {
   tokens?: { yes?: string | null; no?: string | null } | null;
   positionIds?: Array<string | string[]> | null;
@@ -127,6 +132,31 @@ function resolveOutcomeTokens(market: {
     yes: normalized[0],
     no: normalized[1],
   };
+}
+
+function resolveLimitlessOutcome(
+  market: TLimitlessMarketItem | TLimitlessMarket,
+  outcomeTokens: { yes?: string; no?: string },
+): "YES" | "NO" | undefined {
+  if (market.status !== "RESOLVED") return undefined;
+  const winningOutcomeIndex = market.winningOutcomeIndex;
+  if (winningOutcomeIndex == null) return undefined;
+
+  const orderedTokens =
+    Array.isArray(market.outcomeTokens) && market.outcomeTokens.length
+      ? market.outcomeTokens
+      : normalizePositionIds(market.positionIds);
+  const winningToken = orderedTokens[winningOutcomeIndex] ?? null;
+
+  const normalizedWinning = normalizeOutcomeTokenId(winningToken);
+  const normalizedYes = normalizeOutcomeTokenId(outcomeTokens.yes);
+  const normalizedNo = normalizeOutcomeTokenId(outcomeTokens.no);
+
+  if (normalizedWinning && normalizedWinning === normalizedYes) return "YES";
+  if (normalizedWinning && normalizedWinning === normalizedNo) return "NO";
+  if (winningOutcomeIndex === 0) return "YES";
+  if (winningOutcomeIndex === 1) return "NO";
+  return undefined;
 }
 
 export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
@@ -424,6 +454,7 @@ export function mapToUnifiedMarket(
   const lastPrice = yesPrice;
   const usePriceAsTop = tradeType.toLowerCase() === "amm" && yesPrice != null;
   const outcomeTokens = resolveOutcomeTokens(market);
+  const resolvedOutcome = resolveLimitlessOutcome(market, outcomeTokens);
   const image = pickImage(market);
   const icon = pickIcon(market);
   const venueInfo = extractVenueInfo(market);
@@ -462,6 +493,7 @@ export function mapToUnifiedMarket(
     token_yes: prefixLimitlessToken(outcomeTokens.yes),
     token_no: prefixLimitlessToken(outcomeTokens.no),
     condition_id: market.conditionId ?? undefined,
+    resolved_outcome: resolvedOutcome,
     slug: market.slug || undefined,
     image,
     icon,

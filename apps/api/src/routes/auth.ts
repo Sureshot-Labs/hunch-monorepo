@@ -1,6 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { BuilderSigner } from "@polymarket/builder-signing-sdk";
+import crypto from "node:crypto";
+import bs58 from "bs58";
+import { PublicKey } from "@solana/web3.js";
+import { ethers } from "ethers";
 import { z as zod } from "zod";
 import {
   AuthService,
@@ -9,12 +13,14 @@ import {
   WalletUnlinkNotAllowedError,
   createAuthMiddleware,
 } from "../auth.js";
+import { checkRateLimit } from "../lib/rate-limit.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { PrivyService } from "../privy-service.js";
 import {
   addWalletBodySchema,
   authPrivyBodySchema,
+  walletNonceBodySchema,
   polymarketConnectBodySchema,
   polymarketCredentialsBodySchema,
   polymarketFunderBodySchema,
@@ -24,6 +30,77 @@ import {
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 import { attachReferralCode } from "../services/rewards.js";
+
+const WALLET_TYPES = new Set(["ethereum", "solana"]);
+const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const ED25519_SPKI_PREFIX = Buffer.from(
+  "302a300506032b6570032100",
+  "hex",
+);
+
+function normalizeWalletType(input?: string): string {
+  const raw = (input ?? "").trim().toLowerCase();
+  return raw.length ? raw : "ethereum";
+}
+
+function normalizeWalletAddressForType(
+  walletType: string,
+  address: string,
+): string {
+  const trimmed = address.trim();
+  if (walletType === "ethereum") return trimmed.toLowerCase();
+  return trimmed;
+}
+
+function assertWalletAddress(walletType: string, address: string): void {
+  if (!WALLET_TYPES.has(walletType)) {
+    throw new Error("Unsupported wallet type");
+  }
+  if (walletType === "ethereum") {
+    if (!ETH_ADDRESS_RE.test(address)) {
+      throw new Error("Invalid wallet address format");
+    }
+    return;
+  }
+
+  try {
+    // PublicKey will throw if invalid base58 or wrong length.
+    new PublicKey(address);
+  } catch (error) {
+    throw new Error(
+      error instanceof Error ? error.message : "Invalid wallet address format",
+    );
+  }
+}
+
+function decodeSignatureBytes(signature: string): Buffer {
+  try {
+    return Buffer.from(bs58.decode(signature));
+  } catch {
+    try {
+      return Buffer.from(signature, "base64");
+    } catch {
+      throw new Error("Invalid signature encoding");
+    }
+  }
+}
+
+function verifySolanaSignature(params: {
+  walletAddress: string;
+  message: string;
+  signature: string;
+}): boolean {
+  const publicKey = new PublicKey(params.walletAddress);
+  const publicKeyBytes = Buffer.from(publicKey.toBytes());
+  const key = crypto.createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PREFIX, publicKeyBytes]),
+    format: "der",
+    type: "spki",
+  });
+  const messageBytes = Buffer.from(params.message, "utf8");
+  const signatureBytes = decodeSignatureBytes(params.signature);
+  return crypto.verify(null, messageBytes, key, signatureBytes);
+}
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -42,6 +119,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const userAgent = request.headers["user-agent"] || "unknown";
 
       try {
+        const canProceed = await checkRateLimit(
+          `auth:privy:${clientIp}`,
+          20,
+          60_000,
+        );
+        if (!canProceed) {
+          reply.code(429);
+          return reply.send({ error: "Rate limit exceeded" });
+        }
+
         const {
           claims,
           user: privyUser,
@@ -110,6 +197,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           session: {
             token: sessionToken,
             expiresAt: session.expiresAt,
+            csrfToken: session.csrfToken,
           },
           walletAddresses,
           primaryWalletAddress,
@@ -748,6 +836,115 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * POST /auth/wallets/nonce
+   * Get a nonce and message to sign for manual wallet linking.
+   */
+  z.post(
+    "/auth/wallets/nonce",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: walletNonceBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const body = request.body;
+      const walletType = normalizeWalletType(body.walletType);
+      const walletAddress = normalizeWalletAddressForType(
+        walletType,
+        body.walletAddress,
+      );
+
+      try {
+        assertWalletAddress(walletType, walletAddress);
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error: error instanceof Error ? error.message : "Invalid wallet data",
+        });
+      }
+
+      try {
+        const canProceed = await checkRateLimit(
+          `auth:wallet-nonce:${request.ip || "unknown"}`,
+          30,
+          60_000,
+        );
+        if (!canProceed) {
+          reply.code(429);
+          return reply.send({ error: "Rate limit exceeded" });
+        }
+
+        const existing = await AuthService.getUserWalletByAddress(
+          user.id,
+          walletAddress,
+        );
+        if (existing) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            alreadyLinked: true,
+            walletAddress: existing.walletAddress,
+            walletType: existing.walletType,
+          });
+        }
+
+        const match = walletType === "ethereum"
+          ? "lower(wallet_address) = lower($2)"
+          : "wallet_address = $2";
+        const conflict = await pool.query<{ user_id: string }>(
+          `SELECT user_id
+           FROM user_wallets
+           WHERE wallet_type = $1
+             AND ${match}
+             AND user_id <> $3
+           LIMIT 1`,
+          [walletType, walletAddress, user.id],
+        );
+        if (conflict.rows.length > 0) {
+          reply.code(409);
+          return reply.send({ error: "Wallet address already exists" });
+        }
+
+        const nonceEntry = await AuthService.createWalletLinkNonce({
+          userId: user.id,
+          walletAddress,
+          walletType,
+        });
+        const message = AuthService.buildWalletLinkMessage({
+          walletAddress,
+          nonce: nonceEntry.nonce,
+          expiresAt: nonceEntry.expiresAt,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          walletAddress,
+          walletType,
+          nonce: nonceEntry.nonce,
+          expiresAt: nonceEntry.expiresAt,
+          message,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Failed to create wallet nonce",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to create wallet nonce",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
    * POST /auth/wallets
    * Add a new wallet to user account
    */
@@ -766,12 +963,84 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
 
-      const walletType = body.walletType || "ethereum";
-      const verificationSignature = body.verificationSignature || undefined;
+      const walletType = normalizeWalletType(body.walletType);
+      const walletAddress = normalizeWalletAddressForType(
+        walletType,
+        body.walletAddress,
+      );
+      const verificationSignature = body.verificationSignature;
+      const nonce = body.nonce;
 
       try {
+        assertWalletAddress(walletType, walletAddress);
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error: error instanceof Error ? error.message : "Invalid wallet data",
+        });
+      }
+
+      try {
+        const canProceed = await checkRateLimit(
+          `auth:add-wallet:${request.ip || "unknown"}`,
+          20,
+          60_000,
+        );
+        if (!canProceed) {
+          reply.code(429);
+          return reply.send({ error: "Rate limit exceeded" });
+        }
+
+        const nonceResult = await AuthService.consumeWalletLinkNonce({
+          userId: user.id,
+          walletAddress,
+          walletType,
+          nonce,
+        });
+
+        if (!nonceResult) {
+          reply.code(400);
+          return reply.send({ error: "Invalid or expired nonce" });
+        }
+
+        const message = AuthService.buildWalletLinkMessage({
+          walletAddress,
+          nonce,
+          expiresAt: nonceResult.expiresAt,
+        });
+
+        if (walletType === "ethereum") {
+          let recovered: string;
+          try {
+            recovered = ethers.verifyMessage(message, verificationSignature);
+          } catch (error) {
+            reply.code(400);
+            return reply.send({
+              error: "Invalid wallet signature",
+              message: error instanceof Error ? error.message : "Unknown error",
+            });
+          }
+
+          if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
+            reply.code(400);
+            return reply.send({
+              error: "Signature does not match wallet address",
+            });
+          }
+        } else {
+          const valid = verifySolanaSignature({
+            walletAddress,
+            message,
+            signature: verificationSignature,
+          });
+          if (!valid) {
+            reply.code(400);
+            return reply.send({ error: "Invalid wallet signature" });
+          }
+        }
+
         const newWallet = await AuthService.addWallet(user.id, {
-          walletAddress: body.walletAddress,
+          walletAddress,
           walletType,
           verificationSignature,
         });
@@ -828,6 +1097,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       try {
+        const canProceed = await checkRateLimit(
+          `auth:remove-wallet:${request.ip || "unknown"}`,
+          20,
+          60_000,
+        );
+        if (!canProceed) {
+          reply.code(429);
+          return reply.send({ error: "Rate limit exceeded" });
+        }
+
         const result = await AuthService.removeWallet(
           user.id,
           body.walletAddress,

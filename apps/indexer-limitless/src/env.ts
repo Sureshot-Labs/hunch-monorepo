@@ -36,6 +36,22 @@ function parseOptionalBool(v: string | undefined): boolean | undefined {
   }
 }
 
+function parseOptionalInt(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : undefined;
+}
+
+function clampInt(
+  value: number | undefined,
+  opts: { min: number; max: number; fallback: number }
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return opts.fallback;
+  }
+  return Math.min(opts.max, Math.max(opts.min, Math.trunc(value)));
+}
+
 const limitlessEnabledSetting = parseOptionalBool(
   process.env.LIMITLESS_ENABLED,
 );
@@ -76,6 +92,16 @@ const limitlessHttpBackoffMs = Math.max(
   Number.isFinite(httpBackoffRaw) ? httpBackoffRaw : 750,
 );
 
+const hotTokensTtlSec = clampInt(
+  parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC),
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 600 }
+);
+const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
+  min: 10,
+  max: 50_000,
+  fallback: 1000,
+});
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -96,6 +122,8 @@ export const env = {
   limitlessHttpMinDelayMs,
   limitlessHttpMaxRetries,
   limitlessHttpBackoffMs,
+  hotTokensTtlSec,
+  hotTokensMax,
 
   // AMM prices are % (0..100) in /markets/active; CLOB prices are 0..1.
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",

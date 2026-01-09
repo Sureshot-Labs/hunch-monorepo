@@ -1,4 +1,8 @@
-import { bootstrapLimitless, resolveHotSlugsForWs } from "./bootstrap.js";
+import {
+  bootstrapLimitless,
+  resolveHotSlugsForWs,
+  syncHotLimitlessMarkets,
+} from "./bootstrap.js";
 import { log } from "./log.js";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 import { env } from "./env.js";
@@ -11,6 +15,7 @@ async function periodicBootstrap() {
   bootstrapping = true;
   try {
     await bootstrapLimitless();
+    await syncHotLimitlessMarkets();
     const slugs = await resolveHotSlugsForWs();
     updateMarketWSSubscriptions(slugs);
   } catch (e) {

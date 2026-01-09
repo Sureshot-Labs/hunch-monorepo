@@ -11,6 +11,7 @@ import { ZodError } from "zod";
 import { onReqEnd, onReqStart } from "./metrics.js";
 import { registerRoutes } from "./routes/index.js";
 import { isRecord } from "./lib/type-guards.js";
+import { env } from "./env.js";
 
 export async function buildApp() {
   const app = Fastify({ logger: true }).withTypeProvider<ZodTypeProvider>();
@@ -46,32 +47,34 @@ export async function buildApp() {
     reply.send(error);
   });
 
-  await app.register(swagger, {
-    openapi: {
-      info: {
-        title: "Hunch API",
-        version: "0.1.0",
+  if (env.enableSwagger) {
+    await app.register(swagger, {
+      openapi: {
+        info: {
+          title: "Hunch API",
+          version: "0.1.0",
+        },
       },
-    },
-    transform: jsonSchemaTransform,
-  });
+      transform: jsonSchemaTransform,
+    });
 
-  await app.register(swaggerUi, {
-    routePrefix: "/docs",
-  });
+    await app.register(swaggerUi, {
+      routePrefix: "/docs",
+    });
 
-  app.get(
-    "/openapi.json",
-    {
-      schema: {
-        hide: true,
+    app.get(
+      "/openapi.json",
+      {
+        schema: {
+          hide: true,
+        },
       },
-    },
-    async (_request, reply) => {
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(app.swagger());
-    },
-  );
+      async (_request, reply) => {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(app.swagger());
+      },
+    );
+  }
 
   await registerRoutes(app);
 

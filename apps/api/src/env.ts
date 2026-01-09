@@ -66,6 +66,9 @@ function parseList(raw: string | undefined, fallback?: string): string[] {
 }
 
 const nodeEnv = process.env.NODE_ENV ?? "development";
+const enableSwaggerSetting = parseOptionalBool(process.env.ENABLE_SWAGGER);
+const enableSwagger =
+  enableSwaggerSetting ?? nodeEnv.toLowerCase() !== "production";
 
 const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
 const dflowEnv: "dev" | "prod" =
@@ -124,6 +127,7 @@ export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "", // optional
   nodeEnv,
+  enableSwagger,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API

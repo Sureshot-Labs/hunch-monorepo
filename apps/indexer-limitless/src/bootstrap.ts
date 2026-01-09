@@ -145,6 +145,178 @@ async function applyOrderbookTop(
   }
 }
 
+type HotMarketRefRow = {
+  slug: string | null;
+  address: string | null;
+};
+
+async function fetchHotTokenIds(): Promise<string[]> {
+  if (env.hotTokensMax <= 0) return [];
+  await ensureRedis();
+
+  const key = "hot:tokens:limitless";
+  const cutoff = Date.now() - env.hotTokensTtlSec * 1000;
+
+  try {
+    await redis.zRemRangeByScore(key, 0, cutoff);
+    return await redis.zRange(key, 0, env.hotTokensMax - 1, { REV: true });
+  } catch (error) {
+    log.warn("Failed to fetch hot tokens", error);
+    return [];
+  }
+}
+
+async function resolveHotMarketRefs(
+  tokenIds: string[],
+): Promise<string[]> {
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<HotMarketRefRow>(
+    `
+      select distinct
+        coalesce(e.slug, m.slug) as slug,
+        nullif(m.metadata->>'address', '') as address
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      left join unified_events e on e.id = m.event_id
+      where t.token_id = any($1::text[])
+        and m.venue = 'limitless'
+    `,
+    [tokenIds],
+  );
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of rows) {
+    const slug = row.slug?.trim();
+    const address = row.address?.trim();
+    const ref = slug || address;
+    if (!ref) continue;
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(ref);
+  }
+  return out;
+}
+
+async function processLimitlessMarket(
+  mergedTop: TLimitlessMarket,
+): Promise<{ eventId: string; marketCount: number }> {
+  const eventRow = mapLimitlessEventRow(mergedTop);
+  const eventId = await upsertLimitlessEvent(eventRow);
+
+  const unifiedEventRow = mapToUnifiedEvent(mergedTop);
+  await upsertUnifiedEvent(pool, unifiedEventRow);
+
+  let marketCount = 0;
+
+  if (mergedTop.marketType === "single") {
+    const marketRow = mapLimitlessMarketRow(eventId, mergedTop);
+    await upsertLimitlessMarket(marketRow);
+    marketCount += 1;
+
+    const unifiedMarketRow = mapToUnifiedMarket(
+      mergedTop,
+      String(mergedTop.id),
+    );
+    if (mergedTop.tradeType?.toLowerCase() === "clob") {
+      await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
+    }
+    await upsertUnifiedMarket(pool, unifiedMarketRow);
+    if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
+      const tokenRows: Array<{
+        token_id: string;
+        market_id: string;
+        side: "YES" | "NO";
+      }> = [];
+      const yesToken = unifiedMarketRow.token_yes
+        ? prefixLimitlessToken(unifiedMarketRow.token_yes)
+        : undefined;
+      const noToken = unifiedMarketRow.token_no
+        ? prefixLimitlessToken(unifiedMarketRow.token_no)
+        : undefined;
+      if (yesToken) {
+        tokenRows.push({
+          token_id: yesToken,
+          market_id: unifiedMarketRow.id,
+          side: "YES",
+        });
+      }
+      if (noToken) {
+        tokenRows.push({
+          token_id: noToken,
+          market_id: unifiedMarketRow.id,
+          side: "NO",
+        });
+      }
+      if (tokenRows.length) {
+        await upsertUnifiedTokens(pool, tokenRows);
+      }
+    }
+  } else if (mergedTop.marketType === "group") {
+    const subMarkets = mergedTop.markets ?? [];
+    for (const subMarket of subMarkets) {
+      const subDetail =
+        subMarket.slug &&
+        (!subMarket.tokens || !subMarket.tokens.yes || !subMarket.tokens.no)
+          ? await getMarketDetail(subMarket.slug)
+          : null;
+      const mergedSub = mergeMarket(
+        subMarket,
+        subDetail,
+        mergedTop.tradeType ?? "clob",
+      );
+      if (!mergedSub.venue && mergedTop.venue) {
+        mergedSub.venue = mergedTop.venue;
+      }
+      const marketRow = mapLimitlessMarketRow(eventId, mergedSub);
+      await upsertLimitlessMarket(marketRow);
+      marketCount += 1;
+
+      const unifiedMarketRow = mapToUnifiedMarket(
+        mergedSub,
+        String(mergedTop.id),
+      );
+      if (mergedSub.tradeType?.toLowerCase() === "clob") {
+        await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
+      }
+      await upsertUnifiedMarket(pool, unifiedMarketRow);
+      if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
+        const tokenRows: Array<{
+          token_id: string;
+          market_id: string;
+          side: "YES" | "NO";
+        }> = [];
+        const yesToken = unifiedMarketRow.token_yes
+          ? prefixLimitlessToken(unifiedMarketRow.token_yes)
+          : undefined;
+        const noToken = unifiedMarketRow.token_no
+          ? prefixLimitlessToken(unifiedMarketRow.token_no)
+          : undefined;
+        if (yesToken) {
+          tokenRows.push({
+            token_id: yesToken,
+            market_id: unifiedMarketRow.id,
+            side: "YES",
+          });
+        }
+        if (noToken) {
+          tokenRows.push({
+            token_id: noToken,
+            market_id: unifiedMarketRow.id,
+            side: "NO",
+          });
+        }
+        if (tokenRows.length) {
+          await upsertUnifiedTokens(pool, tokenRows);
+        }
+      }
+    }
+  }
+
+  return { eventId, marketCount };
+}
+
 export async function bootstrapLimitless() {
   log.info("Bootstrapping Limitless…");
 
@@ -179,130 +351,14 @@ export async function bootstrapLimitless() {
           : null;
       const mergedTop = mergeMarket(lm, detail);
 
-      // Store the main event
-      const eventRow = mapLimitlessEventRow(mergedTop);
-      const eventId = await upsertLimitlessEvent(eventRow);
-      eventCount++;
-
-      // Map and upsert to unified_events table
-      const unifiedEventRow = mapToUnifiedEvent(mergedTop);
-      await upsertUnifiedEvent(pool, unifiedEventRow);
-
-      // Handle different market types
-      if (mergedTop.marketType === "single") {
-        // Single market: the market data is in the main object
-        const marketRow = mapLimitlessMarketRow(eventId, mergedTop);
-        await upsertLimitlessMarket(marketRow);
-        marketCount++;
-
-        // Map and upsert to unified_markets table
-        const unifiedMarketRow = mapToUnifiedMarket(
-          mergedTop,
-          String(mergedTop.id),
-        );
-        if (mergedTop.tradeType?.toLowerCase() === "clob") {
-          await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
-        }
-        await upsertUnifiedMarket(pool, unifiedMarketRow);
-        if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
-          const tokenRows: Array<{
-            token_id: string;
-            market_id: string;
-            side: "YES" | "NO";
-          }> = [];
-          const yesToken = unifiedMarketRow.token_yes
-            ? prefixLimitlessToken(unifiedMarketRow.token_yes)
-            : undefined;
-          const noToken = unifiedMarketRow.token_no
-            ? prefixLimitlessToken(unifiedMarketRow.token_no)
-            : undefined;
-          if (yesToken) {
-            tokenRows.push({
-              token_id: yesToken,
-              market_id: unifiedMarketRow.id,
-              side: "YES",
-            });
-          }
-          if (noToken) {
-            tokenRows.push({
-              token_id: noToken,
-              market_id: unifiedMarketRow.id,
-              side: "NO",
-            });
-          }
-          if (tokenRows.length) {
-            await upsertUnifiedTokens(pool, tokenRows);
-          }
-        }
-      } else if (mergedTop.marketType === "group") {
-        // Group market: iterate through sub-markets
-        const subMarkets = mergedTop.markets ?? lm.markets ?? [];
-        for (const subMarket of subMarkets) {
-          const subDetail =
-            subMarket.slug &&
-            (!subMarket.tokens || !subMarket.tokens.yes || !subMarket.tokens.no)
-              ? await getMarketDetail(subMarket.slug)
-              : null;
-          const mergedSub = mergeMarket(
-            subMarket,
-            subDetail,
-            mergedTop.tradeType ?? "clob",
-          );
-          if (!mergedSub.venue && mergedTop.venue) {
-            mergedSub.venue = mergedTop.venue;
-          }
-          const marketRow = mapLimitlessMarketRow(eventId, mergedSub);
-          await upsertLimitlessMarket(marketRow);
-          marketCount++;
-
-          // Map and upsert to unified_markets table
-          const unifiedMarketRow = mapToUnifiedMarket(
-            mergedSub,
-            String(mergedTop.id),
-          );
-          if (mergedSub.tradeType?.toLowerCase() === "clob") {
-            await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
-          }
-          await upsertUnifiedMarket(pool, unifiedMarketRow);
-          if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
-            const tokenRows: Array<{
-              token_id: string;
-              market_id: string;
-              side: "YES" | "NO";
-            }> = [];
-            const yesToken = unifiedMarketRow.token_yes
-              ? prefixLimitlessToken(unifiedMarketRow.token_yes)
-              : undefined;
-            const noToken = unifiedMarketRow.token_no
-              ? prefixLimitlessToken(unifiedMarketRow.token_no)
-              : undefined;
-            if (yesToken) {
-              tokenRows.push({
-                token_id: yesToken,
-                market_id: unifiedMarketRow.id,
-                side: "YES",
-              });
-            }
-            if (noToken) {
-              tokenRows.push({
-                token_id: noToken,
-                market_id: unifiedMarketRow.id,
-                side: "NO",
-              });
-            }
-            if (tokenRows.length) {
-              await upsertUnifiedTokens(pool, tokenRows);
-            }
-          }
-        }
-      }
+      const { eventId, marketCount: processedMarkets } =
+        await processLimitlessMarket(mergedTop);
+      eventCount += 1;
+      marketCount += processedMarkets;
 
       log.info(`Processed ${mergedTop.marketType} market: ${mergedTop.title}`, {
         eventId,
-        marketCount:
-          mergedTop.marketType === "single"
-            ? 1
-            : mergedTop.markets?.length || 0,
+        marketCount: processedMarkets,
       });
     } catch (error) {
       if (isPgSetupIssue(error)) throw error;
@@ -315,6 +371,42 @@ export async function bootstrapLimitless() {
   }
 
   log.info(`Bootstrap complete: events=${eventCount} markets=${marketCount}`);
+}
+
+export async function syncHotLimitlessMarkets(): Promise<{
+  processedMarkets: number;
+}> {
+  if (!env.limitlessEnabled || env.hotTokensMax <= 0) {
+    return { processedMarkets: 0 };
+  }
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const tokenIds = await fetchHotTokenIds();
+  if (!tokenIds.length) return { processedMarkets: 0 };
+
+  const refs = await resolveHotMarketRefs(tokenIds);
+  if (!refs.length) return { processedMarkets: 0 };
+
+  let processedMarkets = 0;
+  for (const ref of refs) {
+    try {
+      const detail = await fetchMarket(ref);
+      const mergedTop = mergeMarket(detail, null);
+      const result = await processLimitlessMarket(mergedTop);
+      processedMarkets += result.marketCount;
+    } catch (error) {
+      log.warn("Limitless hot market fetch failed", { ref, error });
+    }
+  }
+
+  log.info("Limitless hot status refresh complete", {
+    tokens: tokenIds.length,
+    markets: processedMarkets,
+  });
+
+  return { processedMarkets };
 }
 
 export async function resolveHotSlugsForWs(): Promise<string[]> {

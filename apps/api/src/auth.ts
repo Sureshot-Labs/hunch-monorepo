@@ -10,6 +10,7 @@ import {
   encryptCredentialsString,
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
+import { checkRateLimit } from "./lib/rate-limit.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -322,6 +323,7 @@ export interface AuthSession {
   expiresAt: Date;
   createdAt: Date;
   lastAccessedAt: Date;
+  csrfToken: string;
 }
 
 // Authentication utilities
@@ -363,6 +365,92 @@ export class AuthService {
     return crypto.randomBytes(32).toString("hex");
   }
 
+  static buildWalletLinkMessage(params: {
+    walletAddress: string;
+    nonce: string;
+    expiresAt: Date;
+  }): string {
+    return [
+      "Hunch wallet verification",
+      `Wallet: ${params.walletAddress}`,
+      `Nonce: ${params.nonce}`,
+      `Expires: ${params.expiresAt.toISOString()}`,
+    ].join("\n");
+  }
+
+  static async createWalletLinkNonce(params: {
+    userId: string;
+    walletAddress: string;
+    walletType: string;
+    ttlMs?: number;
+  }): Promise<{ nonce: string; expiresAt: Date }> {
+    const expiresAt = new Date(Date.now() + (params.ttlMs ?? 10 * 60 * 1000));
+    const nonce = AuthService.generateNonce();
+    const normalized = normalizeWalletAddress(params.walletAddress);
+
+    const { rows } = await pool.query<{
+      nonce: string;
+      expires_at: Date;
+    }>(
+      `INSERT INTO user_wallet_link_nonces (user_id, wallet_address, wallet_type, nonce, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (user_id, wallet_type, wallet_address)
+       DO UPDATE SET nonce = excluded.nonce, expires_at = excluded.expires_at, created_at = now()
+       RETURNING nonce, expires_at`,
+      [params.userId, normalized, params.walletType, nonce, expiresAt],
+    );
+
+    return {
+      nonce: rows[0].nonce,
+      expiresAt: rows[0].expires_at,
+    };
+  }
+
+  static async consumeWalletLinkNonce(params: {
+    userId: string;
+    walletAddress: string;
+    walletType: string;
+    nonce: string;
+  }): Promise<{ expiresAt: Date } | null> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const normalized = normalizeWalletAddress(params.walletAddress);
+      const result = await client.query<{
+        id: string;
+        nonce: string;
+        expires_at: Date;
+      }>(
+        `SELECT id, nonce, expires_at
+         FROM user_wallet_link_nonces
+         WHERE user_id = $1 AND wallet_type = $2 AND wallet_address = $3
+         FOR UPDATE`,
+        [params.userId, params.walletType, normalized],
+      );
+
+      const row = result.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (row.nonce !== params.nonce || row.expires_at <= new Date()) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+
+      await client.query("DELETE FROM user_wallet_link_nonces WHERE id = $1", [
+        row.id,
+      ]);
+      await client.query("COMMIT");
+      return { expiresAt: row.expires_at };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * Verify wallet signature (simplified - in production, use proper signature verification)
    */
@@ -397,7 +485,6 @@ export class AuthService {
         throw new Error("No wallet address found in Privy user data");
       }
 
-      const walletAddresses = privyWallets.map((w) => w.address);
       const primaryWalletAddress = primaryWallet.address;
 
       let userId: string | null = null;
@@ -408,27 +495,7 @@ export class AuthService {
       );
       userId = userByPrivyId.rows[0]?.id ?? null;
 
-      // Backward-compat: find user by any linked wallet address.
-      const walletConditions: string[] = [];
-      const walletValues: string[] = [];
-      if (!userId) {
-        for (const wallet of walletAddresses) {
-          const index = walletValues.length + 1;
-          walletValues.push(wallet);
-          walletConditions.push(
-            ETH_ADDRESS_RE.test(wallet)
-              ? `lower(wallet_address) = lower($${index})`
-              : `wallet_address = $${index}`,
-          );
-        }
-
-        const walletResult = await client.query<{ user_id: string }>(
-          `SELECT user_id FROM user_wallets WHERE ${walletConditions.join(" OR ")} LIMIT 1`,
-          walletValues,
-        );
-
-        userId = walletResult.rows[0]?.user_id ?? null;
-      }
+      // Note: we no longer fall back to wallet-based lookup for Privy auth.
 
       if (userId) {
         const normalizeAddress = (input: string): string => {
@@ -1355,7 +1422,7 @@ export class AuthService {
     const result = await pool.query(
       `INSERT INTO user_sessions (user_id, session_token, wallet_address, ip_address, user_agent, expires_at) 
        VALUES ($1, $2, $3, $4, $5, $6) 
-       RETURNING id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at`,
+       RETURNING id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at, csrf_token`,
       [userId, sessionToken, walletAddress, ipAddress, userAgent, expiresAt],
     );
 
@@ -1373,6 +1440,7 @@ export class AuthService {
       expiresAt: row.expires_at,
       createdAt: row.created_at,
       lastAccessedAt: row.last_accessed_at,
+      csrfToken: row.csrf_token,
     };
   }
 
@@ -1383,7 +1451,7 @@ export class AuthService {
     sessionToken: string,
   ): Promise<AuthSession | null> {
     const result = await pool.query(
-      `SELECT id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at 
+      `SELECT id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at, csrf_token
        FROM user_sessions 
        WHERE session_token = $1 AND is_active = true AND expires_at > now()`,
       [sessionToken],
@@ -1413,6 +1481,7 @@ export class AuthService {
       expiresAt: row.expires_at,
       createdAt: row.created_at,
       lastAccessedAt: row.last_accessed_at,
+      csrfToken: row.csrf_token,
     };
   }
 
@@ -1469,6 +1538,17 @@ function readHeaderValue(
   return undefined;
 }
 
+function requiresCsrf(method: string): boolean {
+  switch (method.toUpperCase()) {
+    case "GET":
+    case "HEAD":
+    case "OPTIONS":
+      return false;
+    default:
+      return true;
+  }
+}
+
 export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const authHeader = request.headers.authorization;
@@ -1491,6 +1571,22 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     if (!session) {
       reply.code(401);
       return reply.send({ error: "Invalid or expired session" });
+    }
+
+    const requestAgent = readHeaderValue(request.headers, "user-agent");
+    if (session.userAgent && requestAgent && session.userAgent !== requestAgent) {
+      request.log.warn(
+        { sessionAgent: session.userAgent, requestAgent },
+        "Session user-agent mismatch",
+      );
+    }
+
+    if (requiresCsrf(request.method)) {
+      const csrfHeader = readHeaderValue(request.headers, "x-csrf-token");
+      if (!csrfHeader || csrfHeader !== session.csrfToken) {
+        reply.code(403);
+        return reply.send({ error: "Invalid CSRF token" });
+      }
     }
 
     // Get user data
@@ -1541,6 +1637,13 @@ export function createAdminMiddleware(options: AuthMiddlewareOptions = {}) {
     if (!request.user?.isAdmin) {
       reply.code(403);
       return reply.send({ error: "Admin access required" });
+    }
+
+    const rateLimitKey = `admin:${request.ip || "unknown"}`;
+    const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000);
+    if (!canProceed) {
+      reply.code(429);
+      return reply.send({ error: "Rate limit exceeded" });
     }
   };
 }
