@@ -15,6 +15,14 @@ const zOrderKind = z.preprocess(
 export const ordersQuerySchema = z.object({
   venue: zVenueOptional,
   wallets: zCsvString("wallets is required").optional(),
+  marketId: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
+  tokenId: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
   status: z
     .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
     .optional()
@@ -30,6 +38,11 @@ export const ordersQuerySchema = z.object({
     .int()
     .catch(0)
     .transform((n) => Math.max(n, 0)),
+});
+
+export const ordersOpenQuerySchema = ordersQuerySchema.omit({
+  status: true,
+  type: true,
 });
 
 export const orderIdParamsSchema = z.object({

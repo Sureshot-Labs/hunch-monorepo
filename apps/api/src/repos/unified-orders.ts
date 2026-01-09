@@ -36,6 +36,8 @@ type FilterInputs = {
   walletAddresses: string[];
   venue?: string;
   status?: string;
+  marketId?: string;
+  tokenId?: string;
 };
 
 type FetchUnifiedOrdersInputs = FilterInputs & {
@@ -48,6 +50,8 @@ type FilterParams = {
   params: PgParams;
   venueIndex?: number;
   statusIndex?: number;
+  marketIndex?: number;
+  tokenIndex?: number;
 };
 
 const buildFilterParams = (inputs: FilterInputs): FilterParams => {
@@ -68,13 +72,28 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.status);
   }
 
-  return { params, venueIndex, statusIndex };
+  let marketIndex: number | undefined;
+  if (inputs.marketId) {
+    paramCount += 1;
+    marketIndex = paramCount;
+    params.push(inputs.marketId);
+  }
+
+  let tokenIndex: number | undefined;
+  if (inputs.tokenId) {
+    paramCount += 1;
+    tokenIndex = paramCount;
+    params.push(inputs.tokenId);
+  }
+
+  return { params, venueIndex, statusIndex, marketIndex, tokenIndex };
 };
 
 const buildWhereClause = (
   alias: string,
   filterParams: FilterParams,
   includeSigner: boolean,
+  columns: { market?: string; token?: string } = {},
 ): string => {
   const walletClause = includeSigner
     ? `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2) or ${alias}.signer_address = ANY($2))`
@@ -87,6 +106,14 @@ const buildWhereClause = (
 
   if (filterParams.statusIndex) {
     conditions.push(`${alias}.status = $${filterParams.statusIndex}`);
+  }
+
+  if (filterParams.marketIndex && columns.market) {
+    conditions.push(`${columns.market} = $${filterParams.marketIndex}`);
+  }
+
+  if (filterParams.tokenIndex && columns.token) {
+    conditions.push(`${columns.token} = $${filterParams.tokenIndex}`);
   }
 
   return `where ${conditions.join(" and ")}`;
@@ -166,15 +193,20 @@ export async function fetchUnifiedOrders(
   inputs: FetchUnifiedOrdersInputs,
 ): Promise<{ rows: UnifiedOrderRow[]; total: number }> {
   const includeOrders = inputs.type !== "swap";
-  const includeSwaps = inputs.type !== "order";
+  const includeSwaps = inputs.type !== "order" && !inputs.tokenId;
 
   if (!includeOrders && !includeSwaps) {
     return { rows: [], total: 0 };
   }
 
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams, true);
-  const execWhere = buildWhereClause("e", filterParams, false);
+  const orderWhere = buildWhereClause("o", filterParams, true, {
+    market: "ut.market_id",
+    token: "o.token_id",
+  });
+  const execWhere = buildWhereClause("e", filterParams, false, {
+    market: "e.unified_market_id",
+  });
 
   const selects: string[] = [];
   if (includeOrders) selects.push(buildOrdersSelect(orderWhere));

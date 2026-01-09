@@ -55,11 +55,15 @@ type ScriptOptions = {
   orderHash?: string;
   includeExpired: boolean;
   archiveLegacy: boolean;
+  txConfirmations: number;
+  txTimeoutMs: number;
 };
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_DUST_REMAINING = 1000n;
+const DEFAULT_TX_CONFIRMATIONS = 1;
+const DEFAULT_TX_TIMEOUT_MS = 120_000;
 const USDC_DECIMALS = 6n;
 
 function parseArgs(): ScriptOptions {
@@ -76,6 +80,8 @@ function parseArgs(): ScriptOptions {
   const maxAttemptsRaw = getValue("--max-attempts");
   const dustRaw = getValue("--dust-remaining");
   const orderHash = getValue("--order-hash");
+  const txConfirmationsRaw = getValue("--tx-confirmations");
+  const txTimeoutRaw = getValue("--tx-timeout-ms");
 
   const limit = limitRaw ? Math.max(1, Number(limitRaw)) : DEFAULT_LIMIT;
   const maxAttempts = maxAttemptsRaw
@@ -85,6 +91,13 @@ function parseArgs(): ScriptOptions {
   const dustRemainingMicro = Number.isFinite(dustParsed)
     ? BigInt(Math.max(0, Math.trunc(dustParsed)))
     : DEFAULT_DUST_REMAINING;
+  const txConfirmations = txConfirmationsRaw
+    ? Math.max(0, Number(txConfirmationsRaw))
+    : DEFAULT_TX_CONFIRMATIONS;
+  const txTimeoutParsed = txTimeoutRaw ? Number(txTimeoutRaw) : Number.NaN;
+  const txTimeoutMs = Number.isFinite(txTimeoutParsed)
+    ? Math.max(0, Math.trunc(txTimeoutParsed))
+    : DEFAULT_TX_TIMEOUT_MS;
 
   return {
     dryRun: hasFlag("--dry-run"),
@@ -96,6 +109,8 @@ function parseArgs(): ScriptOptions {
       : DEFAULT_MAX_ATTEMPTS,
     dustRemainingMicro,
     orderHash: orderHash?.trim(),
+    txConfirmations,
+    txTimeoutMs,
   };
 }
 
@@ -639,7 +654,19 @@ async function main() {
     try {
       const tx = await collector.collectFee(order, feeAuth, feeAuthSig);
       console.log(`collectFee tx ${tx.hash} for ${orderHash}`);
-      const receipt = await tx.wait();
+      const receipt = await provider.waitForTransaction(
+        tx.hash,
+        options.txConfirmations,
+        options.txTimeoutMs,
+      );
+      if (!receipt) {
+        throw new Error(
+          `collectFee tx not confirmed within ${options.txTimeoutMs}ms`,
+        );
+      }
+      if (receipt.status === 0) {
+        throw new Error("collectFee tx reverted");
+      }
       if (receipt) {
         let feeAmount: bigint | null = null;
         for (const log of receipt.logs) {

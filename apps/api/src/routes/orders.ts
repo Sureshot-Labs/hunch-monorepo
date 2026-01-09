@@ -9,6 +9,7 @@ import {
 import {
   orderIdParamsSchema,
   orderIdQuerySchema,
+  ordersOpenQuerySchema,
   ordersQuerySchema,
 } from "../schemas/orders.js";
 
@@ -112,6 +113,8 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddresses,
           venue: query.venue,
+          marketId: query.marketId,
+          tokenId: query.tokenId,
           status: query.status,
           type: query.type,
           limit: query.limit,
@@ -138,6 +141,75 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch orders",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /orders/open
+   * List open orders for the current user.
+   */
+  z.get(
+    "/orders/open",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: ordersOpenQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+
+      try {
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
+          walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to query." });
+        }
+
+        const result = await fetchUnifiedOrders(pool, {
+          userId: user.id,
+          walletAddresses,
+          venue: query.venue,
+          marketId: query.marketId,
+          tokenId: query.tokenId,
+          status: "open",
+          type: "order",
+          limit: query.limit,
+          offset: query.offset,
+        });
+
+        const orders = result.rows.map(mapUnifiedOrder);
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          orders,
+          pagination: {
+            total: result.total,
+            limit: query.limit,
+            offset: query.offset,
+            hasMore: query.offset + query.limit < result.total,
+          },
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Failed to fetch open orders",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to fetch open orders",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }
