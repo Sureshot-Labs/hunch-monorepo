@@ -408,6 +408,8 @@ function extractCategoryFromTitle(
 
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   const extra = e as Record<string, unknown>;
+  const seriesKey = s(extra.seriesSlug) ?? s(extra.series_slug);
+  const seriesTitle = s(extra.seriesTitle) ?? s(extra.series_title);
   const metadata = compactMetadata({
     ticker: s(extra.ticker),
     resolutionSource: s(extra.resolutionSource),
@@ -450,6 +452,8 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     description: e.description ?? undefined,
     category: e.category ?? extractCategoryFromTitle(e.title, e.description), // Use API category if available, else extract from title/description
     status,
+    series_key: seriesKey ?? undefined,
+    series_title: seriesTitle ?? undefined,
     start_date: e.startDate ? new Date(e.startDate) : undefined,
     end_date: e.endDate ? new Date(e.endDate) : undefined,
     volume_total: n(e.volume) ?? undefined,

@@ -136,6 +136,10 @@ export function mapTokens(marketUuid: string, marketTicker: string) {
 export function mapToUnifiedEvent(
   e: z.infer<typeof KalshiEvent>,
 ): UnifiedEventRow {
+  const seriesKey =
+    typeof e.series_ticker === "string" && e.series_ticker.trim().length
+      ? e.series_ticker
+      : undefined;
   const markets = (e.markets ?? []) as z.infer<typeof KalshiMarket>[];
 
   // Aggregate from child markets
@@ -193,6 +197,7 @@ export function mapToUnifiedEvent(
     description: typeof e.sub_title === "string" ? e.sub_title : undefined,
     category: e.category ?? undefined,
     status,
+    series_key: seriesKey,
     start_date,
     end_date,
     volume_total: volSum || undefined,

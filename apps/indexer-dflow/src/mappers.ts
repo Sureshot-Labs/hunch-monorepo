@@ -186,6 +186,7 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
   const slug = s(extra.slug);
   const subtitle = s(extra.subtitle);
   const seriesTicker = s(extra.seriesTicker) ?? s(extra.series_ticker);
+  const seriesTitle = s(extra.seriesTitle) ?? s(extra.series_title);
   const competition = s(extra.competition);
   const competitionScope = s(extra.competitionScope) ?? s(extra.competition_scope);
   const strikeDate = s(extra.strikeDate) ?? s(extra.strike_date);
@@ -224,6 +225,8 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
         ? e.category.trim()
         : undefined,
     status,
+    series_key: seriesTicker ?? undefined,
+    series_title: seriesTitle ?? undefined,
     start_date,
     end_date,
     volume_total,

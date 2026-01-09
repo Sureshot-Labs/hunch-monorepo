@@ -9,6 +9,8 @@ export interface UnifiedEventRow {
   description?: string;
   category?: string;
   status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
+  series_key?: string;
+  series_title?: string;
   start_date?: Date;
   end_date?: Date;
   volume_total?: number;
@@ -85,10 +87,10 @@ export async function upsertUnifiedEvent(
   const query = `
     INSERT INTO unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
-      image, icon, created_at, updated_at
+      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+      liquidity, metadata, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
     )
     ON CONFLICT (venue, venue_event_id) 
     DO UPDATE SET
@@ -96,6 +98,8 @@ export async function upsertUnifiedEvent(
       description = EXCLUDED.description,
       category = EXCLUDED.category,
       status = EXCLUDED.status,
+      series_key = EXCLUDED.series_key,
+      series_title = EXCLUDED.series_title,
       start_date = EXCLUDED.start_date,
       end_date = EXCLUDED.end_date,
       volume_total = EXCLUDED.volume_total,
@@ -120,6 +124,8 @@ export async function upsertUnifiedEvent(
     eventRow.description,
     eventRow.category,
     eventRow.status,
+    eventRow.series_key,
+    eventRow.series_title,
     eventRow.start_date,
     eventRow.end_date,
     eventRow.volume_total,
@@ -157,6 +163,8 @@ export async function upsertUnifiedEvents(
         description text,
         category text,
         status unified_status,
+        series_key text,
+        series_title text,
         start_date timestamptz,
         end_date timestamptz,
         volume_total numeric,
@@ -173,13 +181,13 @@ export async function upsertUnifiedEvents(
     )
     insert into unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
-      image, icon, created_at, updated_at
+      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+      liquidity, metadata, slug, image, icon, created_at, updated_at
     )
     select
       id, venue, venue_event_id, title, description, category, status,
-      start_date, end_date, volume_total, volume_24h, open_interest, liquidity, metadata, slug,
-      image, icon, created_at, updated_at
+      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+      liquidity, metadata, slug, image, icon, created_at, updated_at
     from input
     on conflict (venue, venue_event_id)
     do update set
@@ -187,6 +195,8 @@ export async function upsertUnifiedEvents(
       description = excluded.description,
       category = excluded.category,
       status = excluded.status,
+      series_key = excluded.series_key,
+      series_title = excluded.series_title,
       start_date = excluded.start_date,
       end_date = excluded.end_date,
       volume_total = excluded.volume_total,
@@ -202,13 +212,14 @@ export async function upsertUnifiedEvents(
       updated_at_db = now()
     where
       (unified_events.title, unified_events.description, unified_events.category,
-       unified_events.status, unified_events.start_date, unified_events.end_date,
+       unified_events.status, unified_events.series_key, unified_events.series_title,
+       unified_events.start_date, unified_events.end_date,
        unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
        unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
        unified_events.created_at, unified_events.updated_at)
       is distinct from
       (excluded.title, excluded.description, excluded.category,
-       excluded.status, excluded.start_date, excluded.end_date,
+       excluded.status, excluded.series_key, excluded.series_title, excluded.start_date, excluded.end_date,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
        excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
        excluded.created_at, excluded.updated_at)

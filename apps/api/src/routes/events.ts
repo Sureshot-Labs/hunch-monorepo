@@ -26,7 +26,7 @@ import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client
 import { extractLimitlessMessage, limitlessRequest } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
-import { eventParamsSchema } from "../schemas/event.js";
+import { eventParamsSchema, eventSeriesQuerySchema } from "../schemas/event.js";
 import type { TokenPair } from "../server-types.js";
 
 type PolymarketRepresentative = {
@@ -543,6 +543,123 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }
+    },
+  );
+
+  /**
+   * GET /events/:eventId/series
+   * Get series-level sibling events for a given event.
+   */
+  z.get(
+    "/events/:eventId/series",
+    { schema: { params: eventParamsSchema, querystring: eventSeriesQuerySchema } },
+    async (request, reply) => {
+      const { eventId } = request.params;
+      const { statuses } = request.query;
+
+      const base = await pool.query(
+        `
+          select
+            id,
+            venue,
+            venue_event_id,
+            title,
+            slug,
+            series_key,
+            series_title
+          from unified_events
+          where id = $1
+        `,
+        [eventId],
+      );
+
+      if (base.rows.length === 0) {
+        reply.code(404);
+        return reply.send({ error: "Event not found" });
+      }
+
+      const row = base.rows[0] as {
+        id: string;
+        venue: string;
+        venue_event_id: string;
+        title: string;
+        slug: string | null;
+        series_key: string | null;
+        series_title: string | null;
+      };
+
+      if (!row.series_key) {
+        return reply.send({
+          eventId: row.id,
+          venue: row.venue,
+          seriesKey: null,
+          seriesTitle: null,
+          events: [],
+        });
+      }
+
+      const allowedStatuses = new Set([
+        "ACTIVE",
+        "CLOSED",
+        "SETTLED",
+        "ARCHIVED",
+      ]);
+      const parsedStatuses = typeof statuses === "string" ? statuses : "";
+      const requested = parsedStatuses
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+        .map((value) => value.toUpperCase());
+      const invalid = requested.filter((value) => !allowedStatuses.has(value));
+
+      if (invalid.length > 0) {
+        reply.code(400);
+        return reply.send({
+          error: "Invalid statuses filter",
+          invalid,
+        });
+      }
+
+      const statusFilter = (requested.length ? requested : ["ACTIVE"]) as string[];
+
+      const seriesRows = await pool.query(
+        `
+          select
+            id,
+            venue_event_id,
+            title,
+            slug,
+            start_date,
+            end_date,
+            status,
+            image,
+            icon
+          from unified_events
+          where venue = $1
+            and series_key = $2
+            and status = any($3::unified_status[])
+          order by start_date nulls last, end_date nulls last, title asc
+        `,
+        [row.venue, row.series_key, statusFilter],
+      );
+
+      return reply.send({
+        eventId: row.id,
+        venue: row.venue,
+        seriesKey: row.series_key,
+        seriesTitle: row.series_title,
+        events: seriesRows.rows.map((s) => ({
+          eventId: s.id as string,
+          venueEventId: s.venue_event_id as string,
+          title: s.title as string,
+          slug: (s.slug as string | null) ?? null,
+          startTime: s.start_date ?? null,
+          endTime: s.end_date ?? null,
+          status: s.status as string,
+          image: (s.image as string | null) ?? null,
+          icon: (s.icon as string | null) ?? null,
+        })),
+      });
     },
   );
 
