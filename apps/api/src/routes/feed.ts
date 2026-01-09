@@ -59,6 +59,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const categories = q.categories;
       const filter = q.filter;
       const sort = q.sort;
+      const sortDir: "asc" | "desc" = q.sort_dir === "asc" ? "asc" : "desc";
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
@@ -76,7 +77,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}`;
+      const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
@@ -139,6 +140,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         categories,
         filter,
         sort,
+        sortDir,
         minProb,
         maxProb,
         maxSpread,
@@ -250,6 +252,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                     ? Number(1 - Number(rRow.best_ask))
                     : null,
           },
+          change24h:
+            rRow.change_24h != null ? Number(rRow.change_24h) : null,
           lastUpdate: rRow.last_update,
         };
       };

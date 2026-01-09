@@ -87,6 +87,7 @@ export type FeedMarket = {
     noBid: number | null;
     noAsk: number | null;
   };
+  change24h?: number | null;
   lastUpdate: unknown;
 };
 

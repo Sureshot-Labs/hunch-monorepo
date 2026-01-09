@@ -111,8 +111,22 @@ export const feedQuerySchema = z.object({
     )
     .optional()
     .transform((v) =>
-      v === "trending" || v === "totalvol" || v === "liquidity" ? v : undefined,
+      v === "trending" ||
+      v === "totalvol" ||
+      v === "liquidity" ||
+      v === "openinterest" ||
+      v === "change24h" ||
+      v === "time"
+        ? v
+        : undefined,
     ),
+  sort_dir: z
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toLowerCase() : v),
+      z.string(),
+    )
+    .optional()
+    .transform((v) => (v === "asc" || v === "desc" ? v : undefined)),
   min_prob: z.coerce
     .number()
     .optional()

@@ -228,7 +228,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    * POST /auth/logout
    * Logout user and invalidate session
    */
-  z.post("/auth/logout", async (request, reply) => {
+  z.post(
+    "/auth/logout",
+    { preHandler: createAuthMiddleware() },
+    async (request, reply) => {
     const authHeader = request.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -250,7 +253,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         message: error instanceof Error ? error.message : "Unknown error",
       });
     }
-  });
+    },
+  );
 
   /**
    * GET /auth/me
