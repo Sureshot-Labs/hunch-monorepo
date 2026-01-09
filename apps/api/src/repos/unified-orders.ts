@@ -37,6 +37,7 @@ type FilterInputs = {
   venue?: string;
   status?: string;
   marketId?: string;
+  marketIds?: string[];
   tokenId?: string;
 };
 
@@ -50,7 +51,7 @@ type FilterParams = {
   params: PgParams;
   venueIndex?: number;
   statusIndex?: number;
-  marketIndex?: number;
+  marketListIndex?: number;
   tokenIndex?: number;
 };
 
@@ -72,11 +73,16 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.status);
   }
 
-  let marketIndex: number | undefined;
-  if (inputs.marketId) {
+  const normalizedMarketIds = inputs.marketIds?.length
+    ? inputs.marketIds
+    : inputs.marketId
+      ? [inputs.marketId]
+      : undefined;
+  let marketListIndex: number | undefined;
+  if (normalizedMarketIds?.length) {
     paramCount += 1;
-    marketIndex = paramCount;
-    params.push(inputs.marketId);
+    marketListIndex = paramCount;
+    params.push(normalizedMarketIds);
   }
 
   let tokenIndex: number | undefined;
@@ -86,7 +92,7 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.tokenId);
   }
 
-  return { params, venueIndex, statusIndex, marketIndex, tokenIndex };
+  return { params, venueIndex, statusIndex, marketListIndex, tokenIndex };
 };
 
 const buildWhereClause = (
@@ -108,8 +114,10 @@ const buildWhereClause = (
     conditions.push(`${alias}.status = $${filterParams.statusIndex}`);
   }
 
-  if (filterParams.marketIndex && columns.market) {
-    conditions.push(`${columns.market} = $${filterParams.marketIndex}`);
+  if (filterParams.marketListIndex && columns.market) {
+    conditions.push(
+      `${columns.market} = ANY($${filterParams.marketListIndex}::text[])`,
+    );
   }
 
   if (filterParams.tokenIndex && columns.token) {

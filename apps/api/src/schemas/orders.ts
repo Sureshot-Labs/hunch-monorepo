@@ -15,6 +15,10 @@ const zOrderKind = z.preprocess(
 export const ordersQuerySchema = z.object({
   venue: zVenueOptional,
   wallets: zCsvString("wallets is required").optional(),
+  eventId: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
   marketId: z
     .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
     .optional()

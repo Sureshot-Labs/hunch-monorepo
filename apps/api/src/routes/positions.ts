@@ -135,6 +135,39 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     return [walletAddress];
   };
 
+  const resolveTokenIdsForFilter = async (
+    marketId: string | undefined,
+    eventId: string | undefined,
+  ): Promise<string[] | null> => {
+    if (marketId) {
+      const { rows } = await pool.query<{ token_id: string }>(
+        `
+          select token_id
+          from unified_tokens
+          where market_id = $1
+        `,
+        [marketId],
+      );
+      return rows.map((row) => row.token_id);
+    }
+
+    if (eventId) {
+      const { rows } = await pool.query<{ token_id: string }>(
+        `
+          select ut.token_id
+          from unified_tokens ut
+          join unified_markets m
+            on m.id = ut.market_id
+          where m.event_id = $1
+        `,
+        [eventId],
+      );
+      return rows.map((row) => row.token_id);
+    }
+
+    return null;
+  };
+
   /**
    * GET /positions
    * Get user positions
@@ -172,14 +205,32 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
-        const positions = await fetchPositionsForUserWallet(pool, {
-          userId: user.id,
-          walletAddresses,
-          venue,
-          venues,
-          includeHidden: query.includeHidden,
-          minSize: query.minSize,
-        });
+        const tokenIds = await resolveTokenIdsForFilter(
+          query.marketId,
+          query.eventId,
+        );
+
+        const positions =
+          tokenIds != null
+            ? tokenIds.length === 0
+              ? []
+              : await fetchPositionsForUserWalletByTokenIds(pool, {
+                  userId: user.id,
+                  walletAddresses,
+                  tokenIds,
+                  venue,
+                  venues,
+                  includeHidden: query.includeHidden,
+                  minSize: query.minSize,
+                })
+            : await fetchPositionsForUserWallet(pool, {
+                userId: user.id,
+                walletAddresses,
+                venue,
+                venues,
+                includeHidden: query.includeHidden,
+                minSize: query.minSize,
+              });
 
         if (positions.length) {
           void markHotTokens({

@@ -54,6 +54,14 @@ export const positionsQuerySchema = z.object({
   venue: zVenueOptional,
   venues: zVenueListOptional,
   wallets: zCsvString("wallets is required").optional(),
+  eventId: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
+  marketId: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
   minSize: zOptionalNumber,
   includeHidden: z
     .union([z.boolean(), z.string(), z.undefined()])

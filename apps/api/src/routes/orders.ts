@@ -78,6 +78,21 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
     return [walletAddress];
   };
 
+  const resolveMarketIds = async (
+    eventId: string | undefined,
+  ): Promise<string[]> => {
+    if (!eventId) return [];
+    const { rows } = await pool.query<{ id: string }>(
+      `
+        select id
+        from unified_markets
+        where event_id = $1
+      `,
+      [eventId],
+    );
+    return rows.map((row) => row.id);
+  };
+
   /**
    * GET /orders
    * List unified orders (orders + swaps) for the current user.
@@ -109,11 +124,29 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
+        const marketIds =
+          query.marketId || !query.eventId
+            ? []
+            : await resolveMarketIds(query.eventId);
+        if (query.eventId && !query.marketId && marketIds.length === 0) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            orders: [],
+            pagination: {
+              total: 0,
+              limit: query.limit,
+              offset: query.offset,
+              hasMore: false,
+            },
+          });
+        }
+
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
           venue: query.venue,
           marketId: query.marketId,
+          marketIds: marketIds.length ? marketIds : undefined,
           tokenId: query.tokenId,
           status: query.status,
           type: query.type,
@@ -178,11 +211,29 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
+        const marketIds =
+          query.marketId || !query.eventId
+            ? []
+            : await resolveMarketIds(query.eventId);
+        if (query.eventId && !query.marketId && marketIds.length === 0) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            orders: [],
+            pagination: {
+              total: 0,
+              limit: query.limit,
+              offset: query.offset,
+              hasMore: false,
+            },
+          });
+        }
+
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
           venue: query.venue,
           marketId: query.marketId,
+          marketIds: marketIds.length ? marketIds : undefined,
           tokenId: query.tokenId,
           status: "open",
           type: "order",
