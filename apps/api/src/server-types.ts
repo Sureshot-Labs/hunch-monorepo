@@ -64,6 +64,7 @@ export type FeedMarket = {
   marketTitle: string;
   marketSlug: string | null;
   marketType?: string | null;
+  status?: string | null;
   tradeType?: string | null;
   marketAddress?: string | null;
   volume24h: number;

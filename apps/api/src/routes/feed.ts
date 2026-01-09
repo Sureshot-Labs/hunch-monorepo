@@ -193,12 +193,38 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         const marketAddress =
           rRow.venue === "limitless" ? rRow.market_address ?? null : null;
 
+        const marketStatus =
+          typeof rRow.market_status === "string" ? rRow.market_status : null;
+        const closeTime =
+          rRow.market_close_time instanceof Date
+            ? rRow.market_close_time.getTime()
+            : typeof rRow.market_close_time === "string"
+              ? Date.parse(rRow.market_close_time)
+              : null;
+        const expirationTime =
+          rRow.market_expiration_time instanceof Date
+            ? rRow.market_expiration_time.getTime()
+            : typeof rRow.market_expiration_time === "string"
+              ? Date.parse(rRow.market_expiration_time)
+              : null;
+        const nowMs = Date.now();
+        const isClosedByTime =
+          (closeTime != null && !Number.isNaN(closeTime) && closeTime <= nowMs) ||
+          (expirationTime != null &&
+            !Number.isNaN(expirationTime) &&
+            expirationTime <= nowMs);
+        const acceptingOrders =
+          marketStatus != null
+            ? marketStatus === "ACTIVE" && !isClosedByTime
+            : !isClosedByTime;
+
         return {
           venue: String(rRow.venue),
           marketId: String(rRow.venue_market_id),
           marketTitle: rRow.market_title ?? "",
           marketSlug: rRow.market_slug ?? null,
           marketType: rRow.market_type ?? null,
+          status: marketStatus,
           volume24h: rRow.volume_24h != null ? Number(rRow.volume_24h) : 0,
           volumeTotal:
             rRow.volume_total != null ? Number(rRow.volume_total) : 0,
@@ -211,7 +237,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             rRow.liquidity_display != null
               ? Number(rRow.liquidity_display)
               : 0,
-          acceptingOrders: true,
+          acceptingOrders,
           tokens,
           outcomes,
           negRiskExchange,

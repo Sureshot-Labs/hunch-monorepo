@@ -282,6 +282,9 @@ export type FeedMarketRow = {
   venue_market_id: string;
   market_title: string | null;
   market_type: string | null;
+  market_status: string | null;
+  market_close_time: unknown;
+  market_expiration_time: unknown;
   volume_24h: unknown;
   volume_total: unknown;
   volume_display: unknown;
@@ -479,6 +482,9 @@ export async function fetchFeedMarkets(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.status as market_status,
+      m.close_time as market_close_time,
+      m.expiration_time as market_expiration_time,
       m.volume_24h,
       m.volume_total,
       (${marketVolumeDisplayExpr}) as volume_display,
@@ -815,6 +821,9 @@ export async function fetchFeedMarketsDirect(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.status as market_status,
+      m.close_time as market_close_time,
+      m.expiration_time as market_expiration_time,
       m.volume_24h,
       m.volume_total,
       (${marketVolumeDisplayExpr}) as volume_display,

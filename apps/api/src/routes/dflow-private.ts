@@ -5,7 +5,11 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { storeExecution } from "../repos/executions-repo.js";
-import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
+import {
+  dflowRequest,
+  extractDflowErrorMessage,
+  formatDflowUserMessage,
+} from "../services/dflow-client.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
@@ -290,9 +294,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        const userMessage = formatDflowUserMessage(upstream.payload);
         reply.code(502);
         return reply.send({
-          error: "DFlow order failed",
+          error: userMessage ?? "DFlow order failed",
           status: upstream.status,
           message: extractDflowErrorMessage(upstream.payload),
           payload: upstream.payload,
@@ -368,9 +373,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        const userMessage = formatDflowUserMessage(upstream.payload);
         reply.code(502);
         return reply.send({
-          error: "DFlow quote failed",
+          error: userMessage ?? "DFlow quote failed",
           status: upstream.status,
           message: extractDflowErrorMessage(upstream.payload),
           payload: upstream.payload,

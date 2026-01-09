@@ -88,7 +88,28 @@ export async function dflowRequest(inputs: {
 
 export function extractDflowErrorMessage(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
-  const raw = payload.error ?? payload.message;
+  const raw = payload.error ?? payload.message ?? payload.msg;
   if (typeof raw === "string" && raw.trim().length) return raw.trim();
+  return null;
+}
+
+export function extractDflowErrorCode(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const raw = payload.code ?? payload.errorCode ?? payload.error_code;
+  if (typeof raw === "string" && raw.trim().length) return raw.trim();
+  return null;
+}
+
+export function formatDflowUserMessage(payload: unknown): string | null {
+  const code = extractDflowErrorCode(payload);
+  if (code === "route_not_found") {
+    return "No route available for this market right now. It may be closed or have no liquidity.";
+  }
+
+  const rawMessage = extractDflowErrorMessage(payload);
+  if (!rawMessage) return null;
+  if (rawMessage.toLowerCase().includes("route not found")) {
+    return "No route available for this market right now. It may be closed or have no liquidity.";
+  }
   return null;
 }
