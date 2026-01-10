@@ -36,11 +36,13 @@
     "ethers": "^6.8.1",
     "fastify": "^5.6.2",
     "fastify-type-provider-zod": "6.1.0",
+    "geoip-lite": "^1.4.10",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.16.3",
     "zod": "4.2.0"
   },
   "devDependencies": {
+    "@types/geoip-lite": "^1.4.2",
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.11.30",
     "tsx": "^4.19.2"

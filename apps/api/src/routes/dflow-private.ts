@@ -4,6 +4,11 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import {
+  buildGeoFenceResponse,
+  evaluateGeoFence,
+  type GeoFenceConfig,
+} from "../lib/geo-fence.js";
 import { storeExecution } from "../repos/executions-repo.js";
 import {
   dflowRequest,
@@ -146,6 +151,27 @@ function computeFeeFromBps(inputs: {
 // Mounted under /trade/kalshi and /trade/dflow (alias).
 export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const geoFenceConfig: GeoFenceConfig = {
+    enabled: env.dflowGeoBlockEnabled,
+    blockedCountries: env.dflowGeoBlockCountries,
+    defaultPolicy: env.dflowGeoBlockDefault,
+    trustProxy: env.trustProxy,
+  };
+
+  app.addHook("preHandler", async (request, reply) => {
+    const decision = evaluateGeoFence(request, geoFenceConfig);
+    if (decision.allowed) return;
+    app.log.warn(
+      {
+        country: decision.country,
+        reason: decision.reason,
+        path: request.url,
+      },
+      "Kalshi geofence blocked request",
+    );
+    reply.code(403);
+    return reply.send(buildGeoFenceResponse({ venue: "kalshi", decision }));
+  });
 
   /**
    * GET /account

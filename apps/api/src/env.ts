@@ -69,6 +69,8 @@ const nodeEnv = process.env.NODE_ENV ?? "development";
 const enableSwaggerSetting = parseOptionalBool(process.env.ENABLE_SWAGGER);
 const enableSwagger =
   enableSwaggerSetting ?? nodeEnv.toLowerCase() !== "production";
+const trustProxySetting = parseOptionalBool(process.env.TRUST_PROXY);
+const trustProxy = trustProxySetting ?? false;
 
 const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
 const dflowEnv: "dev" | "prod" =
@@ -116,6 +118,25 @@ const dflowRequireApiKey = dflowRequireApiKeySetting ?? dflowEnv === "prod";
 const dflowApiKey = process.env.DFLOW_API_KEY?.trim() || "";
 const dflowConfigured = !dflowRequireApiKey || dflowApiKey.length > 0;
 
+const dflowGeoBlockEnabledSetting = parseOptionalBool(
+  process.env.DFLOW_GEO_BLOCK_ENABLED,
+);
+const dflowGeoBlockEnabled = dflowGeoBlockEnabledSetting ?? false;
+const dflowGeoBlockCountries = parseList(
+  process.env.DFLOW_GEO_BLOCK_COUNTRIES,
+).map((country) => country.toUpperCase());
+const dflowGeoBlockDefaultRaw = process.env.DFLOW_GEO_BLOCK_DEFAULT
+  ?.trim()
+  .toLowerCase();
+const dflowGeoBlockDefault: "allow" | "block" =
+  dflowGeoBlockDefaultRaw === "allow" ? "allow" : "block";
+
+if (dflowGeoBlockEnabled && dflowGeoBlockCountries.length === 0) {
+  throw new Error(
+    "[env] DFLOW_GEO_BLOCK_COUNTRIES is required when DFLOW_GEO_BLOCK_ENABLED=true",
+  );
+}
+
 const solanaRpcUrls = parseList(
   process.env.SOLANA_RPC_URLS,
   process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
@@ -128,6 +149,7 @@ export const env = {
   redisUrl: process.env.REDIS_URL ?? "", // optional
   nodeEnv,
   enableSwagger,
+  trustProxy,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
@@ -254,4 +276,7 @@ export const env = {
   dflowRequireApiKey,
   dflowApiKey,
   dflowConfigured,
+  dflowGeoBlockEnabled,
+  dflowGeoBlockCountries,
+  dflowGeoBlockDefault,
 };

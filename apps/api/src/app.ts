@@ -14,7 +14,10 @@ import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
 
 export async function buildApp() {
-  const app = Fastify({ logger: true }).withTypeProvider<ZodTypeProvider>();
+  const app = Fastify({
+    logger: true,
+    trustProxy: env.trustProxy,
+  }).withTypeProvider<ZodTypeProvider>();
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
