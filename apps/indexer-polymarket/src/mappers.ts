@@ -408,8 +408,18 @@ function extractCategoryFromTitle(
 
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
   const extra = e as Record<string, unknown>;
-  const seriesKey = s(extra.seriesSlug) ?? s(extra.series_slug);
-  const seriesTitle = s(extra.seriesTitle) ?? s(extra.series_title);
+  const seriesList = Array.isArray(extra.series) ? extra.series : [];
+  const series0 =
+    seriesList.length > 0 && typeof seriesList[0] === "object"
+      ? (seriesList[0] as Record<string, unknown>)
+      : null;
+  const seriesKey =
+    s(series0?.slug) ??
+    s(series0?.ticker) ??
+    s(extra.seriesSlug) ??
+    s(extra.series_slug);
+  const seriesTitle =
+    s(series0?.title) ?? s(extra.seriesTitle) ?? s(extra.series_title);
   const metadata = compactMetadata({
     ticker: s(extra.ticker),
     resolutionSource: s(extra.resolutionSource),
