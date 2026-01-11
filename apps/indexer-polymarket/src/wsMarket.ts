@@ -3,7 +3,7 @@ import { env } from "./env";
 import { log } from "./log";
 import { ensureRedis, redis } from "./redis";
 import PQueue from "p-queue";
-import { writeUnifiedBookTop } from "@hunch/db";
+import { writeUnifiedBookTop, writeUnifiedLastTrade } from "@hunch/db";
 import { pool } from "./db";
 
 // Very light state holder
@@ -38,6 +38,20 @@ function parsePrice(value: unknown): number | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function parseSize(value: unknown): number | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function normalizeSide(value: unknown): "BUY" | "SELL" | null {
+  if (typeof value !== "string") return null;
+  const lower = value.toLowerCase();
+  if (lower.includes("buy")) return "BUY";
+  if (lower.includes("sell")) return "SELL";
+  return null;
 }
 
 function bestBid(levels: Array<{ price: string }> | undefined): number | null {
@@ -202,7 +216,38 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
               ]);
             }
           } else if (evt === "last_trade_price") {
-            // optional: buffer then batch insert into last_trade
+            const price = parsePrice(
+              m.price ??
+                m.last_trade_price ??
+                m.last_price ??
+                m.value ??
+                m.last_trade_price_dollars,
+            );
+            if (price == null || price < 0 || price > 1) return;
+
+            const size =
+              parseSize(m.size ?? m.amount ?? m.quantity ?? m.count) ?? 1;
+            const side = normalizeSide(
+              m.side ?? m.taker_side ?? m.takerSide ?? m.direction,
+            );
+
+            const t = Number(m.timestamp);
+            const ts = isFinite(t) ? (t < 1e12 ? t * 1000 : t) : Date.now();
+
+            await writeUnifiedLastTrade(pool, {
+              tokenId: id,
+              venue: "polymarket",
+              price,
+              size,
+              side: side ?? "BUY",
+              ts: new Date(ts),
+              txHash:
+                typeof m.tx_hash === "string"
+                  ? m.tx_hash
+                  : typeof m.txHash === "string"
+                    ? m.txHash
+                    : null,
+            });
           }
         } catch (err) {
           log.warn("WS message handler error", err);

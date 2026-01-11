@@ -564,3 +564,26 @@ export async function writeUnifiedBookTop(
     ],
   );
 }
+
+export async function writeUnifiedLastTrade(
+  pool: Pool,
+  inputs: {
+    tokenId: string;
+    venue: string;
+    price: number;
+    size: number;
+    side: "BUY" | "SELL";
+    ts: Date;
+    txHash?: string | null;
+  },
+): Promise<void> {
+  const { tokenId, venue, price, size, side, ts, txHash } = inputs;
+  await pool.query(
+    `
+      insert into unified_last_trade(token_id, venue, ts, price, size, side, tx_hash)
+      values ($1,$2,$3,$4,$5,$6,$7)
+      on conflict do nothing
+    `,
+    [tokenId, venue, ts.toISOString(), price, size, side, txHash ?? null],
+  );
+}

@@ -5,6 +5,7 @@ import {
   upsertUnifiedMarkets,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
+  writeUnifiedLastTrade,
 } from "@hunch/db";
 
 import { env } from "./env";
@@ -20,6 +21,7 @@ import {
   iterateEventPages,
   iterateEventsWithMarkets,
 } from "./marketClient";
+import { fetchTradesByMint, type TDflowTrade } from "./tradesClient";
 import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
@@ -39,6 +41,9 @@ type SyncCounters = {
 
 const STATUS_BATCH_LIMIT = 100;
 const STATUS_POSITION_TOKEN_LIMIT = 200;
+const TRADE_MIN_SIZE = 1e-9;
+
+type TradeSide = "BUY" | "SELL";
 
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
   if (b.volume24h !== a.volume24h) return b.volume24h - a.volume24h;
@@ -135,6 +140,95 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+function parseTradeNumber(value: unknown): number | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeTradeSide(value: unknown): TradeSide | null {
+  if (typeof value !== "string") return null;
+  const lower = value.toLowerCase();
+  if (lower.includes("buy")) return "BUY";
+  if (lower.includes("sell")) return "SELL";
+  return null;
+}
+
+function parseTradeTimestamp(value: unknown): Date | null {
+  const n = parseTradeNumber(value);
+  if (n == null) return null;
+  const ms = n < 1e12 ? n * 1000 : n;
+  const ts = new Date(ms);
+  return Number.isNaN(ts.getTime()) ? null : ts;
+}
+
+function pickTradePrice(
+  trade: TDflowTrade,
+  tokenSide: "YES" | "NO" | null,
+): number | null {
+  const yesDollars = parseTradeNumber(trade.yesPriceDollars);
+  const noDollars = parseTradeNumber(trade.noPriceDollars);
+  const directDollars = parseTradeNumber(trade.priceDollars);
+  const yes = parseTradeNumber(trade.yesPrice);
+  const no = parseTradeNumber(trade.noPrice);
+  const direct = parseTradeNumber(trade.price);
+
+  const price =
+    tokenSide === "YES"
+      ? yesDollars ?? directDollars ?? yes ?? direct ?? null
+      : tokenSide === "NO"
+        ? noDollars ?? directDollars ?? no ?? direct ?? null
+        : directDollars ?? yesDollars ?? noDollars ?? direct ?? yes ?? no ?? null;
+
+  if (price == null || price < 0 || price > 1) return null;
+  return price;
+}
+
+function pickTradeSize(trade: TDflowTrade): number | null {
+  const count = parseTradeNumber(trade.count);
+  if (count != null && count > 0) return count;
+  return null;
+}
+
+async function fetchTokenSides(
+  tokenIds: string[],
+): Promise<Map<string, "YES" | "NO">> {
+  if (!tokenIds.length) return new Map();
+  const { rows } = await pool.query<{ token_id: string; side: "YES" | "NO" }>(
+    `
+      select token_id, side
+      from unified_tokens
+      where token_id = any($1::text[])
+    `,
+    [tokenIds],
+  );
+  const map = new Map<string, "YES" | "NO">();
+  for (const row of rows) {
+    if (row.token_id && row.side) map.set(row.token_id, row.side);
+  }
+  return map;
+}
+
+async function fetchLastTradeTimestamps(
+  tokenIds: string[],
+): Promise<Map<string, Date>> {
+  if (!tokenIds.length) return new Map();
+  const { rows } = await pool.query<{ token_id: string; ts: Date | null }>(
+    `
+      select token_id, max(ts) as ts
+      from unified_last_trade
+      where token_id = any($1::text[])
+      group by token_id
+    `,
+    [tokenIds],
+  );
+  const map = new Map<string, Date>();
+  for (const row of rows) {
+    if (row.token_id && row.ts) map.set(row.token_id, row.ts);
+  }
+  return map;
+}
+
 async function fetchPositionTokenIds(
   limit = STATUS_POSITION_TOKEN_LIMIT,
 ): Promise<string[]> {
@@ -177,6 +271,84 @@ async function fetchHotTickers(): Promise<string[]> {
   return rows
     .map((row) => row.venue_market_id)
     .filter((ticker): ticker is string => Boolean(ticker));
+}
+
+async function fetchTradeTokenIds(): Promise<string[]> {
+  const hotTokenIds = await fetchHotTokenIds();
+  const positionTokenIds = await fetchPositionTokenIds();
+  const tokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]))
+    .filter((tokenId) => tokenId.startsWith("sol:"));
+  return tokenIds.slice(0, env.tradesTokenLimit);
+}
+
+export async function syncRecentTrades(): Promise<{
+  tokenCount: number;
+  tradeCount: number;
+}> {
+  if (!env.dflowEnabled) return { tokenCount: 0, tradeCount: 0 };
+
+  const tokenIds = await fetchTradeTokenIds();
+  if (!tokenIds.length) return { tokenCount: 0, tradeCount: 0 };
+
+  const [sideMap, lastTradeMap] = await Promise.all([
+    fetchTokenSides(tokenIds),
+    fetchLastTradeTimestamps(tokenIds),
+  ]);
+
+  const q = new PQueue({ concurrency: env.tradesConcurrency });
+  let tradeCount = 0;
+
+  await Promise.all(
+    tokenIds.map((tokenId) =>
+      q.add(async () => {
+        const mint = stripSolanaPrefix(tokenId);
+        if (!mint) return;
+
+        const lastTs = lastTradeMap.get(tokenId);
+        const minTs =
+          lastTs != null ? Math.floor(lastTs.getTime() / 1000) + 1 : undefined;
+
+        let response;
+        try {
+          response = await fetchTradesByMint({
+            mint,
+            limit: env.tradesPerMintLimit,
+            minTs,
+          });
+        } catch (error) {
+          log.warn("DFlow trades fetch failed", { tokenId, error });
+          return;
+        }
+
+        const tokenSide = sideMap.get(tokenId) ?? null;
+        for (const trade of response.trades) {
+          const ts = parseTradeTimestamp(trade.createdTime);
+          if (!ts) continue;
+
+          const price = pickTradePrice(trade, tokenSide);
+          if (price == null) continue;
+
+          const size = pickTradeSize(trade);
+          if (size == null || size <= TRADE_MIN_SIZE) continue;
+
+          const side = normalizeTradeSide(trade.takerSide) ?? "BUY";
+
+          await writeUnifiedLastTrade(pool, {
+            tokenId,
+            venue: "kalshi",
+            price,
+            size,
+            side,
+            ts,
+            txHash: trade.tradeId ?? null,
+          });
+          tradeCount += 1;
+        }
+      }),
+    ),
+  );
+
+  return { tokenCount: tokenIds.length, tradeCount };
 }
 
 export async function resolveHotTickersForWs(): Promise<string[]> {

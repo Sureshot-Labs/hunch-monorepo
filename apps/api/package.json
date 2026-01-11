@@ -17,6 +17,7 @@
     "fees:reconcile": "tsx src/reconcile-fees.ts",
     "rewards:payout": "tsx src/rewards-payout.ts",
     "polycurl": "tsx src/polyclob.ts",
+    "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",

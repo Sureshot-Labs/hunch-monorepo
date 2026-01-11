@@ -190,6 +190,19 @@ const dflowWsLogEverySec = clampInt(
   { min: 0, max: 3600, fallback: 0 },
 );
 
+const tradesTokenLimit = clampInt(
+  parseOptionalInt(process.env.DFLOW_TRADES_TOKEN_LIMIT),
+  { min: 1, max: 2000, fallback: 200 },
+);
+const tradesPerMintLimit = clampInt(
+  parseOptionalInt(process.env.DFLOW_TRADES_PER_MINT),
+  { min: 1, max: 1000, fallback: 50 },
+);
+const tradesConcurrency = clampInt(
+  parseOptionalInt(process.env.DFLOW_TRADES_CONCURRENCY),
+  { min: 1, max: 50, fallback: 8 },
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -227,6 +240,9 @@ export const env = {
   requireInitialized,
   dflowWsAll,
   dflowWsLogEverySec,
+  tradesTokenLimit,
+  tradesPerMintLimit,
+  tradesConcurrency,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

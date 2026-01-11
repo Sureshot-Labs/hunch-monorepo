@@ -14,6 +14,7 @@ import { metricsRoutes } from "./metrics.js";
 import { ordersRoutes } from "./orders.js";
 import { positionsRoutes } from "./positions.js";
 import { pricesSseRoutes } from "./prices-sse.js";
+import { tradesRoutes } from "./trades.js";
 import { limitlessPrivateRoutes } from "./limitless-private.js";
 import { polymarketPrivateRoutes } from "./polymarket-private.js";
 import { polymarketProxyRoutes } from "./polymarket-proxy.js";
@@ -44,6 +45,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(eventRoutes);
   await app.register(executionsRoutes);
   await app.register(ordersRoutes);
+  await app.register(tradesRoutes);
   await app.register(rewardsRoutes);
   await app.register(positionsRoutes);
   await app.register(walletsRoutes);

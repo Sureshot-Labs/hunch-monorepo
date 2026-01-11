@@ -4,6 +4,7 @@ import {
   syncCatchUpFromCursor,
   syncHotMarketStatuses,
   syncHotWindow,
+  syncRecentTrades,
   resolveHotTickersForWs,
 } from "./bootstrap";
 import { env } from "./env";
@@ -18,6 +19,7 @@ async function periodicBootstrap() {
   try {
     await syncHotWindow();
     await syncHotMarketStatuses();
+    await syncRecentTrades();
     const tickers = await resolveHotTickersForWs();
     updateMarketWSSubscriptions(tickers);
   } catch (e) {
