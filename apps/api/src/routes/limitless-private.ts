@@ -16,6 +16,10 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
+import {
+  buildOrderNotification,
+  createNotificationSafe,
+} from "../services/notifications.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import {
   syncLimitlessHistoryForWallet,
@@ -1157,6 +1161,22 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderPayload,
       });
 
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: user.id,
+          venue: "limitless",
+          status,
+          side,
+          size,
+          price,
+          orderId: venueOrderId,
+          tokenId: tokenId ?? null,
+          walletAddress: signer,
+        }),
+        app.log,
+      );
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
@@ -1236,6 +1256,22 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         lastUpdate: now,
         filledAt: now,
       });
+
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: user.id,
+          venue: "limitless",
+          status: "filled",
+          side,
+          size,
+          price: price ?? null,
+          orderId: venueOrderId,
+          tokenId,
+          walletAddress: signer,
+        }),
+        app.log,
+      );
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, orderId: venueOrderId });
@@ -1597,6 +1633,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         [user.id, signer, request.params.orderId],
       );
 
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: user.id,
+          venue: "limitless",
+          status: "cancelled",
+          orderId: request.params.orderId,
+          walletAddress: signer,
+        }),
+        app.log,
+      );
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, payload: upstream.payload });
     },
@@ -1665,6 +1713,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               and venue_order_id = ANY($3::text[])
           `,
           [user.id, signer, cancelledIds],
+        );
+
+        void createNotificationSafe(
+          pool,
+          {
+            userId: user.id,
+            type: "order_cancelled",
+            title: "Orders cancelled",
+            body: `${cancelledIds.length} Limitless orders`,
+            severity: "warning",
+            data: {
+              venue: "limitless",
+              orderIds: cancelledIds,
+              walletAddress: signer,
+            },
+            dedupeKey: `order_cancelled_batch:${cancelledIds[0] ?? "batch"}`,
+          },
+          app.log,
         );
       }
 
@@ -1758,6 +1824,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               and venue_order_id = ANY($3::text[])
           `,
           [user.id, signer, cancelledIds],
+        );
+
+        void createNotificationSafe(
+          pool,
+          {
+            userId: user.id,
+            type: "order_cancelled",
+            title: "Orders cancelled",
+            body: `${cancelledIds.length} Limitless orders`,
+            severity: "warning",
+            data: {
+              venue: "limitless",
+              orderIds: cancelledIds,
+              walletAddress: signer,
+            },
+            dedupeKey: `order_cancelled_all:${cancelledIds[0] ?? "all"}`,
+          },
+          app.log,
         );
       }
 

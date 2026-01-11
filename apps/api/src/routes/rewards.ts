@@ -15,6 +15,10 @@ import {
   getRewardsReferrals,
   getRewardsSummary,
 } from "../services/rewards.js";
+import {
+  buildRewardNotification,
+  createNotificationSafe,
+} from "../services/notifications.js";
 
 export const rewardsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -181,6 +185,19 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
           });
           return { claimId: claim.claimId, amount: requestedAmount };
         });
+
+        void createNotificationSafe(
+          pool,
+          buildRewardNotification({
+            userId: user.id,
+            status: "submitted",
+            amountUsd: claim.amount,
+            chainId,
+            claimId: claim.claimId,
+            walletAddress: targetWallet,
+          }),
+          request.log,
+        );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({

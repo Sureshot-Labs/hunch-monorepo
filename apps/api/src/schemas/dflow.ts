@@ -41,6 +41,7 @@ const zNumberish = z.union([z.string(), z.number()]);
 
 export const dflowExecutionBodySchema = z.object({
   marketId: z.string().optional(),
+  purpose: z.enum(["trade", "redeem"]).optional(),
   inputMint: zRequiredString("inputMint is required"),
   outputMint: zRequiredString("outputMint is required"),
   amountIn: zNumberish.optional(),

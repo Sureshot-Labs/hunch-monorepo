@@ -27,6 +27,10 @@ import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.j
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import {
+  buildOrderNotification,
+  createNotificationSafe,
+} from "../services/notifications.js";
+import {
   extractOrderArray,
   extractOrderId,
   extractTokenId,
@@ -1698,6 +1702,22 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         feeDeadline,
       });
 
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: user.id,
+          venue: "polymarket",
+          status: statusRaw,
+          side,
+          size,
+          price,
+          orderId: venueOrderId,
+          tokenId,
+          walletAddress: funder,
+        }),
+        app.log,
+      );
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
@@ -1783,6 +1803,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             and venue_order_id = $3
         `,
         [user.id, signer, request.body.orderID],
+      );
+
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: user.id,
+          venue: "polymarket",
+          status: "cancelled",
+          orderId: request.body.orderID,
+          walletAddress: signer,
+        }),
+        app.log,
       );
 
       reply.header("Content-Type", "application/json; charset=utf-8");

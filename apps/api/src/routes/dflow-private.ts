@@ -16,6 +16,10 @@ import {
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
 import {
+  buildTradeNotification,
+  createNotificationSafe,
+} from "../services/notifications.js";
+import {
   fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -612,6 +616,22 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
               on conflict (user_id, source_type, source_id) do nothing
             `,
             [user.id, walletAddress, execution.id, notionalUsd],
+          );
+        }
+
+        if (body.purpose !== "redeem") {
+          void createNotificationSafe(
+            pool,
+            buildTradeNotification({
+              userId: user.id,
+              venue: "kalshi",
+              side: body.side ?? null,
+              amountUsd: notionalUsd,
+              marketId: body.marketId ?? null,
+              txHash: body.txSignature ?? null,
+              walletAddress,
+            }),
+            app.log,
           );
         }
 

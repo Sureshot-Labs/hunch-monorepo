@@ -9,6 +9,10 @@ import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
 import {
+  buildBridgeNotification,
+  createNotificationSafe,
+} from "../services/notifications.js";
+import {
   bridgeChainsQuerySchema,
   bridgeOrderBodySchema,
   bridgeOrdersQuerySchema,
@@ -77,6 +81,16 @@ type AffiliateDefaults = {
   affiliateFeePercent?: number;
   affiliateFeeRecipient?: string;
 };
+
+function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (["fulfilled", "completed", "success"].includes(normalized)) return "completed";
+  if (["failed", "cancelled", "canceled", "reverted"].includes(normalized)) {
+    return "failed";
+  }
+  return null;
+}
 
 const FALLBACK_TOKEN_META: Record<
   string,
@@ -433,6 +447,88 @@ function resolveSwapType(
 
 export const bridgeRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  const notifyBridgeStatusByTx = async (
+    txHash: string,
+    statusRaw: string | null,
+  ) => {
+    const status = normalizeBridgeStatus(statusRaw);
+    if (!status) return;
+
+    const { rows } = await pool.query<{
+      user_id: string;
+      src_chain_id: string;
+      dst_chain_id: string;
+      order_id: string | null;
+    }>(
+      `
+        select user_id, src_chain_id, dst_chain_id, order_id
+        from bridge_orders
+        where provider = 'debridge'
+          and tx_hash_src = $1
+        order by updated_at desc
+        limit 1
+      `,
+      [txHash],
+    );
+
+    const row = rows[0];
+    if (!row) return;
+    void createNotificationSafe(
+      pool,
+      buildBridgeNotification({
+        userId: row.user_id,
+        provider: "debridge",
+        status,
+        srcChainId: row.src_chain_id,
+        dstChainId: row.dst_chain_id,
+        bridgeOrderId: row.order_id ?? null,
+        txHash,
+      }),
+      app.log,
+    );
+  };
+
+  const notifyBridgeStatusByOrder = async (
+    orderId: string,
+    statusRaw: string | null,
+  ) => {
+    const status = normalizeBridgeStatus(statusRaw);
+    if (!status) return;
+
+    const { rows } = await pool.query<{
+      user_id: string;
+      src_chain_id: string;
+      dst_chain_id: string;
+      tx_hash_src: string | null;
+    }>(
+      `
+        select user_id, src_chain_id, dst_chain_id, tx_hash_src
+        from bridge_orders
+        where provider = 'debridge'
+          and order_id = $1
+        order by updated_at desc
+        limit 1
+      `,
+      [orderId],
+    );
+
+    const row = rows[0];
+    if (!row) return;
+    void createNotificationSafe(
+      pool,
+      buildBridgeNotification({
+        userId: row.user_id,
+        provider: "debridge",
+        status,
+        srcChainId: row.src_chain_id,
+        dstChainId: row.dst_chain_id,
+        bridgeOrderId: orderId,
+        txHash: row.tx_hash_src ?? null,
+      }),
+      app.log,
+    );
+  };
 
   z.get(
     "/bridge/chains",
@@ -888,6 +984,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [fallback.status, txHash],
             );
+            await notifyBridgeStatusByTx(txHash, fallback.status);
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,
@@ -962,6 +1059,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 `,
                 [fallback.status, txHash],
               );
+              await notifyBridgeStatusByTx(txHash, fallback.status);
               reply.header("Content-Type", "application/json; charset=utf-8");
               return reply.send({
                 ok: true,
@@ -989,6 +1087,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [status, txHash],
             );
+            await notifyBridgeStatusByTx(txHash, status);
           }
         }
 
@@ -1074,6 +1173,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [status, id],
             );
+            await notifyBridgeStatusByOrder(id, status);
           }
         }
       }

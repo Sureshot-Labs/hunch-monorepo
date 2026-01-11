@@ -6,6 +6,10 @@ import bs58 from "bs58";
 import { ethers } from "ethers";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import {
+  buildRewardNotification,
+  createNotificationSafe,
+} from "./services/notifications.js";
 
 type ClaimRow = {
   id: string;
@@ -17,6 +21,25 @@ type ClaimRow = {
   tx_hash: string | null;
   created_at: Date;
 };
+
+async function notifyClaimStatus(
+  claim: ClaimRow,
+  status: "submitted" | "confirmed" | "failed",
+) {
+  const amountUsd = Number(claim.amount_usdc);
+  if (!Number.isFinite(amountUsd)) return;
+  await createNotificationSafe(
+    pool,
+    buildRewardNotification({
+      userId: claim.user_id,
+      status,
+      amountUsd,
+      chainId: claim.chain_id,
+      claimId: claim.id,
+      walletAddress: claim.wallet_address,
+    }),
+  );
+}
 
 type ScriptOptions = {
   dryRun: boolean;
@@ -272,16 +295,30 @@ async function markClaimStatus(inputs: {
   status: "submitted" | "confirmed" | "failed";
   txHash?: string | null;
 }) {
-  await pool.query(
+  const { rows } = await pool.query<ClaimRow>(
     `
       update reward_claims
       set status = $2,
           tx_hash = coalesce($3, tx_hash),
           updated_at = now()
       where id = $1
+      returning
+        id,
+        user_id,
+        wallet_address,
+        chain_id,
+        amount_usdc::text as amount_usdc,
+        status,
+        tx_hash,
+        created_at
     `,
     [inputs.id, inputs.status, inputs.txHash ?? null],
   );
+
+  const row = rows[0];
+  if (row) {
+    await notifyClaimStatus(row, inputs.status);
+  }
 }
 
 async function confirmEvmClaim(
@@ -419,6 +456,9 @@ async function main() {
     failed.forEach((claim) => {
       console.log(`${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`);
     });
+    for (const claim of failed) {
+      await notifyClaimStatus(claim, "failed");
+    }
     return;
   }
 

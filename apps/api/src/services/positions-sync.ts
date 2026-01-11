@@ -11,8 +11,13 @@ import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
+import { notifyResolvedPositions } from "./positions-notifications.js";
 import { AuthService } from "../auth.js";
 import { fetchPolymarketTrades } from "./polymarket-clob-l2.js";
+import {
+  buildOrderNotification,
+  createNotificationSafe,
+} from "./notifications.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -608,7 +613,12 @@ async function syncPolymarketTradesForSigner(
 
   if (!fillOrderIds.length) return;
 
-  await pool.query(
+  const { rows: insertedFills } = await pool.query<{
+    order_id: string;
+    fill_size: number;
+    fill_price: number;
+    fill_side: string;
+  }>(
     `
       with input as (
         select *
@@ -635,6 +645,7 @@ async function syncPolymarketTradesForSigner(
         where of.order_id = t.order_id
           and of.venue_fill_id = t.venue_fill_id
       )
+      returning order_id, fill_size, fill_price, fill_side
     `,
     [
       fillOrderIds,
@@ -715,6 +726,65 @@ async function syncPolymarketTradesForSigner(
     `,
     [Array.from(new Set(fillOrderIds))],
   );
+
+  if (insertedFills.length) {
+    const orderIds = Array.from(
+      new Set(insertedFills.map((row) => row.order_id)),
+    );
+    const { rows: orderRows } = await pool.query<{
+      id: string;
+      venue_order_id: string | null;
+      token_id: string | null;
+      side: string | null;
+      wallet_address: string | null;
+    }>(
+      `
+        select id, venue_order_id, token_id, side, wallet_address
+        from orders
+        where id = any($1::uuid[])
+      `,
+      [orderIds],
+    );
+
+    const fillStats = new Map<
+      string,
+      { size: number; notional: number; fillSide: string | null }
+    >();
+    for (const fill of insertedFills) {
+      const nextSize = Number(fill.fill_size);
+      const nextPrice = Number(fill.fill_price);
+      if (!Number.isFinite(nextSize) || !Number.isFinite(nextPrice)) continue;
+      const stats = fillStats.get(fill.order_id) ?? {
+        size: 0,
+        notional: 0,
+        fillSide: fill.fill_side ?? null,
+      };
+      stats.size += nextSize;
+      stats.notional += nextSize * nextPrice;
+      stats.fillSide = stats.fillSide ?? fill.fill_side ?? null;
+      fillStats.set(fill.order_id, stats);
+    }
+
+    for (const order of orderRows) {
+      const stats = fillStats.get(order.id);
+      if (!stats || stats.size <= 0) continue;
+      const avgPrice = stats.notional > 0 ? stats.notional / stats.size : null;
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: inputs.userId,
+          venue: "polymarket",
+          status: "matched",
+          side: order.side ?? stats.fillSide,
+          size: stats.size,
+          price: avgPrice,
+          orderId: order.venue_order_id ?? order.id,
+          tokenId: order.token_id ?? null,
+          walletAddress: order.wallet_address ?? inputs.signerAddress,
+        }),
+      );
+    }
+  }
 }
 
 export type PositionsSyncResult = {
@@ -765,6 +835,16 @@ async function syncKalshiPositionsFromSolana(
     });
   } catch (error) {
     console.error("Kalshi position metrics update failed", error);
+  }
+
+  try {
+    await notifyResolvedPositions(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "kalshi",
+    });
+  } catch (error) {
+    console.error("Kalshi resolved position notification failed", error);
   }
 
   return {
@@ -881,6 +961,19 @@ async function syncPolymarketPositionsFromPolygon(
       console.error("Polymarket position metrics update failed", error);
     }
 
+    try {
+      await notifyResolvedPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: owner,
+        venue: "polymarket",
+      });
+    } catch (error) {
+      console.error(
+        "Polymarket resolved position notification failed",
+        error,
+      );
+    }
+
   }
 
   if (allHeldTokens.size) {
@@ -972,6 +1065,16 @@ async function syncLimitlessPositionsFromPortfolio(
     });
   } catch (error) {
     console.error("Limitless position metrics update failed", error);
+  }
+
+  try {
+    await notifyResolvedPositions(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "limitless",
+    });
+  } catch (error) {
+    console.error("Limitless resolved position notification failed", error);
   }
 
   return {

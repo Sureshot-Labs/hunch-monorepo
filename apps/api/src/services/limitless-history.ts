@@ -10,6 +10,10 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./limitless-client.js";
+import {
+  buildOrderNotification,
+  createNotificationSafe,
+} from "./notifications.js";
 
 export type LimitlessHistorySyncStats = {
   fetched: number;
@@ -371,6 +375,20 @@ export async function syncLimitlessHistoryForWallet(
           orderHash,
           orderPayload: entry,
         });
+        void createNotificationSafe(
+          pool,
+          buildOrderNotification({
+            userId: inputs.userId,
+            venue: "limitless",
+            status: "filled",
+            side,
+            size,
+            price,
+            orderId: venueOrderId ?? orderHash ?? null,
+            tokenId,
+            walletAddress: inputs.walletAddress,
+          }),
+        );
         await deleteHistoryOrder(pool, {
           userId: inputs.userId,
           venue: "limitless",
@@ -404,6 +422,21 @@ export async function syncLimitlessHistoryForWallet(
 
     if (result.kind === "stored") storedNew += 1;
     if (result.kind === "exists") alreadyKnown += 1;
+
+    void createNotificationSafe(
+      pool,
+      buildOrderNotification({
+        userId: inputs.userId,
+        venue: "limitless",
+        status: "filled",
+        side,
+        size,
+        price,
+        orderId: venueOrderId ?? orderHash ?? null,
+        tokenId,
+        walletAddress: inputs.walletAddress,
+      }),
+    );
   }
 
   return {
