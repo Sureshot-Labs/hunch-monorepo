@@ -485,3 +485,107 @@ export async function fetchSolanaSignatureStatus(inputs: {
   }
   return { status: "submitted" };
 }
+
+type LargestTokenAccount = {
+  address: string;
+  amount: bigint;
+  decimals: number;
+  uiAmountString: string;
+};
+
+export async function fetchSolanaTokenLargestAccounts(inputs: {
+  rpcUrls: string[];
+  mint: string;
+  timeoutMs: number;
+}): Promise<LargestTokenAccount[]> {
+  const result = await solanaRpcRequest<{ value?: unknown[] }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenLargestAccounts",
+    params: [inputs.mint],
+  });
+
+  const entries = Array.isArray(result?.value) ? result.value : [];
+  const parsed: LargestTokenAccount[] = [];
+
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    const address = entry.address;
+    if (typeof address !== "string" || address.trim().length === 0) continue;
+
+    const amountRaw = entry.amount;
+    if (typeof amountRaw !== "string" || amountRaw.trim().length === 0) continue;
+
+    const decimalsRaw = entry.decimals;
+    if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw)) continue;
+
+    let amount: bigint;
+    try {
+      amount = BigInt(amountRaw);
+    } catch {
+      continue;
+    }
+
+    const decimals = Math.max(0, Math.trunc(decimalsRaw));
+    const uiAmountString =
+      typeof entry.uiAmountString === "string"
+        ? entry.uiAmountString
+        : formatUiAmount(amount, decimals);
+
+    parsed.push({ address, amount, decimals, uiAmountString });
+  }
+
+  return parsed;
+}
+
+export async function fetchSolanaTokenAccountOwners(inputs: {
+  rpcUrls: string[];
+  accounts: string[];
+  timeoutMs: number;
+}): Promise<Record<string, string | null>> {
+  if (inputs.accounts.length === 0) return {};
+
+  const result = await solanaRpcRequest<{
+    value?: Array<{ data?: unknown } | null>;
+  }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getMultipleAccounts",
+    params: [inputs.accounts, { encoding: "jsonParsed" }],
+  });
+
+  const values = Array.isArray(result?.value) ? result.value : [];
+  const owners: Record<string, string | null> = {};
+
+  for (let i = 0; i < inputs.accounts.length; i += 1) {
+    const account = inputs.accounts[i];
+    const entry = values[i];
+    if (!entry || !isRecord(entry)) {
+      owners[account] = null;
+      continue;
+    }
+    const data = entry.data;
+    if (!isRecord(data)) {
+      owners[account] = null;
+      continue;
+    }
+    const parsed = data.parsed;
+    if (!isRecord(parsed)) {
+      owners[account] = null;
+      continue;
+    }
+    const info = parsed.info;
+    if (!isRecord(info)) {
+      owners[account] = null;
+      continue;
+    }
+    const owner = info.owner;
+    if (typeof owner === "string" && owner.trim().length > 0) {
+      owners[account] = owner;
+    } else {
+      owners[account] = null;
+    }
+  }
+
+  return owners;
+}

@@ -155,6 +155,7 @@ export const env = {
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
     15,
@@ -182,6 +183,13 @@ export const env = {
   baseMulticallAddress:
     process.env.BASE_MULTICALL_ADDRESS?.trim() ||
     "0xca11bde05977b3631167028862be2a173976ca11",
+  alchemyPolygonNftBaseUrl:
+    process.env.ALCHEMY_POLYGON_NFT_BASE_URL?.trim() || "",
+  alchemyBaseNftBaseUrl:
+    process.env.ALCHEMY_BASE_NFT_BASE_URL?.trim() || "",
+  polymarketDataApiBase:
+    process.env.POLYMARKET_DATA_API_BASE?.trim() ||
+    "https://data-api.polymarket.com",
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",

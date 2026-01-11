@@ -8,6 +8,7 @@ import { executionsRoutes } from "./executions.js";
 import { feesRoutes } from "./fees.js";
 import { feedRoutes } from "./feed.js";
 import { healthRoutes } from "./health.js";
+import { holdersRoutes } from "./holders.js";
 import { marketRoutes } from "./markets.js";
 import { metaRoutes } from "./meta.js";
 import { metricsRoutes } from "./metrics.js";
@@ -41,6 +42,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(solanaRoutes);
   await app.register(pricesSseRoutes);
   await app.register(feedRoutes);
+  await app.register(holdersRoutes);
   await app.register(marketRoutes);
   await app.register(eventRoutes);
   await app.register(executionsRoutes);
