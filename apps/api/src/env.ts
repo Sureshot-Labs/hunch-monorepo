@@ -71,6 +71,7 @@ const enableSwagger =
   enableSwaggerSetting ?? nodeEnv.toLowerCase() !== "production";
 const trustProxySetting = parseOptionalBool(process.env.TRUST_PROXY);
 const trustProxy = trustProxySetting ?? false;
+const proxySecret = process.env.HUNCH_PROXY_SECRET?.trim() || "";
 
 const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
 const dflowEnv: "dev" | "prod" =
@@ -150,6 +151,7 @@ export const env = {
   nodeEnv,
   enableSwagger,
   trustProxy,
+  proxySecret,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API

@@ -156,6 +156,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     blockedCountries: env.dflowGeoBlockCountries,
     defaultPolicy: env.dflowGeoBlockDefault,
     trustProxy: env.trustProxy,
+    proxySecret: env.proxySecret,
   };
 
   app.addHook("preHandler", async (request, reply) => {

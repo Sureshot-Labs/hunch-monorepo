@@ -7,6 +7,7 @@ export type GeoFenceConfig = {
   blockedCountries: string[];
   defaultPolicy: "allow" | "block";
   trustProxy: boolean;
+  proxySecret: string;
 };
 
 export type GeoFenceDecision = {
@@ -46,11 +47,21 @@ function readHeader(
   return raw;
 }
 
+function shouldTrustForwardedHeaders(
+  request: FastifyRequest,
+  config: GeoFenceConfig,
+): boolean {
+  if (!config.trustProxy) return false;
+  if (!config.proxySecret) return false;
+  const header = readHeader(request, "x-hunch-proxy-secret");
+  return header === config.proxySecret;
+}
+
 export function resolveClientIp(
   request: FastifyRequest,
-  trustProxy: boolean,
+  config: GeoFenceConfig,
 ): string | null {
-  const forwarded = trustProxy
+  const forwarded = shouldTrustForwardedHeaders(request, config)
     ? [
         readHeader(request, "cf-connecting-ip"),
         readHeader(request, "x-forwarded-for"),
@@ -85,7 +96,7 @@ export function evaluateGeoFence(
     return { allowed: true, country: null, ip: null, reason: "disabled" };
   }
 
-  const ip = resolveClientIp(request, config.trustProxy);
+  const ip = resolveClientIp(request, config);
   if (!ip) {
     const allowed = config.defaultPolicy === "allow";
     return {

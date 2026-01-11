@@ -14,6 +14,7 @@ export const tradePolicyRoutes: FastifyPluginAsync = async (app) => {
     blockedCountries: env.dflowGeoBlockCountries,
     defaultPolicy: env.dflowGeoBlockDefault,
     trustProxy: env.trustProxy,
+    proxySecret: env.proxySecret,
   };
 
   z.get("/trade/policies", async (request, reply) => {
