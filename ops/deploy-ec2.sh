@@ -12,12 +12,17 @@ if [[ -n "${ARCHIVE}" ]]; then
   fi
   WORK_DIR="$(mktemp -d)"
   tar -xzf "${ARCHIVE}" -C "${WORK_DIR}"
+  SRC_DIR="${WORK_DIR}/hunch-monorepo"
+  if [[ ! -d "${SRC_DIR}" ]]; then
+    SRC_DIR="${WORK_DIR}"
+  fi
   if [[ -d "${APP_DIR}" ]]; then
     BACKUP_DIR="${APP_DIR}.prev.$(date +%s)"
     mv "${APP_DIR}" "${BACKUP_DIR}"
     echo "Backed up repo to ${BACKUP_DIR}"
   fi
-  mv "${WORK_DIR}/hunch-monorepo" "${APP_DIR}"
+  mkdir -p "${APP_DIR}"
+  (cd "${SRC_DIR}" && tar -cf - .) | (cd "${APP_DIR}" && tar -xf -)
   rm -rf "${WORK_DIR}"
   echo "Repo updated from ${ARCHIVE}"
 fi
