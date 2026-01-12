@@ -483,7 +483,10 @@ export async function upsertUnifiedToken(
     `
     insert into unified_tokens(token_id, venue, market_id, side)
     values ($1,$2,$3,$4)
-    on conflict (token_id) do nothing
+    on conflict (market_id, side) do update
+      set token_id = excluded.token_id,
+          venue = excluded.venue,
+          updated_at = now()
   `,
     [
       token.token_id,
@@ -504,9 +507,11 @@ export async function upsertUnifiedTokens(
 ): Promise<void> {
   if (tokens.length === 0) return;
 
-  const byId = new Map<string, (typeof tokens)[number]>();
-  for (const token of tokens) byId.set(token.token_id, token);
-  const rows = Array.from(byId.values());
+  const byMarketSide = new Map<string, (typeof tokens)[number]>();
+  for (const token of tokens) {
+    byMarketSide.set(`${token.market_id}:${token.side}`, token);
+  }
+  const rows = Array.from(byMarketSide.values());
 
   // We want to call venueFromUnifiedTokenId() from SQL, but it's a TS function.
   // Instead, inject venue values in JS and batch insert.
@@ -526,7 +531,10 @@ export async function upsertUnifiedTokens(
     insert into unified_tokens(token_id, venue, market_id, side)
     select token_id, venue, market_id, side
     from input
-    on conflict (token_id) do nothing
+    on conflict (market_id, side) do update
+      set token_id = excluded.token_id,
+          venue = excluded.venue,
+          updated_at = now()
   `;
 
   const batches = chunkArray(payload, 500);
