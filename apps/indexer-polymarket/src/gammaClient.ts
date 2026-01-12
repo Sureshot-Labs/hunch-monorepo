@@ -1,6 +1,6 @@
-import { env } from "./env";
-import { GammaEvent, GammaEventsResponse } from "./types";
-import type { TEvent as GammaEventType } from "./types";
+import { env } from "./env.js";
+import { GammaEvent, GammaEventsResponse } from "./types.js";
+import type { TEvent as GammaEventType } from "./types.js";
 import { z } from "zod";
 
 const GammaEventsListResponse = z.array(GammaEvent);

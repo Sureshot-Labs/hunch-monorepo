@@ -1,10 +1,10 @@
 import WebSocket from "ws";
-import { env } from "./env";
-import { log } from "./log";
-import { ensureRedis, redis } from "./redis";
+import { env } from "./env.js";
+import { log } from "./log.js";
+import { ensureRedis, redis } from "./redis.js";
 import PQueue from "p-queue";
 import { writeUnifiedBookTop, writeUnifiedLastTrade } from "@hunch/db";
-import { pool } from "./db";
+import { pool } from "./db.js";
 
 // Very light state holder
 type SubState = { subscribed: Set<string> };

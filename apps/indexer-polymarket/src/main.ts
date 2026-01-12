@@ -5,11 +5,11 @@ import {
   syncCatchUpFromCursor,
   syncHotEventStatuses,
   syncHotWindow,
-} from "./bootstrap";
-import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
-import { log } from "./log";
+} from "./bootstrap.js";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
+import { log } from "./log.js";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
-import { env } from "./env";
+import { env } from "./env.js";
 
 let running = false;
 let wsStarted = false;

@@ -1,32 +1,32 @@
-import { ensureRedis, redis } from "./redis";
-import { env } from "./env";
-import { fetchEventsByIds, iterateEventPages } from "./gammaClient";
-import { postBooksOnce } from "./clobClient";
+import { ensureRedis, redis } from "./redis.js";
+import { env } from "./env.js";
+import { fetchEventsByIds, iterateEventPages } from "./gammaClient.js";
+import { postBooksOnce } from "./clobClient.js";
 import {
   upsertPolymarketEvents,
   upsertPolymarketMarkets,
-} from "./polymarket-repo";
+} from "./polymarket-repo.js";
 import {
   mapPolymarketEventRow,
   mapPolymarketMarketRow,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
-} from "./mappers";
+} from "./mappers.js";
 import {
   upsertUnifiedEvents,
   upsertUnifiedMarkets,
   writeUnifiedBookTop,
 } from "@hunch/db";
 import { isPgSetupIssue } from "@hunch/infra";
-import { pool } from "./db";
-import { PolymarketEvent, type TPolymarketEvent } from "./types";
-import { log } from "./log";
+import { pool } from "./db.js";
+import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
+import { log } from "./log.js";
 import PQueue from "p-queue";
 import {
   getPolymarketEventsOffset,
   resetPolymarketEventsOffset,
   setPolymarketEventsOffset,
-} from "./cursor";
+} from "./cursor.js";
 
 function chunk<T>(arr: T[], n: number): T[][] {
   const out: T[][] = [];

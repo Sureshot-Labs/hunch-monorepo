@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { env } from "./env";
+import { env } from "./env.js";
 
 const DflowTrade = z
   .object({

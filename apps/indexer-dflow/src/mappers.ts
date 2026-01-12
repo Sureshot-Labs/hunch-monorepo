@@ -1,6 +1,6 @@
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
-import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types";
+import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types.js";
 
 const DFLOW_U64_SENTINEL_MIN = 9e18;
 

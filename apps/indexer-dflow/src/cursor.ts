@@ -1,4 +1,4 @@
-import { ensureRedis, redis } from "./redis";
+import { ensureRedis, redis } from "./redis.js";
 
 export const DFLOW_EVENTS_OFFSET_KEY = "indexer:dflow:events_offset:v1";
 

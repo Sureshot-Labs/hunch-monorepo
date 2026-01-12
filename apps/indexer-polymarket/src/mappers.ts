@@ -4,7 +4,7 @@ import type {
   TMarket,
   TPolymarketEvent,
   TPolymarketMarket,
-} from "./types";
+} from "./types.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 const n = (v: unknown): number | null => {

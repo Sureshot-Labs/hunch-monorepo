@@ -1,5 +1,5 @@
-import { pool } from "./db";
-import type { mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers";
+import { pool } from "./db.js";
+import type { mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers.js";
 
 export type PolymarketEventRow = ReturnType<typeof mapPolymarketEventRow>;
 export type PolymarketMarketRow = ReturnType<typeof mapPolymarketMarketRow>;

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
+ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
+ARCHIVE="${ARCHIVE:-}"
+
+if [[ -n "${ARCHIVE}" ]]; then
+  if [[ ! -f "${ARCHIVE}" ]]; then
+    echo "Archive not found: ${ARCHIVE}" >&2
+    exit 1
+  fi
+  WORK_DIR="$(mktemp -d)"
+  tar -xzf "${ARCHIVE}" -C "${WORK_DIR}"
+  if [[ -d "${APP_DIR}" ]]; then
+    BACKUP_DIR="${APP_DIR}.prev.$(date +%s)"
+    mv "${APP_DIR}" "${BACKUP_DIR}"
+    echo "Backed up repo to ${BACKUP_DIR}"
+  fi
+  mv "${WORK_DIR}/hunch-monorepo" "${APP_DIR}"
+  rm -rf "${WORK_DIR}"
+  echo "Repo updated from ${ARCHIVE}"
+fi
+
+compose=(docker-compose --project-directory "${APP_DIR}" \
+  -f "${APP_DIR}/ops/docker-compose.prod.yml" \
+  --env-file "${ENV_FILE}")
+
+"${compose[@]}" down
+"${compose[@]}" build
+
+# Bring up infra only so we can migrate without exposing app containers yet.
+"${compose[@]}" up -d postgres redis
+"${compose[@]}" run --rm api node /app/packages/db/dist/migrate.js
+
+"${compose[@]}" up -d
+echo "Deploy complete."

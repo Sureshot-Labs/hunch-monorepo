@@ -1,5 +1,5 @@
 // clobClient.ts
-import { env } from "./env";
+import { env } from "./env.js";
 
 export type Book = {
   market: string;

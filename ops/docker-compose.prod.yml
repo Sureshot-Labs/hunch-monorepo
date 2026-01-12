@@ -104,7 +104,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/indexer-polymarket/dist/main.js"]
+    command:
+      [
+        "node",
+        "--experimental-specifier-resolution=node",
+        "apps/indexer-polymarket/dist/apps/indexer-polymarket/src/main.js"
+      ]
 
   indexer-limitless:
     build:
@@ -123,7 +128,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/indexer-limitless/dist/main.js"]
+    command:
+      [
+        "node",
+        "--experimental-specifier-resolution=node",
+        "apps/indexer-limitless/dist/apps/indexer-limitless/src/main.js"
+      ]
 
   indexer-dflow:
     build:
@@ -142,7 +152,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/indexer-dflow/dist/main.js"]
+    command:
+      [
+        "node",
+        "--experimental-specifier-resolution=node",
+        "apps/indexer-dflow/dist/apps/indexer-dflow/src/main.js"
+      ]
 
   nginx:
     image: nginx:1.27-alpine
@@ -150,6 +165,8 @@ services:
     restart: unless-stopped
     networks:
       - hunch-net
+    env_file:
+      - /opt/hunch/.env
     environment:
       NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
       NGINX_PROXY_READ_TIMEOUT: ${NGINX_PROXY_READ_TIMEOUT:-3600}

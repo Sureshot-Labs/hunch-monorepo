@@ -2,10 +2,10 @@ import WebSocket from "ws";
 import PQueue from "p-queue";
 import { writeUnifiedBookTop } from "@hunch/db";
 
-import { env } from "./env";
-import { log } from "./log";
-import { pool } from "./db";
-import { ensureRedis, redis } from "./redis";
+import { env } from "./env.js";
+import { log } from "./log.js";
+import { pool } from "./db.js";
+import { ensureRedis, redis } from "./redis.js";
 
 type PriceMessage = {
   channel?: string;

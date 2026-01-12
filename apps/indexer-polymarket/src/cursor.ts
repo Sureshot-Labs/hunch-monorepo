@@ -1,4 +1,4 @@
-import { ensureRedis, redis } from "./redis";
+import { ensureRedis, redis } from "./redis.js";
 
 export const POLYMARKET_EVENTS_OFFSET_KEY =
   "indexer:polymarket:gamma:events_offset:v1";

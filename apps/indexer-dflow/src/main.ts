@@ -6,10 +6,10 @@ import {
   syncHotWindow,
   syncRecentTrades,
   resolveHotTickersForWs,
-} from "./bootstrap";
-import { env } from "./env";
-import { log } from "./log";
-import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
+} from "./bootstrap.js";
+import { env } from "./env.js";
+import { log } from "./log.js";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 
 let running = false;
 

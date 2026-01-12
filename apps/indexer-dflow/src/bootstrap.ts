@@ -8,27 +8,27 @@ import {
   writeUnifiedLastTrade,
 } from "@hunch/db";
 
-import { env } from "./env";
+import { env } from "./env.js";
 import {
   getDflowEventsOffset,
   resetDflowEventsOffset,
   setDflowEventsOffset,
-} from "./cursor";
-import { pool } from "./db";
-import { log } from "./log";
+} from "./cursor.js";
+import { pool } from "./db.js";
+import { log } from "./log.js";
 import {
   fetchMarketsBatch,
   iterateEventPages,
   iterateEventsWithMarkets,
-} from "./marketClient";
-import { fetchTradesByMint, type TDflowTrade } from "./tradesClient";
+} from "./marketClient.js";
+import { fetchTradesByMint, type TDflowTrade } from "./tradesClient.js";
 import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   type DflowMarketSnapshot,
-} from "./mappers";
-import type { TDflowEvent, TDflowMarket } from "./types";
-import { ensureRedis, redis } from "./redis";
+} from "./mappers.js";
+import type { TDflowEvent, TDflowMarket } from "./types.js";
+import { ensureRedis, redis } from "./redis.js";
 
 type SyncCounters = {
   processedEvents: number;
