@@ -13,6 +13,7 @@ REMOTE_ARCHIVE_DIR="${REMOTE_ARCHIVE_DIR:-/tmp}"
 ARCHIVE_NAME="${REPO_NAME}-$(date +%Y%m%d%H%M%S).tar.gz"
 ARCHIVE_PATH="${ARCHIVE_PATH:-/tmp/${ARCHIVE_NAME}}"
 REMOTE_ARCHIVE="${REMOTE_ARCHIVE_DIR}/${ARCHIVE_NAME}"
+REMOTE_SCRIPT="${REMOTE_ARCHIVE_DIR}/hunch-deploy-ec2.sh"
 GIT_REF="${GIT_REF:-HEAD}"
 
 cleanup() {
@@ -30,11 +31,14 @@ git -C "${ROOT_DIR}" archive --format=tar.gz --output "${ARCHIVE_PATH}" "${GIT_R
 echo "Uploading ${ARCHIVE_NAME} to ${REMOTE_HOST}:${REMOTE_ARCHIVE}"
 scp "${ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_ARCHIVE}"
 
+echo "Uploading deploy script to ${REMOTE_HOST}:${REMOTE_SCRIPT}"
+scp "${ROOT_DIR}/ops/deploy-ec2.sh" "${REMOTE_HOST}:${REMOTE_SCRIPT}"
+
 echo "Running remote deploy"
 ssh "${REMOTE_HOST}" \
-  "ARCHIVE='${REMOTE_ARCHIVE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' ${APP_DIR}/ops/deploy-ec2.sh"
+  "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
 
 echo "Cleaning up remote archive"
-ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}'"
+ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_SCRIPT}'"
 
 echo "Deploy complete."
