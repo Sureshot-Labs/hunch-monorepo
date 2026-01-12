@@ -127,8 +127,10 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         )::int as markets_with_volume,
         count(*) filter (
           where status = 'ACTIVE'
-            and coalesce(liquidity, open_interest) is not null
-            and coalesce(liquidity, open_interest) > 0
+            and (
+              (liquidity is not null and liquidity > 0)
+              or (open_interest is not null and open_interest > 0)
+            )
         )::int as markets_with_liquidity,
         count(*) filter (
           where status = 'ACTIVE'
