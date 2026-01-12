@@ -48,6 +48,9 @@ export async function fetchTradesByMint(inputs: {
   if (env.dflowApiKey) headers["x-api-key"] = env.dflowApiKey;
 
   const res = await fetch(url.toString(), { headers });
+  if (res.status === 404) {
+    return { trades: [], cursor: undefined };
+  }
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`DFlow trades ${res.status}: ${body.slice(0, 500)}`);
