@@ -26,7 +26,13 @@ compose=(docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prod.yml" \
   --env-file "${ENV_FILE}")
 
-"${compose[@]}" down
+project_name="hunch-monorepo"
+
+"${compose[@]}" down --remove-orphans || true
+stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
+if [[ -n "${stale_containers}" ]]; then
+  docker rm -f ${stale_containers}
+fi
 "${compose[@]}" build
 
 # Bring up infra only so we can migrate without exposing app containers yet.
