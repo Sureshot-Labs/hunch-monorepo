@@ -60,7 +60,7 @@ const Venue = z
   .nullable()
   .optional();
 
-const PositionIds = z.array(z.union([z.string(), z.array(z.string())]));
+const PositionIds = z.array(z.union([z.string(), z.array(z.string())])).nullable();
 
 const FeedEvent = z
   .object({
