@@ -159,6 +159,29 @@ services:
         "apps/indexer-dflow/dist/apps/indexer-dflow/src/main.js"
       ]
 
+  fee-collector:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-fee-collector
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -lc "while true; do
+        node /app/apps/api/dist/collect-fees.js --archive-legacy;
+        sleep ${FEE_COLLECT_INTERVAL_SEC:-600};
+      done"
+
   nginx:
     image: nginx:1.27-alpine
     container_name: hunch-nginx
