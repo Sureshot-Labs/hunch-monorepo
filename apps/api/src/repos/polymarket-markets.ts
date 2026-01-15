@@ -9,6 +9,8 @@ export type PolymarketMarketInfoRow = {
   order_price_min_tick_size: unknown;
   order_min_size: unknown;
   accepting_orders: boolean | null;
+  taker_fee_bps: string | null;
+  maker_fee_bps: string | null;
 };
 
 export async function fetchPolymarketMarketInfo(
@@ -30,7 +32,9 @@ export async function fetchPolymarketMarketInfo(
           pm.neg_risk,
           pm.order_price_min_tick_size,
           pm.order_min_size,
-          pm.accepting_orders
+          pm.accepting_orders,
+          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
+          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
         from polymarket_markets pm
         left join unified_markets m
           on m.venue = 'polymarket' and m.venue_market_id = pm.id
@@ -56,7 +60,9 @@ export async function fetchPolymarketMarketInfo(
           pm.neg_risk,
           pm.order_price_min_tick_size,
           pm.order_min_size,
-          pm.accepting_orders
+          pm.accepting_orders,
+          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
+          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
         from polymarket_markets pm
         left join unified_markets m
           on m.venue = 'polymarket' and m.venue_market_id = pm.id
@@ -86,7 +92,9 @@ export async function fetchPolymarketMarketInfo(
         pm.neg_risk,
         pm.order_price_min_tick_size,
         pm.order_min_size,
-        pm.accepting_orders
+        pm.accepting_orders,
+        coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
+        coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
       from polymarket_markets pm
       left join unified_markets m
         on m.venue = 'polymarket' and m.venue_market_id = pm.id

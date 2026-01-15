@@ -472,6 +472,16 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         const negRisk =
           info.neg_risk != null ? Boolean(info.neg_risk) : null;
+        const takerFeeRaw = info.taker_fee_bps ?? null;
+        const makerFeeRaw = info.maker_fee_bps ?? null;
+        const takerFeeBps =
+          takerFeeRaw != null && takerFeeRaw !== ""
+            ? Math.max(0, Number(takerFeeRaw))
+            : 0;
+        const makerFeeBps =
+          makerFeeRaw != null && makerFeeRaw !== ""
+            ? Math.max(0, Number(makerFeeRaw))
+            : 0;
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -496,6 +506,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             info.accepting_orders != null
               ? Boolean(info.accepting_orders)
               : null,
+          takerFeeBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
+          makerFeeBps: Number.isFinite(makerFeeBps) ? makerFeeBps : 0,
         });
       } catch (error) {
         app.log.error(
@@ -542,12 +554,26 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "tokenId is required" });
       }
 
+      const marketInfo = await fetchPolymarketMarketInfo(pool, { tokenId });
+      const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
+      const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
+      const takerFeeBps =
+        takerFeeRaw != null && takerFeeRaw !== ""
+          ? Math.max(0, Number(takerFeeRaw))
+          : 0;
+      const makerFeeBps =
+        makerFeeRaw != null && makerFeeRaw !== ""
+          ? Math.max(0, Number(makerFeeRaw))
+          : 0;
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
         tokenId,
         nonce: generatePolymarketNonce(),
-        feeRateBps: 0,
+        feeRateBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
+        takerFeeBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
+        makerFeeBps: Number.isFinite(makerFeeBps) ? makerFeeBps : 0,
       });
     },
   );
@@ -1500,10 +1526,40 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const orderType = normalizeOrderTypeForClob(body.orderType);
+      const orderTokenId = extractTokenId(order);
+      if (orderTokenId) {
+        const marketInfo = await fetchPolymarketMarketInfo(pool, {
+          tokenId: orderTokenId,
+        });
+        const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
+        const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
+        const takerFeeBps =
+          takerFeeRaw != null && takerFeeRaw !== ""
+            ? Math.max(0, Number(takerFeeRaw))
+            : 0;
+        const makerFeeBps =
+          makerFeeRaw != null && makerFeeRaw !== ""
+            ? Math.max(0, Number(makerFeeRaw))
+            : 0;
+        const orderFeeBps = parseNumberish(order.feeRateBps) ?? 0;
+        const expectedFeeBps =
+          orderType === "GTC" || orderType === "GTD"
+            ? makerFeeBps
+            : takerFeeBps;
+        if (expectedFeeBps > 0 && orderFeeBps !== expectedFeeBps) {
+          reply.code(400);
+          return reply.send({
+            error: `Order feeRateBps must match market ${
+              orderType === "GTC" || orderType === "GTD" ? "maker" : "taker"
+            } fee (${expectedFeeBps}).`,
+          });
+        }
+      }
+
       const normalizedOrder = normalizeOrderForPayload(order, side);
       const normalizedForHash = normalizeOrderForHash(order, side);
       const orderPayload = normalizedForHash ?? normalizedOrder;
-      const orderType = normalizeOrderTypeForClob(body.orderType);
 
       const feeAuth = body.feeAuth;
       const feeAuthSig =
