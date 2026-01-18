@@ -6,11 +6,13 @@ import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import {
   rewardsClaimBodySchema,
+  rewardsLeaderboardQuerySchema,
   rewardsReferralsQuerySchema,
 } from "../schemas/rewards.js";
 import {
   createRewardClaim,
   getOrCreateReferralCode,
+  getRewardsLeaderboard,
   getRewardsPolicy,
   getRewardsReferrals,
   getRewardsSummary,
@@ -92,6 +94,32 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, ...data });
+    },
+  );
+
+  z.get(
+    "/rewards/leaderboard",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: rewardsLeaderboardQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const leaderboard = await getRewardsLeaderboard(pool, {
+        userId: user.id,
+        metric: query.metric,
+        interval: query.interval,
+        limit: query.limit,
+        offset: query.offset,
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, leaderboard });
     },
   );
 

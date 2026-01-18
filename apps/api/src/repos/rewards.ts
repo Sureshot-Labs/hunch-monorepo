@@ -20,6 +20,25 @@ export type ReferralRow = {
   updated_at: Date;
 };
 
+export type RewardsLeaderboardMetric = "points" | "volume" | "pnl";
+export type RewardsLeaderboardInterval =
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "yearly"
+  | "alltime";
+
+export type RewardsLeaderboardRow = {
+  userId: string;
+  rank: number;
+  points: number;
+  volumeUsd: number;
+  pnlUsd: number;
+  displayName: string | null;
+  username: string | null;
+  walletAddress: string | null;
+};
+
 export async function fetchActiveRewardsPolicy(
   pool: DbQuery,
 ): Promise<RewardsPolicyRow | null> {
@@ -411,4 +430,270 @@ export async function insertRewardClaim(
     ],
   );
   return { id: rows[0].id };
+}
+
+type RewardsLeaderboardRowDb = {
+  user_id: string;
+  rank: number;
+  points: string | null;
+  volume_usd: string | null;
+  pnl_usd: string | null;
+  display_name: string | null;
+  username: string | null;
+  wallet_address: string | null;
+};
+
+function mapLeaderboardRow(row: RewardsLeaderboardRowDb): RewardsLeaderboardRow {
+  return {
+    userId: row.user_id,
+    rank: Number(row.rank ?? 0),
+    points: Number(row.points ?? 0),
+    volumeUsd: Number(row.volume_usd ?? 0),
+    pnlUsd: Number(row.pnl_usd ?? 0),
+    displayName: row.display_name ?? null,
+    username: row.username ?? null,
+    walletAddress: row.wallet_address ?? null,
+  };
+}
+
+async function fetchVolumeRank(
+  pool: DbQuery,
+  inputs: { value: number; startAt: Date | null },
+): Promise<number> {
+  const params: PgParams = [inputs.value];
+  const whereClause = inputs.startAt ? "where created_at >= $2" : "";
+  if (inputs.startAt) {
+    params.push(inputs.startAt);
+  }
+
+  const { rows } = await pool.query<{ higher: string | null }>(
+    `
+      with totals as (
+        select user_id, coalesce(sum(notional_usd), 0)::numeric as volume_usd
+        from volume_events
+        ${whereClause}
+        group by user_id
+      )
+      select count(*)::text as higher
+      from totals
+      where volume_usd > $1
+    `,
+    params,
+  );
+
+  return Number(rows[0]?.higher ?? 0) + 1;
+}
+
+async function fetchPnlRank(
+  pool: DbQuery,
+  inputs: { value: number },
+): Promise<number> {
+  const { rows } = await pool.query<{ higher: string | null }>(
+    `
+      with totals as (
+        select user_id,
+               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
+        from positions
+        group by user_id
+      )
+      select count(*)::text as higher
+      from totals
+      where pnl_usd > $1
+    `,
+    [inputs.value],
+  );
+
+  return Number(rows[0]?.higher ?? 0) + 1;
+}
+
+export async function fetchRewardsLeaderboardRows(
+  pool: DbQuery,
+  inputs: {
+    metric: RewardsLeaderboardMetric;
+    startAt: Date | null;
+    limit: number;
+    offset: number;
+  },
+): Promise<RewardsLeaderboardRow[]> {
+  if (inputs.metric === "pnl") {
+    const params: PgParams = [inputs.limit, inputs.offset];
+    const limitIdx = 1;
+    const offsetIdx = 2;
+
+    const { rows } = await pool.query<RewardsLeaderboardRowDb>(
+      `
+        with pnl as (
+          select user_id,
+                 coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
+          from positions
+          group by user_id
+        ),
+        volume as (
+          select user_id,
+                 coalesce(sum(notional_usd), 0)::numeric as volume_usd
+          from volume_events
+          group by user_id
+        ),
+        ranked as (
+          select
+            user_id,
+            pnl_usd,
+            dense_rank() over (order by pnl_usd desc) as rank
+          from pnl
+        )
+        select
+          r.user_id,
+          r.rank,
+          coalesce(v.volume_usd, 0)::text as volume_usd,
+          coalesce(v.volume_usd, 0)::text as points,
+          r.pnl_usd::text as pnl_usd,
+          u.display_name,
+          u.username,
+          primary_wallet.wallet_address
+        from ranked r
+        join users u on u.id = r.user_id
+        left join volume v on v.user_id = r.user_id
+        left join lateral (
+          select wallet_address
+          from user_wallets
+          where user_id = u.id
+          order by is_primary desc, created_at asc
+          limit 1
+        ) primary_wallet on true
+        order by r.pnl_usd desc, r.user_id
+        limit $${limitIdx} offset $${offsetIdx}
+      `,
+      params,
+    );
+    return rows.map(mapLeaderboardRow);
+  }
+
+  const params: PgParams = [];
+  const whereClause = inputs.startAt ? "where created_at >= $1" : "";
+  if (inputs.startAt) {
+    params.push(inputs.startAt);
+  }
+  params.push(inputs.limit);
+  const limitIdx = params.length;
+  params.push(inputs.offset);
+  const offsetIdx = params.length;
+
+  const { rows } = await pool.query<RewardsLeaderboardRowDb>(
+    `
+      with volume as (
+        select user_id,
+               coalesce(sum(notional_usd), 0)::numeric as volume_usd
+        from volume_events
+        ${whereClause}
+        group by user_id
+      ),
+      pnl as (
+        select user_id,
+               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
+        from positions
+        group by user_id
+      ),
+      ranked as (
+        select
+          user_id,
+          volume_usd,
+          dense_rank() over (order by volume_usd desc) as rank
+        from volume
+      )
+      select
+        r.user_id,
+        r.rank,
+        r.volume_usd::text as volume_usd,
+        r.volume_usd::text as points,
+        coalesce(p.pnl_usd, 0)::text as pnl_usd,
+        u.display_name,
+        u.username,
+        primary_wallet.wallet_address
+      from ranked r
+      join users u on u.id = r.user_id
+      left join pnl p on p.user_id = r.user_id
+      left join lateral (
+        select wallet_address
+        from user_wallets
+        where user_id = u.id
+        order by is_primary desc, created_at asc
+        limit 1
+      ) primary_wallet on true
+      order by r.volume_usd desc, r.user_id
+      limit $${limitIdx} offset $${offsetIdx}
+    `,
+    params,
+  );
+  return rows.map(mapLeaderboardRow);
+}
+
+export async function fetchRewardsLeaderboardMe(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    metric: RewardsLeaderboardMetric;
+    startAt: Date | null;
+  },
+): Promise<RewardsLeaderboardRow | null> {
+  const params: PgParams = [inputs.userId];
+  const volumeWhereClause = inputs.startAt ? "and created_at >= $2" : "";
+  if (inputs.startAt) {
+    params.push(inputs.startAt);
+  }
+
+  const { rows } = await pool.query<RewardsLeaderboardRowDb>(
+    `
+      with volume as (
+        select user_id,
+               coalesce(sum(notional_usd), 0)::numeric as volume_usd
+        from volume_events
+        where user_id = $1
+        ${volumeWhereClause}
+        group by user_id
+      ),
+      pnl as (
+        select user_id,
+               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
+        from positions
+        where user_id = $1
+        group by user_id
+      )
+      select
+        u.id as user_id,
+        0 as rank,
+        coalesce(v.volume_usd, 0)::text as volume_usd,
+        coalesce(v.volume_usd, 0)::text as points,
+        coalesce(p.pnl_usd, 0)::text as pnl_usd,
+        u.display_name,
+        u.username,
+        primary_wallet.wallet_address
+      from users u
+      left join volume v on v.user_id = u.id
+      left join pnl p on p.user_id = u.id
+      left join lateral (
+        select wallet_address
+        from user_wallets
+        where user_id = u.id
+        order by is_primary desc, created_at asc
+        limit 1
+      ) primary_wallet on true
+      where u.id = $1
+      limit 1
+    `,
+    params,
+  );
+
+  const row = rows[0];
+  if (!row) return null;
+
+  const mapped = mapLeaderboardRow(row);
+  const rank =
+    inputs.metric === "pnl"
+      ? await fetchPnlRank(pool, { value: mapped.pnlUsd })
+      : await fetchVolumeRank(pool, {
+          value: mapped.volumeUsd,
+          startAt: inputs.startAt,
+        });
+
+  return { ...mapped, rank };
 }

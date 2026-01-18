@@ -6,12 +6,17 @@ import {
   fetchFeeTotalsByChain,
   fetchQualifiedReferralCount,
   fetchReferralFeeTotalsByChain,
+  fetchRewardsLeaderboardMe,
+  fetchRewardsLeaderboardRows,
   fetchReferralsForUser,
   fetchUserPoints,
   fetchUserReferralCode,
   findUserByReferralCode,
   insertReferral,
   insertRewardClaim,
+  type RewardsLeaderboardInterval,
+  type RewardsLeaderboardMetric,
+  type RewardsLeaderboardRow,
   markQualifiedReferralsForUser,
   setUserReferralCode,
 } from "../repos/rewards.js";
@@ -87,6 +92,16 @@ export type RewardsPolicy = {
   referralBonus: ReferralBonus[];
 };
 
+export type RewardsLeaderboardEntry = RewardsLeaderboardRow & { isYou: boolean };
+
+export type RewardsLeaderboard = {
+  metric: RewardsLeaderboardMetric;
+  intervalRequested: RewardsLeaderboardInterval;
+  intervalApplied: RewardsLeaderboardInterval;
+  entries: RewardsLeaderboardEntry[];
+  me: RewardsLeaderboardEntry | null;
+};
+
 function normalizeTier(raw: unknown): RewardsTier | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
@@ -107,6 +122,31 @@ function normalizeReferralBonus(raw: unknown): ReferralBonus | null {
   const bonusBps = Number(record.bonusBps);
   if (!Number.isFinite(minReferrals) || !Number.isFinite(bonusBps)) return null;
   return { minReferrals, bonusBps };
+}
+
+function resolveLeaderboardStart(
+  interval: RewardsLeaderboardInterval,
+): Date | null {
+  const now = new Date();
+  switch (interval) {
+    case "daily":
+      return new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    case "weekly":
+      return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    case "monthly": {
+      const date = new Date(now);
+      date.setMonth(date.getMonth() - 1);
+      return date;
+    }
+    case "yearly": {
+      const date = new Date(now);
+      date.setFullYear(date.getFullYear() - 1);
+      return date;
+    }
+    case "alltime":
+    default:
+      return null;
+  }
 }
 
 function parsePolicy(raw: {
@@ -468,4 +508,46 @@ export async function createRewardClaim(
     status: "pending",
   });
   return { claimId: claim.id };
+}
+
+export async function getRewardsLeaderboard(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    metric: RewardsLeaderboardMetric;
+    interval: RewardsLeaderboardInterval;
+    limit: number;
+    offset: number;
+  },
+): Promise<RewardsLeaderboard> {
+  const intervalApplied =
+    inputs.metric === "pnl" ? "alltime" : inputs.interval;
+  const startAt = resolveLeaderboardStart(intervalApplied);
+
+  const [rows, me] = await Promise.all([
+    fetchRewardsLeaderboardRows(pool, {
+      metric: inputs.metric,
+      startAt,
+      limit: inputs.limit,
+      offset: inputs.offset,
+    }),
+    fetchRewardsLeaderboardMe(pool, {
+      userId: inputs.userId,
+      metric: inputs.metric,
+      startAt,
+    }),
+  ]);
+
+  const entries = rows.map((row) => ({
+    ...row,
+    isYou: row.userId === inputs.userId,
+  }));
+
+  return {
+    metric: inputs.metric,
+    intervalRequested: inputs.interval,
+    intervalApplied,
+    entries,
+    me: me ? { ...me, isYou: true } : null,
+  };
 }
