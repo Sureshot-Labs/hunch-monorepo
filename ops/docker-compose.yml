@@ -45,18 +45,13 @@ services:
       - statement_timeout=30000
 
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:latest
     container_name: hunch-redis
     networks:
       - hunch-net
     restart: unless-stopped
-    command:
-      - redis-server
-      - "--save"
-      - "60"
-      - "1"
-      - "--loglevel"
-      - warning
+    environment:
+      REDIS_ARGS: "--save 60 1 --loglevel warning"
     ports:
       - "${REDIS_PORT:-6379}:6379"
     healthcheck:

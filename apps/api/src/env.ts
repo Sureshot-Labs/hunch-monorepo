@@ -156,6 +156,10 @@ export const env = {
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
+  similarMarketsCacheTtlSec: optionalNonNegativeInt(
+    "API_SIMILAR_CACHE_TTL_SEC",
+    300,
+  ),
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
     15,

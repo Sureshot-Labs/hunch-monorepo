@@ -12,6 +12,7 @@ import {
   writeUnifiedBookTop,
 } from "@hunch/db";
 import { pool } from "./db";
+import { enqueueEmbedItems, type EmbedQueueItem } from "@hunch/infra";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
@@ -63,6 +64,7 @@ export async function bootstrapKalshi() {
   // Fetch all markets regardless of status so we can update closed/settled markets in DB
   // API supports fetching all statuses by omitting the status parameter
   for await (const events of iterateEventsWithMarkets()) {
+    const embedItems: EmbedQueueItem[] = [];
     for (const e of events) {
       // Store event in Kalshi-specific table
       await upsertKalshiEvent(e);
@@ -71,6 +73,17 @@ export async function bootstrapKalshi() {
       // Map and upsert to unified_events table
       const unifiedEventRow = mapToUnifiedEvent(e);
       await upsertUnifiedEvent(pool, unifiedEventRow);
+      embedItems.push({
+        entity_type: "event",
+        event_id: unifiedEventRow.id,
+        venue: unifiedEventRow.venue,
+        status: unifiedEventRow.status,
+        event_title: unifiedEventRow.title,
+        description: unifiedEventRow.description,
+        category: unifiedEventRow.category,
+        updated_at: unifiedEventRow.updated_at ?? unifiedEventRow.created_at,
+        source: "kalshi",
+      });
 
       for (const m of e.markets ?? []) {
         // Store market in Kalshi-specific table
@@ -80,6 +93,20 @@ export async function bootstrapKalshi() {
         // Map and upsert to unified_markets table
         const unifiedMarketRow = mapToUnifiedMarket(m, e.event_ticker);
         await upsertUnifiedMarket(pool, unifiedMarketRow);
+        embedItems.push({
+          entity_type: "market",
+          market_id: unifiedMarketRow.id,
+          venue: unifiedMarketRow.venue,
+          status: unifiedMarketRow.status,
+          market_title: unifiedMarketRow.title,
+          event_title: unifiedEventRow.title,
+          description: unifiedMarketRow.description,
+          category: unifiedMarketRow.category,
+          outcomes: unifiedMarketRow.outcomes,
+          market_type: unifiedMarketRow.market_type,
+          updated_at: unifiedMarketRow.updated_at ?? unifiedMarketRow.created_at,
+          source: "kalshi",
+        });
 
         // Still need to store tokens in the shared tokens table for orderbook functionality
         const marketUuid = uuid();
@@ -95,6 +122,14 @@ export async function bootstrapKalshi() {
       console.log(
         `[Bootstrap] Processed ${processedEvents} events, ${processedMarkets} markets`,
       );
+    }
+
+    if (embedItems.length) {
+      try {
+        await enqueueEmbedItems(redis, embedItems);
+      } catch (err) {
+        console.warn("[kalshi] embed enqueue failed", err);
+      }
     }
   }
 

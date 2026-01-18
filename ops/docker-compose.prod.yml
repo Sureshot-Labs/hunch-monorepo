@@ -40,18 +40,13 @@ services:
       - statement_timeout=30000
 
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:latest
     container_name: hunch-redis
     restart: unless-stopped
     networks:
       - hunch-net
-    command:
-      - redis-server
-      - "--save"
-      - "60"
-      - "1"
-      - "--loglevel"
-      - warning
+    environment:
+      REDIS_ARGS: "--save 60 1 --loglevel warning"
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -158,6 +153,23 @@ services:
         "--experimental-specifier-resolution=node",
         "apps/indexer-dflow/dist/apps/indexer-dflow/src/main.js"
       ]
+
+  ai-worker:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-ai-worker
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/ai-worker/dist/main.js"]
 
   fee-collector:
     build:

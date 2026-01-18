@@ -17,7 +17,11 @@ import {
   upsertUnifiedMarkets,
   writeUnifiedBookTop,
 } from "@hunch/db";
-import { isPgSetupIssue } from "@hunch/infra";
+import {
+  enqueueEmbedItems,
+  isPgSetupIssue,
+  type EmbedQueueItem,
+} from "@hunch/infra";
 import { pool } from "./db.js";
 import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
 import { log } from "./log.js";
@@ -118,6 +122,40 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     upsertPolymarketMarkets(polymarketMarketRows),
     upsertUnifiedMarkets(pool, unifiedMarketRows),
   ]);
+
+  try {
+    const eventTitleById = new Map(
+      unifiedEventRows.map((row) => [row.id, row.title]),
+    );
+    const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
+      entity_type: "event",
+      event_id: row.id,
+      venue: row.venue,
+      status: row.status,
+      event_title: row.title,
+      description: row.description,
+      category: row.category,
+      updated_at: row.updated_at ?? row.created_at,
+      source: "polymarket",
+    }));
+    const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+      entity_type: "market",
+      market_id: row.id,
+      venue: row.venue,
+      status: row.status,
+      market_title: row.title,
+      event_title: eventTitleById.get(row.event_id),
+      description: row.description,
+      category: row.category,
+      outcomes: row.outcomes,
+      market_type: row.market_type,
+      updated_at: row.updated_at ?? row.created_at,
+      source: "polymarket",
+    }));
+    await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
+  } catch (err) {
+    log.warn("Polymarket embed enqueue failed", err);
+  }
 
   return {
     processedEvents: parsedEvents.length,

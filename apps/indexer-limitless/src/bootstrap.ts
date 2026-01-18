@@ -21,7 +21,7 @@ import {
   upsertUnifiedTokens,
   writeUnifiedBookTop,
 } from "@hunch/db";
-import { isPgSetupIssue } from "@hunch/infra";
+import { enqueueEmbedItems, isPgSetupIssue, type EmbedQueueItem } from "@hunch/infra";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
@@ -209,6 +209,19 @@ async function processLimitlessMarket(
   await upsertUnifiedEvent(pool, unifiedEventRow);
 
   let marketCount = 0;
+  const embedItems: EmbedQueueItem[] = [
+    {
+      entity_type: "event",
+      event_id: unifiedEventRow.id,
+      venue: unifiedEventRow.venue,
+      status: unifiedEventRow.status,
+      event_title: unifiedEventRow.title,
+      description: unifiedEventRow.description,
+      category: unifiedEventRow.category,
+      updated_at: unifiedEventRow.updated_at ?? unifiedEventRow.created_at,
+      source: "limitless",
+    },
+  ];
 
   if (mergedTop.marketType === "single") {
     const marketRow = mapLimitlessMarketRow(eventId, mergedTop);
@@ -223,6 +236,20 @@ async function processLimitlessMarket(
       await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
     }
     await upsertUnifiedMarket(pool, unifiedMarketRow);
+    embedItems.push({
+      entity_type: "market",
+      market_id: unifiedMarketRow.id,
+      venue: unifiedMarketRow.venue,
+      status: unifiedMarketRow.status,
+      market_title: unifiedMarketRow.title,
+      event_title: unifiedEventRow.title,
+      description: unifiedMarketRow.description,
+      category: unifiedMarketRow.category,
+      outcomes: unifiedMarketRow.outcomes,
+      market_type: unifiedMarketRow.market_type,
+      updated_at: unifiedMarketRow.updated_at ?? unifiedMarketRow.created_at,
+      source: "limitless",
+    });
     if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
       const tokenRows: Array<{
         token_id: string;
@@ -281,6 +308,20 @@ async function processLimitlessMarket(
         await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
       }
       await upsertUnifiedMarket(pool, unifiedMarketRow);
+      embedItems.push({
+        entity_type: "market",
+        market_id: unifiedMarketRow.id,
+        venue: unifiedMarketRow.venue,
+        status: unifiedMarketRow.status,
+        market_title: unifiedMarketRow.title,
+        event_title: unifiedEventRow.title,
+        description: unifiedMarketRow.description,
+        category: unifiedMarketRow.category,
+        outcomes: unifiedMarketRow.outcomes,
+        market_type: unifiedMarketRow.market_type,
+        updated_at: unifiedMarketRow.updated_at ?? unifiedMarketRow.created_at,
+        source: "limitless",
+      });
       if (unifiedMarketRow.token_yes || unifiedMarketRow.token_no) {
         const tokenRows: Array<{
           token_id: string;
@@ -314,6 +355,14 @@ async function processLimitlessMarket(
     }
   }
 
+  if (embedItems.length) {
+    try {
+      await enqueueEmbedItems(redis, embedItems);
+    } catch (err) {
+      log.warn("Limitless embed enqueue failed", err);
+    }
+  }
+
   return { eventId, marketCount };
 }
 
@@ -322,9 +371,7 @@ export async function bootstrapLimitless() {
 
   // Fail fast on DB/auth/migrations issues (otherwise we spam per-market failures).
   await pool.query("select 1");
-  if (env.writePriceSnapshots) {
-    await ensureRedis();
-  }
+  await ensureRedis();
 
   const markets = await fetchAllActive(
     env.bootstrapMaxPages,

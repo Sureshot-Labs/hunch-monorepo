@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { createHash } from "crypto";
+import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -27,7 +29,11 @@ import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client
 import { extractLimitlessMessage, limitlessRequest } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
-import { marketParamsSchema, marketsByTokenQuerySchema } from "../schemas/market.js";
+import {
+  marketParamsSchema,
+  marketsByTokenQuerySchema,
+  marketSimilarQuerySchema,
+} from "../schemas/market.js";
 
 function parseTimestampSeconds(value: unknown): number | null {
   if (value == null) return null;
@@ -616,6 +622,238 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           error: "Internal server error",
           message: error instanceof Error ? error.message : "Unknown error",
         });
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/similar
+   * Get similar markets using Redis vector search
+   */
+  z.get(
+    "/markets/:marketId/similar",
+    { schema: { params: marketParamsSchema, querystring: marketSimilarQuerySchema } },
+    async (request, reply) => {
+      const { marketId } = request.params;
+      const {
+        limit,
+        venue,
+        activeOnly,
+        cutoff,
+        excludeMarkets,
+        excludeEvents,
+      } = request.query;
+      const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
+      const active = activeOnly ?? true;
+      const maxScore =
+        cutoff != null && Number.isFinite(cutoff) ? cutoff : undefined;
+      const excludeMarketSet = new Set(
+        (excludeMarkets ?? []).filter((entry) => entry !== marketId),
+      );
+      const excludeEventSet = new Set(excludeEvents ?? []);
+      let baseEventId: string | null = null;
+      let baseSeriesKey: string | null = null;
+
+      const redis = await getRedis();
+      if (!redis) {
+        return reply.send({ items: [], cache_status: "disabled" as const });
+      }
+
+      const bufferClient = redis.withTypeMapping({
+        [RESP_TYPES.BLOB_STRING]: Buffer,
+      });
+      const [embeddingRaw, textHashRaw, embedVersionRaw] =
+        await bufferClient.hmGet(`ai:embed:market:${marketId}`, [
+          "embedding",
+          "text_hash",
+          "embedding_version",
+        ]);
+      const embedding = Buffer.isBuffer(embeddingRaw) ? embeddingRaw : null;
+      if (!embedding) {
+        return reply.send({ items: [], cache_status: "miss" as const });
+      }
+
+      try {
+        const { rows } = await pool.query(
+          `
+          select m.event_id as event_id, e.series_key as series_key
+          from unified_markets m
+          left join unified_events e on e.id = m.event_id
+          where m.id = $1
+          limit 1;
+        `,
+          [marketId],
+        );
+        if (rows.length) {
+          baseEventId = rows[0].event_id ?? null;
+          baseSeriesKey = rows[0].series_key ?? null;
+          if (baseEventId) excludeEventSet.add(baseEventId);
+        }
+      } catch (err) {
+        app.log.warn({ err, marketId }, "Similar markets base event lookup failed");
+      }
+
+      const textHash = textHashRaw
+        ? Buffer.isBuffer(textHashRaw)
+          ? textHashRaw.toString()
+          : String(textHashRaw)
+        : "";
+      const embeddingVersion = embedVersionRaw
+        ? Buffer.isBuffer(embedVersionRaw)
+          ? embedVersionRaw.toString()
+          : String(embedVersionRaw)
+        : "";
+      const cacheTtlSec = env.similarMarketsCacheTtlSec;
+      const cacheHash = createHash("sha256")
+        .update(
+          JSON.stringify({
+            textHash,
+            embeddingVersion,
+            limit: cappedLimit,
+            active,
+            venue: venue ?? "",
+            maxScore: maxScore ?? null,
+            seriesKey: baseSeriesKey ?? "",
+            excludeMarkets: Array.from(excludeMarketSet).sort(),
+            excludeEvents: Array.from(excludeEventSet).sort(),
+          }),
+        )
+        .digest("hex")
+        .slice(0, 16);
+      const cacheKey = `ai:similar:market:${marketId}:${cacheHash}`;
+
+      if (cacheTtlSec > 0) {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          try {
+            const items = JSON.parse(cached) as Array<{
+              id: string;
+              score: number;
+            }>;
+            return reply.send({
+              items,
+              cache_status: "hit" as const,
+              cache_source: "cache",
+            });
+          } catch {
+            // fall through to recompute
+          }
+        }
+      }
+
+      const filters: string[] = [];
+      if (active) filters.push("@status:{ACTIVE}");
+      if (venue) filters.push(`@venue:{${venue}}`);
+      const filterClause = filters.length ? `(${filters.join(" ")})` : "*";
+      const query = `${filterClause}=>[KNN ${cappedLimit} @embedding $vec AS score]`;
+
+      try {
+        const raw = (await redis.sendCommand([
+          "FT.SEARCH",
+          "idx:ai:embed:market",
+          query,
+          "PARAMS",
+          "2",
+          "vec",
+          embedding,
+          "SORTBY",
+          "score",
+          "RETURN",
+          "1",
+          "score",
+          "LIMIT",
+          "0",
+          String(cappedLimit),
+          "DIALECT",
+          "2",
+        ])) as unknown[];
+
+        const items: Array<{ id: string; score: number }> = [];
+        for (let i = 1; i < raw.length; i += 2) {
+          const key = raw[i];
+          const fields = raw[i + 1] as unknown[];
+          const id = String(key).replace("ai:embed:market:", "");
+          if (id === marketId) continue;
+          let score = Number.POSITIVE_INFINITY;
+          for (let j = 0; j < fields.length; j += 2) {
+            if (String(fields[j]) === "score") {
+              score = Number(fields[j + 1]);
+              break;
+            }
+          }
+          if (!Number.isFinite(score)) continue;
+          items.push({ id, score });
+        }
+
+        let filteredItems =
+          maxScore != null ? items.filter((item) => item.score <= maxScore) : items;
+
+        if (excludeMarketSet.size > 0) {
+          filteredItems = filteredItems.filter(
+            (item) => !excludeMarketSet.has(item.id),
+          );
+        }
+
+        let eventById: Map<string, string | null> | null = null;
+        if (
+          (excludeEventSet.size > 0 || baseSeriesKey) &&
+          filteredItems.length > 0
+        ) {
+          const ids = filteredItems.map((item) => item.id);
+          const { rows } = await pool.query(
+            `select id, event_id from unified_markets where id = any($1)`,
+            [ids],
+          );
+          eventById = new Map<string, string | null>(
+            rows.map((row) => [row.id as string, row.event_id as string | null]),
+          );
+          if (excludeEventSet.size > 0) {
+            filteredItems = filteredItems.filter((item) => {
+              const eventId = eventById?.get(item.id);
+              if (!eventId) return true;
+              return !excludeEventSet.has(eventId);
+            });
+          }
+        }
+
+        if (baseSeriesKey && filteredItems.length > 0 && eventById) {
+          const eventIds = Array.from(
+            new Set(
+              filteredItems
+                .map((item) => eventById?.get(item.id))
+                .filter(Boolean),
+            ),
+          ) as string[];
+          if (eventIds.length) {
+            const { rows } = await pool.query(
+              `select id, series_key from unified_events where id = any($1)`,
+              [eventIds],
+            );
+            const seriesByEvent = new Map<string, string | null>(
+              rows.map((row) => [row.id as string, row.series_key as string | null]),
+            );
+            filteredItems = filteredItems.filter((item) => {
+              const eventId = eventById?.get(item.id);
+              if (!eventId) return true;
+              return seriesByEvent.get(eventId) !== baseSeriesKey;
+            });
+          }
+        }
+
+        if (cacheTtlSec > 0) {
+          await redis.set(cacheKey, JSON.stringify(filteredItems), {
+            EX: cacheTtlSec,
+          });
+        }
+
+        return reply.send({
+          items: filteredItems,
+          cache_status: "hit" as const,
+          cache_source: "knn",
+        });
+      } catch (err) {
+        app.log.warn({ err, marketId }, "Similar markets lookup failed");
+        return reply.send({ items: [], cache_status: "error" as const });
       }
     },
   );

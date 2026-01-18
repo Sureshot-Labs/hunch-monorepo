@@ -1,5 +1,6 @@
 import PQueue from "p-queue";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import { enqueueEmbedItems, type EmbedQueueItem } from "@hunch/infra";
 import {
   upsertUnifiedEvents,
   upsertUnifiedMarkets,
@@ -511,6 +512,34 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
     await upsertUnifiedTokens(pool, tokenRows);
   }
 
+  if (unifiedMarketRows.length) {
+    try {
+      const eventTitleById = new Map(
+        Array.from(eventInfoByTicker.values()).map((info) => [
+          info.eventId,
+          info.eventTitle,
+        ]),
+      );
+      const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+        entity_type: "market",
+        market_id: row.id,
+        venue: row.venue,
+        status: row.status,
+        market_title: row.title,
+        event_title: eventTitleById.get(row.event_id),
+        description: row.description,
+        category: row.category,
+        outcomes: row.outcomes,
+        market_type: row.market_type,
+        updated_at: row.updated_at ?? row.created_at,
+        source: "dflow",
+      }));
+      await enqueueEmbedItems(redis, embedMarkets);
+    } catch (err) {
+      log.warn("DFlow embed enqueue failed", err);
+    }
+  }
+
   log.info("DFlow hot status refresh complete", {
     tokens: allTokenIds.length,
     markets: processedMarkets,
@@ -605,6 +634,42 @@ async function processEvents(events: TDflowEvent[]): Promise<{
   }
   if (tokenRows.length) {
     await upsertUnifiedTokens(pool, tokenRows);
+  }
+
+  if (unifiedEventRows.length || unifiedMarketRows.length) {
+    try {
+      const eventTitleById = new Map(
+        unifiedEventRows.map((row) => [row.id, row.title]),
+      );
+      const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
+        entity_type: "event",
+        event_id: row.id,
+        venue: row.venue,
+        status: row.status,
+        event_title: row.title,
+        description: row.description,
+        category: row.category,
+        updated_at: row.updated_at ?? row.created_at,
+        source: "dflow",
+      }));
+      const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+        entity_type: "market",
+        market_id: row.id,
+        venue: row.venue,
+        status: row.status,
+        market_title: row.title,
+        event_title: eventTitleById.get(row.event_id),
+        description: row.description,
+        category: row.category,
+        outcomes: row.outcomes,
+        market_type: row.market_type,
+        updated_at: row.updated_at ?? row.created_at,
+        source: "dflow",
+      }));
+      await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
+    } catch (err) {
+      log.warn("DFlow embed enqueue failed", err);
+    }
   }
 
   return { processedEvents, processedMarkets, snapshots };
