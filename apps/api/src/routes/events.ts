@@ -742,13 +742,14 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const cacheHash = createHash("sha256")
         .update(
           JSON.stringify({
-            selectorVersion: "v3",
+            selectorVersion: "v6",
             textHash,
             embeddingVersion,
             limit: cappedLimit,
             active,
             venue: venue ?? "",
             maxScore: maxScore ?? null,
+            marketId: marketId ?? "",
             seriesKey: baseSeriesKey ?? "",
             excludeEvents: Array.from(excludeEventSet).sort(),
           }),
@@ -777,17 +778,199 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const searchVenues = venue
-        ? [venue]
-        : (["polymarket", "kalshi", "limitless"] as const);
-      const perVenueLimit = venue
-        ? cappedLimit
-        : Math.min(
-            200,
-            Math.max(5, Math.ceil(cappedLimit / searchVenues.length) * 2),
-          );
-
       try {
+        const baseMarketEmbeddingRaw =
+          marketId != null
+            ? (await bufferClient.hmGet(`ai:embed:market:${marketId}`, [
+                "embedding",
+              ]))[0]
+            : null;
+        const baseMarketBuffer = Buffer.isBuffer(baseMarketEmbeddingRaw)
+          ? baseMarketEmbeddingRaw
+          : null;
+        const baseMarketVector = baseMarketBuffer
+          ? parseEmbeddingBuffer(baseMarketBuffer)
+          : null;
+
+        if (marketId && baseMarketBuffer && baseMarketVector) {
+          const filters: string[] = [];
+          if (active) filters.push("@status:{ACTIVE}");
+          if (venue) filters.push(`@venue:{${venue}}`);
+          const filterClause = filters.length ? `(${filters.join(" ")})` : "*";
+          const marketSearchLimit = Math.min(
+            300,
+            Math.max(50, cappedLimit * 25),
+          );
+          const query = `${filterClause}=>[KNN ${marketSearchLimit} @embedding $vec AS score]`;
+
+          const raw = (await redis.sendCommand([
+            "FT.SEARCH",
+            "idx:ai:embed:market",
+            query,
+            "PARAMS",
+            "2",
+            "vec",
+            baseMarketBuffer,
+            "SORTBY",
+            "score",
+            "RETURN",
+            "1",
+            "score",
+            "LIMIT",
+            "0",
+            String(marketSearchLimit),
+            "DIALECT",
+            "2",
+          ])) as unknown[];
+
+          const marketHits: Array<{ marketId: string; score: number }> = [];
+          for (let i = 1; i < raw.length; i += 2) {
+            const key = raw[i];
+            const fields = raw[i + 1] as unknown[];
+            const id = String(key).replace("ai:embed:market:", "");
+            let score = Number.POSITIVE_INFINITY;
+            for (let j = 0; j < fields.length; j += 2) {
+              if (String(fields[j]) === "score") {
+                score = Number(fields[j + 1]);
+                break;
+              }
+            }
+            if (!Number.isFinite(score)) continue;
+            if (maxScore != null && score > maxScore) continue;
+            marketHits.push({ marketId: id, score });
+          }
+
+          if (marketHits.length) {
+            const marketIds = marketHits.map((item) => item.marketId);
+            const { rows } = await pool.query(
+              `
+              select m.id as market_id,
+                     m.event_id,
+                     e.venue,
+                     e.series_key,
+                     e.status as event_status
+              from unified_markets m
+              join unified_events e on e.id = m.event_id
+              where m.id = any($1)
+              ${active ? "and e.status = 'ACTIVE'" : ""}
+              `,
+              [marketIds],
+            );
+
+            const marketMeta = new Map<
+              string,
+              {
+                eventId: string;
+                venue: string | null;
+                seriesKey: string | null;
+              }
+            >();
+            for (const row of rows) {
+              marketMeta.set(row.market_id as string, {
+                eventId: row.event_id as string,
+                venue: row.venue ?? null,
+                seriesKey: row.series_key ?? null,
+              });
+            }
+
+            const bestByEvent = new Map<
+              string,
+              { marketId: string; score: number; venue: string | null }
+            >();
+            for (const hit of marketHits) {
+              const meta = marketMeta.get(hit.marketId);
+              if (!meta) continue;
+              if (excludeEventSet.has(meta.eventId)) continue;
+              if (baseSeriesKey && meta.seriesKey === baseSeriesKey) continue;
+              const current = bestByEvent.get(meta.eventId);
+              if (!current || hit.score < current.score) {
+                bestByEvent.set(meta.eventId, {
+                  marketId: hit.marketId,
+                  score: hit.score,
+                  venue: meta.venue ?? null,
+                });
+              }
+            }
+
+            let eventItems = Array.from(bestByEvent.entries()).map(
+              ([eventIdKey, best]) => ({
+                eventId: eventIdKey,
+                marketId: best.marketId,
+                score: best.score,
+                venue: best.venue ?? "unknown",
+              }),
+            );
+
+            if (!venue && eventItems.length > 0) {
+              const byVenue = new Map<
+                string,
+                Array<{ eventId: string; marketId: string; score: number; venue: string }>
+              >();
+              for (const item of eventItems) {
+                const list = byVenue.get(item.venue) ?? [];
+                list.push(item);
+                byVenue.set(item.venue, list);
+              }
+              for (const list of byVenue.values()) {
+                list.sort((a, b) => a.score - b.score);
+              }
+              const venueOrder = Array.from(byVenue.entries())
+                .sort((a, b) => (a[1][0]?.score ?? 0) - (b[1][0]?.score ?? 0))
+                .map(([v]) => v);
+              const diversified: Array<{
+                eventId: string;
+                marketId: string;
+                score: number;
+                venue: string;
+              }> = [];
+              let added = true;
+              while (added && diversified.length < eventItems.length) {
+                added = false;
+                for (const v of venueOrder) {
+                  const list = byVenue.get(v);
+                  if (!list || list.length === 0) continue;
+                  const item = list.shift();
+                  if (item) {
+                    diversified.push(item);
+                    added = true;
+                  }
+                }
+              }
+              eventItems = diversified;
+            } else {
+              eventItems.sort((a, b) => a.score - b.score);
+            }
+
+            const responseItems = eventItems.slice(0, cappedLimit).map((item) => ({
+              eventId: item.eventId,
+              marketId: item.marketId,
+              score: item.score,
+            }));
+
+            if (cacheTtlSec > 0) {
+              await redis.set(cacheKey, JSON.stringify(responseItems), {
+                EX: cacheTtlSec,
+              });
+            }
+
+            return reply.send({
+              items: responseItems,
+              cache_status: "hit" as const,
+              cache_source: "knn",
+            });
+          }
+        }
+
+        const searchVenues = venue
+          ? [venue]
+          : (["polymarket", "kalshi", "limitless"] as const);
+        const perVenueLimit = venue
+          ? cappedLimit
+          : Math.min(
+              200,
+              Math.max(5, Math.ceil(cappedLimit / searchVenues.length) * 2),
+            );
+
         const items: Array<{ eventId: string; score: number }> = [];
         for (const venueFilter of searchVenues) {
           const filters: string[] = [];
@@ -926,21 +1109,6 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         const finalItems = filteredItems.slice(0, cappedLimit);
         const finalEventIds = finalItems.map((item) => item.eventId);
         const marketByEvent = new Map<string, string | null>();
-
-        const bufferClient = redis.withTypeMapping({
-          [RESP_TYPES.BLOB_STRING]: Buffer,
-        });
-        let baseMarketVector: Float32Array | null = null;
-        if (marketId) {
-          const [marketEmbeddingRaw] = await bufferClient.hmGet(
-            `ai:embed:market:${marketId}`,
-            ["embedding"],
-          );
-          if (Buffer.isBuffer(marketEmbeddingRaw)) {
-            baseMarketVector = parseEmbeddingBuffer(marketEmbeddingRaw);
-          }
-        }
-
         if (finalEventIds.length && baseMarketVector) {
           const { rows } = await pool.query(
             `
@@ -951,12 +1119,13 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             `,
             [finalEventIds],
           );
-          const pipeline = bufferClient.multi();
-          for (const row of rows) {
-            pipeline.hmGet(`ai:embed:market:${row.market_id}`, ["embedding"]);
-          }
-          const embeddingsRaw = (await pipeline.exec()) as unknown;
-          const embeddings = Array.isArray(embeddingsRaw) ? embeddingsRaw : [];
+          const embeddings = await Promise.all(
+            rows.map((row) =>
+              bufferClient.hmGet(`ai:embed:market:${row.market_id}`, [
+                "embedding",
+              ]),
+            ),
+          );
 
           const bestByEvent = new Map<
             string,

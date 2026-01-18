@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { abis } from "@hunch/contracts";
+import { getEmbedStreamKey } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { getRedis } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { fetchActiveRewardsPolicy } from "../repos/rewards.js";
@@ -43,6 +45,9 @@ const DEBRIDGE_CONFIG_TTL_MS = 30_000;
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
+const EMBED_INDEX_MARKET = "idx:ai:embed:market";
+const EMBED_INDEX_EVENT = "idx:ai:embed:event";
+const EMBED_DLQ_KEY = "ai:embed:dead";
 
 const DEBRIDGE_CHAIN_META: Record<
   string,
@@ -139,6 +144,43 @@ function clampFeeBps(value: number): number {
 function clampFeeScale(value: number | undefined): number | null {
   if (value == null || !Number.isFinite(value)) return null;
   return Math.min(Math.max(value, 0), MAX_FEE_SCALE);
+}
+
+function toOptionalNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+async function fetchIndexCount(
+  redis: NonNullable<Awaited<ReturnType<typeof getRedis>>>,
+  indexName: string,
+  query: string,
+): Promise<{ count: number | null; error: string | null }> {
+  try {
+    const response = (await redis.sendCommand([
+      "FT.SEARCH",
+      indexName,
+      query,
+      "RETURN",
+      "0",
+      "LIMIT",
+      "0",
+      "0",
+    ])) as unknown[];
+    const count = toOptionalNumber(response?.[0]) ?? null;
+    return { count, error: count == null ? "Invalid index count" : null };
+  } catch (error) {
+    return {
+      count: null,
+      error: error instanceof Error ? error.message : "Index count failed",
+    };
+  }
 }
 
 async function resolveUserIdByWallet(walletAddress: string) {
@@ -545,6 +587,171 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           recipients: debridgeRecipientBalances,
           source: debridgeConfig.source,
         },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/vector",
+    { preHandler: createAdminMiddleware() },
+    async (_request, reply) => {
+      const streamKey = getEmbedStreamKey();
+      const groupName = process.env.AI_EMBED_GROUP ?? "ai-embedder";
+      const generatedAt = new Date().toISOString();
+
+      const [{ rows: eventRows }, { rows: marketRows }] = await Promise.all([
+        pool.query<{ total: string; active: string }>(
+          `
+            select
+              count(*)::text as total,
+              count(*) filter (where status = 'ACTIVE')::text as active
+            from unified_events
+          `,
+        ),
+        pool.query<{ total: string; active: string }>(
+          `
+            select
+              count(*)::text as total,
+              count(*) filter (where status = 'ACTIVE')::text as active
+            from unified_markets
+          `,
+        ),
+      ]);
+
+      const eventDbTotal = Number(eventRows[0]?.total ?? 0);
+      const eventDbActive = Number(eventRows[0]?.active ?? 0);
+      const marketDbTotal = Number(marketRows[0]?.total ?? 0);
+      const marketDbActive = Number(marketRows[0]?.active ?? 0);
+
+      const redis = await getRedis();
+      const redisStats: {
+        available: boolean;
+        error: string | null;
+        stream: {
+          key: string;
+          length: number | null;
+          group: string;
+          lag: number | null;
+          pending: number | null;
+          consumers: number | null;
+        };
+        dlq: { key: string; length: number | null };
+        indexes: {
+          event: { total: number | null; active: number | null; error: string | null };
+          market: { total: number | null; active: number | null; error: string | null };
+        };
+      } = {
+        available: false,
+        error: "Redis not configured",
+        stream: {
+          key: streamKey,
+          length: null,
+          group: groupName,
+          lag: null,
+          pending: null,
+          consumers: null,
+        },
+        dlq: { key: EMBED_DLQ_KEY, length: null },
+        indexes: {
+          event: { total: null, active: null, error: null },
+          market: { total: null, active: null, error: null },
+        },
+      };
+
+      if (redis) {
+        redisStats.available = true;
+        redisStats.error = null;
+
+        const [eventTotal, eventActive, marketTotal, marketActive] =
+          await Promise.all([
+            fetchIndexCount(redis, EMBED_INDEX_EVENT, "*"),
+            fetchIndexCount(redis, EMBED_INDEX_EVENT, "@status:{ACTIVE}"),
+            fetchIndexCount(redis, EMBED_INDEX_MARKET, "*"),
+            fetchIndexCount(redis, EMBED_INDEX_MARKET, "@status:{ACTIVE}"),
+          ]);
+
+        redisStats.indexes.event = {
+          total: eventTotal.count,
+          active: eventActive.count,
+          error: eventTotal.error ?? eventActive.error,
+        };
+        redisStats.indexes.market = {
+          total: marketTotal.count,
+          active: marketActive.count,
+          error: marketTotal.error ?? marketActive.error,
+        };
+
+        try {
+          const [streamLength, dlqLength] = await Promise.all([
+            redis.xLen(streamKey),
+            redis.xLen(EMBED_DLQ_KEY),
+          ]);
+          redisStats.stream.length = streamLength;
+          redisStats.dlq.length = dlqLength;
+        } catch (error) {
+          redisStats.error =
+            error instanceof Error ? error.message : "Redis stream lookup failed";
+        }
+
+        try {
+          const groups = await redis.xInfoGroups(streamKey);
+          const group = groups.find((entry) => entry.name === groupName);
+          if (group) {
+            redisStats.stream.lag = toOptionalNumber(group.lag);
+            redisStats.stream.pending = toOptionalNumber(group.pending);
+            redisStats.stream.consumers = toOptionalNumber(group.consumers);
+          }
+        } catch (error) {
+          redisStats.error =
+            redisStats.error ??
+            (error instanceof Error
+              ? error.message
+              : "Redis consumer info failed");
+        }
+      }
+
+      const buildCoverage = (options: {
+        dbTotal: number;
+        dbActive: number;
+        embeddedTotal: number | null;
+        embeddedActive: number | null;
+      }) => {
+        const embeddedInactive =
+          options.embeddedTotal != null && options.embeddedActive != null
+            ? Math.max(options.embeddedTotal - options.embeddedActive, 0)
+            : null;
+        const coverageActive =
+          options.embeddedActive != null && options.dbActive > 0
+            ? options.embeddedActive / options.dbActive
+            : null;
+        return {
+          dbTotal: options.dbTotal,
+          dbActive: options.dbActive,
+          embeddedTotal: options.embeddedTotal,
+          embeddedActive: options.embeddedActive,
+          embeddedInactive,
+          coverageActive,
+        };
+      };
+
+      return reply.send({
+        ok: true,
+        generatedAt,
+        coverage: {
+          events: buildCoverage({
+            dbTotal: eventDbTotal,
+            dbActive: eventDbActive,
+            embeddedTotal: redisStats.indexes.event.total,
+            embeddedActive: redisStats.indexes.event.active,
+          }),
+          markets: buildCoverage({
+            dbTotal: marketDbTotal,
+            dbActive: marketDbActive,
+            embeddedTotal: redisStats.indexes.market.total,
+            embeddedActive: redisStats.indexes.market.active,
+          }),
+        },
+        redis: redisStats,
       });
     },
   );

@@ -21,7 +21,12 @@ import {
   upsertUnifiedTokens,
   writeUnifiedBookTop,
 } from "@hunch/db";
-import { enqueueEmbedItems, isPgSetupIssue, type EmbedQueueItem } from "@hunch/infra";
+import {
+  buildTopMarketsText,
+  enqueueEmbedItems,
+  isPgSetupIssue,
+  type EmbedQueueItem,
+} from "@hunch/infra";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
@@ -222,6 +227,13 @@ async function processLimitlessMarket(
       source: "limitless",
     },
   ];
+  const eventMarkets: Array<{
+    title?: string | null;
+    volume_24h?: number | null;
+    volume_total?: number | null;
+    liquidity?: number | null;
+    open_interest?: number | null;
+  }> = [];
 
   if (mergedTop.marketType === "single") {
     const marketRow = mapLimitlessMarketRow(eventId, mergedTop);
@@ -236,6 +248,7 @@ async function processLimitlessMarket(
       await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
     }
     await upsertUnifiedMarket(pool, unifiedMarketRow);
+    eventMarkets.push(unifiedMarketRow);
     embedItems.push({
       entity_type: "market",
       market_id: unifiedMarketRow.id,
@@ -308,6 +321,7 @@ async function processLimitlessMarket(
         await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
       }
       await upsertUnifiedMarket(pool, unifiedMarketRow);
+      eventMarkets.push(unifiedMarketRow);
       embedItems.push({
         entity_type: "market",
         market_id: unifiedMarketRow.id,
@@ -353,6 +367,11 @@ async function processLimitlessMarket(
         }
       }
     }
+  }
+
+  const topMarkets = buildTopMarketsText(eventMarkets, unifiedEventRow.title);
+  if (topMarkets) {
+    embedItems[0] = { ...embedItems[0], top_markets: topMarkets };
   }
 
   if (embedItems.length) {

@@ -12,7 +12,11 @@ import {
   writeUnifiedBookTop,
 } from "@hunch/db";
 import { pool } from "./db";
-import { enqueueEmbedItems, type EmbedQueueItem } from "@hunch/infra";
+import {
+  buildTopMarketsText,
+  enqueueEmbedItems,
+  type EmbedQueueItem,
+} from "@hunch/infra";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
@@ -73,7 +77,7 @@ export async function bootstrapKalshi() {
       // Map and upsert to unified_events table
       const unifiedEventRow = mapToUnifiedEvent(e);
       await upsertUnifiedEvent(pool, unifiedEventRow);
-      embedItems.push({
+      const eventEmbed: EmbedQueueItem = {
         entity_type: "event",
         event_id: unifiedEventRow.id,
         venue: unifiedEventRow.venue,
@@ -83,7 +87,15 @@ export async function bootstrapKalshi() {
         category: unifiedEventRow.category,
         updated_at: unifiedEventRow.updated_at ?? unifiedEventRow.created_at,
         source: "kalshi",
-      });
+      };
+
+      const unifiedMarketRows: Array<{
+        title?: string | null;
+        volume_24h?: number | null;
+        volume_total?: number | null;
+        liquidity?: number | null;
+        open_interest?: number | null;
+      }> = [];
 
       for (const m of e.markets ?? []) {
         // Store market in Kalshi-specific table
@@ -93,6 +105,7 @@ export async function bootstrapKalshi() {
         // Map and upsert to unified_markets table
         const unifiedMarketRow = mapToUnifiedMarket(m, e.event_ticker);
         await upsertUnifiedMarket(pool, unifiedMarketRow);
+        unifiedMarketRows.push(unifiedMarketRow);
         embedItems.push({
           entity_type: "market",
           market_id: unifiedMarketRow.id,
@@ -115,6 +128,13 @@ export async function bootstrapKalshi() {
         }
         topTickers.add(m.ticker);
       }
+
+      const topMarkets = buildTopMarketsText(
+        unifiedMarketRows,
+        unifiedEventRow.title,
+      );
+      if (topMarkets) eventEmbed.top_markets = topMarkets;
+      embedItems.push(eventEmbed);
     }
 
     // Log progress every 50 events

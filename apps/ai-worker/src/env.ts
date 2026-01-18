@@ -37,7 +37,7 @@ const concurrency = clampInt(concurrencyRaw, { min: 1, max: 32, fallback: 4 });
 const blockMsRaw = parseOptionalInt(process.env.AI_EMBED_BLOCK_MS);
 const blockMs = clampInt(blockMsRaw, { min: 100, max: 60_000, fallback: 2_000 });
 
-const textVersion = process.env.AI_EMBED_TEXT_VERSION ?? "v1";
+const textVersion = process.env.AI_EMBED_TEXT_VERSION ?? "v3";
 const ttlRaw = parseOptionalInt(process.env.AI_EMBED_TTL_SEC);
 const embedTtlSec = clampInt(ttlRaw, { min: 3600, max: 30 * 24 * 3600, fallback: 2 * 24 * 3600 });
 
@@ -80,6 +80,10 @@ export const env = {
   maxDescriptionChars: clampInt(
     parseOptionalInt(process.env.AI_EMBED_DESC_MAX_CHARS),
     { min: 50, max: 2000, fallback: 500 },
+  ),
+  maxTopMarketsChars: clampInt(
+    parseOptionalInt(process.env.AI_EMBED_TOP_MARKETS_MAX_CHARS),
+    { min: 50, max: 2000, fallback: 320 },
   ),
   enabled: (process.env.AI_EMBED_ENABLED ?? "true") !== "false",
 };

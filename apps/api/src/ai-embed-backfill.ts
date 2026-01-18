@@ -1,4 +1,9 @@
-import { createRedisClient, enqueueEmbedItems, ensureRedis } from "@hunch/infra";
+import {
+  buildTopMarketsText,
+  createRedisClient,
+  enqueueEmbedItems,
+  ensureRedis,
+} from "@hunch/infra";
 import type { EmbedQueueItem } from "@hunch/infra";
 import { pool } from "./db.js";
 import { env } from "./env.js";
@@ -207,17 +212,56 @@ async function backfillEvents(
     const { rows } = await pool.query(sql, params);
     if (rows.length === 0) break;
 
-    const items: EmbedQueueItem[] = rows.map((row) => ({
-      entity_type: "event",
-      event_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      event_title: row.event_title,
-      description: row.description,
-      category: row.category,
-      updated_at: row.sort_ts,
-      source: "backfill",
-    }));
+    const eventIds = rows.map((row) => row.id);
+    const marketRows = await pool.query(
+      `
+      select
+        event_id,
+        title,
+        volume_24h,
+        volume_total,
+        liquidity,
+        open_interest
+      from unified_markets
+      where event_id = any($1)
+        and status = 'ACTIVE'
+      `,
+      [eventIds],
+    );
+    const marketsByEvent = new Map<
+      string,
+      Array<{
+        title?: string | null;
+        volume_24h?: number | null;
+        volume_total?: number | null;
+        liquidity?: number | null;
+        open_interest?: number | null;
+      }>
+    >();
+    for (const row of marketRows.rows) {
+      const list = marketsByEvent.get(row.event_id) ?? [];
+      list.push(row);
+      marketsByEvent.set(row.event_id, list);
+    }
+
+    const items: EmbedQueueItem[] = rows.map((row) => {
+      const topMarkets = buildTopMarketsText(
+        marketsByEvent.get(row.id) ?? [],
+        row.event_title,
+      );
+      return {
+        entity_type: "event",
+        event_id: row.id,
+        venue: row.venue,
+        status: row.status,
+        event_title: row.event_title,
+        top_markets: topMarkets,
+        description: row.description,
+        category: row.category,
+        updated_at: row.sort_ts,
+        source: "backfill",
+      };
+    });
 
     if (!options.dryRun) {
       await enqueueEmbedItems(redis, items);

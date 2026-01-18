@@ -18,6 +18,7 @@ import {
   writeUnifiedBookTop,
 } from "@hunch/db";
 import {
+  buildTopMarketsText,
   enqueueEmbedItems,
   isPgSetupIssue,
   type EmbedQueueItem,
@@ -127,12 +128,25 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     const eventTitleById = new Map(
       unifiedEventRows.map((row) => [row.id, row.title]),
     );
+    const marketsByEvent = new Map<string, typeof unifiedMarketRows>();
+    for (const row of unifiedMarketRows) {
+      const list = marketsByEvent.get(row.event_id) ?? [];
+      list.push(row);
+      marketsByEvent.set(row.event_id, list);
+    }
+    const topMarketsByEvent = new Map<string, string>();
+    for (const row of unifiedEventRows) {
+      const markets = marketsByEvent.get(row.id) ?? [];
+      const topMarkets = buildTopMarketsText(markets, row.title);
+      if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
+    }
     const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
       entity_type: "event",
       event_id: row.id,
       venue: row.venue,
       status: row.status,
       event_title: row.title,
+      top_markets: topMarketsByEvent.get(row.id),
       description: row.description,
       category: row.category,
       updated_at: row.updated_at ?? row.created_at,

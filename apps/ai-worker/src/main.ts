@@ -23,6 +23,7 @@ type EmbedPayload = {
   venue?: string;
   marketTitle?: string;
   eventTitle?: string;
+  topMarkets?: string;
   description?: string;
   category?: string;
   outcomes?: string;
@@ -192,12 +193,57 @@ function parseOutcomes(value: string | undefined): string | undefined {
   return value;
 }
 
+function normalizeOutcomes(value: string | undefined): string | undefined {
+  const outcomes = normalizeText(parseOutcomes(value));
+  if (!outcomes) return undefined;
+  const parts = outcomes
+    .split(",")
+    .map((part) => normalizeText(part))
+    .filter((part): part is string => Boolean(part));
+  if (!parts.length) return undefined;
+  const lowers = new Set(parts.map((part) => part.toLowerCase()));
+  const isYesNo =
+    lowers.size <= 2 && lowers.has("yes") && lowers.has("no");
+  const isTrueFalse =
+    lowers.size <= 2 && lowers.has("true") && lowers.has("false");
+  if (isYesNo || isTrueFalse) return undefined;
+  return parts.join(", ");
+}
+
+function normalizeTopMarkets(
+  value: string | undefined,
+  eventTitle: string | undefined,
+): string | undefined {
+  const cleaned = normalizeText(value);
+  if (!cleaned) return undefined;
+  const eventLower = normalizeText(eventTitle)?.toLowerCase();
+  const parts = cleaned
+    .split("|")
+    .map((part) => normalizeText(part))
+    .filter((part): part is string => Boolean(part));
+  const seen = new Set<string>();
+  const filtered: string[] = [];
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (eventLower && lower === eventLower) continue;
+    if (lower === "yes" || lower === "no" || lower === "true" || lower === "false")
+      continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    filtered.push(part);
+    if (filtered.length >= 20) break;
+  }
+  if (!filtered.length) return undefined;
+  const joined = filtered.join(" | ");
+  return truncate(joined, env.maxTopMarketsChars) ?? joined;
+}
+
 function buildMarketText(payload: EmbedPayload): string {
-  const lines: string[] = [`passage: venue=${payload.venue ?? ""}`];
+  const lines: string[] = ["passage: market"];
   const marketTitle = normalizeText(payload.marketTitle);
   const eventTitle = normalizeText(payload.eventTitle);
   const category = normalizeText(payload.category);
-  const outcomes = normalizeText(parseOutcomes(payload.outcomes));
+  const outcomes = normalizeOutcomes(payload.outcomes);
   const marketType = normalizeText(payload.marketType);
   const description = truncate(
     normalizeText(payload.description),
@@ -205,10 +251,12 @@ function buildMarketText(payload: EmbedPayload): string {
   );
 
   if (marketTitle) lines.push(`market_title=${marketTitle}`);
-  if (eventTitle) lines.push(`event_title=${eventTitle}`);
+  if (eventTitle && eventTitle !== marketTitle)
+    lines.push(`event_title=${eventTitle}`);
   if (category) lines.push(`category=${category}`);
   if (outcomes) lines.push(`outcomes=${outcomes}`);
-  if (marketType) lines.push(`market_type=${marketType}`);
+  if (marketType && marketType !== "binary")
+    lines.push(`market_type=${marketType}`);
   if (description) lines.push(`description=${description}`);
 
   const text = lines.join("\n");
@@ -216,15 +264,17 @@ function buildMarketText(payload: EmbedPayload): string {
 }
 
 function buildEventText(payload: EmbedPayload): string {
-  const lines: string[] = [`passage: venue=${payload.venue ?? ""}`];
+  const lines: string[] = ["passage: event"];
   const eventTitle = normalizeText(payload.eventTitle);
   const category = normalizeText(payload.category);
+  const topMarkets = normalizeTopMarkets(payload.topMarkets, eventTitle);
   const description = truncate(
     normalizeText(payload.description),
     env.maxDescriptionChars,
   );
 
   if (eventTitle) lines.push(`event_title=${eventTitle}`);
+  if (topMarkets) lines.push(`top_markets=${topMarkets}`);
   if (category) lines.push(`category=${category}`);
   if (description) lines.push(`description=${description}`);
 
@@ -265,6 +315,7 @@ function parsePayload(fields: Record<string, string>): EmbedPayload | null {
     venue: normalizeText(fields.venue),
     marketTitle: normalizeText(fields.market_title),
     eventTitle: normalizeText(fields.event_title),
+    topMarkets: normalizeText(fields.top_markets),
     description: normalizeText(fields.description),
     category: normalizeText(fields.category),
     outcomes: fields.outcomes,
