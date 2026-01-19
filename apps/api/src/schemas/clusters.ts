@@ -1,0 +1,15 @@
+import { z } from "zod";
+
+export const clustersQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  minLiquidity: z.coerce.number().min(0).optional(),
+  minVenueCount: z.coerce.number().int().min(1).max(10).optional(),
+  minSpread: z.coerce.number().min(0).max(1).optional(),
+});
+
+export const clusterParamsSchema = z.object({
+  id: z.string().min(1),
+});
+
+export type ClustersQuery = z.infer<typeof clustersQuerySchema>;
+export type ClusterParams = z.infer<typeof clusterParamsSchema>;
