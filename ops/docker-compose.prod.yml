@@ -169,7 +169,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    command: ["node", "apps/ai-worker/dist/main.js"]
+    command: ["node", "apps/ai-worker/dist/apps/ai-worker/src/main.js"]
 
   fee-collector:
     build:
