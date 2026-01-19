@@ -76,6 +76,12 @@ importers:
         specifier: ^8.27.0
         version: 8.49.0(eslint@9.39.1)(typescript@5.9.3)
 
+  apps/ai-worker:
+    dependencies:
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
+
   apps/api:
     dependencies:
       '@fastify/swagger':
