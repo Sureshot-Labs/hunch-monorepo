@@ -305,7 +305,10 @@ async function run() {
 
   const options = resolveOptions(args);
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis);
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "ai-embed-backfill",
+  });
 
   console.log("[backfill] starting", {
     venues: options.venues.length ? options.venues : "all",

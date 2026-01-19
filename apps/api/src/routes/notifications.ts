@@ -8,6 +8,7 @@ import {
   markNotificationRead,
 } from "../repos/notifications-repo.js";
 import { subscribeToNotifications } from "../lib/notifications-stream-manager.js";
+import { getRedisStatus } from "../redis.js";
 import {
   buildRedemptionNotification,
   createNotificationSafe,
@@ -147,6 +148,14 @@ export const notificationsRoutes: FastifyPluginAsync = async (app) => {
       if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
+      }
+
+      const { redis, status } = await getRedisStatus();
+      if (!redis) {
+        reply.code(503);
+        return reply.send({
+          error: status === "loading" ? "Redis loading, retry" : "Redis unavailable",
+        });
       }
 
       reply.raw.setHeader("Content-Type", "text/event-stream");

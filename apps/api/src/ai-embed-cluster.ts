@@ -1412,7 +1412,7 @@ async function main() {
 
   const redis = createRedisClient({ url: env.redisUrl });
   redis.on("error", (e: unknown) => console.warn("[redis] err", String(e)));
-  await ensureRedis(redis);
+  await ensureRedis(redis, { waitForReady: true, logLabel: "ai-embed-cluster" });
 
   try {
     const seeds = await fetchSeedMarkets(options);

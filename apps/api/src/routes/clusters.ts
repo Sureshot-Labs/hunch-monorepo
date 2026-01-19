@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
-import { getRedis } from "../redis.js";
+import { getRedisStatus } from "../redis.js";
 import {
   buildMarketSummary,
   type ClusterMarketSummary,
@@ -90,9 +90,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: clustersQuerySchema } },
     async (request, reply) => {
       const query = request.query;
-      const redis = await getRedis();
+      const { redis, status } = await getRedisStatus();
       if (!redis) {
-        return reply.code(503).send({ error: "Redis unavailable" });
+        const error =
+          status === "loading" ? "Redis loading, retry" : "Redis unavailable";
+        return reply.code(503).send({ error });
       }
 
       const [indexRaw, meta] = await Promise.all([
@@ -189,9 +191,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     { schema: { params: clusterParamsSchema } },
     async (request, reply) => {
       const { id } = request.params;
-      const redis = await getRedis();
+      const { redis, status } = await getRedisStatus();
       if (!redis) {
-        return reply.code(503).send({ error: "Redis unavailable" });
+        const error =
+          status === "loading" ? "Redis loading, retry" : "Redis unavailable";
+        return reply.code(503).send({ error });
       }
 
       const hash = (await redis.hGetAll(

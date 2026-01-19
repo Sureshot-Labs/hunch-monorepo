@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { abis } from "@hunch/contracts";
-import { getEmbedStreamKey } from "@hunch/infra";
+import { getEmbedStreamKey, type RedisClientType } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { getRedis } from "../redis.js";
+import { getRedisStatus } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { fetchActiveRewardsPolicy } from "../repos/rewards.js";
@@ -158,7 +158,7 @@ function toOptionalNumber(value: unknown): number | null {
 }
 
 async function fetchIndexCount(
-  redis: NonNullable<Awaited<ReturnType<typeof getRedis>>>,
+  redis: RedisClientType,
   indexName: string,
   query: string,
 ): Promise<{ count: number | null; error: string | null }> {
@@ -623,7 +623,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const marketDbTotal = Number(marketRows[0]?.total ?? 0);
       const marketDbActive = Number(marketRows[0]?.active ?? 0);
 
-      const redis = await getRedis();
+      const { redis, status, error: redisError } = await getRedisStatus();
       const redisStats: {
         available: boolean;
         error: string | null;
@@ -642,7 +642,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         };
       } = {
         available: false,
-        error: "Redis not configured",
+        error:
+          status === "loading"
+            ? "Redis loading"
+            : status === "error"
+              ? redisError ?? "Redis unavailable"
+              : "Redis not configured",
         stream: {
           key: streamKey,
           length: null,

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { getRedis } from "../redis.js";
+import { getRedisStatus } from "../redis.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
 import { subscribeToPriceTicks } from "../lib/prices-stream-manager.js";
@@ -26,10 +26,12 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
     "/prices/stream",
     { schema: { querystring: pricesStreamQuerySchema } },
     async (request, reply) => {
-      const r = await getRedis();
+      const { redis: r, status } = await getRedisStatus();
       if (!r) {
         reply.code(503);
-        return reply.send({ error: "Redis not configured" });
+        return reply.send({
+          error: status === "loading" ? "Redis loading, retry" : "Redis unavailable",
+        });
       }
 
       const ids = request.query.token_id;

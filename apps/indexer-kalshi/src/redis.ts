@@ -8,5 +8,5 @@ import { env } from "./env";
 export const redis: RedisClientType = createRedisClient({ url: env.redisUrl });
 
 export async function ensureRedis(): Promise<void> {
-  await ensure(redis);
+  await ensure(redis, { waitForReady: true, logLabel: "indexer-kalshi" });
 }
