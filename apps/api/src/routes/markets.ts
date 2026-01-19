@@ -50,6 +50,11 @@ function parseTimestampSeconds(value: unknown): number | null {
   return Math.floor(parsed / 1000);
 }
 
+function isExpiredAt(value: unknown, nowSec: number): boolean {
+  const ts = parseTimestampSeconds(value);
+  return ts != null && ts <= nowSec;
+}
+
 type LimitlessMeta = {
   negRiskRequestId?: string;
   negRiskMarketId?: string;
@@ -785,32 +790,55 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           items.push({ id, score });
         }
 
-        let filteredItems =
-          maxScore != null ? items.filter((item) => item.score <= maxScore) : items;
+      let filteredItems =
+        maxScore != null ? items.filter((item) => item.score <= maxScore) : items;
 
-        if (excludeMarketSet.size > 0) {
-          filteredItems = filteredItems.filter(
-            (item) => !excludeMarketSet.has(item.id),
-          );
+      if (excludeMarketSet.size > 0) {
+        filteredItems = filteredItems.filter(
+          (item) => !excludeMarketSet.has(item.id),
+        );
+      }
+
+      let eventById: Map<string, string | null> | null = null;
+      if (
+        (excludeEventSet.size > 0 || baseSeriesKey || active) &&
+        filteredItems.length > 0
+      ) {
+        const ids = filteredItems.map((item) => item.id);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const { rows } = await pool.query(
+          `
+            select m.id, m.event_id, m.close_time, m.expiration_time, e.end_date
+            from unified_markets m
+            left join unified_events e on e.id = m.event_id
+            where m.id = any($1)
+          `,
+          [ids],
+        );
+        eventById = new Map<string, string | null>(
+          rows.map((row) => [row.id as string, row.event_id as string | null]),
+        );
+        if (active && rows.length > 0) {
+          const expiredMarketIds = new Set<string>();
+          for (const row of rows) {
+            if (
+              isExpiredAt(row.close_time, nowSec) ||
+              isExpiredAt(row.expiration_time, nowSec) ||
+              isExpiredAt(row.end_date, nowSec)
+            ) {
+              expiredMarketIds.add(row.id as string);
+            }
+          }
+          if (expiredMarketIds.size > 0) {
+            filteredItems = filteredItems.filter(
+              (item) => !expiredMarketIds.has(item.id),
+            );
+          }
         }
-
-        let eventById: Map<string, string | null> | null = null;
-        if (
-          (excludeEventSet.size > 0 || baseSeriesKey) &&
-          filteredItems.length > 0
-        ) {
-          const ids = filteredItems.map((item) => item.id);
-          const { rows } = await pool.query(
-            `select id, event_id from unified_markets where id = any($1)`,
-            [ids],
-          );
-          eventById = new Map<string, string | null>(
-            rows.map((row) => [row.id as string, row.event_id as string | null]),
-          );
-          if (excludeEventSet.size > 0) {
-            filteredItems = filteredItems.filter((item) => {
-              const eventId = eventById?.get(item.id);
-              if (!eventId) return true;
+        if (excludeEventSet.size > 0) {
+          filteredItems = filteredItems.filter((item) => {
+            const eventId = eventById?.get(item.id);
+            if (!eventId) return true;
               return !excludeEventSet.has(eventId);
             });
           }

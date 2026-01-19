@@ -73,6 +73,11 @@ function parseTimestampSeconds(value: unknown): number | null {
   return Math.floor(parsed / 1000);
 }
 
+function isExpiredAt(value: unknown, nowSec: number): boolean {
+  const ts = parseTimestampSeconds(value);
+  return ts != null && ts <= nowSec;
+}
+
 type LimitlessMeta = {
   negRiskRequestId?: string;
   negRiskMarketId?: string;
@@ -215,6 +220,7 @@ async function fetchSimilarMarketSummaries(
 ): Promise<SimilarEventMarketSummary[]> {
   if (!marketIds.length) return [];
   const uniqueIds = Array.from(new Set(marketIds));
+  const nowSec = Math.floor(Date.now() / 1000);
   const { rows } = await pool.query<{
     market_id: string;
     event_id: string;
@@ -224,6 +230,9 @@ async function fetchSimilarMarketSummaries(
     best_bid: unknown;
     best_ask: unknown;
     last_price: unknown;
+    close_time: unknown;
+    expiration_time: unknown;
+    end_date: unknown;
   }>(
     `
       select
@@ -234,7 +243,10 @@ async function fetchSimilarMarketSummaries(
         m.title as market_title,
         m.best_bid,
         m.best_ask,
-        m.last_price
+        m.last_price,
+        m.close_time,
+        m.expiration_time,
+        e.end_date
       from unified_markets m
       join unified_events e on e.id = m.event_id
       where m.id = any($1::text[])
@@ -243,7 +255,16 @@ async function fetchSimilarMarketSummaries(
     [uniqueIds],
   );
 
-  return rows.map((row) => ({
+  const filteredRows = activeOnly
+    ? rows.filter(
+        (row) =>
+          !isExpiredAt(row.close_time, nowSec) &&
+          !isExpiredAt(row.expiration_time, nowSec) &&
+          !isExpiredAt(row.end_date, nowSec),
+      )
+    : rows;
+
+  return filteredRows.map((row) => ({
     marketId: row.market_id,
     eventId: row.event_id,
     venue: row.venue ?? null,
@@ -756,6 +777,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const withDetails = includeDetails ?? false;
       const maxScore =
         cutoff != null && Number.isFinite(cutoff) ? cutoff : undefined;
+      const now = new Date();
+      const nowSec = Math.floor(now.getTime() / 1000);
       const excludeEventSet = new Set(
         (excludeEvents ?? []).filter((entry) => entry !== eventId),
       );
@@ -924,9 +947,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               `
               select m.id as market_id,
                      m.event_id,
+                     m.close_time,
+                     m.expiration_time,
                      e.venue,
                      e.series_key,
-                     e.status as event_status
+                     e.status as event_status,
+                     e.end_date
               from unified_markets m
               join unified_events e on e.id = m.event_id
               where m.id = any($1)
@@ -941,13 +967,20 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 eventId: string;
                 venue: string | null;
                 seriesKey: string | null;
+                isExpired: boolean;
               }
             >();
             for (const row of rows) {
+              const isExpired =
+                active &&
+                (isExpiredAt(row.close_time, nowSec) ||
+                  isExpiredAt(row.expiration_time, nowSec) ||
+                  isExpiredAt(row.end_date, nowSec));
               marketMeta.set(row.market_id as string, {
                 eventId: row.event_id as string,
                 venue: row.venue ?? null,
                 seriesKey: row.series_key ?? null,
+                isExpired,
               });
             }
 
@@ -958,6 +991,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             for (const hit of marketHits) {
               const meta = marketMeta.get(hit.marketId);
               if (!meta) continue;
+              if (meta.isExpired) continue;
               if (excludeEventSet.has(meta.eventId)) continue;
               if (baseSeriesKey && meta.seriesKey === baseSeriesKey) continue;
               const current = bestByEvent.get(meta.eventId);
@@ -1129,19 +1163,32 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         const eventIds = filteredItems.map((item) => item.eventId);
         const eventMeta = new Map<
           string,
-          { venue: string | null; seriesKey: string | null }
+          { venue: string | null; seriesKey: string | null; endDate: unknown }
         >();
         if (eventIds.length) {
           const { rows } = await pool.query(
-            `select id, venue, series_key from unified_events where id = any($1)`,
+            `
+              select id, venue, series_key, end_date
+              from unified_events
+              where id = any($1)
+            `,
             [eventIds],
           );
           for (const row of rows) {
             eventMeta.set(row.id as string, {
               venue: row.venue ?? null,
               seriesKey: row.series_key ?? null,
+              endDate: row.end_date ?? null,
             });
           }
+        }
+
+        if (active && filteredItems.length > 0) {
+          filteredItems = filteredItems.filter((item) => {
+            const meta = eventMeta.get(item.eventId);
+            if (!meta) return true;
+            return !isExpiredAt(meta.endDate, nowSec);
+          });
         }
 
         if (baseSeriesKey && filteredItems.length > 0) {
@@ -1189,9 +1236,16 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             select distinct event_id
             from unified_markets
             where event_id = any($1)
-            ${active ? "and status = 'ACTIVE'" : ""}
+            ${
+              active
+                ? "and status = 'ACTIVE' and (close_time is null or close_time > $2) and (expiration_time is null or expiration_time > $2)"
+                : ""
+            }
           `;
-          const { rows } = await pool.query(marketFilterSql, [candidateEventIds]);
+          const marketParams = active
+            ? [candidateEventIds, now]
+            : [candidateEventIds];
+          const { rows } = await pool.query(marketFilterSql, marketParams);
           const eventIdsWithMarkets = new Set(
             rows.map((row) => row.event_id as string),
           );
@@ -1204,15 +1258,20 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         const finalEventIds = finalItems.map((item) => item.eventId);
         const marketByEvent = new Map<string, string | null>();
         if (finalEventIds.length && baseMarketVector) {
-          const { rows } = await pool.query(
-            `
+          const marketVectorSql = `
             select m.id as market_id, m.event_id
             from unified_markets m
             where m.event_id = any($1)
-              and m.status = 'ACTIVE';
-            `,
-            [finalEventIds],
-          );
+            ${
+              active
+                ? "and m.status = 'ACTIVE' and (m.close_time is null or m.close_time > $2) and (m.expiration_time is null or m.expiration_time > $2)"
+                : ""
+            }
+          `;
+          const marketVectorParams = active
+            ? [finalEventIds, now]
+            : [finalEventIds];
+          const { rows } = await pool.query(marketVectorSql, marketVectorParams);
           const embeddings = await Promise.all(
             rows.map((row) =>
               bufferClient.hmGet(`ai:embed:market:${row.market_id}`, [
@@ -1278,10 +1337,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               join unified_events e on e.id = m.event_id
               where m.event_id = any($1)
                 and m.status = 'ACTIVE'
+                and (m.close_time is null or m.close_time > $2)
+                and (m.expiration_time is null or m.expiration_time > $2)
             )
             select event_id, market_id from ranked where rn = 1;
             `,
-            [missingEventIds],
+            [missingEventIds, now],
           );
           for (const row of rows) {
             marketByEvent.set(row.event_id as string, row.market_id as string);
@@ -1292,8 +1353,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           (id) => !marketByEvent.has(id),
         );
         if (stillMissingEventIds.length) {
-          const { rows } = await pool.query(
-            `
+          const fallbackSql = `
             with ranked as (
               select
                 m.event_id,
@@ -1313,11 +1373,18 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               from unified_markets m
               join unified_events e on e.id = m.event_id
               where m.event_id = any($1)
+              ${
+                active
+                  ? "and (m.close_time is null or m.close_time > $2) and (m.expiration_time is null or m.expiration_time > $2)"
+                  : ""
+              }
             )
             select event_id, market_id from ranked where rn = 1;
-            `,
-            [stillMissingEventIds],
-          );
+          `;
+          const fallbackParams = active
+            ? [stillMissingEventIds, now]
+            : [stillMissingEventIds];
+          const { rows } = await pool.query(fallbackSql, fallbackParams);
           for (const row of rows) {
             marketByEvent.set(row.event_id as string, row.market_id as string);
           }

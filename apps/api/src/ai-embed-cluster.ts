@@ -263,6 +263,7 @@ async function fetchSeedMarkets(options: Options): Promise<SeedRow[]> {
         join unified_events e on e.id = m.event_id
         where m.status = 'ACTIVE'
           and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > $1)
           and (m.expiration_time is null or m.expiration_time > $1)
           and (m.close_time is null or m.close_time > $1)
           and (
@@ -291,6 +292,7 @@ async function fetchTopMarketsForEvents(
     "coalesce(m.volume_24h, 0) * 2 + coalesce(m.liquidity, 0) + coalesce(m.open_interest, 0) + coalesce(m.volume_total, 0) * 0.2";
   const hasPriceExpr =
     "case when m.best_bid is not null or m.best_ask is not null or m.last_price is not null then 1 else 0 end";
+  const now = new Date();
 
   const { rows } = await pool.query<ClusterMarketRow & { rn: number }>(
     `
@@ -321,10 +323,13 @@ async function fetchTopMarketsForEvents(
         where m.event_id = any($1::text[])
           and m.status = 'ACTIVE'
           and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > $2)
+          and (m.expiration_time is null or m.expiration_time > $2)
+          and (m.close_time is null or m.close_time > $2)
       ) ranked
       where rn = 1
     `,
-    [eventIds],
+    [eventIds, now],
   );
 
   const map = new Map<string, ClusterMarketRow>();
