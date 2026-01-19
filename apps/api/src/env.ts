@@ -166,6 +166,52 @@ export const env = {
   ),
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
+  openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",
+  aiClusterAnalysisEnabled:
+    parseOptionalBool(process.env.AI_CLUSTER_ANALYSIS_ENABLED) ?? false,
+  aiClusterModelFast:
+    process.env.AI_CLUSTER_MODEL_FAST?.trim() || "openai/gpt-5-nano",
+  aiClusterModelFinal:
+    process.env.AI_CLUSTER_MODEL_FINAL?.trim() || "openai/gpt-5.2",
+  aiClusterModelFallback:
+    process.env.AI_CLUSTER_MODEL_FALLBACK?.trim() || "openai/gpt-4o-mini",
+  aiClusterMaxStageB: optionalNonNegativeInt("AI_CLUSTER_MAX_STAGE_B", 50),
+  aiClusterReanalyzeHours: optionalNonNegativeInt(
+    "AI_CLUSTER_REANALYZE_HOURS",
+    24,
+  ),
+  aiClusterUseWebContext:
+    parseOptionalBool(process.env.AI_CLUSTER_USE_WEB_CONTEXT) ?? false,
+  aiClusterWebMaxResults: optionalNonNegativeInt(
+    "AI_CLUSTER_WEB_MAX_RESULTS",
+    5,
+  ),
+  aiClusterMinConfidence: optionalNonNegativeNumber(
+    "AI_CLUSTER_MIN_CONFIDENCE",
+    0.6,
+  ),
+  aiClusterMaxOutlierRatio: optionalNonNegativeNumber(
+    "AI_CLUSTER_MAX_OUTLIER_RATIO",
+    0.4,
+  ),
+  aiClusterAnalysisMinSpread: optionalNonNegativeNumber(
+    "AI_CLUSTER_ANALYSIS_MIN_SPREAD",
+    0.02,
+  ),
+  aiClusterAnalysisMinQuality: optionalNonNegativeNumber(
+    "AI_CLUSTER_ANALYSIS_MIN_QUALITY",
+    0.45,
+  ),
+  aiClusterAnalysisMinVenueCount: optionalNonNegativeInt(
+    "AI_CLUSTER_ANALYSIS_MIN_VENUE_COUNT",
+    2,
+  ),
+  aiClusterAnalysisConcurrency: optionalPositiveInt(
+    "AI_CLUSTER_ANALYSIS_CONCURRENCY",
+    3,
+  ),
+  aiClusterDebugLogs:
+    parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),

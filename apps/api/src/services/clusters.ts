@@ -3,6 +3,7 @@ type ClusterMarketRow = {
   event_id: string;
   venue: string;
   title: string | null;
+  description?: string | null;
   market_type: string | null;
   best_bid: unknown;
   best_ask: unknown;
@@ -14,6 +15,7 @@ type ClusterMarketRow = {
   close_time: unknown;
   expiration_time: unknown;
   event_title: string | null;
+  event_description?: string | null;
 };
 
 export type ClusterMarketSummary = {
@@ -21,7 +23,9 @@ export type ClusterMarketSummary = {
   eventId: string;
   venue: string;
   marketTitle: string | null;
+  marketDescription: string | null;
   eventTitle: string | null;
+  eventDescription: string | null;
   marketType: string | null;
   yesBid: number | null;
   yesAsk: number | null;
@@ -101,7 +105,9 @@ export function buildMarketSummary(row: ClusterMarketRow): ClusterMarketSummary 
     eventId: row.event_id,
     venue: row.venue,
     marketTitle: row.title,
+    marketDescription: row.description ?? null,
     eventTitle: row.event_title,
+    eventDescription: row.event_description ?? null,
     marketType: row.market_type,
     yesBid,
     yesAsk,

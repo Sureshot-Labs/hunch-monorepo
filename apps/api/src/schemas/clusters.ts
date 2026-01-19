@@ -5,6 +5,9 @@ export const clustersQuerySchema = z.object({
   minLiquidity: z.coerce.number().min(0).optional(),
   minVenueCount: z.coerce.number().int().min(1).max(10).optional(),
   minSpread: z.coerce.number().min(0).max(1).optional(),
+  minQualityScore: z.coerce.number().min(0).max(1).optional(),
+  minAnalysisConfidence: z.coerce.number().min(0).max(1).optional(),
+  maxOutlierRatio: z.coerce.number().min(0).max(1).optional(),
 });
 
 export const clusterParamsSchema = z.object({

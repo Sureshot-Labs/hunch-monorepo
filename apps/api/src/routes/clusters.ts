@@ -30,11 +30,25 @@ type ClusterHash = {
   analysis: string;
   analysis_status: string;
   analysis_updated_at: string;
+  analysis_confidence: string;
+  analysis_model: string;
   quality_score: string;
   market_ids: string;
   markets_preview: string;
   updated_at: string;
   version: string;
+};
+
+type ClusterAnalysis = {
+  label: string;
+  summary: string;
+  category: string;
+  outliers: string[];
+  confidence: number;
+  query?: string | null;
+  sources?: Array<{ title: string; url: string; snippet?: string | null }> | null;
+  model?: string | null;
+  stage?: "fast" | "final";
 };
 
 function parseNumber(value: string | undefined): number | null {
@@ -52,12 +66,26 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   }
 }
 
+function normalizeAnalysis(
+  value: string | undefined,
+): ClusterAnalysis | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as ClusterAnalysis;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function formatClusterSummary(id: string, hash: ClusterHash) {
   const venueCounts = parseJson<Record<string, number>>(hash.venue_counts, {});
   const marketsPreview = parseJson<ClusterMarketSummary[]>(
     hash.markets_preview,
     [],
   );
+  const analysis = normalizeAnalysis(hash.analysis);
 
   return {
     id,
@@ -72,9 +100,12 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
     totalLiquidity: parseNumber(hash.total_liquidity),
     volume24h: parseNumber(hash.volume_24h),
     expiresAt: hash.expires_at || null,
-    analysis: hash.analysis || null,
+    analysis,
     analysisStatus: hash.analysis_status || null,
     analysisUpdatedAt: hash.analysis_updated_at || null,
+    analysisConfidence:
+      parseNumber(hash.analysis_confidence) ?? analysis?.confidence ?? null,
+    analysisModel: hash.analysis_model || analysis?.model || null,
     qualityScore: parseNumber(hash.quality_score),
     markets: marketsPreview,
     updatedAt: hash.updated_at || null,
@@ -127,6 +158,8 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         "analysis",
         "analysis_status",
         "analysis_updated_at",
+        "analysis_confidence",
+        "analysis_model",
         "quality_score",
         "market_ids",
         "markets_preview",
@@ -176,6 +209,31 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.priceSpread != null &&
             cluster.priceSpread >= minSpread,
         );
+      }
+      const minQualityScore = query.minQualityScore;
+      if (minQualityScore != null) {
+        filtered = filtered.filter(
+          (cluster) =>
+            cluster.qualityScore != null &&
+            cluster.qualityScore >= minQualityScore,
+        );
+      }
+      const minAnalysisConfidence = query.minAnalysisConfidence;
+      if (minAnalysisConfidence != null) {
+        filtered = filtered.filter(
+          (cluster) =>
+            cluster.analysis != null &&
+            cluster.analysis.confidence >= minAnalysisConfidence,
+        );
+      }
+      const maxOutlierRatio = query.maxOutlierRatio;
+      if (maxOutlierRatio != null) {
+        filtered = filtered.filter((cluster) => {
+          if (!cluster.analysis) return false;
+          const outliers = cluster.analysis.outliers ?? [];
+          if (cluster.marketCount <= 0) return false;
+          return outliers.length / cluster.marketCount <= maxOutlierRatio;
+        });
       }
 
       const limit = query.limit ?? 20;
@@ -245,7 +303,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             m.open_interest,
             m.close_time,
             m.expiration_time,
-            e.title as event_title
+            e.title as event_title,
+            m.description,
+            e.description as event_description
           from unified_markets m
           join unified_events e on e.id = m.event_id
           where m.id = any($1::text[])
