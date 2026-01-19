@@ -22,6 +22,8 @@ type SeedRow = {
   venue: string;
   market_title: string | null;
   event_title: string | null;
+  market_category: string | null;
+  event_category: string | null;
   market_type: string | null;
   volume_24h: unknown;
   volume_total: unknown;
@@ -32,6 +34,7 @@ type SeedRow = {
   last_price: unknown;
   close_time: unknown;
   expiration_time: unknown;
+  end_date: unknown;
   score: number;
 };
 
@@ -42,6 +45,7 @@ type ClusterSeed = {
   seedMarketType: string | null;
   seedMarketTitle: string | null;
   seedEventTitle: string | null;
+  seedSignature: Signature;
   eventIds: Set<string>;
 };
 
@@ -60,6 +64,10 @@ type ClusterRecord = {
   totalLiquidity: number | null;
   volume24h: number | null;
   expiresAt: string | null;
+  analysis: string | null;
+  analysisStatus: string | null;
+  analysisUpdatedAt: string | null;
+  qualityScore: number | null;
 };
 
 type Options = {
@@ -93,6 +101,20 @@ type ClusterMarketRow = {
   event_title: string | null;
 };
 
+type NeighborMarketRow = {
+  id: string;
+  event_id: string;
+  venue: string;
+  market_title: string | null;
+  event_title: string | null;
+  market_category: string | null;
+  event_category: string | null;
+  market_type: string | null;
+  close_time: unknown;
+  expiration_time: unknown;
+  end_date: unknown;
+};
+
 function parseFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx === -1) return undefined;
@@ -122,12 +144,12 @@ function resolveOptions(args: string[]): Options {
     seedLimit: clampNumber(parseNumber(parseFlag(args, "--seed-limit")), {
       min: 50,
       max: 5000,
-      fallback: 500,
+      fallback: 1200,
     }),
     knnLimit: clampNumber(parseNumber(parseFlag(args, "--knn")), {
       min: 20,
       max: 200,
-      fallback: 60,
+      fallback: 80,
     }),
     neighborLimit: clampNumber(parseNumber(parseFlag(args, "--neighbors")), {
       min: 5,
@@ -137,17 +159,17 @@ function resolveOptions(args: string[]): Options {
     maxDistance: clampNumber(parseNumber(parseFlag(args, "--max-distance")), {
       min: 0.01,
       max: 1,
-      fallback: 0.2,
+      fallback: 0.15,
     }),
     minLiquidity: clampNumber(parseNumber(parseFlag(args, "--min-liquidity")), {
       min: 0,
       max: 1_000_000,
-      fallback: 250,
+      fallback: 50,
     }),
     minVolume24h: clampNumber(parseNumber(parseFlag(args, "--min-volume-24h")), {
       min: 0,
       max: 1_000_000,
-      fallback: 1000,
+      fallback: 200,
     }),
     minVenueCount: clampNumber(parseNumber(parseFlag(args, "--min-venues")), {
       min: 1,
@@ -172,12 +194,12 @@ function printHelp(): void {
   console.log(`Usage: pnpm -C hunch-monorepo -F api run ai:embed:clusters -- [options]
 
 Options:
-  --seed-limit <n>        Max seeds (default: 500)
-  --knn <n>               KNN search size (default: 60)
+  --seed-limit <n>        Max seeds (default: 1200)
+  --knn <n>               KNN search size (default: 80)
   --neighbors <n>         Max neighbors per seed (default: 12)
-  --max-distance <n>      Max cosine distance (default: 0.2)
-  --min-liquidity <n>     Seed min liquidity (default: 250)
-  --min-volume-24h <n>    Seed min 24h volume (default: 1000)
+  --max-distance <n>      Max cosine distance (default: 0.15)
+  --min-liquidity <n>     Seed min liquidity (default: 50)
+  --min-volume-24h <n>    Seed min 24h volume (default: 200)
   --min-venues <n>        Min venues per cluster (default: 2)
   --min-spread <n>        Min price spread (default: 0.05)
   --ttl-sec <n>           Redis TTL seconds (default: 172800)
@@ -226,6 +248,566 @@ function resolveClusterLabel(
   return fallback?.trim() || "Untitled cluster";
 }
 
+type CoarseCategory =
+  | "sports"
+  | "politics"
+  | "crypto"
+  | "macro"
+  | "entertainment";
+
+type QuestionType =
+  | "mention"
+  | "price"
+  | "winner"
+  | "match"
+  | "performance"
+  | "count"
+  | "occurrence"
+  | "other";
+
+type Signature = {
+  type: QuestionType;
+  category: CoarseCategory | null;
+  tokens: Set<string>;
+  entityTokens: Set<string>;
+  years: Set<number>;
+  months: Set<string>;
+};
+
+const STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "or",
+  "the",
+  "of",
+  "in",
+  "to",
+  "for",
+  "on",
+  "at",
+  "by",
+  "before",
+  "after",
+  "between",
+  "within",
+  "from",
+  "with",
+  "without",
+  "vs",
+  "v",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "must",
+  "do",
+  "does",
+  "did",
+  "doing",
+  "what",
+  "when",
+  "where",
+  "who",
+  "whom",
+  "whose",
+  "why",
+  "how",
+  "if",
+  "then",
+  "than",
+  "over",
+  "under",
+  "above",
+  "below",
+  "around",
+  "about",
+  "into",
+  "out",
+  "as",
+  "per",
+  "not",
+  "no",
+  "yes",
+  "up",
+  "down",
+  "this",
+  "that",
+  "these",
+  "those",
+  "today",
+  "tomorrow",
+  "yesterday",
+  "year",
+  "month",
+  "week",
+  "day",
+  "q1",
+  "q2",
+  "q3",
+  "q4",
+  "jan",
+  "january",
+  "feb",
+  "february",
+  "mar",
+  "march",
+  "apr",
+  "april",
+  "may",
+  "jun",
+  "june",
+  "jul",
+  "july",
+  "aug",
+  "august",
+  "sep",
+  "sept",
+  "september",
+  "oct",
+  "october",
+  "nov",
+  "november",
+  "dec",
+  "december",
+]);
+
+const SHORT_TOKENS = new Set(["ai", "btc", "eth", "sol", "epl", "nfl", "nba", "mlb", "nhl", "fed", "cpi", "gdp"]);
+
+const CATEGORY_KEYWORDS: Record<CoarseCategory, Set<string>> = {
+  sports: new Set([
+    "nfl",
+    "nba",
+    "mlb",
+    "nhl",
+    "epl",
+    "uefa",
+    "champions",
+    "league",
+    "laliga",
+    "serie",
+    "cup",
+    "championship",
+    "mvp",
+    "goalscorer",
+    "goal",
+    "score",
+    "match",
+    "season",
+    "football",
+    "soccer",
+    "baseball",
+    "basketball",
+    "hockey",
+    "tennis",
+    "golf",
+  ]),
+  politics: new Set([
+    "president",
+    "election",
+    "senate",
+    "house",
+    "nominee",
+    "trump",
+    "biden",
+    "vote",
+    "voting",
+    "party",
+    "democratic",
+    "republican",
+    "congress",
+    "governor",
+    "parliament",
+    "prime",
+    "minister",
+  ]),
+  crypto: new Set([
+    "bitcoin",
+    "btc",
+    "eth",
+    "ethereum",
+    "sol",
+    "solana",
+    "crypto",
+    "token",
+    "airdrop",
+    "fdv",
+    "marketcap",
+    "chain",
+    "defi",
+    "stablecoin",
+    "stablecoins",
+    "usdc",
+    "usdt",
+  ]),
+  macro: new Set([
+    "fed",
+    "cpi",
+    "inflation",
+    "gdp",
+    "interest",
+    "rates",
+    "rate",
+    "recession",
+    "economy",
+    "unemployment",
+    "treasury",
+    "yield",
+  ]),
+  entertainment: new Set([
+    "movie",
+    "film",
+    "album",
+    "music",
+    "song",
+    "boxoffice",
+    "oscar",
+    "grammy",
+    "gta",
+    "game",
+    "tv",
+    "series",
+    "season",
+    "actor",
+    "actress",
+    "rottentomatoes",
+    "rt",
+  ]),
+};
+
+function extractTopicTokens(text: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  if (!text) return tokens;
+  const matches = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  for (const token of matches) {
+    if (STOPWORDS.has(token)) continue;
+    if (/^\d+$/.test(token)) continue;
+    if (token.length < 2) continue;
+    if (token.length === 2 && !SHORT_TOKENS.has(token)) continue;
+    if (token.length >= 3 && /\d/.test(token) && !SHORT_TOKENS.has(token)) {
+      continue;
+    }
+    tokens.add(token);
+  }
+  return tokens;
+}
+
+const MONTH_TOKENS = new Set([
+  "jan",
+  "january",
+  "feb",
+  "february",
+  "mar",
+  "march",
+  "apr",
+  "april",
+  "may",
+  "jun",
+  "june",
+  "jul",
+  "july",
+  "aug",
+  "august",
+  "sep",
+  "sept",
+  "september",
+  "oct",
+  "october",
+  "nov",
+  "november",
+  "dec",
+  "december",
+]);
+
+function extractEntityTokens(text: string | null | undefined): Set<string> {
+  const entities = new Set<string>();
+  if (!text) return entities;
+  const matches = text.match(/[A-Za-z0-9][A-Za-z0-9'’.-]*/g) ?? [];
+  for (const raw of matches) {
+    const cleaned = raw.replace(/['’.-]+$/g, "");
+    if (cleaned.length < 3) continue;
+    if (/^\d+$/.test(cleaned)) continue;
+    const isAllCaps =
+      cleaned.toUpperCase() === cleaned && /[A-Z]/.test(cleaned);
+    const isTitle = cleaned[0] === cleaned[0]?.toUpperCase();
+    if (isAllCaps || isTitle) {
+      entities.add(cleaned.toLowerCase());
+    }
+  }
+  return entities;
+}
+
+function extractYears(text: string | null | undefined): Set<number> {
+  const years = new Set<number>();
+  if (!text) return years;
+  const matches = text.match(/\b(20\d{2})\b/g) ?? [];
+  for (const match of matches) {
+    const year = Number(match);
+    if (Number.isFinite(year)) years.add(year);
+  }
+  return years;
+}
+
+function extractMonths(text: string | null | undefined): Set<string> {
+  const months = new Set<string>();
+  if (!text) return months;
+  const matches = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  for (const token of matches) {
+    if (MONTH_TOKENS.has(token)) months.add(token);
+  }
+  return months;
+}
+
+function classifyQuestionType(text: string | null | undefined): QuestionType {
+  if (!text) return "other";
+  const lower = text.toLowerCase();
+  if (
+    lower.includes("say ") ||
+    lower.includes("mention") ||
+    lower.includes("tweet") ||
+    lower.includes("announce") ||
+    lower.includes("earnings call") ||
+    lower.includes("call")
+  ) {
+    return "mention";
+  }
+  if (
+    lower.includes("$") ||
+    lower.includes("price") ||
+    lower.includes("hit") ||
+    lower.includes("above") ||
+    lower.includes("below") ||
+    lower.includes("over") ||
+    lower.includes("under") ||
+    lower.includes("at least") ||
+    lower.includes("at most") ||
+    lower.includes("fdv") ||
+    lower.includes("market cap") ||
+    lower.includes("valuation")
+  ) {
+    return "price";
+  }
+  if (
+    lower.includes("winner") ||
+    lower.includes("wins") ||
+    lower.includes("champion") ||
+    lower.includes("nominee") ||
+    lower.includes("nomination") ||
+    lower.includes("elected") ||
+    lower.includes("election")
+  ) {
+    return "winner";
+  }
+  if (
+    lower.includes("vs ") ||
+    lower.includes(" vs") ||
+    lower.includes("versus") ||
+    lower.includes("match") ||
+    lower.includes("game") ||
+    lower.includes("fixture")
+  ) {
+    return "match";
+  }
+  if (
+    lower.includes("score") ||
+    lower.includes("goals") ||
+    lower.includes("points") ||
+    lower.includes("shots") ||
+    lower.includes("assists") ||
+    lower.includes("rebounds") ||
+    lower.includes("yards") ||
+    lower.includes("touchdowns")
+  ) {
+    return "performance";
+  }
+  if (
+    lower.includes("how many") ||
+    lower.includes("number of") ||
+    lower.includes("count") ||
+    lower.includes("total") ||
+    lower.includes("#")
+  ) {
+    return "count";
+  }
+  if (
+    lower.includes("will ") ||
+    lower.includes("does ") ||
+    lower.includes("do ") ||
+    lower.includes("is ") ||
+    lower.includes("are ")
+  ) {
+    return "occurrence";
+  }
+  return "other";
+}
+
+function buildSignature(params: {
+  eventTitle: string | null | undefined;
+  marketTitle: string | null | undefined;
+  eventCategory: string | null | undefined;
+  marketCategory: string | null | undefined;
+  dates?: Array<unknown>;
+}): Signature {
+  const text = `${params.eventTitle ?? ""} ${params.marketTitle ?? ""}`.trim();
+  const tokens = extractTopicTokens(text);
+  const entityTokens = extractEntityTokens(text);
+  if (entityTokens.size === 0) {
+    const fallback = Array.from(tokens).filter((token) => token.length >= 5);
+    for (const token of fallback.slice(0, 6)) entityTokens.add(token);
+  }
+  const years = extractYears(text);
+  const months = extractMonths(text);
+  if (params.dates?.length) {
+    for (const value of params.dates) {
+      if (!value) continue;
+      const date = value instanceof Date ? value : new Date(String(value));
+      if (!Number.isNaN(date.getTime())) years.add(date.getUTCFullYear());
+    }
+  }
+  const category = resolveCategory(
+    params.eventCategory,
+    params.marketCategory,
+    tokens,
+  );
+  const type = classifyQuestionType(text);
+
+  return {
+    type,
+    category,
+    tokens,
+    entityTokens,
+    years,
+    months,
+  };
+}
+
+function timeCompatible(a: Signature, b: Signature): boolean {
+  if (a.years.size === 0 || b.years.size === 0) return true;
+  for (const year of a.years) {
+    if (b.years.has(year)) return true;
+  }
+  let minDiff = Number.POSITIVE_INFINITY;
+  for (const year of a.years) {
+    for (const other of b.years) {
+      minDiff = Math.min(minDiff, Math.abs(year - other));
+    }
+  }
+  return minDiff <= 1;
+}
+
+function scoreSignatureMatch(a: Signature, b: Signature, embedScore: number): number {
+  const embedSim = Math.max(0, Math.min(1, 1 - embedScore));
+  const { intersection, jaccard } = computeTopicOverlap(a.tokens, b.tokens);
+  const entityOverlap = intersectionSize(a.entityTokens, b.entityTokens);
+  const typeScore = a.type === b.type ? 1 : 0;
+  const categoryScore =
+    a.category && b.category ? (a.category === b.category ? 1 : 0) : 0.5;
+  const timeScore = timeCompatible(a, b) ? 1 : 0;
+  const entityScore = entityOverlap > 0 ? 1 : 0;
+  const lexicalScore =
+    intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
+
+  return (
+    embedSim * 0.45 +
+    lexicalScore * 0.25 +
+    entityScore * 0.15 +
+    typeScore * 0.1 +
+    categoryScore * 0.05 +
+    timeScore * 0.05
+  );
+}
+
+function scoreSignatureSimilarity(a: Signature, b: Signature): number {
+  const { intersection, jaccard } = computeTopicOverlap(a.tokens, b.tokens);
+  const entityOverlap = intersectionSize(a.entityTokens, b.entityTokens);
+  const typeScore = a.type === b.type ? 1 : 0;
+  const categoryScore =
+    a.category && b.category ? (a.category === b.category ? 1 : 0) : 0.5;
+  const timeScore = timeCompatible(a, b) ? 1 : 0;
+  const entityScore = entityOverlap > 0 ? 1 : 0;
+  const lexicalScore =
+    intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
+
+  return (
+    lexicalScore * 0.4 +
+    entityScore * 0.2 +
+    typeScore * 0.2 +
+    categoryScore * 0.1 +
+    timeScore * 0.1
+  );
+}
+
+function isSignatureCompatible(a: Signature, b: Signature): boolean {
+  if (a.type !== b.type) return false;
+  if (a.category && b.category && a.category !== b.category) return false;
+  if (!timeCompatible(a, b)) return false;
+  const { intersection, jaccard } = computeTopicOverlap(a.tokens, b.tokens);
+  const entityOverlap = intersectionSize(a.entityTokens, b.entityTokens);
+  if (entityOverlap < 1 && intersection < 2 && jaccard < 0.12) return false;
+  return true;
+}
+
+function computeTopicOverlap(a: Set<string>, b: Set<string>) {
+  if (a.size === 0 || b.size === 0) return { intersection: 0, jaccard: 0 };
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection += 1;
+  }
+  const union = a.size + b.size - intersection;
+  const jaccard = union > 0 ? intersection / union : 0;
+  return { intersection, jaccard };
+}
+
+function normalizeCategory(raw?: string | null): CoarseCategory | null {
+  if (!raw) return null;
+  const value = raw.toLowerCase();
+  if (value.includes("sport")) return "sports";
+  if (value.includes("polit")) return "politics";
+  if (value.includes("crypto") || value.includes("token")) return "crypto";
+  if (value.includes("econom") || value.includes("macro") || value.includes("finance"))
+    return "macro";
+  if (value.includes("entertain") || value.includes("culture")) return "entertainment";
+  return null;
+}
+
+function deriveCategory(tokens: Set<string>): CoarseCategory | null {
+  let best: { category: CoarseCategory; count: number } | null = null;
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS) as Array<
+    [CoarseCategory, Set<string>]
+  >) {
+    let count = 0;
+    for (const token of tokens) {
+      if (keywords.has(token)) count += 1;
+    }
+    if (count === 0) continue;
+    if (!best || count > best.count) {
+      best = { category, count };
+    }
+  }
+  return best ? best.category : null;
+}
+
+function resolveCategory(
+  eventCategory: string | null | undefined,
+  marketCategory: string | null | undefined,
+  tokens: Set<string>,
+): CoarseCategory | null {
+  return (
+    normalizeCategory(eventCategory) ??
+    normalizeCategory(marketCategory) ??
+    deriveCategory(tokens)
+  );
+}
+
 async function fetchSeedMarkets(options: Options): Promise<SeedRow[]> {
   const scoreExpr =
     "coalesce(m.volume_24h, 0) * 2 + coalesce(m.liquidity, 0) + coalesce(m.open_interest, 0) + coalesce(m.volume_total, 0) * 0.2";
@@ -243,6 +825,8 @@ async function fetchSeedMarkets(options: Options): Promise<SeedRow[]> {
           m.venue,
           m.title as market_title,
           e.title as event_title,
+          m.category as market_category,
+          e.category as event_category,
           m.market_type,
           m.volume_24h,
           m.volume_total,
@@ -253,6 +837,7 @@ async function fetchSeedMarkets(options: Options): Promise<SeedRow[]> {
           m.last_price,
           m.close_time,
           m.expiration_time,
+          e.end_date,
           ${scoreExpr} as score,
           ${hasPriceExpr} as has_price,
           row_number() over (
@@ -339,7 +924,7 @@ async function fetchTopMarketsForEvents(
   return map;
 }
 
-async function fetchEventNeighbors(
+async function fetchMarketNeighbors(
   redis: RedisClientType,
   embedding: Buffer,
   options: Options,
@@ -349,7 +934,7 @@ async function fetchEventNeighbors(
 
   const raw = (await redis.sendCommand([
     "FT.SEARCH",
-    "idx:ai:embed:event",
+    "idx:ai:embed:market",
     query,
     "PARAMS",
     "2",
@@ -371,7 +956,7 @@ async function fetchEventNeighbors(
   for (let i = 1; i < raw.length; i += 2) {
     const key = raw[i];
     const fields = raw[i + 1] as unknown[];
-    const id = String(key).replace("ai:embed:event:", "");
+    const id = String(key).replace("ai:embed:market:", "");
     let score = Number.POSITIVE_INFINITY;
     for (let j = 0; j < fields.length; j += 2) {
       if (String(fields[j]) === "score") {
@@ -419,6 +1004,25 @@ function scoreCluster(metrics: ReturnType<typeof computeClusterMetrics>): number
   return spreadScore + liquidityScore + volumeScore + metrics.venueCount * 3;
 }
 
+type ClusterAnalysis = {
+  summary: string;
+  status: string;
+  updatedAt: string;
+  qualityScore: number | null;
+};
+
+async function runClusterAnalysis(
+  _cluster: ClusterRecord,
+): Promise<ClusterAnalysis | null> {
+  if (process.env.AI_CLUSTER_ANALYSIS_ENABLED !== "true") return null;
+  return {
+    summary: "",
+    status: "pending",
+    updatedAt: new Date().toISOString(),
+    qualityScore: null,
+  };
+}
+
 async function buildClusters(
   redis: RedisClientType,
   seeds: SeedRow[],
@@ -430,20 +1034,117 @@ async function buildClusters(
   });
 
   for (const seed of seeds) {
+    const seedSignature = buildSignature({
+      eventTitle: seed.event_title,
+      marketTitle: seed.market_title,
+      eventCategory: seed.event_category,
+      marketCategory: seed.market_category,
+      dates: [seed.end_date, seed.expiration_time, seed.close_time],
+    });
     const embeddingRaw = (await bufferClient.hmGet(
-      `ai:embed:event:${seed.event_id}`,
+      `ai:embed:market:${seed.id}`,
       ["embedding"],
     ))[0];
     const embedding = Buffer.isBuffer(embeddingRaw) ? embeddingRaw : null;
     if (!embedding) continue;
 
-    const neighbors = await fetchEventNeighbors(redis, embedding, options);
-    const eventIds = new Set<string>([seed.event_id]);
+    const neighbors = await fetchMarketNeighbors(redis, embedding, options);
+    const candidateIds = Array.from(
+      new Set(
+        neighbors
+          .filter((neighbor) => neighbor.score <= options.maxDistance)
+          .map((neighbor) => neighbor.id)
+          .concat(seed.id),
+      ),
+    );
+
+    if (candidateIds.length === 0) continue;
+
+    const now = new Date();
+    const { rows } = await pool.query<NeighborMarketRow>(
+      `
+        select
+          m.id,
+          m.event_id,
+          m.venue,
+          m.title as market_title,
+          e.title as event_title,
+          m.category as market_category,
+          e.category as event_category,
+          m.market_type,
+          m.close_time,
+          m.expiration_time,
+          e.end_date
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        where m.id = any($1::text[])
+          and m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > $2)
+          and (m.expiration_time is null or m.expiration_time > $2)
+          and (m.close_time is null or m.close_time > $2)
+      `,
+      [candidateIds, now],
+    );
+
+    const metaById = new Map<string, NeighborMarketRow>();
+    const signatureById = new Map<string, Signature>();
+    for (const row of rows) {
+      metaById.set(row.id, row);
+      signatureById.set(
+        row.id,
+        buildSignature({
+          eventTitle: row.event_title,
+          marketTitle: row.market_title,
+          eventCategory: row.event_category,
+          marketCategory: row.market_category,
+          dates: [row.end_date, row.expiration_time, row.close_time],
+        }),
+      );
+    }
+
+    const bestByEvent = new Map<
+      string,
+      { matchScore: number; eventId: string }
+    >();
+
     for (const neighbor of neighbors) {
-      if (neighbor.id === seed.event_id) continue;
       if (neighbor.score > options.maxDistance) continue;
-      eventIds.add(neighbor.id);
-      if (eventIds.size >= options.neighborLimit + 1) break;
+      const meta = metaById.get(neighbor.id);
+      if (!meta) continue;
+      if (meta.event_id === seed.event_id) continue;
+      if (
+        seed.market_type &&
+        meta.market_type &&
+        meta.market_type !== seed.market_type
+      )
+        continue;
+
+      const signature = signatureById.get(neighbor.id);
+      if (!signature) continue;
+      if (!isSignatureCompatible(seedSignature, signature)) continue;
+
+      const matchScore = scoreSignatureMatch(
+        seedSignature,
+        signature,
+        neighbor.score,
+      );
+      const existing = bestByEvent.get(meta.event_id);
+      if (!existing || matchScore > existing.matchScore) {
+        bestByEvent.set(meta.event_id, {
+          matchScore,
+          eventId: meta.event_id,
+        });
+      }
+    }
+
+    const eventIds = new Set<string>([seed.event_id]);
+    const ranked = Array.from(bestByEvent.values())
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .slice(0, options.neighborLimit);
+
+    for (const entry of ranked) {
+      eventIds.add(entry.eventId);
     }
 
     if (eventIds.size < 2) continue;
@@ -454,6 +1155,7 @@ async function buildClusters(
       seedMarketType: seed.market_type,
       seedMarketTitle: seed.market_title,
       seedEventTitle: seed.event_title,
+      seedSignature,
       eventIds,
     });
   }
@@ -461,10 +1163,12 @@ async function buildClusters(
   if (!clusters.length) return [];
 
   const { find, union } = unionFind(clusters.length);
-  const mergeJaccard = 0.35;
-  const mergeOverlap = 3;
+  const mergeJaccard = 0.25;
+  const mergeOverlap = 2;
   for (let i = 0; i < clusters.length; i += 1) {
     for (let j = i + 1; j < clusters.length; j += 1) {
+      if (!isSignatureCompatible(clusters[i].seedSignature, clusters[j].seedSignature))
+        continue;
       const inter = intersectionSize(clusters[i].eventIds, clusters[j].eventIds);
       if (inter === 0) continue;
       const unionSize =
@@ -495,6 +1199,7 @@ async function buildClusters(
       current.seedMarketType = clusters[i].seedMarketType;
       current.seedMarketTitle = clusters[i].seedMarketTitle;
       current.seedEventTitle = clusters[i].seedEventTitle;
+      current.seedSignature = clusters[i].seedSignature;
     }
   }
 
@@ -551,14 +1256,19 @@ async function buildClusters(
 
     if (capped.length < 2) continue;
 
-    const metrics = computeClusterMetrics(capped);
+    const priced = capped.filter((summary) => summary.yesMid != null);
+    if (priced.length < 2) continue;
+    const pricedVenueCount = new Set(priced.map((summary) => summary.venue)).size;
+    if (pricedVenueCount < options.minVenueCount) continue;
+
+    const metrics = computeClusterMetrics(priced);
     if (metrics.venueCount < options.minVenueCount) continue;
     if (metrics.priceSpread != null && metrics.priceSpread < options.minSpread)
       continue;
 
     const score = scoreCluster(metrics);
-    const marketIds = capped.map((summary) => summary.marketId).sort();
-    const marketsPreview = capped
+    const marketIds = priced.map((summary) => summary.marketId).sort();
+    const marketsPreview = priced
       .slice()
       .sort((a, b) => {
         const scoreA = marketScoreById.get(a.marketId) ?? 0;
@@ -567,7 +1277,25 @@ async function buildClusters(
       })
       .slice(0, 6);
 
-    results.push({
+    const qualityScores = priced.map((summary) =>
+      scoreSignatureSimilarity(
+        cluster.seedSignature,
+        buildSignature({
+          eventTitle: summary.eventTitle,
+          marketTitle: summary.marketTitle,
+          eventCategory: null,
+          marketCategory: null,
+          dates: [summary.expiresAt],
+        }),
+      ),
+    );
+    const qualityScore =
+      qualityScores.length > 0
+        ? qualityScores.reduce((sum, value) => sum + value, 0) /
+          qualityScores.length
+        : null;
+
+    const record: ClusterRecord = {
       id: buildClusterId(Array.from(cluster.eventIds).sort()),
       label: resolveClusterLabel(
         marketsPreview,
@@ -585,7 +1313,21 @@ async function buildClusters(
       totalLiquidity: metrics.totalLiquidity,
       volume24h: metrics.volume24h,
       expiresAt: metrics.expiresAt,
-    });
+      analysis: null,
+      analysisStatus: null,
+      analysisUpdatedAt: null,
+      qualityScore,
+    };
+
+    const analysis = await runClusterAnalysis(record);
+    if (analysis) {
+      record.analysis = analysis.summary;
+      record.analysisStatus = analysis.status;
+      record.analysisUpdatedAt = analysis.updatedAt;
+      record.qualityScore = analysis.qualityScore;
+    }
+
+    results.push(record);
   }
 
   results.sort((a, b) => b.score - a.score);
@@ -631,6 +1373,11 @@ async function storeClusters(
         cluster.totalLiquidity != null ? String(cluster.totalLiquidity) : "",
       volume_24h: cluster.volume24h != null ? String(cluster.volume24h) : "",
       expires_at: cluster.expiresAt ?? "",
+      analysis: cluster.analysis ?? "",
+      analysis_status: cluster.analysisStatus ?? "",
+      analysis_updated_at: cluster.analysisUpdatedAt ?? "",
+      quality_score:
+        cluster.qualityScore != null ? String(cluster.qualityScore) : "",
       market_ids: JSON.stringify(cluster.marketIds),
       markets_preview: JSON.stringify(cluster.marketsPreview),
       updated_at: now,

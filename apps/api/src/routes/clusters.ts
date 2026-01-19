@@ -27,6 +27,10 @@ type ClusterHash = {
   total_liquidity: string;
   volume_24h: string;
   expires_at: string;
+  analysis: string;
+  analysis_status: string;
+  analysis_updated_at: string;
+  quality_score: string;
   market_ids: string;
   markets_preview: string;
   updated_at: string;
@@ -68,6 +72,10 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
     totalLiquidity: parseNumber(hash.total_liquidity),
     volume24h: parseNumber(hash.volume_24h),
     expiresAt: hash.expires_at || null,
+    analysis: hash.analysis || null,
+    analysisStatus: hash.analysis_status || null,
+    analysisUpdatedAt: hash.analysis_updated_at || null,
+    qualityScore: parseNumber(hash.quality_score),
     markets: marketsPreview,
     updatedAt: hash.updated_at || null,
     version: hash.version || null,
@@ -114,6 +122,10 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         "total_liquidity",
         "volume_24h",
         "expires_at",
+        "analysis",
+        "analysis_status",
+        "analysis_updated_at",
+        "quality_score",
         "market_ids",
         "markets_preview",
         "updated_at",
