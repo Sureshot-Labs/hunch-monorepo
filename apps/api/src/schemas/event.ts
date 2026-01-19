@@ -57,4 +57,5 @@ export const eventSimilarQuerySchema = z.object({
   cutoff: zOptionalNumber.optional(),
   excludeEvents: zOptionalCsv.optional(),
   marketId: z.string().min(1).optional(),
+  includeDetails: zOptionalBool.optional(),
 });

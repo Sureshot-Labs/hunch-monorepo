@@ -40,6 +40,17 @@ type PolymarketRepresentative = {
   tokens: TokenPair;
 };
 
+type SimilarEventMarketSummary = {
+  marketId: string;
+  eventId: string;
+  venue: string | null;
+  eventTitle: string | null;
+  marketTitle: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  lastPrice: number | null;
+};
+
 function parseEmbeddingBuffer(buffer: Buffer): Float32Array | null {
   if (buffer.byteLength % 4 !== 0) return null;
   const aligned = new ArrayBuffer(buffer.byteLength);
@@ -196,6 +207,52 @@ function toNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+async function fetchSimilarMarketSummaries(
+  marketIds: string[],
+  activeOnly: boolean,
+): Promise<SimilarEventMarketSummary[]> {
+  if (!marketIds.length) return [];
+  const uniqueIds = Array.from(new Set(marketIds));
+  const { rows } = await pool.query<{
+    market_id: string;
+    event_id: string;
+    venue: string | null;
+    event_title: string | null;
+    market_title: string | null;
+    best_bid: unknown;
+    best_ask: unknown;
+    last_price: unknown;
+  }>(
+    `
+      select
+        m.id as market_id,
+        m.event_id,
+        m.venue,
+        e.title as event_title,
+        m.title as market_title,
+        m.best_bid,
+        m.best_ask,
+        m.last_price
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      where m.id = any($1::text[])
+      ${activeOnly ? "and m.status = 'ACTIVE' and e.status = 'ACTIVE'" : ""}
+    `,
+    [uniqueIds],
+  );
+
+  return rows.map((row) => ({
+    marketId: row.market_id,
+    eventId: row.event_id,
+    venue: row.venue ?? null,
+    eventTitle: row.event_title ?? null,
+    marketTitle: row.market_title ?? null,
+    bestBid: toNumber(row.best_bid),
+    bestAsk: toNumber(row.best_ask),
+    lastPrice: toNumber(row.last_price),
+  }));
 }
 
 function clampProbability(value: number): number {
@@ -685,10 +742,18 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     { schema: { params: eventParamsSchema, querystring: eventSimilarQuerySchema } },
     async (request, reply) => {
       const { eventId } = request.params;
-      const { limit, venue, activeOnly, cutoff, excludeEvents, marketId } =
-        request.query;
+      const {
+        limit,
+        venue,
+        activeOnly,
+        cutoff,
+        excludeEvents,
+        marketId,
+        includeDetails,
+      } = request.query;
       const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
       const active = activeOnly ?? true;
+      const withDetails = includeDetails ?? false;
       const maxScore =
         cutoff != null && Number.isFinite(cutoff) ? cutoff : undefined;
       const excludeEventSet = new Set(
@@ -742,7 +807,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const cacheHash = createHash("sha256")
         .update(
           JSON.stringify({
-            selectorVersion: "v6",
+            selectorVersion: "v7",
             textHash,
             embeddingVersion,
             limit: cappedLimit,
@@ -751,6 +816,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             maxScore: maxScore ?? null,
             marketId: marketId ?? "",
             seriesKey: baseSeriesKey ?? "",
+            includeDetails: withDetails,
             excludeEvents: Array.from(excludeEventSet).sort(),
           }),
         )
@@ -762,13 +828,25 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         const cached = await redis.get(cacheKey);
         if (cached) {
           try {
-            const items = JSON.parse(cached) as Array<{
-              eventId: string;
-              marketId: string | null;
-              score: number;
-            }>;
+            const parsed = JSON.parse(cached) as
+              | Array<{
+                  eventId: string;
+                  marketId: string | null;
+                  score: number;
+                }>
+              | {
+                  items: Array<{
+                    eventId: string;
+                    marketId: string | null;
+                    score: number;
+                  }>;
+                  markets?: SimilarEventMarketSummary[];
+                };
+            const items = Array.isArray(parsed) ? parsed : parsed.items;
+            const markets = Array.isArray(parsed) ? undefined : parsed.markets;
             return reply.send({
               items,
+              markets: markets ?? undefined,
               cache_status: "hit" as const,
               cache_source: "cache",
             });
@@ -947,14 +1025,30 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               score: item.score,
             }));
 
+            const markets = withDetails
+              ? await fetchSimilarMarketSummaries(
+                  responseItems
+                    .map((entry) => entry.marketId)
+                    .filter(Boolean) as string[],
+                  active,
+                )
+              : undefined;
+
             if (cacheTtlSec > 0) {
-              await redis.set(cacheKey, JSON.stringify(responseItems), {
+              const payload = withDetails
+                ? {
+                    items: responseItems,
+                    markets,
+                  }
+                : responseItems;
+              await redis.set(cacheKey, JSON.stringify(payload), {
                 EX: cacheTtlSec,
               });
             }
 
             return reply.send({
               items: responseItems,
+              markets,
               cache_status: "hit" as const,
               cache_source: "knn",
             });
@@ -1235,14 +1329,30 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           score: item.score,
         }));
 
+        const markets = withDetails
+          ? await fetchSimilarMarketSummaries(
+              responseItems
+                .map((entry) => entry.marketId)
+                .filter(Boolean) as string[],
+              active,
+            )
+          : undefined;
+
         if (cacheTtlSec > 0) {
-          await redis.set(cacheKey, JSON.stringify(responseItems), {
+          const payload = withDetails
+            ? {
+                items: responseItems,
+                markets,
+              }
+            : responseItems;
+          await redis.set(cacheKey, JSON.stringify(payload), {
             EX: cacheTtlSec,
           });
         }
 
         return reply.send({
           items: responseItems,
+          markets,
           cache_status: "hit" as const,
           cache_source: "knn",
         });
