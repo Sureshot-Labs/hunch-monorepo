@@ -142,6 +142,26 @@ const solanaRpcUrls = parseList(
   process.env.SOLANA_RPC_URLS,
   process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
 );
+const walletIntelWhaleUsd = optionalNonNegativeNumber(
+  "WALLET_INTEL_WHALE_USD",
+  10_000,
+);
+const walletIntelWhaleUsdSolana = optionalNonNegativeNumber(
+  "WALLET_INTEL_WHALE_USD_SOLANA",
+  walletIntelWhaleUsd,
+);
+const walletIntelMarketLimitPerVenue = optionalNonNegativeInt(
+  "WALLET_INTEL_MARKET_LIMIT_PER_VENUE",
+  10,
+);
+const walletIntelMarketLimitKalshi = optionalNonNegativeInt(
+  "WALLET_INTEL_MARKET_LIMIT_KALSHI",
+  walletIntelMarketLimitPerVenue,
+);
+const walletIntelWhaleMarketLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_WHALE_MARKET_LIMIT",
+  50,
+);
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -212,6 +232,45 @@ export const env = {
   ),
   aiClusterDebugLogs:
     parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
+  walletIntelMarketLimit: optionalPositiveInt(
+    "WALLET_INTEL_MARKET_LIMIT",
+    50,
+  ),
+  walletIntelMarketLimitPerVenue,
+  walletIntelMarketLimitKalshi,
+  walletIntelWhaleMarketLimit,
+  walletIntelHolderLimit: optionalPositiveInt(
+    "WALLET_INTEL_HOLDER_LIMIT",
+    20,
+  ),
+  walletIntelSnapshotHours: optionalPositiveInt(
+    "WALLET_INTEL_SNAPSHOT_HOURS",
+    6,
+  ),
+  walletIntelMinVolume24h: optionalNonNegativeNumber(
+    "WALLET_INTEL_MIN_VOLUME_24H",
+    0,
+  ),
+  walletIntelMinActivityUsd: optionalNonNegativeNumber(
+    "WALLET_INTEL_MIN_ACTIVITY_USD",
+    0.01,
+  ),
+  walletIntelMinActivityShares: optionalNonNegativeNumber(
+    "WALLET_INTEL_MIN_ACTIVITY_SHARES",
+    0.001,
+  ),
+  walletIntelMinPositionUsd: optionalNonNegativeNumber(
+    "WALLET_INTEL_MIN_POSITION_USD",
+    0.01,
+  ),
+  walletIntelMinPositionShares: optionalNonNegativeNumber(
+    "WALLET_INTEL_MIN_POSITION_SHARES",
+    0.001,
+  ),
+  walletIntelFreshDays: optionalPositiveInt("WALLET_INTEL_FRESH_DAYS", 7),
+  walletIntelDormantDays: optionalPositiveInt("WALLET_INTEL_DORMANT_DAYS", 30),
+  walletIntelWhaleUsd,
+  walletIntelWhaleUsdSolana,
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),

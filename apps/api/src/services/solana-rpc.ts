@@ -10,6 +10,16 @@ type JsonRpcResponse<T> =
   | { jsonrpc: "2.0"; id: number; result: T }
   | { jsonrpc: "2.0"; id: number; error: JsonRpcError };
 
+function isSolanaMintNotFound(error: unknown): boolean {
+  if (!error) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("could not find mint") ||
+    message.includes("Invalid param: could not find mint") ||
+    message.includes("Invalid param")
+  );
+}
+
 export function formatUiAmount(amount: bigint, decimals: number): string {
   if (decimals <= 0) return amount.toString();
 
@@ -588,4 +598,52 @@ export async function fetchSolanaTokenAccountOwners(inputs: {
   }
 
   return owners;
+}
+
+export async function fetchSolanaTokenBalancesByOwnerMints(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  owner: string;
+  mints: string[];
+}): Promise<Map<string, number>> {
+  const balances = new Map<string, number>();
+  const owner = inputs.owner.trim();
+  if (!owner || inputs.mints.length === 0) return balances;
+
+  for (const mint of inputs.mints) {
+    const mintValue = mint.trim();
+    if (!mintValue) continue;
+    let result: { value?: unknown[] };
+    try {
+      result = await solanaRpcRequest<{ value?: unknown[] }>({
+        rpcUrls: inputs.rpcUrls,
+        timeoutMs: inputs.timeoutMs,
+        method: "getTokenAccountsByOwner",
+        params: [owner, { mint: mintValue }, { encoding: "jsonParsed" }],
+      });
+    } catch (error) {
+      if (isSolanaMintNotFound(error)) {
+        continue;
+      }
+      throw error;
+    }
+
+    const entries = Array.isArray(result?.value) ? result.value : [];
+    let total = 0;
+
+    for (const entry of entries) {
+      const parsed = parseTokenAccount(entry);
+      if (!parsed) continue;
+      if (parsed.mint !== mintValue) continue;
+      const uiAmount = Number(formatUiAmount(parsed.amount, parsed.decimals));
+      if (!Number.isFinite(uiAmount) || uiAmount <= 0) continue;
+      total += uiAmount;
+    }
+
+    if (total > 0) {
+      balances.set(mintValue, total);
+    }
+  }
+
+  return balances;
 }

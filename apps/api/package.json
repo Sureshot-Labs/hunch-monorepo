@@ -18,6 +18,7 @@
     "rewards:payout": "tsx src/rewards-payout.ts",
     "ai:embed:backfill": "tsx src/ai-embed-backfill.ts",
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
+    "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
     "polycurl": "tsx src/polyclob.ts",
     "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",

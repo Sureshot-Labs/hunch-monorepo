@@ -194,6 +194,30 @@ async function inspectCandidate(inputs: {
   }
 }
 
+export async function inspectSafeWallet(inputs: {
+  address: string;
+  rpcUrl?: string;
+  timeoutMs?: number;
+}): Promise<{ safe: boolean; owners?: string[]; threshold?: number }> {
+  const normalized = normalizeEthAddress(inputs.address);
+  if (!normalized) return { safe: false };
+  const rpcUrl = inputs.rpcUrl ?? env.polygonRpcUrl;
+  const timeoutMs = inputs.timeoutMs ?? env.polygonRpcTimeoutMs;
+
+  try {
+    const code = await fetchEvmCode({
+      rpcUrl,
+      timeoutMs,
+      address: normalized,
+    });
+    if (isEmptyCode(code)) return { safe: false };
+  } catch {
+    return { safe: false };
+  }
+
+  return inspectSafe({ rpcUrl, timeoutMs, address: normalized });
+}
+
 export async function derivePolymarketFunders(inputs: {
   signer: string;
   storedFunder?: string | null;
