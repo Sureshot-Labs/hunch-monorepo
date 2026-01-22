@@ -247,6 +247,10 @@ export const env = {
     "WALLET_INTEL_SNAPSHOT_HOURS",
     6,
   ),
+  walletIntelBackfillSnapshots: optionalNonNegativeInt(
+    "WALLET_INTEL_BACKFILL_SNAPSHOTS",
+    0,
+  ),
   walletIntelMinVolume24h: optionalNonNegativeNumber(
     "WALLET_INTEL_MIN_VOLUME_24H",
     0,

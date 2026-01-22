@@ -1345,8 +1345,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           metadata: row.metadata ?? null,
         }));
 
-        const minUsd = env.walletIntelMinActivityUsd;
-        const minShares = env.walletIntelMinActivityShares;
+        const minUsd = env.walletIntelMinPositionUsd;
+        const minShares = env.walletIntelMinPositionShares;
 
         const filteredItems =
           minUsd <= 0 && minShares <= 0

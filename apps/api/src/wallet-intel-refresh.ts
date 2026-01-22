@@ -47,6 +47,26 @@ function bucketDate(date: Date, hours: number): Date {
   return new Date(bucket);
 }
 
+function addHours(date: Date, hours: number): Date {
+  return new Date(date.getTime() + hours * 60 * 60 * 1000);
+}
+
+function parseBackfillSnapshots(): number {
+  const arg = process.argv.find((entry) => entry.startsWith("--backfill="));
+  if (arg) {
+    const raw = arg.split("=")[1];
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  const envValue = env.walletIntelBackfillSnapshots ?? 0;
+  if (Number.isFinite(envValue) && envValue > 0) {
+    return Math.floor(envValue);
+  }
+  return 0;
+}
+
 function normalizeAddress(address: string, chain: Chain): string {
   const trimmed = address.trim();
   if (chain === "solana") return trimmed;
@@ -362,12 +382,22 @@ async function snapshotFollowedWalletHoldingsSolana(
   },
 ): Promise<number> {
   if (inputs.tokenMints.length === 0) return 0;
-  const balances = await fetchSolanaTokenBalancesByOwnerMints({
-    rpcUrls: env.solanaRpcUrls,
-    timeoutMs: env.solanaRpcTimeoutMs,
-    owner: inputs.address,
-    mints: inputs.tokenMints,
-  });
+  let balances: Map<string, number>;
+  try {
+    balances = await fetchSolanaTokenBalancesByOwnerMints({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      owner: inputs.address,
+      mints: inputs.tokenMints,
+    });
+  } catch (error) {
+    console.error(
+      "[wallets:intel:refresh] solana balances fetch failed",
+      { wallet: inputs.address, mints: inputs.tokenMints.length },
+      error,
+    );
+    return 0;
+  }
 
   let inserted = 0;
 
@@ -667,8 +697,8 @@ async function refreshMetrics(
 
   for (const entry of periods) {
     const whereSince = entry.since
-      ? `and occurred_at >= now() - interval '${entry.since}'`
-      : "";
+      ? `and occurred_at >= $3::timestamptz - interval '${entry.since}' and occurred_at <= $3::timestamptz`
+      : "and occurred_at <= $3::timestamptz";
     await client.query(
       `
         insert into wallet_metrics_snapshots (
@@ -714,6 +744,7 @@ async function refreshSystemTags(
     dormantDays: number;
     whaleUsd: number;
     whaleUsdSolana: number;
+    asOf: Date;
   },
 ) {
   if (inputs.walletIds.length === 0) return;
@@ -723,9 +754,9 @@ async function refreshSystemTags(
       select id
       from wallets
       where id = any($1::uuid[])
-        and first_seen_at >= now() - ($2::text || ' days')::interval
+        and first_seen_at >= $3::timestamptz - ($2::text || ' days')::interval
     `,
-    [inputs.walletIds, inputs.freshDays],
+    [inputs.walletIds, inputs.freshDays, inputs.asOf],
   );
 
   const dormantRows = await client.query<{ wallet_id: string }>(
@@ -739,9 +770,9 @@ async function refreshSystemTags(
           and activity_type in ('delta', 'trade')
       ) t on true
       where w.id = any($1::uuid[])
-        and (t.last_trade is null or t.last_trade < now() - ($2::text || ' days')::interval)
+        and (t.last_trade is null or t.last_trade < $3::timestamptz - ($2::text || ' days')::interval)
     `,
-    [inputs.walletIds, inputs.dormantDays],
+    [inputs.walletIds, inputs.dormantDays, inputs.asOf],
   );
 
   const whaleRows = await client.query<{ wallet_id: string }>(
@@ -756,9 +787,10 @@ async function refreshSystemTags(
           (w.chain = 'solana' and wa.size_usd >= $2)
           or (w.chain <> 'solana' and wa.size_usd >= $3)
         )
-        and wa.occurred_at >= now() - interval '7 days'
+        and wa.occurred_at >= $4::timestamptz - interval '7 days'
+        and wa.occurred_at <= $4::timestamptz
     `,
-    [inputs.walletIds, inputs.whaleUsdSolana, inputs.whaleUsd],
+    [inputs.walletIds, inputs.whaleUsdSolana, inputs.whaleUsd, inputs.asOf],
   );
 
   const tagAssignments: Array<{ slug: string; walletIds: string[] }> = [
@@ -911,9 +943,7 @@ async function linkSafeOwnersForWhales(client: Queryable): Promise<number> {
   return linked;
 }
 
-async function main() {
-  const runAt = new Date();
-  const snapshotAt = bucketDate(runAt, env.walletIntelSnapshotHours);
+async function runSnapshot(snapshotAt: Date) {
   const holderLimit = env.walletIntelHolderLimit;
   const marketLimit = env.walletIntelMarketLimit;
   const marketLimitPerVenue = env.walletIntelMarketLimitPerVenue;
@@ -1369,6 +1399,7 @@ async function main() {
       dormantDays: env.walletIntelDormantDays,
       whaleUsd: env.walletIntelWhaleUsd,
       whaleUsdSolana: env.walletIntelWhaleUsdSolana,
+      asOf: snapshotAt,
     });
 
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
@@ -1378,6 +1409,29 @@ async function main() {
     );
   } finally {
     client.release();
+  }
+}
+
+async function main() {
+  const runAt = new Date();
+  const baseSnapshot = bucketDate(runAt, env.walletIntelSnapshotHours);
+  const backfillSteps = parseBackfillSnapshots();
+  const snapshots: Date[] = [];
+
+  if (backfillSteps > 0) {
+    console.log(
+      `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${env.walletIntelSnapshotHours}`,
+    );
+  }
+
+  for (let step = backfillSteps; step >= 0; step -= 1) {
+    snapshots.push(
+      addHours(baseSnapshot, -step * env.walletIntelSnapshotHours),
+    );
+  }
+
+  for (const snapshotAt of snapshots) {
+    await runSnapshot(snapshotAt);
   }
 }
 
