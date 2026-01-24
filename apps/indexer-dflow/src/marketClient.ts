@@ -1,3 +1,4 @@
+import { sleep } from "@hunch/shared";
 import { env } from "./env.js";
 import { DflowEventsResponse, DflowMarketsBatchResponse } from "./types.js";
 import type { TDflowEvent } from "./types.js";
@@ -47,10 +48,6 @@ function setOptionalNumber(
 ): void {
   if (value == null) return;
   sp.set(key, String(value));
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeCursor(value: unknown): number | null {

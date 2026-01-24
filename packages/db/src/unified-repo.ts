@@ -1,3 +1,4 @@
+import { chunkArray } from "@hunch/shared";
 import { Pool } from "pg";
 
 // Types for unified tables
@@ -23,15 +24,6 @@ export interface UnifiedEventRow {
   icon?: string;
   created_at?: Date;
   updated_at?: Date;
-}
-
-function chunkArray<T>(items: T[], chunkSize: number): T[][] {
-  if (chunkSize <= 0) return [items];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
 }
 
 function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
@@ -252,7 +244,13 @@ export async function upsertUnifiedMarket(
       title = EXCLUDED.title,
       description = EXCLUDED.description,
       category = EXCLUDED.category,
-      status = EXCLUDED.status,
+      status = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+          AND EXCLUDED.status = 'ACTIVE'
+        THEN unified_markets.status
+        ELSE EXCLUDED.status
+      END,
       market_type = EXCLUDED.market_type,
       open_time = EXCLUDED.open_time,
       close_time = EXCLUDED.close_time,
@@ -266,16 +264,28 @@ export async function upsertUnifiedMarket(
       liquidity = EXCLUDED.liquidity,
       metadata = EXCLUDED.metadata,
       outcomes = EXCLUDED.outcomes,
-      token_yes = EXCLUDED.token_yes,
-      token_no = EXCLUDED.token_no,
+      token_yes = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_yes like 'sol:%'
+          AND EXCLUDED.token_yes like 'kalshi:%'
+        THEN unified_markets.token_yes
+        ELSE EXCLUDED.token_yes
+      END,
+      token_no = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_no like 'sol:%'
+          AND EXCLUDED.token_no like 'kalshi:%'
+        THEN unified_markets.token_no
+        ELSE EXCLUDED.token_no
+      END,
       clob_token_ids = EXCLUDED.clob_token_ids,
       condition_id = EXCLUDED.condition_id,
-      market_ledger = EXCLUDED.market_ledger,
-      settlement_mint = EXCLUDED.settlement_mint,
-      is_initialized = EXCLUDED.is_initialized,
-      redemption_status = EXCLUDED.redemption_status,
-      resolved_outcome = EXCLUDED.resolved_outcome,
-      resolved_outcome_pct = EXCLUDED.resolved_outcome_pct,
+      market_ledger = COALESCE(EXCLUDED.market_ledger, unified_markets.market_ledger),
+      settlement_mint = COALESCE(EXCLUDED.settlement_mint, unified_markets.settlement_mint),
+      is_initialized = COALESCE(EXCLUDED.is_initialized, unified_markets.is_initialized),
+      redemption_status = COALESCE(EXCLUDED.redemption_status, unified_markets.redemption_status),
+      resolved_outcome = COALESCE(EXCLUDED.resolved_outcome, unified_markets.resolved_outcome),
+      resolved_outcome_pct = COALESCE(EXCLUDED.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
       slug = EXCLUDED.slug,
       image = EXCLUDED.image,
       icon = EXCLUDED.icon,
@@ -400,7 +410,13 @@ export async function upsertUnifiedMarkets(
       title = excluded.title,
       description = excluded.description,
       category = excluded.category,
-      status = excluded.status,
+      status = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+          AND excluded.status = 'ACTIVE'
+        THEN unified_markets.status
+        ELSE excluded.status
+      END,
       market_type = excluded.market_type,
       open_time = excluded.open_time,
       close_time = excluded.close_time,
@@ -414,16 +430,28 @@ export async function upsertUnifiedMarkets(
       liquidity = excluded.liquidity,
       metadata = excluded.metadata,
       outcomes = excluded.outcomes,
-      token_yes = excluded.token_yes,
-      token_no = excluded.token_no,
+      token_yes = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_yes like 'sol:%'
+          AND excluded.token_yes like 'kalshi:%'
+        THEN unified_markets.token_yes
+        ELSE excluded.token_yes
+      END,
+      token_no = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_no like 'sol:%'
+          AND excluded.token_no like 'kalshi:%'
+        THEN unified_markets.token_no
+        ELSE excluded.token_no
+      END,
       clob_token_ids = excluded.clob_token_ids,
       condition_id = excluded.condition_id,
-      market_ledger = excluded.market_ledger,
-      settlement_mint = excluded.settlement_mint,
-      is_initialized = excluded.is_initialized,
-      redemption_status = excluded.redemption_status,
-      resolved_outcome = excluded.resolved_outcome,
-      resolved_outcome_pct = excluded.resolved_outcome_pct,
+      market_ledger = COALESCE(excluded.market_ledger, unified_markets.market_ledger),
+      settlement_mint = COALESCE(excluded.settlement_mint, unified_markets.settlement_mint),
+      is_initialized = COALESCE(excluded.is_initialized, unified_markets.is_initialized),
+      redemption_status = COALESCE(excluded.redemption_status, unified_markets.redemption_status),
+      resolved_outcome = COALESCE(excluded.resolved_outcome, unified_markets.resolved_outcome),
+      resolved_outcome_pct = COALESCE(excluded.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
       slug = excluded.slug,
       image = excluded.image,
       icon = excluded.icon,
@@ -484,8 +512,20 @@ export async function upsertUnifiedToken(
     insert into unified_tokens(token_id, venue, market_id, side)
     values ($1,$2,$3,$4)
     on conflict (market_id, side) do update
-      set token_id = excluded.token_id,
-          venue = excluded.venue,
+      set token_id = CASE
+            WHEN unified_tokens.venue = 'kalshi'
+              AND unified_tokens.token_id like 'sol:%'
+              AND excluded.token_id like 'kalshi:%'
+            THEN unified_tokens.token_id
+            ELSE excluded.token_id
+          END,
+          venue = CASE
+            WHEN unified_tokens.venue = 'kalshi'
+              AND unified_tokens.token_id like 'sol:%'
+              AND excluded.token_id like 'kalshi:%'
+            THEN unified_tokens.venue
+            ELSE excluded.venue
+          END,
           updated_at = now()
   `,
     [

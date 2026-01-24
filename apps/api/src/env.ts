@@ -65,6 +65,17 @@ function parseList(raw: string | undefined, fallback?: string): string[] {
   return [];
 }
 
+function parseEnum<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  const match = allowed.find((entry) => entry === normalized);
+  return match ?? fallback;
+}
+
 const nodeEnv = process.env.NODE_ENV ?? "development";
 const enableSwaggerSetting = parseOptionalBool(process.env.ENABLE_SWAGGER);
 const enableSwagger =
@@ -142,6 +153,19 @@ const solanaRpcUrls = parseList(
   process.env.SOLANA_RPC_URLS,
   process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
 );
+const aiWhaleProfileAutoRun =
+  parseOptionalBool(process.env.AI_WHALE_PROFILE_AUTORUN) ?? false;
+const aiWhaleProfileLimit = optionalPositiveInt("AI_WHALE_PROFILE_LIMIT", 15);
+const aiWhaleProfileMarketLimit = optionalPositiveInt(
+  "AI_WHALE_PROFILE_MARKET_LIMIT",
+  5,
+);
+const aiWhaleProfileWindowDays = optionalPositiveInt(
+  "AI_WHALE_PROFILE_WINDOW_DAYS",
+  30,
+);
+const aiWhaleProfileModel =
+  process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
 const walletIntelWhaleUsd = optionalNonNegativeNumber(
   "WALLET_INTEL_WHALE_USD",
   10_000,
@@ -161,6 +185,21 @@ const walletIntelMarketLimitKalshi = optionalNonNegativeInt(
 const walletIntelWhaleMarketLimit = optionalNonNegativeInt(
   "WALLET_INTEL_WHALE_MARKET_LIMIT",
   50,
+);
+const walletIntelSelectionModePoly = parseEnum(
+  process.env.WALLET_INTEL_SELECTION_MODE_POLY,
+  ["trade_24h", "trade_1h", "volume_24h", "liquidity", "hybrid"],
+  "trade_24h",
+);
+const walletIntelSelectionModeKalshi = parseEnum(
+  process.env.WALLET_INTEL_SELECTION_MODE_KALSHI,
+  ["trade_24h", "trade_1h", "open_interest", "updated", "hybrid"],
+  "trade_24h",
+);
+const walletIntelSelectionModeLimitless = parseEnum(
+  process.env.WALLET_INTEL_SELECTION_MODE_LIMITLESS,
+  ["liquidity", "book", "updated", "hybrid"],
+  "liquidity",
 );
 
 export const env = {
@@ -187,6 +226,11 @@ export const env = {
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",
+  aiWhaleProfileAutoRun,
+  aiWhaleProfileLimit,
+  aiWhaleProfileMarketLimit,
+  aiWhaleProfileWindowDays,
+  aiWhaleProfileModel,
   aiClusterAnalysisEnabled:
     parseOptionalBool(process.env.AI_CLUSTER_ANALYSIS_ENABLED) ?? false,
   aiClusterModelFast:
@@ -239,6 +283,9 @@ export const env = {
   walletIntelMarketLimitPerVenue,
   walletIntelMarketLimitKalshi,
   walletIntelWhaleMarketLimit,
+  walletIntelSelectionModePoly,
+  walletIntelSelectionModeKalshi,
+  walletIntelSelectionModeLimitless,
   walletIntelHolderLimit: optionalPositiveInt(
     "WALLET_INTEL_HOLDER_LIMIT",
     20,

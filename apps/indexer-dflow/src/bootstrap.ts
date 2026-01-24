@@ -1,3 +1,4 @@
+import { chunkArray } from "@hunch/shared";
 import PQueue from "p-queue";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
@@ -134,15 +135,6 @@ async function fetchHotTokenIds(): Promise<string[]> {
 function stripSolanaPrefix(tokenId: string): string | null {
   if (!tokenId) return null;
   return tokenId.startsWith("sol:") ? tokenId.slice(4) : tokenId;
-}
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  if (size <= 0) return [];
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    out.push(items.slice(i, i + size));
-  }
-  return out;
 }
 
 function parseTradeNumber(value: unknown): number | null {

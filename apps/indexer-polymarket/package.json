@@ -15,6 +15,7 @@
   "dependencies": {
     "@hunch/db": "workspace:*",
     "@hunch/infra": "workspace:*",
+    "@hunch/shared": "workspace:*",
     "pg": "^8.16.3",
     "redis": "^4.7.0",
     "zod": "^3.23.8",

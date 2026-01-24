@@ -70,6 +70,11 @@ type WhaleMarketRow = {
   last_activity_at: Date | null;
 };
 
+type WhaleProfileRow = {
+  profile: unknown | null;
+  profile_updated_at: Date | null;
+};
+
 function normalizeAddress(address: string): string {
   if (address.startsWith("0x")) return address.toLowerCase();
   return address.trim();
@@ -394,6 +399,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             metrics: WalletMetricsRow | null;
             inferred_wins: number | null;
             inferred_total: number | null;
+            profile: unknown | null;
+            profile_updated_at: Date | null;
           }
         >(
           `
@@ -409,9 +416,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tags.tags,
               metrics.metrics,
               inferred.wins as inferred_wins,
-              inferred.total as inferred_total
+              inferred.total as inferred_total,
+              wp.profile as profile,
+              wp.updated_at as profile_updated_at
             from wallet_follows wf
             join wallets w on w.id = wf.wallet_id
+            left join wallet_profiles wp on wp.wallet_id = w.id
             left join lateral (
               select jsonb_agg(jsonb_build_object(
                 'slug', t.slug,
@@ -511,6 +521,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 : null,
             inferredResolvedCount:
               row.inferred_total != null ? Number(row.inferred_total) : null,
+            profile: row.profile ?? null,
+            profileUpdatedAt: row.profile_updated_at ?? null,
           })),
         });
       } catch (error) {
@@ -545,7 +557,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const orderBy = (() => {
           switch (query.sort) {
             case "volume_30d":
-              return "metrics.metrics_volume desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+              return "whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "trades_30d":
               return "metrics.metrics_trades desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "exposure_usd":
@@ -554,12 +566,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "last_activity":
             default:
-              return "activity.last_activity_at desc nulls last, metrics.metrics_volume desc nulls last, w.last_seen_at desc";
+              return "activity.last_activity_at desc nulls last, whale_score desc nulls last, w.last_seen_at desc";
           }
         })();
 
         const whaleRows = await client.query<
-          WalletRow & {
+          WalletRow &
+            WhaleProfileRow & {
             is_followed: boolean;
             tags: WalletTagRow[] | null;
             metrics: WalletMetricsRow | null;
@@ -569,6 +582,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             metrics_volume: string | null;
             metrics_trades: number | null;
             exposure_usd: string | null;
+            whale_score: string | null;
             is_safe: boolean;
             owner_address: string | null;
             owner_label: string | null;
@@ -593,9 +607,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               metrics.metrics_volume,
               metrics.metrics_trades,
               exposure.exposure_usd,
+              case
+                when w.chain = 'solana'
+                  then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
+                else coalesce(metrics.metrics_volume, 0)
+              end as whale_score,
               owner.owner_address,
               owner.owner_label,
               owner.owner_wallet_id,
+              wp.profile as profile,
+              wp.updated_at as profile_updated_at,
               activity.last_activity_at,
               inferred.wins as inferred_wins,
               inferred.total as inferred_total
@@ -668,6 +689,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 and w2.chain = w.chain
               limit 1
             ) owner on true
+            left join wallet_profiles wp on wp.wallet_id = w.id
             left join lateral (
               with latest as (
                 select distinct on (ws.market_id, ws.outcome_side)
@@ -748,6 +770,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   um.best_bid,
                   um.best_ask,
                   um.last_price,
+                  um.status as market_status,
+                  um.close_time,
+                  um.expiration_time,
+                  um.resolved_outcome,
                   row_number() over (
                     partition by wa.wallet_id
                     order by sum(wa.size_usd) desc nulls last,
@@ -769,7 +795,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   wa.venue,
                   um.best_bid,
                   um.best_ask,
-                  um.last_price
+                  um.last_price,
+                  um.status,
+                  um.close_time,
+                  um.expiration_time,
+                  um.resolved_outcome
               ) ranked
               left join lateral (
                 select
@@ -828,6 +858,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           ownerAddress: row.owner_address,
           ownerLabel: row.owner_label,
           ownerWalletId: row.owner_wallet_id,
+          profile: row.profile ?? null,
+          profileUpdatedAt: row.profile_updated_at ?? null,
           topMarkets:
             marketMap.get(row.id)?.map((market) => ({
               marketId: market.market_id,
@@ -843,6 +875,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               bestBid: market.best_bid ? Number(market.best_bid) : null,
               bestAsk: market.best_ask ? Number(market.best_ask) : null,
               lastPrice: market.last_price ? Number(market.last_price) : null,
+              marketStatus: market.market_status ?? null,
+              closeTime: market.close_time ?? null,
+              expirationTime: market.expiration_time ?? null,
+              resolvedOutcome: market.resolved_outcome ?? null,
               positionSide: market.position_side,
               positionShares: market.position_shares
                 ? Number(market.position_shares)

@@ -1,3 +1,4 @@
+import { sleep } from "@hunch/shared";
 import type { PoolClient } from "pg";
 
 import { pool } from "../db.js";
@@ -8,6 +9,13 @@ import {
   fetchSolanaTokenLargestAccounts,
 } from "./solana-rpc.js";
 
+function isRpcRateLimit(error: unknown): boolean {
+  if (!error) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("429") || message.includes("Too Many Requests");
+}
+
+
 export type MarketRow = {
   id: string;
   venue: string;
@@ -17,6 +25,9 @@ export type MarketRow = {
   token_yes: string | null;
   token_no: string | null;
   clob_token_ids: string | null;
+  best_bid: string | null;
+  best_ask: string | null;
+  last_price: string | null;
 };
 
 export type TokenRow = {
@@ -59,10 +70,6 @@ function isAbortError(error: unknown): boolean {
     return (error as { name?: string }).name === "AbortError";
   }
   return false;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseOutcomes(outcomes: string | null): string[] {
@@ -128,6 +135,13 @@ function resolveMidPrice(
   if (bidNum != null) return bidNum;
   if (askNum != null) return askNum;
   return null;
+}
+
+function clampProb(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 function normalizeTokenId(value: string | null | undefined): string | null {
@@ -353,7 +367,8 @@ export async function fetchMarketHolderData(inputs: {
   const db: Queryable = inputs.client ?? pool;
   const { rows: markets } = await db.query<MarketRow>(
     `
-      select id, venue, title, outcomes, condition_id, token_yes, token_no, clob_token_ids
+      select id, venue, title, outcomes, condition_id, token_yes, token_no, clob_token_ids,
+             best_bid, best_ask, last_price
       from unified_markets
       where id = $1
     `,
@@ -442,6 +457,26 @@ export async function fetchMarketHolderData(inputs: {
         }
       }
     }
+  }
+
+  if (priceBySide.YES == null || priceBySide.NO == null) {
+    const marketYes = clampProb(
+      resolveMidPrice(market.best_bid, market.best_ask) ??
+        (market.last_price != null ? Number(market.last_price) : null),
+    );
+    if (priceBySide.YES == null && marketYes != null) {
+      priceBySide.YES = marketYes;
+    }
+    if (priceBySide.NO == null && marketYes != null) {
+      priceBySide.NO = clampProb(1 - marketYes);
+    }
+  }
+
+  if (priceBySide.YES == null && priceBySide.NO != null) {
+    priceBySide.YES = clampProb(1 - priceBySide.NO);
+  }
+  if (priceBySide.NO == null && priceBySide.YES != null) {
+    priceBySide.NO = clampProb(1 - priceBySide.YES);
   }
 
   const outcomes = parseOutcomes(market.outcomes);
@@ -534,19 +569,30 @@ export async function fetchMarketHolderData(inputs: {
     source = "solana";
     const safeFetch = async (mint: string | null) => {
       if (!mint) return [];
-      try {
-        return await fetchSolanaHolders({ mint, limit: inputs.limit });
-      } catch (error) {
-        if (isSolanaMintNotFound(error)) {
-          return [];
+      const retry = 2;
+      const backoffMs = 250;
+      const delayMs = 50;
+      let attempt = 0;
+      while (true) {
+        try {
+          const owners = await fetchSolanaHolders({ mint, limit: inputs.limit });
+          if (delayMs > 0) await sleep(delayMs);
+          return owners;
+        } catch (error) {
+          if (isSolanaMintNotFound(error)) {
+            return [];
+          }
+          if ((isRpcRateLimit(error) || isAbortError(error)) && attempt < retry) {
+            await sleep(backoffMs * Math.max(1, 2 ** attempt));
+            attempt += 1;
+            continue;
+          }
+          throw error;
         }
-        throw error;
       }
     };
-    const [yesOwners, noOwners] = await Promise.all([
-      safeFetch(yesMint),
-      safeFetch(noMint),
-    ]);
+    const yesOwners = await safeFetch(yesMint);
+    const noOwners = await safeFetch(noMint);
     for (const owner of yesOwners) {
       holderEntries.push({
         wallet: owner.wallet,

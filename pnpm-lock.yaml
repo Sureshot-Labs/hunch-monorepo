@@ -81,6 +81,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
 
   apps/api:
     dependencies:
@@ -96,6 +99,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@polymarket/builder-signing-sdk':
         specifier: ^0.0.8
         version: 0.0.8
@@ -154,6 +160,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       fast-json-stable-stringify:
         specifier: ^2.1.0
         version: 2.1.0
@@ -227,6 +236,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       fast-json-stable-stringify:
         specifier: ^2.1.0
         version: 2.1.0
@@ -263,6 +275,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       fast-json-stable-stringify:
         specifier: ^2.1.0
         version: 2.1.0
@@ -338,6 +353,9 @@ importers:
       '@hunch/config':
         specifier: workspace:*
         version: link:../config
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../shared
       globby:
         specifier: ^14.1.0
         version: 14.1.0

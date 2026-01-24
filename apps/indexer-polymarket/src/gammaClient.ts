@@ -1,3 +1,4 @@
+import { sleep } from "@hunch/shared";
 import { env } from "./env.js";
 import { GammaEvent, GammaEventsResponse } from "./types.js";
 import type { TEvent as GammaEventType } from "./types.js";
@@ -113,10 +114,6 @@ export type GammaEventPaginationOptions = {
   pageSize?: number;
   maxPages?: number; // 0 = unlimited
 } & Omit<GammaEventsQuery, "offset" | "limit">;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((res) => setTimeout(res, ms));
-}
 
 // Streaming generator: yields events page-by-page to avoid loading everything into memory
 export async function* iterateEventPages(

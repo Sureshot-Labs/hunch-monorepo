@@ -1,17 +1,9 @@
+import { chunkArray } from "@hunch/shared";
 import { pool } from "./db.js";
 import type { mapPolymarketEventRow, mapPolymarketMarketRow } from "./mappers.js";
 
 export type PolymarketEventRow = ReturnType<typeof mapPolymarketEventRow>;
 export type PolymarketMarketRow = ReturnType<typeof mapPolymarketMarketRow>;
-
-function chunkArray<T>(items: T[], chunkSize: number): T[][] {
-  if (chunkSize <= 0) return [items];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
-}
 
 function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   const map = new Map<string, T>();

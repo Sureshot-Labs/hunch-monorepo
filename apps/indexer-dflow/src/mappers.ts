@@ -252,7 +252,6 @@ type Instrument = {
 function pickUsdcInstrument(
   market: TDflowMarket,
   usdcMint: string,
-  requireInitialized: boolean,
 ): Instrument | null {
   const accounts = market.accounts ?? {};
   const entry = (accounts as Record<string, TDflowMarketAccount | null>)[
@@ -260,7 +259,6 @@ function pickUsdcInstrument(
   ];
   if (!entry) return null;
 
-  if (requireInitialized && entry.isInitialized !== true) return null;
   const yes = entry.yesMint?.trim();
   const no = entry.noMint?.trim();
   if (!yes || !no) return null;
@@ -305,8 +303,7 @@ export function mapToUnifiedMarket(
   requireInitialized: boolean,
 ): DflowMappedMarket | null {
   const status = mapDflowStatusToUnified(market.status);
-  const requireInit = status === "ACTIVE" ? requireInitialized : false;
-  const instrument = pickUsdcInstrument(market, usdcMint, requireInit);
+  const instrument = pickUsdcInstrument(market, usdcMint);
   if (!instrument) return null;
 
   const extra = market as Record<string, unknown>;
@@ -499,7 +496,7 @@ export function mapToUnifiedMarket(
   ];
 
   const snapshot: DflowMarketSnapshot | null =
-    status === "ACTIVE"
+    status === "ACTIVE" && (!requireInitialized || isInitialized === true)
       ? {
           marketId: marketRow.id,
           yesTokenId,

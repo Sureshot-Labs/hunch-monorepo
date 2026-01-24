@@ -1,3 +1,4 @@
+import { chunkArray } from "@hunch/shared";
 import { createHash } from "crypto";
 import { setTimeout as delay } from "timers/promises";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
@@ -339,15 +340,6 @@ function vectorToBuffer(values: number[]): Buffer {
   return Buffer.from(arr.buffer);
 }
 
-function chunk<T>(items: T[], size: number): T[][] {
-  if (items.length <= size) return [items];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
-}
-
 async function ensureConsumerGroup(redis: ReturnType<typeof createRedisClient>) {
   try {
     await redis.xGroupCreate(STREAM_KEY, env.group, "0", { MKSTREAM: true });
@@ -538,7 +530,7 @@ async function processStreamBatch(
     return;
   }
 
-  const chunks = chunk(pending, env.batchSize);
+  const chunks = chunkArray(pending, env.batchSize);
   const results = await Promise.all(
     chunks.map(async (batch) => {
       let embedded = 0;

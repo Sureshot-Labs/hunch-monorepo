@@ -13,6 +13,7 @@
     "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
-    "@hunch/infra": "workspace:*"
+    "@hunch/infra": "workspace:*",
+    "@hunch/shared": "workspace:*"
   }
 }

@@ -1,3 +1,4 @@
+import { sleep } from "@hunch/shared";
 import PQueue from "p-queue";
 
 import { env } from "./env.js";
@@ -18,11 +19,6 @@ const requestQueue = new PQueue({
   interval: env.limitlessHttpMinDelayMs,
   intervalCap: 1,
 });
-
-function sleep(ms: number) {
-  if (!ms) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function shouldRetry(status: number) {
   return status === 429 || status === 403 || status === 503;
@@ -50,7 +46,7 @@ async function getJson(url: string) {
           env.limitlessHttpBackoffMs * 2 ** attempt +
           Math.floor(Math.random() * 250);
         attempt += 1;
-        await sleep(backoff);
+        if (backoff > 0) await sleep(backoff);
         continue;
       }
 
@@ -81,7 +77,7 @@ export async function fetchAllActive(maxPages: number, pageSize: number) {
     if (!res.data.length) break;
     out.push(...res.data);
     // cheap throttling
-    await new Promise((r) => setTimeout(r, 150));
+    await sleep(150);
     const totalCount = res.totalMarketsCount;
     const totalPages =
       res.totalPages ??

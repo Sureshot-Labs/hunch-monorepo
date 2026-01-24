@@ -112,6 +112,7 @@ export const feedQuerySchema = z.object({
     .optional()
     .transform((v) =>
       v === "trending" ||
+      v === "trending_v2" ||
       v === "totalvol" ||
       v === "liquidity" ||
       v === "openinterest" ||

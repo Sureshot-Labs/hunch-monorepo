@@ -25,9 +25,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
    *  - min_volume24hr?: number (default > 0)
    *  - venue?: string | string[] ("polymarket" | "kalshi" | "limitless", supports CSV)
    *  - category?: string (exact match)
-   *  - sort?: string ("trending" | "totalvol" | "liquidity", default: "trending")
+   *  - sort?: string ("trending" | "trending_v2" | "totalvol" | "liquidity", default: "trending")
    *
    * Default sorting uses trending algorithm: 40% volume + 30% liquidity + 20% new events + 10% ending soon
+   * trending_v2 favors recent trade volume for Polymarket/Kalshi and liquidity/book for Limitless
    * Adds ETag + Cache-Control. Uses Redis string body as the single source of truth
    * so ETag always matches the exact bytes sent.
    */
@@ -357,7 +358,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           eventMap[eid].markets.push(buildMarket(rRow));
         }
 
-        if (r && sort === "trending") {
+        if (r && (sort === "trending" || sort === "trending_v2")) {
           const uniqueTokenIds: string[] = [];
           const seen = new Set<string>();
 

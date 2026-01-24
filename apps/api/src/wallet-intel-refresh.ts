@@ -5,10 +5,27 @@ import { ethers } from "ethers";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { fetchMarketHolderData } from "./services/holders-core.js";
+import { isRecord } from "./lib/type-guards.js";
+import { limitlessRequest } from "./services/limitless-client.js";
 import { fetchErc1155BalancesByOwner } from "./services/polygon-rpc.js";
 import { inspectSafeWallet } from "./services/polymarket-funder.js";
 import { fetchSolanaTokenBalancesByOwnerMints } from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
+import { runWhaleProfiles } from "./services/whale-profiles.js";
+
+function isRpcRateLimit(error: unknown): boolean {
+  if (!error) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("429") || message.includes("Too Many Requests");
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (error && typeof error === "object" && "name" in error) {
+    return (error as { name?: string }).name === "AbortError";
+  }
+  return false;
+}
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -32,6 +49,159 @@ type TokenIndexEntry = {
   side: "YES" | "NO";
   price: number | null;
 };
+
+type LimitlessOrderbook = {
+  bids?: Array<{ price?: unknown }>;
+  asks?: Array<{ price?: unknown }>;
+  lastTradePrice?: unknown;
+};
+
+type LimitlessMarketDetail = {
+  prices?: Array<unknown>;
+  tradeType?: unknown;
+};
+
+function parseLimitlessNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizeLimitlessPrice(
+  value: unknown,
+  tradeType: string | null,
+): number | null {
+  const raw = parseLimitlessNumber(value);
+  if (raw == null) return null;
+  if (tradeType?.toLowerCase() === "amm") {
+    const normalized = raw / 100;
+    return normalized >= 0 && normalized <= 1 ? normalized : null;
+  }
+  return raw;
+}
+
+async function fetchLimitlessOrderbook(
+  slug: string,
+): Promise<LimitlessOrderbook | null> {
+  const res = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(slug)}/orderbook`,
+  });
+  if (!res.ok) return null;
+  const payload = res.payload;
+  if (!isRecord(payload)) return null;
+  const data = isRecord(payload.data) ? payload.data : payload;
+  return {
+    bids: Array.isArray(data.bids) ? (data.bids as LimitlessOrderbook["bids"]) : [],
+    asks: Array.isArray(data.asks) ? (data.asks as LimitlessOrderbook["asks"]) : [],
+    lastTradePrice: data.lastTradePrice,
+  };
+}
+
+async function fetchLimitlessMarketDetail(
+  slug: string,
+): Promise<LimitlessMarketDetail | null> {
+  const res = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(slug)}`,
+  });
+  if (!res.ok) return null;
+  const payload = res.payload;
+  if (!isRecord(payload)) return null;
+  const data = isRecord(payload.data) ? payload.data : payload;
+  return {
+    prices: Array.isArray(data.prices) ? (data.prices as LimitlessMarketDetail["prices"]) : [],
+    tradeType: data.tradeType,
+  };
+}
+
+async function backfillLimitlessPrices(
+  client: Queryable,
+  markets: Array<{ id: string; venue: string }>,
+): Promise<number> {
+  const limitlessIds = markets
+    .filter((market) => market.venue === "limitless")
+    .map((market) => market.id);
+  if (limitlessIds.length === 0) return 0;
+
+  const rows = await client.query<{
+    id: string;
+    slug: string | null;
+    best_bid: number | null;
+    best_ask: number | null;
+    last_price: number | null;
+    trade_type: string | null;
+  }>(
+    `
+      select
+        id,
+        slug,
+        best_bid,
+        best_ask,
+        last_price,
+        metadata->>'tradeType' as trade_type
+      from unified_markets
+      where venue = 'limitless'
+        and id = any($1::text[])
+    `,
+    [limitlessIds],
+  );
+
+  let updated = 0;
+
+  for (const row of rows.rows) {
+    const hasPrice =
+      row.best_bid != null || row.best_ask != null || row.last_price != null;
+    if (hasPrice) continue;
+    if (!row.slug) continue;
+
+    let bestBid: number | null = null;
+    let bestAsk: number | null = null;
+    let lastPrice: number | null = null;
+
+    const orderbook = await fetchLimitlessOrderbook(row.slug);
+    if (orderbook) {
+      bestBid = parseLimitlessNumber(orderbook.bids?.[0]?.price ?? null);
+      bestAsk = parseLimitlessNumber(orderbook.asks?.[0]?.price ?? null);
+      lastPrice = parseLimitlessNumber(orderbook.lastTradePrice ?? null);
+    }
+
+    if (bestBid == null && bestAsk == null && lastPrice == null) {
+      const detail = await fetchLimitlessMarketDetail(row.slug);
+      if (detail) {
+        const tradeType =
+          typeof detail.tradeType === "string" ? detail.tradeType : row.trade_type;
+        const yesPrice = normalizeLimitlessPrice(detail.prices?.[0], tradeType);
+        if (yesPrice != null) {
+          bestBid = yesPrice;
+          bestAsk = yesPrice;
+          lastPrice = yesPrice;
+        }
+      }
+    }
+
+    if (bestBid == null && bestAsk == null && lastPrice == null) continue;
+
+    await client.query(
+      `
+        update unified_markets
+        set
+          best_bid = coalesce($2, best_bid),
+          best_ask = coalesce($3, best_ask),
+          last_price = coalesce($4, last_price),
+          updated_at = now()
+        where id = $1
+      `,
+      [row.id, bestBid, bestAsk, lastPrice],
+    );
+    updated += 1;
+  }
+
+  return updated;
+}
 
 
 function isLimitlessSessionMissing(error: unknown): boolean {
@@ -943,6 +1113,220 @@ async function linkSafeOwnersForWhales(client: Queryable): Promise<number> {
   return linked;
 }
 
+type MarketPickRow = {
+  id: string;
+  venue: string;
+  volume_24h: number | null;
+};
+
+const TRADE_WINDOW_HOURS = 24;
+
+async function selectPolymarketByTrade(
+  client: Queryable,
+  hours: number,
+  limit: number,
+  mode: "trade_1h" | "trade_24h" | "hybrid",
+): Promise<MarketPickRow[]> {
+  const result = await client.query<MarketPickRow>(
+    `
+      with recent as (
+        select token_id, sum(volume) as vol
+        from unified_last_trade_1m
+        where venue = 'polymarket'
+          and bucket >= now() - ($1::text || ' hours')::interval
+        group by token_id
+      )
+      select
+        m.id,
+        m.venue,
+        m.volume_24h
+      from unified_markets m
+      join recent r on (m.clob_token_ids::jsonb ? r.token_id)
+      where m.status = 'ACTIVE'
+        and m.venue = 'polymarket'
+      group by m.id, m.venue, m.volume_24h, m.liquidity
+      order by ${
+        mode === "hybrid"
+          ? "(coalesce(sum(r.vol), 0) + 0.5 * coalesce(m.volume_24h, 0) + 0.3 * coalesce(m.liquidity, 0))"
+          : "sum(r.vol)"
+      } desc nulls last
+      limit $2
+    `,
+    [hours, limit],
+  );
+  return result.rows;
+}
+
+async function selectPolymarketByMetric(
+  client: Queryable,
+  limit: number,
+  mode: "volume_24h" | "liquidity",
+): Promise<MarketPickRow[]> {
+  const order =
+    mode === "volume_24h"
+      ? "m.volume_24h desc nulls last"
+      : "m.liquidity desc nulls last";
+  const result = await client.query<MarketPickRow>(
+    `
+      select m.id, m.venue, m.volume_24h
+      from unified_markets m
+      where m.status = 'ACTIVE'
+        and m.venue = 'polymarket'
+      order by ${order}
+      limit $1
+    `,
+    [limit],
+  );
+  return result.rows;
+}
+
+async function selectKalshiByTrade(
+  client: Queryable,
+  hours: number,
+  limit: number,
+  mode: "trade_1h" | "trade_24h" | "hybrid",
+): Promise<MarketPickRow[]> {
+  const result = await client.query<MarketPickRow>(
+    `
+      with recent as (
+        select token_id, sum(volume) as vol
+        from unified_last_trade_1m
+        where venue = 'kalshi'
+          and bucket >= now() - ($1::text || ' hours')::interval
+        group by token_id
+      )
+      select
+        m.id,
+        m.venue,
+        m.volume_24h
+      from unified_markets m
+      join recent r on (m.token_yes = r.token_id or m.token_no = r.token_id)
+      where m.status = 'ACTIVE'
+        and m.venue = 'kalshi'
+        and m.is_initialized is true
+      group by m.id, m.venue, m.volume_24h, m.open_interest
+      order by ${
+        mode === "hybrid"
+          ? "(coalesce(sum(r.vol), 0) + 0.3 * coalesce(m.open_interest, 0))"
+          : "sum(r.vol)"
+      } desc nulls last
+      limit $2
+    `,
+    [hours, limit],
+  );
+  return result.rows;
+}
+
+async function selectKalshiByMetric(
+  client: Queryable,
+  limit: number,
+  mode: "open_interest" | "updated",
+): Promise<MarketPickRow[]> {
+  const order =
+    mode === "open_interest"
+      ? "m.open_interest desc nulls last"
+      : "m.updated_at desc nulls last";
+  const result = await client.query<MarketPickRow>(
+    `
+      select m.id, m.venue, m.volume_24h
+      from unified_markets m
+      where m.status = 'ACTIVE'
+        and m.venue = 'kalshi'
+        and m.is_initialized is true
+      order by ${order}
+      limit $1
+    `,
+    [limit],
+  );
+  return result.rows;
+}
+
+async function selectLimitlessByMetric(
+  client: Queryable,
+  limit: number,
+  mode: "liquidity" | "updated" | "book" | "hybrid",
+): Promise<MarketPickRow[]> {
+  let order = "m.updated_at desc nulls last";
+  if (mode === "liquidity") order = "m.liquidity desc nulls last";
+  if (mode === "book") {
+    order = `case when m.best_bid is not null or m.best_ask is not null then 1 else 0 end desc,
+      m.liquidity desc nulls last,
+      m.updated_at desc nulls last`;
+  }
+  if (mode === "hybrid") {
+    order = `(coalesce(m.liquidity, 0) +
+      case when m.best_bid is not null or m.best_ask is not null then 1 else 0 end) desc,
+      m.updated_at desc nulls last`;
+  }
+  const result = await client.query<MarketPickRow>(
+    `
+      select m.id, m.venue, m.volume_24h
+      from unified_markets m
+      where m.status = 'ACTIVE'
+        and m.venue = 'limitless'
+      order by ${order}
+      limit $1
+    `,
+    [limit],
+  );
+  return result.rows;
+}
+
+async function selectMarketsPerVenue(
+  client: Queryable,
+  limitPoly: number,
+  limitKalshi: number,
+  limitLimitless: number,
+): Promise<MarketPickRow[]> {
+  const rows: MarketPickRow[] = [];
+  const polyMode = env.walletIntelSelectionModePoly;
+  const kalshiMode = env.walletIntelSelectionModeKalshi;
+  const limitlessMode = env.walletIntelSelectionModeLimitless;
+
+  if (limitPoly > 0) {
+    if (polyMode === "trade_1h") {
+      rows.push(...(await selectPolymarketByTrade(client, 1, limitPoly, "trade_1h")));
+    } else if (polyMode === "trade_24h") {
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "trade_24h")));
+    } else if (polyMode === "hybrid") {
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "hybrid")));
+    } else if (polyMode === "volume_24h" || polyMode === "liquidity") {
+      rows.push(...(await selectPolymarketByMetric(client, limitPoly, polyMode)));
+    } else {
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "trade_24h")));
+    }
+  }
+
+  if (limitKalshi > 0) {
+    if (kalshiMode === "trade_1h") {
+      rows.push(...(await selectKalshiByTrade(client, 1, limitKalshi, "trade_1h")));
+    } else if (kalshiMode === "trade_24h") {
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "trade_24h")));
+    } else if (kalshiMode === "hybrid") {
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "hybrid")));
+    } else if (kalshiMode === "open_interest" || kalshiMode === "updated") {
+      rows.push(...(await selectKalshiByMetric(client, limitKalshi, kalshiMode)));
+    } else {
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "trade_24h")));
+    }
+  }
+
+  if (limitLimitless > 0) {
+    if (
+      limitlessMode === "liquidity" ||
+      limitlessMode === "updated" ||
+      limitlessMode === "book" ||
+      limitlessMode === "hybrid"
+    ) {
+      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, limitlessMode)));
+    } else {
+      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, "liquidity")));
+    }
+  }
+
+  return rows;
+}
+
 async function runSnapshot(snapshotAt: Date) {
   const holderLimit = env.walletIntelHolderLimit;
   const marketLimit = env.walletIntelMarketLimit;
@@ -968,6 +1352,7 @@ async function runSnapshot(snapshotAt: Date) {
         from unified_markets
         where status = 'ACTIVE'
           and venue in ('polymarket', 'limitless', 'kalshi')
+          and (venue != 'kalshi' or is_initialized is true)
           and coalesce(volume_24h, 0) >= $1
         order by volume_24h desc nulls last
         limit $2
@@ -975,44 +1360,15 @@ async function runSnapshot(snapshotAt: Date) {
       [env.walletIntelMinVolume24h, marketLimit],
     );
 
-    const marketsPerVenue =
+    const marketsPerVenueRows =
       marketLimitPerVenueMax > 0
-        ? await client.query<{
-            id: string;
-            venue: string;
-            volume_24h: number | null;
-          }>(
-            `
-              select id, venue, volume_24h
-              from (
-                select
-                  id,
-                  venue,
-                  volume_24h,
-                  row_number() over (
-                    partition by venue
-                    order by volume_24h desc nulls last, liquidity desc nulls last, updated_at desc nulls last, id
-                  ) as rn
-                from unified_markets
-                where status = 'ACTIVE'
-                  and venue in ('polymarket', 'limitless', 'kalshi')
-                  and (
-                    venue = 'kalshi'
-                    or coalesce(volume_24h, 0) >= $1
-                  )
-              ) ranked
-              where rn <= case
-                when venue = 'kalshi' then $2::bigint
-                else $3::bigint
-              end
-            `,
-            [
-              env.walletIntelMinVolume24h,
-              marketLimitKalshi,
-              marketLimitPerVenue,
-            ],
+        ? await selectMarketsPerVenue(
+            client,
+            marketLimitPerVenue,
+            marketLimitKalshi,
+            marketLimitPerVenue,
           )
-        : { rows: [] };
+        : [];
 
     const watchlistMarkets = await client.query<{
       id: string;
@@ -1026,6 +1382,7 @@ async function runSnapshot(snapshotAt: Date) {
         join unified_markets um on um.id = uw.market_id
         where um.status = 'ACTIVE'
           and um.venue in ('polymarket', 'limitless', 'kalshi')
+          and (um.venue != 'kalshi' or um.is_initialized is true)
       `,
     );
 
@@ -1044,6 +1401,7 @@ async function runSnapshot(snapshotAt: Date) {
               join unified_markets um on um.id = ws.market_id
               where um.status = 'ACTIVE'
                 and um.venue in ('polymarket', 'limitless', 'kalshi')
+                and (um.venue != 'kalshi' or um.is_initialized is true)
               order by um.volume_24h desc nulls last
               limit $1
             `,
@@ -1055,7 +1413,7 @@ async function runSnapshot(snapshotAt: Date) {
     for (const row of markets.rows) {
       marketMap.set(row.id, row);
     }
-    for (const row of marketsPerVenue.rows) {
+    for (const row of marketsPerVenueRows) {
       marketMap.set(row.id, row);
     }
     for (const row of watchlistMarkets.rows) {
@@ -1066,6 +1424,15 @@ async function runSnapshot(snapshotAt: Date) {
     }
 
     const marketRows = Array.from(marketMap.values());
+    const limitlessPriceBackfills = await backfillLimitlessPrices(
+      client,
+      marketRows,
+    );
+    if (limitlessPriceBackfills > 0) {
+      console.log(
+        `[wallets:intel:refresh] limitless price backfills=${limitlessPriceBackfills}`,
+      );
+    }
 
     const walletCache = new Map<string, string>();
     const tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>> = {
@@ -1083,6 +1450,9 @@ async function runSnapshot(snapshotAt: Date) {
     let activityRows = 0;
     let deltaInserts = 0;
     let deltaUpdates = 0;
+    let holderRateLimitErrors = 0;
+    let holderAbortErrors = 0;
+    let holderOtherErrors = 0;
 
     for (const market of marketRows) {
       const venue = market.venue as Venue;
@@ -1097,6 +1467,15 @@ async function runSnapshot(snapshotAt: Date) {
           client,
         });
       } catch (error) {
+        if (isRpcRateLimit(error)) {
+          holderRateLimitErrors += 1;
+          continue;
+        }
+        if (isAbortError(error)) {
+          holderAbortErrors += 1;
+          continue;
+        }
+        holderOtherErrors += 1;
         console.error(
           "[wallets:intel:refresh] market holders fetch failed",
           { marketId: market.id, venue: market.venue },
@@ -1220,6 +1599,18 @@ async function runSnapshot(snapshotAt: Date) {
         touchedWalletIds.add(walletId);
         activityRows += 1;
       }
+    }
+
+    if (holderRateLimitErrors > 0 || holderAbortErrors > 0) {
+      console.warn("[wallets:intel:refresh] holder fetch throttled", {
+        rateLimited: holderRateLimitErrors,
+        aborted: holderAbortErrors,
+      });
+    }
+    if (holderOtherErrors > 0) {
+      console.warn("[wallets:intel:refresh] holder fetch errors", {
+        count: holderOtherErrors,
+      });
     }
 
     const followedWallets = await client.query<{
@@ -1432,6 +1823,15 @@ async function main() {
 
   for (const snapshotAt of snapshots) {
     await runSnapshot(snapshotAt);
+  }
+
+  if (env.aiWhaleProfileAutoRun) {
+    const result = await runWhaleProfiles({
+      limit: env.aiWhaleProfileLimit,
+      marketLimit: env.aiWhaleProfileMarketLimit,
+      windowDays: env.aiWhaleProfileWindowDays,
+    });
+    console.log("[wallets:intel:refresh] whale profiles", result);
   }
 }
 

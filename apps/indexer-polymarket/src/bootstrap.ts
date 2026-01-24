@@ -1,3 +1,4 @@
+import { chunkArray } from "@hunch/shared";
 import { ensureRedis, redis } from "./redis.js";
 import { env } from "./env.js";
 import { fetchEventsByIds, iterateEventPages } from "./gammaClient.js";
@@ -32,12 +33,6 @@ import {
   resetPolymarketEventsOffset,
   setPolymarketEventsOffset,
 } from "./cursor.js";
-
-function chunk<T>(arr: T[], n: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-  return out;
-}
 
 function parsePrice(value: unknown): number | null {
   if (typeof value !== "string" && typeof value !== "number") return null;
@@ -325,7 +320,7 @@ export async function snapshotBooks(tokenIds: string[]): Promise<void> {
   const snapIds = tokenIds.slice(0, env.topBookSnapshot);
   log.info(`Snapshotting ${snapIds.length} top books`);
 
-  const batches = chunk(snapIds, 20);
+  const batches = chunkArray(snapIds, 20);
   const q = new PQueue({ interval: 10_000, intervalCap: 45 }); // safe under /books 50/10s
   await Promise.all(
     batches.map((group) =>

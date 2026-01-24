@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@hunch/config": "workspace:*",
+    "@hunch/shared": "workspace:*",
     "globby": "^14.1.0",
     "pg": "8.16.3"
   },

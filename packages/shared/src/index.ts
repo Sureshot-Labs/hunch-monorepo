@@ -1,5 +1,8 @@
 import pino from "pino";
 
+export { chunkArray } from "./array.js";
+export { sleep } from "./async.js";
+
 export type EventEnvelope<T> = {
   type: string;
   ts: number;

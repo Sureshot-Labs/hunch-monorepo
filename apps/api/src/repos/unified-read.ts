@@ -140,6 +140,13 @@ export async function fetchFeedEventIds(
       else m.token_yes
     end
   `;
+  const tokenNoExpr = `
+    case
+      when m.venue = 'polymarket' and m.clob_token_ids is not null
+        then (m.clob_token_ids::jsonb->>1)
+      else m.token_no
+    end
+  `;
   const currentYesMidExpr =
     inputs.sort === "change24h"
       ? `
@@ -199,6 +206,18 @@ export async function fetchFeedEventIds(
           limit 1
         ) yes_top on true`
       : "";
+  const tradeJoin =
+    inputs.sort === "trending_v2"
+      ? `left join lateral (
+          select sum(volume) as vol
+          from unified_last_trade_1m
+          where bucket >= ${nowParam}::timestamptz - interval '24 hours'
+            and (
+              (m.venue = 'polymarket' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr})) or
+              (m.venue = 'kalshi' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr}))
+            )
+        ) trade_24h on true`
+      : "";
 
   const having: string[] = [];
   if (inputs.minVol > 1e-9) {
@@ -228,7 +247,16 @@ export async function fetchFeedEventIds(
     eventOrder = "e.start_date desc nulls last, e.id";
   else if (inputs.filter === "endingsoon")
     eventOrder = "e.end_date asc nulls last, e.id";
-  else if (inputs.sort == null || inputs.sort === "trending") {
+  else if (inputs.sort === "trending_v2") {
+    const eventTrendExpr = `
+      case
+        when m.venue = 'limitless'
+          then (coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))
+        else coalesce(trade_24h.vol, 0)
+      end
+    `;
+    eventOrder = `sum(${eventTrendExpr}) ${sortDir} nulls last, e.id`;
+  } else if (inputs.sort == null || inputs.sort === "trending") {
     const sevenDaysAgo = add(inputs.sevenDaysAgo);
     const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
     eventOrder = `
@@ -251,6 +279,7 @@ export async function fetchFeedEventIds(
       and ${supportedLimitlessMarketExpr}
     ${changeJoin}
     ${currentJoin}
+    ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
     having ${having.map((clause) => `(${clause})`).join(" and ")}
@@ -612,6 +641,21 @@ export async function fetchFeedMarketsDirect(
     end
   `;
 
+  const tokenYesExpr = `
+    case
+      when m.venue = 'polymarket' and m.clob_token_ids is not null
+        then (m.clob_token_ids::jsonb->>0)
+      else m.token_yes
+    end
+  `;
+  const tokenNoExpr = `
+    case
+      when m.venue = 'polymarket' and m.clob_token_ids is not null
+        then (m.clob_token_ids::jsonb->>1)
+      else m.token_no
+    end
+  `;
+
   const where: string[] = [
     "m.status = 'ACTIVE'",
     "e.status = 'ACTIVE'",
@@ -705,7 +749,16 @@ export async function fetchFeedMarketsDirect(
     marketOrder = "e.start_date desc nulls last, m.venue_market_id";
   else if (inputs.filter === "endingsoon")
     marketOrder = "e.end_date asc nulls last, m.venue_market_id";
-  else if (inputs.sort == null || inputs.sort === "trending") {
+  else if (inputs.sort === "trending_v2") {
+    const marketTrendExpr = `
+      case
+        when m.venue = 'limitless'
+          then (coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))
+        else coalesce(trade_24h.vol, 0)
+      end
+    `;
+    marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
+  } else if (inputs.sort == null || inputs.sort === "trending") {
     marketOrder = `
       (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
        coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
@@ -739,6 +792,18 @@ export async function fetchFeedMarketsDirect(
           limit 1
         ) yes_24h on true`
       : "";
+  const tradeJoin =
+    inputs.sort === "trending_v2"
+      ? `left join lateral (
+          select sum(volume) as vol
+          from unified_last_trade_1m
+          where bucket >= ${nowParam}::timestamptz - interval '24 hours'
+            and (
+              (m.venue = 'polymarket' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr})) or
+              (m.venue = 'kalshi' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr}))
+            )
+        ) trade_24h on true`
+      : "";
   const candidateYesMidExpr = `
     case
       when m.best_bid is not null and m.best_ask is not null
@@ -762,6 +827,7 @@ export async function fetchFeedMarketsDirect(
     join unified_events e on e.id = m.event_id
     ${marketCountJoin}
     ${change24hCandidateJoin}
+    ${tradeJoin}
     where ${where.join(" and ")}
     ${marketOrder ? `order by ${marketOrder}` : ""}
     limit ${limitParam} offset ${offsetParam}
