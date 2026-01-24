@@ -1,6 +1,7 @@
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types.js";
+import type { DflowSeriesInfo } from "./seriesClient.js";
 
 const DFLOW_U64_SENTINEL_MIN = 9e18;
 
@@ -115,7 +116,10 @@ function pickEventTicker(e: TDflowEvent): string | null {
   return candidates[0] ? candidates[0].trim() : null;
 }
 
-export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
+export function mapToUnifiedEvent(
+  e: TDflowEvent,
+  seriesLookup?: Map<string, DflowSeriesInfo>,
+): UnifiedEventRow | null {
   const venueEventId = pickEventTicker(e);
   if (!venueEventId) return null;
 
@@ -187,6 +191,13 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
   const subtitle = s(extra.subtitle);
   const seriesTicker = s(extra.seriesTicker) ?? s(extra.series_ticker);
   const seriesTitle = s(extra.seriesTitle) ?? s(extra.series_title);
+  const seriesInfo =
+    seriesTicker && seriesLookup ? seriesLookup.get(seriesTicker) : undefined;
+  const seriesTitleResolved = seriesTitle ?? seriesInfo?.title;
+  const seriesCategory =
+    typeof e.category === "string" && e.category.trim().length
+      ? e.category.trim()
+      : seriesInfo?.category;
   const competition = s(extra.competition);
   const competitionScope = s(extra.competitionScope) ?? s(extra.competition_scope);
   const strikeDate = s(extra.strikeDate) ?? s(extra.strike_date);
@@ -206,6 +217,9 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
     strikeDate,
     strikePeriod,
     settlementSources,
+    seriesCategory: seriesInfo?.category,
+    seriesTags: seriesInfo?.tags,
+    seriesTitle: seriesTitleResolved,
   });
 
   return {
@@ -220,13 +234,10 @@ export function mapToUnifiedEvent(e: TDflowEvent): UnifiedEventRow | null {
       typeof (e as Record<string, unknown>).description === "string"
         ? ((e as Record<string, unknown>).description as string)
         : undefined,
-    category:
-      typeof e.category === "string" && e.category.trim().length
-        ? e.category.trim()
-        : undefined,
+    category: seriesCategory,
     status,
     series_key: seriesTicker ?? undefined,
-    series_title: seriesTitle ?? undefined,
+    series_title: seriesTitleResolved ?? undefined,
     start_date,
     end_date,
     volume_total,

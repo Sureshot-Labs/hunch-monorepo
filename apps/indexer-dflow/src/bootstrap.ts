@@ -35,6 +35,7 @@ import {
 } from "./mappers.js";
 import type { TDflowEvent, TDflowMarket } from "./types.js";
 import { ensureRedis, redis } from "./redis.js";
+import { getSeriesLookup, type DflowSeriesInfo } from "./seriesClient.js";
 
 type SyncCounters = {
   processedEvents: number;
@@ -544,7 +545,10 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
   return { processedMarkets };
 }
 
-async function processEvents(events: TDflowEvent[]): Promise<{
+async function processEvents(
+  events: TDflowEvent[],
+  seriesLookup?: Map<string, DflowSeriesInfo>,
+): Promise<{
   processedEvents: number;
   processedMarkets: number;
   snapshots: DflowMarketSnapshot[];
@@ -562,7 +566,7 @@ async function processEvents(events: TDflowEvent[]): Promise<{
   let processedMarkets = 0;
 
   for (const e of events) {
-    const unifiedEvent = mapToUnifiedEvent(e);
+    const unifiedEvent = mapToUnifiedEvent(e, seriesLookup);
     if (!unifiedEvent) continue;
 
     let volumeTotalSum = 0;
@@ -722,6 +726,7 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   };
 
   const snapshotByMarketId = new Map<string, DflowMarketSnapshot>();
+  const seriesLookup = await getSeriesLookup();
 
   for await (const events of iterateEventsWithMarkets({
     label: "hot",
@@ -729,7 +734,7 @@ export async function syncHotWindow(): Promise<SyncCounters> {
     maxPages: env.hotMaxPages,
   })) {
     totals.pages += 1;
-    const r = await processEvents(events);
+    const r = await processEvents(events, seriesLookup);
     totals.processedEvents += r.processedEvents;
     totals.processedMarkets += r.processedMarkets;
     for (const snap of r.snapshots) snapshotByMarketId.set(snap.marketId, snap);
@@ -783,6 +788,8 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
     pages: 0,
   };
 
+  const seriesLookup = await getSeriesLookup();
+
   for await (const page of iterateEventPages({
     label: "catch-up",
     startCursor,
@@ -793,7 +800,7 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
     isInitialized: env.isInitialized,
   })) {
     totals.pages += 1;
-    const r = await processEvents(page.events);
+    const r = await processEvents(page.events, seriesLookup);
     totals.processedEvents += r.processedEvents;
     totals.processedMarkets += r.processedMarkets;
 

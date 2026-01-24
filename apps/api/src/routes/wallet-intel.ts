@@ -57,6 +57,10 @@ type WhaleMarketRow = {
   event_id: string | null;
   event_title: string | null;
   venue: string;
+  market_status: string | null;
+  close_time: Date | null;
+  expiration_time: Date | null;
+  resolved_outcome: string | null;
   activity_count: number;
   volume_usd: string | null;
   avg_price: string | null;

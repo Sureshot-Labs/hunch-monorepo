@@ -203,6 +203,20 @@ const tradesConcurrency = clampInt(
   { min: 1, max: 50, fallback: 8 },
 );
 
+const seriesRefreshHours = clampInt(
+  parseOptionalInt(process.env.DFLOW_SERIES_REFRESH_HOURS),
+  { min: 1, max: 168, fallback: 24 },
+);
+const seriesPageSizeRaw = parseOptionalInt(process.env.DFLOW_SERIES_PAGE_SIZE);
+const seriesPageSize =
+  seriesPageSizeRaw != null
+    ? clampInt(seriesPageSizeRaw, { min: 1, max: 5000, fallback: 1000 })
+    : undefined;
+const seriesMaxPages = clampInt(
+  parseOptionalInt(process.env.DFLOW_SERIES_MAX_PAGES),
+  { min: 0, max: 100_000, fallback: 0 },
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -243,6 +257,9 @@ export const env = {
   tradesTokenLimit,
   tradesPerMintLimit,
   tradesConcurrency,
+  seriesRefreshHours,
+  seriesPageSize,
+  seriesMaxPages,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

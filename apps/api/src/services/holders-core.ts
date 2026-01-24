@@ -1,4 +1,4 @@
-import { sleep } from "@hunch/shared";
+import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
 import type { PoolClient } from "pg";
 
 import { pool } from "../db.js";
@@ -8,13 +8,6 @@ import {
   fetchSolanaTokenAccountOwners,
   fetchSolanaTokenLargestAccounts,
 } from "./solana-rpc.js";
-
-function isRpcRateLimit(error: unknown): boolean {
-  if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("429") || message.includes("Too Many Requests");
-}
-
 
 export type MarketRow = {
   id: string;
@@ -63,14 +56,6 @@ const POLYMARKET_HOLDER_LIMIT = 20;
 const HOLDERS_TIMEOUT_MS = 10_000;
 const HOLDERS_RETRY_ATTEMPTS = 2;
 const HOLDERS_RETRY_DELAY_MS = 250;
-
-function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true;
-  if (error && typeof error === "object" && "name" in error) {
-    return (error as { name?: string }).name === "AbortError";
-  }
-  return false;
-}
 
 function parseOutcomes(outcomes: string | null): string[] {
   if (!outcomes) return [];

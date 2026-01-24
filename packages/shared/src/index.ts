@@ -2,6 +2,7 @@ import pino from "pino";
 
 export { chunkArray } from "./array.js";
 export { sleep } from "./async.js";
+export { isAbortError, isRpcRateLimit } from "./errors.js";
 
 export type EventEnvelope<T> = {
   type: string;

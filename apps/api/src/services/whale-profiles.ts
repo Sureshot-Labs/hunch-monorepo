@@ -4,7 +4,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 
-const PROFILE_VERSION = "v2";
+const PROFILE_VERSION = "v3";
 
 type WhaleProfile = {
   label_short?: string;
@@ -54,6 +54,7 @@ type WhaleProfileInput = {
     top_market_concentration: number | null;
     side_bias: { yes: number; no: number; ratio: number | null };
     category_counts: Record<string, number>;
+    market_state_counts: { active: number; ended: number; resolved: number };
   };
   top_markets: Array<{
     market_id: string;
@@ -61,6 +62,10 @@ type WhaleProfileInput = {
     event_title: string | null;
     venue: string;
     category: string | null;
+    status: string | null;
+    close_time: string | null;
+    expiration_time: string | null;
+    resolved_outcome: string | null;
     volume_usd: number | null;
     activity_count: number;
     last_activity_at: string | null;
@@ -103,6 +108,10 @@ type WhaleMarketRow = {
   event_title: string | null;
   venue: string;
   category: string | null;
+  status: string | null;
+  close_time: Date | null;
+  expiration_time: Date | null;
+  resolved_outcome: string | null;
   volume_usd: string | null;
   activity_count: number;
   last_activity_at: Date | null;
@@ -179,6 +188,24 @@ function normalizeProfile(raw: unknown): WhaleProfile | null {
   };
 }
 
+function parseProfileJson(raw: string): unknown | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
 async function callOpenRouter(
   model: string,
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -237,12 +264,19 @@ function buildProfileInput(
   topMarkets: WhaleMarketRow[],
   context: { marketLimit: number; windowDays: number },
 ): WhaleProfileInput {
+  const now = Date.now();
   const markets = topMarkets.map((market) => ({
     market_id: market.market_id,
     market_title: market.market_title,
     event_title: market.event_title,
     venue: market.venue,
     category: market.category,
+    status: market.status,
+    close_time: market.close_time ? market.close_time.toISOString() : null,
+    expiration_time: market.expiration_time
+      ? market.expiration_time.toISOString()
+      : null,
+    resolved_outcome: market.resolved_outcome,
     volume_usd: parseNumber(market.volume_usd),
     activity_count: market.activity_count,
     last_activity_at: market.last_activity_at
@@ -290,6 +324,28 @@ function buildProfileInput(
     return acc;
   }, {});
 
+  const marketStateCounts = markets.reduce(
+    (acc, market) => {
+      if (market.resolved_outcome) {
+        acc.resolved += 1;
+        return acc;
+      }
+      const status = market.status?.toUpperCase();
+      if (status && status !== "ACTIVE") {
+        acc.ended += 1;
+        return acc;
+      }
+      const closeAt = market.close_time ?? market.expiration_time;
+      if (closeAt && new Date(closeAt).getTime() < now) {
+        acc.ended += 1;
+        return acc;
+      }
+      acc.active += 1;
+      return acc;
+    },
+    { active: 0, ended: 0, resolved: 0 },
+  );
+
   return {
     context: {
       purpose: "wallet_whale_profile",
@@ -320,7 +376,7 @@ function buildProfileInput(
     inferred: {
       win_rate:
         wallet.inferred_total && wallet.inferred_total > 0
-          ? wallet.inferred_wins / wallet.inferred_total
+          ? (wallet.inferred_wins ?? 0) / wallet.inferred_total
           : null,
       resolved_count:
         wallet.inferred_total != null ? Number(wallet.inferred_total) : null,
@@ -343,6 +399,7 @@ function buildProfileInput(
         ratio: sideRatio,
       },
       category_counts: categoryCounts,
+      market_state_counts: marketStateCounts,
     },
     top_markets: markets,
   };
@@ -506,6 +563,10 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             ue.title as event_title,
             wa.venue,
             um.category,
+            um.status,
+            um.close_time,
+            um.expiration_time,
+            um.resolved_outcome,
             sum(wa.size_usd) as volume_usd,
             count(*)::int as activity_count,
             max(wa.occurred_at) as last_activity_at,
@@ -538,7 +599,11 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             um.category,
             um.best_bid,
             um.best_ask,
-            um.last_price
+            um.last_price,
+            um.status,
+            um.close_time,
+            um.expiration_time,
+            um.resolved_outcome
         ) ranked
         left join lateral (
           select
@@ -619,8 +684,12 @@ Rules:
 - Be factual, pattern-based, and neutral in tone.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
+- If most top markets are resolved or ended, mention that the pattern is historical.
 
 Whale data (JSON):\n${JSON.stringify(input)}`;
+      const compactUser = `${user}
+
+Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
 
       let profileRaw = "";
       try {
@@ -641,13 +710,28 @@ Whale data (JSON):\n${JSON.stringify(input)}`;
         continue;
       }
 
-      const parsed = (() => {
+      let parsed = parseProfileJson(profileRaw);
+      if (!parsed) {
         try {
-          return JSON.parse(profileRaw);
-        } catch {
-          return null;
+          profileRaw = await callOpenRouter(
+            env.aiWhaleProfileModel,
+            [
+              { role: "system", content: system },
+              { role: "user", content: compactUser },
+            ],
+            320,
+          );
+          parsed = parseProfileJson(profileRaw);
+        } catch (error) {
+          failed += 1;
+          console.warn("[whale-profile] openrouter retry failed", {
+            walletId: whale.id,
+            error,
+          });
+          continue;
         }
-      })();
+      }
+
       const normalized = normalizeProfile(parsed);
       if (!normalized) {
         failed += 1;

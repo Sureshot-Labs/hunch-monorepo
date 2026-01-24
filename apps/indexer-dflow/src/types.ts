@@ -65,8 +65,27 @@ export const DflowMarketsBatchResponse = z
   })
   .passthrough();
 
+export const DflowSeries = z
+  .object({
+    ticker: z.string(),
+    title: z.string().optional().nullable(),
+    category: z.string().optional().nullable(),
+    tags: z.array(z.string()).optional().nullable(),
+  })
+  .passthrough();
+
+export const DflowSeriesResponse = z
+  .object({
+    series: z.array(DflowSeries).optional().nullable(),
+    cursor: z.union([z.string(), z.number()]).optional().nullable(),
+    nextCursor: z.union([z.string(), z.number()]).optional().nullable(),
+  })
+  .passthrough();
+
 export type TDflowMarketAccount = z.infer<typeof DflowMarketAccount>;
 export type TDflowMarket = z.infer<typeof DflowMarket>;
 export type TDflowEvent = z.infer<typeof DflowEvent>;
 export type TDflowEventsResponse = z.infer<typeof DflowEventsResponse>;
 export type TDflowMarketsBatchResponse = z.infer<typeof DflowMarketsBatchResponse>;
+export type TDflowSeries = z.infer<typeof DflowSeries>;
+export type TDflowSeriesResponse = z.infer<typeof DflowSeriesResponse>;

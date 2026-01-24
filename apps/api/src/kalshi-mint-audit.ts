@@ -1,4 +1,4 @@
-import { sleep } from "@hunch/shared";
+import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { fetchSolanaMintDecimals } from "./services/solana-rpc.js";
@@ -20,19 +20,6 @@ function parseArgValue(name: string): string | null {
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
-}
-
-function isRpcRateLimit(error: unknown): boolean {
-  if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("429") || message.includes("Too Many Requests");
-}
-
-function isRpcAbort(error: unknown): boolean {
-  if (!error) return false;
-  if (error instanceof Error && error.name === "AbortError") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("AbortError") || message.includes("aborted");
 }
 
 function isMintNotFound(error: unknown): boolean {
@@ -133,7 +120,7 @@ async function main() {
             } catch (error) {
               if (isMintNotFound(error)) return false;
               if (
-                (isRpcRateLimit(error) || isRpcAbort(error)) &&
+                (isRpcRateLimit(error) || isAbortError(error)) &&
                 attempt < retry
               ) {
                 await sleep(backoffMs * Math.max(1, 2 ** attempt));

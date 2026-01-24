@@ -22,6 +22,7 @@
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",
     "kalshi:mint-audit": "tsx src/kalshi-mint-audit.ts",
+    "kalshi:series-backfill": "tsx src/kalshi-series-backfill.ts",
     "polycurl": "tsx src/polyclob.ts",
     "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",

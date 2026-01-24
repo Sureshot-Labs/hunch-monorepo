@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { ethers } from "ethers";
+import { isAbortError, isRpcRateLimit } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
@@ -12,20 +13,6 @@ import { inspectSafeWallet } from "./services/polymarket-funder.js";
 import { fetchSolanaTokenBalancesByOwnerMints } from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
-
-function isRpcRateLimit(error: unknown): boolean {
-  if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("429") || message.includes("Too Many Requests");
-}
-
-function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === "AbortError") return true;
-  if (error && typeof error === "object" && "name" in error) {
-    return (error as { name?: string }).name === "AbortError";
-  }
-  return false;
-}
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
