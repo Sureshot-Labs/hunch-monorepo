@@ -987,7 +987,35 @@ async function backfillDerivedWalletLabels(client: Queryable) {
   await client.query(
     `
       update wallets w
-      set label = concat_ws(' ', src.label, '(Safe)'),
+      set label = concat_ws(' ', src.label, '(Trading wallet)'),
+          updated_at = now()
+      from wallets src
+      where w.label = concat_ws(' ', src.label, '(Safe)')
+        and w.metadata->>'kind' = 'safe'
+        and w.metadata->>'derivedFrom' = src.address
+        and w.chain = src.chain
+        and src.label is not null
+    `,
+  );
+
+  await client.query(
+    `
+      update wallets w
+      set label = concat_ws(' ', src.label, '(Signer wallet)'),
+          updated_at = now()
+      from wallets src
+      where w.label = concat_ws(' ', src.label, '(Signer)')
+        and w.metadata->>'kind' = 'safe_owner'
+        and w.metadata->>'derivedFrom' = src.address
+        and w.chain = src.chain
+        and src.label is not null
+    `,
+  );
+
+  await client.query(
+    `
+      update wallets w
+      set label = concat_ws(' ', src.label, '(Trading wallet)'),
           updated_at = now()
       from wallets src
       where w.label is null
@@ -1001,7 +1029,7 @@ async function backfillDerivedWalletLabels(client: Queryable) {
   await client.query(
     `
       update wallets w
-      set label = concat_ws(' ', src.label, '(Signer)'),
+      set label = concat_ws(' ', src.label, '(Signer wallet)'),
           updated_at = now()
       from wallets src
       where w.label is null
@@ -1015,20 +1043,20 @@ async function backfillDerivedWalletLabels(client: Queryable) {
   await client.query(
     `
       update wallets
-      set label = 'Safe (auto)',
+      set label = 'Trading wallet (auto)',
           updated_at = now()
-      where label is null
-        and metadata->>'kind' = 'safe'
+      where metadata->>'kind' = 'safe'
+        and (label is null or label = 'Safe (auto)')
     `,
   );
 
   await client.query(
     `
       update wallets
-      set label = 'Signer (auto)',
+      set label = 'Signer wallet (auto)',
           updated_at = now()
-      where label is null
-        and metadata->>'kind' = 'safe_owner'
+      where metadata->>'kind' = 'safe_owner'
+        and (label is null or label = 'Signer (auto)')
     `,
   );
 }

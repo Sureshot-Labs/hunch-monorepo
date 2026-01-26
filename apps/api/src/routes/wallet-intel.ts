@@ -143,6 +143,20 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           [user.id, wallet.id],
         );
 
+        if (baseLabel) {
+          await client.query(
+            `
+              insert into wallet_user_labels (user_id, wallet_id, label)
+              values ($1, $2, $3)
+              on conflict (user_id, wallet_id)
+              do update set
+                label = excluded.label,
+                updated_at = now()
+            `,
+            [user.id, wallet.id, baseLabel],
+          );
+        }
+
         if (chain === "polygon" && ethers.isAddress(address)) {
           try {
             const funderResult = await derivePolymarketFunders({
@@ -158,8 +172,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (safeCandidate) {
               const safeAddress = normalizeAddress(safeCandidate.funder);
               const safeLabel = baseLabel
-                ? `${baseLabel} (Safe)`
-                : "Safe (auto)";
+                ? `${baseLabel} (Trading wallet)`
+                : "Trading wallet (auto)";
               const safeWalletResult = await client.query<WalletRow>(
                 `
                   insert into wallets (address, chain, label, metadata)
@@ -195,6 +209,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   `,
                   [user.id, safeWalletId],
                 );
+                if (baseLabel) {
+                  await client.query(
+                    `
+                      insert into wallet_user_labels (user_id, wallet_id, label)
+                      values ($1, $2, $3)
+                      on conflict (user_id, wallet_id)
+                      do update set
+                        label = excluded.label,
+                        updated_at = now()
+                    `,
+                    [user.id, safeWalletId, `${baseLabel} (Trading wallet)`],
+                  );
+                }
               }
             }
           } catch (error) {
@@ -228,8 +255,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 const owner = normalizeAddress(safeInfo.owners[0]);
                 if (owner !== address) {
                   const ownerLabel = baseLabel
-                    ? `${baseLabel} (Signer)`
-                    : "Signer (auto)";
+                    ? `${baseLabel} (Signer wallet)`
+                    : "Signer wallet (auto)";
                   const ownerWalletResult = await client.query<{
                     id: string;
                   }>(
@@ -266,6 +293,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       `,
                       [user.id, ownerWalletId],
                     );
+                    if (baseLabel) {
+                      await client.query(
+                        `
+                          insert into wallet_user_labels (user_id, wallet_id, label)
+                          values ($1, $2, $3)
+                          on conflict (user_id, wallet_id)
+                          do update set
+                            label = excluded.label,
+                            updated_at = now()
+                        `,
+                        [user.id, ownerWalletId, `${baseLabel} (Signer wallet)`],
+                      );
+                    }
                   }
                 }
               }
@@ -358,6 +398,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           [user.id, walletRow.id],
         );
 
+        await client.query(
+          `
+            delete from wallet_user_labels
+            where user_id = $1 and wallet_id = $2
+          `,
+          [user.id, walletRow.id],
+        );
+
         if (deleteResult.rowCount === 0) {
           reply.code(404);
           return reply.send({ error: "Wallet not followed" });
@@ -405,6 +453,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             inferred_total: number | null;
             profile: unknown | null;
             profile_updated_at: Date | null;
+            user_label: string | null;
           }
         >(
           `
@@ -422,10 +471,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               inferred.wins as inferred_wins,
               inferred.total as inferred_total,
               wp.profile as profile,
-              wp.updated_at as profile_updated_at
+              wp.updated_at as profile_updated_at,
+              wl.label as user_label
             from wallet_follows wf
             join wallets w on w.id = wf.wallet_id
             left join wallet_profiles wp on wp.wallet_id = w.id
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $1
             left join lateral (
               select jsonb_agg(jsonb_build_object(
                 'slug', t.slug,
@@ -527,6 +580,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               row.inferred_total != null ? Number(row.inferred_total) : null,
             profile: row.profile ?? null,
             profileUpdatedAt: row.profile_updated_at ?? null,
+            userLabel: row.user_label ?? null,
           })),
         });
       } catch (error) {
@@ -593,6 +647,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             owner_wallet_id: string | null;
             inferred_wins: number | null;
             inferred_total: number | null;
+            user_label: string | null;
           }
         >(
           `
@@ -601,6 +656,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               w.address,
               w.chain,
               w.label,
+              wl.label as user_label,
               w.is_system_flagged,
               (w.metadata->>'kind' = 'safe') as is_safe,
               w.first_seen_at,
@@ -628,6 +684,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             join wallet_tag_map tm on tm.wallet_id = w.id
             join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
             left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $1
             left join lateral (
               select jsonb_agg(jsonb_build_object(
                 'slug', t.slug,
@@ -836,6 +895,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           address: row.address,
           chain: row.chain,
           label: row.label,
+          userLabel: row.user_label ?? null,
           isSystemFlagged: row.is_system_flagged,
           firstSeenAt: row.first_seen_at,
           lastSeenAt: row.last_seen_at,
@@ -1084,16 +1144,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
-      const params: Array<string | number | null> = [];
+      const params: Array<string | number | null> = [user.id];
       let where = "";
-      let idx = 1;
+      let idx = 2;
+      const userParam = 1;
 
       if (query.walletId) {
         where += `wa.wallet_id = $${idx++}`;
         params.push(query.walletId);
       } else {
-        where += `wa.wallet_id in (select wallet_id from wallet_follows where user_id = $${idx++})`;
-        params.push(user.id);
+        where += `wa.wallet_id in (select wallet_id from wallet_follows where user_id = $${userParam})`;
       }
 
       if (query.venue) {
@@ -1116,6 +1176,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           wallet_id: string;
           address: string;
           chain: string;
+          label: string | null;
+          user_label: string | null;
+          profile_label: string | null;
           venue: string;
           market_id: string;
           market_title: string | null;
@@ -1139,6 +1202,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               wa.wallet_id,
               w.address,
               w.chain,
+              w.label,
+              wl.label as user_label,
+              wp.profile->>'label_short' as profile_label,
               wa.venue,
               wa.market_id,
               um.title as market_title,
@@ -1158,6 +1224,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               wa.metadata
             from wallet_activity_events wa
             join wallets w on w.id = wa.wallet_id
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $${userParam}
+            left join wallet_profiles wp on wp.wallet_id = w.id
             left join unified_markets um on um.id = wa.market_id
             left join unified_events ue on ue.id = um.event_id
             where ${where}
@@ -1176,6 +1246,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           walletId: row.wallet_id,
           address: row.address,
           chain: row.chain,
+          label: row.label,
+          userLabel: row.user_label ?? null,
+          profileLabel: row.profile_label,
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
@@ -1246,16 +1319,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
-      const params: Array<string | number | null> = [];
+      const params: Array<string | number | null> = [user.id];
       let where = "";
-      let idx = 1;
+      let idx = 2;
+      const userParam = 1;
 
       if (query.walletId) {
         where += `ws.wallet_id = $${idx++}`;
         params.push(query.walletId);
       } else {
-        where += `ws.wallet_id in (select wallet_id from wallet_follows where user_id = $${idx++})`;
-        params.push(user.id);
+        where += `ws.wallet_id in (select wallet_id from wallet_follows where user_id = $${userParam})`;
       }
 
       if (query.venue) {
@@ -1290,6 +1363,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.wallet_id,
                 w.address,
                 w.chain,
+                w.label,
+                wl.label as user_label,
+                wp.profile->>'label_short' as profile_label,
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
@@ -1310,6 +1386,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                and ls.venue = ws.venue
                and ls.snapshot_at = ws.snapshot_at
               join wallets w on w.id = ws.wallet_id
+              left join wallet_user_labels wl
+                on wl.wallet_id = w.id
+               and wl.user_id = $${userParam}
+              left join wallet_profiles wp on wp.wallet_id = w.id
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               order by ws.snapshot_at desc
@@ -1321,6 +1401,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.wallet_id,
                 w.address,
                 w.chain,
+                w.label,
+                wl.label as user_label,
+                wp.profile->>'label_short' as profile_label,
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
@@ -1337,6 +1420,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.metadata
               from wallet_position_snapshots ws
               join wallets w on w.id = ws.wallet_id
+              left join wallet_user_labels wl
+                on wl.wallet_id = w.id
+               and wl.user_id = $${userParam}
+              left join wallet_profiles wp on wp.wallet_id = w.id
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${where}
@@ -1349,6 +1436,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           wallet_id: string;
           address: string;
           chain: string;
+          label: string | null;
+          user_label: string | null;
+          profile_label: string | null;
           venue: string;
           market_id: string;
           market_title: string | null;
@@ -1369,6 +1459,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           walletId: row.wallet_id,
           address: row.address,
           chain: row.chain,
+          label: row.label,
+          userLabel: row.user_label ?? null,
+          profileLabel: row.profile_label,
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
