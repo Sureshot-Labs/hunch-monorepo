@@ -130,7 +130,8 @@ type WhaleProfileInput = {
     avg_price: number | null;
     best_bid: number | null;
     best_ask: number | null;
-    last_price: number | null;
+    last_yes_price: number | null;
+    held_odds: number | null;
     position_side: string | null;
     position_shares: number | null;
     position_value_usd: number | null;
@@ -445,6 +446,21 @@ function deriveCategoriesFromInput(
   return ranked.slice(0, 3);
 }
 
+function resolveHeldOdds(
+  side: string | null | undefined,
+  positionPrice: number | null,
+  lastYesPrice: number | null,
+): number | null {
+  if (positionPrice != null && Number.isFinite(positionPrice)) {
+    return positionPrice;
+  }
+  if (lastYesPrice == null || !Number.isFinite(lastYesPrice) || !side) return null;
+  const normalized = side.toUpperCase();
+  if (normalized === "YES") return lastYesPrice;
+  if (normalized === "NO") return 1 - lastYesPrice;
+  return null;
+}
+
 async function callOpenRouter(
   model: string,
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -542,7 +558,12 @@ function buildProfileInput(
       avg_price: parseNumber(market.avg_price),
       best_bid: parseNumber(market.best_bid),
       best_ask: parseNumber(market.best_ask),
-      last_price: parseNumber(market.last_price),
+      last_yes_price: parseNumber(market.last_price),
+      held_odds: resolveHeldOdds(
+        market.position_side,
+        parseNumber(market.position_price),
+        parseNumber(market.last_price),
+      ),
       position_side: market.position_side,
       position_shares: parseNumber(market.position_shares),
       position_value_usd: parseNumber(market.position_value_usd),
@@ -1060,6 +1081,10 @@ Rules:
   but treat it as secondary to the broader 30d pattern.
 - recent_window.top_changes are already aggregated per market/outcome;
   avoid repeating identical markets.
+- Price fields:
+  - top_markets.last_yes_price is the YES price from the market.
+  - top_markets.held_odds is the side-aware price (YES/NO) for the held position.
+  - top_changes.odds is also side-aware for the change row.
 - Wallet type/roles:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.

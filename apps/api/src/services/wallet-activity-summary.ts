@@ -258,7 +258,15 @@ export async function fetchWalletActivitySummaries(
       latest_change as (
         select
           cr.*,
-          coalesce(cr.last_price, cr.price) as odds
+          coalesce(
+            cr.price,
+            case
+              when upper(coalesce(cr.outcome_side, '')) = 'NO'
+                and cr.last_price is not null
+                then 1 - cr.last_price
+              else cr.last_price
+            end
+          ) as odds
         from change_rows cr
       ),
       latest_per_market as (

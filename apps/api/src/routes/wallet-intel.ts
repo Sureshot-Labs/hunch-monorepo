@@ -1125,7 +1125,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 avgPrice: market.avg_price ? Number(market.avg_price) : null,
                 bestBid: market.best_bid ? Number(market.best_bid) : null,
                 bestAsk: market.best_ask ? Number(market.best_ask) : null,
-                lastPrice: market.last_price ? Number(market.last_price) : null,
+                lastYesPrice: market.last_price
+                  ? Number(market.last_price)
+                  : null,
                 marketStatus: market.market_status ?? null,
                 closeTime: market.close_time ?? null,
                 expirationTime: market.expiration_time ?? null,
