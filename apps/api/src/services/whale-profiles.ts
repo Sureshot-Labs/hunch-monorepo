@@ -5,11 +5,25 @@ import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 
 const PROFILE_VERSION = "v3";
+const CATEGORY_VALUES = [
+  "sports",
+  "politics",
+  "crypto",
+  "finance",
+  "entertainment",
+  "tech",
+  "macro",
+  "social",
+  "other",
+] as const;
+
+type WhaleCategory = (typeof CATEGORY_VALUES)[number];
 
 type WhaleProfile = {
   label_short?: string;
   label_long?: string;
   archetype?: string;
+  categories?: string[];
   theme_focus?: string[];
   risk_style?: string;
   confidence?: number;
@@ -25,14 +39,17 @@ type WhaleProfileInput = {
     window_days: number;
     currency: "USD";
     display_notes: string;
+    style_guide: string;
   };
   wallet: {
     address: string;
     chain: string;
     label: string | null;
-    is_safe: boolean;
     owner_address: string | null;
     owner_label: string | null;
+    kind: "eoa" | "safe" | "contract" | "unknown";
+    role: "trading_wallet" | "signer_wallet" | "unknown";
+    owner_role: "signer_wallet" | "unknown";
   };
   metrics: {
     volume_30d: number | null;
@@ -52,10 +69,17 @@ type WhaleProfileInput = {
   };
   summary: {
     top_market_concentration: number | null;
+    concentration_label: "high" | "medium" | "low" | "unknown";
     side_bias: { yes: number; no: number; ratio: number | null };
+    side_bias_label: "mostly_yes" | "mostly_no" | "mixed" | "unknown";
     category_counts: Record<string, number>;
     market_state_counts: { active: number; ended: number; resolved: number };
   };
+  top_events: Array<{
+    event_title: string;
+    total_volume_usd: number | null;
+    market_count: number;
+  }>;
   top_markets: Array<{
     market_id: string;
     market_title: string | null;
@@ -66,6 +90,7 @@ type WhaleProfileInput = {
     close_time: string | null;
     expiration_time: string | null;
     resolved_outcome: string | null;
+    is_active: boolean;
     volume_usd: number | null;
     activity_count: number;
     last_activity_at: string | null;
@@ -157,6 +182,7 @@ function normalizeProfile(raw: unknown): WhaleProfile | null {
     typeof raw.label_long === "string" ? raw.label_long.trim() : null;
   const archetype =
     typeof raw.archetype === "string" ? raw.archetype.trim() : null;
+  const categories = normalizeCategoryList(raw.categories);
   const riskStyle =
     typeof raw.risk_style === "string" ? raw.risk_style.trim() : null;
   const notes = typeof raw.notes === "string" ? raw.notes.trim() : null;
@@ -180,6 +206,7 @@ function normalizeProfile(raw: unknown): WhaleProfile | null {
     ...(labelShort ? { label_short: labelShort } : {}),
     ...(labelLong ? { label_long: labelLong } : {}),
     ...(archetype ? { archetype } : {}),
+    ...(categories.length ? { categories } : {}),
     ...(themeFocus.length ? { theme_focus: themeFocus } : {}),
     ...(riskStyle ? { risk_style: riskStyle } : {}),
     ...(confidence != null ? { confidence } : {}),
@@ -204,6 +231,75 @@ function parseProfileJson(raw: string): unknown | null {
     }
     return null;
   }
+}
+
+function mapCategory(raw: string): WhaleCategory | null {
+  const key = raw.trim().toLowerCase();
+  if (!key) return null;
+  if (key.includes("sport")) return "sports";
+  if (key.includes("politic") || key.includes("election") || key.includes("geopolit")) {
+    return "politics";
+  }
+  if (key.includes("crypto") || key.includes("blockchain") || key.includes("web3")) {
+    return "crypto";
+  }
+  if (key.includes("macro") || key.includes("rates") || key.includes("fed")) {
+    return "macro";
+  }
+  if (
+    key.includes("finance") ||
+    key.includes("econom") ||
+    key.includes("stocks") ||
+    key.includes("equities") ||
+    key.includes("markets")
+  ) {
+    return "finance";
+  }
+  if (key.includes("entertain") || key.includes("culture") || key.includes("celebrity") || key.includes("music")) {
+    return "entertainment";
+  }
+  if (key.includes("tech") || key.includes("ai") || key.includes("software")) {
+    return "tech";
+  }
+  if (key.includes("social") || key.includes("twitter") || key.includes("tweets")) {
+    return "social";
+  }
+  if (CATEGORY_VALUES.includes(key as WhaleCategory)) return key as WhaleCategory;
+  return null;
+}
+
+function normalizeCategoryList(raw: unknown): WhaleCategory[] {
+  if (!Array.isArray(raw)) return [];
+  const deduped = new Set<WhaleCategory>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const mapped = mapCategory(entry);
+    if (mapped) deduped.add(mapped);
+  }
+  return Array.from(deduped);
+}
+
+function deriveCategoriesFromInput(
+  input: WhaleProfileInput,
+  themeFocus?: string[],
+): WhaleCategory[] {
+  const counts = new Map<WhaleCategory, number>();
+  for (const [rawKey, count] of Object.entries(input.summary.category_counts)) {
+    const mapped = mapCategory(rawKey);
+    if (!mapped) continue;
+    counts.set(mapped, (counts.get(mapped) ?? 0) + count);
+  }
+  if (counts.size === 0 && themeFocus?.length) {
+    for (const focus of themeFocus) {
+      const mapped = mapCategory(focus);
+      if (!mapped) continue;
+      counts.set(mapped, (counts.get(mapped) ?? 0) + 1);
+    }
+  }
+  const ranked = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([category]) => category);
+  return ranked.slice(0, 3);
 }
 
 async function callOpenRouter(
@@ -265,32 +361,45 @@ function buildProfileInput(
   context: { marketLimit: number; windowDays: number },
 ): WhaleProfileInput {
   const now = Date.now();
-  const markets = topMarkets.map((market) => ({
-    market_id: market.market_id,
-    market_title: market.market_title,
-    event_title: market.event_title,
-    venue: market.venue,
-    category: market.category,
-    status: market.status,
-    close_time: market.close_time ? market.close_time.toISOString() : null,
-    expiration_time: market.expiration_time
+  const markets = topMarkets.map((market) => {
+    const closeTime = market.close_time ? market.close_time.toISOString() : null;
+    const expirationTime = market.expiration_time
       ? market.expiration_time.toISOString()
-      : null,
-    resolved_outcome: market.resolved_outcome,
-    volume_usd: parseNumber(market.volume_usd),
-    activity_count: market.activity_count,
-    last_activity_at: market.last_activity_at
-      ? market.last_activity_at.toISOString()
-      : null,
-    avg_price: parseNumber(market.avg_price),
-    best_bid: parseNumber(market.best_bid),
-    best_ask: parseNumber(market.best_ask),
-    last_price: parseNumber(market.last_price),
-    position_side: market.position_side,
-    position_shares: parseNumber(market.position_shares),
-    position_value_usd: parseNumber(market.position_value_usd),
-    position_price: parseNumber(market.position_price),
-  }));
+      : null;
+    const resolved = Boolean(market.resolved_outcome);
+    const status = market.status?.toUpperCase();
+    const hasEndedStatus = status != null && status !== "ACTIVE";
+    const endTimestamp = closeTime ?? expirationTime;
+    const endTimeMs = endTimestamp ? new Date(endTimestamp).getTime() : null;
+    const endedByTime = endTimeMs != null && endTimeMs < now;
+    const isActive = !(resolved || hasEndedStatus || endedByTime);
+
+    return {
+      market_id: market.market_id,
+      market_title: market.market_title,
+      event_title: market.event_title,
+      venue: market.venue,
+      category: market.category,
+      status: market.status,
+      close_time: closeTime,
+      expiration_time: expirationTime,
+      resolved_outcome: market.resolved_outcome,
+      is_active: isActive,
+      volume_usd: parseNumber(market.volume_usd),
+      activity_count: market.activity_count,
+      last_activity_at: market.last_activity_at
+        ? market.last_activity_at.toISOString()
+        : null,
+      avg_price: parseNumber(market.avg_price),
+      best_bid: parseNumber(market.best_bid),
+      best_ask: parseNumber(market.best_ask),
+      last_price: parseNumber(market.last_price),
+      position_side: market.position_side,
+      position_shares: parseNumber(market.position_shares),
+      position_value_usd: parseNumber(market.position_value_usd),
+      position_price: parseNumber(market.position_price),
+    };
+  });
 
   const totalVolume = markets.reduce(
     (sum, market) => sum + (market.volume_usd ?? 0),
@@ -316,6 +425,23 @@ function buildProfileInput(
   }
   const totalSide = yesValue + noValue;
   const sideRatio = totalSide > 0 ? yesValue / totalSide : null;
+  const sideBiasLabel: WhaleProfileInput["summary"]["side_bias_label"] =
+    sideRatio == null
+      ? "unknown"
+      : sideRatio >= 0.65
+        ? "mostly_yes"
+        : sideRatio <= 0.35
+          ? "mostly_no"
+          : "mixed";
+
+  const concentrationLabel: WhaleProfileInput["summary"]["concentration_label"] =
+    concentration == null
+      ? "unknown"
+      : concentration >= 0.6
+        ? "high"
+        : concentration >= 0.3
+          ? "medium"
+          : "low";
 
   const categoryCounts = markets.reduce<Record<string, number>>((acc, market) => {
     const category = market.category?.trim();
@@ -346,6 +472,37 @@ function buildProfileInput(
     { active: 0, ended: 0, resolved: 0 },
   );
 
+  const eventRollup = new Map<
+    string,
+    { title: string; total: number; count: number }
+  >();
+  for (const market of markets) {
+    const rawTitle = market.event_title?.trim() || market.market_title?.trim();
+    if (!rawTitle) continue;
+    const entry = eventRollup.get(rawTitle) ?? {
+      title: rawTitle,
+      total: 0,
+      count: 0,
+    };
+    entry.total += market.volume_usd ?? 0;
+    entry.count += 1;
+    eventRollup.set(rawTitle, entry);
+  }
+  const topEvents = Array.from(eventRollup.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 3)
+    .map((entry) => ({
+      event_title: entry.title,
+      total_volume_usd: entry.total || null,
+      market_count: entry.count,
+    }));
+
+  const walletKind: WhaleProfileInput["wallet"]["kind"] =
+    wallet.is_safe ? "safe" : "eoa";
+  const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
+  const ownerRole: WhaleProfileInput["wallet"]["owner_role"] =
+    wallet.owner_address ? "signer_wallet" : "unknown";
+
   return {
     context: {
       purpose: "wallet_whale_profile",
@@ -355,14 +512,17 @@ function buildProfileInput(
       currency: "USD",
       display_notes:
         "Write for end-users. Avoid jargon, avoid market IDs, no insider claims.",
+      style_guide: env.aiWhaleProfileStyleGuide,
     },
     wallet: {
       address: wallet.address,
       chain: wallet.chain,
       label: wallet.label,
-      is_safe: wallet.is_safe,
       owner_address: wallet.owner_address,
       owner_label: wallet.owner_label,
+      kind: walletKind,
+      role: walletRole,
+      owner_role: ownerRole,
     },
     metrics: {
       volume_30d: parseNumber(wallet.metrics_volume),
@@ -393,14 +553,17 @@ function buildProfileInput(
     },
     summary: {
       top_market_concentration: concentration,
+      concentration_label: concentrationLabel,
       side_bias: {
         yes: yesValue,
         no: noValue,
         ratio: sideRatio,
       },
+      side_bias_label: sideBiasLabel,
       category_counts: categoryCounts,
       market_state_counts: marketStateCounts,
     },
+    top_events: topEvents,
     top_markets: markets,
   };
 }
@@ -672,6 +835,7 @@ Output JSON with:
 - label_short: short name (<= 40 chars), no venue names, no chain names.
 - label_long: 1–2 sentences (<= 220 chars) summarizing the main behavior pattern.
 - archetype: short snake_case tag.
+- categories: array of 1–3 from [sports, politics, crypto, finance, entertainment, tech, macro, social, other].
 - theme_focus: array of up to 3 lowercase tags.
 - risk_style: short phrase (<= 60 chars).
 - confidence: number 0–1.
@@ -685,6 +849,13 @@ Rules:
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
+- Wallet type/roles:
+  - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
+  - wallet.role: "trading_wallet" for the wallet holding positions.
+  - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
+ - Prefer evidence from top_events when available; fall back to top_markets.
+ - Use summary.side_bias_label and summary.concentration_label as hints.
+ - Style guide: ${env.aiWhaleProfileStyleGuide}
 
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
@@ -699,7 +870,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
             { role: "system", content: system },
             { role: "user", content: user },
           ],
-          520,
+          env.aiWhaleProfileMaxTokens,
         );
       } catch (error) {
         failed += 1;
@@ -719,7 +890,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
               { role: "system", content: system },
               { role: "user", content: compactUser },
             ],
-            320,
+            env.aiWhaleProfileMaxTokensFallback,
           );
           parsed = parseProfileJson(profileRaw);
         } catch (error) {
@@ -732,7 +903,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         }
       }
 
-      const normalized = normalizeProfile(parsed);
+      let normalized = normalizeProfile(parsed);
       if (!normalized) {
         failed += 1;
         console.warn("[whale-profile] invalid json", {
@@ -740,6 +911,16 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
           raw: profileRaw.slice(0, 500),
         });
         continue;
+      }
+
+      if (!normalized.categories || normalized.categories.length === 0) {
+        const derivedCategories = deriveCategoriesFromInput(
+          input,
+          normalized.theme_focus,
+        );
+        if (derivedCategories.length > 0) {
+          normalized = { ...normalized, categories: derivedCategories };
+        }
       }
 
       if (options.dryRun) {

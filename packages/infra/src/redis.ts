@@ -16,7 +16,15 @@ export type RedisReadyOptions = {
 };
 
 export function createRedisClient(options: { url: string }): RedisClientType {
-  return createClient({ url: options.url });
+  return createClient({
+    url: options.url,
+    socket: {
+      reconnectStrategy: (retries) => {
+        const delayMs = Math.min(100 * 2 ** retries, 10_000);
+        return delayMs;
+      },
+    },
+  });
 }
 
 function delay(ms: number): Promise<void> {

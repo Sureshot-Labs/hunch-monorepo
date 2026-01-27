@@ -276,6 +276,17 @@ export const env = {
   ),
   aiClusterDebugLogs:
     parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
+  aiWhaleProfileStyleGuide:
+    process.env.AI_WHALE_PROFILE_STYLE_GUIDE?.trim() ||
+    "Neutral tone, short sentences, no hype, no speculation.",
+  aiWhaleProfileMaxTokens: optionalPositiveInt(
+    "AI_WHALE_PROFILE_MAX_TOKENS",
+    800,
+  ),
+  aiWhaleProfileMaxTokensFallback: optionalPositiveInt(
+    "AI_WHALE_PROFILE_MAX_TOKENS_FALLBACK",
+    420,
+  ),
   walletIntelMarketLimit: optionalPositiveInt(
     "WALLET_INTEL_MARKET_LIMIT",
     50,
@@ -296,6 +307,18 @@ export const env = {
   ),
   walletIntelBackfillSnapshots: optionalNonNegativeInt(
     "WALLET_INTEL_BACKFILL_SNAPSHOTS",
+    0,
+  ),
+  walletIntelRetentionDaysSnapshots: optionalNonNegativeInt(
+    "WALLET_INTEL_RETENTION_DAYS_SNAPSHOTS",
+    0,
+  ),
+  walletIntelRetentionDaysActivity: optionalNonNegativeInt(
+    "WALLET_INTEL_RETENTION_DAYS_ACTIVITY",
+    0,
+  ),
+  walletIntelRetentionDaysMetrics: optionalNonNegativeInt(
+    "WALLET_INTEL_RETENTION_DAYS_METRICS",
     0,
   ),
   walletIntelMinVolume24h: optionalNonNegativeNumber(

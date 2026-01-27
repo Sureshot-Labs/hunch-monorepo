@@ -49,6 +49,21 @@ export const walletWhalesQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   marketLimit: z.coerce.number().int().min(1).max(20).default(5),
   windowDays: z.coerce.number().int().min(1).max(365).default(30),
+  categories: z
+    .preprocess(
+      value => {
+        if (Array.isArray(value)) return value;
+        if (typeof value === "string") {
+          return value
+            .split(",")
+            .map(item => item.trim())
+            .filter(Boolean);
+        }
+        return undefined;
+      },
+      z.array(z.string().min(1)).optional()
+    )
+    .optional(),
   sort: z
     .enum([
       "last_activity",

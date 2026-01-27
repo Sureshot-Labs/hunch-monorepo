@@ -610,6 +610,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      const categoryFilterRaw = Array.isArray(query.categories)
+        ? query.categories
+        : query.categories
+          ? [query.categories]
+          : [];
+      const categoryFilter = Array.from(
+        new Set(
+          categoryFilterRaw
+            .map((category: string) => category.trim().toLowerCase())
+            .filter(Boolean)
+        )
+      );
       const client = await pool.connect();
       try {
         const orderBy = (() => {
@@ -797,10 +809,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 count(*)::int as total
               from eligible
             ) inferred on true
+            where ($5::text[] is null or wp.profile->'categories' ?| $5::text[])
             order by ${orderBy}
             limit $2 offset $3
           `,
-          [user.id, query.limit, query.offset, query.windowDays],
+          [
+            user.id,
+            query.limit,
+            query.offset,
+            query.windowDays,
+            categoryFilter.length > 0 ? categoryFilter : null,
+          ],
         );
 
         const whaleIds = whaleRows.rows.map((row) => row.id);

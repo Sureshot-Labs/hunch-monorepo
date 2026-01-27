@@ -224,6 +224,69 @@ function parseBackfillSnapshots(): number {
   return 0;
 }
 
+type RetentionConfig = {
+  snapshotsDays: number | null;
+  activityDays: number | null;
+  metricsDays: number | null;
+  cleanupOnly: boolean;
+  skipCleanup: boolean;
+};
+
+function parseOptionalArgInt(prefix: string): number | undefined {
+  const arg = process.argv.find((entry) => entry.startsWith(prefix));
+  if (!arg) return undefined;
+  const raw = arg.slice(prefix.length);
+  if (!raw.length) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.trunc(parsed);
+}
+
+function normalizeRetentionDays(value: number | undefined | null): number | null {
+  if (value == null) return null;
+  const asInt = Math.trunc(value);
+  return asInt > 0 ? asInt : null;
+}
+
+function resolveRetentionDays(
+  explicit: number | undefined,
+  global: number | undefined,
+  envValue: number,
+): number | null {
+  if (explicit !== undefined) return normalizeRetentionDays(explicit);
+  if (global !== undefined) return normalizeRetentionDays(global);
+  return normalizeRetentionDays(envValue);
+}
+
+function parseRetentionConfig(): RetentionConfig {
+  const cleanupOnly = process.argv.includes("--cleanup-only");
+  const skipCleanup = process.argv.includes("--skip-cleanup");
+  const globalRetention = parseOptionalArgInt("--retention-days=");
+  const snapshotsRetention = parseOptionalArgInt("--retention-snapshots=");
+  const activityRetention = parseOptionalArgInt("--retention-activity=");
+  const metricsRetention = parseOptionalArgInt("--retention-metrics=");
+
+  return {
+    cleanupOnly,
+    skipCleanup,
+    snapshotsDays: resolveRetentionDays(
+      snapshotsRetention,
+      globalRetention,
+      env.walletIntelRetentionDaysSnapshots ?? 0,
+    ),
+    activityDays: resolveRetentionDays(
+      activityRetention,
+      globalRetention,
+      env.walletIntelRetentionDaysActivity ?? 0,
+    ),
+    metricsDays: resolveRetentionDays(
+      metricsRetention,
+      globalRetention,
+      env.walletIntelRetentionDaysMetrics ?? 0,
+    ),
+  };
+}
+
 function normalizeAddress(address: string, chain: Chain): string {
   const trimmed = address.trim();
   if (chain === "solana") return trimmed;
@@ -294,6 +357,68 @@ async function ensureSystemTags(
     acc[row.slug] = row.id;
     return acc;
   }, {});
+}
+
+function retentionEnabled(config: RetentionConfig): boolean {
+  return Boolean(
+    config.snapshotsDays || config.activityDays || config.metricsDays,
+  );
+}
+
+function retentionCutoff(now: Date, days: number): Date {
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
+async function cleanupWalletIntel(
+  config: RetentionConfig,
+  now: Date,
+): Promise<{ snapshots: number; activity: number; metrics: number }> {
+  const client = await pool.connect();
+  try {
+    let snapshots = 0;
+    let activity = 0;
+    let metrics = 0;
+
+    if (config.snapshotsDays) {
+      const cutoff = retentionCutoff(now, config.snapshotsDays);
+      const result = await client.query(
+        `
+          delete from wallet_position_snapshots
+          where snapshot_at < $1
+        `,
+        [cutoff],
+      );
+      snapshots = result.rowCount ?? 0;
+    }
+
+    if (config.activityDays) {
+      const cutoff = retentionCutoff(now, config.activityDays);
+      const result = await client.query(
+        `
+          delete from wallet_activity_events
+          where occurred_at < $1
+        `,
+        [cutoff],
+      );
+      activity = result.rowCount ?? 0;
+    }
+
+    if (config.metricsDays) {
+      const cutoff = retentionCutoff(now, config.metricsDays);
+      const result = await client.query(
+        `
+          delete from wallet_metrics_snapshots
+          where as_of < $1
+        `,
+        [cutoff],
+      );
+      metrics = result.rowCount ?? 0;
+    }
+
+    return { snapshots, activity, metrics };
+  } finally {
+    client.release();
+  }
 }
 
 async function upsertWallet(
@@ -1822,12 +1947,32 @@ async function main() {
   const runAt = new Date();
   const baseSnapshot = bucketDate(runAt, env.walletIntelSnapshotHours);
   const backfillSteps = parseBackfillSnapshots();
+  const retention = parseRetentionConfig();
   const snapshots: Date[] = [];
 
   if (backfillSteps > 0) {
     console.log(
       `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${env.walletIntelSnapshotHours}`,
     );
+  }
+
+  if (retention.cleanupOnly) {
+    if (retention.skipCleanup) {
+      console.log("[wallets:intel:refresh] cleanup-only skipped (--skip-cleanup)");
+      return;
+    }
+    if (!retentionEnabled(retention)) {
+      console.log("[wallets:intel:refresh] cleanup-only skipped (no retention)");
+      return;
+    }
+    console.log(
+      `[wallets:intel:refresh] cleanup-only retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
+    );
+    const result = await cleanupWalletIntel(retention, runAt);
+    console.log(
+      `[wallets:intel:refresh] cleanup-only done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
+    );
+    return;
   }
 
   for (let step = backfillSteps; step >= 0; step -= 1) {
@@ -1847,6 +1992,20 @@ async function main() {
       windowDays: env.aiWhaleProfileWindowDays,
     });
     console.log("[wallets:intel:refresh] whale profiles", result);
+  }
+
+  if (retention.skipCleanup) {
+    console.log("[wallets:intel:refresh] cleanup skipped (--skip-cleanup)");
+  } else if (retentionEnabled(retention)) {
+    console.log(
+      `[wallets:intel:refresh] cleanup retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
+    );
+    const result = await cleanupWalletIntel(retention, runAt);
+    console.log(
+      `[wallets:intel:refresh] cleanup done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
+    );
+  } else {
+    console.log("[wallets:intel:refresh] cleanup skipped (no retention)");
   }
 }
 

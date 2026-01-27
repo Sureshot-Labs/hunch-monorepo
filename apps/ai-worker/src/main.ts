@@ -1,7 +1,7 @@
 import { chunkArray } from "@hunch/shared";
 import { createHash } from "crypto";
 import { setTimeout as delay } from "timers/promises";
-import { createRedisClient, ensureRedis } from "@hunch/infra";
+import { createRedisClient, ensureRedis, isRedisRetryableError } from "@hunch/infra";
 import { env } from "./env.js";
 
 const INDEX_MARKET = "idx:ai:embed:market";
@@ -623,12 +623,30 @@ async function readLoop() {
   const count = Math.max(1, env.batchSize * env.concurrency);
 
   while (true) {
-    const response = await redis.xReadGroup(
-      env.group,
-      env.consumer,
-      { key: STREAM_KEY, id: ">" },
-      { COUNT: count, BLOCK: env.blockMs },
-    );
+    let response;
+    try {
+      response = await redis.xReadGroup(
+        env.group,
+        env.consumer,
+        { key: STREAM_KEY, id: ">" },
+        { COUNT: count, BLOCK: env.blockMs },
+      );
+    } catch (err) {
+      if (isRedisRetryableError(err)) {
+        console.warn("[ai-worker] redis read failed, retrying", String(err));
+        await delay(1000);
+        try {
+          await ensureRedis(redis, { waitForReady: true, logLabel: "ai-worker" });
+        } catch (connectErr) {
+          console.warn(
+            "[ai-worker] redis reconnect failed",
+            String(connectErr),
+          );
+        }
+        continue;
+      }
+      throw err;
+    }
 
     if (!response) {
       await delay(200);
