@@ -830,9 +830,12 @@ async function applySnapshotDeltas(
   inputs: {
     walletIds: string[];
     occurredAt: Date;
+    marketIds: string[];
   },
 ): Promise<{ inserts: number; updates: number }> {
-  if (inputs.walletIds.length === 0) return { inserts: 0, updates: 0 };
+  if (inputs.walletIds.length === 0 || inputs.marketIds.length === 0) {
+    return { inserts: 0, updates: 0 };
+  }
 
   const currentRows = await client.query<{
     wallet_id: string;
@@ -848,8 +851,9 @@ async function applySnapshotDeltas(
       from wallet_position_snapshots
       where wallet_id = any($1::uuid[])
         and snapshot_at = $2
+        and market_id = any($3::text[])
     `,
-    [inputs.walletIds, inputs.occurredAt],
+    [inputs.walletIds, inputs.occurredAt, inputs.marketIds],
   );
 
   const prevRows = await client.query<{
@@ -873,9 +877,10 @@ async function applySnapshotDeltas(
       from wallet_position_snapshots
       where wallet_id = any($1::uuid[])
         and snapshot_at < $2
+        and market_id = any($3::text[])
       order by wallet_id, venue, market_id, outcome_side, snapshot_at desc
     `,
-    [inputs.walletIds, inputs.occurredAt],
+    [inputs.walletIds, inputs.occurredAt, inputs.marketIds],
   );
 
   const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
@@ -957,6 +962,36 @@ async function applySnapshotDeltas(
       occurredAt: inputs.occurredAt,
     });
     updates += 1;
+
+    // When a selected market disappears from the current snapshot, record a
+    // zero-share snapshot to prevent repeated synthetic "SELL" events on
+    // subsequent runs.
+    const missingCurrent = !current && previous && prevShares > 0;
+    if (missingCurrent) {
+      const venue = previous.venue;
+      await upsertWalletVenue(client, walletId, venue as Venue);
+      await upsertWalletPositionSnapshot(client, {
+        walletId,
+        venue,
+        marketId,
+        outcomeSide: previous.outcome_side ?? null,
+        shares: 0,
+        sizeUsd: 0,
+        price:
+          previous.price != null && Number.isFinite(Number(previous.price))
+            ? Number(previous.price)
+            : null,
+        metadata: {
+          ...(metadataBase as Record<string, unknown>),
+          source: "snapshot_zero",
+          snapshotSource,
+          prevShares: Number(prevShares.toFixed(9)),
+          currShares: 0,
+          deltaShares: Number(absShares.toFixed(9)),
+        },
+        snapshotAt: inputs.occurredAt,
+      });
+    }
   }
 
   return { inserts, updates };
@@ -1564,6 +1599,7 @@ async function runSnapshot(snapshotAt: Date) {
     }
 
     const marketRows = Array.from(marketMap.values());
+    const selectedMarketIds = marketRows.map((row) => row.id);
     const limitlessPriceBackfills = await backfillLimitlessPrices(
       client,
       marketRows,
@@ -1913,6 +1949,7 @@ async function runSnapshot(snapshotAt: Date) {
     const deltaResult = await applySnapshotDeltas(client, {
       walletIds: Array.from(touchedWalletIds),
       occurredAt: snapshotAt,
+      marketIds: selectedMarketIds,
     });
     deltaInserts += deltaResult.inserts;
     deltaUpdates += deltaResult.updates;

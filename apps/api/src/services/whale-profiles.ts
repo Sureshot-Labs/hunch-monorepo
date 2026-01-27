@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  fetchWalletActivitySummaries,
+  type WalletActivitySummary,
+} from "./wallet-activity-summary.js";
 
 const PROFILE_VERSION = "v3";
 const CATEGORY_VALUES = [
@@ -80,6 +84,35 @@ type WhaleProfileInput = {
     total_volume_usd: number | null;
     market_count: number;
   }>;
+  recent_window: {
+    window_hours: number;
+    last_activity_at: string | null;
+    net_change_usd: number;
+    net_change_yes_usd: number;
+    net_change_no_usd: number;
+    counts: {
+      new: number;
+      increase: number;
+      reduce: number;
+      exit: number;
+      flip: number;
+    };
+    unusual_score: number | null;
+    top_changes: Array<{
+      market_title: string | null;
+      event_title: string | null;
+      venue: string;
+      category: string | null;
+      market_status: string | null;
+      resolved_outcome: string | null;
+      action: string | null;
+      position_side: string | null;
+      delta_usd: number | null;
+      odds: number | null;
+      labels: string[];
+      occurred_at: string | null;
+    }>;
+  };
   top_markets: Array<{
     market_id: string;
     market_title: string | null;
@@ -167,10 +200,120 @@ const parseNumber = (value: string | number | null | undefined): number | null =
   return Number.isFinite(num) ? num : null;
 };
 
+const USD_BUCKETS = [
+  100,
+  1_000,
+  10_000,
+  100_000,
+  1_000_000,
+  10_000_000,
+  100_000_000,
+  1_000_000_000,
+] as const;
+
+const COUNT_BUCKETS = [
+  1,
+  2,
+  5,
+  10,
+  25,
+  50,
+  100,
+  250,
+  500,
+  1_000,
+  2_500,
+  5_000,
+] as const;
+
+const UNUSUAL_BUCKETS = [1, 2, 5, 10, 20, 50] as const;
+
+function bucketSignedUsd(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  const sign = value < 0 ? -1 : 1;
+  const abs = Math.abs(value);
+  let bucket = 0;
+  for (const threshold of USD_BUCKETS) {
+    if (abs >= threshold) bucket = threshold;
+    else break;
+  }
+  return sign * bucket;
+}
+
+function bucketCount(value: number | null | undefined): number {
+  if (value == null || !Number.isFinite(value) || value <= 0) return 0;
+  let bucket = 0;
+  for (const threshold of COUNT_BUCKETS) {
+    if (value >= threshold) bucket = threshold;
+    else break;
+  }
+  return bucket;
+}
+
+function bucketUnusual(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  let bucket: number = UNUSUAL_BUCKETS[0];
+  for (const threshold of UNUSUAL_BUCKETS) {
+    if (value >= threshold) bucket = threshold;
+    else break;
+  }
+  return bucket;
+}
+
+function truncateIsoToHour(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  date.setMinutes(0, 0, 0);
+  return date.toISOString();
+}
+
+function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
+  const recent = input.recent_window;
+  const recentHash: WhaleProfileInput["recent_window"] = {
+    window_hours: recent.window_hours,
+    last_activity_at: truncateIsoToHour(recent.last_activity_at),
+    net_change_usd: bucketSignedUsd(recent.net_change_usd) ?? 0,
+    net_change_yes_usd: bucketSignedUsd(recent.net_change_yes_usd) ?? 0,
+    net_change_no_usd: bucketSignedUsd(recent.net_change_no_usd) ?? 0,
+    counts: {
+      new: bucketCount(recent.counts.new),
+      increase: bucketCount(recent.counts.increase),
+      reduce: bucketCount(recent.counts.reduce),
+      exit: bucketCount(recent.counts.exit),
+      flip: bucketCount(recent.counts.flip),
+    },
+    unusual_score: bucketUnusual(recent.unusual_score),
+    // Avoid churn from rapidly changing market-level details.
+    top_changes: [
+      {
+        market_title: null,
+        event_title: null,
+        venue: "summary",
+        category: null,
+        market_status: null,
+        resolved_outcome: null,
+        action: null,
+        position_side: null,
+        delta_usd: bucketCount(recent.top_changes.length),
+        odds: null,
+        labels: [],
+        occurred_at: null,
+      },
+    ],
+  };
+
+  return {
+    ...input,
+    recent_window: recentHash,
+  };
+}
+
 function hashProfileInput(input: WhaleProfileInput): string {
+  const hashInput = buildProfileHashInput(input);
   return crypto
     .createHash("sha256")
-    .update(JSON.stringify(input))
+    .update(JSON.stringify(hashInput))
     .digest("hex");
 }
 
@@ -358,7 +501,13 @@ function toActivityKind(
 function buildProfileInput(
   wallet: WhaleRow,
   topMarkets: WhaleMarketRow[],
-  context: { marketLimit: number; windowDays: number },
+  context: {
+    marketLimit: number;
+    windowDays: number;
+    recentSummary: WalletActivitySummary | null;
+    recentWindowHours: number;
+    recentTopChanges: number;
+  },
 ): WhaleProfileInput {
   const now = Date.now();
   const markets = topMarkets.map((market) => {
@@ -502,6 +651,41 @@ function buildProfileInput(
   const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
   const ownerRole: WhaleProfileInput["wallet"]["owner_role"] =
     wallet.owner_address ? "signer_wallet" : "unknown";
+  const recentSummary = context.recentSummary;
+  const recentTopChanges = (recentSummary?.topChanges ?? [])
+    .slice(0, context.recentTopChanges)
+    .map((change) => ({
+      market_title: change.marketTitle ?? null,
+      event_title: change.eventTitle ?? null,
+      venue: change.venue,
+      category: change.category ?? null,
+      market_status: change.marketStatus ?? null,
+      resolved_outcome: change.resolvedOutcome ?? null,
+      action: change.action ?? null,
+      position_side: change.positionSide ?? null,
+      delta_usd: change.deltaUsd ?? null,
+      odds: change.odds ?? null,
+      labels: change.labels ?? [],
+      occurred_at: change.occurredAt ? change.occurredAt.toISOString() : null,
+    }));
+  const recentWindow: WhaleProfileInput["recent_window"] = {
+    window_hours: context.recentWindowHours,
+    last_activity_at: recentSummary?.lastActivityAt
+      ? recentSummary.lastActivityAt.toISOString()
+      : null,
+    net_change_usd: recentSummary?.netChangeUsd ?? 0,
+    net_change_yes_usd: recentSummary?.netChangeYesUsd ?? 0,
+    net_change_no_usd: recentSummary?.netChangeNoUsd ?? 0,
+    counts: {
+      new: recentSummary?.countsNew ?? 0,
+      increase: recentSummary?.countsIncrease ?? 0,
+      reduce: recentSummary?.countsReduce ?? 0,
+      exit: recentSummary?.countsExit ?? 0,
+      flip: recentSummary?.countsFlip ?? 0,
+    },
+    unusual_score: recentSummary?.unusualScore ?? null,
+    top_changes: recentTopChanges,
+  };
 
   return {
     context: {
@@ -564,6 +748,7 @@ function buildProfileInput(
       market_state_counts: marketStateCounts,
     },
     top_events: topEvents,
+    recent_window: recentWindow,
     top_markets: markets,
   };
 }
@@ -577,6 +762,9 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const limit = Math.max(1, options.limit);
   const marketLimit = Math.max(1, options.marketLimit);
   const windowDays = Math.max(1, options.windowDays);
+  // Keep recent-window inputs small and stable; hashing is bucketed below.
+  const recentWindowHours = 24;
+  const recentTopChanges = 3;
   const client = await pool.connect();
   try {
     const whaleRows = await client.query<WhaleRow>(
@@ -710,6 +898,20 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     }
 
     const whaleIds = whaleRows.rows.map((row) => row.id);
+    let recentSummaryMap = new Map<string, WalletActivitySummary>();
+    try {
+      recentSummaryMap = await fetchWalletActivitySummaries(
+        client,
+        whaleIds,
+        {
+          windowHours: recentWindowHours,
+          topChanges: recentTopChanges,
+          baselineDays: windowDays,
+        },
+      );
+    } catch (error) {
+      console.warn("[whale-profile] recent summary failed", { error });
+    }
     const marketRows = await client.query<WhaleMarketRow>(
       `
         select
@@ -818,9 +1020,13 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     for (const whale of whaleRows.rows) {
       processed += 1;
       const topMarkets = marketMap.get(whale.id) ?? [];
+      const recentSummary = recentSummaryMap.get(whale.id) ?? null;
       const input = buildProfileInput(whale, topMarkets, {
         marketLimit,
         windowDays,
+        recentSummary,
+        recentWindowHours,
+        recentTopChanges,
       });
       const featuresHash = hashProfileInput(input);
       if (!options.force && existingMap.get(whale.id) === featuresHash) {
@@ -849,6 +1055,11 @@ Rules:
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
+- recent_window summarizes the last recent_window.window_hours hours.
+  Use it to explain what changed recently (net change, many exits, spikes),
+  but treat it as secondary to the broader 30d pattern.
+- recent_window.top_changes are already aggregated per market/outcome;
+  avoid repeating identical markets.
 - Wallet type/roles:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.

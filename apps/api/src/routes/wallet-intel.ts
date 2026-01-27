@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
+import type { PoolClient } from "pg";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -11,7 +12,12 @@ import {
   inspectSafeWallet,
 } from "../services/polymarket-funder.js";
 import {
+  fetchWalletActivitySummaries,
+  type WalletActivityTopChange,
+} from "../services/wallet-activity-summary.js";
+import {
   walletActivityQuerySchema,
+  walletActivitySummaryQuerySchema,
   walletFollowBodySchema,
   walletFollowDeleteQuerySchema,
   walletFollowParamsSchema,
@@ -79,9 +85,148 @@ type WhaleProfileRow = {
   profile_updated_at: Date | null;
 };
 
+type CandidateWalletRow = WalletRow &
+  WhaleProfileRow & {
+    user_label: string | null;
+    tags: WalletTagRow[] | null;
+    metrics: WalletMetricsRow | null;
+  };
+
+type WalletActivitySummaryItem = {
+  walletId: string;
+  address: string;
+  chain: string;
+  label: string | null;
+  userLabel: string | null;
+  isSystemFlagged: boolean;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  tags: WalletTagRow[];
+  metrics: WalletMetricsRow | null;
+  profile: unknown | null;
+  profileUpdatedAt: Date | null;
+  windowHours: number;
+  lastActivityAt: Date | null;
+  netChangeUsd: number;
+  netChangeYesUsd: number;
+  netChangeNoUsd: number;
+  countsNew: number;
+  countsExit: number;
+  countsIncrease: number;
+  countsReduce: number;
+  countsFlip: number;
+  unusualScore: number | null;
+  topChanges: WalletActivityTopChange[];
+};
+
 function normalizeAddress(address: string): string {
   if (address.startsWith("0x")) return address.toLowerCase();
   return address.trim();
+}
+
+async function loadCandidateWallets(
+  client: PoolClient,
+  userId: string,
+  scope: "following" | "whales" | "all",
+  categories: string[] | null,
+): Promise<CandidateWalletRow[]> {
+  const categoryFilter = categories && categories.length > 0 ? categories : null;
+  const baseTagsLateral = `
+    left join lateral (
+      select jsonb_agg(jsonb_build_object(
+        'slug', t.slug,
+        'label', t.label,
+        'tag_type', t.tag_type,
+        'is_system', t.is_system
+      ) order by t.tag_type, t.slug) as tags
+      from wallet_tag_map tm
+      join wallet_tags t on t.id = tm.tag_id
+      where tm.wallet_id = w.id
+    ) tags on true
+  `;
+  const baseMetricsLateral = `
+    left join lateral (
+      select jsonb_build_object(
+        'period', s.period,
+        'as_of', s.as_of,
+        'trades_count', s.trades_count,
+        'volume_usd', s.volume_usd,
+        'pnl_usd', s.pnl_usd,
+        'roi', s.roi,
+        'win_rate', s.win_rate,
+        'avg_hold_hours', s.avg_hold_hours,
+        'last_trade_at', s.last_trade_at
+      ) as metrics
+      from wallet_metrics_snapshots s
+      where s.wallet_id = w.id and s.period = '30d'
+      order by s.as_of desc
+      limit 1
+    ) metrics on true
+  `;
+
+  if (scope === "following") {
+    const rows = await client.query<CandidateWalletRow>(
+      `
+        select
+          w.id,
+          w.address,
+          w.chain,
+          w.label,
+          wl.label as user_label,
+          w.is_system_flagged,
+          w.first_seen_at,
+          w.last_seen_at,
+          tags.tags,
+          metrics.metrics,
+          wp.profile,
+          wp.updated_at as profile_updated_at
+        from wallet_follows wf
+        join wallets w on w.id = wf.wallet_id
+        left join wallet_user_labels wl
+          on wl.wallet_id = w.id
+         and wl.user_id = $1
+        ${baseTagsLateral}
+        ${baseMetricsLateral}
+        left join wallet_profiles wp on wp.wallet_id = w.id
+        where wf.user_id = $1
+          and ($2::text[] is null or wp.profile->'categories' ?| $2::text[])
+        order by w.last_seen_at desc
+      `,
+      [userId, categoryFilter],
+    );
+    return rows.rows;
+  }
+
+  const rows = await client.query<CandidateWalletRow>(
+    `
+      select
+        w.id,
+        w.address,
+        w.chain,
+        w.label,
+        wl.label as user_label,
+        w.is_system_flagged,
+        w.first_seen_at,
+        w.last_seen_at,
+        tags.tags,
+        metrics.metrics,
+        wp.profile,
+        wp.updated_at as profile_updated_at
+      from wallets w
+      join wallet_tag_map tm on tm.wallet_id = w.id
+      join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+      left join wallet_user_labels wl
+        on wl.wallet_id = w.id
+       and wl.user_id = $1
+      ${baseTagsLateral}
+      ${baseMetricsLateral}
+      left join wallet_profiles wp on wp.wallet_id = w.id
+      where ($2::text[] is null or wp.profile->'categories' ?| $2::text[])
+      order by w.last_seen_at desc
+    `,
+    [userId, categoryFilter],
+  );
+  return rows.rows;
 }
 
 export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
@@ -823,6 +968,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
 
         const whaleIds = whaleRows.rows.map((row) => row.id);
+        const summaryMap =
+          query.includeSummary && whaleIds.length > 0
+            ? await fetchWalletActivitySummaries(client, whaleIds, {
+                windowHours: query.windowHours,
+                topChanges: query.topChanges,
+                baselineDays: 30,
+                enteredLateHours: 24,
+              })
+            : new Map();
         const marketMap = new Map<string, WhaleMarketRow[]>();
         if (whaleIds.length > 0) {
           const marketRows = await client.query<WhaleMarketRow>(
@@ -909,75 +1063,92 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const walletsRaw = whaleRows.rows.map((row) => ({
-          walletId: row.id,
-          address: row.address,
-          chain: row.chain,
-          label: row.label,
-          userLabel: row.user_label ?? null,
-          isSystemFlagged: row.is_system_flagged,
-          firstSeenAt: row.first_seen_at,
-          lastSeenAt: row.last_seen_at,
-          isFollowed: row.is_followed,
-          tags: row.tags ?? [],
-          metrics: row.metrics ?? null,
-          lastActivityAt: row.last_activity_at,
-          activityKind: (() => {
-            const hasTrade = row.has_trade_activity ?? false;
-            const hasHolder = row.has_holder_activity ?? false;
-            if (hasTrade && hasHolder) return "mixed";
-            if (hasTrade) return "trade";
-            if (hasHolder) return "holder";
-            return null;
-          })(),
-          trackedExposureUsd: row.exposure_usd ? Number(row.exposure_usd) : null,
-          inferredWinRate:
-            row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
-              ? Number(row.inferred_wins) / Number(row.inferred_total)
-              : null,
-          inferredResolvedCount:
-            row.inferred_total != null ? Number(row.inferred_total) : null,
-          isSafe: row.is_safe,
-          ownerAddress: row.owner_address,
-          ownerLabel: row.owner_label,
-          ownerWalletId: row.owner_wallet_id,
-          profile: row.profile ?? null,
-          profileUpdatedAt: row.profile_updated_at ?? null,
-          topMarkets:
-            marketMap.get(row.id)?.map((market) => ({
-              marketId: market.market_id,
-              marketTitle: market.market_title,
-              eventId: market.event_id,
-              eventTitle: market.event_title,
-              venue: market.venue,
-              activityCount: market.activity_count,
-              volumeUsd: market.volume_usd
-                ? Number(market.volume_usd)
+        const walletsRaw = whaleRows.rows.map((row) => {
+          const summary = summaryMap.get(row.id) ?? null;
+          const lastActivityAt = summary?.lastActivityAt ?? row.last_activity_at;
+          return {
+            walletId: row.id,
+            address: row.address,
+            chain: row.chain,
+            label: row.label,
+            userLabel: row.user_label ?? null,
+            isSystemFlagged: row.is_system_flagged,
+            firstSeenAt: row.first_seen_at,
+            lastSeenAt: row.last_seen_at,
+            isFollowed: row.is_followed,
+            tags: row.tags ?? [],
+            metrics: row.metrics ?? null,
+            lastActivityAt,
+            activityKind: (() => {
+              const hasTrade = row.has_trade_activity ?? false;
+              const hasHolder = row.has_holder_activity ?? false;
+              if (hasTrade && hasHolder) return "mixed";
+              if (hasTrade) return "trade";
+              if (hasHolder) return "holder";
+              return null;
+            })(),
+            trackedExposureUsd: row.exposure_usd ? Number(row.exposure_usd) : null,
+            inferredWinRate:
+              row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
+                ? Number(row.inferred_wins) / Number(row.inferred_total)
                 : null,
-              avgPrice: market.avg_price ? Number(market.avg_price) : null,
-              bestBid: market.best_bid ? Number(market.best_bid) : null,
-              bestAsk: market.best_ask ? Number(market.best_ask) : null,
-              lastPrice: market.last_price ? Number(market.last_price) : null,
-              marketStatus: market.market_status ?? null,
-              closeTime: market.close_time ?? null,
-              expirationTime: market.expiration_time ?? null,
-              resolvedOutcome: market.resolved_outcome ?? null,
-              positionSide: market.position_side,
-              positionShares: market.position_shares
-                ? Number(market.position_shares)
-                : null,
-              positionValueUsd: market.position_value_usd
-                ? Number(market.position_value_usd)
-                : null,
-              positionPrice: market.position_price
-                ? Number(market.position_price)
-                : null,
-              lastActivityAt: market.last_activity_at,
-            })) ?? [],
-        }));
+            inferredResolvedCount:
+              row.inferred_total != null ? Number(row.inferred_total) : null,
+            isSafe: row.is_safe,
+            ownerAddress: row.owner_address,
+            ownerLabel: row.owner_label,
+            ownerWalletId: row.owner_wallet_id,
+            profile: row.profile ?? null,
+            profileUpdatedAt: row.profile_updated_at ?? null,
+            windowHours: summary?.windowHours ?? null,
+            netChangeUsd: summary?.netChangeUsd ?? null,
+            netChangeYesUsd: summary?.netChangeYesUsd ?? null,
+            netChangeNoUsd: summary?.netChangeNoUsd ?? null,
+            countsNew: summary?.countsNew ?? null,
+            countsExit: summary?.countsExit ?? null,
+            countsIncrease: summary?.countsIncrease ?? null,
+            countsReduce: summary?.countsReduce ?? null,
+            countsFlip: summary?.countsFlip ?? null,
+            unusualScore: summary?.unusualScore ?? null,
+            topChanges: summary?.topChanges ?? [],
+            topMarkets:
+              marketMap.get(row.id)?.map((market) => ({
+                marketId: market.market_id,
+                marketTitle: market.market_title,
+                eventId: market.event_id,
+                eventTitle: market.event_title,
+                venue: market.venue,
+                activityCount: market.activity_count,
+                volumeUsd: market.volume_usd
+                  ? Number(market.volume_usd)
+                  : null,
+                avgPrice: market.avg_price ? Number(market.avg_price) : null,
+                bestBid: market.best_bid ? Number(market.best_bid) : null,
+                bestAsk: market.best_ask ? Number(market.best_ask) : null,
+                lastPrice: market.last_price ? Number(market.last_price) : null,
+                marketStatus: market.market_status ?? null,
+                closeTime: market.close_time ?? null,
+                expirationTime: market.expiration_time ?? null,
+                resolvedOutcome: market.resolved_outcome ?? null,
+                positionSide: market.position_side,
+                positionShares: market.position_shares
+                  ? Number(market.position_shares)
+                  : null,
+                positionValueUsd: market.position_value_usd
+                  ? Number(market.position_value_usd)
+                  : null,
+                positionPrice: market.position_price
+                  ? Number(market.position_price)
+                  : null,
+                lastActivityAt: market.last_activity_at,
+              })) ?? [],
+          };
+        });
 
         const filtered = walletsRaw.filter(
-          (row) => row.lastActivityAt && row.topMarkets.length > 0,
+          (row) =>
+            row.lastActivityAt &&
+            (row.topMarkets.length > 0 || row.topChanges.length > 0),
         );
 
         const deduped = new Map<string, typeof walletsRaw[number]>();
@@ -1140,6 +1311,129 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/activity/summary
+   */
+  z.get(
+    "/wallets/activity/summary",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: walletActivitySummaryQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const categoryFilterRaw = Array.isArray(query.categories)
+        ? query.categories
+        : query.categories
+          ? [query.categories]
+          : [];
+      const categoryFilter = Array.from(
+        new Set(
+          categoryFilterRaw
+            .map((category: string) => category.trim().toLowerCase())
+            .filter(Boolean),
+        ),
+      );
+
+      const client = await pool.connect();
+      try {
+        const candidates = await loadCandidateWallets(
+          client,
+          user.id,
+          query.scope,
+          categoryFilter,
+        );
+        const walletIds = candidates.map((row) => row.id);
+        if (walletIds.length === 0) {
+          return reply.send({ ok: true, items: [] });
+        }
+
+        const summaryMap = await fetchWalletActivitySummaries(client, walletIds, {
+          windowHours: query.windowHours,
+          topChanges: query.topChanges,
+          baselineDays: 30,
+          enteredLateHours: 24,
+        });
+
+        const merged = candidates
+          .map<WalletActivitySummaryItem | null>((row) => {
+            const summary = summaryMap.get(row.id);
+            if (!summary) return null;
+            return {
+              walletId: row.id,
+              address: row.address,
+              chain: row.chain,
+              label: row.label,
+              userLabel: row.user_label ?? null,
+              isSystemFlagged: row.is_system_flagged,
+              firstSeenAt: row.first_seen_at,
+              lastSeenAt: row.last_seen_at,
+              tags: row.tags ?? [],
+              metrics: row.metrics ?? null,
+              profile: row.profile ?? null,
+              profileUpdatedAt: row.profile_updated_at ?? null,
+              windowHours: summary.windowHours,
+              lastActivityAt: summary.lastActivityAt,
+              netChangeUsd: summary.netChangeUsd,
+              netChangeYesUsd: summary.netChangeYesUsd,
+              netChangeNoUsd: summary.netChangeNoUsd,
+              countsNew: summary.countsNew,
+              countsExit: summary.countsExit,
+              countsIncrease: summary.countsIncrease,
+              countsReduce: summary.countsReduce,
+              countsFlip: summary.countsFlip,
+              unusualScore: summary.unusualScore,
+              topChanges: summary.topChanges,
+            };
+          })
+          .filter(
+            (row): row is WalletActivitySummaryItem =>
+              Boolean(row && row.lastActivityAt && row.topChanges.length > 0),
+          );
+
+        const sortMode = query.sort;
+        const sorted = merged.sort((a, b) => {
+          if (sortMode === "net_change_usd") {
+            return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
+          }
+          if (sortMode === "unusual_score") {
+            const aScore = a.unusualScore ?? 0;
+            const bScore = b.unusualScore ?? 0;
+            if (bScore !== aScore) return bScore - aScore;
+            return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
+          }
+          const aTime = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+          const bTime = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+          return bTime - aTime;
+        });
+
+        const start = query.offset;
+        const end = start + query.limit;
+        const paged = sorted.slice(start, end);
+
+        return reply.send({
+          ok: true,
+          items: paged,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, query },
+          "Failed to load wallet activity summaries",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load wallet activity summaries" });
       } finally {
         client.release();
       }
@@ -1390,6 +1684,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.title as market_title,
                 um.event_id as event_id,
                 ue.title as event_title,
+                um.status as market_status,
+                um.close_time,
+                um.expiration_time,
+                um.resolved_outcome,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -1428,6 +1726,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.title as market_title,
                 um.event_id as event_id,
                 ue.title as event_title,
+                um.status as market_status,
+                um.close_time,
+                um.expiration_time,
+                um.resolved_outcome,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,

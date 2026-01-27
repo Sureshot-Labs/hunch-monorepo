@@ -35,6 +35,32 @@ export const walletActivityQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+export const walletActivitySummaryQuerySchema = z.object({
+  scope: z.enum(["following", "whales", "all"]).default("whales"),
+  windowHours: z.coerce.number().int().min(1).max(24 * 14).default(24),
+  topChanges: z.coerce.number().int().min(1).max(10).default(5),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+  sort: z
+    .enum(["last_activity", "net_change_usd", "unusual_score"])
+    .default("last_activity"),
+  categories: z
+    .preprocess(
+      value => {
+        if (Array.isArray(value)) return value;
+        if (typeof value === "string") {
+          return value
+            .split(",")
+            .map(item => item.trim())
+            .filter(Boolean);
+        }
+        return undefined;
+      },
+      z.array(z.string().min(1)).optional()
+    )
+    .optional(),
+});
+
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   venue: zVenue.optional(),
@@ -49,6 +75,9 @@ export const walletWhalesQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   marketLimit: z.coerce.number().int().min(1).max(20).default(5),
   windowDays: z.coerce.number().int().min(1).max(365).default(30),
+  includeSummary: z.coerce.boolean().default(false),
+  windowHours: z.coerce.number().int().min(1).max(24 * 14).default(24),
+  topChanges: z.coerce.number().int().min(1).max(10).default(3),
   categories: z
     .preprocess(
       value => {
