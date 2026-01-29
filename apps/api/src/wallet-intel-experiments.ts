@@ -145,7 +145,10 @@ async function selectPolymarketTradeVolume(limit: number, hours: number) {
         mapped as (
           select m.id, sum(r.vol) as vol
           from unified_markets m
-          join recent r on (m.clob_token_ids::jsonb ? r.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'polymarket'
+          join recent r on r.token_id = t.token_id
           where m.status = 'ACTIVE' and m.venue = 'polymarket'
           group by m.id
         )
@@ -180,7 +183,10 @@ async function selectPolymarketHybrid(limit: number, hours: number) {
                  max(m.volume_24h) as volume_24h,
                  max(m.liquidity) as liquidity
           from unified_markets m
-          left join recent r on (m.clob_token_ids::jsonb ? r.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'polymarket'
+          left join recent r on r.token_id = t.token_id
           where m.status = 'ACTIVE' and m.venue = 'polymarket'
           group by m.id
         )
@@ -233,7 +239,10 @@ async function selectKalshiTradeVolume(limit: number, hours: number) {
         mapped as (
           select m.id, sum(r.vol) as vol
           from unified_markets m
-          join recent r on (m.token_yes = r.token_id or m.token_no = r.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'kalshi'
+          join recent r on r.token_id = t.token_id
           where m.status = 'ACTIVE'
             and m.venue = 'kalshi'
             and m.is_initialized is true
@@ -290,7 +299,10 @@ async function selectKalshiHybrid(limit: number, hours: number) {
                  sum(r.vol) as vol,
                  max(m.open_interest) as open_interest
           from unified_markets m
-          left join recent r on (m.token_yes = r.token_id or m.token_no = r.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'kalshi'
+          left join recent r on r.token_id = t.token_id
           where m.status = 'ACTIVE'
             and m.venue = 'kalshi'
             and m.is_initialized is true
@@ -469,7 +481,10 @@ async function evaluateSelection(
             coalesce(sum(recent.vol), 0)::text as vol,
             coalesce(sum(recent.trades), 0)::text as trades
           from unified_markets m
-          join recent on (m.clob_token_ids::jsonb ? recent.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'polymarket'
+          join recent on recent.token_id = t.token_id
           where m.id = any($2::text[])
         `,
         [hours, ids],
@@ -492,7 +507,10 @@ async function evaluateSelection(
             coalesce(sum(recent.vol), 0)::text as vol,
             coalesce(sum(recent.trades), 0)::text as trades
           from unified_markets m
-          join recent on (m.token_yes = recent.token_id or m.token_no = recent.token_id)
+          join unified_market_tokens t
+            on t.market_id = m.id
+           and t.venue = 'kalshi'
+          join recent on recent.token_id = t.token_id
           where m.id = any($2::text[])
         `,
         [hours, ids],

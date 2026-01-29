@@ -1316,7 +1316,10 @@ async function selectPolymarketByTrade(
         m.venue,
         m.volume_24h
       from unified_markets m
-      join recent r on (m.clob_token_ids::jsonb ? r.token_id)
+      join unified_market_tokens t
+        on t.market_id = m.id
+       and t.venue = 'polymarket'
+      join recent r on r.token_id = t.token_id
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
       group by m.id, m.venue, m.volume_24h, m.liquidity
@@ -1375,7 +1378,10 @@ async function selectKalshiByTrade(
         m.venue,
         m.volume_24h
       from unified_markets m
-      join recent r on (m.token_yes = r.token_id or m.token_no = r.token_id)
+      join unified_market_tokens t
+        on t.market_id = m.id
+       and t.venue = 'kalshi'
+      join recent r on r.token_id = t.token_id
       where m.status = 'ACTIVE'
         and m.venue = 'kalshi'
         and m.is_initialized is true

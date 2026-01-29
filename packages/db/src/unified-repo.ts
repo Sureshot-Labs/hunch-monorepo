@@ -335,7 +335,9 @@ export async function upsertUnifiedMarket(
   ];
 
   const result = await pool.query(query, values);
-  return result.rows[0].id;
+  const id = result.rows[0].id as string;
+  await syncUnifiedMarketTokens(pool, [id]);
+  return id;
 }
 
 export async function upsertUnifiedMarkets(
@@ -489,6 +491,119 @@ export async function upsertUnifiedMarkets(
   const batches = chunkArray(rows, 500);
   for (const batch of batches) {
     await pool.query(query, [JSON.stringify(batch)]);
+    await syncUnifiedMarketTokens(
+      pool,
+      batch.map((row) => row.id),
+    );
+  }
+}
+
+type UnifiedMarketTokenRow = {
+  market_id: string;
+  token_id: string;
+  venue: string;
+  outcome_side: "YES" | "NO" | null;
+};
+
+type MarketTokenSource = Pick<
+  UnifiedMarketRow,
+  "id" | "venue" | "token_yes" | "token_no" | "clob_token_ids"
+>;
+
+function parseClobTokenIds(raw?: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((token) => typeof token === "string") as string[];
+  } catch {
+    return [];
+  }
+}
+
+function buildMarketTokenRows(market: MarketTokenSource): UnifiedMarketTokenRow[] {
+  const tokens: UnifiedMarketTokenRow[] = [];
+  const seen = new Set<string>();
+
+  const pushToken = (token_id: string | null | undefined, outcome_side: "YES" | "NO" | null) => {
+    if (!token_id) return;
+    if (seen.has(token_id)) return;
+    seen.add(token_id);
+    tokens.push({
+      market_id: market.id,
+      token_id,
+      venue: market.venue,
+      outcome_side,
+    });
+  };
+
+  pushToken(market.token_yes ?? null, "YES");
+  pushToken(market.token_no ?? null, "NO");
+  const clobTokens = parseClobTokenIds(market.clob_token_ids);
+  if (clobTokens.length > 0) {
+    pushToken(clobTokens[0], "YES");
+    pushToken(clobTokens[1], "NO");
+    for (const token of clobTokens.slice(2)) {
+      pushToken(token, null);
+    }
+  }
+
+  return tokens;
+}
+
+export async function syncUnifiedMarketTokens(
+  pool: Pool,
+  marketIds: string[],
+): Promise<void> {
+  const ids = Array.from(new Set(marketIds)).filter(Boolean);
+  if (ids.length === 0) return;
+
+  const batches = chunkArray(ids, 1000);
+  for (const batch of batches) {
+    const markets = await pool.query<MarketTokenSource>(
+      `
+        select id, venue, token_yes, token_no, clob_token_ids
+        from unified_markets
+        where id = any($1::text[])
+      `,
+      [batch],
+    );
+
+    const tokenRows = markets.rows.flatMap(buildMarketTokenRows);
+
+    await pool.query("begin");
+    try {
+      await pool.query(
+        `
+          delete from unified_market_tokens
+          where market_id = any($1::text[])
+        `,
+        [batch],
+      );
+
+      if (tokenRows.length > 0) {
+        await pool.query(
+          `
+            insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
+            select market_id, token_id, venue, outcome_side
+            from jsonb_to_recordset($1::jsonb) as x(
+              market_id text,
+              token_id text,
+              venue text,
+              outcome_side text
+            )
+            on conflict (market_id, token_id) do update
+              set venue = excluded.venue,
+                  outcome_side = excluded.outcome_side
+          `,
+          [JSON.stringify(tokenRows)],
+        );
+      }
+      await pool.query("commit");
+    } catch (err) {
+      await pool.query("rollback");
+      throw err;
+    }
   }
 }
 
