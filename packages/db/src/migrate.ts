@@ -76,8 +76,18 @@ async function runSingleMigration(
   const noTx = sql.includes("/* no-transaction */");
 
   try {
-    if (!noTx) await client.query("BEGIN");
-    await client.query(sql);
+    if (!noTx) {
+      await client.query("BEGIN");
+      await client.query(sql);
+    } else {
+      const statements = sql
+        .split(";")
+        .map((statement) => statement.trim())
+        .filter(Boolean);
+      for (const statement of statements) {
+        await client.query(statement);
+      }
+    }
     await client.query(
       `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)`,
       [filename, checksum],
