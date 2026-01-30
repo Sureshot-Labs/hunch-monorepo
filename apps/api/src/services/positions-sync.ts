@@ -827,24 +827,26 @@ async function syncKalshiPositionsFromSolana(
     tokenIdLike: "sol:%",
   });
 
-  try {
-    await recomputePositionMetricsForWallet(pool, {
+  const [kalshiMetrics, kalshiNotifications] = await Promise.allSettled([
+    recomputePositionMetricsForWallet(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
       venue: "kalshi",
-    });
-  } catch (error) {
-    console.error("Kalshi position metrics update failed", error);
+    }),
+    notifyResolvedPositions(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      venue: "kalshi",
+    }),
+  ]);
+  if (kalshiMetrics.status === "rejected") {
+    console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
   }
-
-  try {
-    await notifyResolvedPositions(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "kalshi",
-    });
-  } catch (error) {
-    console.error("Kalshi resolved position notification failed", error);
+  if (kalshiNotifications.status === "rejected") {
+    console.error(
+      "Kalshi resolved position notification failed",
+      kalshiNotifications.reason,
+    );
   }
 
   return {
@@ -905,7 +907,8 @@ async function syncPolymarketPositionsFromPolygon(
   const heldByOwner = new Map<string, Array<{ tokenId: string; size: string }>>();
   const allHeldTokens = new Set<string>();
   const chunkSize = 200;
-  for (const owner of owners) {
+
+  const fetchHeldForOwner = async (owner: string) => {
     const held: Array<{ tokenId: string; size: string }> = [];
     for (let i = 0; i < tokenIds.length; i += chunkSize) {
       const chunk = tokenIds.slice(i, i + chunkSize);
@@ -923,6 +926,13 @@ async function syncPolymarketPositionsFromPolygon(
         held.push({ tokenId, size: ethers.formatUnits(balance, 6) });
       }
     }
+    return { owner, held };
+  };
+
+  const ownerHeldResults = await Promise.all(
+    owners.map((owner) => fetchHeldForOwner(owner)),
+  );
+  for (const { owner, held } of ownerHeldResults) {
     for (const item of held) {
       allHeldTokens.add(item.tokenId);
     }
@@ -951,26 +961,25 @@ async function syncPolymarketPositionsFromPolygon(
     upsertedPositions += result.upsertedPositions;
     flattenedPositions += result.flattenedPositions;
 
-    try {
-      await recomputePositionMetricsForWallet(pool, {
+    const [pmMetrics, pmNotifications] = await Promise.allSettled([
+      recomputePositionMetricsForWallet(pool, {
         userId: inputs.userId,
         walletAddress: owner,
         venue: "polymarket",
-      });
-    } catch (error) {
-      console.error("Polymarket position metrics update failed", error);
+      }),
+      notifyResolvedPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: owner,
+        venue: "polymarket",
+      }),
+    ]);
+    if (pmMetrics.status === "rejected") {
+      console.error("Polymarket position metrics update failed", pmMetrics.reason);
     }
-
-    try {
-      await notifyResolvedPositions(pool, {
-        userId: inputs.userId,
-        walletAddress: owner,
-        venue: "polymarket",
-      });
-    } catch (error) {
+    if (pmNotifications.status === "rejected") {
       console.error(
         "Polymarket resolved position notification failed",
-        error,
+        pmNotifications.reason,
       );
     }
 
@@ -1057,24 +1066,30 @@ async function syncLimitlessPositionsFromPortfolio(
     tokenIdLike: "limitless:%",
   });
 
-  try {
-    await recomputePositionMetricsForWallet(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "limitless",
-    });
-  } catch (error) {
-    console.error("Limitless position metrics update failed", error);
+  const [limitlessMetrics, limitlessNotifications] =
+    await Promise.allSettled([
+      recomputePositionMetricsForWallet(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "limitless",
+      }),
+      notifyResolvedPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "limitless",
+      }),
+    ]);
+  if (limitlessMetrics.status === "rejected") {
+    console.error(
+      "Limitless position metrics update failed",
+      limitlessMetrics.reason,
+    );
   }
-
-  try {
-    await notifyResolvedPositions(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "limitless",
-    });
-  } catch (error) {
-    console.error("Limitless resolved position notification failed", error);
+  if (limitlessNotifications.status === "rejected") {
+    console.error(
+      "Limitless resolved position notification failed",
+      limitlessNotifications.reason,
+    );
   }
 
   return {

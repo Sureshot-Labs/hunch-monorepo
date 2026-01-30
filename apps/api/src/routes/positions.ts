@@ -33,6 +33,34 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
   const isEthAddress = (address: string): boolean => ETH_ADDRESS_RE.test(address);
 
+  const allowedVenues = new Set(["polymarket", "kalshi", "limitless"] as const);
+  type AllowedVenue = "polymarket" | "kalshi" | "limitless";
+  const isAllowedVenue = (venue: string | undefined): venue is AllowedVenue =>
+    Boolean(venue && allowedVenues.has(venue as AllowedVenue));
+
+  const runWithConcurrency = async <T, R>(
+    items: T[],
+    limit: number,
+    handler: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> => {
+    if (items.length === 0) return [];
+    const concurrency = Math.max(1, limit);
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const workers = Array.from(
+      { length: Math.min(concurrency, items.length) },
+      async () => {
+        while (true) {
+          const index = nextIndex++;
+          if (index >= items.length) return;
+          results[index] = await handler(items[index], index);
+        }
+      },
+    );
+    await Promise.all(workers);
+    return results;
+  };
+
   const filterWalletsByVenueCredentials = async (
     userId: string,
     venue: "polymarket" | "kalshi" | "limitless",
@@ -442,6 +470,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         const cooldownSec = Math.max(0, env.positionsSyncCooldownSec);
         const r = cooldownSec > 0 ? await getRedis() : null;
 
+        const evmConcurrency = Math.max(1, env.positionsSyncConcurrencyEvm);
+        const solanaConcurrency = Math.max(1, env.positionsSyncConcurrencySolana);
+
         const results: Array<{
           walletAddress: string;
           venue: string | null;
@@ -454,62 +485,76 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           error?: string;
         }> = [];
 
-        let synced = 0;
-        let skipped = 0;
-        let errors = 0;
+        type SyncTask = {
+          walletAddress: string;
+          venue: "polymarket" | "kalshi" | "limitless" | null;
+          chain: "evm" | "solana";
+        };
 
-        if (!usingVenueList) {
-          for (const wallet of expandedWalletAddresses) {
-            if (r && cooldownSec > 0) {
-              const key = `positions:sync:${user.id}:${wallet}:${
-                query.venue ?? "all"
-              }`;
-              const locked = await r.set(key, Date.now().toString(), {
-                NX: true,
-                EX: cooldownSec,
-              });
-              if (!locked) {
-                skipped += 1;
-                results.push({
-                  walletAddress: wallet,
-                  venue: query.venue ?? null,
-                  status: "skipped",
-                  skippedReason: "cooldown",
-                });
-                continue;
-              }
-            }
-
-            try {
-              const result = await syncPositionsForUserWallet(pool, {
-                userId: user.id,
-                walletAddress: wallet,
-                venue: query.venue,
-              });
-              synced += 1;
-              results.push({
-                walletAddress: wallet,
-                venue: result.venue,
-                status: "ok",
-                heldTokens: result.heldTokens,
-                knownTokens: result.knownTokens,
-                upsertedPositions: result.upsertedPositions,
-                flattenedPositions: result.flattenedPositions,
-              });
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : "Unknown error";
-              errors += 1;
-              results.push({
-                walletAddress: wallet,
-                venue: query.venue ?? null,
-                status: "error",
-                error: message,
-              });
+        const executeTask = async (task: SyncTask) => {
+          if (r && cooldownSec > 0) {
+            const key = `positions:sync:${user.id}:${task.walletAddress}:${
+              task.venue ?? "all"
+            }`;
+            const locked = await r.set(key, Date.now().toString(), {
+              NX: true,
+              EX: cooldownSec,
+            });
+            if (!locked) {
+              return {
+                walletAddress: task.walletAddress,
+                venue: task.venue ?? null,
+                status: "skipped" as const,
+                skippedReason: "cooldown",
+              };
             }
           }
+
+          try {
+            const result = await syncPositionsForUserWallet(pool, {
+              userId: user.id,
+              walletAddress: task.walletAddress,
+              venue: task.venue ?? undefined,
+            });
+            return {
+              walletAddress: task.walletAddress,
+              venue: result.venue ?? task.venue ?? null,
+              status: "ok" as const,
+              heldTokens: result.heldTokens,
+              knownTokens: result.knownTokens,
+              upsertedPositions: result.upsertedPositions,
+              flattenedPositions: result.flattenedPositions,
+            };
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Unknown error";
+            return {
+              walletAddress: task.walletAddress,
+              venue: task.venue ?? null,
+              status: "error" as const,
+              error: message,
+            };
+          }
+        };
+
+        if (!usingVenueList) {
+          const resolvedVenue = isAllowedVenue(query.venue)
+            ? query.venue
+            : null;
+          const tasks: SyncTask[] = expandedWalletAddresses.map((wallet) => ({
+            walletAddress: wallet,
+            venue: resolvedVenue,
+            chain: isEthAddress(wallet) ? "evm" : "solana",
+          }));
+          const evmTasks = tasks.filter((task) => task.chain === "evm");
+          const solTasks = tasks.filter((task) => task.chain === "solana");
+          const [evmResults, solResults] = await Promise.all([
+            runWithConcurrency(evmTasks, evmConcurrency, executeTask),
+            runWithConcurrency(solTasks, solanaConcurrency, executeTask),
+          ]);
+          results.push(...evmResults, ...solResults);
         } else {
-          const venuesToSync = venues ?? [];
+          const venuesToSync = (venues ?? []).filter(isAllowedVenue);
           const baseSolanaWallets = baseWalletAddresses.filter(
             (wallet) => !isEthAddress(wallet),
           );
@@ -540,78 +585,71 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               )
             : [];
 
-          const syncByVenue = async (
-            venue: "polymarket" | "kalshi" | "limitless",
-            wallets: string[],
-          ) => {
-            for (const wallet of wallets) {
-              if (r && cooldownSec > 0) {
-                const key = `positions:sync:${user.id}:${wallet}:${venue}`;
-                const locked = await r.set(key, Date.now().toString(), {
-                  NX: true,
-                  EX: cooldownSec,
-                });
-                if (!locked) {
-                  skipped += 1;
-                  results.push({
-                    walletAddress: wallet,
-                    venue,
-                    status: "skipped",
-                    skippedReason: "cooldown",
-                  });
-                  continue;
-                }
-              }
-
-              try {
-                const result = await syncPositionsForUserWallet(pool, {
-                  userId: user.id,
-                  walletAddress: wallet,
-                  venue,
-                });
-                synced += 1;
-                results.push({
-                  walletAddress: wallet,
-                  venue: result.venue ?? venue,
-                  status: "ok",
-                  heldTokens: result.heldTokens,
-                  knownTokens: result.knownTokens,
-                  upsertedPositions: result.upsertedPositions,
-                  flattenedPositions: result.flattenedPositions,
-                });
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : "Unknown error";
-                errors += 1;
-                results.push({
-                  walletAddress: wallet,
-                  venue,
-                  status: "error",
-                  error: message,
-                });
-              }
-            }
-          };
-
+          const tasks: SyncTask[] = [];
           if (venuesToSync.includes("polymarket")) {
             const polymarketEvmWallets = polymarketWallets.filter((wallet) =>
               isEthAddress(wallet),
             );
-            await syncByVenue("polymarket", polymarketEvmWallets);
+            tasks.push(
+              ...polymarketEvmWallets.map(
+                (wallet) =>
+                  ({
+                    walletAddress: wallet,
+                    venue: "polymarket",
+                    chain: "evm",
+                  }) as SyncTask,
+              ),
+            );
           }
           if (venuesToSync.includes("kalshi")) {
-            await syncByVenue("kalshi", kalshiWallets);
+            tasks.push(
+              ...kalshiWallets.map(
+                (wallet) =>
+                  ({
+                    walletAddress: wallet,
+                    venue: "kalshi",
+                    chain: "solana",
+                  }) as SyncTask,
+              ),
+            );
           }
           if (venuesToSync.includes("limitless")) {
-            await syncByVenue("limitless", limitlessWallets);
+            tasks.push(
+              ...limitlessWallets.map(
+                (wallet) =>
+                  ({
+                    walletAddress: wallet,
+                    venue: "limitless",
+                    chain: "evm",
+                  }) as SyncTask,
+              ),
+            );
           }
+
+          const evmTasks = tasks.filter((task) => task.chain === "evm");
+          const solTasks = tasks.filter((task) => task.chain === "solana");
+          const [evmResults, solResults] = await Promise.all([
+            runWithConcurrency(evmTasks, evmConcurrency, executeTask),
+            runWithConcurrency(solTasks, solanaConcurrency, executeTask),
+          ]);
+          results.push(...evmResults, ...solResults);
         }
+
+        const summary = results.reduce(
+          (acc, result) => {
+            if (result.status === "ok") acc.synced += 1;
+            if (result.status === "skipped") acc.skipped += 1;
+            if (result.status === "error") acc.errors += 1;
+            return acc;
+          },
+          { synced: 0, skipped: 0, errors: 0 },
+        );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           message: "Positions synced",
           results,
-          summary: { synced, skipped, errors },
+          summary,
         });
       } catch (error) {
         const message =

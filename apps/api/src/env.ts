@@ -223,6 +223,14 @@ export const env = {
     "POSITIONS_SYNC_COOLDOWN_SEC",
     15,
   ),
+  positionsSyncConcurrencyEvm: optionalNonNegativeInt(
+    "POSITIONS_SYNC_CONCURRENCY_EVM",
+    2,
+  ),
+  positionsSyncConcurrencySolana: optionalNonNegativeInt(
+    "POSITIONS_SYNC_CONCURRENCY_SOLANA",
+    2,
+  ),
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",

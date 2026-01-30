@@ -28,6 +28,7 @@
     "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",
     "lint": "eslint .",
+    "check": "pnpm run lint && pnpm run typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
     "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
