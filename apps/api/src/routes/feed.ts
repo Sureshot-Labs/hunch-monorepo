@@ -283,6 +283,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           change24h:
             rRow.change_24h != null ? Number(rRow.change_24h) : null,
           createdAt: rRow.market_created_at ?? null,
+          startAt: rRow.market_open_time ?? null,
           lastUpdate: rRow.last_update,
         };
       };

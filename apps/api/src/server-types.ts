@@ -90,6 +90,7 @@ export type FeedMarket = {
   };
   change24h?: number | null;
   createdAt?: unknown;
+  startAt?: unknown;
   lastUpdate: unknown;
 };
 
