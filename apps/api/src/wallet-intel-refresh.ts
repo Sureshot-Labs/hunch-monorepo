@@ -1528,6 +1528,7 @@ async function runSnapshot(snapshotAt: Date) {
 
   const client = await pool.connect();
   try {
+    await client.query("SET statement_timeout = '120s'");
     const tagIds = await ensureSystemTags(client);
     await backfillDerivedWalletLabels(client);
 
