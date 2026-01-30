@@ -59,8 +59,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
-      const sort =
-        q.sort === "change24h" ? "trending" : q.sort;
+      const sort = q.sort;
       const sortDir: "asc" | "desc" = q.sort_dir === "asc" ? "asc" : "desc";
       const minProb = q.min_prob;
       const maxProb = q.max_prob;

@@ -188,7 +188,7 @@ export async function fetchFeedEventIds(
         select distinct on (bt.token_id)
           bt.token_id,
           bt.avg_mid
-        from unified_book_top_1m bt
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
         where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
         order by bt.token_id, bt.bucket desc
@@ -352,7 +352,7 @@ export async function fetchFeedEventIds(
         select distinct on (bt.token_id)
           bt.token_id,
           bt.avg_mid
-        from unified_book_top_1m bt
+        from unified_book_top_1h bt
         where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
         order by bt.token_id, bt.bucket desc
       )
@@ -430,7 +430,7 @@ export async function fetchFeedEventIds(
       ? `
         trade_24h as (
           select mt.market_id, sum(t.volume) as vol
-          from unified_last_trade_1m t
+          from unified_last_trade_1h t
           join unified_market_tokens mt on mt.token_id = t.token_id
           join unified_markets bm on bm.id = mt.market_id
           where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
@@ -752,7 +752,7 @@ export async function fetchFeedMarkets(
         select distinct on (bt.token_id)
           bt.token_id,
           bt.avg_mid
-        from unified_book_top_1m bt
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
         where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
         order by bt.token_id, bt.bucket desc
@@ -838,7 +838,7 @@ export async function fetchFeedMarkets(
       ? ""
       : `left join lateral (
           select avg_mid
-          from unified_book_top_1m
+          from unified_book_top_1h
           where token_id = m.resolved_token_yes
             and bucket <= (${nowParam}::timestamptz - interval '24 hours')
           order by bucket desc
@@ -1068,7 +1068,7 @@ export async function fetchFeedMarketsDirect(
         select distinct on (bt.token_id)
           bt.token_id,
           bt.avg_mid
-        from unified_book_top_1m bt
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
         where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
         order by bt.token_id, bt.bucket desc
@@ -1233,7 +1233,7 @@ export async function fetchFeedMarketsDirect(
       ? `
         trade_24h as (
           select mt.market_id, sum(t.volume) as vol
-          from unified_last_trade_1m t
+          from unified_last_trade_1h t
           join unified_market_tokens mt on mt.token_id = t.token_id
           join unified_markets bm on bm.id = mt.market_id
           where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
@@ -1252,11 +1252,13 @@ export async function fetchFeedMarketsDirect(
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
 
+  const marketOrderExpr = marketOrder || "m.venue_market_id";
   const marketCandidatesSql = `
     select
       m.id,
       m.event_id
       ${inputs.sort === "change24h" ? `, (${change24hCandidateExpr}) as change_24h` : ""}
+      , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
     ${marketCountJoin}
@@ -1270,7 +1272,9 @@ export async function fetchFeedMarketsDirect(
   const marketBaseSql = `
     select
       m.*,
-      case
+      mc.ord as ord
+      ${inputs.sort === "change24h" ? ", mc.change_24h as change_24h" : ""}
+      , case
         when m.venue = 'polymarket' and m.clob_token_ids is not null
           then (m.clob_token_ids::jsonb->>0)
         else m.token_yes
@@ -1291,7 +1295,7 @@ export async function fetchFeedMarketsDirect(
     end
   `;
   const change24hExpr = `
-    ${inputs.sort === "change24h" ? "mc.change_24h" : `case
+    ${inputs.sort === "change24h" ? "m.change_24h" : `case
       when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
     end`}
@@ -1312,7 +1316,7 @@ export async function fetchFeedMarketsDirect(
       ? ""
       : `left join lateral (
           select avg_mid
-          from unified_book_top_1m
+          from unified_book_top_1h
           where token_id = m.resolved_token_yes
             and bucket <= (${nowParam}::timestamptz - interval '24 hours')
           order by bucket desc
@@ -1396,7 +1400,7 @@ export async function fetchFeedMarketsDirect(
       order by ts desc
       limit 1
     ) no_top on true
-    ${marketOrder ? `order by ${marketOrder}` : ""}
+    order by m.ord, m.venue_market_id
     limit ${limitParam} offset ${offsetParam}
   `;
 
