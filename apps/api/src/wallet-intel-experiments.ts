@@ -130,6 +130,10 @@ async function selectPolymarketLiquidity(limit: number) {
   }
 }
 
+function tradeTable(hours: number): string {
+  return hours <= 1 ? "unified_last_trade_1m" : "unified_last_trade_1h";
+}
+
 async function selectPolymarketTradeVolume(limit: number, hours: number) {
   const client = await pool.connect();
   try {
@@ -137,7 +141,7 @@ async function selectPolymarketTradeVolume(limit: number, hours: number) {
       `
         with recent as (
           select token_id, sum(volume) as vol
-          from unified_last_trade_1m
+          from ${tradeTable(hours)}
           where venue = 'polymarket'
             and bucket >= now() - ($1::text || ' hours')::interval
           group by token_id
@@ -172,7 +176,7 @@ async function selectPolymarketHybrid(limit: number, hours: number) {
       `
         with recent as (
           select token_id, sum(volume) as vol
-          from unified_last_trade_1m
+          from ${tradeTable(hours)}
           where venue = 'polymarket'
             and bucket >= now() - ($1::text || ' hours')::interval
           group by token_id
@@ -231,7 +235,7 @@ async function selectKalshiTradeVolume(limit: number, hours: number) {
       `
         with recent as (
           select token_id, sum(volume) as vol
-          from unified_last_trade_1m
+          from ${tradeTable(hours)}
           where venue = 'kalshi'
             and bucket >= now() - ($1::text || ' hours')::interval
           group by token_id
@@ -289,7 +293,7 @@ async function selectKalshiHybrid(limit: number, hours: number) {
       `
         with recent as (
           select token_id, sum(volume) as vol
-          from unified_last_trade_1m
+          from ${tradeTable(hours)}
           where venue = 'kalshi'
             and bucket >= now() - ($1::text || ' hours')::interval
           group by token_id
@@ -472,7 +476,7 @@ async function evaluateSelection(
         `
           with recent as (
             select token_id, sum(volume) as vol, sum(trades) as trades
-            from unified_last_trade_1m
+            from ${tradeTable(hours)}
             where venue = 'polymarket'
               and bucket >= now() - ($1::text || ' hours')::interval
             group by token_id
@@ -498,7 +502,7 @@ async function evaluateSelection(
         `
           with recent as (
             select token_id, sum(volume) as vol, sum(trades) as trades
-            from unified_last_trade_1m
+            from ${tradeTable(hours)}
             where venue = 'kalshi'
               and bucket >= now() - ($1::text || ' hours')::interval
             group by token_id

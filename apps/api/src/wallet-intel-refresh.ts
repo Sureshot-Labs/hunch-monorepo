@@ -1302,11 +1302,13 @@ async function selectPolymarketByTrade(
   limit: number,
   mode: "trade_1h" | "trade_24h" | "hybrid",
 ): Promise<MarketPickRow[]> {
+  const tradeTable =
+    hours <= 1 ? "unified_last_trade_1m" : "unified_last_trade_1h";
   const result = await client.query<MarketPickRow>(
     `
       with recent as (
         select token_id, sum(volume) as vol
-        from unified_last_trade_1m
+        from ${tradeTable}
         where venue = 'polymarket'
           and bucket >= now() - ($1::text || ' hours')::interval
         group by token_id
@@ -1364,11 +1366,13 @@ async function selectKalshiByTrade(
   limit: number,
   mode: "trade_1h" | "trade_24h" | "hybrid",
 ): Promise<MarketPickRow[]> {
+  const tradeTable =
+    hours <= 1 ? "unified_last_trade_1m" : "unified_last_trade_1h";
   const result = await client.query<MarketPickRow>(
     `
       with recent as (
         select token_id, sum(volume) as vol
-        from unified_last_trade_1m
+        from ${tradeTable}
         where venue = 'kalshi'
           and bucket >= now() - ($1::text || ' hours')::interval
         group by token_id
