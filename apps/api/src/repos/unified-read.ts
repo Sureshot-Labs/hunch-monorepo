@@ -172,7 +172,7 @@ export async function fetchFeedEventIds(
     `);
     change24hParts.push(`
       active_yes_tokens as (
-        select mt.market_id, mt.token_id, m.event_id, m.best_bid, m.best_ask
+        select mt.market_id, mt.token_id, m.event_id
         from unified_market_tokens mt
         join unified_markets m on m.id = mt.market_id
         join filtered_events fe on fe.id = m.event_id
@@ -198,12 +198,11 @@ export async function fetchFeedEventIds(
       book_now as (
         select distinct on (bt.token_id)
           bt.token_id,
-          bt.best_bid,
-          bt.best_ask
-        from unified_book_top bt
+          bt.avg_mid
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.ts desc
+        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.bucket desc
       )
     `);
     change24hParts.push(`
@@ -212,28 +211,14 @@ export async function fetchFeedEventIds(
           ay.market_id,
           ay.event_id,
           case
-            when (
-              case
-                when yes_top.best_bid is not null and yes_top.best_ask is not null
-                  then (yes_top.best_bid + yes_top.best_ask) / 2
-                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-              end
-            ) is null
+            when yes_now.avg_mid is null
               or yes_24h.avg_mid is null
               or yes_24h.avg_mid = 0
             then null
-            else (
-              (
-                case
-                  when yes_top.best_bid is not null and yes_top.best_ask is not null
-                    then (yes_top.best_bid + yes_top.best_ask) / 2
-                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-                end
-              ) - yes_24h.avg_mid
-            ) / yes_24h.avg_mid
+            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
           end as change_24h
         from active_yes_tokens ay
-        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_now yes_now on yes_now.token_id = ay.token_id
         left join book_24h yes_24h on yes_24h.token_id = ay.token_id
       )
     `);
@@ -335,7 +320,7 @@ export async function fetchFeedEventIds(
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
       active_yes_tokens as (
-        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        select mt.market_id, mt.token_id
         from unified_market_tokens mt
         join unified_markets bm on bm.id = mt.market_id
         join unified_events e on e.id = bm.event_id
@@ -361,11 +346,10 @@ export async function fetchFeedEventIds(
       book_now as (
         select distinct on (bt.token_id)
           bt.token_id,
-          bt.best_bid,
-          bt.best_ask
-        from unified_book_top bt
-        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.ts desc
+          bt.avg_mid
+        from unified_book_top_1h bt
+        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.bucket desc
       )
     `);
     change24hCteParts.push(`
@@ -373,28 +357,14 @@ export async function fetchFeedEventIds(
         select
           ay.market_id,
           case
-            when (
-              case
-                when yes_top.best_bid is not null and yes_top.best_ask is not null
-                  then (yes_top.best_bid + yes_top.best_ask) / 2
-                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-              end
-            ) is null
+            when yes_now.avg_mid is null
               or yes_24h.avg_mid is null
               or yes_24h.avg_mid = 0
             then null
-            else (
-              (
-                case
-                  when yes_top.best_bid is not null and yes_top.best_ask is not null
-                    then (yes_top.best_bid + yes_top.best_ask) / 2
-                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-                end
-              ) - yes_24h.avg_mid
-            ) / yes_24h.avg_mid
+            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
           end as change_24h
         from active_yes_tokens ay
-        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_now yes_now on yes_now.token_id = ay.token_id
         left join book_24h yes_24h on yes_24h.token_id = ay.token_id
       )
     `);
@@ -428,8 +398,8 @@ export async function fetchFeedEventIds(
   const tradeCte =
     inputs.sort === "trending_v2"
       ? `
-        trade_24h as (
-          select mt.market_id, sum(t.volume) as vol
+        event_trade_24h as (
+          select bm.event_id, sum(t.volume) as vol
           from unified_last_trade_1h t
           join unified_market_tokens mt on mt.token_id = t.token_id
           join unified_markets bm on bm.id = mt.market_id
@@ -438,13 +408,13 @@ export async function fetchFeedEventIds(
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
             and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
             and ${supportedLimitlessMarketExpr}
-          group by mt.market_id
+          group by bm.event_id
         )
       `
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? "left join trade_24h on trade_24h.market_id = m.id"
+      ? "left join event_trade_24h et on et.event_id = e.id"
       : "";
 
   const having: string[] = [];
@@ -476,14 +446,13 @@ export async function fetchFeedEventIds(
   else if (inputs.filter === "endingsoon")
     eventOrder = "e.end_date asc nulls last, e.id";
   else if (inputs.sort === "trending_v2") {
-    const eventTrendExpr = `
+    eventOrder = `
       case
-        when m.venue = 'limitless'
-          then (coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))
-        else coalesce(trade_24h.vol, 0)
-      end
+        when e.venue = 'limitless'
+          then max(coalesce(${eventLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${eventVolumeDisplayExpr}, 0))
+        else coalesce(max(et.vol), 0)
+      end ${sortDir} nulls last, e.id
     `;
-    eventOrder = `sum(${eventTrendExpr}) ${sortDir} nulls last, e.id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
     const sevenDaysAgo = add(inputs.sevenDaysAgo);
     const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
@@ -736,7 +705,7 @@ export async function fetchFeedMarkets(
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
       active_yes_tokens as (
-        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        select mt.market_id, mt.token_id
         from unified_market_tokens mt
         join unified_markets bm on bm.id = mt.market_id
         where mt.outcome_side = 'YES'
@@ -762,12 +731,11 @@ export async function fetchFeedMarkets(
       book_now as (
         select distinct on (bt.token_id)
           bt.token_id,
-          bt.best_bid,
-          bt.best_ask
-        from unified_book_top bt
+          bt.avg_mid
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.ts desc
+        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.bucket desc
       )
     `);
     change24hCteParts.push(`
@@ -775,28 +743,14 @@ export async function fetchFeedMarkets(
         select
           ay.market_id,
           case
-            when (
-              case
-                when yes_top.best_bid is not null and yes_top.best_ask is not null
-                  then (yes_top.best_bid + yes_top.best_ask) / 2
-                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-              end
-            ) is null
+            when yes_now.avg_mid is null
               or yes_24h.avg_mid is null
               or yes_24h.avg_mid = 0
             then null
-            else (
-              (
-                case
-                  when yes_top.best_bid is not null and yes_top.best_ask is not null
-                    then (yes_top.best_bid + yes_top.best_ask) / 2
-                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-                end
-              ) - yes_24h.avg_mid
-            ) / yes_24h.avg_mid
+            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
           end as change_24h
         from active_yes_tokens ay
-        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_now yes_now on yes_now.token_id = ay.token_id
         left join book_24h yes_24h on yes_24h.token_id = ay.token_id
       )
     `);
@@ -822,10 +776,7 @@ export async function fetchFeedMarkets(
       ord
     from unnest(${eventIdsParam}::text[]) with ordinality as t(event_id, ord)
   `;
-  const yesTopJoin =
-    inputs.sort === "change24h"
-      ? "left join book_now yes_top on yes_top.token_id = m.resolved_token_yes"
-      : `left join lateral (
+  const yesTopJoin = `left join lateral (
           select best_bid, best_ask
           from unified_book_top
           where token_id = m.resolved_token_yes
@@ -1051,7 +1002,7 @@ export async function fetchFeedMarketsDirect(
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
       active_yes_tokens as (
-        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        select mt.market_id, mt.token_id
         from unified_market_tokens mt
         join unified_markets bm on bm.id = mt.market_id
         join unified_events e on e.id = bm.event_id
@@ -1078,12 +1029,11 @@ export async function fetchFeedMarketsDirect(
       book_now as (
         select distinct on (bt.token_id)
           bt.token_id,
-          bt.best_bid,
-          bt.best_ask
-        from unified_book_top bt
+          bt.avg_mid
+        from unified_book_top_1h bt
         join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.ts desc
+        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.bucket desc
       )
     `);
     change24hCteParts.push(`
@@ -1091,28 +1041,14 @@ export async function fetchFeedMarketsDirect(
         select
           ay.market_id,
           case
-            when (
-              case
-                when yes_top.best_bid is not null and yes_top.best_ask is not null
-                  then (yes_top.best_bid + yes_top.best_ask) / 2
-                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-              end
-            ) is null
+            when yes_now.avg_mid is null
               or yes_24h.avg_mid is null
               or yes_24h.avg_mid = 0
             then null
-            else (
-              (
-                case
-                  when yes_top.best_bid is not null and yes_top.best_ask is not null
-                    then (yes_top.best_bid + yes_top.best_ask) / 2
-                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
-                end
-              ) - yes_24h.avg_mid
-            ) / yes_24h.avg_mid
+            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
           end as change_24h
         from active_yes_tokens ay
-        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_now yes_now on yes_now.token_id = ay.token_id
         left join book_24h yes_24h on yes_24h.token_id = ay.token_id
       )
     `);
@@ -1300,10 +1236,7 @@ export async function fetchFeedMarketsDirect(
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
     end`}
   `;
-  const yesTopJoin =
-    inputs.sort === "change24h"
-      ? "left join book_now yes_top on yes_top.token_id = m.resolved_token_yes"
-      : `left join lateral (
+  const yesTopJoin = `left join lateral (
           select best_bid, best_ask
           from unified_book_top
           where token_id = m.resolved_token_yes
