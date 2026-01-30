@@ -1387,7 +1387,7 @@ export async function fetchMarketsByTokenIds(
     ? `left join lateral (
       select best_bid, best_ask
       from unified_book_top
-      where token_id = mt.token_yes
+      where token_id = token_yes.token_id
         and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
       order by ts desc
@@ -1396,13 +1396,18 @@ export async function fetchMarketsByTokenIds(
     left join lateral (
       select best_bid, best_ask
       from unified_book_top
-      where token_id = mt.token_no
+      where token_id = token_no.token_id
         and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
       order by ts desc
       limit 1
     ) no_top on true`
     : "";
+
+  const negRiskParentSelect =
+    `pm_parent.condition_id as pm_neg_risk_parent_condition_id,`;
+  const negRiskParentJoin = `left join polymarket_markets pm_parent
+      on pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')`;
 
   const sql = `
     with input_tokens as (
@@ -1411,58 +1416,16 @@ export async function fetchMarketsByTokenIds(
       where token_id is not null and token_id <> ''
       group by token_id
     ),
-    market_tokens as (
-      select
-        m.id as market_id,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
-      from unified_markets m
-    ),
-    token_matches_raw as (
-      select
-        t.token_id,
-        ut.side,
-        ut.market_id,
-        t.ordinality
-      from input_tokens t
-      join unified_tokens ut on ut.token_id = t.token_id
-
-      union all
-
-      select
-        t.token_id,
-        case
-          when (m.clob_token_ids::jsonb->>0) = t.token_id then 'YES'
-          when (m.clob_token_ids::jsonb->>1) = t.token_id then 'NO'
-          else null
-        end as side,
-        m.id as market_id,
-        t.ordinality
-      from input_tokens t
-      join unified_markets m
-        on m.venue = 'polymarket'
-       and m.clob_token_ids is not null
-       and m.clob_token_ids <> ''
-       and m.clob_token_ids <> '[]'
-       and (m.clob_token_ids::jsonb ? t.token_id)
-    ),
     token_matches as (
-      select distinct on (token_id)
-        token_id,
-        side,
-        market_id,
-        ordinality
-      from token_matches_raw
-      where side is not null
-      order by token_id, ordinality
+      select
+        t.token_id,
+        umt.outcome_side as side,
+        umt.market_id,
+        t.ordinality
+      from input_tokens t
+      join unified_market_tokens umt
+        on umt.token_id = t.token_id
+      where umt.outcome_side is not null
     )
     select
       tm.token_id,
@@ -1477,7 +1440,7 @@ export async function fetchMarketsByTokenIds(
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
       coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID') as pm_neg_risk_market_id,
-      pm_parent.condition_id as pm_neg_risk_parent_condition_id,
+      ${negRiskParentSelect}
       pm.neg_risk_request_id as pm_neg_risk_request_id,
       pm.question_id as pm_question_id,
       m.open_time,
@@ -1492,8 +1455,8 @@ export async function fetchMarketsByTokenIds(
       ${topSelect}
       m.last_price,
       m.outcomes,
-      mt.token_yes,
-      mt.token_no,
+      token_yes.token_id as token_yes,
+      token_no.token_id as token_no,
       m.clob_token_ids,
       m.condition_id,
       m.market_ledger,
@@ -1528,12 +1491,16 @@ export async function fetchMarketsByTokenIds(
       e.metadata as event_metadata
     from token_matches tm
     join unified_markets m on m.id = tm.market_id
-    join market_tokens mt on mt.market_id = m.id
+    left join unified_market_tokens token_yes
+      on token_yes.market_id = m.id
+     and token_yes.outcome_side = 'YES'
+    left join unified_market_tokens token_no
+      on token_no.market_id = m.id
+     and token_no.outcome_side = 'NO'
     ${topJoins}
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
-    left join polymarket_markets pm_parent
-      on pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')
+    ${negRiskParentJoin}
     left join unified_events e on e.id = m.event_id
     ${venueClause}
     order by tm.ordinality
