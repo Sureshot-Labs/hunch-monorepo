@@ -546,37 +546,6 @@ export async function fetchFeedMarkets(
   const eventIdsParam = add(eventIds);
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
-  const tokenEventFilters: string[] = [
-    "e.status = 'ACTIVE'",
-    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
-  ];
-  if (inputs.venues?.length) {
-    tokenEventFilters.push(`bm.venue = ANY(${add(inputs.venues)}::text[])`);
-  }
-  if (inputs.categories?.length) {
-    tokenEventFilters.push(
-      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
-  } else if (inputs.category) {
-    tokenEventFilters.push(
-      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
-    );
-  }
-  if (inputs.filter === "newest") {
-    tokenEventFilters.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
-  } else if (inputs.filter === "endingsoon") {
-    tokenEventFilters.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
-  }
-  if (inputs.endWithin) {
-    tokenEventFilters.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
-    );
-  }
-  if (inputs.ageSince) {
-    tokenEventFilters.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
-    );
-  }
   const yesMidExpr = `
     case
       when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
@@ -886,18 +855,22 @@ export async function fetchFeedMarketsDirect(
     );
   }
   if (inputs.filter === "newest") {
-    tokenEventFilters.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
+    tokenEventFilters.push(
+      `e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
+    );
   } else if (inputs.filter === "endingsoon") {
-    tokenEventFilters.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
+    tokenEventFilters.push(
+      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
+    );
   }
   if (inputs.endWithin) {
     tokenEventFilters.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
     );
   }
   if (inputs.ageSince) {
     tokenEventFilters.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
     );
   }
   if (hasSearch) {
@@ -967,19 +940,21 @@ export async function fetchFeedMarketsDirect(
   }
 
   if (inputs.filter === "newest") {
-    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
+    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
   } else if (inputs.filter === "endingsoon") {
-    where.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
+    where.push(
+      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
+    );
   }
 
   if (inputs.endWithin) {
     where.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
     );
   }
   if (inputs.ageSince) {
     where.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
     );
   }
 
