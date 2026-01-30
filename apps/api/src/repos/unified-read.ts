@@ -68,11 +68,12 @@ export async function fetchFeedEventIds(
   const supportedLimitlessMarketExpr = "true";
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
-  `; 
+  `;
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
 
-  if (inputs.venues?.length) {
-    eventWhere.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
+  const venuesParam = inputs.venues?.length ? add(inputs.venues) : null;
+  if (venuesParam) {
+    eventWhere.push(`e.venue = ANY(${venuesParam}::text[])`);
   }
   if (inputs.categories?.length) {
     eventWhere.push(
@@ -83,20 +84,33 @@ export async function fetchFeedEventIds(
       `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
     );
   }
-  if (inputs.q) {
-    const search = add(`%${inputs.q}%`);
-    eventWhere.push(
-      `(
-        e.title ilike ${search} or
-        e.description ilike ${search} or
-        e.category ilike ${search} or
-        e.slug ilike ${search} or
-        m.title ilike ${search} or
-        m.description ilike ${search} or
-        m.category ilike ${search} or
-        m.slug ilike ${search}
-      )`,
-    );
+  const hasSearch = Boolean(inputs.q);
+  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
+  const searchCte = hasSearch
+    ? `
+      search_events as (
+        select e.id
+        from unified_events e
+        where (
+          e.title ilike ${searchParam} or
+          e.description ilike ${searchParam} or
+          e.category ilike ${searchParam} or
+          e.slug ilike ${searchParam}
+        )
+        union
+        select m.event_id as id
+        from unified_markets m
+        where (
+          m.title ilike ${searchParam} or
+          m.description ilike ${searchParam} or
+          m.category ilike ${searchParam} or
+          m.slug ilike ${searchParam}
+        )
+      )
+    `
+    : "";
+  if (hasSearch) {
+    eventWhere.push("e.id in (select id from search_events)");
   }
 
   if (inputs.filter === "newest") {
@@ -127,42 +141,269 @@ export async function fetchFeedEventIds(
     );
   }
 
+  const requiresMarketJoin =
+    inputs.minProb != null ||
+    inputs.maxProb != null ||
+    inputs.maxSpread != null ||
+    inputs.eventScope != null ||
+    inputs.sort === "trending_v2";
+
+  if (inputs.sort === "change24h" && !requiresMarketJoin) {
+    const eventChangeWhere = [...eventWhere];
+    if (inputs.minVol > 1e-9) {
+      eventChangeWhere.push(
+        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
+      );
+    }
+    if (inputs.minLiquidity > 0) {
+      eventChangeWhere.push(
+        `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+      );
+    }
+
+    const change24hParts: string[] = [];
+    if (searchCte) change24hParts.push(searchCte);
+    change24hParts.push(`
+      filtered_events as (
+        select e.id
+        from unified_events e
+        ${eventChangeWhere.length ? "where " + eventChangeWhere.join(" and ") : ""}
+      )
+    `);
+    change24hParts.push(`
+      active_yes_tokens as (
+        select mt.market_id, mt.token_id, m.event_id, m.best_bid, m.best_ask
+        from unified_market_tokens mt
+        join unified_markets m on m.id = mt.market_id
+        join filtered_events fe on fe.id = m.event_id
+        where mt.outcome_side = 'YES'
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+      )
+    `);
+    change24hParts.push(`
+      book_24h as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.avg_mid
+        from unified_book_top_1m bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
+        order by bt.token_id, bt.bucket desc
+      )
+    `);
+    change24hParts.push(`
+      book_now as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.best_bid,
+          bt.best_ask
+        from unified_book_top bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.ts desc
+      )
+    `);
+    change24hParts.push(`
+      market_change as (
+        select
+          ay.market_id,
+          ay.event_id,
+          case
+            when (
+              case
+                when yes_top.best_bid is not null and yes_top.best_ask is not null
+                  then (yes_top.best_bid + yes_top.best_ask) / 2
+                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+              end
+            ) is null
+              or yes_24h.avg_mid is null
+              or yes_24h.avg_mid = 0
+            then null
+            else (
+              (
+                case
+                  when yes_top.best_bid is not null and yes_top.best_ask is not null
+                    then (yes_top.best_bid + yes_top.best_ask) / 2
+                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+                end
+              ) - yes_24h.avg_mid
+            ) / yes_24h.avg_mid
+          end as change_24h
+        from active_yes_tokens ay
+        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+      )
+    `);
+    change24hParts.push(`
+      event_change as (
+        select event_id, avg(change_24h) as change_24h
+        from market_change
+        group by event_id
+      )
+    `);
+
+    const withClause = `with ${change24hParts.join(",\n")}`;
+    const eventChangeSql = `
+      ${withClause}
+      select e.id
+      from unified_events e
+      join filtered_events fe on fe.id = e.id
+      left join event_change ec on ec.event_id = e.id
+      order by ec.change_24h ${sortDir} nulls last, e.id
+      limit ${inputs.limit} offset ${inputs.offset}
+    `;
+
+    const { rows } = await pool.query<{ id: string }>(eventChangeSql, params);
+    return rows;
+  }
+
+  if (!requiresMarketJoin) {
+    const eventOnlyWhere = [...eventWhere];
+    eventOnlyWhere.push(
+      `exists (
+        select 1
+        from unified_markets m
+        where m.event_id = e.id
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+      )`,
+    );
+    if (inputs.minVol > 1e-9) {
+      eventOnlyWhere.push(
+        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
+      );
+    }
+    if (inputs.minLiquidity > 0) {
+      eventOnlyWhere.push(
+        `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+      );
+    }
+
+    const eventOpenInterestSortExpr =
+      "coalesce(nullif(e.open_interest, 0), 0)";
+    let eventOnlyOrder = "";
+    if (inputs.sort === "totalvol")
+      eventOnlyOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
+    else if (inputs.sort === "liquidity")
+      eventOnlyOrder = `(${eventLiquidityDisplayExpr}) ${sortDir} nulls last, e.id`;
+    else if (inputs.sort === "openinterest")
+      eventOnlyOrder = `(${eventOpenInterestSortExpr}) ${sortDir} nulls last, e.id`;
+    else if (inputs.sort === "time")
+      eventOnlyOrder = `e.end_date ${sortDir} nulls last, e.id`;
+    else if (inputs.filter === "newest")
+      eventOnlyOrder = "e.start_date desc nulls last, e.id";
+    else if (inputs.filter === "endingsoon")
+      eventOnlyOrder = "e.end_date asc nulls last, e.id";
+    else if (inputs.sort == null || inputs.sort === "trending") {
+      const sevenDaysAgo = add(inputs.sevenDaysAgo);
+      const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
+      eventOnlyOrder = `
+        (coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
+         coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
+         case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
+         case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
+        ) ${sortDir} nulls last, e.id
+      `;
+    } else eventOnlyOrder = "e.start_date desc nulls last, e.id";
+
+    const eventOnlySql = `
+      ${searchCte ? `with ${searchCte}` : ""}
+      select
+        e.id
+      from unified_events e
+      ${eventOnlyWhere.length ? "where " + eventOnlyWhere.join(" and ") : ""}
+      ${eventOnlyOrder ? `order by ${eventOnlyOrder}` : ""}
+      limit ${inputs.limit} offset ${inputs.offset}
+    `;
+
+    const { rows } = await pool.query<{ id: string }>(eventOnlySql, params);
+    return rows;
+  }
+
   const yesMidExpr = `
     case
       when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
       else coalesce(m.best_bid, m.best_ask)
     end
   `;
-  const tokenYesExpr = `
-    case
-      when m.venue = 'polymarket' and m.clob_token_ids is not null
-        then (m.clob_token_ids::jsonb->>0)
-      else m.token_yes
-    end
-  `;
-  const tokenNoExpr = `
-    case
-      when m.venue = 'polymarket' and m.clob_token_ids is not null
-        then (m.clob_token_ids::jsonb->>1)
-      else m.token_no
-    end
-  `;
-  const currentYesMidExpr =
+  const change24hCteParts: string[] = [];
+  if (inputs.sort === "change24h") {
+    change24hCteParts.push(`
+      active_yes_tokens as (
+        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        from unified_market_tokens mt
+        join unified_markets bm on bm.id = mt.market_id
+        join unified_events e on e.id = bm.event_id
+        where mt.outcome_side = 'YES'
+          and bm.status = 'ACTIVE'
+          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
+          and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+          ${eventWhere.length ? `and ${eventWhere.join(" and ")}` : ""}
+      )
+    `);
+    change24hCteParts.push(`
+      book_24h as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.avg_mid
+        from unified_book_top_1m bt
+        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
+        order by bt.token_id, bt.bucket desc
+      )
+    `);
+    change24hCteParts.push(`
+      book_now as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.best_bid,
+          bt.best_ask
+        from unified_book_top bt
+        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.ts desc
+      )
+    `);
+    change24hCteParts.push(`
+      market_change as (
+        select
+          ay.market_id,
+          case
+            when (
+              case
+                when yes_top.best_bid is not null and yes_top.best_ask is not null
+                  then (yes_top.best_bid + yes_top.best_ask) / 2
+                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+              end
+            ) is null
+              or yes_24h.avg_mid is null
+              or yes_24h.avg_mid = 0
+            then null
+            else (
+              (
+                case
+                  when yes_top.best_bid is not null and yes_top.best_ask is not null
+                    then (yes_top.best_bid + yes_top.best_ask) / 2
+                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+                end
+              ) - yes_24h.avg_mid
+            ) / yes_24h.avg_mid
+          end as change_24h
+        from active_yes_tokens ay
+        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+      )
+    `);
+  }
+  const marketChangeJoin =
     inputs.sort === "change24h"
-      ? `
-    case
-      when yes_top.best_bid is not null and yes_top.best_ask is not null
-        then (yes_top.best_bid + yes_top.best_ask) / 2
-      else coalesce(yes_top.best_bid, yes_top.best_ask, m.best_bid, m.best_ask)
-    end
-  `
-      : yesMidExpr;
-  const change24hExpr = `
-    case
-      when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
-      else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
-    end
-  `;
+      ? "left join market_change mc on mc.market_id = m.id"
+      : "";
+  const change24hExpr = inputs.sort === "change24h" ? "mc.change_24h" : "null";
 
   const marketQual: string[] = [];
   if (inputs.minLiquidity > 0) {
@@ -184,39 +425,26 @@ export async function fetchFeedEventIds(
   const marketQualSql = marketQual.length
     ? marketQual.map((clause) => `(${clause})`).join(" and ")
     : "true";
-  const changeJoin =
-    inputs.sort === "change24h"
-      ? `left join lateral (
-          select avg_mid
-          from unified_book_top_1m
-          where token_id = ${tokenYesExpr}
-            and bucket <= ${nowParam}::timestamptz - interval '24 hours'
-          order by bucket desc
-          limit 1
-        ) yes_24h on true`
-      : "";
-  const currentJoin =
-    inputs.sort === "change24h"
-      ? `left join lateral (
-          select best_bid, best_ask
-          from unified_book_top
-          where token_id = ${tokenYesExpr}
-            and ts > (${nowParam}::timestamptz - interval '7 days')
-          order by ts desc
-          limit 1
-        ) yes_top on true`
+  const tradeCte =
+    inputs.sort === "trending_v2"
+      ? `
+        trade_24h as (
+          select mt.market_id, sum(t.volume) as vol
+          from unified_last_trade_1m t
+          join unified_market_tokens mt on mt.token_id = t.token_id
+          join unified_markets bm on bm.id = mt.market_id
+          where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
+            and bm.status = 'ACTIVE'
+            and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
+            and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
+            and ${supportedLimitlessMarketExpr}
+          group by mt.market_id
+        )
+      `
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? `left join lateral (
-          select sum(volume) as vol
-          from unified_last_trade_1m
-          where bucket >= ${nowParam}::timestamptz - interval '24 hours'
-            and (
-              (m.venue = 'polymarket' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr})) or
-              (m.venue = 'kalshi' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr}))
-            )
-        ) trade_24h on true`
+      ? "left join trade_24h on trade_24h.market_id = m.id"
       : "";
 
   const having: string[] = [];
@@ -268,7 +496,14 @@ export async function fetchFeedEventIds(
     `;
   } else eventOrder = "e.start_date desc nulls last, e.id";
 
+  const withParts: string[] = [];
+  if (searchCte) withParts.push(searchCte);
+  if (change24hCteParts.length) withParts.push(...change24hCteParts);
+  if (tradeCte) withParts.push(tradeCte);
+  const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
+
   const eventSql = `
+    ${withClause}
     select
       e.id
     from unified_events e
@@ -277,8 +512,7 @@ export async function fetchFeedEventIds(
       and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
       and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
-    ${changeJoin}
-    ${currentJoin}
+    ${marketChangeJoin}
     ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
@@ -396,6 +630,37 @@ export async function fetchFeedMarkets(
   const eventIdsParam = add(eventIds);
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
+  const tokenEventFilters: string[] = [
+    "e.status = 'ACTIVE'",
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
+  ];
+  if (inputs.venues?.length) {
+    tokenEventFilters.push(`bm.venue = ANY(${add(inputs.venues)}::text[])`);
+  }
+  if (inputs.categories?.length) {
+    tokenEventFilters.push(
+      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
+    );
+  } else if (inputs.category) {
+    tokenEventFilters.push(
+      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
+    );
+  }
+  if (inputs.filter === "newest") {
+    tokenEventFilters.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
+  } else if (inputs.filter === "endingsoon") {
+    tokenEventFilters.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
+  }
+  if (inputs.endWithin) {
+    tokenEventFilters.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+    );
+  }
+  if (inputs.ageSince) {
+    tokenEventFilters.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+    );
+  }
   const yesMidExpr = `
     case
       when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
@@ -467,6 +732,75 @@ export async function fetchFeedMarkets(
     from (${rankedMarketSql}) m
     where m.market_rank <= ${add(perEventMarketLimit)}
   `;
+  const change24hCteParts: string[] = [];
+  if (inputs.sort === "change24h") {
+    change24hCteParts.push(`
+      active_yes_tokens as (
+        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        from unified_market_tokens mt
+        join unified_markets bm on bm.id = mt.market_id
+        where mt.outcome_side = 'YES'
+          and bm.event_id = ANY(${eventIdsParam}::text[])
+          and bm.status = 'ACTIVE'
+          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
+          and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+      )
+    `);
+    change24hCteParts.push(`
+      book_24h as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.avg_mid
+        from unified_book_top_1m bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
+        order by bt.token_id, bt.bucket desc
+      )
+    `);
+    change24hCteParts.push(`
+      book_now as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.best_bid,
+          bt.best_ask
+        from unified_book_top bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.ts desc
+      )
+    `);
+    change24hCteParts.push(`
+      market_change as (
+        select
+          ay.market_id,
+          case
+            when (
+              case
+                when yes_top.best_bid is not null and yes_top.best_ask is not null
+                  then (yes_top.best_bid + yes_top.best_ask) / 2
+                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+              end
+            ) is null
+              or yes_24h.avg_mid is null
+              or yes_24h.avg_mid = 0
+            then null
+            else (
+              (
+                case
+                  when yes_top.best_bid is not null and yes_top.best_ask is not null
+                    then (yes_top.best_bid + yes_top.best_ask) / 2
+                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+                end
+              ) - yes_24h.avg_mid
+            ) / yes_24h.avg_mid
+          end as change_24h
+        from active_yes_tokens ay
+        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+      )
+    `);
+  }
   const currentYesMidExpr = `
     case
       when yes_top.best_bid is not null and yes_top.best_ask is not null
@@ -474,7 +808,8 @@ export async function fetchFeedMarkets(
       else coalesce(yes_top.best_bid, yes_top.best_ask, m.best_bid, m.best_ask)
     end
   `;
-  const change24hExpr = `
+  const change24hExpr =
+    inputs.sort === "change24h" ? "mc.change_24h" : `
     case
       when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
@@ -487,10 +822,39 @@ export async function fetchFeedMarkets(
       ord
     from unnest(${eventIdsParam}::text[]) with ordinality as t(event_id, ord)
   `;
+  const yesTopJoin =
+    inputs.sort === "change24h"
+      ? "left join book_now yes_top on yes_top.token_id = m.resolved_token_yes"
+      : `left join lateral (
+          select best_bid, best_ask
+          from unified_book_top
+          where token_id = m.resolved_token_yes
+            and ts > (${nowParam}::timestamptz - interval '7 days')
+          order by ts desc
+          limit 1
+        ) yes_top on true`;
+  const yes24hJoin =
+    inputs.sort === "change24h"
+      ? ""
+      : `left join lateral (
+          select avg_mid
+          from unified_book_top_1m
+          where token_id = m.resolved_token_yes
+            and bucket <= (${nowParam}::timestamptz - interval '24 hours')
+          order by bucket desc
+          limit 1
+        ) yes_24h on true`;
+  const marketChangeJoin =
+    inputs.sort === "change24h"
+      ? "left join market_change mc on mc.market_id = m.id"
+      : "";
+  const withParts: string[] = [];
+  if (change24hCteParts.length) withParts.push(...change24hCteParts);
+  withParts.push(`event_order as (${eventOrderSql})`);
+  withParts.push(`market_base as (${marketBaseSql})`);
+  const withClause = `with ${withParts.join(",\n")}`;
   const marketSql = `
-    with
-      event_order as (${eventOrderSql}),
-      market_base as (${marketBaseSql})
+    ${withClause}
     select
       e.id as event_id,
       e.title as event_title,
@@ -545,22 +909,9 @@ export async function fetchFeedMarkets(
     from event_order eo
     join unified_events e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = m.resolved_token_yes
-        and ts > (${nowParam}::timestamptz - interval '7 days')
-      order by ts desc
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select avg_mid
-      from unified_book_top_1m
-      where token_id = m.resolved_token_yes
-        and bucket <= (${nowParam}::timestamptz - interval '24 hours')
-      order by bucket desc
-      limit 1
-    ) yes_24h on true
+    ${yesTopJoin}
+    ${yes24hJoin}
+    ${marketChangeJoin}
     left join lateral (
       select best_bid, best_ask
       from unified_book_top
@@ -622,9 +973,65 @@ export async function fetchFeedMarketsDirect(
   `;
   const supportedLimitlessMarketExpr = "true";
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const hasSearch = Boolean(inputs.q);
+  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
+  const searchCte = hasSearch
+    ? `
+      search_events as (
+        select e.id
+        from unified_events e
+        where (
+          e.title ilike ${searchParam} or
+          e.description ilike ${searchParam} or
+          e.category ilike ${searchParam} or
+          e.slug ilike ${searchParam}
+        )
+        union
+        select m.event_id as id
+        from unified_markets m
+        where (
+          m.title ilike ${searchParam} or
+          m.description ilike ${searchParam} or
+          m.category ilike ${searchParam} or
+          m.slug ilike ${searchParam}
+        )
+      )
+    `
+    : "";
 
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
+  const tokenEventFilters: string[] = [];
+  if (inputs.venues?.length) {
+    tokenEventFilters.push(`bm.venue = ANY(${add(inputs.venues)}::text[])`);
+  }
+  if (inputs.categories?.length) {
+    tokenEventFilters.push(
+      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
+    );
+  } else if (inputs.category) {
+    tokenEventFilters.push(
+      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
+    );
+  }
+  if (inputs.filter === "newest") {
+    tokenEventFilters.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}`);
+  } else if (inputs.filter === "endingsoon") {
+    tokenEventFilters.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}`);
+  }
+  if (inputs.endWithin) {
+    tokenEventFilters.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}`,
+    );
+  }
+  if (inputs.ageSince) {
+    tokenEventFilters.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}`,
+    );
+  }
+  if (hasSearch) {
+    tokenEventFilters.push("e.id in (select id from search_events)");
+  }
   const marketCountSql = `
     select event_id, count(*) as market_count
     from unified_markets m
@@ -640,22 +1047,76 @@ export async function fetchFeedMarketsDirect(
       else coalesce(m.best_bid, m.best_ask)
     end
   `;
-
-  const tokenYesExpr = `
-    case
-      when m.venue = 'polymarket' and m.clob_token_ids is not null
-        then (m.clob_token_ids::jsonb->>0)
-      else m.token_yes
-    end
-  `;
-  const tokenNoExpr = `
-    case
-      when m.venue = 'polymarket' and m.clob_token_ids is not null
-        then (m.clob_token_ids::jsonb->>1)
-      else m.token_no
-    end
-  `;
-
+  const change24hCteParts: string[] = [];
+  if (inputs.sort === "change24h") {
+    change24hCteParts.push(`
+      active_yes_tokens as (
+        select mt.market_id, mt.token_id, bm.best_bid, bm.best_ask
+        from unified_market_tokens mt
+        join unified_markets bm on bm.id = mt.market_id
+        join unified_events e on e.id = bm.event_id
+        where mt.outcome_side = 'YES'
+          and bm.status = 'ACTIVE'
+          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
+          and (bm.close_time is null or bm.close_time > ${nowCloseParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+          ${tokenEventFilters.length ? `and ${tokenEventFilters.join(" and ")}` : ""}
+      )
+    `);
+    change24hCteParts.push(`
+      book_24h as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.avg_mid
+        from unified_book_top_1m bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
+        order by bt.token_id, bt.bucket desc
+      )
+    `);
+    change24hCteParts.push(`
+      book_now as (
+        select distinct on (bt.token_id)
+          bt.token_id,
+          bt.best_bid,
+          bt.best_ask
+        from unified_book_top bt
+        join active_yes_tokens ay on ay.token_id = bt.token_id
+        where bt.ts > ${nowParam}::timestamptz - interval '7 days'
+        order by bt.token_id, bt.ts desc
+      )
+    `);
+    change24hCteParts.push(`
+      market_change as (
+        select
+          ay.market_id,
+          case
+            when (
+              case
+                when yes_top.best_bid is not null and yes_top.best_ask is not null
+                  then (yes_top.best_bid + yes_top.best_ask) / 2
+                else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+              end
+            ) is null
+              or yes_24h.avg_mid is null
+              or yes_24h.avg_mid = 0
+            then null
+            else (
+              (
+                case
+                  when yes_top.best_bid is not null and yes_top.best_ask is not null
+                    then (yes_top.best_bid + yes_top.best_ask) / 2
+                  else coalesce(yes_top.best_bid, yes_top.best_ask, ay.best_bid, ay.best_ask)
+                end
+              ) - yes_24h.avg_mid
+            ) / yes_24h.avg_mid
+          end as change_24h
+        from active_yes_tokens ay
+        left join book_now yes_top on yes_top.token_id = ay.token_id
+        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+      )
+    `);
+  }
   const where: string[] = [
     "m.status = 'ACTIVE'",
     "e.status = 'ACTIVE'",
@@ -695,20 +1156,8 @@ export async function fetchFeedMarketsDirect(
     );
   }
 
-  if (inputs.q) {
-    const search = add(`%${inputs.q}%`);
-    where.push(
-      `(
-        e.title ilike ${search} or
-        e.description ilike ${search} or
-        e.category ilike ${search} or
-        e.slug ilike ${search} or
-        m.title ilike ${search} or
-        m.description ilike ${search} or
-        m.category ilike ${search} or
-        m.slug ilike ${search}
-      )`,
-    );
+  if (hasSearch) {
+    where.push("e.id in (select id from search_events)");
   }
 
   if (inputs.minLiquidity > 0) {
@@ -777,46 +1226,31 @@ export async function fetchFeedMarketsDirect(
     : "";
   const change24hCandidateJoin =
     inputs.sort === "change24h"
-      ? `left join lateral (
-          select avg_mid
-          from unified_book_top_1m
-          where token_id = (
-            case
-              when m.venue = 'polymarket' and m.clob_token_ids is not null
-                then (m.clob_token_ids::jsonb->>0)
-              else m.token_yes
-            end
-          )
-          and bucket <= ${nowParam}::timestamptz - interval '24 hours'
-          order by bucket desc
-          limit 1
-        ) yes_24h on true`
+      ? "left join market_change mc on mc.market_id = m.id"
+      : "";
+  const tradeCte =
+    inputs.sort === "trending_v2"
+      ? `
+        trade_24h as (
+          select mt.market_id, sum(t.volume) as vol
+          from unified_last_trade_1m t
+          join unified_market_tokens mt on mt.token_id = t.token_id
+          join unified_markets bm on bm.id = mt.market_id
+          where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
+            and bm.status = 'ACTIVE'
+            and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
+            and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
+            and ${supportedLimitlessMarketExpr}
+          group by mt.market_id
+        )
+      `
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? `left join lateral (
-          select sum(volume) as vol
-          from unified_last_trade_1m
-          where bucket >= ${nowParam}::timestamptz - interval '24 hours'
-            and (
-              (m.venue = 'polymarket' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr})) or
-              (m.venue = 'kalshi' and (token_id = ${tokenYesExpr} or token_id = ${tokenNoExpr}))
-            )
-        ) trade_24h on true`
+      ? "left join trade_24h on trade_24h.market_id = m.id"
       : "";
-  const candidateYesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null
-        then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
-    end
-  `;
-  const change24hCandidateExpr = `
-    case
-      when ${candidateYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
-      else (${candidateYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
-    end
-  `;
+  const change24hCandidateExpr =
+    inputs.sort === "change24h" ? "mc.change_24h" : "null";
 
   const marketCandidatesSql = `
     select
@@ -857,16 +1291,47 @@ export async function fetchFeedMarketsDirect(
     end
   `;
   const change24hExpr = `
-    case
+    ${inputs.sort === "change24h" ? "mc.change_24h" : `case
       when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
-    end
+    end`}
   `;
+  const yesTopJoin =
+    inputs.sort === "change24h"
+      ? "left join book_now yes_top on yes_top.token_id = m.resolved_token_yes"
+      : `left join lateral (
+          select best_bid, best_ask
+          from unified_book_top
+          where token_id = m.resolved_token_yes
+            and ts > (${nowParam}::timestamptz - interval '7 days')
+          order by ts desc
+          limit 1
+        ) yes_top on true`;
+  const yes24hJoin =
+    inputs.sort === "change24h"
+      ? ""
+      : `left join lateral (
+          select avg_mid
+          from unified_book_top_1m
+          where token_id = m.resolved_token_yes
+            and bucket <= (${nowParam}::timestamptz - interval '24 hours')
+          order by bucket desc
+          limit 1
+        ) yes_24h on true`;
+  const marketChangeJoin =
+    inputs.sort === "change24h"
+      ? "left join market_change mc on mc.market_id = m.id"
+      : "";
+  const withParts: string[] = [];
+  if (searchCte) withParts.push(searchCte);
+  if (change24hCteParts.length) withParts.push(...change24hCteParts);
+  if (tradeCte) withParts.push(tradeCte);
+  withParts.push(`market_candidates as (${marketCandidatesSql})`);
+  withParts.push(`market_base as (${marketBaseSql})`);
+  const withClause = `with ${withParts.join(",\n")}`;
 
   const marketSql = `
-    with
-      market_candidates as (${marketCandidatesSql}),
-      market_base as (${marketBaseSql})
+    ${withClause}
     select
       e.id as event_id,
       e.title as event_title,
@@ -920,22 +1385,9 @@ export async function fetchFeedMarketsDirect(
       m.updated_at as last_update
     from unified_events e
     join market_base m on m.event_id = e.id
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = m.resolved_token_yes
-        and ts > (${nowParam}::timestamptz - interval '7 days')
-      order by ts desc
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select avg_mid
-      from unified_book_top_1m
-      where token_id = m.resolved_token_yes
-        and bucket <= (${nowParam}::timestamptz - interval '24 hours')
-      order by bucket desc
-      limit 1
-    ) yes_24h on true
+    ${yesTopJoin}
+    ${yes24hJoin}
+    ${marketChangeJoin}
     left join lateral (
       select best_bid, best_ask
       from unified_book_top

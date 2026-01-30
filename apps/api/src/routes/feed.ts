@@ -74,7 +74,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         : normalizedCategory;
 
       // Calculate cache TTL (default 30 seconds, can be overridden via env var)
-      const cacheTtl = env.feedTtlSec > 0 ? env.feedTtlSec : 30;
+      const cacheEnabled = env.feedTtlSec > 0;
+      const cacheTtl = cacheEnabled ? env.feedTtlSec : 0;
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
@@ -82,7 +83,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const r = await getRedis();
 
       // serve from cache if present, with proper ETag/304 handling
-      if (r) {
+      if (cacheEnabled && r) {
         const cachedBody = await r.get(cacheKey);
         if (cachedBody) {
           const etag = `W/"${crypto
@@ -452,7 +453,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const body = JSON.stringify(payload);
       const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
 
-      if (r) {
+      if (cacheEnabled && r) {
         // Use longer cache TTL for better performance
         await r.set(cacheKey, body, { EX: cacheTtl });
         reply.header("x-cache", "miss");
@@ -461,7 +462,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       reply.header("ETag", etag);
       reply.header(
         "Cache-Control",
-        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
+        cacheEnabled
+          ? `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`
+          : "no-store",
       );
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(body);
