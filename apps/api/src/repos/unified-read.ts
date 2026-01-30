@@ -490,6 +490,7 @@ export type FeedMarketRow = {
   market_address: string | null;
   trade_type: string | null;
   last_update: unknown;
+  market_created_at: unknown;
 };
 
 export async function fetchFeedMarkets(
@@ -772,7 +773,8 @@ export async function fetchFeedMarkets(
       m.metadata->>'venueAdapter' as venue_adapter,
       m.metadata->>'address' as market_address,
       m.metadata->>'tradeType' as trade_type,
-      m.updated_at as last_update
+      m.updated_at as last_update,
+      m.created_at as market_created_at
     from event_order eo
     join unified_events e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
@@ -1207,7 +1209,8 @@ export async function fetchFeedMarketsDirect(
       m.metadata->>'venueAdapter' as venue_adapter,
       m.metadata->>'address' as market_address,
       m.metadata->>'tradeType' as trade_type,
-      m.updated_at as last_update
+      m.updated_at as last_update,
+      m.created_at as market_created_at
     from unified_events e
     join market_base m on m.event_id = e.id
     ${yesTopJoin}
