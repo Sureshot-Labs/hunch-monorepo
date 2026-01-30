@@ -184,42 +184,13 @@ export async function fetchFeedEventIds(
       )
     `);
     change24hParts.push(`
-      book_24h as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hParts.push(`
-      book_now as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hParts.push(`
       market_change as (
         select
           ay.market_id,
           ay.event_id,
-          case
-            when yes_now.avg_mid is null
-              or yes_24h.avg_mid is null
-              or yes_24h.avg_mid = 0
-            then null
-            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
-          end as change_24h
+          tc.change_24h
         from active_yes_tokens ay
-        left join book_now yes_now on yes_now.token_id = ay.token_id
-        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+        left join unified_token_change_24h tc on tc.token_id = ay.token_id
       )
     `);
     change24hParts.push(`
@@ -333,39 +304,12 @@ export async function fetchFeedEventIds(
       )
     `);
     change24hCteParts.push(`
-      book_24h as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
-      book_now as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
           ay.market_id,
-          case
-            when yes_now.avg_mid is null
-              or yes_24h.avg_mid is null
-              or yes_24h.avg_mid = 0
-            then null
-            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
-          end as change_24h
+          tc.change_24h
         from active_yes_tokens ay
-        left join book_now yes_now on yes_now.token_id = ay.token_id
-        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+        left join unified_token_change_24h tc on tc.token_id = ay.token_id
       )
     `);
   }
@@ -405,6 +349,7 @@ export async function fetchFeedEventIds(
           join unified_markets bm on bm.id = mt.market_id
           where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
             and bm.status = 'ACTIVE'
+            and bm.venue <> 'limitless'
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
             and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
             and ${supportedLimitlessMarketExpr}
@@ -717,41 +662,12 @@ export async function fetchFeedMarkets(
       )
     `);
     change24hCteParts.push(`
-      book_24h as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
-      book_now as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
           ay.market_id,
-          case
-            when yes_now.avg_mid is null
-              or yes_24h.avg_mid is null
-              or yes_24h.avg_mid = 0
-            then null
-            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
-          end as change_24h
+          tc.change_24h
         from active_yes_tokens ay
-        left join book_now yes_now on yes_now.token_id = ay.token_id
-        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+        left join unified_token_change_24h tc on tc.token_id = ay.token_id
       )
     `);
   }
@@ -1015,41 +931,12 @@ export async function fetchFeedMarketsDirect(
       )
     `);
     change24hCteParts.push(`
-      book_24h as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket <= ${nowParam}::timestamptz - interval '24 hours'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
-      book_now as (
-        select distinct on (bt.token_id)
-          bt.token_id,
-          bt.avg_mid
-        from unified_book_top_1h bt
-        join active_yes_tokens ay on ay.token_id = bt.token_id
-        where bt.bucket >= ${nowParam}::timestamptz - interval '7 days'
-        order by bt.token_id, bt.bucket desc
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
           ay.market_id,
-          case
-            when yes_now.avg_mid is null
-              or yes_24h.avg_mid is null
-              or yes_24h.avg_mid = 0
-            then null
-            else (yes_now.avg_mid - yes_24h.avg_mid) / yes_24h.avg_mid
-          end as change_24h
+          tc.change_24h
         from active_yes_tokens ay
-        left join book_now yes_now on yes_now.token_id = ay.token_id
-        left join book_24h yes_24h on yes_24h.token_id = ay.token_id
+        left join unified_token_change_24h tc on tc.token_id = ay.token_id
       )
     `);
   }
@@ -1167,13 +1054,14 @@ export async function fetchFeedMarketsDirect(
   const tradeCte =
     inputs.sort === "trending_v2"
       ? `
-        trade_24h as (
+        trade_24h as materialized (
           select mt.market_id, sum(t.volume) as vol
           from unified_last_trade_1h t
           join unified_market_tokens mt on mt.token_id = t.token_id
           join unified_markets bm on bm.id = mt.market_id
           where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
             and bm.status = 'ACTIVE'
+            and bm.venue <> 'limitless'
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
             and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
             and ${supportedLimitlessMarketExpr}
@@ -1183,7 +1071,7 @@ export async function fetchFeedMarketsDirect(
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? "left join trade_24h on trade_24h.market_id = m.id"
+      ? "left join trade_24h on trade_24h.market_id = m.id and m.venue <> 'limitless'"
       : "";
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
