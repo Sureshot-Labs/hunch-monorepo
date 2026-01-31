@@ -19,10 +19,9 @@ if (envPath) {
   require("dotenv").config({ path: envPath, override: true });
 }
 
-const rawArgs = process.argv.slice(2);
 // `pnpm <script> -- <args>` passes a literal `--` through to the script.
-// Strip it so we can forward flags like `-c` to psql.
-if (rawArgs[0] === "--") rawArgs.shift();
+// Strip any standalone `--` so psql doesn't treat it as a positional arg.
+const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
 const dockerFlag = rawArgs.includes("--docker");
 const localFlag = rawArgs.includes("--local");
 const args = rawArgs.filter((a) => a !== "--docker" && a !== "--local");

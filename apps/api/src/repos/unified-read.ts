@@ -88,7 +88,7 @@ export async function fetchFeedEventIds(
   const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
   const searchCte = hasSearch
     ? `
-      search_events as (
+      search_events as materialized (
         select e.id
         from unified_events e
         where (
@@ -171,38 +171,18 @@ export async function fetchFeedEventIds(
       )
     `);
     change24hParts.push(`
-      active_yes_markets as (
+      event_change as (
         select
-          m.id as market_id,
           m.event_id,
-          case
-            when m.venue = 'polymarket' and m.clob_token_ids is not null
-              then (m.clob_token_ids::jsonb->>0)
-            else m.token_yes
-          end as token_id
+          avg(mc.change_24h) as change_24h
         from unified_markets m
         join filtered_events fe on fe.id = m.event_id
+        left join unified_market_change_24h mc on mc.market_id = m.id
         where m.status = 'ACTIVE'
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
-      )
-    `);
-    change24hParts.push(`
-      market_change as (
-        select
-          am.market_id,
-          am.event_id,
-          tc.change_24h
-        from active_yes_markets am
-        left join unified_token_change_24h tc on tc.token_id = am.token_id
-      )
-    `);
-    change24hParts.push(`
-      event_change as (
-        select event_id, avg(change_24h) as change_24h
-        from market_change
-        group by event_id
+        group by m.event_id
       )
     `);
 
@@ -295,26 +275,18 @@ export async function fetchFeedEventIds(
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
-      active_yes_tokens as (
-        select mt.market_id, mt.token_id
-        from unified_market_tokens mt
-        join unified_markets bm on bm.id = mt.market_id
-        join unified_events e on e.id = bm.event_id
-        where mt.outcome_side = 'YES'
-          and bm.status = 'ACTIVE'
-          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
-          and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-          ${eventWhere.length ? `and ${eventWhere.join(" and ")}` : ""}
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
-          ay.market_id,
-          tc.change_24h
-        from active_yes_tokens ay
-        left join unified_token_change_24h tc on tc.token_id = ay.token_id
+          m.id as market_id,
+          mc.change_24h
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        left join unified_market_change_24h mc on mc.market_id = m.id
+        where m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+          ${eventWhere.length ? `and ${eventWhere.join(" and ")}` : ""}
       )
     `);
   }
@@ -623,29 +595,17 @@ export async function fetchFeedMarkets(
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
-      active_yes_markets as (
-        select
-          bm.id as market_id,
-          case
-            when bm.venue = 'polymarket' and bm.clob_token_ids is not null
-              then (bm.clob_token_ids::jsonb->>0)
-            else bm.token_yes
-          end as token_id
-        from unified_markets bm
-        where bm.event_id = ANY(${eventIdsParam}::text[])
-          and bm.status = 'ACTIVE'
-          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
-          and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
-          am.market_id,
-          tc.change_24h
-        from active_yes_markets am
-        left join unified_token_change_24h tc on tc.token_id = am.token_id
+          m.id as market_id,
+          mc.change_24h
+        from unified_markets m
+        left join unified_market_change_24h mc on mc.market_id = m.id
+        where m.event_id = ANY(${eventIdsParam}::text[])
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
       )
     `);
   }
@@ -824,7 +784,7 @@ export async function fetchFeedMarketsDirect(
   const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
   const searchCte = hasSearch
     ? `
-      search_events as (
+      search_events as materialized (
         select e.id
         from unified_events e
         where (
@@ -845,52 +805,32 @@ export async function fetchFeedMarketsDirect(
       )
     `
     : "";
+  const searchEventJoin = hasSearch
+    ? "join search_events se on se.id = e.id"
+    : "";
+  const searchMarketJoin = hasSearch
+    ? "join search_events se on se.id = m.event_id"
+    : "";
+  const searchMarketJoinBm = hasSearch
+    ? "join search_events se on se.id = bm.event_id"
+    : "";
 
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
-  const tokenEventFilters: string[] = [];
-  if (inputs.venues?.length) {
-    tokenEventFilters.push(`bm.venue = ANY(${add(inputs.venues)}::text[])`);
-  }
-  if (inputs.categories?.length) {
-    tokenEventFilters.push(
-      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
-  } else if (inputs.category) {
-    tokenEventFilters.push(
-      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
-    );
-  }
-  if (inputs.filter === "newest") {
-    tokenEventFilters.push(
-      `e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
-    );
-  } else if (inputs.filter === "endingsoon") {
-    tokenEventFilters.push(
-      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
-    );
-  }
-  if (inputs.endWithin) {
-    tokenEventFilters.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
-    );
-  }
-  if (inputs.ageSince) {
-    tokenEventFilters.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
-    );
-  }
-  if (hasSearch) {
-    tokenEventFilters.push("e.id in (select id from search_events)");
-  }
-  const marketCountSql = `
-    select event_id, count(*) as market_count
-    from unified_markets m
-    where status = 'ACTIVE'
-      and (expiration_time is null or expiration_time > ${nowParam}::timestamptz)
-      and (close_time is null or close_time > ${nowCloseParam}::timestamptz)
-      and ${supportedLimitlessMarketExpr}
-    group by event_id
+  const marketCountCte = `
+    market_count as (
+      select m.event_id, count(*) as market_count
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      ${searchMarketJoin}
+      where m.status = 'ACTIVE'
+        and e.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and ${supportedLimitlessMarketExpr}
+      group by m.event_id
+    )
   `;
   const yesMidExpr = `
     case
@@ -901,30 +841,11 @@ export async function fetchFeedMarketsDirect(
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
-      active_yes_markets as (
-        select
-          bm.id as market_id,
-          case
-            when bm.venue = 'polymarket' and bm.clob_token_ids is not null
-              then (bm.clob_token_ids::jsonb->>0)
-            else bm.token_yes
-          end as token_id
-        from unified_markets bm
-        join unified_events e on e.id = bm.event_id
-        where bm.status = 'ACTIVE'
-          and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
-          and (bm.close_time is null or bm.close_time > ${nowCloseParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-          ${tokenEventFilters.length ? `and ${tokenEventFilters.join(" and ")}` : ""}
-      )
-    `);
-    change24hCteParts.push(`
       market_change as (
         select
-          am.market_id,
-          tc.change_24h
-        from active_yes_markets am
-        left join unified_token_change_24h tc on tc.token_id = am.token_id
+          market_id,
+          change_24h
+        from unified_market_change_24h
       )
     `);
   }
@@ -967,10 +888,6 @@ export async function fetchFeedMarketsDirect(
     where.push(
       `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
     );
-  }
-
-  if (hasSearch) {
-    where.push("e.id in (select id from search_events)");
   }
 
   if (inputs.minLiquidity > 0) {
@@ -1035,7 +952,7 @@ export async function fetchFeedMarketsDirect(
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
   const marketCountJoin = needsMarketCount
-    ? `join (${marketCountSql}) emc on emc.event_id = m.event_id`
+    ? "join market_count emc on emc.event_id = m.event_id"
     : "";
   const change24hCandidateJoin =
     inputs.sort === "change24h"
@@ -1048,6 +965,7 @@ export async function fetchFeedMarketsDirect(
           select mt24.market_id, mt24.volume_24h as vol
           from unified_market_trade_24h mt24
           join unified_markets bm on bm.id = mt24.market_id
+          ${searchMarketJoinBm}
           where bm.status = 'ACTIVE'
             and bm.venue <> 'limitless'
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
@@ -1072,6 +990,7 @@ export async function fetchFeedMarketsDirect(
       , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
+    ${searchEventJoin}
     ${marketCountJoin}
     ${change24hCandidateJoin}
     ${tradeJoin}
@@ -1136,6 +1055,9 @@ export async function fetchFeedMarketsDirect(
       : "";
   const withParts: string[] = [];
   if (searchCte) withParts.push(searchCte);
+  if (needsMarketCount || inputs.eventScope) {
+    withParts.push(marketCountCte);
+  }
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   if (tradeCte) withParts.push(tradeCte);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);
