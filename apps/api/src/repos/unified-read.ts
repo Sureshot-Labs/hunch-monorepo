@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import type { QueryResultRow } from "pg";
 import type { PgParams } from "../server-types.js";
 
 export type FeedInputs = {
@@ -32,6 +33,36 @@ function createParamBuilder() {
     return `$${params.length}`;
   };
   return { params, add };
+}
+
+async function queryRowsWithSearchHint<T extends QueryResultRow>(
+  pool: Pool,
+  sql: string,
+  params: PgParams,
+  useSearchHint: boolean,
+): Promise<T[]> {
+  if (!useSearchHint) {
+    const { rows } = await pool.query<T>(sql, params);
+    return rows;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL enable_seqscan = off");
+    const { rows } = await client.query<T>(sql, params);
+    await client.query("COMMIT");
+    return rows;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Best-effort rollback for failed search hints.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function fetchFeedEventIds(
@@ -84,6 +115,7 @@ export async function fetchFeedEventIds(
       `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
     );
   }
+  const nowParam = add(inputs.nowParam);
   const hasSearch = Boolean(inputs.q);
   const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
   const searchCte = hasSearch
@@ -91,7 +123,9 @@ export async function fetchFeedEventIds(
       search_events as materialized (
         select e.id
         from unified_events e
-        where (
+        where e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
           e.title ilike ${searchParam} or
           e.description ilike ${searchParam} or
           e.category ilike ${searchParam} or
@@ -100,7 +134,13 @@ export async function fetchFeedEventIds(
         union
         select m.event_id as id
         from unified_markets m
-        where (
+        join unified_events e on e.id = m.event_id
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
           m.title ilike ${searchParam} or
           m.description ilike ${searchParam} or
           m.category ilike ${searchParam} or
@@ -125,7 +165,6 @@ export async function fetchFeedEventIds(
 
   eventWhere.push("e.status = 'ACTIVE'");
 
-  const nowParam = add(inputs.nowParam);
   eventWhere.push(
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
   );
@@ -197,8 +236,12 @@ export async function fetchFeedEventIds(
       limit ${inputs.limit} offset ${inputs.offset}
     `;
 
-    const { rows } = await pool.query<{ id: string }>(eventChangeSql, params);
-    return rows;
+    return await queryRowsWithSearchHint<{ id: string }>(
+      pool,
+      eventChangeSql,
+      params,
+      hasSearch,
+    );
   }
 
   if (!requiresMarketJoin) {
@@ -316,25 +359,9 @@ export async function fetchFeedEventIds(
   const marketQualSql = marketQual.length
     ? marketQual.map((clause) => `(${clause})`).join(" and ")
     : "true";
-  const tradeCte =
-    inputs.sort === "trending_v2"
-      ? `
-        event_trade_24h as (
-          select bm.event_id, sum(mt24.volume_24h) as vol
-          from unified_market_trade_24h mt24
-          join unified_markets bm on bm.id = mt24.market_id
-          where bm.status = 'ACTIVE'
-            and bm.venue <> 'limitless'
-            and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
-            and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
-            and ${supportedLimitlessMarketExpr}
-          group by bm.event_id
-        )
-      `
-      : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? "left join event_trade_24h et on et.event_id = e.id"
+      ? "left join unified_event_trade_24h et on et.event_id = e.id"
       : "";
 
   const having: string[] = [];
@@ -370,7 +397,7 @@ export async function fetchFeedEventIds(
       case
         when e.venue = 'limitless'
           then max(coalesce(${eventLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${eventVolumeDisplayExpr}, 0))
-        else coalesce(max(et.vol), 0)
+        else coalesce(max(et.volume_24h), 0)
       end ${sortDir} nulls last, e.id
     `;
   } else if (inputs.sort == null || inputs.sort === "trending") {
@@ -388,7 +415,6 @@ export async function fetchFeedEventIds(
   const withParts: string[] = [];
   if (searchCte) withParts.push(searchCte);
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
-  if (tradeCte) withParts.push(tradeCte);
   const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
 
   const eventSql = `
@@ -410,8 +436,12 @@ export async function fetchFeedEventIds(
     limit ${inputs.limit} offset ${inputs.offset}
   `;
 
-  const { rows } = await pool.query<{ id: string }>(eventSql, params);
-  return rows;
+  return await queryRowsWithSearchHint<{ id: string }>(
+    pool,
+    eventSql,
+    params,
+    hasSearch,
+  );
 }
 
 export type FeedMarketRow = {
@@ -780,6 +810,8 @@ export async function fetchFeedMarketsDirect(
   `;
   const supportedLimitlessMarketExpr = "true";
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const nowParam = add(inputs.nowParam);
+  const nowCloseParam = add(inputs.nowParam);
   const hasSearch = Boolean(inputs.q);
   const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
   const searchCte = hasSearch
@@ -787,7 +819,9 @@ export async function fetchFeedMarketsDirect(
       search_events as materialized (
         select e.id
         from unified_events e
-        where (
+        where e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
           e.title ilike ${searchParam} or
           e.description ilike ${searchParam} or
           e.category ilike ${searchParam} or
@@ -796,7 +830,13 @@ export async function fetchFeedMarketsDirect(
         union
         select m.event_id as id
         from unified_markets m
-        where (
+        join unified_events e on e.id = m.event_id
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
           m.title ilike ${searchParam} or
           m.description ilike ${searchParam} or
           m.category ilike ${searchParam} or
@@ -814,9 +854,6 @@ export async function fetchFeedMarketsDirect(
   const searchMarketJoinBm = hasSearch
     ? "join search_events se on se.id = bm.event_id"
     : "";
-
-  const nowParam = add(inputs.nowParam);
-  const nowCloseParam = add(inputs.nowParam);
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
