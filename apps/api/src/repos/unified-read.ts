@@ -171,13 +171,18 @@ export async function fetchFeedEventIds(
       )
     `);
     change24hParts.push(`
-      active_yes_tokens as (
-        select mt.market_id, mt.token_id, m.event_id
-        from unified_market_tokens mt
-        join unified_markets m on m.id = mt.market_id
+      active_yes_markets as (
+        select
+          m.id as market_id,
+          m.event_id,
+          case
+            when m.venue = 'polymarket' and m.clob_token_ids is not null
+              then (m.clob_token_ids::jsonb->>0)
+            else m.token_yes
+          end as token_id
+        from unified_markets m
         join filtered_events fe on fe.id = m.event_id
-        where mt.outcome_side = 'YES'
-          and m.status = 'ACTIVE'
+        where m.status = 'ACTIVE'
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
@@ -186,11 +191,11 @@ export async function fetchFeedEventIds(
     change24hParts.push(`
       market_change as (
         select
-          ay.market_id,
-          ay.event_id,
+          am.market_id,
+          am.event_id,
           tc.change_24h
-        from active_yes_tokens ay
-        left join unified_token_change_24h tc on tc.token_id = ay.token_id
+        from active_yes_markets am
+        left join unified_token_change_24h tc on tc.token_id = am.token_id
       )
     `);
     change24hParts.push(`
@@ -343,12 +348,10 @@ export async function fetchFeedEventIds(
     inputs.sort === "trending_v2"
       ? `
         event_trade_24h as (
-          select bm.event_id, sum(t.volume) as vol
-          from unified_last_trade_1h t
-          join unified_market_tokens mt on mt.token_id = t.token_id
-          join unified_markets bm on bm.id = mt.market_id
-          where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
-            and bm.status = 'ACTIVE'
+          select bm.event_id, sum(mt24.volume_24h) as vol
+          from unified_market_trade_24h mt24
+          join unified_markets bm on bm.id = mt24.market_id
+          where bm.status = 'ACTIVE'
             and bm.venue <> 'limitless'
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
             and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
@@ -620,12 +623,16 @@ export async function fetchFeedMarkets(
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
-      active_yes_tokens as (
-        select mt.market_id, mt.token_id
-        from unified_market_tokens mt
-        join unified_markets bm on bm.id = mt.market_id
-        where mt.outcome_side = 'YES'
-          and bm.event_id = ANY(${eventIdsParam}::text[])
+      active_yes_markets as (
+        select
+          bm.id as market_id,
+          case
+            when bm.venue = 'polymarket' and bm.clob_token_ids is not null
+              then (bm.clob_token_ids::jsonb->>0)
+            else bm.token_yes
+          end as token_id
+        from unified_markets bm
+        where bm.event_id = ANY(${eventIdsParam}::text[])
           and bm.status = 'ACTIVE'
           and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
           and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
@@ -635,10 +642,10 @@ export async function fetchFeedMarkets(
     change24hCteParts.push(`
       market_change as (
         select
-          ay.market_id,
+          am.market_id,
           tc.change_24h
-        from active_yes_tokens ay
-        left join unified_token_change_24h tc on tc.token_id = ay.token_id
+        from active_yes_markets am
+        left join unified_token_change_24h tc on tc.token_id = am.token_id
       )
     `);
   }
@@ -894,13 +901,17 @@ export async function fetchFeedMarketsDirect(
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
-      active_yes_tokens as (
-        select mt.market_id, mt.token_id
-        from unified_market_tokens mt
-        join unified_markets bm on bm.id = mt.market_id
+      active_yes_markets as (
+        select
+          bm.id as market_id,
+          case
+            when bm.venue = 'polymarket' and bm.clob_token_ids is not null
+              then (bm.clob_token_ids::jsonb->>0)
+            else bm.token_yes
+          end as token_id
+        from unified_markets bm
         join unified_events e on e.id = bm.event_id
-        where mt.outcome_side = 'YES'
-          and bm.status = 'ACTIVE'
+        where bm.status = 'ACTIVE'
           and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
           and (bm.close_time is null or bm.close_time > ${nowCloseParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
@@ -910,10 +921,10 @@ export async function fetchFeedMarketsDirect(
     change24hCteParts.push(`
       market_change as (
         select
-          ay.market_id,
+          am.market_id,
           tc.change_24h
-        from active_yes_tokens ay
-        left join unified_token_change_24h tc on tc.token_id = ay.token_id
+        from active_yes_markets am
+        left join unified_token_change_24h tc on tc.token_id = am.token_id
       )
     `);
   }
@@ -1034,17 +1045,14 @@ export async function fetchFeedMarketsDirect(
     inputs.sort === "trending_v2"
       ? `
         trade_24h as materialized (
-          select mt.market_id, sum(t.volume) as vol
-          from unified_last_trade_1h t
-          join unified_market_tokens mt on mt.token_id = t.token_id
-          join unified_markets bm on bm.id = mt.market_id
-          where t.bucket >= ${nowParam}::timestamptz - interval '24 hours'
-            and bm.status = 'ACTIVE'
+          select mt24.market_id, mt24.volume_24h as vol
+          from unified_market_trade_24h mt24
+          join unified_markets bm on bm.id = mt24.market_id
+          where bm.status = 'ACTIVE'
             and bm.venue <> 'limitless'
             and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
             and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
             and ${supportedLimitlessMarketExpr}
-          group by mt.market_id
         )
       `
       : "";
