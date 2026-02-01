@@ -1,0 +1,13 @@
+services:
+  api:
+    image: ${HUNCH_BACKEND_IMAGE}
+  indexer-polymarket:
+    image: ${HUNCH_BACKEND_IMAGE}
+  indexer-limitless:
+    image: ${HUNCH_BACKEND_IMAGE}
+  indexer-dflow:
+    image: ${HUNCH_BACKEND_IMAGE}
+  ai-worker:
+    image: ${HUNCH_BACKEND_IMAGE}
+  fee-collector:
+    image: ${HUNCH_BACKEND_IMAGE}

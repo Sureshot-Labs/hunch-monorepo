@@ -44,3 +44,14 @@ pnpm -C hunch-monorepo -F api exec -- tsx src/solana-rpc-check.ts \
 ## Environment
 Wallet intel limits and thresholds are set in `hunch-monorepo/.env`.
 See `apps/api/src/env.ts` for defaults.
+
+## Deploy (self-hosted)
+Ops scripts live in `hunch-monorepo/ops`:
+
+- **Server build (simple):**
+  `REMOTE_HOST=ubuntu@13.48.86.72 ops/deploy-local.sh`
+- **Prebuilt image (recommended for small instances):**
+  `REMOTE_HOST=ubuntu@13.48.86.72 ops/deploy-local-prebuilt.sh`
+
+The prebuilt flow builds the Docker image locally for `linux/arm64`,
+ships it via SCP, then deploys with `--no-build` and still runs migrations.
