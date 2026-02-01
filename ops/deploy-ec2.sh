@@ -33,6 +33,11 @@ compose=(docker-compose --project-directory "${APP_DIR}" \
 
 project_name="hunch-monorepo"
 
+# Ensure external network for edge proxy exists (required by nginx).
+if ! docker network inspect hunch-edge >/dev/null 2>&1; then
+  docker network create hunch-edge
+fi
+
 "${compose[@]}" down --remove-orphans || true
 stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
 if [[ -n "${stale_containers}" ]]; then

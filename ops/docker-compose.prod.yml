@@ -1,6 +1,8 @@
 networks:
   hunch-net:
     driver: bridge
+  hunch-edge:
+    external: true
 
 services:
   postgres:
@@ -200,6 +202,7 @@ services:
     restart: unless-stopped
     networks:
       - hunch-net
+      - hunch-edge
     env_file:
       - /opt/hunch/.env
     environment:
