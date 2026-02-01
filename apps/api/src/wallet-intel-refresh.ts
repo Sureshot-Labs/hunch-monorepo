@@ -401,6 +401,14 @@ async function cleanupWalletIntel(
         [cutoff],
       );
       activity = result.rowCount ?? 0;
+
+      await client.query(
+        `
+          delete from wallet_activity_hourly
+          where hour_bucket < $1
+        `,
+        [cutoff],
+      );
     }
 
     if (config.metricsDays) {
@@ -1050,6 +1058,332 @@ async function refreshMetrics(
       [inputs.walletIds, entry.period, inputs.asOf],
     );
   }
+}
+
+async function refreshWalletActivityBaseline(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+    windowDays: number;
+  },
+) {
+  if (inputs.walletIds.length === 0) return;
+  await client.query(
+    `
+      insert into wallet_activity_baseline (
+        wallet_id,
+        window_days,
+        as_of,
+        p50_usd,
+        p90_usd
+      )
+      select
+        wa.wallet_id,
+        $2::int,
+        $3::timestamptz,
+        percentile_cont(0.5) within group (order by wa.size_usd) as p50_usd,
+        percentile_cont(0.9) within group (order by wa.size_usd) as p90_usd
+      from wallet_activity_events wa
+      where wa.wallet_id = any($1::uuid[])
+        and wa.activity_type in ('delta', 'trade')
+        and wa.size_usd is not null
+        and wa.occurred_at >= $3::timestamptz - ($2::text || ' days')::interval
+        and wa.occurred_at <= $3::timestamptz
+      group by wa.wallet_id
+      on conflict (wallet_id, window_days)
+      do update set
+        p50_usd = excluded.p50_usd,
+        p90_usd = excluded.p90_usd,
+        as_of = excluded.as_of,
+        updated_at = now()
+    `,
+    [inputs.walletIds, inputs.windowDays, inputs.asOf],
+  );
+}
+
+async function refreshWalletActivityHourly(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    since: Date;
+    enteredLateHours: number;
+  },
+) {
+  if (inputs.walletIds.length === 0) return;
+  await client.query(
+    `
+      insert into wallet_activity_hourly (
+        wallet_id,
+        venue,
+        market_id,
+        outcome_side,
+        activity_type,
+        hour_bucket,
+        event_count,
+        volume_usd,
+        delta_shares_sum,
+        price_weighted_sum,
+        signed_delta_shares,
+        signed_delta_usd,
+        abs_delta_usd,
+        max_abs_delta_usd,
+        last_occurred_at,
+        last_price,
+        last_change_action,
+        entered_late,
+        counts_opened,
+        counts_closed,
+        counts_increased,
+        counts_reduced
+      )
+      select
+        e.wallet_id,
+        e.venue,
+        e.market_id,
+        coalesce(e.outcome_side, '') as outcome_side,
+        e.activity_type,
+        e.hour_bucket,
+        count(*)::int as event_count,
+        sum(e.size_usd) as volume_usd,
+        sum(e.delta_shares) as delta_shares_sum,
+        sum(e.price_weighted) as price_weighted_sum,
+        sum(e.signed_delta_shares) as signed_delta_shares,
+        sum(e.signed_delta_usd) as signed_delta_usd,
+        sum(e.abs_delta_usd) as abs_delta_usd,
+        max(e.abs_delta_usd) as max_abs_delta_usd,
+        max(e.occurred_at) as last_occurred_at,
+        (array_agg(e.price order by e.occurred_at desc))[1] as last_price,
+        (array_agg(e.change_action order by e.occurred_at desc))[1] as last_change_action,
+        bool_or(e.entered_late) as entered_late,
+        sum(case when e.change_action = 'OPENED' then 1 else 0 end) as counts_opened,
+        sum(case when e.change_action = 'CLOSED' then 1 else 0 end) as counts_closed,
+        sum(case when e.change_action = 'INCREASED' then 1 else 0 end) as counts_increased,
+        sum(case when e.change_action = 'REDUCED' then 1 else 0 end) as counts_reduced
+      from (
+        select
+          wa.wallet_id,
+          wa.venue,
+          wa.market_id,
+          wa.outcome_side,
+          wa.activity_type,
+          wa.delta_shares,
+          wa.size_usd,
+          wa.price,
+          wa.occurred_at,
+          date_trunc('hour', wa.occurred_at) as hour_bucket,
+          case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end as action_sign,
+          coalesce(
+            wa.size_usd,
+            abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
+          ) as delta_usd,
+          coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0) as prev_shares,
+          coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0) as curr_shares,
+          case
+            when wa.delta_shares is not null and wa.price is not null
+              then wa.price * wa.delta_shares
+            else null
+          end as price_weighted,
+          (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
+            * coalesce(wa.delta_shares, 0) as signed_delta_shares,
+          (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
+            * coalesce(
+                wa.size_usd,
+                abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
+              ) as signed_delta_usd,
+          abs(
+            coalesce(
+              wa.size_usd,
+              abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
+            )
+          ) as abs_delta_usd,
+          case
+            when coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0) <= 0
+             and coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0) > 0
+              then 'OPENED'
+            when coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0) > 0
+             and coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0) <= 0
+              then 'CLOSED'
+            when coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0)
+              > coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0)
+             and coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0) > 0
+              then 'INCREASED'
+            when coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0)
+              < coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0)
+             and coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0) > 0
+              then 'REDUCED'
+            else null
+          end as change_action,
+          case
+            when coalesce(um.close_time, um.expiration_time) is not null
+             and coalesce(um.close_time, um.expiration_time) >= wa.occurred_at
+             and coalesce(um.close_time, um.expiration_time) - wa.occurred_at
+               <= ($3::text || ' hours')::interval
+              then true
+            else false
+          end as entered_late
+        from wallet_activity_events wa
+        left join unified_markets um on um.id = wa.market_id
+        where wa.wallet_id = any($1::uuid[])
+          and wa.activity_type in ('delta', 'trade', 'holder')
+          and wa.occurred_at >= $2::timestamptz
+      ) e
+      group by
+        e.wallet_id,
+        e.venue,
+        e.market_id,
+        e.outcome_side,
+        e.activity_type,
+        e.hour_bucket
+      on conflict (wallet_id, venue, market_id, outcome_side, activity_type, hour_bucket)
+      do update set
+        event_count = excluded.event_count,
+        volume_usd = excluded.volume_usd,
+        delta_shares_sum = excluded.delta_shares_sum,
+        price_weighted_sum = excluded.price_weighted_sum,
+        signed_delta_shares = excluded.signed_delta_shares,
+        signed_delta_usd = excluded.signed_delta_usd,
+        abs_delta_usd = excluded.abs_delta_usd,
+        max_abs_delta_usd = excluded.max_abs_delta_usd,
+        last_occurred_at = excluded.last_occurred_at,
+        last_price = excluded.last_price,
+        last_change_action = excluded.last_change_action,
+        entered_late = excluded.entered_late,
+        counts_opened = excluded.counts_opened,
+        counts_closed = excluded.counts_closed,
+        counts_increased = excluded.counts_increased,
+        counts_reduced = excluded.counts_reduced,
+        updated_at = now()
+    `,
+    [inputs.walletIds, inputs.since, inputs.enteredLateHours],
+  );
+}
+
+async function refreshWalletPositionExposure(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+  },
+) {
+  if (inputs.walletIds.length === 0) return;
+  await client.query(
+    `
+      with latest as (
+        select
+          ws.wallet_id,
+          ws.venue,
+          max(ws.snapshot_at) as snapshot_at
+        from wallet_position_snapshots ws
+        where ws.wallet_id = any($1::uuid[])
+        group by ws.wallet_id, ws.venue
+      ),
+      exposure as (
+        select
+          ws.wallet_id,
+          sum(coalesce(ws.size_usd, 0)) as exposure_usd
+        from wallet_position_snapshots ws
+        join latest l
+          on l.wallet_id = ws.wallet_id
+         and l.venue = ws.venue
+         and l.snapshot_at = ws.snapshot_at
+        where ws.wallet_id = any($1::uuid[])
+        group by ws.wallet_id
+      )
+      insert into wallet_position_exposure (
+        wallet_id,
+        exposure_usd,
+        as_of
+      )
+      select
+        wallet_id,
+        exposure_usd,
+        $2::timestamptz
+      from exposure
+      on conflict (wallet_id)
+      do update set
+        exposure_usd = excluded.exposure_usd,
+        as_of = excluded.as_of,
+        updated_at = now()
+    `,
+    [inputs.walletIds, inputs.asOf],
+  );
+}
+
+async function refreshWalletInferredOutcomes(
+  client: Queryable,
+  inputs: { walletIds: string[] },
+) {
+  if (inputs.walletIds.length === 0) return;
+  await client.query(
+    `
+      with latest as (
+        select distinct on (ws.wallet_id, ws.market_id, ws.outcome_side)
+          ws.wallet_id,
+          ws.market_id,
+          ws.outcome_side,
+          ws.shares
+        from wallet_position_snapshots ws
+        where ws.wallet_id = any($1::uuid[])
+          and ws.shares > 0
+        order by ws.wallet_id, ws.market_id, ws.outcome_side, ws.snapshot_at desc
+      ),
+      agg as (
+        select
+          wallet_id,
+          market_id,
+          sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
+          sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
+        from latest
+        group by wallet_id, market_id
+      ),
+      resolved as (
+        select
+          agg.wallet_id,
+          agg.market_id,
+          agg.yes_shares,
+          agg.no_shares,
+          upper(m.resolved_outcome) as resolved_outcome
+        from agg
+        join unified_markets m on m.id = agg.market_id
+        where m.resolved_outcome is not null
+          and upper(m.resolved_outcome) in ('YES', 'NO')
+      ),
+      eligible as (
+        select *
+        from resolved
+        where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
+           or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
+      ),
+      summary as (
+        select
+          wallet_id,
+          count(*) filter (
+            where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
+               or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
+          )::int as wins,
+          count(*)::int as total
+        from eligible
+        group by wallet_id
+      )
+      insert into wallet_inferred_outcomes (
+        wallet_id,
+        wins,
+        total
+      )
+      select
+        wallet_id,
+        wins,
+        total
+      from summary
+      on conflict (wallet_id)
+      do update set
+        wins = excluded.wins,
+        total = excluded.total,
+        updated_at = now()
+    `,
+    [inputs.walletIds],
+  );
 }
 
 async function refreshSystemTags(
@@ -1979,6 +2313,43 @@ async function runSnapshot(snapshotAt: Date) {
       whaleUsd: env.walletIntelWhaleUsd,
       whaleUsdSolana: env.walletIntelWhaleUsdSolana,
       asOf: snapshotAt,
+    });
+
+    const whaleRows = await client.query<{ wallet_id: string }>(
+      `
+        select tm.wallet_id
+        from wallet_tag_map tm
+        join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+      `,
+    );
+    const aggregateWalletIds = Array.from(
+      new Set([
+        ...walletIds,
+        ...whaleRows.rows.map((row) => row.wallet_id),
+      ]),
+    );
+
+    const activityLookbackDays = 365;
+    const activitySince = new Date(
+      snapshotAt.getTime() - activityLookbackDays * 24 * 60 * 60 * 1000,
+    );
+
+    await refreshWalletActivityBaseline(client, {
+      walletIds: aggregateWalletIds,
+      asOf: snapshotAt,
+      windowDays: 30,
+    });
+    await refreshWalletActivityHourly(client, {
+      walletIds: aggregateWalletIds,
+      since: activitySince,
+      enteredLateHours: 24,
+    });
+    await refreshWalletPositionExposure(client, {
+      walletIds: aggregateWalletIds,
+      asOf: snapshotAt,
+    });
+    await refreshWalletInferredOutcomes(client, {
+      walletIds: aggregateWalletIds,
     });
 
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);

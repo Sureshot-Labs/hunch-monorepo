@@ -877,26 +877,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ) metrics on true
             left join lateral (
               select
-                max(wa.occurred_at) as last_activity_at,
-                bool_or(wa.activity_type in ('delta', 'trade')) as has_trade_activity,
-                bool_or(wa.activity_type = 'holder') as has_holder_activity
-              from wallet_activity_events wa
-              where wa.wallet_id = w.id
-                and wa.activity_type in ('delta', 'trade', 'holder')
-                and wa.occurred_at >= now() - ($4::text || ' days')::interval
+                max(wah.last_occurred_at) as last_activity_at,
+                bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+                bool_or(wah.activity_type = 'holder') as has_holder_activity
+              from wallet_activity_hourly wah
+              where wah.wallet_id = w.id
+                and wah.hour_bucket >= now() - ($4::text || ' days')::interval
             ) activity on true
-            left join lateral (
-              select
-                sum(coalesce(ws.size_usd, 0)) as exposure_usd
-              from wallet_position_snapshots ws
-              join (
-                select venue, max(snapshot_at) as snapshot_at
-                from wallet_position_snapshots
-                where wallet_id = w.id
-                group by venue
-              ) latest on latest.venue = ws.venue and latest.snapshot_at = ws.snapshot_at
-              where ws.wallet_id = w.id
-            ) exposure on true
+            left join wallet_position_exposure exposure on exposure.wallet_id = w.id
             left join lateral (
               select
                 w2.address as owner_address,
@@ -910,50 +898,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               limit 1
             ) owner on true
             left join wallet_profiles wp on wp.wallet_id = w.id
-            left join lateral (
-              with latest as (
-                select distinct on (ws.market_id, ws.outcome_side)
-                  ws.market_id,
-                  ws.outcome_side,
-                  ws.shares
-                from wallet_position_snapshots ws
-                where ws.wallet_id = w.id
-                  and ws.shares > 0
-                order by ws.market_id, ws.outcome_side, ws.snapshot_at desc
-              ),
-              agg as (
-                select
-                  market_id,
-                  sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
-                  sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
-                from latest
-                group by market_id
-              ),
-              resolved as (
-                select
-                  agg.market_id,
-                  agg.yes_shares,
-                  agg.no_shares,
-                  upper(m.resolved_outcome) as resolved_outcome
-                from agg
-                join unified_markets m on m.id = agg.market_id
-                where m.resolved_outcome is not null
-                  and upper(m.resolved_outcome) in ('YES', 'NO')
-              ),
-              eligible as (
-                select *
-                from resolved
-                where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
-                   or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
-              )
-              select
-                count(*) filter (
-                  where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
-                     or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
-                ) as wins,
-                count(*)::int as total
-              from eligible
-            ) inferred on true
+            left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
             where ($5::text[] is null or wp.profile->'categories' ?| $5::text[])
             order by ${orderBy}
             limit $2 offset $3
@@ -989,20 +934,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 pos.price as position_price
               from (
                 select
-                  wa.wallet_id,
-                  wa.market_id,
+                  wah.wallet_id,
+                  wah.market_id,
                   um.title as market_title,
                   um.event_id,
                   ue.title as event_title,
-                  wa.venue,
-                  count(*)::int as activity_count,
-                  sum(wa.size_usd) as volume_usd,
+                  wah.venue,
+                  sum(wah.event_count)::int as activity_count,
+                  sum(wah.volume_usd) as volume_usd,
                   case
-                    when sum(wa.delta_shares) is null or sum(wa.delta_shares) = 0
+                    when sum(wah.delta_shares_sum) is null
+                      or sum(wah.delta_shares_sum) = 0
                       then null
-                    else sum(wa.price * wa.delta_shares) / nullif(sum(wa.delta_shares), 0)
+                    else sum(wah.price_weighted_sum)
+                      / nullif(sum(wah.delta_shares_sum), 0)
                   end as avg_price,
-                  max(wa.occurred_at) as last_activity_at,
+                  max(wah.last_occurred_at) as last_activity_at,
                   um.best_bid,
                   um.best_ask,
                   um.last_price,
@@ -1011,24 +958,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   um.expiration_time,
                   um.resolved_outcome,
                   row_number() over (
-                    partition by wa.wallet_id
-                    order by sum(wa.size_usd) desc nulls last,
-                             count(*) desc,
-                             max(wa.occurred_at) desc
+                    partition by wah.wallet_id
+                    order by sum(wah.volume_usd) desc nulls last,
+                             sum(wah.event_count) desc,
+                             max(wah.last_occurred_at) desc
                   ) as rn
-                from wallet_activity_events wa
-                left join unified_markets um on um.id = wa.market_id
+                from wallet_activity_hourly wah
+                left join unified_markets um on um.id = wah.market_id
                 left join unified_events ue on ue.id = um.event_id
-                where wa.wallet_id = any($1::uuid[])
-                  and wa.activity_type in ('delta', 'trade', 'holder')
-                  and wa.occurred_at >= now() - ($3::text || ' days')::interval
+                where wah.wallet_id = any($1::uuid[])
+                  and wah.activity_type in ('delta', 'trade', 'holder')
+                  and wah.hour_bucket >= now() - ($3::text || ' days')::interval
                 group by
-                  wa.wallet_id,
-                  wa.market_id,
+                  wah.wallet_id,
+                  wah.market_id,
                   um.title,
                   um.event_id,
                   ue.title,
-                  wa.venue,
+                  wah.venue,
                   um.best_bid,
                   um.best_ask,
                   um.last_price,
@@ -1502,6 +1449,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           best_bid: string | null;
           best_ask: string | null;
           last_price: string | null;
+          market_status: string | null;
+          close_time: Date | null;
+          expiration_time: Date | null;
+          resolved_outcome: string | null;
           outcome_side: string | null;
           action: string | null;
           delta_shares: string | null;
@@ -1528,6 +1479,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               um.best_bid,
               um.best_ask,
               um.last_price,
+              um.status as market_status,
+              um.close_time,
+              um.expiration_time,
+              um.resolved_outcome,
               wa.outcome_side,
               wa.action,
               wa.delta_shares,
@@ -1572,6 +1527,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           bestBid: row.best_bid ? Number(row.best_bid) : null,
           bestAsk: row.best_ask ? Number(row.best_ask) : null,
           lastPrice: row.last_price ? Number(row.last_price) : null,
+          marketStatus: row.market_status,
+          closeTime: row.close_time ? row.close_time.toISOString() : null,
+          expirationTime: row.expiration_time
+            ? row.expiration_time.toISOString()
+            : null,
+          resolvedOutcome: row.resolved_outcome,
           outcomeSide: row.outcome_side,
           action: row.action,
           deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
@@ -1767,6 +1728,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           market_title: string | null;
           event_id: string | null;
           event_title: string | null;
+          market_status: string | null;
+          close_time: Date | null;
+          expiration_time: Date | null;
+          resolved_outcome: string | null;
           best_bid: string | null;
           best_ask: string | null;
           last_price: string | null;
@@ -1793,6 +1758,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           bestBid: row.best_bid ? Number(row.best_bid) : null,
           bestAsk: row.best_ask ? Number(row.best_ask) : null,
           lastPrice: row.last_price ? Number(row.last_price) : null,
+          marketStatus: row.market_status,
+          closeTime: row.close_time ? row.close_time.toISOString() : null,
+          expirationTime: row.expiration_time
+            ? row.expiration_time.toISOString()
+            : null,
+          resolvedOutcome: row.resolved_outcome,
           outcomeSide: row.outcome_side,
           shares: row.shares ? Number(row.shares) : null,
           sizeUsd: row.size_usd ? Number(row.size_usd) : null,

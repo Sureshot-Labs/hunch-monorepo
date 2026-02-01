@@ -132,7 +132,6 @@ export async function fetchWalletActivitySummaries(
   const windowHours = Math.max(1, Math.trunc(options.windowHours));
   const topChanges = Math.max(1, Math.trunc(options.topChanges));
   const baselineDays = Math.max(7, Math.trunc(options.baselineDays ?? 30));
-  const enteredLateHours = Math.max(1, Math.trunc(options.enteredLateHours ?? 24));
 
   const result = await client.query<WalletActivitySummaryDbRow>(
     `
@@ -151,57 +150,42 @@ export async function fetchWalletActivitySummaries(
         from wallet_profiles wp
         join wallet_set ws on ws.wallet_id = wp.wallet_id
       ),
-      events_window as (
-        select
-          wa.wallet_id,
-          wa.venue,
-          wa.market_id,
-          wa.outcome_side,
-          wa.action,
-          wa.delta_shares,
-          wa.size_usd,
-          wa.price,
-          wa.occurred_at,
-          wa.metadata,
-          coalesce(nullif(wa.metadata->>'prevShares', '')::numeric, 0) as prev_shares,
-          coalesce(nullif(wa.metadata->>'currShares', '')::numeric, 0) as curr_shares
-        from wallet_activity_events wa
-        join wallet_set ws on ws.wallet_id = wa.wallet_id
-        where wa.activity_type in ('delta', 'trade')
-          and wa.occurred_at >= now() - ($2::text || ' hours')::interval
-      ),
       baseline as (
         select
-          wa.wallet_id,
-          percentile_cont(0.5) within group (order by wa.size_usd) as p50_usd,
-          percentile_cont(0.9) within group (order by wa.size_usd) as p90_usd
-        from wallet_activity_events wa
-        join wallet_set ws on ws.wallet_id = wa.wallet_id
-        where wa.activity_type in ('delta', 'trade')
-          and wa.size_usd is not null
-          and wa.occurred_at >= now() - ($3::text || ' days')::interval
-        group by wa.wallet_id
+          wb.wallet_id,
+          wb.p50_usd,
+          wb.p90_usd
+        from wallet_activity_baseline wb
+        where wb.wallet_id = any($1::uuid[])
+          and wb.window_days = $3::int
       ),
-      classified as (
+      events_window as (
         select
-          ew.*,
-          case when upper(coalesce(ew.action, 'BUY')) = 'SELL' then -1 else 1 end as action_sign,
-          coalesce(
-            ew.size_usd,
-            abs(coalesce(ew.delta_shares, 0)) * nullif(ew.price, 0)
-          ) as delta_usd,
-          case
-            when ew.prev_shares <= 0 and ew.curr_shares > 0 then 'OPENED'
-            when ew.prev_shares > 0 and ew.curr_shares <= 0 then 'CLOSED'
-            when ew.curr_shares > ew.prev_shares and ew.prev_shares > 0 then 'INCREASED'
-            when ew.curr_shares < ew.prev_shares and ew.curr_shares > 0 then 'REDUCED'
-            else null
-          end as change_action
-        from events_window ew
+          wah.wallet_id,
+          wah.venue,
+          wah.market_id,
+          nullif(wah.outcome_side, '') as outcome_side,
+          sum(coalesce(wah.signed_delta_shares, 0)) as signed_delta_shares,
+          sum(coalesce(wah.signed_delta_usd, 0)) as signed_delta_usd,
+          sum(coalesce(wah.abs_delta_usd, 0)) as gross_abs_delta_usd,
+          max(coalesce(wah.max_abs_delta_usd, 0)) as max_abs_delta_usd,
+          max(wah.last_occurred_at) as last_occurred_at,
+          (array_agg(wah.last_price order by wah.last_occurred_at desc))[1] as last_price,
+          (array_agg(wah.last_change_action order by wah.last_occurred_at desc))[1] as change_action,
+          bool_or(wah.entered_late) as entered_late,
+          sum(coalesce(wah.counts_opened, 0)) as counts_opened,
+          sum(coalesce(wah.counts_closed, 0)) as counts_closed,
+          sum(coalesce(wah.counts_increased, 0)) as counts_increased,
+          sum(coalesce(wah.counts_reduced, 0)) as counts_reduced
+        from wallet_activity_hourly wah
+        join wallet_set ws on ws.wallet_id = wah.wallet_id
+        where wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
+        group by wah.wallet_id, wah.venue, wah.market_id, wah.outcome_side
       ),
       enriched as (
         select
-          c.*,
+          ew.*,
           um.title as market_title,
           um.event_id,
           ue.title as event_title,
@@ -212,9 +196,9 @@ export async function fetchWalletActivitySummaries(
           lower(coalesce(um.category, ue.category)) as category,
           um.best_bid,
           um.best_ask,
-          um.last_price
-        from classified c
-        left join unified_markets um on um.id = c.market_id
+          um.last_price as market_last_price
+        from events_window ew
+        left join unified_markets um on um.id = ew.market_id
         left join unified_events ue on ue.id = um.event_id
       ),
       labeled as (
@@ -223,9 +207,7 @@ export async function fetchWalletActivitySummaries(
           b.p50_usd,
           b.p90_usd,
           p.categories as profile_categories,
-          coalesce(e.close_time, e.expiration_time) as close_at,
-          (e.action_sign * coalesce(e.delta_shares, 0)) as signed_delta_shares,
-          (e.action_sign * coalesce(e.delta_usd, 0)) as signed_delta_usd
+          coalesce(e.close_time, e.expiration_time) as close_at
         from enriched e
         left join baseline b on b.wallet_id = e.wallet_id
         left join profiles p on p.wallet_id = e.wallet_id
@@ -233,16 +215,10 @@ export async function fetchWalletActivitySummaries(
       change_rows as (
         select
           l.*,
-          abs(l.signed_delta_usd) as abs_delta_usd,
           case
-            when l.close_at is not null
-             and l.close_at >= l.occurred_at
-             and l.close_at - l.occurred_at <= ($5::text || ' hours')::interval
-              then true
-            else false
-          end as entered_late,
-          case
-            when l.p90_usd is not null and l.p90_usd > 0 and coalesce(l.delta_usd, 0) >= l.p90_usd
+            when l.p90_usd is not null
+             and l.p90_usd > 0
+             and coalesce(l.max_abs_delta_usd, 0) >= l.p90_usd
               then true
             else false
           end as unusual_size,
@@ -255,32 +231,17 @@ export async function fetchWalletActivitySummaries(
           end as on_pattern
         from labeled l
       ),
-      latest_change as (
-        select
-          cr.*,
-          coalesce(
-            cr.price,
-            case
-              when upper(coalesce(cr.outcome_side, '')) = 'NO'
-                and cr.last_price is not null
-                then 1 - cr.last_price
-              else cr.last_price
-            end
-          ) as odds
-        from change_rows cr
-      ),
       latest_per_market as (
-        select distinct on (lc.wallet_id, lc.venue, lc.market_id, lc.outcome_side)
-          lc.wallet_id,
-          lc.venue,
-          lc.market_id,
-          lc.outcome_side,
-          lc.change_action,
-          lc.price,
-          lc.odds,
-          lc.occurred_at
-        from latest_change lc
-        order by lc.wallet_id, lc.venue, lc.market_id, lc.outcome_side, lc.occurred_at desc
+        select distinct on (cr.wallet_id, cr.venue, cr.market_id, cr.outcome_side)
+          cr.wallet_id,
+          cr.venue,
+          cr.market_id,
+          cr.outcome_side,
+          cr.change_action,
+          cr.last_price,
+          cr.last_occurred_at
+        from change_rows cr
+        order by cr.wallet_id, cr.venue, cr.market_id, cr.outcome_side, cr.last_occurred_at desc
       ),
       market_changes as (
         select
@@ -298,10 +259,11 @@ export async function fetchWalletActivitySummaries(
           max(cr.category) as category,
           sum(cr.signed_delta_shares) as signed_delta_shares,
           sum(cr.signed_delta_usd) as signed_delta_usd,
-          sum(cr.abs_delta_usd) as gross_abs_delta_usd,
+          sum(cr.gross_abs_delta_usd) as gross_abs_delta_usd,
           bool_or(cr.entered_late) as entered_late,
           bool_or(cr.unusual_size) as unusual_size,
-          bool_or(coalesce(cr.on_pattern, false)) as on_pattern
+          bool_or(coalesce(cr.on_pattern, false)) as on_pattern,
+          max(cr.market_last_price) as market_last_price
         from change_rows cr
         group by cr.wallet_id, cr.venue, cr.market_id, cr.outcome_side
       ),
@@ -326,13 +288,19 @@ export async function fetchWalletActivitySummaries(
           mc.unusual_size,
           mc.on_pattern,
           lpm.change_action,
-          lpm.price,
-          lpm.odds,
-          lpm.occurred_at,
+          lpm.last_price as price,
+          case
+            when lpm.last_price is not null then lpm.last_price
+            when upper(coalesce(mc.outcome_side, '')) = 'NO'
+              and mc.market_last_price is not null
+              then 1 - mc.market_last_price
+            else mc.market_last_price
+          end as odds,
+          lpm.last_occurred_at as occurred_at,
           p.categories as profile_categories,
           row_number() over (
             partition by mc.wallet_id
-            order by mc.gross_abs_delta_usd desc nulls last, lpm.occurred_at desc nulls last
+            order by mc.gross_abs_delta_usd desc nulls last, lpm.last_occurred_at desc nulls last
           ) as rn
         from market_changes mc
         left join latest_per_market lpm
@@ -384,19 +352,19 @@ export async function fetchWalletActivitySummaries(
       summary as (
         select
           cr.wallet_id,
-          max(cr.occurred_at) as last_activity_at,
+          max(cr.last_occurred_at) as last_activity_at,
           sum(cr.signed_delta_usd) as net_change_usd,
-          sum(case when upper(cr.outcome_side) = 'YES' then cr.signed_delta_usd else 0 end) as net_change_yes_usd,
-          sum(case when upper(cr.outcome_side) = 'NO' then cr.signed_delta_usd else 0 end) as net_change_no_usd,
-          count(*) filter (where cr.change_action = 'OPENED')::int as counts_new,
-          count(*) filter (where cr.change_action = 'CLOSED')::int as counts_exit,
-          count(*) filter (where cr.change_action = 'INCREASED')::int as counts_increase,
-          count(*) filter (where cr.change_action = 'REDUCED')::int as counts_reduce,
+          sum(case when upper(coalesce(cr.outcome_side, '')) = 'YES' then cr.signed_delta_usd else 0 end) as net_change_yes_usd,
+          sum(case when upper(coalesce(cr.outcome_side, '')) = 'NO' then cr.signed_delta_usd else 0 end) as net_change_no_usd,
+          sum(cr.counts_opened)::int as counts_new,
+          sum(cr.counts_closed)::int as counts_exit,
+          sum(cr.counts_increased)::int as counts_increase,
+          sum(cr.counts_reduced)::int as counts_reduce,
           0::int as counts_flip,
           max(
             case
               when cr.p50_usd is not null and cr.p50_usd > 0
-                then coalesce(cr.delta_usd, 0) / cr.p50_usd
+                then coalesce(cr.max_abs_delta_usd, 0) / cr.p50_usd
               else null
             end
           ) as unusual_score
@@ -419,7 +387,7 @@ export async function fetchWalletActivitySummaries(
       from summary s
       left join top_changes tc on tc.wallet_id = s.wallet_id
     `,
-    [walletIds, windowHours, baselineDays, topChanges, enteredLateHours],
+    [walletIds, windowHours, baselineDays, topChanges],
   );
 
   const map = new Map<string, WalletActivitySummary>();
