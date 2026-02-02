@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_NAME="$(basename "${ROOT_DIR}")"
 PARENT_DIR="$(dirname "${ROOT_DIR}")"
 
-REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.48.86.72}"
+REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 REMOTE_ARCHIVE_DIR="${REMOTE_ARCHIVE_DIR:-/tmp}"

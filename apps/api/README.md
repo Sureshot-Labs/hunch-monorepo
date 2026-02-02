@@ -49,9 +49,14 @@ See `apps/api/src/env.ts` for defaults.
 Ops scripts live in `hunch-monorepo/ops`:
 
 - **Server build (simple):**
-  `REMOTE_HOST=ubuntu@13.48.86.72 ops/deploy-local.sh`
+  `REMOTE_HOST=ubuntu@13.51.155.185 ops/deploy-local.sh`
 - **Prebuilt image (recommended for small instances):**
-  `REMOTE_HOST=ubuntu@13.48.86.72 ops/deploy-local-prebuilt.sh`
+  `REMOTE_HOST=ubuntu@13.51.155.185 ops/deploy-local-prebuilt.sh`
 
 The prebuilt flow builds the Docker image locally for `linux/arm64`,
 ships it via SCP, then deploys with `--no-build` and still runs migrations.
+
+Cleanup flags:
+- `DOCKER_PRUNE=1` (default) prunes unused images older than 24h on the server.
+- `LOCAL_IMAGE_CLEANUP=1` (default) removes the just-built local image in prebuilt deploys.
+- `LOCAL_BUILDER_PRUNE=0` (opt-in) prunes local build cache after prebuilt deploys.

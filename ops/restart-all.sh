@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.48.86.72}"
+REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 

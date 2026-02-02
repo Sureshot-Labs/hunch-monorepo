@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.48.86.72}"
+REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 SERVICE="${SERVICE:-hunch-api}"
 
 usage() {
@@ -22,7 +22,7 @@ Tools:
   psql "<sql>"     -> run SQL against hunch-postgres using container env
 
 Env overrides:
-  REMOTE_HOST=ubuntu@13.48.86.72
+  REMOTE_HOST=ubuntu@13.51.155.185
   SERVICE=hunch-api
 EOF
 }

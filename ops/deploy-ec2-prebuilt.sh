@@ -70,3 +70,16 @@ fi
 "${compose[@]}" up -d --no-build
 
 echo "Deploy complete."
+
+# Optional cleanup to reclaim disk (keeps images used in last 24h).
+if [[ "${DOCKER_PRUNE:-1}" == "1" ]]; then
+  echo "Pruning unused Docker images (older than 24h)..."
+  docker image prune -af --filter "until=24h" || true
+fi
+
+if [[ -n "${ARCHIVE}" ]]; then
+  rm -f "${ARCHIVE}" || true
+fi
+if [[ -n "${IMAGE_ARCHIVE}" ]]; then
+  rm -f "${IMAGE_ARCHIVE}" || true
+fi
