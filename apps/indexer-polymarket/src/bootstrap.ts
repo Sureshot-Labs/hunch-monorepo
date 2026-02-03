@@ -10,12 +10,14 @@ import {
 import {
   mapPolymarketEventRow,
   mapPolymarketMarketRow,
+  mapTokens,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
 import {
   upsertUnifiedEvents,
   upsertUnifiedMarkets,
+  upsertUnifiedTokens,
   writeUnifiedBookTop,
 } from "@hunch/db";
 import {
@@ -108,6 +110,14 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
   const unifiedMarketRows = parsedEvents.flatMap((event) =>
     event.markets.map((market) => mapToUnifiedMarket(market, event.id)),
   );
+  const unifiedTokenRows = parsedEvents.flatMap((event) =>
+    event.markets.flatMap((market) => {
+      const [yes, no] = Array.isArray(market.clobTokenIds)
+        ? market.clobTokenIds
+        : [];
+      return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
+    }),
+  );
 
   await Promise.all([
     upsertPolymarketEvents(polymarketEventRows),
@@ -118,6 +128,9 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     upsertPolymarketMarkets(polymarketMarketRows),
     upsertUnifiedMarkets(pool, unifiedMarketRows),
   ]);
+  if (unifiedTokenRows.length) {
+    await upsertUnifiedTokens(pool, unifiedTokenRows);
+  }
 
   try {
     const eventTitleById = new Map(

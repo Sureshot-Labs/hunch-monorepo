@@ -103,4 +103,5 @@ export const limitlessAccountQuerySchema = z.object({
   clobSpender: zEthAddress.optional(),
   negRiskSpender: zEthAddress.optional(),
   ammSpender: zEthAddress.optional(),
+  verifySession: z.coerce.boolean().optional(),
 });

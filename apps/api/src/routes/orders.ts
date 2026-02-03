@@ -51,6 +51,16 @@ const mapUnifiedOrder = (
   txSignature: row.tx_signature,
 });
 
+const OPEN_ORDER_STATUSES: string[] = [
+  "pending",
+  "submitted",
+  "live",
+  "partially_filled",
+  "delayed",
+  "unmatched",
+  "open",
+];
+
 export const ordersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -235,7 +245,8 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           marketId: query.marketId,
           marketIds: marketIds.length ? marketIds : undefined,
           tokenId: query.tokenId,
-          status: "open",
+          status: OPEN_ORDER_STATUSES,
+          openOnly: true,
           type: "order",
           limit: query.limit,
           offset: query.offset,

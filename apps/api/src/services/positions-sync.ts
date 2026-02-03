@@ -299,7 +299,11 @@ async function fetchPolymarketCandidateTokenIds(
         select token_id
         from orders
         where user_id = $1
-          and (wallet_address is null or wallet_address = any($2::text[]))
+          and (
+            wallet_address is null
+            or wallet_address = any($2::text[])
+            or signer_address = any($2::text[])
+          )
           and venue = 'polymarket'
           and token_id is not null
       ),

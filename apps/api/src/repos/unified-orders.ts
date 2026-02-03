@@ -35,7 +35,8 @@ type FilterInputs = {
   userId: string;
   walletAddresses: string[];
   venue?: string;
-  status?: string;
+  status?: string | string[];
+  openOnly?: boolean;
   marketId?: string;
   marketIds?: string[];
   tokenId?: string;
@@ -67,10 +68,15 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.venue);
   }
 
-  if (inputs.status) {
+  const statusList = Array.isArray(inputs.status)
+    ? inputs.status.filter(Boolean)
+    : typeof inputs.status === "string" && inputs.status.trim()
+      ? [inputs.status.trim()]
+      : undefined;
+  if (statusList?.length) {
     paramCount += 1;
     statusIndex = paramCount;
-    params.push(inputs.status);
+    params.push(statusList);
   }
 
   const normalizedMarketIds = inputs.marketIds?.length
@@ -111,7 +117,7 @@ const buildWhereClause = (
   }
 
   if (filterParams.statusIndex) {
-    conditions.push(`${alias}.status = $${filterParams.statusIndex}`);
+    conditions.push(`${alias}.status = ANY($${filterParams.statusIndex}::text[])`);
   }
 
   if (filterParams.marketListIndex && columns.market) {
@@ -208,10 +214,13 @@ export async function fetchUnifiedOrders(
   }
 
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams, true, {
+  const baseOrderWhere = buildWhereClause("o", filterParams, true, {
     market: "ut.market_id",
     token: "o.token_id",
   });
+  const orderWhere = inputs.openOnly
+    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size)`
+    : baseOrderWhere;
   const execWhere = buildWhereClause("e", filterParams, false, {
     market: "e.unified_market_id",
   });

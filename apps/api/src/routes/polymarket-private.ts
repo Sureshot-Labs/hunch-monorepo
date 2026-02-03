@@ -1334,13 +1334,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderIds.push(venueOrderId);
 
         const tokenId = extractTokenId(o);
-        const orderType = isRecord(o) ? extractOrderType(o) : null;
+        const record = isRecord(o) ? o : null;
+        const orderType = record ? extractOrderType(record) : null;
         const sideRaw =
-          typeof (o as Record<string, unknown>).side === "string"
-            ? ((o as Record<string, unknown>).side as string).toUpperCase()
-            : null;
+          typeof record?.side === "string" ? record.side.toUpperCase() : null;
         const side =
           sideRaw === "BUY" || sideRaw === "SELL" ? sideRaw : null;
+        const { price, size } = side && record
+          ? derivePriceAndSize(record, side)
+          : { price: null, size: null };
 
         const result = await storeOrder(pool, {
           userId: user.id,
@@ -1351,8 +1353,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           tokenId,
           side,
           orderType: orderType ?? undefined,
-          price: null,
-          size: null,
+          price,
+          size,
           status: "live",
           errorMessage: null,
           rawError: null,

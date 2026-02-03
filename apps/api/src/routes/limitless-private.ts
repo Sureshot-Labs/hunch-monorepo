@@ -362,6 +362,30 @@ function extractLimitlessOrderStatus(record: Record<string, unknown>): string {
   return "live";
 }
 
+function extractLimitlessOrderPrice(record: Record<string, unknown>): number | null {
+  const value = readOrderField(record, [
+    "price",
+    "orderPrice",
+    "limitPrice",
+    "outcomeTokenPrice",
+    "outcome_token_price",
+  ]);
+  return parseNumberish(value);
+}
+
+function extractLimitlessOrderSize(record: Record<string, unknown>): number | null {
+  const value = readOrderField(record, [
+    "size",
+    "orderSize",
+    "amount",
+    "shares",
+    "quantity",
+    "outcomeAmount",
+    "outcome_amount",
+  ]);
+  return parseNumberish(value);
+}
+
 function extractLimitlessCanceledIds(
   payload: unknown,
   fallback: string[],
@@ -701,13 +725,32 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         "limitless",
         signer,
       );
-      const sessionProfile = extractProfileFromSessionCookie(
-        creds?.apiSecret?.trim(),
-      );
+      const sessionCookie = creds?.apiSecret?.trim();
+      const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
       const profile = mergeProfiles(
         extractProfile(creds?.additionalData ?? null),
         sessionProfile,
       );
+      const verifySession = request.query.verifySession === true;
+      let sessionValid: boolean | null = null;
+      let hasCredentials = Boolean(creds);
+
+      if (verifySession) {
+        if (!sessionCookie) {
+          sessionValid = false;
+          hasCredentials = false;
+        } else {
+          const verify = await limitlessRequest({
+            method: "GET",
+            requestPath: "/auth/verify-auth",
+            sessionCookie,
+          });
+          sessionValid = verify.ok;
+          if (!verify.ok) {
+            hasCredentials = false;
+          }
+        }
+      }
 
       try {
         const clobSpender =
@@ -830,7 +873,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             },
           },
           profile: profile ?? null,
-          hasCredentials: Boolean(creds),
+          hasCredentials,
+          ...(sessionValid == null ? {} : { sessionValid }),
         });
       } catch (error) {
         app.log.error(
@@ -1086,6 +1130,13 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           reply.code(400);
           return reply.send({
             error: "FOK orders must not include price.",
+          });
+        }
+      } else {
+        if (coercedPrice == null) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC orders require a price.",
           });
         }
       }
@@ -1344,6 +1395,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         const side = extractLimitlessOrderSide(order);
         const orderType = extractLimitlessOrderType(order);
         const status = extractLimitlessOrderStatus(order);
+        const price = extractLimitlessOrderPrice(order);
+        const size = extractLimitlessOrderSize(order);
 
         const result = await storeOrder(pool, {
           userId: user.id,
@@ -1354,8 +1407,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           tokenId: tokenId ?? null,
           side,
           orderType: orderType ?? undefined,
-          price: null,
-          size: null,
+          price,
+          size,
           status,
           errorMessage: null,
           rawError: null,
