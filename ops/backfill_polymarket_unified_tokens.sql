@@ -1,5 +1,6 @@
 -- Backfill Polymarket CLOB token IDs into unified_tokens.
 -- Safe to re-run: uses upsert on (market_id, side).
+set statement_timeout = 0;
 
 insert into unified_tokens(token_id, venue, market_id, side)
 select elem.token_id,
@@ -13,6 +14,7 @@ where m.venue = 'polymarket'
   and m.clob_token_ids is not null
   and m.clob_token_ids <> ''
   and m.clob_token_ids <> '[]'
+  and elem.ordinality <= 2
 on conflict (market_id, side) do update
   set token_id = excluded.token_id,
       venue = excluded.venue,
