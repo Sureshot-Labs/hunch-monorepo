@@ -171,6 +171,12 @@ async function fetchHotTokenIds(): Promise<string[]> {
   }
 }
 
+function splitBudget(total: number, hotShare: number): { hotBudget: number } {
+  const clampedShare = Math.max(0, Math.min(1, hotShare));
+  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  return { hotBudget };
+}
+
 async function resolveHotMarketRefs(
   tokenIds: string[],
 ): Promise<string[]> {
@@ -200,6 +206,35 @@ async function resolveHotMarketRefs(
     if (seen.has(ref)) continue;
     seen.add(ref);
     out.push(ref);
+  }
+  return out;
+}
+
+async function resolveHotMarketSlugs(
+  tokenIds: string[],
+): Promise<string[]> {
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<{ slug: string | null }>(
+    `
+      select distinct coalesce(e.slug, m.slug) as slug
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      left join unified_events e on e.id = m.event_id
+      where t.token_id = any($1::text[])
+        and m.venue = 'limitless'
+        and coalesce(e.slug, m.slug) is not null
+    `,
+    [tokenIds],
+  );
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const slug = row.slug?.trim();
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(slug);
   }
   return out;
 }
@@ -476,6 +511,12 @@ export async function syncHotLimitlessMarkets(): Promise<{
 }
 
 export async function resolveHotSlugsForWs(): Promise<string[]> {
+  const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const hotTokenIds = await fetchHotTokenIds();
+  const hotSlugsAll = await resolveHotMarketSlugs(hotTokenIds);
+  const hotSlugs = hotSlugsAll.slice(0, hotBudget);
+
+  const remaining = Math.max(0, env.wsSubset - hotSlugs.length);
   const { rows } = await pool.query<{ slug: string | null }>(
     `
       select m.slug
@@ -488,7 +529,28 @@ export async function resolveHotSlugsForWs(): Promise<string[]> {
                m.updated_at_db desc
       limit $1
     `,
-    [env.wsSubset],
+    [Math.max(100, remaining * 2)],
   );
-  return rows.map((row) => row.slug).filter((slug): slug is string => !!slug);
+
+  const seen = new Set<string>(hotSlugs);
+  const topSlugs: string[] = [];
+  for (const row of rows) {
+    const slug = row.slug?.trim();
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    topSlugs.push(slug);
+    if (topSlugs.length >= remaining) break;
+  }
+
+  const out = [...hotSlugs, ...topSlugs];
+  if (out.length < env.wsSubset) {
+    for (const slug of hotSlugsAll) {
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      out.push(slug);
+      if (out.length >= env.wsSubset) break;
+    }
+  }
+
+  return out;
 }

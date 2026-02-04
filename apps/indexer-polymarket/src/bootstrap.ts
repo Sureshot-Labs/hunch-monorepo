@@ -378,6 +378,12 @@ function parseJsonStringArray(raw: unknown): string[] {
   }
 }
 
+function splitBudget(total: number, hotShare: number): { hotBudget: number } {
+  const clampedShare = Math.max(0, Math.min(1, hotShare));
+  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  return { hotBudget };
+}
+
 async function fetchHotTokenIds(): Promise<string[]> {
   if (env.hotTokensMax <= 0) return [];
   await ensureRedis();
@@ -392,6 +398,113 @@ async function fetchHotTokenIds(): Promise<string[]> {
     log.warn("Failed to fetch hot tokens", error);
     return [];
   }
+}
+
+async function fetchHotMarketsByTokenIds(
+  tokenIds: string[],
+): Promise<Array<{ marketId: string; tokenIds: string[] }>> {
+  if (!tokenIds.length) return [];
+  const { rows } = await pool.query<{
+    id: string | null;
+    clob_token_ids: unknown;
+  }>(
+    `
+      select id, clob_token_ids
+      from polymarket_markets
+      where clob_token_ids is not null
+        and clob_token_ids <> '[]'
+        and (clob_token_ids::jsonb ?| $1::text[])
+    `,
+    [tokenIds],
+  );
+
+  const markets: Array<{ marketId: string; tokenIds: string[] }> = [];
+  for (const row of rows) {
+    if (!row.id) continue;
+    const ids = parseJsonStringArray(row.clob_token_ids);
+    if (!ids.length) continue;
+    markets.push({ marketId: row.id, tokenIds: ids });
+  }
+  return markets;
+}
+
+async function buildHotTokenList(
+  hotTokenIds: string[],
+  hotBudget: number,
+): Promise<string[]> {
+  if (!hotTokenIds.length || hotBudget <= 0) return [];
+  const markets = await fetchHotMarketsByTokenIds(hotTokenIds);
+  if (!markets.length) return [];
+
+  const tokenToMarket = new Map<
+    string,
+    { marketId: string; tokenIds: string[] }
+  >();
+  for (const market of markets) {
+    for (const tokenId of market.tokenIds) {
+      if (!tokenToMarket.has(tokenId)) tokenToMarket.set(tokenId, market);
+    }
+  }
+
+  const seenMarkets = new Set<string>();
+  const seenTokens = new Set<string>();
+  const out: string[] = [];
+
+  for (const tokenId of hotTokenIds) {
+    const market = tokenToMarket.get(tokenId);
+    if (!market) continue;
+    if (seenMarkets.has(market.marketId)) continue;
+    seenMarkets.add(market.marketId);
+    for (const next of market.tokenIds) {
+      if (seenTokens.has(next)) continue;
+      seenTokens.add(next);
+      out.push(next);
+      if (out.length >= hotBudget) return out;
+    }
+  }
+
+  return out;
+}
+
+async function fetchTopTokens(
+  limitTokens: number,
+  exclude: Set<string>,
+): Promise<string[]> {
+  if (limitTokens <= 0) return [];
+  const limitMarkets = Math.max(100, limitTokens * 2);
+  const { rows } = await pool.query(
+    `
+    select clob_token_ids
+    from polymarket_markets
+    where closed = false
+      and archived = false
+      and enable_order_book = true
+      and accepting_orders = true
+      and clob_token_ids is not null
+      and clob_token_ids <> '[]'
+    order by
+      coalesce(volume24hr_clob, 0) desc,
+      coalesce(liquidity_clob, 0) desc,
+      coalesce(volume24hr, 0) desc,
+      coalesce(liquidity, 0) desc
+    limit $1
+    `,
+    [limitMarkets],
+  );
+
+  const out: string[] = [];
+  for (const row of rows) {
+    const tokenIds = parseJsonStringArray(
+      (row as { clob_token_ids?: unknown }).clob_token_ids,
+    );
+    for (const tokenId of tokenIds) {
+      if (exclude.has(tokenId)) continue;
+      exclude.add(tokenId);
+      out.push(tokenId);
+      if (out.length >= limitTokens) return out;
+    }
+  }
+  return out;
 }
 
 export async function selectHotTokenIds(): Promise<string[]> {
@@ -436,50 +549,13 @@ export async function syncHotEventStatuses(): Promise<void> {
 }
 
 export async function selectWsTokenIds(): Promise<string[]> {
-  const limitMarkets = Math.max(100, env.wsSubset * 2);
-  const { rows } = await pool.query(
-    `
-    select clob_token_ids
-    from polymarket_markets
-    where closed = false
-      and archived = false
-      and enable_order_book = true
-      and accepting_orders = true
-      and clob_token_ids is not null
-      and clob_token_ids <> '[]'
-    order by
-      coalesce(volume24hr_clob, 0) desc,
-      coalesce(liquidity_clob, 0) desc,
-      coalesce(volume24hr, 0) desc,
-      coalesce(liquidity, 0) desc
-    limit $1
-    `,
-    [limitMarkets],
-  );
-
-  const out: string[] = [];
-  const seen = new Set<string>();
+  const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
   const hotTokenIds = await fetchHotTokenIds();
+  const hotTokens = await buildHotTokenList(hotTokenIds, hotBudget);
 
-  for (const tokenId of hotTokenIds) {
-    if (!tokenId) continue;
-    if (seen.has(tokenId)) continue;
-    seen.add(tokenId);
-    out.push(tokenId);
-    if (out.length >= env.wsSubset) return out;
-  }
+  const seen = new Set<string>(hotTokens);
+  const remaining = Math.max(0, env.wsSubset - hotTokens.length);
+  const topTokens = await fetchTopTokens(remaining, seen);
 
-  for (const row of rows) {
-    const tokenIds = parseJsonStringArray(
-      (row as { clob_token_ids?: unknown }).clob_token_ids,
-    );
-    for (const tokenId of tokenIds) {
-      if (seen.has(tokenId)) continue;
-      seen.add(tokenId);
-      out.push(tokenId);
-      if (out.length >= env.wsSubset) return out;
-    }
-  }
-
-  return out;
+  return [...hotTokens, ...topTokens];
 }

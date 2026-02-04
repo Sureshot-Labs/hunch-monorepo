@@ -56,6 +56,21 @@ function clampInt(
   return Math.min(max, Math.max(min, v));
 }
 
+function parseOptionalFloat(v: string | undefined): number | undefined {
+  if (v == null || v.trim() === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function clampFloat(
+  v: number | undefined,
+  { min, max, fallback }: { min: number; max: number; fallback: number },
+): number {
+  if (v == null) return fallback;
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
 const dflowEnabledSetting = parseOptionalBool(process.env.DFLOW_ENABLED);
 const dflowApiKey = opt("DFLOW_API_KEY");
 
@@ -190,6 +205,15 @@ const dflowWsLogEverySec = clampInt(
   { min: 0, max: 3600, fallback: 0 },
 );
 
+const wsHotShareRaw = parseOptionalFloat(
+  process.env.DFLOW_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
+);
+const wsHotShare = clampFloat(wsHotShareRaw, {
+  min: 0,
+  max: 1,
+  fallback: 0.5,
+});
+
 const tradesTokenLimit = clampInt(
   parseOptionalInt(process.env.DFLOW_TRADES_TOKEN_LIMIT),
   { min: 1, max: 2000, fallback: 200 },
@@ -263,6 +287,7 @@ export const env = {
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
+  wsHotShare,
 
   // Phase 1 constraint (documented in INTEGRATIONS_PLAN.md)
   solanaUsdcMint:

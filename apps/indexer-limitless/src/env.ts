@@ -52,6 +52,22 @@ function clampInt(
   return Math.min(opts.max, Math.max(opts.min, Math.trunc(value)));
 }
 
+function parseOptionalFloat(value: string | undefined): number | undefined {
+  if (!value || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function clampFloat(
+  value: number | undefined,
+  opts: { min: number; max: number; fallback: number }
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return opts.fallback;
+  }
+  return Math.min(opts.max, Math.max(opts.min, value));
+}
+
 const limitlessEnabledSetting = parseOptionalBool(
   process.env.LIMITLESS_ENABLED,
 );
@@ -102,6 +118,15 @@ const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
   fallback: 1000,
 });
 
+const wsHotShareRaw = parseOptionalFloat(
+  process.env.LIMITLESS_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
+);
+const wsHotShare = clampFloat(wsHotShareRaw, {
+  min: 0,
+  max: 1,
+  fallback: 0.5,
+});
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -129,6 +154,7 @@ export const env = {
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
+  wsHotShare,
 
   venueName: "limitless",
   venueId: Number(process.env.LIMITLESS_VENUE_ID ?? "3"),

@@ -133,6 +133,12 @@ async function fetchHotTokenIds(): Promise<string[]> {
   }
 }
 
+function splitBudget(total: number, hotShare: number): { hotBudget: number } {
+  const clampedShare = Math.max(0, Math.min(1, hotShare));
+  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  return { hotBudget };
+}
+
 function stripSolanaPrefix(tokenId: string): string | null {
   if (!tokenId) return null;
   return tokenId.startsWith("sol:") ? tokenId.slice(4) : tokenId;
@@ -248,15 +254,16 @@ async function fetchPositionTokenIds(
   return rows.map((row) => row.token_id).filter(Boolean);
 }
 
-async function fetchHotTickers(): Promise<string[]> {
-  const hotTokenIds = await fetchHotTokenIds();
-  const positionTokenIds = await fetchPositionTokenIds();
-  const tokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));
+async function fetchTickersForTokenIds(
+  tokenIds: string[],
+): Promise<string[]> {
   if (!tokenIds.length) return [];
-
-  const { rows } = await pool.query<{ venue_market_id: string }>(
+  const { rows } = await pool.query<{
+    token_id: string | null;
+    venue_market_id: string | null;
+  }>(
     `
-      select distinct m.venue_market_id
+      select t.token_id, m.venue_market_id
       from unified_tokens t
       join unified_markets m on m.id = t.market_id
       where t.token_id = any($1::text[])
@@ -266,9 +273,68 @@ async function fetchHotTickers(): Promise<string[]> {
     [tokenIds],
   );
 
-  return rows
-    .map((row) => row.venue_market_id)
-    .filter((ticker): ticker is string => Boolean(ticker));
+  const tokenToTicker = new Map<string, string>();
+  for (const row of rows) {
+    if (!row.token_id || !row.venue_market_id) continue;
+    tokenToTicker.set(row.token_id, row.venue_market_id);
+  }
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const tokenId of tokenIds) {
+    const ticker = tokenToTicker.get(tokenId);
+    if (!ticker || seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+  }
+  return out;
+}
+
+async function fetchHotTickersOrdered(): Promise<string[]> {
+  const hotTokenIds = await fetchHotTokenIds();
+  const positionTokenIds = await fetchPositionTokenIds();
+
+  const hotTickers = await fetchTickersForTokenIds(hotTokenIds);
+  const positionTickers = await fetchTickersForTokenIds(positionTokenIds);
+
+  const out = [...hotTickers];
+  const seen = new Set(out);
+  for (const ticker of positionTickers) {
+    if (seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+  }
+  return out;
+}
+
+async function fetchTopTickers(limit: number): Promise<string[]> {
+  if (limit <= 0) return [];
+  const limitRows = Math.max(100, limit * 2);
+  const { rows } = await pool.query<{ venue_market_id: string | null }>(
+    `
+      select m.venue_market_id
+      from unified_markets m
+      where m.venue = 'kalshi'
+        and m.status = 'ACTIVE'
+        and m.venue_market_id is not null
+      order by m.volume_24h desc nulls last,
+               m.liquidity desc nulls last,
+               m.open_interest desc nulls last
+      limit $1
+    `,
+    [limitRows],
+  );
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const ticker = row.venue_market_id;
+    if (!ticker || seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 async function fetchTradeTokenIds(): Promise<string[]> {
@@ -353,7 +419,32 @@ export async function resolveHotTickersForWs(): Promise<string[]> {
   if (!env.dflowEnabled) return [];
   await ensureRedis();
   await pool.query("select 1");
-  return fetchHotTickers();
+  const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const hotTickersAll = await fetchHotTickersOrdered();
+  const hotTickers = hotTickersAll.slice(0, hotBudget);
+
+  const seen = new Set(hotTickers);
+  const remaining = Math.max(0, env.wsSubset - hotTickers.length);
+  const topTickers = await fetchTopTickers(remaining);
+
+  const out = [...hotTickers];
+  for (const ticker of topTickers) {
+    if (seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+    if (out.length >= env.wsSubset) break;
+  }
+
+  if (out.length < env.wsSubset) {
+    for (const ticker of hotTickersAll) {
+      if (seen.has(ticker)) continue;
+      seen.add(ticker);
+      out.push(ticker);
+      if (out.length >= env.wsSubset) break;
+    }
+  }
+
+  return out;
 }
 
 async function fetchMarketEventInfoByTickers(

@@ -24,6 +24,21 @@ function clampInt(
   return Math.min(max, Math.max(min, v));
 }
 
+function parseOptionalFloat(v: string | undefined): number | undefined {
+  if (v == null || v.trim() === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function clampFloat(
+  v: number | undefined,
+  { min, max, fallback }: { min: number; max: number; fallback: number },
+): number {
+  if (v == null) return fallback;
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
 function req(name: string): string {
   const v = process.env[name];
   if (!v) {
@@ -90,6 +105,15 @@ const hotTokensMax = clampInt(hotTokensMaxRaw, {
   fallback: 1000,
 });
 
+const wsHotShareRaw = parseOptionalFloat(
+  process.env.POLYMARKET_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
+);
+const wsHotShare = clampFloat(wsHotShareRaw, {
+  min: 0,
+  max: 1,
+  fallback: 0.5,
+});
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -111,4 +135,5 @@ export const env = {
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
+  wsHotShare,
 };
