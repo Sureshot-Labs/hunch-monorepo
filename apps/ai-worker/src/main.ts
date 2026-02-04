@@ -487,7 +487,27 @@ async function processStreamBatch(
 
     if (payload.status !== "ACTIVE") {
       batchStats.inactive += 1;
-      await deleteEmbedding(redis, payload);
+      if (payload.status === "CLOSED") {
+        const keyPrefix =
+          payload.entityType === "market"
+            ? "ai:embed:market:"
+            : "ai:embed:event:";
+        const key = `${keyPrefix}${payload.entityId}`;
+        const exists = await redis.exists(key);
+        if (exists) {
+          const updatedAt = parseUpdatedAt(payload.updatedAt);
+          await redis
+            .multi()
+            .hSet(key, {
+              status: payload.status ?? "",
+              updated_at: String(updatedAt),
+            })
+            .expire(key, env.embedTtlSec)
+            .exec();
+        }
+      } else {
+        await deleteEmbedding(redis, payload);
+      }
       await redis.xAck(STREAM_KEY, env.group, entry.id);
       continue;
     }
