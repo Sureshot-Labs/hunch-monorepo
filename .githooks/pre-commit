@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+if [[ "${branch}" != "main" ]]; then
+  exit 0
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pnpm is required for backend pre-commit checks." >&2
+  exit 1
+fi
+
+pnpm check

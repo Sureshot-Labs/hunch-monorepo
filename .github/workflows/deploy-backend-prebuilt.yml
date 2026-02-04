@@ -1,0 +1,50 @@
+name: Deploy Backend (Prebuilt, SCP)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Start ssh-agent
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Add host to known_hosts
+        run: |
+          if [ -z "${SSH_HOST}" ]; then
+            echo "SSH_HOST is required (set as a GitHub secret)." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Deploy backend (prebuilt)
+        env:
+          REMOTE_HOST: ubuntu@${{ secrets.SSH_HOST }}
+          LOCAL_IMAGE_CLEANUP: "1"
+          LOCAL_BUILDER_PRUNE: "1"
+        run: |
+          chmod +x ops/deploy-local-prebuilt.sh
+          ops/deploy-local-prebuilt.sh

@@ -32,6 +32,14 @@ pnpm migrate
 pnpm dev
 ```
 
+### Git Hooks (optional)
+
+To enforce lint/type-checks before commits:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ### Documentation
 
 - **[Developer Setup Guide](./DEVELOPER_SETUP.md)** - Complete setup instructions for new developers
