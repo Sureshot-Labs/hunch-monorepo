@@ -71,10 +71,11 @@ fi
 
 echo "Deploy complete."
 
-# Optional cleanup to reclaim disk (keeps images used in last 24h).
+# Optional cleanup to reclaim disk (keeps images used in last 3h by default).
 if [[ "${DOCKER_PRUNE:-1}" == "1" ]]; then
-  echo "Pruning unused Docker images (older than 24h)..."
-  docker image prune -af --filter "until=24h" || true
+  DOCKER_PRUNE_UNTIL="${DOCKER_PRUNE_UNTIL:-3h}"
+  echo "Pruning unused Docker images (older than ${DOCKER_PRUNE_UNTIL})..."
+  docker image prune -af --filter "until=${DOCKER_PRUNE_UNTIL}" || true
 fi
 
 if [[ -n "${ARCHIVE}" ]]; then
