@@ -42,7 +42,15 @@ services:
       - -c
       - work_mem=4MB
       - -c
-      - statement_timeout=30000
+      - statement_timeout=120000
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
 
   redis:
     image: redis/redis-stack-server:latest
