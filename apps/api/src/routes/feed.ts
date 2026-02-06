@@ -21,7 +21,8 @@ const FOR_YOU_MIN_VOLUME_24H = 100;
 const FOR_YOU_MIN_LIQUIDITY = 1000;
 const FOR_YOU_HALF_LIFE_DAYS = 14;
 const FOR_YOU_KNN_PAD = 50;
-const FOR_YOU_MAX_KNN = 200;
+const FOR_YOU_KNN_MULTIPLIER = 8;
+const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
 
 type ForYouInteractionRow = {
@@ -276,7 +277,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const categories = q.categories;
       const filter = q.filter;
       const sort = q.sort;
-      const sortDir: "asc" | "desc" = q.sort_dir === "asc" ? "asc" : "desc";
+      const sortDir: "asc" | "desc" =
+        q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
@@ -642,8 +644,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = query.min_prob;
       const maxProb = query.max_prob;
       const maxSpread = query.max_spread;
+      const sort = query.sort;
+      const sortDir: "asc" | "desc" =
+        query.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
       const endWithinHours = query.end_within_hours;
       const ageWithinHours = query.age_within_hours;
+      const search = query.q;
 
       const { rows: interactionRows } =
         await pool.query<ForYouInteractionRow>(
@@ -753,11 +759,17 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       for (let i = 0; i < sum.length; i += 1) sum[i] /= weightSum;
       const userVector = normalizeVector(sum);
 
+      // For You is rendered as ACTIVE markets/events; querying CLOSED embeddings
+      // reduces recall without improving returned rows.
       const knnLimit = Math.min(
         FOR_YOU_MAX_KNN,
-        Math.max(limit + offset + FOR_YOU_KNN_PAD, 50),
+        Math.max(
+          limit + offset + FOR_YOU_KNN_PAD,
+          limit * FOR_YOU_KNN_MULTIPLIER,
+          50,
+        ),
       );
-      const queryText = `@status:{ACTIVE|CLOSED}=>[KNN ${knnLimit} @embedding $vec AS score]`;
+      const queryText = `@status:{ACTIVE}=>[KNN ${knnLimit} @embedding $vec AS score]`;
 
       const raw = (await redis.sendCommand([
         "FT.SEARCH",
@@ -837,7 +849,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         endWithin != null ||
         ageSince != null ||
         minVol > 1e-9 ||
-        minLiquidity > 0;
+        minLiquidity > 0 ||
+        search != null;
 
       let filteredEventIds = candidateEventIds;
       if (shouldFilterEvents) {
@@ -848,6 +861,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         };
         const eventIdsParam = add(candidateEventIds);
         const nowParamSql = add(nowParam);
+        const searchParam = search ? add(`%${search}%`) : null;
         const where: string[] = [
           "e.status = 'ACTIVE'",
           `(e.end_date is null or e.end_date > ${nowParamSql}::timestamptz)`,
@@ -876,6 +890,32 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (minLiquidity > 0) {
           where.push(`${eventLiquidityDisplayExpr} >= ${add(minLiquidity)}`);
         }
+        if (searchParam) {
+          where.push(`
+            (
+              e.id ilike ${searchParam}
+              or e.title ilike ${searchParam}
+              or e.description ilike ${searchParam}
+              or e.category ilike ${searchParam}
+              or e.slug ilike ${searchParam}
+              or exists (
+                select 1
+                from unified_markets m
+                where m.event_id = e.id
+                  and m.status = 'ACTIVE'
+                  and (m.expiration_time is null or m.expiration_time > ${nowParamSql}::timestamptz)
+                  and (m.close_time is null or m.close_time > ${nowParamSql}::timestamptz)
+                  and (
+                    m.venue_market_id::text ilike ${searchParam}
+                    or m.title ilike ${searchParam}
+                    or m.description ilike ${searchParam}
+                    or m.category ilike ${searchParam}
+                    or m.slug ilike ${searchParam}
+                  )
+              )
+            )
+          `);
+        }
 
         const sql = `
           select c.event_id
@@ -903,7 +943,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         offset,
         minVol,
         minLiquidity,
-        q: undefined,
+        q: search,
         view: "events" as const,
         eventScope: "grouped" as const,
         venues,
@@ -1007,8 +1047,76 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         filtered = filterEvents("none", true);
       }
 
-      const totalCount = filtered.length;
-      const page = filtered.slice(offset, offset + limit);
+      const rankByEventId = new Map<string, number>();
+      for (let i = 0; i < orderedEvents.length; i += 1) {
+        rankByEventId.set(orderedEvents[i].eventId, i);
+      }
+      const compareNullableNumber = (
+        a: number | null | undefined,
+        b: number | null | undefined,
+      ): number => {
+        const aNullish = a == null || Number.isNaN(a);
+        const bNullish = b == null || Number.isNaN(b);
+        if (aNullish && bNullish) return 0;
+        if (aNullish) return 1;
+        if (bNullish) return -1;
+        return sortDir === "asc" ? a - b : b - a;
+      };
+      const eventChange24hById = new Map<string, number | null>();
+      if (sort === "change24h") {
+        for (const event of filtered) {
+          const values = event.markets
+            .map((market) => market.change24h)
+            .filter(
+              (value): value is number =>
+                value != null && Number.isFinite(value),
+            );
+          eventChange24hById.set(
+            event.eventId,
+            values.length
+              ? values.reduce((sum, value) => sum + value, 0) / values.length
+              : null,
+          );
+        }
+      }
+      const sorted = sort
+        ? [...filtered].sort((a, b) => {
+            let cmp = 0;
+            if (sort === "totalvol") {
+              cmp = compareNullableNumber(a.eventVolumeDisplay, b.eventVolumeDisplay);
+            } else if (sort === "liquidity") {
+              cmp = compareNullableNumber(
+                a.eventLiquidityDisplay,
+                b.eventLiquidityDisplay,
+              );
+            } else if (sort === "openinterest") {
+              cmp = compareNullableNumber(a.eventOpenInterest, b.eventOpenInterest);
+            } else if (sort === "change24h") {
+              cmp = compareNullableNumber(
+                eventChange24hById.get(a.eventId),
+                eventChange24hById.get(b.eventId),
+              );
+            } else if (sort === "time") {
+              cmp = compareNullableNumber(
+                parseTimestampMs(a.endTime),
+                parseTimestampMs(b.endTime),
+              );
+            } else if (sort === "newest") {
+              cmp = compareNullableNumber(
+                parseTimestampMs(a.startTime),
+                parseTimestampMs(b.startTime),
+              );
+            }
+            if (cmp !== 0) return cmp;
+            return (
+              (rankByEventId.get(a.eventId) ?? Number.MAX_SAFE_INTEGER) -
+              (rankByEventId.get(b.eventId) ?? Number.MAX_SAFE_INTEGER)
+            );
+          })
+        : filtered;
+
+      const totalCount = sorted.length;
+      const page = sorted.slice(offset, offset + limit);
 
       const payload = {
         count: totalCount,
