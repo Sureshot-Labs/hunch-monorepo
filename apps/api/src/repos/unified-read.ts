@@ -851,9 +851,6 @@ export async function fetchFeedMarketsDirect(
   const searchMarketJoin = hasSearch
     ? "join search_events se on se.id = m.event_id"
     : "";
-  const searchMarketJoinBm = hasSearch
-    ? "join search_events se on se.id = bm.event_id"
-    : "";
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
@@ -970,7 +967,7 @@ export async function fetchFeedMarketsDirect(
       case
         when m.venue = 'limitless'
           then (coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))
-        else coalesce(trade_24h.vol, 0)
+        else coalesce(trade_24h.volume_24h, 0)
       end
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
@@ -995,25 +992,14 @@ export async function fetchFeedMarketsDirect(
     inputs.sort === "change24h"
       ? "left join market_change mc on mc.market_id = m.id"
       : "";
-  const tradeCte =
-    inputs.sort === "trending_v2"
-      ? `
-        trade_24h as materialized (
-          select mt24.market_id, mt24.volume_24h as vol
-          from unified_market_trade_24h mt24
-          join unified_markets bm on bm.id = mt24.market_id
-          ${searchMarketJoinBm}
-          where bm.status = 'ACTIVE'
-            and bm.venue <> 'limitless'
-            and (bm.expiration_time is null or bm.expiration_time > ${nowParam}::timestamptz)
-            and (bm.close_time is null or bm.close_time > ${nowParam}::timestamptz)
-            and ${supportedLimitlessMarketExpr}
-        )
-      `
-      : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? "left join trade_24h on trade_24h.market_id = m.id and m.venue <> 'limitless'"
+      ? `left join lateral (
+          select t.volume_24h
+          from unified_market_trade_24h t
+          where t.market_id = m.id
+          limit 1
+        ) trade_24h on true`
       : "";
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
@@ -1096,7 +1082,6 @@ export async function fetchFeedMarketsDirect(
     withParts.push(marketCountCte);
   }
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
-  if (tradeCte) withParts.push(tradeCte);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);
   withParts.push(`market_base as (${marketBaseSql})`);
   const withClause = `with ${withParts.join(",\n")}`;
