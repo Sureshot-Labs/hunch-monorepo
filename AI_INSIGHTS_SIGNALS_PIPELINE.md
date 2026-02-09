@@ -249,11 +249,71 @@ Build a canonical topic graph from `unified_events` + `unified_markets`:
   - category and venue.
 - canonical topic key:
   - `<category>:<entity>:<constraint>:<time_bucket>`
+- market sampling should be feed-like (top/trending-biased), not "all active":
+  - base status/time gates:
+    - `m.status='ACTIVE'`, `e.status='ACTIVE'`
+    - `(m.expiration_time is null or m.expiration_time > now)`
+    - `(m.close_time is null or m.close_time > now)`
+    - `(e.end_date is null or e.end_date > now)`
+  - quality gates:
+    - `marketVolumeDisplay >= min_volume24h`
+    - `marketLiquidityDisplay >= min_liquidity`
+    - optional spread gate:
+      - `best_bid is not null and best_ask is not null and (best_ask - best_bid) <= max_spread`
+  - ranking order for topic extraction input:
+    - `coalesce(marketVolumeDisplay,0) desc`
+    - `coalesce(marketLiquidityDisplay,0) desc`
+    - `m.updated_at desc`
 - optional LLM expansion:
   - add paraphrases and adjacent terms for recall,
   - bounded to top-N expansions per topic to avoid drift.
 - optional embedding/KNN merge:
   - merge near-duplicate topics into one retrieval target.
+
+### 5.1.1 Implemented status (current)
+
+The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validated on local DB:
+
+- feed-like market gating is configurable:
+  - `--min-volume24h`
+  - `--min-liquidity`
+  - `--max-spread` (optional)
+  - `--require-open-now` (time/status guards)
+- top-market sampling supports:
+  - `--sampling global|per-venue`
+  - `--order-by trending|updated`
+- deterministic external retrieval pack generation is active:
+  - per-tier prompt set (`prompt_web_news`, `prompt_web_driver`, `prompt_x_signal`)
+  - xAI tool payload shape with:
+    - `web_search.filters.excluded_domains`
+    - `x_search.from_date`
+    - `x_search.to_date`
+    - `x_search.excluded_x_handles`
+- search-intent dedupe is active before cost estimation:
+  - dedupe key: `category|entity_type|entity`
+  - original topic granularity retained for internal diagnostics.
+
+Validation snapshot (same quality gates, global sampling, trending order):
+
+- top-50 markets:
+  - `uniqueSearchTopics=24`
+  - `dailyAfterCacheCalls=1123.2`
+- top-60 markets:
+  - `uniqueSearchTopics=29`
+  - `dailyAfterCacheCalls=1357.2`
+- top-100 markets:
+  - `uniqueSearchTopics=50`
+  - `dailyAfterCacheCalls=2340`
+- top-200 markets:
+  - `uniqueSearchTopics=96`
+  - `dailyAfterCacheCalls=4492.8`
+
+Cost implication from tool invocations only (`$5 / 1000` calls, token costs excluded):
+
+- top-50: about `$5.62/day`
+- top-60: about `$6.79/day`
+- top-100: about `$11.70/day`
+- top-200: about `$22.46/day`
 
 ### 5.2 Topic score and ranking
 
@@ -335,6 +395,57 @@ When queue pressure rises:
 - widen Tier B interval,
 - keep Tier A topic refresh and only recompute linked high-impact events.
 
+### 6.5 Scheduler/Queue execution model (recommended)
+
+Use a split model:
+
+- Postgres scheduler state as source of truth:
+  - stores topic cadence and due-time state (`next_run_at`, `tier`, `priority`, `enabled`),
+  - remains queryable/auditable and easy to operate.
+- Redis queue/stream as execution transport:
+  - dispatcher enqueues due topics in bounded batches,
+  - workers consume with concurrency limits and retries.
+
+Why this model:
+
+- avoids replay storms after downtime,
+- preserves deterministic scheduling/audit in SQL,
+- allows horizontal worker scaling without losing run control.
+
+Core timing rules:
+
+- planner job updates topic metadata periodically (for example every 6-24h),
+- dispatcher tick runs every 30-60s:
+  - selects due rows ordered by `priority desc, next_run_at asc`,
+  - enqueues at most `N` topics per tick (`max_topics_per_tick`),
+  - uses row leasing/locking to avoid duplicate dispatch.
+- workers process queue continuously and write results to Postgres.
+
+Anti-burst/catch-up policy (required):
+
+- after each run (success or fail), schedule from wall-clock:
+  - `next_run_at = now() + cadence`
+  - not `previous_next_run_at + cadence`.
+- optional one-time immediate catch-up allowed at most once per topic after long pause (`max_catchup=1`),
+- never replay every missed interval.
+
+Backlog/budget guards:
+
+- hard caps:
+  - `max_topics_per_tick`,
+  - `max_external_calls_per_tick`,
+  - `max_external_calls_per_hour`.
+- shedding order under pressure:
+  1. drop Tier C,
+  2. widen Tier B cadence,
+  3. keep Tier A only for highest-priority intents.
+
+Idempotency/locking:
+
+- run idempotency key: `topic_key + time_bucket + stage_version`,
+- queue claim with lease + heartbeat,
+- DB uniqueness guard on `ai_insight_runs(run_key)`.
+
 ## 7) Agent/Tool Architecture
 
 ### 7.1 Four-stage analysis flow
@@ -376,6 +487,11 @@ External tools (phase 2+):
 - web/news retrieval with strict budget + source whitelist,
 - X/social signal adapters only after reliability review.
 
+Implementation rule for external retrieval:
+
+- Use xAI tool parameters for filtering/range control.
+- Do not rely on old search-engine query operators (`site:`, `-site:`, custom DSL) for core policy behavior.
+
 ### 7.3 External news provider strategy (xAI-first)
 
 Use xAI tools as the primary external retrieval layer at launch.
@@ -395,7 +511,71 @@ Launch stack:
 - If xAI tools degrade or exceed budget, pipeline falls back to internal-only mode (no external claims).
 - Rule: do not publish high-confidence external-driven insights during fallback mode.
 
-### 7.4 External evidence normalization and trust policy
+### 7.4 xAI tool contract (validated against current docs)
+
+Use only the documented server-side tool parameters below in production request builders.
+
+`web_search`:
+
+- Supported controls:
+  - `allowed_domains` (max 5)
+  - `excluded_domains` (max 5)
+  - `enable_image_understanding`
+- Constraint:
+  - `allowed_domains` and `excluded_domains` are mutually exclusive.
+- OpenAI-compatible payload note:
+  - domain filters are passed under `tools[].filters` for `web_search`.
+
+`x_search`:
+
+- Supported controls:
+  - `allowed_x_handles` (max 10)
+  - `excluded_x_handles` (max 10)
+  - `from_date` (ISO8601 `YYYY-MM-DD`)
+  - `to_date` (ISO8601 `YYYY-MM-DD`)
+  - `enable_image_understanding`
+  - `enable_video_understanding`
+- Constraints:
+  - `allowed_x_handles` and `excluded_x_handles` are mutually exclusive.
+  - Date range should be bounded per tier (A/B/C), not open-ended.
+
+Prompt/query policy:
+
+- Query strings are natural-language prompts describing intent; they are not a filter DSL.
+- Domain exclusion/inclusion must be applied via tool parameters, not query operators.
+- Date windows must be encoded in `from_date`/`to_date` for `x_search`, and in prompt text for `web_search` only as context.
+
+### 7.5 External retrieval query policy (deterministic)
+
+Per topic, generate a deterministic retrieval pack:
+
+1. `prompt_web_news`
+- intent: current facts and key drivers relevant to entity + constraint.
+
+2. `prompt_web_driver`
+- intent: causal drivers (regulatory, macro, supply/demand, lineup/injury, polling, etc. by category).
+
+3. `prompt_x_signal`
+- intent: real-time social signal and source-linked claims.
+
+Tool policy attached to each pack:
+
+- `web_search.filters.excluded_domains`: prediction-market/self domains configured centrally.
+- `x_search.from_date/to_date`: tier-based lookback windows.
+- `x_search.excluded_x_handles`: optional market-platform handles (configurable).
+
+Search dedupe rule (required before scheduling):
+
+- Build a search-intent key `category|entity_type|entity` and collapse duplicate market topics across time buckets/constraints for external retrieval planning.
+- Keep original topic granularity for internal scoring, but execute external retrieval once per search-intent key per cadence window.
+
+Minimum pack by tier (launch default):
+
+- Tier A: `2 web + 1 x`
+- Tier B: `1 web + 1 x` or `2 web + 0 x` in cost-shedding mode
+- Tier C: `1 web + 0 x` (or disabled)
+
+### 7.6 External evidence normalization and trust policy
 
 Normalize all external results into one internal shape:
 
@@ -415,7 +595,7 @@ Use these in `news_novelty_z` and publish gating:
   - 1 high-trust source + strong internal market/flow corroboration.
 - otherwise insight remains low confidence or suppressed.
 
-### 7.5 Determinism and reproducibility
+### 7.7 Determinism and reproducibility
 
 Persist for each run:
 
@@ -646,6 +826,11 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_XAI_TOOLS=web_search,x_search`
 - `AI_INSIGHTS_NEWS_CACHE_TTL_SEC=900`
 - `AI_INSIGHTS_NEWS_MAX_CALLS_PER_TOPIC_WINDOW=2`
+- `AI_INSIGHTS_WEB_EXCLUDED_DOMAINS=polymarket.com,kalshi.com,limitless.exchange,hunch.trade`
+- `AI_INSIGHTS_X_EXCLUDED_HANDLES=polymarket,kalshi`
+- `AI_INSIGHTS_TIER_A_LOOKBACK_HOURS=24`
+- `AI_INSIGHTS_TIER_B_LOOKBACK_HOURS=72`
+- `AI_INSIGHTS_TIER_C_LOOKBACK_HOURS=168`
 
 These are safe launch defaults, not final tuning.
 
@@ -1139,3 +1324,102 @@ Pipeline:
 - queue lag p95 `< 3 min` steady state
 - DLQ rate `< 1%` steady state
 - budget cap breach days `= 0`
+
+## 30) Extractor Improvement Plan (next)
+
+Goal: improve topic/query precision before connecting dry-run outputs to real external retrieval.
+
+Observed gaps from current dry-run output:
+
+- entity noise still appears (`person:will`, `keyword:attend`, `keyword:wahlberg`, etc.),
+- category balance is skewed (sports-heavy in top-N),
+- market fan-out can overweight one event/league family,
+- cost scales quickly with `N` even after dedupe.
+
+### 30.1 Phase 1: entity normalization hardening (low risk, high value)
+
+Changes:
+
+- add blocklists for pronouns/aux verbs/common non-entities,
+- require stronger evidence for `person:*` extraction:
+  - minimum token length,
+  - title-case phrase checks,
+  - optional whitelist hit for politics persons/countries,
+- convert uncertain entity picks to `unknown` and suppress from search-intent execution.
+
+Acceptance:
+
+- reduce noisy query-entity rate by at least 70% vs current top-50 baseline,
+- keep top-50 `uniqueSearchTopics` within +/-20% of baseline (avoid over-pruning).
+
+### 30.2 Phase 2: market-to-topic balancing controls
+
+Changes:
+
+- add `--per-event-cap` to limit max sampled markets per event in extraction input,
+- add per-category caps for search execution (for example `sports <= 50%` of active search intents),
+- add venue-aware balancing option if one venue dominates sampled rows.
+
+Acceptance:
+
+- no single event contributes more than configured cap in sampled input,
+- category distribution remains within configured guardrails for top-50/top-100 runs.
+
+### 30.3 Phase 3: feed-exact selector integration
+
+Changes:
+
+- add optional mode that seeds extractor from feed-selected IDs:
+  - `mode=feed_top_n`
+  - uses the same repo path as feed ranking (`trending` / `trending_v2`) instead of approximate SQL ordering.
+
+Acceptance:
+
+- overlap between feed top-N IDs and extractor input IDs >= 95% in `feed_top_n` mode.
+
+### 30.4 Phase 4: retrieval-pack cost shaping
+
+Changes:
+
+- dynamic pack policy by confidence/impact:
+  - Tier A high-confidence intent: `1 web + 1 x`
+  - Tier A uncertain intent: `2 web + 1 x`
+  - Tier B shed mode default: `2 web + 0 x`
+- keep hard cap by expected spend, not just topic count.
+
+Acceptance:
+
+- top-50 mode remains below configured daily tool budget cap,
+- no budget-cap breach in simulation runs across 7-day replay.
+
+### 30.5 Phase 5: mapping-readiness hooks (before publish)
+
+Changes:
+
+- emit deterministic `mapping_input_candidates` from extractor output:
+  - lexical candidates,
+  - embedding candidate ids (when available),
+  - constraint/time match features.
+- this bridges extractor output directly into mapping evaluation harness.
+
+Acceptance:
+
+- extractor output can be consumed by offline mapping eval without adapter scripts,
+- mapping eval reports precision/coverage per category from extractor-produced intents.
+
+### 30.6 Suggested default launch profile (cost-first)
+
+For the initial external-retrieval launch:
+
+- start with top-50 (`--limit 50`) and strict quality gates,
+- run hourly (`tier-a-cadence-minutes=60`),
+- keep Tier C off,
+- if daily spend drifts upward, first reduce pack size, then reduce N.
+
+Operational note:
+
+- maintain a weekly top-50/top-100/top-200 comparison report to track:
+  - topic quality drift,
+  - category skew,
+  - estimated cost drift,
+  - noise-entity rate.
