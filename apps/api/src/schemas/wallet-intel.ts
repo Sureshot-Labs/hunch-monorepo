@@ -61,6 +61,36 @@ export const walletActivitySummaryQuerySchema = z.object({
     .optional(),
 });
 
+export const walletActivitySignalsQuerySchema = z.object({
+  scope: z.enum(["following", "active", "all"]).default("following"),
+  windowHours: z.coerce.number().int().min(1).max(24 * 14).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+  minStakeUsd: z.coerce.number().min(0).optional(),
+  maxOdds: z.coerce.number().min(0).max(1).optional(),
+  minIdleDays: z.coerce.number().int().min(0).optional(),
+  maxPriorMarkets: z.coerce.number().int().min(0).optional(),
+  minPayoutUsd: z.coerce.number().min(0).optional(),
+  minScore: z.coerce.number().min(0).max(1).optional(),
+  signalType: z.enum(["longshot_large", "longshot_large_late"]).optional(),
+  lateBucket: z.enum(["late", "very_late", "unknown"]).optional(),
+  categories: z
+    .preprocess(
+      value => {
+        if (Array.isArray(value)) return value;
+        if (typeof value === "string") {
+          return value
+            .split(",")
+            .map(item => item.trim())
+            .filter(Boolean);
+        }
+        return undefined;
+      },
+      z.array(z.string().min(1)).optional()
+    )
+    .optional(),
+});
+
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   venue: zVenue.optional(),

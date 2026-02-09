@@ -201,6 +201,22 @@ const walletIntelSelectionModeLimitless = parseEnum(
   ["liquidity", "book", "updated", "hybrid"],
   "liquidity",
 );
+const walletIntelSignalWeightStake = optionalNonNegativeNumber(
+  "WALLET_INTEL_SIGNAL_WEIGHT_STAKE",
+  0.4,
+);
+const walletIntelSignalWeightOdds = optionalNonNegativeNumber(
+  "WALLET_INTEL_SIGNAL_WEIGHT_ODDS",
+  0.3,
+);
+const walletIntelSignalWeightIdle = optionalNonNegativeNumber(
+  "WALLET_INTEL_SIGNAL_WEIGHT_IDLE",
+  0.2,
+);
+const walletIntelSignalWeightNovelty = optionalNonNegativeNumber(
+  "WALLET_INTEL_SIGNAL_WEIGHT_NOVELTY",
+  0.1,
+);
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -353,6 +369,61 @@ export const env = {
   walletIntelDormantDays: optionalPositiveInt("WALLET_INTEL_DORMANT_DAYS", 30),
   walletIntelWhaleUsd,
   walletIntelWhaleUsdSolana,
+  walletIntelSignalMaxOdds: optionalNonNegativeNumber(
+    "WALLET_INTEL_SIGNAL_MAX_ODDS",
+    0.05,
+  ),
+  walletIntelSignalMinStakeUsd: optionalNonNegativeNumber(
+    "WALLET_INTEL_SIGNAL_MIN_STAKE_USD",
+    25_000,
+  ),
+  walletIntelSignalMinIdleDays: optionalNonNegativeInt(
+    "WALLET_INTEL_SIGNAL_MIN_IDLE_DAYS",
+    180,
+  ),
+  walletIntelSignalMaxPriorMarkets: optionalNonNegativeInt(
+    "WALLET_INTEL_SIGNAL_MAX_PRIOR_MARKETS",
+    1,
+  ),
+  walletIntelSignalMinPayoutUsd: optionalNonNegativeNumber(
+    "WALLET_INTEL_SIGNAL_MIN_PAYOUT_USD",
+    250_000,
+  ),
+  walletIntelSignalLateHours: optionalPositiveInt(
+    "WALLET_INTEL_SIGNAL_LATE_HOURS",
+    24,
+  ),
+  walletIntelSignalVeryLateHours: optionalPositiveInt(
+    "WALLET_INTEL_SIGNAL_VERY_LATE_HOURS",
+    6,
+  ),
+  walletIntelSignalWeightStake,
+  walletIntelSignalWeightOdds,
+  walletIntelSignalWeightIdle,
+  walletIntelSignalWeightNovelty,
+  walletIntelSignalMinScore: optionalNonNegativeNumber(
+    "WALLET_INTEL_SIGNAL_MIN_SCORE",
+    0.6,
+  ),
+  walletIntelSignalWindowHoursDefault: optionalPositiveInt(
+    "WALLET_INTEL_SIGNAL_WINDOW_HOURS_DEFAULT",
+    24,
+  ),
+  walletIntelSignalWindowHoursMax: optionalPositiveInt(
+    "WALLET_INTEL_SIGNAL_WINDOW_HOURS_MAX",
+    24 * 14,
+  ),
+  walletIntelSignalNotificationsEnabled:
+    parseOptionalBool(process.env.WALLET_INTEL_SIGNAL_NOTIFICATIONS_ENABLED) ??
+    false,
+  walletIntelSignalNotifyMinScore: optionalNonNegativeNumber(
+    "WALLET_INTEL_SIGNAL_NOTIFY_MIN_SCORE",
+    0.8,
+  ),
+  walletIntelRetentionDaysSignals: optionalNonNegativeInt(
+    "WALLET_INTEL_RETENTION_DAYS_SIGNALS",
+    30,
+  ),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),

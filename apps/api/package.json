@@ -18,6 +18,7 @@
     "rewards:payout": "tsx src/rewards-payout.ts",
     "ai:embed:backfill": "tsx src/ai-embed-backfill.ts",
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
+    "ai:topics:dry-run": "tsx src/ai-topics-dry-run.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",

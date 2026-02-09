@@ -1,5 +1,7 @@
 import type { PoolClient } from "pg";
 
+import { env } from "../env.js";
+
 type WalletActivitySummaryDbRow = {
   wallet_id: string;
   last_activity_at: Date | null;
@@ -14,6 +16,9 @@ type WalletActivitySummaryDbRow = {
   unusual_score: string | null;
   top_changes: unknown;
 };
+
+export type WalletActivitySignalType = "longshot_large" | "longshot_large_late";
+export type WalletActivityLateBucket = "late" | "very_late" | "unknown";
 
 export type WalletActivityTopChange = {
   marketId: string;
@@ -32,6 +37,14 @@ export type WalletActivityTopChange = {
   deltaUsd: number | null;
   price: number | null;
   odds: number | null;
+  stakeUsd: number | null;
+  potentialPayoutUsd: number | null;
+  idleDays: number | null;
+  priorDistinctMarkets: number | null;
+  signalScore: number | null;
+  signalLabels: string[];
+  signalType: WalletActivitySignalType | null;
+  lateBucket: WalletActivityLateBucket | null;
   labels: string[];
   occurredAt: Date;
 };
@@ -52,6 +65,23 @@ export type WalletActivitySummary = {
   topChanges: WalletActivityTopChange[];
 };
 
+type WalletActivitySignalConfig = {
+  maxOdds: number;
+  minStakeUsd: number;
+  minPayoutUsd: number;
+  minIdleDays: number;
+  maxPriorMarkets: number;
+  lateHours: number;
+  veryLateHours: number;
+  retentionDaysActivity: number;
+  weightStake: number;
+  weightOdds: number;
+  weightIdle: number;
+  weightNovelty: number;
+  weightSum: number;
+  minScore: number;
+};
+
 function parseNumber(value: string | number | null | undefined): number | null {
   if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
@@ -61,6 +91,76 @@ function parseNumber(value: string | number | null | undefined): number | null {
 function toNonNullNumber(value: string | number | null | undefined): number {
   const parsed = parseNumber(value);
   return parsed ?? 0;
+}
+
+function resolveSignalConfig(
+  overrides?: Partial<WalletActivitySignalConfig>,
+): WalletActivitySignalConfig {
+  const retentionDaysActivity = Math.max(
+    0,
+    Math.trunc(
+      overrides?.retentionDaysActivity ?? env.walletIntelRetentionDaysActivity,
+    ),
+  );
+  const configuredMinIdleDays = Math.max(
+    0,
+    Math.trunc(overrides?.minIdleDays ?? env.walletIntelSignalMinIdleDays),
+  );
+  const minIdleDays =
+    retentionDaysActivity > 0
+      ? Math.min(configuredMinIdleDays, retentionDaysActivity)
+      : configuredMinIdleDays;
+  const veryLateHours = Math.max(
+    1,
+    Math.trunc(overrides?.veryLateHours ?? env.walletIntelSignalVeryLateHours),
+  );
+  const lateHours = Math.max(
+    veryLateHours,
+    Math.trunc(overrides?.lateHours ?? env.walletIntelSignalLateHours),
+  );
+  const weightStake = Math.max(
+    0,
+    overrides?.weightStake ?? env.walletIntelSignalWeightStake,
+  );
+  const weightOdds = Math.max(
+    0,
+    overrides?.weightOdds ?? env.walletIntelSignalWeightOdds,
+  );
+  const weightIdle = Math.max(
+    0,
+    overrides?.weightIdle ?? env.walletIntelSignalWeightIdle,
+  );
+  const weightNovelty = Math.max(
+    0,
+    overrides?.weightNovelty ?? env.walletIntelSignalWeightNovelty,
+  );
+  return {
+    maxOdds: Math.max(0, overrides?.maxOdds ?? env.walletIntelSignalMaxOdds),
+    minStakeUsd: Math.max(
+      0,
+      overrides?.minStakeUsd ?? env.walletIntelSignalMinStakeUsd,
+    ),
+    minPayoutUsd: Math.max(
+      0,
+      overrides?.minPayoutUsd ?? env.walletIntelSignalMinPayoutUsd,
+    ),
+    minIdleDays,
+    maxPriorMarkets: Math.max(
+      0,
+      Math.trunc(
+        overrides?.maxPriorMarkets ?? env.walletIntelSignalMaxPriorMarkets,
+      ),
+    ),
+    lateHours,
+    veryLateHours,
+    retentionDaysActivity,
+    weightStake,
+    weightOdds,
+    weightIdle,
+    weightNovelty,
+    weightSum: weightStake + weightOdds + weightIdle + weightNovelty,
+    minScore: Math.max(0, overrides?.minScore ?? env.walletIntelSignalMinScore),
+  };
 }
 
 function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
@@ -101,6 +201,26 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
       deltaUsd: parseNumber(record.deltaUsd as string | number | null),
       price: parseNumber(record.price as string | number | null),
       odds: parseNumber(record.odds as string | number | null),
+      stakeUsd: parseNumber(record.stakeUsd as string | number | null),
+      potentialPayoutUsd: parseNumber(
+        record.potentialPayoutUsd as string | number | null,
+      ),
+      idleDays: parseNumber(record.idleDays as string | number | null),
+      priorDistinctMarkets: parseNumber(
+        record.priorDistinctMarkets as string | number | null,
+      ),
+      signalScore: parseNumber(record.signalScore as string | number | null),
+      signalLabels: Array.isArray(record.signalLabels)
+        ? record.signalLabels.map((label) => String(label))
+        : [],
+      signalType:
+        record.signalType == null
+          ? null
+          : (String(record.signalType) as WalletActivitySignalType),
+      lateBucket:
+        record.lateBucket == null
+          ? null
+          : (String(record.lateBucket) as WalletActivityLateBucket),
       labels: Array.isArray(record.labels)
         ? record.labels.map((label) => String(label))
         : [],
@@ -125,6 +245,7 @@ export async function fetchWalletActivitySummaries(
     topChanges: number;
     baselineDays?: number;
     enteredLateHours?: number;
+    signalConfig?: Partial<WalletActivitySignalConfig>;
   },
 ): Promise<Map<string, WalletActivitySummary>> {
   if (walletIds.length === 0) return new Map();
@@ -132,11 +253,31 @@ export async function fetchWalletActivitySummaries(
   const windowHours = Math.max(1, Math.trunc(options.windowHours));
   const topChanges = Math.max(1, Math.trunc(options.topChanges));
   const baselineDays = Math.max(7, Math.trunc(options.baselineDays ?? 30));
+  const signalConfig = resolveSignalConfig(options.signalConfig);
 
   const result = await client.query<WalletActivitySummaryDbRow>(
     `
       with wallet_set as (
         select unnest($1::uuid[]) as wallet_id
+      ),
+      window_start as (
+        select now() - ($2::text || ' hours')::interval as ts
+      ),
+      history as (
+        select
+          ws.wallet_id,
+          count(distinct wae.market_id)::int as prior_distinct_markets,
+          max(wae.occurred_at) as last_prior_activity_at
+        from wallet_set ws
+        left join wallet_activity_events wae
+          on wae.wallet_id = ws.wallet_id
+         and wae.activity_type in ('delta', 'trade')
+         and wae.occurred_at < (select ts from window_start)
+         and (
+           $11::int = 0
+           or wae.occurred_at >= now() - ($11::text || ' days')::interval
+         )
+        group by ws.wallet_id
       ),
       profiles as (
         select
@@ -298,6 +439,19 @@ export async function fetchWalletActivitySummaries(
           end as odds,
           lpm.last_occurred_at as occurred_at,
           p.categories as profile_categories,
+          h.prior_distinct_markets,
+          h.last_prior_activity_at,
+          coalesce(mc.gross_abs_delta_usd, abs(mc.signed_delta_usd), 0) as stake_usd,
+          case
+            when h.last_prior_activity_at is not null
+              and lpm.last_occurred_at is not null
+              then greatest(
+                extract(epoch from (lpm.last_occurred_at - h.last_prior_activity_at))
+                / 86400.0,
+                0
+              )
+            else null
+          end as idle_days,
           row_number() over (
             partition by mc.wallet_id
             order by mc.gross_abs_delta_usd desc nulls last, lpm.last_occurred_at desc nulls last
@@ -309,45 +463,154 @@ export async function fetchWalletActivitySummaries(
          and lpm.market_id = mc.market_id
          and lpm.outcome_side is not distinct from mc.outcome_side
         left join profiles p on p.wallet_id = mc.wallet_id
+        left join history h on h.wallet_id = mc.wallet_id
+      ),
+      scored_changes as (
+        select
+          mr.*,
+          case
+            when mr.odds is not null and mr.odds > 0
+              then mr.stake_usd / mr.odds
+            else null
+          end as potential_payout_usd,
+          case
+            when coalesce(mr.close_time, mr.expiration_time) is null then 'unknown'
+            when extract(
+              epoch from (coalesce(mr.close_time, mr.expiration_time) - mr.occurred_at)
+            ) / 3600.0 <= $10::numeric then 'very_late'
+            when extract(
+              epoch from (coalesce(mr.close_time, mr.expiration_time) - mr.occurred_at)
+            ) / 3600.0 <= $9::numeric then 'late'
+            else null
+          end as late_bucket,
+          (
+            (
+              $13::numeric * (
+                case
+                  when $6::numeric <= 0 then 0
+                  else least(coalesce(mr.stake_usd, 0) / $6::numeric, 1)
+                end
+              )
+            )
+            + (
+              $14::numeric * (
+                case
+                  when mr.odds is null or $5::numeric <= 0 then 0
+                  else greatest(0, least(1, ($5::numeric - mr.odds) / $5::numeric))
+                end
+              )
+            )
+            + (
+              $15::numeric * (
+                case
+                  when $12::numeric <= 0 then 0
+                  else least(coalesce(mr.idle_days, 0) / $12::numeric, 1)
+                end
+              )
+            )
+            + (
+              $16::numeric * (
+                case
+                  when coalesce(mr.prior_distinct_markets, 0) <= $8::int then 1
+                  else greatest(
+                    0,
+                    1 - (
+                      (coalesce(mr.prior_distinct_markets, 0) - $8::int)::numeric
+                      / greatest($8::numeric + 1, 1)
+                    )
+                  )
+                end
+              )
+            )
+          ) / greatest($17::numeric, 0.0001) as signal_score
+        from market_ranked mr
+      ),
+      classified_changes as (
+        select
+          sc.*,
+          case
+            when sc.odds is not null
+             and sc.odds <= $5::numeric
+             and coalesce(sc.stake_usd, 0) >= $6::numeric
+             and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
+             and coalesce(sc.idle_days, 0) >= $12::numeric
+             and coalesce(sc.prior_distinct_markets, 0) <= $8::int
+             and sc.signal_score >= $18::numeric
+              then true
+            else false
+          end as is_high_risk,
+          case
+            when sc.odds is not null
+             and sc.odds <= $5::numeric
+             and coalesce(sc.stake_usd, 0) >= $6::numeric
+             and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
+             and sc.signal_score >= $18::numeric
+              then case
+                when sc.late_bucket in ('late', 'very_late')
+                  then 'longshot_large_late'
+                else 'longshot_large'
+              end
+            else null
+          end as signal_type
+        from scored_changes sc
       ),
       top_changes as (
         select
-          mr.wallet_id,
+          cc.wallet_id,
           jsonb_agg(
             jsonb_build_object(
-              'marketId', mr.market_id,
-              'marketTitle', mr.market_title,
-              'eventId', mr.event_id,
-              'eventTitle', mr.event_title,
-              'venue', mr.venue,
-              'marketStatus', mr.market_status,
-              'closeTime', mr.close_time,
-              'expirationTime', mr.expiration_time,
-              'resolvedOutcome', mr.resolved_outcome,
-              'category', mr.category,
-              'action', mr.change_action,
-              'positionSide', mr.outcome_side,
-              'deltaShares', mr.signed_delta_shares,
-              'deltaUsd', mr.signed_delta_usd,
-              'price', mr.price,
-              'odds', mr.odds,
-              'labels', array_remove(array[
-                case when mr.entered_late then 'entered_late' end,
-                case when mr.unusual_size then 'unusual_size' end,
-                case when mr.on_pattern then 'on_pattern' end,
-                case
-                  when mr.profile_categories is not null
-                   and coalesce(mr.on_pattern, false) = false
-                   and mr.category is not null
-                    then 'out_of_pattern'
-                end
+              'marketId', cc.market_id,
+              'marketTitle', cc.market_title,
+              'eventId', cc.event_id,
+              'eventTitle', cc.event_title,
+              'venue', cc.venue,
+              'marketStatus', cc.market_status,
+              'closeTime', cc.close_time,
+              'expirationTime', cc.expiration_time,
+              'resolvedOutcome', cc.resolved_outcome,
+              'category', cc.category,
+              'action', cc.change_action,
+              'positionSide', cc.outcome_side,
+              'deltaShares', cc.signed_delta_shares,
+              'deltaUsd', cc.signed_delta_usd,
+              'price', cc.price,
+              'odds', cc.odds,
+              'stakeUsd', cc.stake_usd,
+              'potentialPayoutUsd', cc.potential_payout_usd,
+              'idleDays', cc.idle_days,
+              'priorDistinctMarkets', cc.prior_distinct_markets,
+              'signalScore', cc.signal_score,
+              'signalType', cc.signal_type,
+              'lateBucket', cc.late_bucket,
+              'signalLabels', array_remove(array[
+                case when cc.odds is not null and cc.odds <= $5::numeric then 'longshot_odds' end,
+                case when coalesce(cc.stake_usd, 0) >= $6::numeric then 'high_notional' end,
+                case when coalesce(cc.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
+                case when coalesce(cc.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
+                case when cc.is_high_risk then 'high_risk_longshot' end
               ], null),
-              'occurredAt', mr.occurred_at
+              'labels', array_remove(array[
+                case when cc.entered_late then 'entered_late' end,
+                case when cc.unusual_size then 'unusual_size' end,
+                case when cc.on_pattern then 'on_pattern' end,
+                case
+                  when cc.profile_categories is not null
+                   and coalesce(cc.on_pattern, false) = false
+                   and cc.category is not null
+                    then 'out_of_pattern'
+                end,
+                case when cc.odds is not null and cc.odds <= $5::numeric then 'longshot_odds' end,
+                case when coalesce(cc.stake_usd, 0) >= $6::numeric then 'high_notional' end,
+                case when coalesce(cc.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
+                case when coalesce(cc.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
+                case when cc.is_high_risk then 'high_risk_longshot' end
+              ], null),
+              'occurredAt', cc.occurred_at
             )
-            order by mr.gross_abs_delta_usd desc nulls last, mr.occurred_at desc nulls last
-          ) filter (where mr.rn <= $4) as top_changes
-        from market_ranked mr
-        group by mr.wallet_id
+            order by cc.gross_abs_delta_usd desc nulls last, cc.occurred_at desc nulls last
+          ) filter (where cc.rn <= $4) as top_changes
+        from classified_changes cc
+        group by cc.wallet_id
       ),
       summary as (
         select
@@ -387,7 +650,26 @@ export async function fetchWalletActivitySummaries(
       from summary s
       left join top_changes tc on tc.wallet_id = s.wallet_id
     `,
-    [walletIds, windowHours, baselineDays, topChanges],
+    [
+      walletIds,
+      windowHours,
+      baselineDays,
+      topChanges,
+      signalConfig.maxOdds,
+      signalConfig.minStakeUsd,
+      signalConfig.minPayoutUsd,
+      signalConfig.maxPriorMarkets,
+      signalConfig.lateHours,
+      signalConfig.veryLateHours,
+      signalConfig.retentionDaysActivity,
+      signalConfig.minIdleDays,
+      signalConfig.weightStake,
+      signalConfig.weightOdds,
+      signalConfig.weightIdle,
+      signalConfig.weightNovelty,
+      signalConfig.weightSum,
+      signalConfig.minScore,
+    ],
   );
 
   const map = new Map<string, WalletActivitySummary>();
