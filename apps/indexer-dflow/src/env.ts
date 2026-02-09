@@ -71,6 +71,15 @@ function clampFloat(
   return Math.min(max, Math.max(min, v));
 }
 
+function parseCsvLowercase(v: string | undefined): string[] | undefined {
+  if (!v) return undefined;
+  const items = v
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return items.length ? items : undefined;
+}
+
 const dflowEnabledSetting = parseOptionalBool(process.env.DFLOW_ENABLED);
 const dflowApiKey = opt("DFLOW_API_KEY");
 
@@ -122,6 +131,12 @@ if (
 const dflowIssues: string[] = [];
 if (requireApiKey && !dflowApiKey) {
   dflowIssues.push("Missing DFLOW_API_KEY (required)");
+}
+
+const defaultSolanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const solanaUsdcMint = opt("DFLOW_USDC_MINT") ?? defaultSolanaUsdcMint;
+if (!solanaUsdcMint) {
+  dflowIssues.push("Missing DFLOW_USDC_MINT (effective value is empty)");
 }
 
 const dflowConfigured = dflowIssues.length === 0;
@@ -176,6 +191,38 @@ const catchupMaxPages = clampInt(catchupMaxPagesRaw, {
   max: 100_000,
   fallback: 0,
 });
+
+const nonActiveSweepEnabledSetting = parseOptionalBool(
+  process.env.DFLOW_NON_ACTIVE_SWEEP_ENABLED,
+);
+const nonActiveSweepEnabled = nonActiveSweepEnabledSetting ?? true;
+const nonActiveSweepEvery = clampInt(
+  parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_EVERY),
+  { min: 1, max: 10_000, fallback: 6 },
+);
+const nonActiveSweepMaxPages = clampInt(
+  parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_MAX_PAGES),
+  { min: 1, max: 10_000, fallback: 2 },
+);
+const nonActiveSweepPageSize = clampInt(
+  parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_PAGE_SIZE),
+  { min: 1, max: 500, fallback: 100 },
+);
+const nonActiveSweepOverlapPages = clampInt(
+  parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_OVERLAP_PAGES),
+  { min: 0, max: 1000, fallback: 1 },
+);
+const allowedSweepStatuses = new Set([
+  "closed",
+  "inactive",
+  "settled",
+  "archived",
+  "resolved",
+]);
+const nonActiveSweepStatuses =
+  parseCsvLowercase(process.env.DFLOW_NON_ACTIVE_SWEEP_STATUSES)?.filter(
+    (status) => allowedSweepStatuses.has(status),
+  ) ?? ["closed", "inactive"];
 
 const hotTokensTtlSec = clampInt(parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC), {
   min: 60,
@@ -270,6 +317,13 @@ export const env = {
   catchupEnabled,
   overlapPages,
   catchupMaxPages,
+  nonActiveSweepEnabledSetting,
+  nonActiveSweepEnabled,
+  nonActiveSweepEvery,
+  nonActiveSweepMaxPages,
+  nonActiveSweepPageSize,
+  nonActiveSweepOverlapPages,
+  nonActiveSweepStatuses,
   hotTokensTtlSec,
   hotTokensMax,
   isInitializedSetting,
@@ -290,7 +344,5 @@ export const env = {
   wsHotShare,
 
   // Phase 1 constraint (documented in INTEGRATIONS_PLAN.md)
-  solanaUsdcMint:
-    process.env.DFLOW_USDC_MINT ??
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  solanaUsdcMint,
 };

@@ -4,6 +4,7 @@ import {
   syncCatchUpFromCursor,
   syncHotMarketStatuses,
   syncHotWindow,
+  syncNonActiveSweep,
   syncRecentTrades,
   resolveHotTickersForWs,
 } from "./bootstrap.js";
@@ -12,13 +13,19 @@ import { log } from "./log.js";
 import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 
 let running = false;
+let bootstrapRuns = 0;
 
 async function periodicBootstrap() {
   if (running) return;
   running = true;
+  const runNo = bootstrapRuns;
+  bootstrapRuns += 1;
   try {
     await syncHotWindow();
     await syncHotMarketStatuses();
+    if (env.nonActiveSweepEnabled && runNo % env.nonActiveSweepEvery === 0) {
+      await syncNonActiveSweep();
+    }
     await syncRecentTrades();
     const tickers = await resolveHotTickersForWs();
     updateMarketWSSubscriptions(tickers);

@@ -90,9 +90,30 @@ export function mapDflowStatusToUnified(
   if (!s) return "ACTIVE";
 
   if (["archived"].includes(s)) return "ARCHIVED";
-  if (["finalized", "finalised", "determined", "settled"].includes(s))
+  if (
+    [
+      "finalized",
+      "finalised",
+      "determined",
+      "settled",
+      "resolved",
+    ].includes(s)
+  )
     return "SETTLED";
-  if (["closed", "expired", "halted", "suspended"].includes(s)) return "CLOSED";
+  if (
+    [
+      "closed",
+      "expired",
+      "halted",
+      "suspended",
+      "inactive",
+      "paused",
+      "cancelled",
+      "canceled",
+      "void",
+    ].includes(s)
+  )
+    return "CLOSED";
 
   return "ACTIVE";
 }

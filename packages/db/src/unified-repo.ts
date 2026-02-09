@@ -585,13 +585,14 @@ export async function syncUnifiedMarketTokens(
         await pool.query(
           `
             insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
-            select market_id, token_id, venue, outcome_side
+            select x.market_id, x.token_id, x.venue, x.outcome_side
             from jsonb_to_recordset($1::jsonb) as x(
               market_id text,
               token_id text,
               venue text,
               outcome_side text
             )
+            join unified_markets um on um.id = x.market_id
             on conflict (market_id, token_id) do update
               set venue = excluded.venue,
                   outcome_side = excluded.outcome_side

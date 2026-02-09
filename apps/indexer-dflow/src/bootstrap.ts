@@ -17,8 +17,11 @@ import {
 import { env } from "./env.js";
 import {
   getDflowEventsOffset,
+  getDflowEventsOffsetByStatus,
   resetDflowEventsOffset,
+  resetDflowEventsOffsetByStatus,
   setDflowEventsOffset,
+  setDflowEventsOffsetByStatus,
 } from "./cursor.js";
 import { pool } from "./db.js";
 import { log } from "./log.js";
@@ -51,6 +54,92 @@ const STATUS_POSITION_TOKEN_LIMIT = 200;
 const TRADE_MIN_SIZE = 1e-9;
 
 type TradeSide = "BUY" | "SELL";
+
+function logZeroMarketAnomaly(
+  context: "hot" | "catch-up",
+  totals: SyncCounters,
+): void {
+  if (totals.processedEvents <= 0 || totals.processedMarkets > 0) return;
+  log.err("DFlow sync anomaly: events processed but zero markets mapped", {
+    context,
+    processedEvents: totals.processedEvents,
+    processedMarkets: totals.processedMarkets,
+    pages: totals.pages,
+    requireInitialized: env.requireInitialized,
+    isInitialized: env.isInitialized,
+    solanaUsdcMint: env.solanaUsdcMint,
+  });
+}
+
+async function reconcileKalshiEventStatuses(
+  eventIds?: string[],
+): Promise<number> {
+  if (eventIds && eventIds.length === 0) return 0;
+
+  const uniqueEventIds = eventIds
+    ? Array.from(new Set(eventIds)).filter(Boolean)
+    : undefined;
+  if (eventIds && !uniqueEventIds?.length) return 0;
+
+  const byIdsSql = `
+    with target as (
+      select unnest($1::text[]) as event_id
+    ),
+    agg as (
+      select
+        m.event_id,
+        case
+          when bool_or(m.status = 'ACTIVE') then 'ACTIVE'::unified_status
+          when bool_or(m.status = 'SETTLED') then 'SETTLED'::unified_status
+          when bool_or(m.status = 'CLOSED') then 'CLOSED'::unified_status
+          when bool_or(m.status = 'ARCHIVED') then 'ARCHIVED'::unified_status
+          else 'ACTIVE'::unified_status
+        end as status
+      from unified_markets m
+      join target t on t.event_id = m.event_id
+      where m.venue = 'kalshi'
+      group by m.event_id
+    )
+    update unified_events e
+    set status = agg.status,
+        updated_at = now()
+    from agg
+    where e.id = agg.event_id
+      and e.venue = 'kalshi'
+      and e.status is distinct from agg.status
+    returning e.id
+  `;
+
+  const allSql = `
+    with agg as (
+      select
+        m.event_id,
+        case
+          when bool_or(m.status = 'ACTIVE') then 'ACTIVE'::unified_status
+          when bool_or(m.status = 'SETTLED') then 'SETTLED'::unified_status
+          when bool_or(m.status = 'CLOSED') then 'CLOSED'::unified_status
+          when bool_or(m.status = 'ARCHIVED') then 'ARCHIVED'::unified_status
+          else 'ACTIVE'::unified_status
+        end as status
+      from unified_markets m
+      where m.venue = 'kalshi'
+      group by m.event_id
+    )
+    update unified_events e
+    set status = agg.status,
+        updated_at = now()
+    from agg
+    where e.id = agg.event_id
+      and e.venue = 'kalshi'
+      and e.status is distinct from agg.status
+    returning e.id
+  `;
+
+  const result = uniqueEventIds
+    ? await pool.query(byIdsSql, [uniqueEventIds])
+    : await pool.query(allSql);
+  return result.rowCount ?? 0;
+}
 
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
   if (b.volume24h !== a.volume24h) return b.volume24h - a.volume24h;
@@ -545,92 +634,93 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
   const hotTokenIds = await fetchHotTokenIds();
   const positionTokenIds = await fetchPositionTokenIds();
 
-  const allTokenIds = Array.from(
-    new Set([...hotTokenIds, ...positionTokenIds]),
-  );
-  if (!allTokenIds.length) return { processedMarkets: 0 };
-
-  const mints = Array.from(
-    new Set(
-      allTokenIds
-        .map((tokenId) => stripSolanaPrefix(tokenId))
-        .filter((mint): mint is string => Boolean(mint)),
-    ),
-  );
-
-  if (!mints.length) return { processedMarkets: 0 };
-
-  const batches = chunkArray(mints, STATUS_BATCH_LIMIT);
-  const markets: TDflowMarket[] = [];
-  for (const batch of batches) {
-    const result = await fetchMarketsBatch({ mints: batch });
-    markets.push(...result);
-  }
-
-  const tickers = markets
-    .map((market) => market.ticker)
-    .filter((ticker): ticker is string => Boolean(ticker));
-  const eventInfoByTicker = await fetchMarketEventInfoByTickers(tickers);
-
-  const unifiedMarketRows: UnifiedMarketRow[] = [];
-  const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
-
+  const allTokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));
   let processedMarkets = 0;
 
-  for (const market of markets) {
-    const eventInfo = eventInfoByTicker.get(market.ticker);
-    if (!eventInfo) continue;
-    const mapped = mapToUnifiedMarket(
-      market,
-      eventInfo.eventId,
-      eventInfo.eventTitle,
-      env.solanaUsdcMint,
-      env.requireInitialized,
+  if (allTokenIds.length) {
+    const mints = Array.from(
+      new Set(
+        allTokenIds
+          .map((tokenId) => stripSolanaPrefix(tokenId))
+          .filter((mint): mint is string => Boolean(mint)),
+      ),
     );
-    if (!mapped) continue;
-    unifiedMarketRows.push(mapped.marketRow);
-    tokenRows.push(...mapped.tokenRows);
-    processedMarkets += 1;
-  }
 
-  if (unifiedMarketRows.length) {
-    await upsertUnifiedMarkets(pool, unifiedMarketRows);
-  }
-  if (tokenRows.length) {
-    await upsertUnifiedTokens(pool, tokenRows);
-  }
+    if (mints.length) {
+      const batches = chunkArray(mints, STATUS_BATCH_LIMIT);
+      const markets: TDflowMarket[] = [];
+      for (const batch of batches) {
+        const result = await fetchMarketsBatch({ mints: batch });
+        markets.push(...result);
+      }
 
-  if (unifiedMarketRows.length) {
-    try {
-      const eventTitleById = new Map(
-        Array.from(eventInfoByTicker.values()).map((info) => [
-          info.eventId,
-          info.eventTitle,
-        ]),
-      );
-      const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
-        entity_type: "market",
-        market_id: row.id,
-        venue: row.venue,
-        status: row.status,
-        market_title: row.title,
-        event_title: eventTitleById.get(row.event_id),
-        description: row.description,
-        category: row.category,
-        outcomes: row.outcomes,
-        market_type: row.market_type,
-        updated_at: row.updated_at ?? row.created_at,
-        source: "dflow",
-      }));
-      await enqueueEmbedItems(redis, embedMarkets);
-    } catch (err) {
-      log.warn("DFlow embed enqueue failed", err);
+      const tickers = markets
+        .map((market) => market.ticker)
+        .filter((ticker): ticker is string => Boolean(ticker));
+      const eventInfoByTicker = await fetchMarketEventInfoByTickers(tickers);
+
+      const unifiedMarketRows: UnifiedMarketRow[] = [];
+      const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
+
+      for (const market of markets) {
+        const eventInfo = eventInfoByTicker.get(market.ticker);
+        if (!eventInfo) continue;
+        const mapped = mapToUnifiedMarket(
+          market,
+          eventInfo.eventId,
+          eventInfo.eventTitle,
+          env.solanaUsdcMint,
+          env.requireInitialized,
+        );
+        if (!mapped) continue;
+        unifiedMarketRows.push(mapped.marketRow);
+        tokenRows.push(...mapped.tokenRows);
+        processedMarkets += 1;
+      }
+
+      if (unifiedMarketRows.length) {
+        await upsertUnifiedMarkets(pool, unifiedMarketRows);
+      }
+      if (tokenRows.length) {
+        await upsertUnifiedTokens(pool, tokenRows);
+      }
+
+      if (unifiedMarketRows.length) {
+        try {
+          const eventTitleById = new Map(
+            Array.from(eventInfoByTicker.values()).map((info) => [
+              info.eventId,
+              info.eventTitle,
+            ]),
+          );
+          const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+            entity_type: "market",
+            market_id: row.id,
+            venue: row.venue,
+            status: row.status,
+            market_title: row.title,
+            event_title: eventTitleById.get(row.event_id),
+            description: row.description,
+            category: row.category,
+            outcomes: row.outcomes,
+            market_type: row.market_type,
+            updated_at: row.updated_at ?? row.created_at,
+            source: "dflow",
+          }));
+          await enqueueEmbedItems(redis, embedMarkets);
+        } catch (err) {
+          log.warn("DFlow embed enqueue failed", err);
+        }
+      }
     }
   }
+
+  const reconciledEvents = await reconcileKalshiEventStatuses();
 
   log.info("DFlow hot status refresh complete", {
     tokens: allTokenIds.length,
     markets: processedMarkets,
+    reconciledEvents,
   });
 
   return { processedMarkets };
@@ -725,6 +815,11 @@ async function processEvents(
   }
   if (tokenRows.length) {
     await upsertUnifiedTokens(pool, tokenRows);
+  }
+  if (unifiedMarketRows.length) {
+    await reconcileKalshiEventStatuses(
+      unifiedMarketRows.map((row) => row.event_id),
+    );
   }
 
   if (unifiedEventRows.length || unifiedMarketRows.length) {
@@ -831,6 +926,8 @@ export async function syncHotWindow(): Promise<SyncCounters> {
     for (const snap of r.snapshots) snapshotByMarketId.set(snap.marketId, snap);
   }
 
+  logZeroMarketAnomaly("hot", totals);
+
   const snapshots = Array.from(snapshotByMarketId.values());
   snapshots.sort(byHotness);
   const hot = snapshots.slice(0, env.topBookSnapshot);
@@ -841,6 +938,82 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   if (hotTokenCount > 0) totals.publishedHotTokens = hotTokenCount;
 
   log.info("DFlow hot refresh complete", totals);
+  return totals;
+}
+
+export async function syncNonActiveSweep(): Promise<SyncCounters> {
+  if (!env.dflowEnabled) {
+    log.warn("DFlow indexer disabled", { issues: env.dflowIssues });
+    return { processedEvents: 0, processedMarkets: 0, pages: 0 };
+  }
+  if (!env.nonActiveSweepEnabled || env.nonActiveSweepStatuses.length === 0) {
+    return { processedEvents: 0, processedMarkets: 0, pages: 0 };
+  }
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const totals: SyncCounters = {
+    processedEvents: 0,
+    processedMarkets: 0,
+    pages: 0,
+  };
+  const seriesLookup = await getSeriesLookup();
+
+  for (const status of env.nonActiveSweepStatuses) {
+    const cursorOffset = await getDflowEventsOffsetByStatus(status);
+    const overlap = env.nonActiveSweepOverlapPages * env.nonActiveSweepPageSize;
+    const startCursor = Math.max(0, cursorOffset - overlap);
+
+    let statusPages = 0;
+    let statusEvents = 0;
+    let statusMarkets = 0;
+    let lastCursor = cursorOffset;
+
+    for await (const page of iterateEventPages({
+      label: `non-active:${status}`,
+      startCursor,
+      pageSize: env.nonActiveSweepPageSize,
+      maxPages: env.nonActiveSweepMaxPages,
+      status,
+      withNestedMarkets: true,
+    })) {
+      statusPages += 1;
+      totals.pages += 1;
+
+      const r = await processEvents(page.events, seriesLookup);
+      statusEvents += r.processedEvents;
+      statusMarkets += r.processedMarkets;
+      totals.processedEvents += r.processedEvents;
+      totals.processedMarkets += r.processedMarkets;
+
+      const baseCursor = page.cursor ?? 0;
+      const computed = baseCursor + page.events.length;
+      const nextCursor = page.nextCursor ?? computed;
+      lastCursor = nextCursor;
+      await setDflowEventsOffsetByStatus(status, nextCursor);
+    }
+
+    if (statusPages === 0 && cursorOffset > 0) {
+      // Cursor reached the end for this status; reset to rescan from head next cycle.
+      await resetDflowEventsOffsetByStatus(status);
+      lastCursor = 0;
+    }
+
+    log.info("DFlow non-active sweep status complete", {
+      status,
+      cursorOffset,
+      startCursor,
+      lastCursor,
+      pages: statusPages,
+      events: statusEvents,
+      markets: statusMarkets,
+    });
+  }
+
+  if (totals.pages > 0) {
+    log.info("DFlow non-active sweep complete", totals);
+  }
   return totals;
 }
 
@@ -909,6 +1082,8 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
       });
     }
   }
+
+  logZeroMarketAnomaly("catch-up", totals);
 
   log.info("DFlow catch-up complete", totals);
   return totals;
