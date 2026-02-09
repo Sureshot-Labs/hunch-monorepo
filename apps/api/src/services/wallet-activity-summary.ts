@@ -475,6 +475,9 @@ export async function fetchWalletActivitySummaries(
           end as potential_payout_usd,
           case
             when coalesce(mr.close_time, mr.expiration_time) is null then 'unknown'
+            when mr.occurred_at is null then 'unknown'
+            when coalesce(mr.close_time, mr.expiration_time) <= mr.occurred_at
+              then 'unknown'
             when extract(
               epoch from (coalesce(mr.close_time, mr.expiration_time) - mr.occurred_at)
             ) / 3600.0 <= $10::numeric then 'very_late'
