@@ -1664,8 +1664,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if ((change.signalScore ?? 0) < minScore) continue;
             if ((change.stakeUsd ?? 0) < minStakeUsd) continue;
             if (change.odds == null || change.odds > maxOdds) continue;
-            if ((change.idleDays ?? 0) < minIdleDays) continue;
-            if ((change.priorDistinctMarkets ?? 0) > maxPriorMarkets) continue;
+            const passesIdleDays = (change.idleDays ?? 0) >= minIdleDays;
+            const passesPriorMarkets =
+              (change.priorDistinctMarkets ?? 0) <= maxPriorMarkets;
+            if (!passesIdleDays && !passesPriorMarkets) continue;
             if ((change.potentialPayoutUsd ?? 0) < minPayoutUsd) continue;
             items.push({
               walletId: row.id,

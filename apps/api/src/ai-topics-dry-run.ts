@@ -6,6 +6,12 @@ type Category = "crypto" | "politics" | "sports" | "other";
 
 type EntityType = "ticker" | "match" | "person" | "country" | "keyword";
 
+type EntityArchetype =
+  | "generic"
+  | "head_to_head"
+  | "candidate_list"
+  | "competition_winner";
+
 type Constraint =
   | {
       kind: "threshold";
@@ -59,6 +65,9 @@ type TopicAggregate = {
   category: Category;
   entityType: EntityType;
   entity: string;
+  archetype: EntityArchetype;
+  entitySource: "event" | "market" | "combined" | "derived";
+  unknownReason: string | null;
   constraint: Constraint;
   constraintHash: string;
   timeBucket: string;
@@ -74,6 +83,9 @@ type TopicSummaryRow = {
   category: Category;
   entityType: EntityType;
   entity: string;
+  archetype: EntityArchetype;
+  entitySource: "event" | "market" | "combined" | "derived";
+  unknownReason: string | null;
   constraint: Constraint;
   constraintHash: string;
   timeBucket: string;
@@ -94,11 +106,13 @@ type Args = {
   minLiquidity: number;
   maxSpread: number | null;
   requireOpenNow: boolean;
-  orderBy: "trending" | "updated";
+  orderBy: "trending" | "updated" | "random";
   sampling: "per-venue" | "global";
   perVenueQuota: number | null;
   showTop: number;
   showQueries: number;
+  includeUnknownFallback: boolean;
+  unknownMinMarketCount: number;
   cacheHitRate: number;
   tierAMarketThreshold: number;
   tierBMarketThreshold: number;
@@ -221,6 +235,22 @@ const DAY_TOKENS = new Set([
   "sun",
 ]);
 
+const TEMPORAL_TOKENS = new Set([
+  "before",
+  "after",
+  "by",
+  "until",
+  "during",
+  "between",
+  "within",
+  "next",
+  "this",
+  "last",
+  "today",
+  "tomorrow",
+  "yesterday",
+]);
+
 const GENERIC_TOKENS = new Set([
   "market",
   "markets",
@@ -326,6 +356,16 @@ const ENTITY_LEADING_NOISE = new Set([
   "why",
   "how",
   "which",
+  "before",
+  "after",
+  "by",
+  "until",
+  "during",
+  "between",
+  "within",
+  "next",
+  "this",
+  "last",
 ]);
 
 const ENTITY_TRAILING_NOISE = new Set([
@@ -409,9 +449,16 @@ const SPORTS_ENTITY_PATTERNS: Array<{ regex: RegExp; entity: string }> = [
   { regex: /\bmlb\b|\bbaseball\b/i, entity: "mlb" },
   { regex: /\bnhl\b|\bhockey\b/i, entity: "nhl" },
   { regex: /\bepl\b|\bpremier league\b/i, entity: "premier-league" },
+  { regex: /\bla liga\b/i, entity: "la-liga" },
+  { regex: /\bserie a\b/i, entity: "serie-a" },
+  { regex: /\bbundesliga\b/i, entity: "bundesliga" },
+  { regex: /\bligue 1\b/i, entity: "ligue-1" },
+  { regex: /\bmls\b|\bmajor league soccer\b/i, entity: "mls" },
   { regex: /\bchampions league\b|\bucl\b/i, entity: "champions-league" },
   { regex: /\bworld cup\b/i, entity: "world-cup" },
   { regex: /\bolympics?\b/i, entity: "olympics" },
+  { regex: /\bpga\b|\bphoenix open\b|\bmasters\b/i, entity: "pga-tour" },
+  { regex: /\batp\b|\bwta\b|\bgrand slam\b/i, entity: "tennis-tour" },
   { regex: /\bformula ?1\b|\bf1\b/i, entity: "formula-1" },
   { regex: /\bufc\b|\bmma\b/i, entity: "ufc" },
   {
@@ -421,7 +468,15 @@ const SPORTS_ENTITY_PATTERNS: Array<{ regex: RegExp; entity: string }> = [
 ];
 
 const SPORTS_CATEGORY_HINT_PATTERN =
-  /\b(nfl|nba|mlb|nhl|ncaa|soccer|football|basketball|baseball|hockey|tennis|golf|ufc|mma|olympics?|world cup|premier league|championship|playoff|super bowl|big game|final)\b/i;
+  /\b(nfl|nba|mlb|nhl|ncaa|soccer|football|basketball|baseball|hockey|tennis|golf|ufc|mma|olympics?|world cup|premier league|la liga|serie a|bundesliga|ligue 1|mls|championship|playoff|super bowl|big game|final|winner|mvp|masters|open)\b/i;
+
+const HEAD_TO_HEAD_PATTERN = /\b(vs\.?|@|at)\b/i;
+
+const SPORTS_COMPETITION_OR_AWARD_PATTERN =
+  /\b(winner|champion|championship|mvp|stanley cup|super bowl|world series|world cup|masters|open|heisman|ballon d'or)\b/i;
+
+const POLITICS_CANDIDATE_PATTERN =
+  /\b(nominee|next (?:prime minister|president|chancellor|leader)|election winner|next government|coalition|who will|who(?:'s| is) out|leaders? out|out in \d{4})\b/i;
 
 const SPORTS_NOISE_PATTERNS = [
   /\bmore markets?\b/gi,
@@ -484,6 +539,16 @@ const POLITICS_COUNTRIES = new Set([
   "us",
   "usa",
   "united-states",
+  "oman",
+  "saudi-arabia",
+  "united-arab-emirates",
+  "uae",
+  "qatar",
+  "jordan",
+  "lebanon",
+  "syria",
+  "egypt",
+  "turkey",
   "china",
   "russia",
   "uk",
@@ -503,6 +568,7 @@ const POLITICS_COUNTRY_ALIASES = new Map<string, string>([
   ["us", "united-states"],
   ["usa", "united-states"],
   ["uk", "united-kingdom"],
+  ["uae", "united-arab-emirates"],
 ]);
 
 const POLITICS_ROLE_PATTERNS: Array<{ regex: RegExp; entity: string }> = [
@@ -536,6 +602,26 @@ const CRYPTO_ALIAS_TO_TICKER = new Map<string, string>([
   ["usdc", "usdc"],
   ["usdt", "usdt"],
   ["tether", "usdt"],
+]);
+
+const CRYPTO_FALLBACK_EXCLUDE = new Set([
+  "market",
+  "cap",
+  "fdv",
+  "launch",
+  "price",
+  "prices",
+  "token",
+  "chain",
+  "network",
+  "day",
+  "one",
+  "above",
+  "below",
+  "reach",
+  "reaches",
+  "hit",
+  "hits",
 ]);
 
 function parseFlag(args: string[], flag: string): string | undefined {
@@ -618,8 +704,12 @@ function parseSampling(value: string | undefined): "per-venue" | "global" {
   return value === "global" ? "global" : "per-venue";
 }
 
-function parseOrderBy(value: string | undefined): "trending" | "updated" {
-  return value === "updated" ? "updated" : "trending";
+function parseOrderBy(
+  value: string | undefined,
+): "trending" | "updated" | "random" {
+  if (value === "updated") return "updated";
+  if (value === "random") return "random";
+  return "trending";
 }
 
 function parseTierBMode(value: string | undefined): "normal" | "shed" {
@@ -661,6 +751,14 @@ function resolveArgs(argv: string[]): Args {
     })(),
     showTop: parsePositiveInt(parseFlag(argv, "--show-top"), 20),
     showQueries: parsePositiveInt(parseFlag(argv, "--show-queries"), 12),
+    includeUnknownFallback: parseBoolean(
+      parseFlag(argv, "--include-unknown-fallback"),
+      true,
+    ),
+    unknownMinMarketCount: parsePositiveInt(
+      parseFlag(argv, "--unknown-min-market-count"),
+      3,
+    ),
     cacheHitRate: parseFraction(parseFlag(argv, "--cache-hit-rate"), 0.35),
     tierAMarketThreshold: parsePositiveInt(
       parseFlag(argv, "--tier-a-market-threshold"),
@@ -731,11 +829,13 @@ Options:
   --min-liquidity <n>   Minimum liquidity/open-interest proxy filter (default: 0)
   --max-spread <n>      Optional max spread filter (requires best bid+ask)
   --require-open-now <bool>  Exclude expired/closed markets by time (default: true)
-  --order-by <mode>     Sampling order: trending|updated (default: trending)
+  --order-by <mode>     Sampling order: trending|updated|random (default: trending)
   --sampling <mode>      Sampling strategy: per-venue|global (default: per-venue)
   --per-venue-quota <n>  Optional fixed quota per venue (default: auto from limit)
   --show-top <n>         Show top N topics in text mode (default: 20)
   --show-queries <n>     Show top N synthesized search queries (default: 12)
+  --include-unknown-fallback <bool> Include unknown entities in search modeling (default: true)
+  --unknown-min-market-count <n>  Min marketCount for unknown fallback topics (default: 3)
   --cache-hit-rate <f>   Estimated cache-hit rate for external search [0..1] (default: 0.35)
   --tier-a-market-threshold <n> Tier A if marketCount >= n (default: 20)
   --tier-b-market-threshold <n> Tier B if marketCount >= n (default: 5)
@@ -839,7 +939,11 @@ function normalizeCategory(
     lower.includes("election") ||
     lower.includes("president") ||
     lower.includes("senate") ||
-    lower.includes("ceasefire")
+    lower.includes("ceasefire") ||
+    lower.includes("prime minister") ||
+    lower.includes("government") ||
+    lower.includes("coalition") ||
+    lower.includes("parliament")
   ) {
     return "politics";
   }
@@ -1047,11 +1151,30 @@ function hashConstraint(constraint: Constraint): string {
   return createHash("sha1").update(stable).digest("hex").slice(0, 16);
 }
 
+function compactWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function cleanTeamSide(value: string): string {
+  const normalized = normalizeSlug(value)
+    .replace(
+      /^(championship|playoff|playoffs|final|finals|game|match|round|stage|group)-/,
+      "",
+    )
+    .replace(/-(before|after|by).*$/, "")
+    .replace(/-?\d+(st|nd|rd|th)?$/, "")
+    .replace(/^-+|-+$/g, "");
+  if (!normalized) return "";
+  if (GENERIC_TOKENS.has(normalized)) return "";
+  if (KEYWORD_NOISE.has(normalized)) return "";
+  return normalized;
+}
+
 function extractTeams(text: string): [string, string] | null {
   const match = text.match(/(.+?)\s+(?:vs\.?|@|at)\s+(.+)/i);
   if (!match) return null;
-  let left = normalizeSlug(match[1]).replace(/-(before|after|by).*$/, "");
-  let right = normalizeSlug(match[2]).replace(/-(before|after|by).*$/, "");
+  let left = cleanTeamSide(match[1]);
+  let right = cleanTeamSide(match[2]);
   if (!left || !right) return null;
   // Canonical ordering prevents duplicate topics for "A vs B" and "B @ A".
   if (right.localeCompare(left) < 0) {
@@ -1060,8 +1183,55 @@ function extractTeams(text: string): [string, string] | null {
   return [left, right];
 }
 
+function extractAcronymTokens(text: string): string[] {
+  const matches = text.match(/\b[A-Z]{2,8}\b/g) ?? [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of matches) {
+    const slug = normalizeSlug(item);
+    if (!slug) continue;
+    if (MONTH_TOKENS.has(slug) || DAY_TOKENS.has(slug)) continue;
+    if (GENERIC_TOKENS.has(slug)) continue;
+    if (KEYWORD_NOISE.has(slug)) continue;
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(slug);
+  }
+  return out;
+}
+
+function detectEntityArchetype(
+  category: Category,
+  eventTitle: string | null,
+  marketTitle: string | null,
+): EntityArchetype {
+  const event = `${eventTitle ?? ""}`;
+  const market = `${marketTitle ?? ""}`;
+  const combined = `${event} ${market}`.toLowerCase();
+  if (category === "sports") {
+    if (HEAD_TO_HEAD_PATTERN.test(combined)) return "head_to_head";
+    if (SPORTS_COMPETITION_OR_AWARD_PATTERN.test(combined)) {
+      return "competition_winner";
+    }
+    if (
+      /\b(attend|attendance|starter|lineup|injury|injured|suspended)\b/i.test(
+        combined,
+      )
+    ) {
+      return "candidate_list";
+    }
+  }
+  if (category === "politics") {
+    if (POLITICS_CANDIDATE_PATTERN.test(combined)) return "candidate_list";
+  }
+  return "generic";
+}
+
 function extractCapitalizedPhrases(text: string): string[] {
-  const matches = text.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) ?? [];
+  const matches =
+    text.match(
+      /\b(?:[A-Z]{2,}|[A-Z][\p{L}'’.-]+)(?:\s+(?:[A-Z]{2,}|[A-Z][\p{L}'’.-]+)){0,3}\b/gu,
+    ) ?? [];
   const cleaned: string[] = [];
   const seen = new Set<string>();
 
@@ -1080,6 +1250,17 @@ function extractCapitalizedPhrases(text: string): string[] {
 
     const candidate = parts.join("-");
     if (!candidate) continue;
+    if (
+      parts.every(
+        part =>
+          MONTH_TOKENS.has(part) ||
+          DAY_TOKENS.has(part) ||
+          TEMPORAL_TOKENS.has(part) ||
+          /^\d+$/.test(part),
+      )
+    ) {
+      continue;
+    }
     if (QUESTION_ENTITY_BLOCKLIST.has(candidate)) continue;
     if (GENERIC_TOKENS.has(candidate)) continue;
     if (MONTH_TOKENS.has(candidate)) continue;
@@ -1110,51 +1291,225 @@ function extractKeywordEntity(text: string): string {
   return normalizeSlug(first);
 }
 
+function extractCandidateEntityFromText(
+  text: string,
+  category: Category,
+): string | null {
+  const normalized = normalizeTitle(text, category);
+  const phrases = extractCapitalizedPhrases(text);
+  for (const phrase of phrases) {
+    if (phrase.length < 3) continue;
+    if (STOPWORDS.has(phrase)) continue;
+    if (QUESTION_ENTITY_BLOCKLIST.has(phrase)) continue;
+    if (GENERIC_TOKENS.has(phrase)) continue;
+    if (KEYWORD_NOISE.has(phrase)) continue;
+    if (MONTH_TOKENS.has(phrase) || DAY_TOKENS.has(phrase)) continue;
+    if (TEMPORAL_TOKENS.has(phrase)) continue;
+    return phrase;
+  }
+  const acronyms = extractAcronymTokens(text);
+  if (acronyms.length > 0) {
+    return acronyms[0];
+  }
+  if (category === "politics") {
+    return null;
+  }
+  const tokens = tokenizeNormalized(normalized).filter(
+    token => !POLITICS_GENERIC_LABELS.has(token),
+  );
+  return tokens.length > 0 ? tokens[0] : null;
+}
+
+function extractCoalitionEntity(text: string): string | null {
+  if (!/[+&/]/.test(text) && !/\band\b/i.test(text)) return null;
+  const acronyms = extractAcronymTokens(text);
+  if (acronyms.length < 2) return null;
+  return `${acronyms.slice(0, 3).join("-")}-coalition`;
+}
+
+function isLowSignalOutcomeLabel(value: string): boolean {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (!normalized) return true;
+  if (/^[a-z]$/.test(normalized)) return true;
+  if (/^(player|team)\s+[a-z0-9-]+$/.test(normalized)) return true;
+  if (/^(yes|no|over|under|true|false)$/i.test(normalized)) return true;
+  if (/^[<>]=?\s*\d/.test(normalized)) return true;
+  return false;
+}
+
+function searchSubjectFromUnknownTopic(topic: TopicSummaryRow): string {
+  const event = compactWhitespace(topic.sampleEventTitle ?? "");
+  const market = compactWhitespace(topic.sampleMarketTitle ?? "");
+  if (event && market) {
+    if (isLowSignalOutcomeLabel(market)) {
+      return event;
+    }
+    const loweredEvent = event.toLowerCase();
+    const loweredMarket = market.toLowerCase();
+    if (!loweredEvent.includes(loweredMarket)) {
+      return `${event} ${market}`;
+    }
+    return event;
+  }
+  if (event) return event;
+  if (market) return market;
+  return "prediction market event";
+}
+
 function resolveEntity(
   category: Category,
   eventTitle: string | null,
   marketTitle: string | null,
-): { type: EntityType; value: string } {
+): {
+  type: EntityType;
+  value: string;
+  source: "event" | "market" | "combined" | "derived";
+  archetype: EntityArchetype;
+  unknownReason: string | null;
+} {
   const rawText = `${eventTitle ?? ""} ${marketTitle ?? ""}`.trim();
   const normalizedText = normalizeTitle(rawText, category);
   const eventOnlyText = normalizeTitle(eventTitle ?? "", category);
   const marketOnlyText = normalizeTitle(marketTitle ?? "", category);
-  const entitySourceText = eventOnlyText || marketOnlyText || normalizedText;
-  const rawEntitySource = eventTitle?.trim() || marketTitle?.trim() || rawText;
+  const archetype = detectEntityArchetype(category, eventTitle, marketTitle);
+  const candidateFirst = archetype === "candidate_list" || archetype === "competition_winner";
+  const entitySourceText = candidateFirst
+    ? marketOnlyText || eventOnlyText || normalizedText
+    : eventOnlyText || marketOnlyText || normalizedText;
+  const rawEntitySource = candidateFirst
+    ? marketTitle?.trim() || eventTitle?.trim() || rawText
+    : eventTitle?.trim() || marketTitle?.trim() || rawText;
 
   if (category === "crypto") {
     for (const candidate of CRYPTO_MAP) {
       if (candidate.regex.test(rawEntitySource)) {
-        return { type: "ticker", value: candidate.entity };
+        return {
+          type: "ticker",
+          value: candidate.entity,
+          source: "combined",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
     const ticker = rawEntitySource.match(/\$([A-Z]{2,10})\b/);
     if (ticker) {
       const mapped = CRYPTO_ALIAS_TO_TICKER.get(ticker[1].toLowerCase());
-      if (mapped) return { type: "ticker", value: mapped };
-      return { type: "ticker", value: normalizeSlug(ticker[1]) };
+      if (mapped) {
+        return {
+          type: "ticker",
+          value: mapped,
+          source: "combined",
+          archetype,
+          unknownReason: null,
+        };
+      }
+      return {
+        type: "ticker",
+        value: normalizeSlug(ticker[1]),
+        source: "combined",
+        archetype,
+        unknownReason: null,
+      };
     }
     const cryptoTokens = tokenizeNormalized(entitySourceText);
     for (const token of cryptoTokens) {
       const mapped = CRYPTO_ALIAS_TO_TICKER.get(token);
-      if (mapped) return { type: "ticker", value: mapped };
+      if (mapped) {
+        return {
+          type: "ticker",
+          value: mapped,
+          source: "combined",
+          archetype,
+          unknownReason: null,
+        };
+      }
     }
+
+    const symbolLikeWords = (rawEntitySource.match(/\b([A-Z][A-Za-z0-9]{2,20})\b/g) ?? [])
+      .map(value => normalizeSlug(value))
+      .filter(
+        value =>
+          value.length >= 3 &&
+          !STOPWORDS.has(value) &&
+          !GENERIC_TOKENS.has(value) &&
+          !MONTH_TOKENS.has(value) &&
+          !DAY_TOKENS.has(value) &&
+          !KEYWORD_NOISE.has(value) &&
+          !CRYPTO_FALLBACK_EXCLUDE.has(value),
+      );
+    if (symbolLikeWords.length > 0) {
+      return {
+        type: "ticker",
+        value: symbolLikeWords[0],
+        source: "combined",
+        archetype,
+        unknownReason: null,
+      };
+    }
+
     // Conservative fallback for crypto: skip unknown entities rather than
     // producing noisy generic keywords that degrade search quality.
-    return { type: "keyword", value: "unknown" };
+    return {
+      type: "keyword",
+      value: "unknown",
+      source: "combined",
+      archetype,
+      unknownReason: "crypto_unresolved",
+    };
   }
 
   if (category === "sports") {
-    const teams = extractTeams(entitySourceText);
+    const teamInputs = candidateFirst
+      ? [marketOnlyText, eventOnlyText, normalizedText]
+      : [eventOnlyText, marketOnlyText, normalizedText];
+    const teams = teamInputs
+      .map(input => extractTeams(input))
+      .find((value): value is [string, string] => value !== null);
     if (teams) {
-      return { type: "match", value: `${teams[0]}-vs-${teams[1]}` };
+      return {
+        type: "match",
+        value: `${teams[0]}-vs-${teams[1]}`,
+        source: candidateFirst ? "market" : "event",
+        archetype,
+        unknownReason: null,
+      };
+    }
+
+    if (archetype === "competition_winner" || archetype === "candidate_list") {
+      const candidateFromMarket = extractCandidateEntityFromText(
+        marketTitle ?? "",
+        "sports",
+      );
+      if (candidateFromMarket) {
+        return {
+          type: "keyword",
+          value: normalizeSlug(candidateFromMarket),
+          source: "market",
+          archetype,
+          unknownReason: null,
+        };
+      }
     }
     for (const pattern of SPORTS_ENTITY_PATTERNS) {
       if (pattern.regex.test(entitySourceText)) {
-        return { type: "keyword", value: pattern.entity };
+        return {
+          type: "keyword",
+          value: pattern.entity,
+          source: "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
-    return { type: "keyword", value: "unknown" };
+    return {
+      type: "keyword",
+      value: "unknown",
+      source: candidateFirst ? "market" : "event",
+      archetype,
+      unknownReason:
+        archetype === "competition_winner" ? "sports_candidate_unresolved" : "sports_unresolved",
+    };
   }
 
   if (category === "politics") {
@@ -1164,23 +1519,115 @@ function resolveEntity(
     const hasRoleToken = (value: string): boolean =>
       value.split("-").some(part => POLITICS_ROLE_TOKENS.has(part));
 
+    if (archetype === "candidate_list") {
+      const coalition = extractCoalitionEntity(marketTitle ?? "");
+      if (coalition) {
+        return {
+          type: "keyword",
+          value: coalition,
+          source: "market",
+          archetype,
+          unknownReason: null,
+        };
+      }
+      const candidateFromMarket = extractCandidateEntityFromText(
+        marketTitle ?? "",
+        "politics",
+      );
+      if (candidateFromMarket) {
+        return {
+          type: "person",
+          value: normalizeSlug(candidateFromMarket),
+          source: "market",
+          archetype,
+          unknownReason: null,
+        };
+      }
+    }
+
+    // Some politics markets encode the candidate/entity in outcomes while
+    // event titles remain generic (e.g. "leaders out in 2026").
+    if (archetype === "generic") {
+      const marketCandidate = extractCandidateEntityFromText(
+        marketTitle ?? "",
+        "politics",
+      );
+      if (marketCandidate) {
+        const normalizedCandidate = normalizeSlug(marketCandidate);
+        const mappedCountry =
+          POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ??
+          normalizedCandidate;
+        const isSingleToken = !normalizedCandidate.includes("-");
+        const singleTokenIsWeak =
+          isSingleToken &&
+          !POLITICS_PERSON_ALLOWLIST.has(normalizedCandidate) &&
+          normalizedCandidate.length < 4;
+        if (
+          normalizedCandidate &&
+          !singleTokenIsWeak &&
+          !STOPWORDS.has(normalizedCandidate) &&
+          !TEMPORAL_TOKENS.has(normalizedCandidate) &&
+          !MONTH_TOKENS.has(normalizedCandidate) &&
+          !DAY_TOKENS.has(normalizedCandidate) &&
+          !QUESTION_ENTITY_BLOCKLIST.has(normalizedCandidate) &&
+          !POLITICS_GENERIC_LABELS.has(normalizedCandidate) &&
+          !KEYWORD_NOISE.has(normalizedCandidate)
+        ) {
+          if (POLITICS_COUNTRIES.has(mappedCountry)) {
+            return {
+              type: "country",
+              value: mappedCountry,
+              source: "market",
+              archetype,
+              unknownReason: null,
+            };
+          }
+          return {
+            type: "person",
+            value: normalizedCandidate,
+            source: "market",
+            archetype,
+            unknownReason: null,
+          };
+        }
+      }
+    }
+
     for (const pattern of POLITICS_ROLE_PATTERNS) {
       if (pattern.regex.test(source)) {
-        return { type: "keyword", value: pattern.entity };
+        return {
+          type: "keyword",
+          value: pattern.entity,
+          source: "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
 
     for (const phrase of phrases) {
       const mappedCountry = POLITICS_COUNTRY_ALIASES.get(phrase) ?? phrase;
       if (POLITICS_COUNTRIES.has(mappedCountry)) {
-        return { type: "country", value: mappedCountry };
+        return {
+          type: "country",
+          value: mappedCountry,
+          source: "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
 
     for (const token of sourceTokens) {
       const mappedCountry = POLITICS_COUNTRY_ALIASES.get(token) ?? token;
       if (POLITICS_COUNTRIES.has(mappedCountry)) {
-        return { type: "country", value: mappedCountry };
+        return {
+          type: "country",
+          value: mappedCountry,
+          source: "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
 
@@ -1203,19 +1650,39 @@ function resolveEntity(
           .every(part => !POLITICS_GENERIC_LABELS.has(part) && !KEYWORD_NOISE.has(part)),
     );
     if (multiWordPerson) {
-      return { type: "person", value: multiWordPerson };
+      return {
+        type: "person",
+        value: multiWordPerson,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
     }
 
-    const singleWordPerson = filteredPhrases.find(phrase =>
-      POLITICS_PERSON_ALLOWLIST.has(phrase),
+    const singleWordPerson = filteredPhrases.find(
+      phrase =>
+        POLITICS_PERSON_ALLOWLIST.has(phrase) ||
+        (archetype === "candidate_list" && phrase.length >= 4),
     );
     if (singleWordPerson) {
-      return { type: "person", value: singleWordPerson };
+      return {
+        type: "person",
+        value: singleWordPerson,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
     }
 
     const rolePhrase = filteredPhrases.find(phrase => hasRoleToken(phrase));
     if (rolePhrase) {
-      return { type: "keyword", value: rolePhrase };
+      return {
+        type: "keyword",
+        value: rolePhrase,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
     }
 
     const politicsKeyword = sourceTokens.find(
@@ -1228,25 +1695,58 @@ function resolveEntity(
         token === "ceasefire",
     );
     if (politicsKeyword) {
-      return { type: "keyword", value: politicsKeyword };
+      return {
+        type: "keyword",
+        value: politicsKeyword,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
     }
 
-    return { type: "keyword", value: "unknown" };
+    return {
+      type: "keyword",
+      value: "unknown",
+      source: candidateFirst ? "market" : "event",
+      archetype,
+      unknownReason:
+        archetype === "candidate_list"
+          ? "politics_candidate_unresolved"
+          : "politics_unresolved",
+    };
   }
 
   const keyword = extractKeywordEntity(normalizedText);
   const mappedTicker = CRYPTO_ALIAS_TO_TICKER.get(keyword);
   if (mappedTicker) {
-    return { type: "ticker", value: mappedTicker };
+    return {
+      type: "ticker",
+      value: mappedTicker,
+      source: "derived",
+      archetype,
+      unknownReason: null,
+    };
   }
   if (
     keyword === "unknown" ||
     QUESTION_ENTITY_BLOCKLIST.has(keyword) ||
     GENERIC_TOKENS.has(keyword)
   ) {
-    return { type: "keyword", value: "unknown" };
+    return {
+      type: "keyword",
+      value: "unknown",
+      source: "derived",
+      archetype,
+      unknownReason: "generic_unresolved",
+    };
   }
-  return { type: "keyword", value: keyword };
+  return {
+    type: "keyword",
+    value: keyword,
+    source: "derived",
+    archetype,
+    unknownReason: null,
+  };
 }
 
 type SqlParam = string[] | number | string;
@@ -1270,6 +1770,9 @@ function marketLiquidityDisplayExpr(alias = "m"): string {
 function marketOrderByClause(args: Args): string {
   if (args.orderBy === "updated") {
     return "m.updated_at desc nulls last, m.id desc";
+  }
+  if (args.orderBy === "random") {
+    return "random(), m.id";
   }
   const volumeExpr = marketVolumeDisplayExpr("m");
   const liquidityExpr = marketLiquidityDisplayExpr("m");
@@ -1463,6 +1966,9 @@ function buildTopicFromRow(row: MarketRow): {
   category: Category;
   entityType: EntityType;
   entity: string;
+  archetype: EntityArchetype;
+  entitySource: "event" | "market" | "combined" | "derived";
+  unknownReason: string | null;
   constraint: Constraint;
   constraintHash: string;
   timeBucket: string;
@@ -1486,6 +1992,9 @@ function buildTopicFromRow(row: MarketRow): {
     category,
     entityType: entity.type,
     entity: entity.value,
+    archetype: entity.archetype,
+    entitySource: entity.source,
+    unknownReason: entity.unknownReason,
     constraint,
     constraintHash,
     timeBucket,
@@ -1516,6 +2025,9 @@ function formatConstraintForQuery(constraint: Constraint): string {
 }
 
 function entityTerm(topic: TopicSummaryRow): string {
+  if (topic.entity === "unknown") {
+    return searchSubjectFromUnknownTopic(topic);
+  }
   if (topic.entityType === "match") {
     return topic.entity.replace(/-vs-/g, " vs ").replace(/-/g, " ");
   }
@@ -1754,6 +2266,9 @@ async function main(): Promise<void> {
         category: built.category,
         entityType: built.entityType,
         entity: built.entity,
+        archetype: built.archetype,
+        entitySource: built.entitySource,
+        unknownReason: built.unknownReason,
         constraint: built.constraint,
         constraintHash: built.constraintHash,
         timeBucket: built.timeBucket,
@@ -1781,6 +2296,9 @@ async function main(): Promise<void> {
       category: topic.category,
       entityType: topic.entityType,
       entity: topic.entity,
+      archetype: topic.archetype,
+      entitySource: topic.entitySource,
+      unknownReason: topic.unknownReason,
       constraint: topic.constraint,
       constraintHash: topic.constraintHash,
       timeBucket: topic.timeBucket,
@@ -1795,9 +2313,13 @@ async function main(): Promise<void> {
 
   const searchTopicMap = new Map<string, TopicSummaryRow>();
   for (const topic of topics) {
-    if (topic.entity === "unknown") continue;
     if (!args.searchCategories.includes(topic.category)) continue;
-    const searchKey = `${topic.category}|${topic.entityType}|${topic.entity}`;
+    const isUnknown = topic.entity === "unknown";
+    if (isUnknown && !args.includeUnknownFallback) continue;
+    if (isUnknown && topic.marketCount < args.unknownMinMarketCount) continue;
+    const searchKey = isUnknown
+      ? `${topic.category}|unknown|${topic.topicKey}`
+      : `${topic.category}|${topic.entityType}|${topic.entity}`;
     const existing = searchTopicMap.get(searchKey);
     if (!existing) {
       searchTopicMap.set(searchKey, { ...topic, venues: [...topic.venues] });
@@ -1823,6 +2345,9 @@ async function main(): Promise<void> {
       merged.timeBucket = topic.timeBucket;
       merged.sampleEventTitle = topic.sampleEventTitle;
       merged.sampleMarketTitle = topic.sampleMarketTitle;
+      merged.archetype = topic.archetype;
+      merged.entitySource = topic.entitySource;
+      merged.unknownReason = topic.unknownReason;
     }
     searchTopicMap.set(searchKey, merged);
   }
@@ -1864,6 +2389,9 @@ async function main(): Promise<void> {
       lookbackHours: lookback.lookbackHours,
       category: topic.category,
       entity: `${topic.entityType}:${topic.entity}`,
+      archetype: topic.archetype,
+      entitySource: topic.entitySource,
+      unknownReason: topic.unknownReason,
       marketCount: topic.marketCount,
       promptWebNews: queries.promptWebNews,
       promptWebDrivers: queries.promptWebDrivers,
@@ -1942,6 +2470,8 @@ async function main(): Promise<void> {
         maxSpread: args.maxSpread,
         requireOpenNow: args.requireOpenNow,
         orderBy: args.orderBy,
+        includeUnknownFallback: args.includeUnknownFallback,
+        unknownMinMarketCount: args.unknownMinMarketCount,
         cacheHitRate: args.cacheHitRate,
         tierAMarketThreshold: args.tierAMarketThreshold,
         tierBMarketThreshold: args.tierBMarketThreshold,

@@ -1325,101 +1325,145 @@ Pipeline:
 - DLQ rate `< 1%` steady state
 - budget cap breach days `= 0`
 
-## 30) Extractor Improvement Plan (next)
+## 30) Extractor Improvement Plan (implemented + next)
 
-Goal: improve topic/query precision before connecting dry-run outputs to real external retrieval.
+Goal: keep topic/query generation deterministic and high-precision before wiring live retrieval execution.
 
-Observed gaps from current dry-run output:
+### 30.1 What is now implemented in `ai-topics-dry-run.ts`
 
-- entity noise still appears (`person:will`, `keyword:attend`, `keyword:wahlberg`, etc.),
-- category balance is skewed (sports-heavy in top-N),
-- market fan-out can overweight one event/league family,
-- cost scales quickly with `N` even after dedupe.
+Implemented deterministic hardening (P0 + P1):
 
-### 30.1 Phase 1: entity normalization hardening (low risk, high value)
+- resolver archetypes: `generic`, `head_to_head`, `candidate_list`, `competition_winner`
+- source-aware entity extraction (`event` vs `market` vs `derived`) with provenance fields
+- politics candidate/cohort extraction from market outcomes (coalitions and person names)
+- sports head-to-head parsing expansion and winner/candidate handling
+- stricter unknown handling (`includeUnknownFallback`, `unknownMinMarketCount`)
+- low-signal outcome label guard for unknown topics (`A/B`, `Player X`, `Team N`, `Yes/No`), using event-only subject when needed
+- random sampling mode (`--order-by random`) for stress testing
+- improved crypto fallback (`MegaETH`-style symbol detection) without generic token bleed
 
-Changes:
+### 30.2 Before/after quality on the same benchmark slice
 
-- add blocklists for pronouns/aux verbs/common non-entities,
-- require stronger evidence for `person:*` extraction:
-  - minimum token length,
-  - title-case phrase checks,
-  - optional whitelist hit for politics persons/countries,
-- convert uncertain entity picks to `unknown` and suppress from search-intent execution.
+Benchmark command family:
 
-Acceptance:
+- `limit=100`
+- `sampling=per-venue`
+- `order-by=trending`
+- `show-top=500`
 
-- reduce noisy query-entity rate by at least 70% vs current top-50 baseline,
-- keep top-50 `uniqueSearchTopics` within +/-20% of baseline (avoid over-pruning).
+| Metric | Before hardening | After hardening |
+|---|---:|---:|
+| `rowsUsed` | `100` | `100` |
+| `uniqueTopics` | `67` | `86` |
+| `unknownTopics` | `17` (`25.37%`) | `0` (`0%`) |
+| `unknownMarketCoverage` | `29/100` (`29%`) | `0/100` (`0%`) |
+| `uniqueSearchTopics` | `26` | `62` |
+| `calls/day after cache` | `113.1` | `253.5` |
+| `tool cost/day` (`$0.005/call`) | `$0.57` | `$1.27` |
 
-### 30.2 Phase 2: market-to-topic balancing controls
+Interpretation:
 
-Changes:
+- quality improved materially (unknown coverage eliminated on the benchmark slice),
+- cost increased because more markets now resolve into executable topics,
+- still far below the `$10/day` launch ceiling.
 
-- add `--per-event-cap` to limit max sampled markets per event in extraction input,
-- add per-category caps for search execution (for example `sports <= 50%` of active search intents),
-- add venue-aware balancing option if one venue dominates sampled rows.
+### 30.3 Launch profile matrix (current code, deterministic trending runs)
 
-Acceptance:
+All profiles below:
 
-- no single event contributes more than configured cap in sampled input,
-- category distribution remains within configured guardrails for top-50/top-100 runs.
+- `search-categories=crypto,politics,sports`
+- default tiers (`A>=20`, `B>=5`) unless stated
+- default cadences (`A=10m`, `B=120m`, `C=240m`)
+- tool price model: `$0.005/call`
 
-### 30.3 Phase 3: feed-exact selector integration
+| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | calls/day after cache | tool $/day | tier A/B/C | sample kalshi/poly/limitless |
+|---|---:|---:|---:|---:|---:|---|---|
+| `global_50` | 50 | 36 | 0% | 140.4 | 0.702 | `0/0/36` | `48/1/1` |
+| `pervenue_50` | 50 | 30 | 0% | 117.0 | 0.585 | `0/0/30` | `17/16/17` |
+| `pervenue_60` | 60 | 37 | 0% | 144.3 | 0.722 | `0/0/37` | `20/20/20` |
+| `pervenue_100` | 100 | 62 | 0% | 253.5 | 1.268 | `0/1/61` | `34/32/34` |
+| `pervenue_50` with `tier-c-cadence=60` | 50 | 30 | 0% | 468.0 | 2.340 | `0/0/30` | `17/16/17` |
 
-Changes:
+Conclusion:
 
-- add optional mode that seeds extractor from feed-selected IDs:
-  - `mode=feed_top_n`
-  - uses the same repo path as feed ranking (`trending` / `trending_v2`) instead of approximate SQL ordering.
+- `global` remains venue-skewed,
+- `per-venue` gives stable diversity at low cost,
+- even hourly Tier-C refresh stays inexpensive.
 
-Acceptance:
+### 30.4 Random-stress validation (hardened resolver)
 
-- overlap between feed top-N IDs and extractor input IDs >= 95% in `feed_top_n` mode.
+Matrix: 10 runs (`limit=200`, `order-by=random`):
 
-### 30.4 Phase 4: retrieval-pack cost shaping
+- 5x `sampling=global`
+- 5x `sampling=per-venue`
 
-Changes:
+Average results:
 
-- dynamic pack policy by confidence/impact:
-  - Tier A high-confidence intent: `1 web + 1 x`
-  - Tier A uncertain intent: `2 web + 1 x`
-  - Tier B shed mode default: `2 web + 0 x`
-- keep hard cap by expected spend, not just topic count.
+| Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg calls/day after cache | tool $/day |
+|---|---:|---:|---:|---:|---:|
+| `global` | `4.59%` | `7.50%` | `108.8` | `461.8` | `2.31` |
+| `per-venue` | `3.94%` | `5.30%` | `116.4` | `472.7` | `2.36` |
 
-Acceptance:
+Residual unknowns are concentrated in low-information placeholders:
 
-- top-50 mode remains below configured daily tool budget cap,
-- no budget-cap breach in simulation runs across 7-day replay.
+- election markets with outcomes like `A/B/C/D`,
+- sports awards with anonymized outcomes like `Player X`, `Team 64`,
+- qualifier/group markets where entity is not explicit in title/outcome.
 
-### 30.5 Phase 5: mapping-readiness hooks (before publish)
+This is expected unresolved space and should not be force-resolved deterministically.
 
-Changes:
+### 30.5 Recommended cost-first launch configuration
 
-- emit deterministic `mapping_input_candidates` from extractor output:
-  - lexical candidates,
-  - embedding candidate ids (when available),
-  - constraint/time match features.
-- this bridges extractor output directly into mapping evaluation harness.
+Recommended initial execution mode:
 
-Acceptance:
+- `sampling=per-venue`
+- `limit=50`
+- `search-categories=crypto,politics,sports`
+- keep unknown suppression enabled for live retrieval execution
 
-- extractor output can be consumed by offline mapping eval without adapter scripts,
-- mapping eval reports precision/coverage per category from extractor-produced intents.
+Cadence options:
 
-### 30.6 Suggested default launch profile (cost-first)
+- conservative: default `tier-c-cadence=240` (`~117 calls/day`, `$0.585/day`)
+- hourly: `tier-c-cadence=60` (`~468 calls/day`, `$2.34/day`)
 
-For the initial external-retrieval launch:
+Both are comfortably below `$10/day`; use hourly only after retrieval/mapping correctness checks pass.
 
-- start with top-50 (`--limit 50`) and strict quality gates,
-- run hourly (`tier-a-cadence-minutes=60`),
-- keep Tier C off,
-- if daily spend drifts upward, first reduce pack size, then reduce N.
+### 30.6 Next high-impact improvements
 
-Operational note:
+1. Placeholder-aware routing (non-LLM)
+   - detect `A/B/C`, `Player X`, `Team N` outcomes,
+   - anchor entity to event-level object (district/tournament) instead of forcing person/team extraction.
 
-- maintain a weekly top-50/top-100/top-200 comparison report to track:
-  - topic quality drift,
-  - category skew,
-  - estimated cost drift,
-  - noise-entity rate.
+2. District and tournament canonicalizers (non-LLM)
+   - parse `CA-38`, `VA-02`, etc. into canonical district entities,
+   - add sports event-family resolver for qualifiers and award ladders.
+
+3. Search-intent execution caps
+   - add per-event and per-category caps in executor (not extractor),
+   - prevent one taxonomy from consuming full budget during spikes.
+
+4. Optional LLM fallback lane (strictly bounded)
+   - only for unresolved, high-impact topics (`marketCount>=3` or promoted tier),
+   - fixed JSON schema output, `temperature=0`, hard daily cap.
+
+5. Prompt quality lint
+   - normalize synonyms and aliases,
+   - enforce no duplicated terms and no prediction-market-domain leakage.
+
+### 30.7 Mapping-readiness hooks
+
+Keep extractor output mapping-friendly:
+
+- preserve entity provenance (`entitySource`, `unknownReason`, `archetype`),
+- keep deterministic constraints/time buckets in each topic,
+- allow canary gating by provenance class (e.g., `static` only).
+
+### 30.8 Reporting cadence
+
+Run weekly replay matrix (`top50/top100/top200` + random stress):
+
+- unknown topic ratio,
+- unknown market coverage,
+- venue/category share,
+- calls/day and cost/day,
+- false-entity QA examples.
