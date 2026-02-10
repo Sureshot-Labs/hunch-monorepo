@@ -283,7 +283,8 @@ The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validate
   - `--sampling global|per-venue`
   - `--order-by trending|updated`
 - deterministic external retrieval pack generation is active:
-  - per-tier prompt set (`prompt_web_news`, `prompt_web_driver`, `prompt_x_signal`)
+  - launch prompt set (`prompt_web_news`, `prompt_x_signal`) with strict no-fallback execution
+  - legacy `prompt_web_driver` remains code-path-compatible but is intentionally disabled in launch profile
   - xAI tool payload shape with:
     - `web_search.filters.excluded_domains`
     - `x_search.from_date`
@@ -296,24 +297,24 @@ The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validate
 Validation snapshot (same quality gates, global sampling, trending order):
 
 - top-50 markets:
-  - `uniqueSearchTopics=24`
-  - `dailyAfterCacheCalls=1123.2`
-- top-60 markets:
-  - `uniqueSearchTopics=29`
-  - `dailyAfterCacheCalls=1357.2`
+  - `uniqueSearchTopics=39`
+  - `dailyAfterCacheCalls=152.1`
 - top-100 markets:
-  - `uniqueSearchTopics=50`
-  - `dailyAfterCacheCalls=2340`
+  - `uniqueSearchTopics=75`
+  - `dailyAfterCacheCalls=304.2`
 - top-200 markets:
-  - `uniqueSearchTopics=96`
-  - `dailyAfterCacheCalls=4492.8`
+  - `uniqueSearchTopics=144`
+  - `dailyAfterCacheCalls=585.0`
+- top-50 markets (per-venue sampling):
+  - `uniqueSearchTopics=29`
+  - `dailyAfterCacheCalls=113.1`
 
 Cost implication from tool invocations only (`$5 / 1000` calls, token costs excluded):
 
-- top-50: about `$5.62/day`
-- top-60: about `$6.79/day`
-- top-100: about `$11.70/day`
-- top-200: about `$22.46/day`
+- top-50 global: about `$0.76/day`
+- top-100 global: about `$1.52/day`
+- top-200 global: about `$2.93/day`
+- top-50 per-venue: about `$0.57/day`
 
 ### 5.2 Topic score and ranking
 
@@ -507,9 +508,9 @@ Launch stack:
 - Candidates: licensed finance/news feeds if quality or latency requires it.
 - Rule: introduce only after baseline precision/cost targets are measured with xAI-only retrieval.
 
-3. Fallback policy
-- If xAI tools degrade or exceed budget, pipeline falls back to internal-only mode (no external claims).
-- Rule: do not publish high-confidence external-driven insights during fallback mode.
+3. Degraded mode policy
+- If xAI tools degrade or exceed budget, pipeline switches to internal-only mode (no external claims).
+- Rule: do not publish high-confidence external-driven insights while external retrieval is disabled.
 
 ### 7.4 xAI tool contract (validated against current docs)
 
@@ -552,11 +553,13 @@ Per topic, generate a deterministic retrieval pack:
 1. `prompt_web_news`
 - intent: current facts and key drivers relevant to entity + constraint.
 
-2. `prompt_web_driver`
-- intent: causal drivers (regulatory, macro, supply/demand, lineup/injury, polling, etc. by category).
-
-3. `prompt_x_signal`
+2. `prompt_x_signal`
 - intent: real-time social signal and source-linked claims.
+
+Launch rule:
+
+- strict two-call pattern per executable topic run: exactly `1 web_news + 1 x_signal`
+- no fallback prompt family and no extra driver call during launch
 
 Tool policy attached to each pack:
 
@@ -571,9 +574,11 @@ Search dedupe rule (required before scheduling):
 
 Minimum pack by tier (launch default):
 
-- Tier A: `2 web + 1 x`
-- Tier B: `1 web + 1 x` or `2 web + 0 x` in cost-shedding mode
-- Tier C: `1 web + 0 x` (or disabled)
+- Tier A: `1 web + 1 x`
+- Tier B: `1 web + 1 x`
+- Tier C: `1 web + 1 x` (or disabled by scheduler)
+
+Budget is controlled by cadence, per-run topic caps, and tier shedding, not by adding/removing query families.
 
 ### 7.6 External evidence normalization and trust policy
 
@@ -824,6 +829,7 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_MAX_EXTERNAL_CALLS=3`
 - `AI_INSIGHTS_NEWS_PROVIDER=xai_tools`
 - `AI_INSIGHTS_XAI_TOOLS=web_search,x_search`
+- `XAI_API_KEY=<secret>`
 - `AI_INSIGHTS_NEWS_CACHE_TTL_SEC=900`
 - `AI_INSIGHTS_NEWS_MAX_CALLS_PER_TOPIC_WINDOW=2`
 - `AI_INSIGHTS_WEB_EXCLUDED_DOMAINS=polymarket.com,kalshi.com,limitless.exchange,hunch.trade`
@@ -941,7 +947,7 @@ This section captures the remaining execution gaps after contracts were specifie
 - Method and thresholds are now defined (Section 25), but labeled dataset + evaluator + CI gate are not yet built.
 
 3. Provider reliability policy is not operationalized.
-- Need to wire `ai_domain_policies`, `ai_provider_status`, and automatic fallback behavior into runtime controls.
+- Need to wire `ai_domain_policies`, `ai_provider_status`, and automatic degrade-to-internal-only behavior into runtime controls.
 
 4. Scheduling ownership is not fully specified.
 - Need one scheduler contract for periodic refresh and one trigger contract for event-driven boosts.
@@ -1136,7 +1142,7 @@ This plan adopts that verdict and adds explicit launch gates:
 - confidence must be calibrated against realized outcomes and canary behavior.
 
 3. Provider reliability gate:
-- automated fallback to internal-only mode when xAI retrieval health degrades.
+- automatic degrade-to-internal-only mode when xAI retrieval health degrades.
 
 4. Budget hard-stop gate:
 - spend forecast + shedding must prevent cap breaches.
@@ -1336,7 +1342,18 @@ Observed gaps from current dry-run output:
 - market fan-out can overweight one event/league family,
 - cost scales quickly with `N` even after dedupe.
 
+<<<<<<< Updated upstream
 ### 30.1 Phase 1: entity normalization hardening (low risk, high value)
+=======
+- resolver archetypes: `generic`, `head_to_head`, `candidate_list`, `competition_winner`
+- source-aware entity extraction (`event` vs `market` vs `derived`) with provenance fields
+- politics candidate/cohort extraction from market outcomes (coalitions and person names)
+- sports head-to-head parsing expansion and winner/candidate handling
+- stricter unknown handling (`includeUnknownFallback`, `unknownMinMarketCount`)
+- low-signal outcome label guard for unknown topics (`A/B`, `Player X`, `Team N`, `Yes/No`), using event-only subject when needed
+- random sampling mode (`--order-by random`) for stress testing
+- improved crypto symbol resolver (`MegaETH`-style detection) without generic token bleed
+>>>>>>> Stashed changes
 
 Changes:
 
@@ -1356,24 +1373,61 @@ Acceptance:
 
 Changes:
 
+<<<<<<< Updated upstream
 - add `--per-event-cap` to limit max sampled markets per event in extraction input,
 - add per-category caps for search execution (for example `sports <= 50%` of active search intents),
 - add venue-aware balancing option if one venue dominates sampled rows.
+=======
+### 30.3 Launch profile matrix (2026-02-10, deterministic trending runs)
+
+Command used:
+
+- `hunch-monorepo/scripts/ai-topics-matrix.sh --mode wide --wide-limits "50 100 200"`
+- output dir example: `/tmp/ai-topics-matrix-20260210021328`
+>>>>>>> Stashed changes
 
 Acceptance:
 
+<<<<<<< Updated upstream
 - no single event contributes more than configured cap in sampled input,
 - category distribution remains within configured guardrails for top-50/top-100 runs.
 
 ### 30.3 Phase 3: feed-exact selector integration
+=======
+- `search-categories=crypto,politics,sports`
+- default tiers (`A>=20`, `B>=5`)
+- default cadences (`A=10m`, `B=120m`, `C=240m`)
+- tool price model only: `$0.005/call`
+
+| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | calls/day after cache | tool $/day | tier A/B/C | sample kalshi/poly/limitless |
+|---|---:|---:|---:|---:|---:|---|---|
+| `wide_global_50` | 50 | 39 | `0/50` (`0%`) | 152.1 | 0.761 | `0/0/39` | `47/2/1` |
+| `wide_global_100` | 100 | 75 | `0/100` (`0%`) | 304.2 | 1.521 | `0/1/74` | `94/5/1` |
+| `wide_global_200` | 200 | 144 | `0/200` (`0%`) | 585.0 | 2.925 | `0/2/142` | `189/10/1` |
+| `wide_pervenue_50` | 50 | 29 | `0/50` (`0%`) | 113.1 | 0.566 | `0/0/29` | `17/16/17` |
+| `wide_pervenue_100` | 100 | 63 | `0/100` (`0%`) | 257.4 | 1.287 | `0/1/62` | `34/32/34` |
+| `wide_pervenue_200` | 200 | 122 | `2/200` (`1%`) | 487.5 | 2.438 | `0/1/121` | `67/66/67` |
+>>>>>>> Stashed changes
 
 Changes:
 
+<<<<<<< Updated upstream
 - add optional mode that seeds extractor from feed-selected IDs:
   - `mode=feed_top_n`
   - uses the same repo path as feed ranking (`trending` / `trending_v2`) instead of approximate SQL ordering.
 
 Acceptance:
+=======
+- `global` remains heavily Kalshi-skewed at top limits.
+- `per-venue` keeps cross-venue diversity while staying well under a `$10/day` tool budget.
+- static threshold-only tiering is not enough on small top-N slices; balancing promotion is required for non-zero A/B.
+
+### 30.4 Random-stress validation (2026-02-10 matrix, hardened resolver)
+
+Command used:
+
+- `hunch-monorepo/scripts/ai-topics-matrix.sh --mode random --random-limit 200 --random-runs 5`
+>>>>>>> Stashed changes
 
 - overlap between feed top-N IDs and extractor input IDs >= 95% in `feed_top_n` mode.
 
@@ -1381,18 +1435,36 @@ Acceptance:
 
 Changes:
 
+<<<<<<< Updated upstream
 - dynamic pack policy by confidence/impact:
   - Tier A high-confidence intent: `1 web + 1 x`
   - Tier A uncertain intent: `2 web + 1 x`
   - Tier B shed mode default: `2 web + 0 x`
 - keep hard cap by expected spend, not just topic count.
+=======
+| Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg calls/day after cache | tool $/day |
+|---|---:|---:|---:|---:|---:|
+| `global` | `12.79%` (`13.2/103.2`) | `12.10%` (`24.2/200`) | `103.2` | `435.24` | `2.176` |
+| `per-venue` | `7.59%` (`8.8/116.0`) | `6.60%` (`13.2/200`) | `116.0` | `471.12` | `2.356` |
+>>>>>>> Stashed changes
 
 Acceptance:
 
+<<<<<<< Updated upstream
 - top-50 mode remains below configured daily tool budget cap,
 - no budget-cap breach in simulation runs across 7-day replay.
 
 ### 30.5 Phase 5: mapping-readiness hooks (before publish)
+=======
+- election outcomes represented as `A/B/C/D` or generic `Party X`,
+- sports awards/rosters with anonymized `Player X`, `Team N`,
+- qualifier/group markets where entity is not explicit in title/outcome.
+
+Important hardening outcome:
+
+- placeholder topics are now effectively suppressed (`placeholderTopics=0` across matrix outputs),
+- unresolved topics remain as `unknown` with explicit `unknownReason` so they can be handled by a separate bounded unknown-resolution lane.
+>>>>>>> Stashed changes
 
 Changes:
 
@@ -1402,6 +1474,7 @@ Changes:
   - constraint/time match features.
 - this bridges extractor output directly into mapping evaluation harness.
 
+<<<<<<< Updated upstream
 Acceptance:
 
 - extractor output can be consumed by offline mapping eval without adapter scripts,
@@ -1410,6 +1483,27 @@ Acceptance:
 ### 30.6 Suggested default launch profile (cost-first)
 
 For the initial external-retrieval launch:
+=======
+- `sampling=per-venue`
+- `limit=50` (top per-venue trending slice)
+- `search-categories=crypto,politics,sports`
+- keep unknown suppression enabled for live deterministic execution
+
+Cadence/options:
+
+- default query packs now assume both tools for all tiers (`web + x`) to keep source diversity consistent.
+- balancing promotion (current default):
+  - `tier-auto-promote-a=true`, `tier-auto-promote-a-min-market-count=2`
+  - `tier-auto-promote-b=true`, `tier-auto-promote-b-min-topics=2`, `tier-auto-promote-b-min-market-count=2`
+  - effect: if static thresholds produce only C, we promote to maintain non-zero A/B.
+
+Measured top50 result with balancing enabled:
+
+- `wide_global_50`: `tier A/B/C = 1/2/36`, `calls/day after cache = 592.8`, tool cost/day `~$2.964`
+- `wide_pervenue_50`: `tier A/B/C = 1/2/23`, `calls/day after cache = 491.4`, tool cost/day `~$2.457`
+
+This is still below `$10/day` for tool invocations only; token/model budget remains separately capped via hard budget + shedding.
+>>>>>>> Stashed changes
 
 - start with top-50 (`--limit 50`) and strict quality gates,
 - run hourly (`tier-a-cadence-minutes=60`),
@@ -1418,8 +1512,128 @@ For the initial external-retrieval launch:
 
 Operational note:
 
+<<<<<<< Updated upstream
 - maintain a weekly top-50/top-100/top-200 comparison report to track:
   - topic quality drift,
   - category skew,
   - estimated cost drift,
   - noise-entity rate.
+=======
+2. District and tournament canonicalizers (non-LLM)
+   - parse `CA-38`, `VA-02`, etc. into canonical district entities,
+   - add sports event-family resolver for qualifiers and award ladders.
+
+3. Search-intent execution caps
+   - add per-event and per-category caps in executor (not extractor),
+   - prevent one taxonomy from consuming full budget during spikes.
+
+4. Unknown resolver lane (strictly bounded, no fallback retrieval)
+   - only for unresolved, high-impact topics (`marketCount>=3` or promoted tier),
+   - deterministic parser first; optional LLM extraction only with strict schema and hard daily cap,
+   - does not trigger extra external retrieval calls by itself.
+
+5. Prompt quality lint
+   - normalize synonyms and aliases,
+   - enforce no duplicated terms and no prediction-market-domain leakage.
+
+### 30.6.1 P0 execution plan (strict no-fallback retrieval path)
+
+This locks the five launch-critical gaps requested for the first production pass.
+
+1. Provenance gate (required)
+   - Rule: mark external evidence valid only when tool provenance is present and parseable (`citations` and/or `server_side_tool_usage` with provider metadata).
+   - Implementation: add `provenanceOk` and `provenanceReason` fields to normalized evidence rows and block publish when false.
+   - Acceptance: zero published insights with missing provenance metadata.
+
+2. Crypto entity hardening (required)
+   - Rule: accept `ticker:*` only from allowlist/symbol map; otherwise downgrade to `keyword:*` or reject topic at extraction time.
+   - Implementation: enforce in topic resolver before query generation; emit `unknownReason=unmapped_ticker` when rejected.
+   - Acceptance: no generated `ticker:*` topics outside allowlist; unknown rate tracked separately.
+
+3. Sports keyword pruning (required)
+   - Rule: keep `match:*` as preferred path; for free-form `keyword:*` sports topics require stronger eligibility (`marketCount` + score threshold).
+   - Implementation: add minimum thresholds for sports keyword topics and demote low-confidence keyword-only topics to non-executable.
+   - Acceptance: sports unknown/noise topics drop while coverage of actionable match topics remains stable.
+
+4. Threshold-aware support checks (required)
+   - Rule: for numeric markets (`>=`, `<=`, "above", "below"), evidence can set `supports_topic=true` only when numeric + temporal constraints are satisfied.
+   - Implementation: add deterministic comparator parser and time-window check in evidence evaluation.
+   - Acceptance: `supports_topic=true` rows for threshold topics always include parsed numeric/time match metadata.
+
+5. Budget safety (required)
+   - Rule: keep launch mode under `$10/day` tool-call budget before token costs.
+   - Implementation: cap to top per-venue slice, keep one web + one x query per topic run, enforce per-tier cadence caps and hard-stop shedding.
+   - Acceptance: projected tool-call cost remains under budget on weekly matrix runs.
+
+### 30.7 Mapping-readiness hooks
+
+Keep extractor output mapping-friendly:
+
+- preserve entity provenance (`entitySource`, `unknownReason`, `archetype`),
+- keep deterministic constraints/time buckets in each topic,
+- allow canary gating by provenance class (e.g., `static` only).
+
+### 30.8 Reporting cadence
+
+Run weekly replay matrix (`top50/top100/top200` + random stress):
+
+- use `hunch-monorepo/scripts/ai-topics-matrix.sh --mode both --wide-limits "50 100 200" --random-limit 200 --random-runs 5`
+
+- unknown topic ratio,
+- unknown market coverage,
+- venue/category share,
+- calls/day and cost/day,
+- false-entity QA examples.
+
+### 30.9 Real retrieval smoke test (xAI tools)
+
+Use this before wiring scheduler/worker execution:
+
+1. Generate topic/query plan JSON from current local DB:
+
+- `pnpm -C hunch-monorepo -F api run ai:topics:dry-run -- --limit 50 --sampling per-venue --show-top 200 --show-queries 30 --json --out /tmp/ai-topics-smoke.json`
+
+2. Execute live xAI tool calls for top tiers:
+
+- `XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 8 --mode both --out /tmp/ai-search-smoke.json --verbose`
+
+3. Optional dry-run to inspect payload shape only:
+
+- `pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 4 --mode both --dry-run`
+
+Notes:
+
+- `ai:search:smoke` sends one tool-enabled request per planned prompt (`web_news`, `x_signal`) with system-level JSON enforcement.
+- It records HTTP status, latency, citations count, and output preview for quick quality/cost checks.
+
+### 30.10 Focused QA on real retrieval (selected topics 4, 8, 1)
+
+Run setup:
+
+- source plan: `/tmp/ai-topics-picked-4-8-1.json`
+- smoke output: `/tmp/ai-search-smoke-picked-4-8-1.json`
+- olympics web retry output: `/tmp/ai-search-smoke-olympics-web-retry.json`
+- calls: strict `web_news + x_signal`, `maxTopics=3`, no fallback lane
+
+Observed outcomes:
+
+| Topic | Web | X | Expected Stage-3/4 action |
+|---|---|---|---|
+| `keyword:busan-mayoral-election` | `NO_EVIDENCE (0/2)` | `NO_EVIDENCE (0/2)` | suppress topic (no mapping, no publish) |
+| `keyword:prime-minister-israel-election` | `PARTIAL (3/2)` | `OK (6/2)` | proceed to mapping for Israel PM event/candidate markets |
+| `keyword:olympics` | first call `502`, retry `OK (6/2)` | `OK (5/2)` | proceed to mapping; tag transient provider error for reliability metrics |
+
+Interpretation:
+
+- evidence gating behaves correctly: no-evidence topics are suppressed instead of forcing low-quality insights
+- mixed-source topics pass only when support threshold is met
+- provider-transient failures must be handled by bounded retry policy in scheduler/worker layer
+
+### 30.11 Next implementation steps (immediate)
+
+1. Add provenance gate in worker execution path (`citations` and `server_side_tool_usage` required before publish eligibility).
+2. Add bounded retry + idempotency for external calls (`max_retries=1`, jittered backoff, no fan-out amplification).
+3. Wire strict threshold-aware support checks for numeric markets before `supports_topic=true`.
+4. Run weekly `top50 per-venue` replay matrix and track suppression/pass ratios by category/tier.
+5. Start mapping-stage canary using only topics that pass both web and x support thresholds.
+>>>>>>> Stashed changes
