@@ -1581,6 +1581,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         windowMax,
       );
       const minScore = query.minScore ?? env.walletIntelSignalMinScore;
+      const maxOdds = query.maxOdds ?? env.walletIntelSignalMaxOdds;
+      const minStakeUsd = query.minStakeUsd ?? env.walletIntelSignalMinStakeUsd;
+      const minIdleDays = query.minIdleDays ?? env.walletIntelSignalMinIdleDays;
+      const maxPriorMarkets =
+        query.maxPriorMarkets ?? env.walletIntelSignalMaxPriorMarkets;
+      const minPayoutUsd = query.minPayoutUsd ?? env.walletIntelSignalMinPayoutUsd;
 
       const client = await pool.connect();
       try {
@@ -1602,16 +1608,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           baselineDays: 30,
           enteredLateHours: 24,
           signalConfig: {
-            maxOdds: query.maxOdds,
-            minStakeUsd: query.minStakeUsd,
-            minIdleDays: query.minIdleDays,
-            maxPriorMarkets: query.maxPriorMarkets,
-            minPayoutUsd: query.minPayoutUsd,
+            maxOdds,
+            minStakeUsd,
+            minIdleDays,
+            maxPriorMarkets,
+            minPayoutUsd,
             minScore,
           },
         });
 
         const items: WalletActivitySignalItem[] = [];
+        const nowMs = Date.now();
+        let activeWithInvalidClose = 0;
+        const activeInvalidSamples: Array<{
+          marketId: string;
+          marketStatus: string | null;
+          closeTime: Date | null;
+          expirationTime: Date | null;
+        }> = [];
         for (const row of candidates) {
           const summary = summaryMap.get(row.id);
           if (!summary) continue;
@@ -1619,23 +1633,42 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (!change.signalType) continue;
             if (query.signalType && change.signalType !== query.signalType) continue;
             if (query.lateBucket && change.lateBucket !== query.lateBucket) continue;
+            if (change.action !== "OPENED" && change.action !== "INCREASED") continue;
+
+            const marketStatus = change.marketStatus?.trim().toUpperCase() ?? null;
+            const closeAt = change.closeTime ?? change.expirationTime;
+            const closeAtMs = closeAt?.getTime() ?? Number.NaN;
+            const hasValidCloseAt = Number.isFinite(closeAtMs);
+            const isResolved = Boolean(
+              change.resolvedOutcome && String(change.resolvedOutcome).trim().length > 0,
+            );
+            const isOpenNow =
+              marketStatus === "ACTIVE" &&
+              !isResolved &&
+              hasValidCloseAt &&
+              closeAtMs > nowMs;
+
+            if (marketStatus === "ACTIVE" && (!hasValidCloseAt || closeAtMs <= nowMs)) {
+              activeWithInvalidClose += 1;
+              if (activeInvalidSamples.length < 5) {
+                activeInvalidSamples.push({
+                  marketId: change.marketId,
+                  marketStatus: change.marketStatus ?? null,
+                  closeTime: change.closeTime ?? null,
+                  expirationTime: change.expirationTime ?? null,
+                });
+              }
+            }
+
+            if (!isOpenNow) continue;
             if ((change.signalScore ?? 0) < minScore) continue;
-            if (query.minStakeUsd != null) {
-              if ((change.stakeUsd ?? 0) < query.minStakeUsd) continue;
-            }
-            if (query.maxOdds != null) {
-              if (change.odds == null || change.odds > query.maxOdds) continue;
-            }
-            if (query.minIdleDays != null) {
-              if ((change.idleDays ?? 0) < query.minIdleDays) continue;
-            }
-            if (query.maxPriorMarkets != null) {
-              const priorMarkets = change.priorDistinctMarkets ?? 0;
-              if (priorMarkets > query.maxPriorMarkets) continue;
-            }
-            if (query.minPayoutUsd != null) {
-              if ((change.potentialPayoutUsd ?? 0) < query.minPayoutUsd) continue;
-            }
+            if ((change.stakeUsd ?? 0) < minStakeUsd) continue;
+            if (change.odds == null || change.odds > maxOdds) continue;
+            const passesIdleDays = (change.idleDays ?? 0) >= minIdleDays;
+            const passesPriorMarkets =
+              (change.priorDistinctMarkets ?? 0) <= maxPriorMarkets;
+            if (!passesIdleDays && !passesPriorMarkets) continue;
+            if ((change.potentialPayoutUsd ?? 0) < minPayoutUsd) continue;
             items.push({
               walletId: row.id,
               address: row.address,
@@ -1676,6 +1709,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               occurredAt: change.occurredAt,
             });
           }
+        }
+
+        if (activeWithInvalidClose > 0) {
+          app.log.warn(
+            {
+              userId: user.id,
+              activeWithInvalidClose,
+              samples: activeInvalidSamples,
+            },
+            "Detected ACTIVE markets with missing/past close time in wallet signals",
+          );
         }
 
         const sorted = items.sort((a, b) => {

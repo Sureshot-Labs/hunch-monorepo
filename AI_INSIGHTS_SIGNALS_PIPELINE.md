@@ -1331,20 +1331,14 @@ Pipeline:
 - DLQ rate `< 1%` steady state
 - budget cap breach days `= 0`
 
-## 30) Extractor Improvement Plan (next)
+## 30) Extractor Improvement Plan (implemented + next)
 
-Goal: improve topic/query precision before connecting dry-run outputs to real external retrieval.
+Goal: keep topic/query generation deterministic and high-precision before wiring live retrieval execution.
 
-Observed gaps from current dry-run output:
+### 30.1 What is now implemented in `ai-topics-dry-run.ts`
 
-- entity noise still appears (`person:will`, `keyword:attend`, `keyword:wahlberg`, etc.),
-- category balance is skewed (sports-heavy in top-N),
-- market fan-out can overweight one event/league family,
-- cost scales quickly with `N` even after dedupe.
+Implemented deterministic hardening (P0 + P1):
 
-<<<<<<< Updated upstream
-### 30.1 Phase 1: entity normalization hardening (low risk, high value)
-=======
 - resolver archetypes: `generic`, `head_to_head`, `candidate_list`, `competition_winner`
 - source-aware entity extraction (`event` vs `market` vs `derived`) with provenance fields
 - politics candidate/cohort extraction from market outcomes (coalitions and person names)
@@ -1353,47 +1347,41 @@ Observed gaps from current dry-run output:
 - low-signal outcome label guard for unknown topics (`A/B`, `Player X`, `Team N`, `Yes/No`), using event-only subject when needed
 - random sampling mode (`--order-by random`) for stress testing
 - improved crypto symbol resolver (`MegaETH`-style detection) without generic token bleed
->>>>>>> Stashed changes
 
-Changes:
+### 30.2 Before/after quality on the same benchmark slice
 
-- add blocklists for pronouns/aux verbs/common non-entities,
-- require stronger evidence for `person:*` extraction:
-  - minimum token length,
-  - title-case phrase checks,
-  - optional whitelist hit for politics persons/countries,
-- convert uncertain entity picks to `unknown` and suppress from search-intent execution.
+Benchmark command family:
 
-Acceptance:
+- `limit=100`
+- `sampling=per-venue`
+- `order-by=trending`
+- `show-top=500`
 
-- reduce noisy query-entity rate by at least 70% vs current top-50 baseline,
-- keep top-50 `uniqueSearchTopics` within +/-20% of baseline (avoid over-pruning).
+| Metric | Before hardening | After hardening |
+|---|---:|---:|
+| `rowsUsed` | `100` | `100` |
+| `uniqueTopics` | `67` | `86` |
+| `unknownTopics` | `17` (`25.37%`) | `0` (`0%`) |
+| `unknownMarketCoverage` | `29/100` (`29%`) | `0/100` (`0%`) |
+| `uniqueSearchTopics` | `26` | `62` |
+| `calls/day after cache` | `113.1` | `253.5` |
+| `tool cost/day` (`$0.005/call`) | `$0.57` | `$1.27` |
 
-### 30.2 Phase 2: market-to-topic balancing controls
+Interpretation:
 
-Changes:
+- quality improved materially (unknown coverage eliminated on the benchmark slice),
+- cost increased because more markets now resolve into executable topics,
+- still far below the `$10/day` launch ceiling.
 
-<<<<<<< Updated upstream
-- add `--per-event-cap` to limit max sampled markets per event in extraction input,
-- add per-category caps for search execution (for example `sports <= 50%` of active search intents),
-- add venue-aware balancing option if one venue dominates sampled rows.
-=======
 ### 30.3 Launch profile matrix (2026-02-10, deterministic trending runs)
 
 Command used:
 
 - `hunch-monorepo/scripts/ai-topics-matrix.sh --mode wide --wide-limits "50 100 200"`
 - output dir example: `/tmp/ai-topics-matrix-20260210021328`
->>>>>>> Stashed changes
 
-Acceptance:
+All profiles below:
 
-<<<<<<< Updated upstream
-- no single event contributes more than configured cap in sampled input,
-- category distribution remains within configured guardrails for top-50/top-100 runs.
-
-### 30.3 Phase 3: feed-exact selector integration
-=======
 - `search-categories=crypto,politics,sports`
 - default tiers (`A>=20`, `B>=5`)
 - default cadences (`A=10m`, `B=120m`, `C=240m`)
@@ -1407,17 +1395,9 @@ Acceptance:
 | `wide_pervenue_50` | 50 | 29 | `0/50` (`0%`) | 113.1 | 0.566 | `0/0/29` | `17/16/17` |
 | `wide_pervenue_100` | 100 | 63 | `0/100` (`0%`) | 257.4 | 1.287 | `0/1/62` | `34/32/34` |
 | `wide_pervenue_200` | 200 | 122 | `2/200` (`1%`) | 487.5 | 2.438 | `0/1/121` | `67/66/67` |
->>>>>>> Stashed changes
 
-Changes:
+Conclusion:
 
-<<<<<<< Updated upstream
-- add optional mode that seeds extractor from feed-selected IDs:
-  - `mode=feed_top_n`
-  - uses the same repo path as feed ranking (`trending` / `trending_v2`) instead of approximate SQL ordering.
-
-Acceptance:
-=======
 - `global` remains heavily Kalshi-skewed at top limits.
 - `per-venue` keeps cross-venue diversity while staying well under a `$10/day` tool budget.
 - static threshold-only tiering is not enough on small top-N slices; balancing promotion is required for non-zero A/B.
@@ -1427,35 +1407,21 @@ Acceptance:
 Command used:
 
 - `hunch-monorepo/scripts/ai-topics-matrix.sh --mode random --random-limit 200 --random-runs 5`
->>>>>>> Stashed changes
 
-- overlap between feed top-N IDs and extractor input IDs >= 95% in `feed_top_n` mode.
+Matrix: 10 runs (`limit=200`, `order-by=random`):
 
-### 30.4 Phase 4: retrieval-pack cost shaping
+- 5x `sampling=global`
+- 5x `sampling=per-venue`
 
-Changes:
+Average results:
 
-<<<<<<< Updated upstream
-- dynamic pack policy by confidence/impact:
-  - Tier A high-confidence intent: `1 web + 1 x`
-  - Tier A uncertain intent: `2 web + 1 x`
-  - Tier B shed mode default: `2 web + 0 x`
-- keep hard cap by expected spend, not just topic count.
-=======
 | Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg calls/day after cache | tool $/day |
 |---|---:|---:|---:|---:|---:|
 | `global` | `12.79%` (`13.2/103.2`) | `12.10%` (`24.2/200`) | `103.2` | `435.24` | `2.176` |
 | `per-venue` | `7.59%` (`8.8/116.0`) | `6.60%` (`13.2/200`) | `116.0` | `471.12` | `2.356` |
->>>>>>> Stashed changes
 
-Acceptance:
+Residual unknowns are concentrated in low-information placeholders:
 
-<<<<<<< Updated upstream
-- top-50 mode remains below configured daily tool budget cap,
-- no budget-cap breach in simulation runs across 7-day replay.
-
-### 30.5 Phase 5: mapping-readiness hooks (before publish)
-=======
 - election outcomes represented as `A/B/C/D` or generic `Party X`,
 - sports awards/rosters with anonymized `Player X`, `Team N`,
 - qualifier/group markets where entity is not explicit in title/outcome.
@@ -1464,26 +1430,11 @@ Important hardening outcome:
 
 - placeholder topics are now effectively suppressed (`placeholderTopics=0` across matrix outputs),
 - unresolved topics remain as `unknown` with explicit `unknownReason` so they can be handled by a separate bounded unknown-resolution lane.
->>>>>>> Stashed changes
 
-Changes:
+### 30.5 Recommended cost-first launch configuration
 
-- emit deterministic `mapping_input_candidates` from extractor output:
-  - lexical candidates,
-  - embedding candidate ids (when available),
-  - constraint/time match features.
-- this bridges extractor output directly into mapping evaluation harness.
+Recommended initial execution mode:
 
-<<<<<<< Updated upstream
-Acceptance:
-
-- extractor output can be consumed by offline mapping eval without adapter scripts,
-- mapping eval reports precision/coverage per category from extractor-produced intents.
-
-### 30.6 Suggested default launch profile (cost-first)
-
-For the initial external-retrieval launch:
-=======
 - `sampling=per-venue`
 - `limit=50` (top per-venue trending slice)
 - `search-categories=crypto,politics,sports`
@@ -1503,22 +1454,13 @@ Measured top50 result with balancing enabled:
 - `wide_pervenue_50`: `tier A/B/C = 1/2/23`, `calls/day after cache = 491.4`, tool cost/day `~$2.457`
 
 This is still below `$10/day` for tool invocations only; token/model budget remains separately capped via hard budget + shedding.
->>>>>>> Stashed changes
 
-- start with top-50 (`--limit 50`) and strict quality gates,
-- run hourly (`tier-a-cadence-minutes=60`),
-- keep Tier C off,
-- if daily spend drifts upward, first reduce pack size, then reduce N.
+### 30.6 Next high-impact improvements
 
-Operational note:
+1. Placeholder-aware routing (non-LLM)
+   - detect `A/B/C`, `Player X`, `Team N` outcomes,
+   - anchor entity to event-level object (district/tournament) instead of forcing person/team extraction.
 
-<<<<<<< Updated upstream
-- maintain a weekly top-50/top-100/top-200 comparison report to track:
-  - topic quality drift,
-  - category skew,
-  - estimated cost drift,
-  - noise-entity rate.
-=======
 2. District and tournament canonicalizers (non-LLM)
    - parse `CA-38`, `VA-02`, etc. into canonical district entities,
    - add sports event-family resolver for qualifiers and award ladders.
@@ -1636,4 +1578,3 @@ Interpretation:
 3. Wire strict threshold-aware support checks for numeric markets before `supports_topic=true`.
 4. Run weekly `top50 per-venue` replay matrix and track suppression/pass ratios by category/tier.
 5. Start mapping-stage canary using only topics that pass both web and x support thresholds.
->>>>>>> Stashed changes
