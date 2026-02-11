@@ -28,9 +28,9 @@ const TRUSTED_WEB_DOMAINS = [
   "theblock.co",
 ];
 
-type SearchMode = "combined";
+type SearchMode = "combined" | "web_only" | "internal_only";
 type Tier = "A" | "B" | "C";
-type QueryType = "combined";
+type QueryType = "combined" | "web_only" | "internal_only";
 
 type ToolUsageDetails = {
   web_search_calls: number;
@@ -279,11 +279,18 @@ function parseNonNegativeFloat(value: string | undefined, fallback: number): num
 }
 
 function parseMode(value: string | undefined): SearchMode {
-  if (value && value !== "combined") {
-    console.warn(
-      `[ai-search-smoke] --mode=${value} is deprecated; forcing mode=combined`,
-    );
+  if (!value) return "combined";
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "combined" ||
+    normalized === "web_only" ||
+    normalized === "internal_only"
+  ) {
+    return normalized;
   }
+  console.warn(
+    `[ai-search-smoke] invalid --mode=${value}; fallback to mode=combined`,
+  );
   return "combined";
 }
 
@@ -308,7 +315,7 @@ function usage(): never {
       "",
       "Options:",
       "  --topics-file <path>        ai-topics-dry-run JSON output file",
-      "  --mode <combined>           Query mode (default: combined)",
+      "  --mode <combined|web_only|internal_only>  Query mode (default: combined)",
       "  --tiers <csv>               Topic tiers to include, e.g. A,B (default: A,B,C)",
       "  --max-topics <n>            Max topics to test (default: 8)",
       "  --model <name>              xAI model (default: grok-4-1-fast-reasoning)",
@@ -333,6 +340,7 @@ function usage(): never {
       "Examples:",
       "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:topics:dry-run -- --limit 50 --sampling per-venue --json --out /tmp/topics.json",
       "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/topics.json --tiers A,B --max-topics 6 --mode combined --out /tmp/ai-search-smoke.json",
+      "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/topics.json --tiers A --max-topics 6 --mode web_only --out /tmp/ai-search-smoke-web.json",
     ].join("\n"),
   );
   process.exit(1);
@@ -559,9 +567,20 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
     detailsRaw && typeof detailsRaw === "object" && !Array.isArray(detailsRaw)
       ? (detailsRaw as Record<string, unknown>)
       : null;
+  const topLevelUsage = extractServerSideToolUsage(payload) ?? {};
+  const webFallback = Number(
+    topLevelUsage.SERVER_SIDE_TOOL_WEB_SEARCH ??
+      topLevelUsage.web_search_calls ??
+      0,
+  );
+  const xFallback = Number(
+    topLevelUsage.SERVER_SIDE_TOOL_X_SEARCH ??
+      topLevelUsage.x_search_calls ??
+      0,
+  );
   const toolUsageDetails: ToolUsageDetails = {
-    web_search_calls: Number(detailsObj?.web_search_calls ?? 0),
-    x_search_calls: Number(detailsObj?.x_search_calls ?? 0),
+    web_search_calls: Number(detailsObj?.web_search_calls ?? webFallback),
+    x_search_calls: Number(detailsObj?.x_search_calls ?? xFallback),
     code_interpreter_calls: Number(detailsObj?.code_interpreter_calls ?? 0),
     file_search_calls: Number(detailsObj?.file_search_calls ?? 0),
     mcp_calls: Number(detailsObj?.mcp_calls ?? 0),
@@ -766,6 +785,14 @@ function resolveTopicPrompt(topic: QueryExample): string {
   return strict?.combinedPrompt ?? topic.promptCombined;
 }
 
+function promptForMode(prompt: string, mode: SearchMode): string {
+  if (mode === "combined") return prompt;
+  if (mode === "web_only") {
+    return prompt.replaceAll("web_search and x_search together", "web_search only");
+  }
+  return prompt.replaceAll("web_search and x_search together", "internal context only");
+}
+
 function resolveMinEvidence(topic: QueryExample): number {
   const raw = topic.retrievalPlan?.minEvidence;
   const parsed = typeof raw === "number" ? raw : Number.NaN;
@@ -812,6 +839,12 @@ function buildPlannedCalls(topics: QueryExample[], args: Args): PlannedCall[] {
     }
     const minEvidence = resolveMinEvidence(topic);
     const intentAnchor = resolveIntentAnchor(topic);
+    const tools =
+      args.mode === "combined"
+        ? [topic.webSearchTool, topic.xSearchTool]
+        : args.mode === "web_only"
+          ? [topic.webSearchTool]
+          : [];
     const next: Omit<PlannedCall, "callId"> = {
       topicKey: topic.topicKey,
       tier: topic.tier,
@@ -822,11 +855,11 @@ function buildPlannedCalls(topics: QueryExample[], args: Args): PlannedCall[] {
       sampleMarketId: topic.sampleMarketId ?? null,
       sampleVenue: topic.sampleVenue ?? null,
       sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt ?? null,
-      queryType: "combined",
-      prompt: resolveTopicPrompt(topic),
+      queryType: args.mode,
+      prompt: promptForMode(resolveTopicPrompt(topic), args.mode),
       minEvidence,
       intentAnchor,
-      tools: [topic.webSearchTool, topic.xSearchTool],
+      tools,
     };
     const callId = buildCallId(next);
     if (seen.has(callId)) continue;
@@ -1076,7 +1109,11 @@ function meetsEvidenceThreshold(
   parsed: ParsedStructuredResult,
   minEvidence: number,
   provenanceOk: boolean,
+  queryType: QueryType,
 ): boolean {
+  if (queryType === "internal_only") {
+    return parsed.valid && parsed.status !== "INVALID";
+  }
   return (
     provenanceOk &&
     parsed.valid &&
@@ -1163,7 +1200,12 @@ async function main(): Promise<void> {
       intentAnchor: item.intentAnchor,
       tools: item.tools,
     }));
-    console.log(JSON.stringify({ plannedCalls: dry }, null, 2));
+    const dryPayload = { plannedCalls: dry };
+    if (args.out) {
+      await writeFile(args.out, JSON.stringify(dryPayload, null, 2), "utf8");
+      console.error(`[ai-search-smoke] wrote ${args.out}`);
+    }
+    console.log(JSON.stringify(dryPayload, null, 2));
     return;
   }
 
@@ -1272,7 +1314,14 @@ async function main(): Promise<void> {
         attemptsTotal += raw.attempts;
         retriedAny = retriedAny || raw.retried;
 
-        if (meetsEvidenceThreshold(parsed, call.minEvidence, provenance.ok)) {
+        if (
+          meetsEvidenceThreshold(
+            parsed,
+            call.minEvidence,
+            provenance.ok,
+            call.queryType,
+          )
+        ) {
           earlyStop = true;
           earlyStopReason = "evidence_threshold_met";
           break;
@@ -1437,6 +1486,8 @@ async function main(): Promise<void> {
     },
     byQueryType: {
       combined: results.filter(row => row.queryType === "combined").length,
+      web_only: results.filter(row => row.queryType === "web_only").length,
+      internal_only: results.filter(row => row.queryType === "internal_only").length,
     },
     parsedSummary: {
       ok: results.filter(row => row.parsed.status === "OK").length,

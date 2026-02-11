@@ -109,6 +109,7 @@ type TopicSummaryRow = {
   candidateEntities: string[];
   sourceTopicKeys: string[];
   searchIntentKey?: string;
+  constraintClass?: string;
 };
 
 type Args = {
@@ -715,6 +716,15 @@ const CRYPTO_ALIAS_TO_TICKER = new Map<string, string>([
   ["tether", "usdt"],
 ]);
 
+const CRYPTO_TEXT_CUE_PATTERN =
+  /\b(bitcoin|btc|ethereum|eth|solana|sol|dogecoin|doge|xrp|ripple|usdc|usdt|tether|crypto|token|blockchain|onchain|on-chain|defi|market cap|fdv)\b/i;
+
+const POLITICS_TEXT_CUE_PATTERN =
+  /\b(election|president|presidential|prime minister|government|coalition|parliament|senate|house|ceasefire|sanction|tariff|war|strike|nominee|court|fed chair|leader)\b/i;
+
+const SPORTS_TEXT_CUE_PATTERN =
+  /\b(vs\.?|@|match|game|season|champion|championship|mvp|playoff|playoffs|world cup|olympics?|nba|nfl|mlb|nhl|ncaa|premier league|la liga|serie a|bundesliga|ligue 1)\b/i;
+
 const PLACEHOLDER_ENTITY_SLUGS = new Set([
   "unknown",
   "other",
@@ -741,8 +751,9 @@ function isPlaceholderEntitySlug(value: string): boolean {
     return true;
   }
   if (/^[a-z]$/.test(normalized)) return true;
-  if (/^[a-z]{2}-\d{1,2}$/.test(normalized)) return true;
-  if (/^[a-z]{1,2}\d{1,2}$/.test(normalized)) return true;
+  // Keep this narrow: placeholders are usually A1/B1/C1 style buckets.
+  // Broader alpha+digit filtering hides valid entities (e.g. esports teams).
+  if (/^[a-c]-?\d{1,2}$/.test(normalized)) return true;
   return false;
 }
 
@@ -1122,22 +1133,35 @@ function normalizeCategory(
   text: string,
 ): Category {
   const raw = `${eventCategory ?? ""} ${marketCategory ?? ""}`.toLowerCase();
-  if (raw.includes("sport")) return "sports";
-  if (raw.includes("polit")) return "politics";
-  if (raw.includes("crypto") || raw.includes("token")) return "crypto";
+  const rawSports = raw.includes("sport");
+  const rawPolitics = raw.includes("polit");
+  const rawCrypto = raw.includes("crypto") || raw.includes("token");
+
   const lower = text.toLowerCase();
+  const hasCryptoCue = CRYPTO_TEXT_CUE_PATTERN.test(lower);
+  const hasPoliticsCue =
+    POLITICS_TEXT_CUE_PATTERN.test(lower) ||
+    Array.from(POLITICS_COUNTRIES).some(country =>
+      new RegExp(`\\b${country.replace(/-/g, "\\s+")}\\b`, "i").test(lower),
+    );
+  const hasSportsCue =
+    SPORTS_TEXT_CUE_PATTERN.test(lower) || SPORTS_CATEGORY_HINT_PATTERN.test(lower);
+
+  // Prefer strong textual cues over noisy venue/category labels.
+  if (hasSportsCue) return "sports";
+  if (hasPoliticsCue && !hasCryptoCue) return "politics";
+  if (hasCryptoCue && !hasPoliticsCue) return "crypto";
+
+  if (rawSports) return "sports";
+  if (rawPolitics) return "politics";
+  if (rawCrypto) return "crypto";
+
   if (
     lower.includes("bitcoin") ||
-    lower.includes("btc") ||
     lower.includes("ethereum") ||
-    lower.includes("eth") ||
     lower.includes("solana") ||
-    lower.includes("sol ") ||
     lower.includes("dogecoin") ||
-    lower.includes("doge") ||
-    lower.includes("xrp") ||
-    lower.includes("ripple") ||
-    lower.includes("crypto")
+    lower.includes("ripple")
   ) {
     return "crypto";
   }
@@ -1488,7 +1512,7 @@ function extractTeams(text: string): [string, string] | null {
 }
 
 function extractAcronymTokens(text: string): string[] {
-  const matches = text.match(/\b[A-Z]{2,8}\b/g) ?? [];
+  const matches = text.match(/\b[A-Z][A-Z0-9]{1,7}\b/g) ?? [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of matches) {
@@ -1502,6 +1526,28 @@ function extractAcronymTokens(text: string): string[] {
     out.push(slug);
   }
   return out;
+}
+
+function extractSportsCandidateFallback(text: string): string | null {
+  const normalized = normalizeTitle(text, "sports");
+  const tokens = tokenizeNormalized(normalized).filter(token => {
+    if (STOPWORDS.has(token)) return false;
+    if (GENERIC_TOKENS.has(token)) return false;
+    if (KEYWORD_NOISE.has(token)) return false;
+    if (MONTH_TOKENS.has(token) || DAY_TOKENS.has(token)) return false;
+    if (TEMPORAL_TOKENS.has(token)) return false;
+    if (SPORTS_TEAM_SIDE_STOP_TOKENS.has(token)) return false;
+    if (QUESTION_ENTITY_BLOCKLIST.has(token)) return false;
+    if (/^\d+$/.test(token)) return false;
+    if (/^[1-4](q|h)$/.test(token)) return false;
+    if (/^(q|h)[1-4]$/.test(token)) return false;
+    if (isPlaceholderEntitySlug(token)) return false;
+    return true;
+  });
+  if (tokens.length === 0) return null;
+  // Keep the fallback simple and deterministic: prefer longer informative tokens.
+  const [best] = tokens.sort((a, b) => b.length - a.length);
+  return best && !isPlaceholderEntitySlug(best) ? best : null;
 }
 
 function detectEntityArchetype(
@@ -1594,6 +1640,23 @@ function extractKeywordEntity(text: string): string {
     return b.length - a.length;
   });
   return normalizeSlug(first);
+}
+
+function extractEventAnchorKeyword(text: string): string | null {
+  const normalized = normalizeTitle(text, "other");
+  if (!normalized) return null;
+  const tokens = tokenizeNormalized(normalized).filter(
+    token =>
+      !KEYWORD_NOISE.has(token) &&
+      !MONTH_TOKENS.has(token) &&
+      !DAY_TOKENS.has(token) &&
+      !TEMPORAL_TOKENS.has(token) &&
+      !isPlaceholderEntitySlug(token),
+  );
+  if (tokens.length < 2) return null;
+  const anchor = normalizeSlug(tokens.slice(0, 5).join("-"));
+  if (!anchor || isPlaceholderEntitySlug(anchor)) return null;
+  return anchor;
 }
 
 function extractCandidateEntityFromText(
@@ -1746,6 +1809,22 @@ function resolveEntity(
       }
     }
 
+    // If we have explicit crypto cues but no mapped ticker, keep a generic
+    // keyword anchor rather than dropping to unknown.
+    const hasCryptoCue = CRYPTO_TEXT_CUE_PATTERN.test(rawEntitySource);
+    if (hasCryptoCue) {
+      const fallback = extractEventAnchorKeyword(rawEntitySource);
+      if (fallback && !POLITICS_COUNTRIES.has(fallback)) {
+        return {
+          type: "keyword",
+          value: fallback,
+          source: "combined",
+          archetype,
+          unknownReason: null,
+        };
+      }
+    }
+
     // Conservative crypto handling: skip unknown entities rather than
     // producing noisy generic keywords that degrade search quality.
     return {
@@ -1793,6 +1872,18 @@ function resolveEntity(
           unknownReason: null,
         };
         }
+      }
+      const fallbackCandidate =
+        extractSportsCandidateFallback(marketTitle ?? "") ??
+        extractSportsCandidateFallback(eventTitle ?? "");
+      if (fallbackCandidate) {
+        return {
+          type: "keyword",
+          value: fallbackCandidate,
+          source: marketTitle?.trim() ? "market" : "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
     for (const pattern of SPORTS_ENTITY_PATTERNS) {
@@ -2014,6 +2105,19 @@ function resolveEntity(
       return {
         type: "keyword",
         value: rolePhrase,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
+    }
+
+    // Fallback to event-level anchor for generic/candidate politics topics
+    // where outcome labels are placeholders (e.g. "Other", "No one").
+    const eventAnchor = extractEventAnchorKeyword(eventOnlyText);
+    if (eventAnchor) {
+      return {
+        type: "keyword",
+        value: eventAnchor,
         source: "event",
         archetype,
         unknownReason: null,
@@ -2384,6 +2488,7 @@ function candidateIntentAnchor(topic: TopicSummaryRow): string | null {
 }
 
 function searchIntentKey(topic: TopicSummaryRow): string {
+  const constraintClass = constraintClassForConstraint(topic.constraint);
   if (topic.entity === "unknown") {
     return `${topic.category}|unknown|${topic.topicKey}`;
   }
@@ -2393,7 +2498,25 @@ function searchIntentKey(topic: TopicSummaryRow): string {
       return `${topic.category}|candidate_list|${anchor}`;
     }
   }
+  if (constraintClass !== "none") {
+    return `${topic.category}|${topic.entityType}|${topic.entity}|${constraintClass}`;
+  }
   return `${topic.category}|${topic.entityType}|${topic.entity}`;
+}
+
+function constraintClassForConstraint(constraint: Constraint): string {
+  switch (constraint.kind) {
+    case "threshold":
+      return `threshold_${constraint.unit}_${constraint.operator}`;
+    case "range":
+      return `range_${constraint.unit}`;
+    case "ou":
+      return `ou_${constraint.operator}`;
+    case "spread":
+      return "spread_eq";
+    default:
+      return "none";
+  }
 }
 
 function normalizeSearchTopicForIntent(topic: TopicSummaryRow): TopicSummaryRow {
@@ -2969,6 +3092,12 @@ function cadenceForTier(tier: "A" | "B" | "C", args: Args): number {
   return args.tierCCadenceMinutes;
 }
 
+function bucketMinutesForTier(tier: "A" | "B" | "C"): number {
+  if (tier === "A") return 5;
+  if (tier === "B") return 15;
+  return 60;
+}
+
 function countsForTier(
   tier: "A" | "B" | "C",
   args: Args,
@@ -3188,6 +3317,7 @@ async function main(): Promise<void> {
       category: topic.category,
       entity: `${topic.entityType}:${topic.entity}`,
       searchIntentKey: topic.searchIntentKey ?? searchIntentKey(topic),
+      constraintClass: constraintClassForConstraint(topic.constraint),
       archetype: topic.archetype,
       entitySource: topic.entitySource,
       unknownReason: topic.unknownReason,
@@ -3211,6 +3341,9 @@ async function main(): Promise<void> {
         fromDate: lookback.fromDate,
         toDate: lookback.toDate,
         lookbackHours: lookback.lookbackHours,
+      },
+      schedule: {
+        bucketMinutes: bucketMinutesForTier(tier),
       },
     };
   });
@@ -3332,27 +3465,35 @@ async function main(): Promise<void> {
       estimatedCalls: {
         dailyRaw: Number(estimatedDailyRawCalls.toFixed(2)),
         dailyAfterCache: Number(estimatedDailyNetCalls.toFixed(2)),
+        dailyAfterCacheToolCalls: Number(estimatedDailyNetCalls.toFixed(2)),
         hourlyRaw: Number(estimatedHourlyRawCalls.toFixed(2)),
         hourlyAfterCache: Number(estimatedHourlyNetCalls.toFixed(2)),
+        hourlyAfterCacheToolCalls: Number(estimatedHourlyNetCalls.toFixed(2)),
       },
       estimatedCallsByTier: {
         A: {
           dailyRaw: Number(estimatedDailyRawByTier.A.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.A / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
         B: {
           dailyRaw: Number(estimatedDailyRawByTier.B.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.B / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
         C: {
           dailyRaw: Number(estimatedDailyRawByTier.C.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.C / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
       },
       topicsModeled: searchTopics.length,
@@ -3388,10 +3529,10 @@ async function main(): Promise<void> {
     `[topics:dry-run] constraint_collisions=${summary.totals.constraintCollisions}`,
   );
   console.log(
-    `[topics:dry-run] search_calls_per_day_raw=${summary.searchPlan.estimatedCalls.dailyRaw} search_calls_per_day_after_cache=${summary.searchPlan.estimatedCalls.dailyAfterCache}`,
+    `[topics:dry-run] search_calls_per_day_raw=${summary.searchPlan.estimatedCalls.dailyRaw} search_calls_per_day_after_cache_tool=${summary.searchPlan.estimatedCalls.dailyAfterCacheToolCalls}`,
   );
   console.log(
-    `[topics:dry-run] search_calls_per_hour_raw=${summary.searchPlan.estimatedCalls.hourlyRaw} search_calls_per_hour_after_cache=${summary.searchPlan.estimatedCalls.hourlyAfterCache}`,
+    `[topics:dry-run] search_calls_per_hour_raw=${summary.searchPlan.estimatedCalls.hourlyRaw} search_calls_per_hour_after_cache_tool=${summary.searchPlan.estimatedCalls.hourlyAfterCacheToolCalls}`,
   );
   console.log(
     `[topics:dry-run] tier_calls_daily_raw A=${summary.searchPlan.estimatedCallsByTier.A.dailyRaw} B=${summary.searchPlan.estimatedCallsByTier.B.dailyRaw} C=${summary.searchPlan.estimatedCallsByTier.C.dailyRaw}`,

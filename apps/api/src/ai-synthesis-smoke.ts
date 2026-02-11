@@ -178,6 +178,21 @@ type OpenRouterCallResult = {
   usage: OpenRouterUsage;
 };
 
+const TRUSTED_WEB_DOMAINS = [
+  "reuters.com",
+  "apnews.com",
+  "bloomberg.com",
+  "ft.com",
+  "wsj.com",
+  "economist.com",
+  "nytimes.com",
+  "washingtonpost.com",
+  "cnbc.com",
+  "marketwatch.com",
+  "coindesk.com",
+  "theblock.co",
+];
+
 function mergeUsage(a: OpenRouterUsage, b: OpenRouterUsage): OpenRouterUsage {
   return {
     promptTokens: a.promptTokens + b.promptTokens,
@@ -373,6 +388,29 @@ function deriveImpliedMid(bid: number | null, ask: number | null, last: number |
   return null;
 }
 
+function normalizeDomain(raw: string): string {
+  const value = raw.trim().toLowerCase();
+  return value.startsWith("www.") ? value.slice(4) : value;
+}
+
+function isTrustedWebDomain(raw: string): boolean {
+  const domain = normalizeDomain(raw);
+  return TRUSTED_WEB_DOMAINS.some(
+    trusted => domain === trusted || domain.endsWith(`.${trusted}`),
+  );
+}
+
+function computeDataCompletenessScore(event: EventRow, markets: MarketRow[]): number {
+  const requiredValues = [
+    event.volume_24h,
+    event.liquidity,
+    ...markets.flatMap(m => [m.best_bid, m.best_ask, m.last_price, m.volume_24h, m.liquidity]),
+  ];
+  const valid = requiredValues.filter(value => value != null).length;
+  if (requiredValues.length === 0) return 0;
+  return Number((valid / requiredValues.length).toFixed(4));
+}
+
 function chooseRepresentativePrice(input: SynthesisInputV1): number | null {
   const sample = input.markets.find(m => m.role === "sample");
   const first = sample ?? input.markets[0];
@@ -396,6 +434,21 @@ function evaluatePublishGate(input: SynthesisInputV1, output: SynthesisOutputV1)
   if (input.external_evidence.supports_topic_count < input.policy.min_evidence) {
     decision = "skip_external_publish";
     reasonCodes.add("WEAK_EVIDENCE");
+  }
+  if (
+    input.gate_primitives.independent_sources_count < 2 &&
+    !(input.gate_primitives.high_trust_source && input.gate_primitives.strong_internal_corroboration)
+  ) {
+    if (decision === "publish_candidate") decision = "publish_context_only";
+    reasonCodes.add("LOW_SOURCE_INDEPENDENCE");
+  }
+  if (!input.gate_primitives.strong_internal_corroboration) {
+    if (decision === "publish_candidate") decision = "publish_context_only";
+    reasonCodes.add("WEAK_INTERNAL_CORROBORATION");
+  }
+  if (input.gate_primitives.data_completeness_score < input.policy.min_data_completeness) {
+    if (decision === "publish_candidate") decision = "publish_context_only";
+    reasonCodes.add("LOW_DATA_COMPLETENESS");
   }
   if (!input.freshness.is_fresh_tier_a) {
     if (decision === "publish_candidate") decision = "store_weak_signal";
@@ -815,6 +868,15 @@ function buildSynthesisInput(
     context.searchResult?.parsed.supportsTopicCount ??
     evidenceItems.filter(item => item.supports_topic).length;
   const evidenceCount = context.searchResult?.parsed.evidenceCount ?? evidenceItems.length;
+  const uniqueSourceDomains = new Set(
+    evidenceItems
+      .map(item => normalizeDomain(item.source_domain))
+      .filter(domain => domain !== "unknown"),
+  );
+  const independentSourcesCount = uniqueSourceDomains.size;
+  const highTrustSource = evidenceItems.some(item =>
+    isTrustedWebDomain(item.source_domain),
+  );
 
   const ageCandidates = [
     estimateAgeSec(sampleMarket?.market_updated_at ?? null),
@@ -839,13 +901,23 @@ function buildSynthesisInput(
     if (status === "PARTIAL") return 0.65;
     return 0.55;
   })();
+  const dataCompletenessScore = computeDataCompletenessScore(
+    event,
+    [sampleMarket, topMarket].filter((item): item is MarketRow => item != null),
+  );
+  const strongInternalCorroboration =
+    isFreshTierA &&
+    (event.volume_24h != null ||
+      marketItems.some(
+        market => market.volume_24h != null || market.implied_mid != null,
+      ));
 
   return parseSynthesisInputV1({
     version: "synthesis_input_v1",
     run: {
       run_id: `syn-${runHash(context.topicKey)}`,
       generated_at: new Date().toISOString(),
-      stage: "stage1",
+      stage: "SynthesisLite",
       model: env.aiClusterModelFinal || "openai/gpt-5.2",
       prompt_version: "v1",
     },
@@ -893,10 +965,17 @@ function buildSynthesisInput(
       evidence_count: evidenceCount,
       items: evidenceItems,
     },
+    gate_primitives: {
+      independent_sources_count: independentSourcesCount,
+      high_trust_source: highTrustSource,
+      strong_internal_corroboration: strongInternalCorroboration,
+      data_completeness_score: dataCompletenessScore,
+    },
     policy: {
       min_evidence: Math.max(1, context.minEvidence),
       min_confidence: 0.62,
       min_link_confidence: 0.7,
+      min_data_completeness: 0.55,
       extreme_price_low: 0.08,
       extreme_price_high: 0.92,
     },

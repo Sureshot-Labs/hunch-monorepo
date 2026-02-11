@@ -59,7 +59,7 @@ export const synthesisInputV1Schema = z
       .object({
         run_id: z.string().min(1),
         generated_at: zIsoDatetime,
-        stage: z.literal("stage1"),
+        stage: z.enum(["SynthesisLite", "stage1"]),
         model: z.string().min(1),
         prompt_version: z.string().min(1).optional(),
       })
@@ -113,11 +113,20 @@ export const synthesisInputV1Schema = z
         items: z.array(synthesisInputEvidenceItemV1Schema),
       })
       .strict(),
+    gate_primitives: z
+      .object({
+        independent_sources_count: z.number().int().min(0),
+        high_trust_source: z.boolean(),
+        strong_internal_corroboration: z.boolean(),
+        data_completeness_score: zProb,
+      })
+      .strict(),
     policy: z
       .object({
         min_evidence: z.number().int().min(1),
         min_confidence: zProb,
         min_link_confidence: zProb,
+        min_data_completeness: zProb.default(0.55),
         extreme_price_low: zProb.default(0.08),
         extreme_price_high: zProb.default(0.92),
       })

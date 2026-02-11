@@ -158,12 +158,12 @@ for file in "${OUT_DIR}"/*.json; do
       ($unknown | length),
       ($unknown | map(.marketCount) | add // 0),
       ($placeholder | length),
-      (.searchPlan.estimatedCalls.dailyAfterCache // 0),
+      (.searchPlan.estimatedCalls.dailyAfterCacheToolCalls // .searchPlan.estimatedCalls.dailyAfterCache // 0),
       ((.searchPlan.tierCounts.A // 0 | tostring) + "/" +
        (.searchPlan.tierCounts.B // 0 | tostring) + "/" +
        (.searchPlan.tierCounts.C // 0 | tostring)),
-      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | fromdateiso8601)) > (6 * 3600)))) | length),
-      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | fromdateiso8601)) > (24 * 3600)))) | length)
+      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) > (6 * 3600)))) | length),
+      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) > (24 * 3600)))) | length)
     ] | @tsv
   ' "$file"
 done | sort
