@@ -233,16 +233,30 @@ export function buildSynthesisSystemPromptV1(): string {
 }
 
 export function buildSynthesisUserPromptV1(input: SynthesisInputV1): string {
+  const promptInput: SynthesisInputV1 = {
+    ...input,
+    event: {
+      ...input.event,
+      volume_24h_source: undefined,
+      liquidity_source: undefined,
+    },
+    markets: input.markets.map(market => ({
+      ...market,
+      volume_24h_source: undefined,
+      liquidity_source: undefined,
+    })),
+  };
+
   return [
     "Generate synthesis_output_v1 for the payload below.",
     "Requirements:",
     "- Enforce policy thresholds and freshness checks.",
     "- Use evidence_refs to cite evidence_id values from external_evidence.items.",
     "- If market pricing is already extreme (policy.extreme_price_low/high), prefer context-only recommendation.",
-    "- Treat fallback metric sources conservatively: if *_source indicates volume_total_fallback or open_interest_fallback, do not describe it as confirmed short-term trading flow.",
+    "- If market depth/flow information is limited or missing, avoid strong flow/depth claims and state uncertainty in plain user language.",
     "- Keep summaries user-facing and avoid internal implementation vocabulary.",
     "Input payload:",
-    JSON.stringify(input, null, 2),
+    JSON.stringify(promptInput, null, 2),
   ].join("\n");
 }
 
