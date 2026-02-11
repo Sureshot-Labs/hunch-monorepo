@@ -51,6 +51,7 @@ type MarketRow = {
   venue: string;
   market_title: string | null;
   event_title: string | null;
+  event_status: string | null;
   market_category: string | null;
   event_category: string | null;
   market_open_time: Date | string | null;
@@ -80,6 +81,8 @@ type TopicAggregate = {
   sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleEventStatus: string | null;
+  sampleEventEndDate: Date | string | null;
   sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: Set<string>;
   sourceTopicKeys: Set<string>;
@@ -105,10 +108,13 @@ type TopicSummaryRow = {
   sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleEventStatus: string | null;
+  sampleEventEndDate: Date | string | null;
   sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: string[];
   sourceTopicKeys: string[];
   searchIntentKey?: string;
+  constraintClass?: string;
 };
 
 type Args = {
@@ -163,6 +169,7 @@ type Args = {
   webExcludedDomains: string[];
   xExcludedHandles: string[];
   maxSearchTopics: number;
+  strictInvariants: boolean;
   json: boolean;
   out: string | null;
   help: boolean;
@@ -715,6 +722,15 @@ const CRYPTO_ALIAS_TO_TICKER = new Map<string, string>([
   ["tether", "usdt"],
 ]);
 
+const CRYPTO_TEXT_CUE_PATTERN =
+  /\b(bitcoin|btc|ethereum|eth|solana|sol|dogecoin|doge|xrp|ripple|usdc|usdt|tether|crypto|token|blockchain|onchain|on-chain|defi|market cap|fdv)\b/i;
+
+const POLITICS_TEXT_CUE_PATTERN =
+  /\b(election|president|presidential|prime minister|government|coalition|parliament|senate|house|ceasefire|sanction|tariff|war|strike|nominee|court|fed chair|leader)\b/i;
+
+const SPORTS_TEXT_CUE_PATTERN =
+  /\b(vs\.?|@|match|game|season|champion|championship|mvp|playoff|playoffs|world cup|olympics?|nba|nfl|mlb|nhl|ncaa|premier league|la liga|serie a|bundesliga|ligue 1)\b/i;
+
 const PLACEHOLDER_ENTITY_SLUGS = new Set([
   "unknown",
   "other",
@@ -741,8 +757,9 @@ function isPlaceholderEntitySlug(value: string): boolean {
     return true;
   }
   if (/^[a-z]$/.test(normalized)) return true;
-  if (/^[a-z]{2}-\d{1,2}$/.test(normalized)) return true;
-  if (/^[a-z]{1,2}\d{1,2}$/.test(normalized)) return true;
+  // Keep this narrow: placeholders are usually A1/B1/C1 style buckets.
+  // Broader alpha+digit filtering hides valid entities (e.g. esports teams).
+  if (/^[a-c]-?\d{1,2}$/.test(normalized)) return true;
   return false;
 }
 
@@ -1001,6 +1018,7 @@ function resolveArgs(argv: string[]): Args {
       ["polymarket", "kalshi"],
     ),
     maxSearchTopics: parsePositiveInt(parseFlag(argv, "--max-search-topics"), 300),
+    strictInvariants: parseBoolean(parseFlag(argv, "--strict-invariants"), false),
     json: hasFlag(argv, "--json"),
     out: parseFlag(argv, "--out") ?? null,
     help: hasFlag(argv, "--help"),
@@ -1062,6 +1080,7 @@ Options:
   --web-excluded-domains <csv>  web_search excluded domains (max 5)
   --x-excluded-handles <csv>    x_search excluded handles (max 10)
   --max-search-topics <n>       Max topics used in search volume model (default: 300)
+  --strict-invariants <bool>    Exit non-zero when active/open-now invariants fail (default: false)
   --json                 Print JSON summary instead of text table
   --out <path>           Write JSON summary to file
   --help                 Show this help
@@ -1122,22 +1141,35 @@ function normalizeCategory(
   text: string,
 ): Category {
   const raw = `${eventCategory ?? ""} ${marketCategory ?? ""}`.toLowerCase();
-  if (raw.includes("sport")) return "sports";
-  if (raw.includes("polit")) return "politics";
-  if (raw.includes("crypto") || raw.includes("token")) return "crypto";
+  const rawSports = raw.includes("sport");
+  const rawPolitics = raw.includes("polit");
+  const rawCrypto = raw.includes("crypto") || raw.includes("token");
+
   const lower = text.toLowerCase();
+  const hasCryptoCue = CRYPTO_TEXT_CUE_PATTERN.test(lower);
+  const hasPoliticsCue =
+    POLITICS_TEXT_CUE_PATTERN.test(lower) ||
+    Array.from(POLITICS_COUNTRIES).some(country =>
+      new RegExp(`\\b${country.replace(/-/g, "\\s+")}\\b`, "i").test(lower),
+    );
+  const hasSportsCue =
+    SPORTS_TEXT_CUE_PATTERN.test(lower) || SPORTS_CATEGORY_HINT_PATTERN.test(lower);
+
+  // Prefer strong textual cues over noisy venue/category labels.
+  if (hasSportsCue) return "sports";
+  if (hasPoliticsCue && !hasCryptoCue) return "politics";
+  if (hasCryptoCue && !hasPoliticsCue) return "crypto";
+
+  if (rawSports) return "sports";
+  if (rawPolitics) return "politics";
+  if (rawCrypto) return "crypto";
+
   if (
     lower.includes("bitcoin") ||
-    lower.includes("btc") ||
     lower.includes("ethereum") ||
-    lower.includes("eth") ||
     lower.includes("solana") ||
-    lower.includes("sol ") ||
     lower.includes("dogecoin") ||
-    lower.includes("doge") ||
-    lower.includes("xrp") ||
-    lower.includes("ripple") ||
-    lower.includes("crypto")
+    lower.includes("ripple")
   ) {
     return "crypto";
   }
@@ -1488,7 +1520,7 @@ function extractTeams(text: string): [string, string] | null {
 }
 
 function extractAcronymTokens(text: string): string[] {
-  const matches = text.match(/\b[A-Z]{2,8}\b/g) ?? [];
+  const matches = text.match(/\b[A-Z][A-Z0-9]{1,7}\b/g) ?? [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of matches) {
@@ -1502,6 +1534,28 @@ function extractAcronymTokens(text: string): string[] {
     out.push(slug);
   }
   return out;
+}
+
+function extractSportsCandidateFallback(text: string): string | null {
+  const normalized = normalizeTitle(text, "sports");
+  const tokens = tokenizeNormalized(normalized).filter(token => {
+    if (STOPWORDS.has(token)) return false;
+    if (GENERIC_TOKENS.has(token)) return false;
+    if (KEYWORD_NOISE.has(token)) return false;
+    if (MONTH_TOKENS.has(token) || DAY_TOKENS.has(token)) return false;
+    if (TEMPORAL_TOKENS.has(token)) return false;
+    if (SPORTS_TEAM_SIDE_STOP_TOKENS.has(token)) return false;
+    if (QUESTION_ENTITY_BLOCKLIST.has(token)) return false;
+    if (/^\d+$/.test(token)) return false;
+    if (/^[1-4](q|h)$/.test(token)) return false;
+    if (/^(q|h)[1-4]$/.test(token)) return false;
+    if (isPlaceholderEntitySlug(token)) return false;
+    return true;
+  });
+  if (tokens.length === 0) return null;
+  // Keep the fallback simple and deterministic: prefer longer informative tokens.
+  const [best] = tokens.sort((a, b) => b.length - a.length);
+  return best && !isPlaceholderEntitySlug(best) ? best : null;
 }
 
 function detectEntityArchetype(
@@ -1594,6 +1648,23 @@ function extractKeywordEntity(text: string): string {
     return b.length - a.length;
   });
   return normalizeSlug(first);
+}
+
+function extractEventAnchorKeyword(text: string): string | null {
+  const normalized = normalizeTitle(text, "other");
+  if (!normalized) return null;
+  const tokens = tokenizeNormalized(normalized).filter(
+    token =>
+      !KEYWORD_NOISE.has(token) &&
+      !MONTH_TOKENS.has(token) &&
+      !DAY_TOKENS.has(token) &&
+      !TEMPORAL_TOKENS.has(token) &&
+      !isPlaceholderEntitySlug(token),
+  );
+  if (tokens.length < 2) return null;
+  const anchor = normalizeSlug(tokens.slice(0, 5).join("-"));
+  if (!anchor || isPlaceholderEntitySlug(anchor)) return null;
+  return anchor;
 }
 
 function extractCandidateEntityFromText(
@@ -1746,6 +1817,22 @@ function resolveEntity(
       }
     }
 
+    // If we have explicit crypto cues but no mapped ticker, keep a generic
+    // keyword anchor rather than dropping to unknown.
+    const hasCryptoCue = CRYPTO_TEXT_CUE_PATTERN.test(rawEntitySource);
+    if (hasCryptoCue) {
+      const fallback = extractEventAnchorKeyword(rawEntitySource);
+      if (fallback && !POLITICS_COUNTRIES.has(fallback)) {
+        return {
+          type: "keyword",
+          value: fallback,
+          source: "combined",
+          archetype,
+          unknownReason: null,
+        };
+      }
+    }
+
     // Conservative crypto handling: skip unknown entities rather than
     // producing noisy generic keywords that degrade search quality.
     return {
@@ -1793,6 +1880,18 @@ function resolveEntity(
           unknownReason: null,
         };
         }
+      }
+      const fallbackCandidate =
+        extractSportsCandidateFallback(marketTitle ?? "") ??
+        extractSportsCandidateFallback(eventTitle ?? "");
+      if (fallbackCandidate) {
+        return {
+          type: "keyword",
+          value: fallbackCandidate,
+          source: marketTitle?.trim() ? "market" : "event",
+          archetype,
+          unknownReason: null,
+        };
       }
     }
     for (const pattern of SPORTS_ENTITY_PATTERNS) {
@@ -2020,6 +2119,19 @@ function resolveEntity(
       };
     }
 
+    // Fallback to event-level anchor for generic/candidate politics topics
+    // where outcome labels are placeholders (e.g. "Other", "No one").
+    const eventAnchor = extractEventAnchorKeyword(eventOnlyText);
+    if (eventAnchor) {
+      return {
+        type: "keyword",
+        value: eventAnchor,
+        source: "event",
+        archetype,
+        unknownReason: null,
+      };
+    }
+
     return {
       type: "keyword",
       value: "unknown",
@@ -2169,6 +2281,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.venue,
         m.title as market_title,
         e.title as event_title,
+        e.status::text as event_status,
         m.category as market_category,
         e.category as event_category,
         m.open_time as market_open_time,
@@ -2223,6 +2336,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.venue,
         m.title as market_title,
         e.title as event_title,
+        e.status::text as event_status,
         m.category as market_category,
         e.category as event_category,
         m.open_time as market_open_time,
@@ -2245,6 +2359,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
       venue,
       market_title,
       event_title,
+      event_status,
       market_category,
       event_category,
       market_open_time,
@@ -2384,6 +2499,7 @@ function candidateIntentAnchor(topic: TopicSummaryRow): string | null {
 }
 
 function searchIntentKey(topic: TopicSummaryRow): string {
+  const constraintClass = constraintClassForConstraint(topic.constraint);
   if (topic.entity === "unknown") {
     return `${topic.category}|unknown|${topic.topicKey}`;
   }
@@ -2393,7 +2509,25 @@ function searchIntentKey(topic: TopicSummaryRow): string {
       return `${topic.category}|candidate_list|${anchor}`;
     }
   }
+  if (constraintClass !== "none") {
+    return `${topic.category}|${topic.entityType}|${topic.entity}|${constraintClass}`;
+  }
   return `${topic.category}|${topic.entityType}|${topic.entity}`;
+}
+
+function constraintClassForConstraint(constraint: Constraint): string {
+  switch (constraint.kind) {
+    case "threshold":
+      return `threshold_${constraint.unit}_${constraint.operator}`;
+    case "range":
+      return `range_${constraint.unit}`;
+    case "ou":
+      return `ou_${constraint.operator}`;
+    case "spread":
+      return "spread_eq";
+    default:
+      return "none";
+  }
 }
 
 function normalizeSearchTopicForIntent(topic: TopicSummaryRow): TopicSummaryRow {
@@ -2969,6 +3103,12 @@ function cadenceForTier(tier: "A" | "B" | "C", args: Args): number {
   return args.tierCCadenceMinutes;
 }
 
+function bucketMinutesForTier(tier: "A" | "B" | "C"): number {
+  if (tier === "A") return 5;
+  if (tier === "B") return 15;
+  return 60;
+}
+
 function countsForTier(
   tier: "A" | "B" | "C",
   args: Args,
@@ -3048,6 +3188,8 @@ async function main(): Promise<void> {
         sampleVenue: row.venue,
         sampleEventTitle: row.event_title,
         sampleMarketTitle: row.market_title,
+        sampleEventStatus: row.event_status,
+        sampleEventEndDate: row.event_end_date,
         sampleMarketUpdatedAt: row.market_updated_at,
         candidateEntities: new Set(),
         sourceTopicKeys: new Set(),
@@ -3089,6 +3231,8 @@ async function main(): Promise<void> {
       sampleVenue: topic.sampleVenue,
       sampleEventTitle: topic.sampleEventTitle,
       sampleMarketTitle: topic.sampleMarketTitle,
+      sampleEventStatus: topic.sampleEventStatus,
+      sampleEventEndDate: topic.sampleEventEndDate,
       sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       candidateEntities: Array.from(topic.candidateEntities).sort(),
       sourceTopicKeys: Array.from(topic.sourceTopicKeys).sort(),
@@ -3143,6 +3287,8 @@ async function main(): Promise<void> {
       merged.sampleVenue = topic.sampleVenue;
       merged.sampleEventTitle = topic.sampleEventTitle;
       merged.sampleMarketTitle = topic.sampleMarketTitle;
+      merged.sampleEventStatus = topic.sampleEventStatus;
+      merged.sampleEventEndDate = topic.sampleEventEndDate;
       merged.sampleMarketUpdatedAt = topic.sampleMarketUpdatedAt;
       merged.archetype = topic.archetype;
       merged.entitySource = topic.entitySource;
@@ -3188,6 +3334,7 @@ async function main(): Promise<void> {
       category: topic.category,
       entity: `${topic.entityType}:${topic.entity}`,
       searchIntentKey: topic.searchIntentKey ?? searchIntentKey(topic),
+      constraintClass: constraintClassForConstraint(topic.constraint),
       archetype: topic.archetype,
       entitySource: topic.entitySource,
       unknownReason: topic.unknownReason,
@@ -3195,6 +3342,8 @@ async function main(): Promise<void> {
       sampleEventId: topic.sampleEventId,
       sampleMarketId: topic.sampleMarketId,
       sampleVenue: topic.sampleVenue,
+      sampleEventStatus: topic.sampleEventStatus,
+      sampleEventEndDate: topic.sampleEventEndDate,
       sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       tierScore: topicScores.get(topic.topicKey) ?? null,
       candidateEntities: topic.candidateEntities.slice(0, 10),
@@ -3211,6 +3360,9 @@ async function main(): Promise<void> {
         fromDate: lookback.fromDate,
         toDate: lookback.toDate,
         lookbackHours: lookback.lookbackHours,
+      },
+      schedule: {
+        bucketMinutes: bucketMinutesForTier(tier),
       },
     };
   });
@@ -3239,6 +3391,26 @@ async function main(): Promise<void> {
   const rowsUsed = rows.length - skippedByCategory;
   const duplicates = Math.max(0, rowsUsed - topics.length);
   const duplicateRate = rowsUsed > 0 ? duplicates / rowsUsed : 0;
+  const nowMs = Date.now();
+  const nonActiveSamples = searchTopics.filter(
+    item => (item.sampleEventStatus ?? "").toUpperCase() !== "ACTIVE",
+  ).length;
+  const endedSamples = searchTopics.filter(item => {
+    if (!item.sampleEventEndDate) return false;
+    const ts = new Date(item.sampleEventEndDate).getTime();
+    return Number.isFinite(ts) && ts <= nowMs;
+  }).length;
+  const staleSamples6h = searchTopics.filter(item => {
+    if (!item.sampleMarketUpdatedAt) return false;
+    const ts = new Date(item.sampleMarketUpdatedAt).getTime();
+    return Number.isFinite(ts) && nowMs - ts > 6 * 3600 * 1000;
+  }).length;
+  const staleSamples24h = searchTopics.filter(item => {
+    if (!item.sampleMarketUpdatedAt) return false;
+    const ts = new Date(item.sampleMarketUpdatedAt).getTime();
+    return Number.isFinite(ts) && nowMs - ts > 24 * 3600 * 1000;
+  }).length;
+  const invariantViolations = nonActiveSamples + endedSamples;
 
   const constraintCollisions = Array.from(fingerprintToConstraints.entries())
     .filter(([, constraints]) => constraints.size > 1)
@@ -3332,31 +3504,53 @@ async function main(): Promise<void> {
       estimatedCalls: {
         dailyRaw: Number(estimatedDailyRawCalls.toFixed(2)),
         dailyAfterCache: Number(estimatedDailyNetCalls.toFixed(2)),
+        dailyAfterCacheToolCalls: Number(estimatedDailyNetCalls.toFixed(2)),
         hourlyRaw: Number(estimatedHourlyRawCalls.toFixed(2)),
         hourlyAfterCache: Number(estimatedHourlyNetCalls.toFixed(2)),
+        hourlyAfterCacheToolCalls: Number(estimatedHourlyNetCalls.toFixed(2)),
       },
       estimatedCallsByTier: {
         A: {
           dailyRaw: Number(estimatedDailyRawByTier.A.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.A / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
         B: {
           dailyRaw: Number(estimatedDailyRawByTier.B.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.B / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
         C: {
           dailyRaw: Number(estimatedDailyRawByTier.C.toFixed(2)),
           dailyAfterCache: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
           hourlyRaw: Number((estimatedDailyRawByTier.C / 24).toFixed(2)),
           hourlyAfterCache: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
         },
       },
       topicsModeled: searchTopics.length,
       queryExamples: topicSearchPreview,
+    },
+    qa: {
+      invariants: {
+        sampleEventActiveOnly: nonActiveSamples === 0,
+        sampleEventOpenNowOnly: endedSamples === 0,
+      },
+      violations: {
+        nonActiveSamples,
+        endedSamples,
+      },
+      freshness: {
+        staleSamples6h,
+        staleSamples24h,
+      },
     },
     topTopics: topics.slice(0, args.showTop),
     topConstraintCollisions: constraintCollisions.slice(0, args.showTop),
@@ -3388,13 +3582,16 @@ async function main(): Promise<void> {
     `[topics:dry-run] constraint_collisions=${summary.totals.constraintCollisions}`,
   );
   console.log(
-    `[topics:dry-run] search_calls_per_day_raw=${summary.searchPlan.estimatedCalls.dailyRaw} search_calls_per_day_after_cache=${summary.searchPlan.estimatedCalls.dailyAfterCache}`,
+    `[topics:dry-run] search_calls_per_day_raw=${summary.searchPlan.estimatedCalls.dailyRaw} search_calls_per_day_after_cache_tool=${summary.searchPlan.estimatedCalls.dailyAfterCacheToolCalls}`,
   );
   console.log(
-    `[topics:dry-run] search_calls_per_hour_raw=${summary.searchPlan.estimatedCalls.hourlyRaw} search_calls_per_hour_after_cache=${summary.searchPlan.estimatedCalls.hourlyAfterCache}`,
+    `[topics:dry-run] search_calls_per_hour_raw=${summary.searchPlan.estimatedCalls.hourlyRaw} search_calls_per_hour_after_cache_tool=${summary.searchPlan.estimatedCalls.hourlyAfterCacheToolCalls}`,
   );
   console.log(
     `[topics:dry-run] tier_calls_daily_raw A=${summary.searchPlan.estimatedCallsByTier.A.dailyRaw} B=${summary.searchPlan.estimatedCallsByTier.B.dailyRaw} C=${summary.searchPlan.estimatedCallsByTier.C.dailyRaw}`,
+  );
+  console.log(
+    `[topics:dry-run] qa active_only=${summary.qa.invariants.sampleEventActiveOnly} open_now_only=${summary.qa.invariants.sampleEventOpenNowOnly} stale6h=${summary.qa.freshness.staleSamples6h} stale24h=${summary.qa.freshness.staleSamples24h}`,
   );
   console.log("[topics:dry-run] sample_venue_distribution");
   console.table(
@@ -3429,6 +3626,8 @@ async function main(): Promise<void> {
     category: item.category,
     entity: item.entity,
     marketCount: item.marketCount,
+    sampleEventStatus: item.sampleEventStatus ?? "",
+    sampleEventEndDate: item.sampleEventEndDate ?? "",
     combinedPrompt:
       item.pack.combinedCount > 0
         ? item.promptCombined.slice(0, 80)
@@ -3440,6 +3639,13 @@ async function main(): Promise<void> {
   }));
   console.log("[topics:dry-run] query_examples");
   console.table(queryPrintable);
+
+  if (args.strictInvariants && invariantViolations > 0) {
+    console.error(
+      `[topics:dry-run] strict invariant failure: non_active=${nonActiveSamples} ended=${endedSamples}`,
+    );
+    process.exitCode = 2;
+  }
 }
 
 main()

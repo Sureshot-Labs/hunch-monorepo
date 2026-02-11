@@ -291,23 +291,25 @@ The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validate
     - `x_search.to_date`
     - `x_search.excluded_x_handles`
 - search-intent dedupe is active before cost estimation:
-  - dedupe key: `category|entity_type|entity`
+  - dedupe key:
+    - default: `category|entity_type|entity`
+    - threshold/time-sensitive topics: `category|entity_type|entity|constraint_class`
   - original topic granularity retained for internal diagnostics.
 
 Validation snapshot (same quality gates, global sampling, trending order):
 
 - top-50 markets:
   - `uniqueSearchTopics=39`
-  - `dailyAfterCacheCalls=152.1`
+  - `dailyAfterCacheToolCalls=152.1`
 - top-100 markets:
   - `uniqueSearchTopics=75`
-  - `dailyAfterCacheCalls=304.2`
+  - `dailyAfterCacheToolCalls=304.2`
 - top-200 markets:
   - `uniqueSearchTopics=144`
-  - `dailyAfterCacheCalls=585.0`
+  - `dailyAfterCacheToolCalls=585.0`
 - top-50 markets (per-venue sampling):
   - `uniqueSearchTopics=29`
-  - `dailyAfterCacheCalls=113.1`
+  - `dailyAfterCacheToolCalls=113.1`
 
 Cost implication from tool invocations only (`$5 / 1000` calls, token costs excluded):
 
@@ -377,8 +379,8 @@ Where:
 
 ### 5.3 Retrieval cadence by topic tier
 
-- Tier A topics: every 10-15 minutes.
-- Tier B topics: every 60 minutes.
+- Tier A topics: every 10-15 minutes (launch default currently 12m).
+- Tier B topics: every 120 minutes (launch default; tighten to 60m only after budget/quality calibration).
 - Tier C topics: every 4-6 hours or on-demand.
 - Event-driven boost: temporarily promote affected topics to Tier A.
 
@@ -427,8 +429,8 @@ Promote related topics when any fire:
 
 Use dedup keys:
 
-- `topic:refresh:<topicKey>:<bucket>`
-- `insight:recalc:<eventId>:<bucket>`
+- `topic:refresh:<topicKey>:<bucket_by_tier>`
+- `insight:recalc:<eventId>:<bucket_by_tier>`
 
 and cooldown windows to prevent retrigger storms.
 
@@ -445,7 +447,7 @@ When queue pressure rises:
 Use a split model:
 
 - Postgres scheduler state as source of truth:
-  - stores topic cadence and due-time state (`next_run_at`, `tier`, `priority`, `enabled`),
+  - stores topic cadence and due-time state (`next_run_at`, `tier`, `priority`, `enabled`) in a dedicated schedule contract (see Section 8),
   - remains queryable/auditable and easy to operate.
 - Redis queue/stream as execution transport:
   - dispatcher enqueues due topics in bounded batches,
@@ -493,29 +495,36 @@ Idempotency/locking:
 
 ## 7) Agent/Tool Architecture
 
-### 7.1 Four-stage analysis flow
+### 7.1 Canonical stage taxonomy (single source of truth)
 
-Stage 0: Topic graph build (deterministic + optional LLM expansion)
+Use these stage names everywhere (logs, run rows, dashboards, alerts, code):
 
+1. `TopicBuild`
+- deterministic topic extraction + ranking.
 - output: ranked topic queue with cadence and constraints.
 
-Stage 1: Topic retrieval (external + internal evidence)
+2. `ExternalRetrieval`
+- pull broad evidence for each scheduled topic (`web_search + x_search` in launch mode),
+- normalize + dedup + trust/recency scoring.
 
-- pull broad evidence for each topic (news/web/X if enabled),
-- normalize + dedup + trust score.
+3. `Mapping`
+- topic-to-event/market candidate retrieval + rerank,
+- emit high-confidence links with reason metadata.
 
-Stage 2: Topic-to-market/event mapping
+4. `SynthesisLite`
+- cheap structured synthesis (`gpt-5-nano` class) for mapped events,
+- requires internal feature pack; uses external evidence only when gate-eligible.
 
-- run candidate + rerank flow,
-- emit high-confidence links with reasons.
+5. `SynthesisRich` (optional)
+- richer synthesis (`gpt-5.2` class) only for high-impact/high-uncertainty items under quota.
 
-Stage 3: Insight/signal synthesis (conditional)
+6. `PublishGate`
+- deterministic, non-LLM gate on confidence + freshness + evidence quality + internal corroboration.
 
-- stage 3a cheap structured pass (`gpt-5-nano` class) for all linked events,
-- stage 3a input must include internal market/event/wallet feature pack (required) plus mapped external evidence (optional),
-- stage 3b richer synthesis (`gpt-5.2` class) only for high-impact/high-uncertainty items.
+7. `Serve`
+- write latest insight snapshot and serve via API/UI with freshness/confidence metadata.
 
-This preserves quality while keeping cost bounded.
+Legacy labels (`Stage0/1/2/3`) are deprecated and should not be used in new implementations.
 
 ### 7.2 Tool set
 
@@ -555,6 +564,12 @@ Launch stack:
 3. Degraded mode policy
 - If xAI tools degrade or exceed budget, pipeline switches to internal-only mode (no external claims).
 - Rule: do not publish high-confidence external-driven insights while external retrieval is disabled.
+
+Retrieval mode contract (must be explicit in ops and publish rules):
+
+- `combined` (launch default): `web_search + x_search`.
+- `web_only`: allowed for budget/prov-degrade shedding; publish only with stricter confidence/evidence thresholds.
+- `internal_only`: no external claims; only internal-context insights allowed.
 
 ### 7.4 xAI tool contract (validated against current docs)
 
@@ -610,7 +625,10 @@ Tool policy attached to each pack:
 
 Search dedupe rule (required before scheduling):
 
-- Build a search-intent key `category|entity_type|entity` and collapse duplicate market topics across time buckets/constraints for external retrieval planning.
+- Build a search-intent key:
+  - default: `category|entity_type|entity`
+  - threshold/time-sensitive topics: `category|entity_type|entity|constraint_class`
+- Never collapse across opposite numeric direction (`above` vs `below`) or materially different threshold classes.
 - Keep original topic granularity for internal scoring, but execute external retrieval once per search-intent key per cadence window.
 
 Minimum pack by tier (launch default):
@@ -641,6 +659,19 @@ Use these in `news_novelty_z` and publish gating:
   - 1 high-trust source + strong internal market/flow corroboration.
 - otherwise insight remains low confidence or suppressed.
 
+Operational definitions (required to avoid implementation drift):
+
+- `independent_sources`:
+  - must be distinct `eTLD+1`,
+  - and distinct `publisher_group_id` (maintained mapping),
+  - and for factual/causal claims, X-only posts do not count as independent corroboration.
+- `high_trust_source`:
+  - `allowed=true` in `ai_domain_policies`,
+  - `trust_weight >= TRUST_PUBLISH_THRESHOLD` (config).
+- `strong_internal_corroboration`:
+  - freshness gates pass,
+  - and at least one deterministic trigger passes (`price_move`, `flow_spike`, or `volume_acceleration`) with locked thresholds.
+
 ### 7.7 Determinism and reproducibility
 
 Persist for each run:
@@ -654,9 +685,9 @@ Persist for each run:
 
 Without this, production debugging will be painful.
 
-### 7.8 Stage1 synthesis prompt contract (internal-first grounding)
+### 7.8 `SynthesisLite` prompt contract (internal-first grounding)
 
-Yes: this should be explicitly part of the plan. Stage1 is intentionally grounded in internal market data first; external evidence is an augment, not a replacement.
+Yes: this should be explicitly part of the plan. `SynthesisLite` is intentionally grounded in internal market data first; external evidence is an augment, not a replacement.
 
 Prompt shape (recommended):
 
@@ -697,7 +728,7 @@ Required model behavior:
   - `publish_recommendation.decision` with reason codes.
 4. Return `INSUFFICIENT_EVIDENCE` or `STALE` when gates fail.
 
-Stage1 output JSON contract:
+`SynthesisLite` output JSON contract:
 
 - must match `SynthesisOutputV1` (Section 4 objects + serving contracts in Sections 8/9),
 - must include `publish_recommendation` and `evidence_refs`,
@@ -719,56 +750,65 @@ Add additive tables (no breaking schema changes):
 - `topic_key` PK, `category`, `entity`, `constraint_jsonb`, `time_bucket`
 - `tier`, `score`, `active_links_count`, `last_refreshed_at`, `updated_at`
 
-2. `ai_topic_queries`
+2. `ai_topic_schedule` (scheduler source of truth)
+- `topic_key` FK, `next_run_at`, `cadence_sec`, `priority`, `enabled`
+- `lease_expires_at`, `last_run_at`, `last_status`, `last_error`
+- unique key on `topic_key`
+
+3. `ai_topic_queries`
 - `id`, `topic_key`, `query_text`, `query_kind`, `version`, `enabled`
 - keeps deterministic + LLM-expanded query variants auditable.
 
-3. `ai_topic_evidence`
+4. `ai_topic_evidence`
 - `id`, `topic_key`, `provider`, `source_domain`, `headline`, `published_at`, `url`
 - `summary`, `trust_weight`, `recency_weight`, `dedup_hash`, `raw_jsonb`
-- unique index on `dedup_hash` to prevent repeats.
+- unique index on `(topic_key, dedup_hash)` to prevent intra-topic repeats while allowing cross-topic reuse.
+- `raw_jsonb` is short-lived debug storage only (default TTL 7 days); long-lived records should keep references/hashes + normalized fields.
 
-4. `ai_topic_links`
+5. `ai_topic_links`
 - `id`, `topic_key`, `event_id` nullable, `market_id` nullable
 - `link_type`, `link_confidence`, `reasons_jsonb`, `created_at`
 
-5. `ai_insight_runs`
-- `id`, `topic_key` nullable, `event_id` nullable, `market_id` nullable, `trigger_type`, `tier`, `status`
-- `stage1_model`, `stage2_model`, `prompt_version`
+6. `ai_insight_runs`
+- `id`, `run_key`, `stage`, `topic_key` nullable, `event_id` nullable, `market_id` nullable, `trigger_type`, `tier`, `status`
+- `synthesis_lite_model`, `synthesis_rich_model`, `prompt_version`
 - `started_at`, `finished_at`, `latency_ms`
 - `input_hash`, `tool_snapshot_jsonb`
 - `token_in`, `token_out`, `cost_usd_est`, `error` nullable
 
-6. `ai_event_insights`
+7. `ai_event_insights`
 - `event_id` PK
+- `latest_run_key`, `latest_stage`
 - `insight_version`, `signal_version`
 - `summary_short`, `summary_long`
 - `signals_jsonb`, `confidence`, `quality_score`
 - `evidence_jsonb` (internal + external with provenance)
 - `stale_at`, `updated_at`
 
-7. `ai_market_signals` (optional split)
+8. `ai_market_signals` (optional split)
 - keyed by `(market_id, signal_type)`
 - structured payload + confidence + freshness
 
-8. `ai_domain_policies`
+9. `ai_domain_policies`
 - `source_domain` PK, `allowed`, `trust_weight`, `notes`, `updated_at`
 - provider/domain trust and allow/deny enforcement.
 
-9. `ai_provider_status`
+10. `ai_provider_status`
 - `provider` PK, `enabled`, `last_ok_at`, `last_error_at`, `error_rate_5m`, `p95_latency_ms_5m`, `updated_at`
 - circuit-breaker and health tracking for xAI tools.
 
-10. `ai_insight_dlq`
+11. `ai_insight_dlq`
 - failed run payload metadata for replay operations (`run_key`, `stage`, `payload_hash`, `error`, `created_at`).
 
 Indexes:
 
 - `ai_topics(tier, score desc)`
+- `ai_topic_schedule(next_run_at, priority desc)`
 - `ai_topic_evidence(topic_key, published_at desc)`
 - `ai_topic_links(event_id, link_confidence desc)`
 - `ai_topic_links(market_id, link_confidence desc)`
 - `ai_event_insights(updated_at desc)`
+- `ai_insight_runs(stage, started_at desc)`
 - `ai_insight_runs(event_id, started_at desc)`
 - `ai_insight_runs(run_key)` unique
 - `ai_topic_evidence(source_domain, published_at desc)`
@@ -796,7 +836,8 @@ Serving rules:
 ### 10.1 Budget policy
 
 - Daily budget cap (`AI_INSIGHTS_DAILY_BUDGET_USD`)
-- Per-run max tokens stage1/stage2
+- Per-run max tokens `SynthesisLite`/`SynthesisRich`
+- Billable unit for retrieval is `server_side_tool_calls` (not request count).
 - Bound tool-call explosion with `max_turns` and observed tool-usage caps (do not assume one tool call per request).
 - Hard cap on topic refreshes per cycle (e.g. max 200 topics/hour)
 - External news call cap per topic window (e.g. max 1-2 pulls per 10-15m bucket)
@@ -814,7 +855,7 @@ When budget/queue pressure rises:
 
 - keep Tier A,
 - reduce Tier B frequency,
-- disable Stage 2 for low-impact items,
+- disable `SynthesisRich` for low-impact items,
 - disable external news enrichment first,
 - keep using cached external evidence before making new calls.
 
@@ -831,6 +872,8 @@ Cache tool responses by key + short TTL:
 
 ### 11.1 Pre-publish gate
 
+`PublishGate` is deterministic (non-LLM). It evaluates structured outputs + metadata only.
+
 Do not publish insight if:
 
 - confidence below threshold,
@@ -838,6 +881,19 @@ Do not publish insight if:
 - missing minimum evidence count,
 - stale market data beyond threshold,
 - link confidence below mapping threshold for event/market attachment.
+
+Gate primitives (must be configured, measured, and logged with reason codes):
+
+- `independent_sources_count`:
+  - distinct `eTLD+1` and distinct `publisher_group_id`,
+  - X-only sources cannot satisfy factual-independence on their own.
+- `high_trust_source`:
+  - source allowed and `trust_weight >= TRUST_PUBLISH_THRESHOLD`.
+- `strong_internal_corroboration`:
+  - freshness passes,
+  - and deterministic movement/flow trigger(s) pass configured thresholds.
+- `data_completeness_score`:
+  - minimum required before making venue-comparative claims (avoid treating unknown as zero).
 
 ### 11.2 Hallucination control
 
@@ -879,7 +935,7 @@ Phase 2: event insights MVP (1-2 weeks)
 Phase 3: market signals + feed integration (1-2 weeks)
 
 - Add `/insights/feed` and optional `/markets/:marketId/signals`.
-- Enable Stage 2 synthesis only for high-impact candidates.
+- Enable `SynthesisRich` only for high-impact candidates.
 - Add UI affordances for confidence and freshness.
 
 Phase 4: external source expansion + optimization
@@ -892,13 +948,15 @@ Phase 4: external source expansion + optimization
 
 - Reuse existing rollups (`unified_*_1m`, `*_1h`, `*_trade_24h`) for candidate scoring.
 - Treat base-table `volume_24h` and `liquidity` as nullable; always `coalesce(...)` with explicit fallback.
-- Expect sparse membership in `unified_market_trade_24h` / `unified_event_trade_24h`; left join and default missing rows to zero.
+- Expect sparse membership in `unified_market_trade_24h` / `unified_event_trade_24h`; left join with explicit completeness flags.
+- Do not treat missing venue metrics as hard zero for user-facing comparative claims (`unknown` != `0`).
 - Use `unified_book_top` / `unified_book_top_1m` for BBO-derived features across venues (do not assume `unified_markets.best_bid/best_ask` is populated).
 - Avoid running heavy raw hypertable scans inside AI worker.
 - Use batched event IDs in queries (`unnest($1::text[])`) and order-preserving joins.
 - Add bounded windows for wallet-intel joins.
 - Gate profile-conditioned prompt branches by profile existence (`wallet_profiles`) and use deterministic fallback otherwise.
 - Keep AI writes isolated from hot feed query paths.
+- Surface `data_completeness_score` in synthesis input/output and apply stricter publish gating when completeness is low.
 
 ## 14) Risks and Mitigations
 
@@ -924,9 +982,11 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_STAGE1_MODEL=openai/gpt-5-nano`
 - `AI_INSIGHTS_STAGE2_MODEL=openai/gpt-5.2`
 - `AI_INSIGHTS_DAILY_BUDGET_USD=10`
+- `AI_INSIGHTS_MAX_SERVER_SIDE_TOOL_CALLS_PER_DAY=1800`
+- `AI_INSIGHTS_MAX_SERVER_SIDE_TOOL_CALLS_PER_HOUR=120`
 - `AI_INSIGHTS_TOPIC_REFRESH_MAX_PER_HOUR=30`
 - `AI_INSIGHTS_TOPIC_EXPANSION_MAX=8`
-- `AI_INSIGHTS_TIER_A_REFRESH_MIN=10`
+- `AI_INSIGHTS_TIER_A_REFRESH_MIN=12`
 - `AI_INSIGHTS_TIER_B_REFRESH_MIN=120`
 - `AI_INSIGHTS_MIN_CONFIDENCE=0.62`
 - `AI_INSIGHTS_MIN_LINK_CONFIDENCE=0.70`
@@ -935,16 +995,20 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_XAI_TOOLS=web_search,x_search`
 - `XAI_API_KEY=<secret>`
 - `AI_INSIGHTS_NEWS_CACHE_TTL_SEC=900`
+- `AI_INSIGHTS_RAW_EVIDENCE_TTL_HOURS=168`
 - `AI_INSIGHTS_NEWS_MAX_CALLS_PER_TOPIC_WINDOW=1`
-- `AI_INSIGHTS_TARGET_TOPICS_PER_DAY=100`
+- `AI_INSIGHTS_TARGET_TOPICS_PER_DAY=90`
 - `AI_INSIGHTS_RETRIEVAL_MODE=combined_only`
+- `AI_INSIGHTS_RETRIEVAL_MODE_FALLBACK=web_only`
+- `AI_INSIGHTS_DEGRADED_MODE=internal_only`
 - `AI_INSIGHTS_WEB_EXCLUDED_DOMAINS=polymarket.com,kalshi.com,limitless.exchange,hunch.trade`
 - `AI_INSIGHTS_X_EXCLUDED_HANDLES=polymarket,kalshi`
 - `AI_INSIGHTS_TIER_A_LOOKBACK_HOURS=24`
 - `AI_INSIGHTS_TIER_B_LOOKBACK_HOURS=72`
 - `AI_INSIGHTS_TIER_C_LOOKBACK_HOURS=168`
 
-These are safe launch defaults, not final tuning.
+These are launch defaults for shadow/canary, not broad-publish tuning.
+`AI_INSIGHTS_MIN_CONFIDENCE` and `AI_INSIGHTS_MIN_LINK_CONFIDENCE` remain placeholders until calibration gates pass.
 
 ## 16) Recommended First Implementation Slice
 
@@ -963,13 +1027,14 @@ This gives user-visible value quickly while staying operationally safe.
 1. Locked: launch with `web_search + x_search`.
 2. Locked: mapping default is lexical + embedding agreement, with strictly bounded exceptions.
 3. Locked: MVP templates are category-specific (`crypto`, `politics`, `sports`), not global.
-4. Locked: publish requires `2 independent sources` OR `1 high-trust source + strong internal corroboration`.
-5. Locked: Stage2 is allowed for ambiguous high-impact candidates, quota-limited.
-6. Locked: MVP insight scope is event-level (not user-segmented).
-7. Locked: store references/hashes + short-lived raw payload cache (not full long-term raw content).
-8. Remaining: whether to keep full event insight history from day 1 or latest-only plus run logs.
-9. Remaining: whether market-level signals should be separate table in MVP or nested under event payload.
-10. Remaining: exact production budget cap target (daily/weekly) after first shadow-week telemetry.
+4. Locked: publish requires `2 independent sources` OR `1 high-trust source + strong internal corroboration` using deterministic definitions in Sections 7.6 and 11.1.
+5. Locked: `SynthesisRich` is allowed for ambiguous high-impact candidates, quota-limited.
+6. Locked: retrieval modes are explicit (`combined`, `web_only`, `internal_only`) with stricter publish rules as mode degrades.
+7. Locked: MVP insight scope is event-level (not user-segmented).
+8. Locked: store references/hashes + short-lived raw payload cache (not full long-term raw content).
+9. Remaining: whether to keep full event insight history from day 1 or latest-only plus run logs.
+10. Remaining: whether market-level signals should be separate table in MVP or nested under event payload.
+11. Remaining: exact production budget cap target (daily/weekly) after first shadow-week telemetry.
 
 ## 18) Final Recommendation
 
@@ -1087,7 +1152,7 @@ This section captures the remaining execution gaps after contracts were specifie
 1. Should MVP persist full historical versions in `ai_event_insights_history`, or rely on `ai_insight_runs` + latest snapshot only?
 2. Should `ai_market_signals` be physically separate in MVP or nested in `ai_event_insights.signals_jsonb`?
 3. What exact daily/weekly budget cap should production enforce after first-week spend telemetry?
-4. What exact Stage2 quota should be used for launch (percentage of mapped events and absolute hourly cap)?
+4. What exact `SynthesisRich` quota should be used for launch (percentage of mapped events and absolute hourly cap)?
 5. Should any category start with stricter publish thresholds (for example politics) than global defaults?
 
 ## 22) Execution Pseudocode (inputs/outputs and orchestration)
@@ -1128,7 +1193,7 @@ function schedulerTick(now):
   )
 
   for topic in topics:
-    if !acquireRunLock("topic:refresh:" + topic.key + ":" + timeBucket(now)):
+    if !acquireRunLock("topic:refresh:" + topic.key + ":" + timeBucketByTier(now, topic.tier)):
       continue
 
     evidence = loadEvidenceFromCache(topic.key, now)
@@ -1157,23 +1222,24 @@ function schedulerTick(now):
     persist(ai_topic_links, links)
 
     groupedEvents = groupLinksByEvent(links)
-    for eventId in groupedEvents:
+    topEvents = selectTopEventsByImpact(groupedEvents, maxEvents=CFG.MAX_EVENTS_PER_TOPIC_RUN)
+    for eventId in topEvents:
       features = loadInternalEventFeatures(eventId, now)
-      # Stage 1 synthesis is always grounded in internal features.
+      # SynthesisLite is always grounded in internal features.
       # External evidence augments, but does not replace, internal data.
-      payload = buildStage1Input(topic, evidence, links[eventId], features)
+      payload = buildSynthesisLiteInput(topic, evidence, links[eventId], features)
 
-      run = startInsightRun(eventId, topic.key, stage="stage1")
-      stage1 = callStage1Model(payload)
-      updateInsightRun(run, stage1.usage, stage1.latency)
+      run = startInsightRun(eventId, topic.key, stage="SynthesisLite")
+      lite = callSynthesisLiteModel(payload)
+      updateInsightRun(run, lite.usage, lite.latency)
 
-      if shouldRunStage2(stage1, features, CFG):
-        run2 = startInsightRun(eventId, topic.key, stage="stage2")
-        stage2 = callStage2Model(buildStage2Input(stage1, payload))
-        updateInsightRun(run2, stage2.usage, stage2.latency)
-        finalInsight = mergeStageOutputs(stage1, stage2)
+      if shouldRunSynthesisRich(lite, features, CFG):
+        run2 = startInsightRun(eventId, topic.key, stage="SynthesisRich")
+        rich = callSynthesisRichModel(buildSynthesisRichInput(lite, payload))
+        updateInsightRun(run2, rich.usage, rich.latency)
+        finalInsight = mergeStageOutputs(lite, rich)
       else:
-        finalInsight = stage1ToInsight(stage1)
+        finalInsight = synthesisLiteToInsight(lite)
 
       gate = evaluatePublishGate(
         insight=finalInsight,
@@ -1220,9 +1286,9 @@ function onMarketTrigger(event):
                        +--------------------------+--------------------------+
                        |                                                     |
                        v                                                     v
-        [Stage1 Synthesis (Internal Features + Mapped Evidence)]    [Suppressed/Retry]
+        [SynthesisLite (Internal Features + Mapped Evidence)]    [Suppressed/Retry]
                        |
-                (optional Stage2)
+                (optional SynthesisRich)
                        |
                        v
    [Publish Gate (confidence + freshness + evidence quality + internal corroboration)]
@@ -1255,6 +1321,15 @@ This plan adopts that verdict and adds explicit launch gates:
 
 5. Failure/compliance gate:
 - DLQ/replay path and external evidence retention rules must be active before public rollout.
+
+Contract consistency changes integrated from review:
+
+- canonical stage taxonomy (`TopicBuild`, `ExternalRetrieval`, `Mapping`, `SynthesisLite`, `SynthesisRich`, `PublishGate`, `Serve`),
+- tier-aware idempotency buckets (A=5m, B=15m, C=60m),
+- scheduler state contract (`ai_topic_schedule`) and explicit `run_key`/`stage` in `ai_insight_runs`,
+- billable-unit cost language standardized to `server_side_tool_calls`,
+- explicit publish-gate definitions for source independence, trust, and internal corroboration,
+- completeness-aware multi-venue policy (`unknown` distinct from zero).
 
 ## 25) Mapping Quality Contract (launch-critical)
 
@@ -1297,9 +1372,9 @@ Use versioned canonical topic keys:
 - include merge/alias table for near-equivalent topics:
   - `ai_topic_aliases(topic_key_alias, topic_key_canonical)`
 
-### 26.2 Internal feature pack (required for Stage1)
+### 26.2 Internal feature pack (required for `SynthesisLite`)
 
-Stage1 input must always include:
+`SynthesisLite` input must always include:
 
 - event identity + status metadata,
 - freshness bundle (`book_top_max_ts`, `last_trade_max_ts`, `wallet_max_ts`, freshness booleans),
@@ -1325,12 +1400,24 @@ Publish gate output includes:
 - `reason_codes`,
 - `risk_flags`.
 
+Additional deterministic gate requirements:
+
+- `independent_sources_count` must pass policy definition (Section 7.6, Section 11.1).
+- `high_trust_source` and `strong_internal_corroboration` are explicit booleans in gate input.
+- if required gate primitives are missing (`unknown`), fail closed (`publish=false`).
+
 ### 26.4 Idempotency keys
 
 Run keys:
 
-- `topic_refresh_key = topic_refresh:v1:<topic_key>:<15m_bucket>`
-- `event_insight_key = event_insight:v1:<event_id>:<15m_bucket>:<prompt_version>:<stage>`
+- `topic_refresh_key = topic_refresh:v1:<topic_key>:<bucket_by_tier>`
+- `event_insight_key = event_insight:v1:<event_id>:<bucket_by_tier>:<prompt_version>:<stage>`
+
+Launch bucket guidance:
+
+- Tier A: 5m bucket
+- Tier B: 15m bucket
+- Tier C: 60m bucket
 
 Enforce via Redis lock + unique DB constraint on `ai_insight_runs(run_key)`.
 
@@ -1338,11 +1425,10 @@ Enforce via Redis lock + unique DB constraint on `ai_insight_runs(run_key)`.
 
 Cost model (per day):
 
-- `DailyCost = topic_retrieval_cost + embedding_cost + stage1_cost + stage2_cost`
+- `DailyCost = topic_retrieval_cost + embedding_cost + synthesis_lite_cost + synthesis_rich_cost`
 - retrieval term is driven by:
   - topics processed,
-  - `web_search` calls,
-  - `x_search` calls,
+  - `server_side_tool_calls` (billable),
 - cache hit rate.
 
 Observed launch baseline from live smoke tests (xAI tools, strict no-fallback):
@@ -1359,41 +1445,47 @@ Observed launch baseline from live smoke tests (xAI tools, strict no-fallback):
 Operational rule:
 
 - budget is forecast-driven first, topic-count second.
-- keep `AI_INSIGHTS_TOPIC_REFRESH_MAX_PER_HOUR=200` as hard ceiling, but schedule below that based on spend forecast.
+- keep an operational hard ceiling (for example `200`) as emergency cap; launch default is lower (`30`) and should be tuned from spend telemetry.
 
 Scenario planning (required in ops dashboard):
 
 1. Conservative:
-- shadow/canary mode, low Stage2 fraction, strict topic caps.
+- shadow/canary mode, low `SynthesisRich` fraction, strict topic caps.
 
 2. Base:
 - target steady-state production mode aligned to daily budget cap.
 
 3. Aggressive:
-- high topic volume and higher Stage2 ratio; used for stress tests only.
+- high topic volume and higher `SynthesisRich` ratio; used for stress tests only.
 
 Each scenario must include:
 
 - expected topics/hour,
-- expected external calls/topic (web + x),
+- expected `server_side_tool_calls/topic` (p50/p95),
 - expected mapped events/topic,
-- Stage2 promotion rate,
+- `SynthesisRich` promotion rate,
 - projected daily/monthly spend,
 - shedding trigger point.
+
+Hard fanout controls (required):
+
+- `MAX_EVENTS_PER_TOPIC_RUN`
+- `MAX_SYNTHESIS_LITE_RUNS_PER_HOUR`
+- `MAX_SYNTHESIS_RICH_RUNS_PER_HOUR`
 
 Shedding ladder:
 
 1. At `>= 80%` budget or aggressive next-hour forecast:
-- disable/reduce `x_search` first, keep web + internal.
+- mode: `combined -> web_only`.
 
 2. At `>= 85%` budget:
-- disable Stage2, raise link threshold.
+- disable `SynthesisRich`, raise link threshold.
 
 3. At high queue lag (for example `> 5m` sustained):
 - drop Tier C, widen Tier B interval, keep Tier A only.
 
 4. At `>= 98%` budget:
-- hard-stop new external/model runs, serve stale/latest only.
+- mode: `web_only -> internal_only`; hard-stop new external/model runs and serve stale/latest only.
 
 All shedding/hard-stop actions must be logged with reason + config snapshot.
 
@@ -1425,7 +1517,7 @@ DoD:
 
 ### Day 61-90: Scaled rollout
 
-- enable insights feed ranking + selective Stage2 for high-impact ambiguity.
+- enable insights feed ranking + selective `SynthesisRich` for high-impact ambiguity.
 - tune thresholds by venue/category.
 
 DoD:
@@ -1483,7 +1575,7 @@ Benchmark command family:
 | `unknownTopics` | `17` (`25.37%`) | `0` (`0%`) |
 | `unknownMarketCoverage` | `29/100` (`29%`) | `0/100` (`0%`) |
 | `uniqueSearchTopics` | `26` | `62` |
-| `calls/day after cache` | `113.1` | `253.5` |
+| `server-side tool calls/day after cache (est)` | `113.1` | `253.5` |
 | `tool cost/day` (`$0.005/call`) | `$0.57` | `$1.27` |
 
 Interpretation:
@@ -1506,7 +1598,7 @@ All profiles below:
 - default cadences (`A=10m`, `B=120m`, `C=240m`)
 - tool price model only: `$0.005/call`
 
-| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | calls/day after cache | tool $/day | tier A/B/C |
+| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | server-side tool calls/day after cache (est) | tool $/day | tier A/B/C |
 |---|---:|---:|---:|---:|---:|---|
 | `wide_global_50` | 50 | 25 | `0/50` (`0%`) | 241.8 | 1.209 | `1/2/8` |
 | `wide_global_100` | 100 | 54 | `0/100` (`0%`) | 265.2 | 1.326 | `2/4/12` |
@@ -1534,7 +1626,7 @@ Matrix: 6 runs (`limit=200`, `order-by=random`):
 
 Average results:
 
-| Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg calls/day after cache | tool $/day |
+| Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg server-side tool calls/day after cache (est) | tool $/day |
 |---|---:|---:|---:|---:|---:|
 | `global` | `24.76%` (`25.67/103.67`) | `18.50%` (`37.0/200`) | `103.67` | `141.7` | `0.709` |
 | `per-venue` | `21.28%` (`21.0/98.67`) | `14.17%` (`28.33/200`) | `98.67` | `130.0` | `0.650` |
@@ -1569,10 +1661,10 @@ Cadence/options:
 
 Measured top50 result with balancing enabled:
 
-- baseline (`A=10m`, `B=120m`, `C=240m`): `tier A/B/C = 1/2/2`, `calls/day after cache = 117.0`, tool cost/day `~$0.585`
+- baseline (`A=10m`, `B=120m`, `C=240m`): `tier A/B/C = 1/2/2`, `server-side tool calls/day after cache (est) = 117.0`, tool cost/day `~$0.585`
 - tuned target for ~100/day: `A=12m`, `B=120m`, `C=240m`:
   - `tier A/B/C = 1/2/2`
-  - `calls/day after cache = 101.4`
+  - `server-side tool calls/day after cache (est) = 101.4`
   - tool cost/day `~$0.507`
 
 Both are below `$10/day` for tool invocations only; token/model budget remains separately capped via hard budget + shedding.
@@ -1715,7 +1807,7 @@ Cost-first baseline for launch remains:
 
 - target budget cap: `$10/day` total retrieval budget (tool + token),
 - conservative practical capacity: `~92 topics/day` (from earlier measured split baseline),
-- current deterministic launch target (`per-venue limit=50`, `A=12m`) projects `~101.4 calls/day after cache` before model-token adjustments.
+- current deterministic launch target (`per-venue limit=50`, `A=12m`) projects `~101.4 server-side tool calls/day after cache (est)` before model-token adjustments.
 
 Next validation required:
 
@@ -1751,7 +1843,7 @@ Observed extractor output:
 Cost model for this audit shape (not launch-capped):
 
 - estimated calls/day raw: `660`
-- estimated calls/day after cache: `429`
+- estimated server-side tool calls/day after cache (est): `429`
 - per-tier raw calls/day: `A=432`, `B=84`, `C=144`
 
 Interpretation:
@@ -1771,4 +1863,4 @@ Interpretation:
    - category share,
    - venue share,
    - p90 sample age,
-   - estimated calls/day after cache.
+   - estimated server-side tool calls/day after cache (est).
