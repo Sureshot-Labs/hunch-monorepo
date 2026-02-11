@@ -18,6 +18,7 @@ const BOOK_TOP_HEARTBEAT_MS = (() => {
   return parsed;
 })();
 const bookTopWriteCache = new Map<string, BookTopCacheEntry>();
+const bookTopWriteInFlight = new Map<string, Promise<void>>();
 
 function isBookTopValueEqual(a: number | null, b: number | null): boolean {
   if (a == null && b == null) return true;
@@ -48,6 +49,11 @@ function shouldSkipBookTopWrite(
   const prev = bookTopWriteCache.get(tokenId);
   if (!prev) {
     return false;
+  }
+
+  // Drop out-of-order updates so we do not regress the book timestamp per token.
+  if (tsMs < prev.lastWrittenAtMs) {
+    return true;
   }
 
   const unchanged =
@@ -771,38 +777,57 @@ export async function writeUnifiedBookTop(
 ): Promise<void> {
   if (bestBid == null && bestAsk == null) return;
 
-  const tsMs = ts.getTime();
-  if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {
-    return;
-  }
+  const runWrite = async (): Promise<void> => {
+    const tsMs = ts.getTime();
+    if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {
+      return;
+    }
 
-  const mid =
-    bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
-  const spread =
-    bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
+    const mid =
+      bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+    const spread =
+      bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
 
-  await pool.query(
-    `
-    insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
-    values ($1,$2,$3,$4,$5,$6,$7)
-    on conflict do nothing
-  `,
-    [
-      tokenId,
-      venueFromUnifiedTokenId(tokenId),
-      ts.toISOString(),
+    await pool.query(
+      `
+      insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
+      values ($1,$2,$3,$4,$5,$6,$7)
+      on conflict do nothing
+    `,
+      [
+        tokenId,
+        venueFromUnifiedTokenId(tokenId),
+        ts.toISOString(),
+        bestBid,
+        bestAsk,
+        mid,
+        spread,
+      ],
+    );
+
+    setBookTopCache(tokenId, {
       bestBid,
       bestAsk,
-      mid,
-      spread,
-    ],
-  );
+      lastWrittenAtMs: tsMs,
+    });
+  };
 
-  setBookTopCache(tokenId, {
-    bestBid,
-    bestAsk,
-    lastWrittenAtMs: tsMs,
-  });
+  const prev = bookTopWriteInFlight.get(tokenId);
+  let current: Promise<void>;
+  if (prev) {
+    current = prev.then(runWrite, runWrite);
+  } else {
+    current = runWrite();
+  }
+
+  bookTopWriteInFlight.set(tokenId, current);
+  try {
+    await current;
+  } finally {
+    if (bookTopWriteInFlight.get(tokenId) === current) {
+      bookTopWriteInFlight.delete(tokenId);
+    }
+  }
 }
 
 export async function writeUnifiedLastTrade(
