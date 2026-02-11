@@ -145,7 +145,7 @@ fi
 echo
 echo "[ai-topics-matrix] outputs: ${OUT_DIR}"
 echo "[ai-topics-matrix] summary"
-printf "file\trows\tuniqueSearch\tunknownTopics\tunknownMarkets\tplaceholderTopics\tcallsDayAfterCache\ttierA/B/C\tsearchStale6h\tsearchStale24h\n"
+printf "file\trows\tuniqueSearch\tunknownTopics\tunknownMarkets\tplaceholderTopics\tcallsDayAfterCache\ttierA/B/C\tactiveOnly\topenNowOnly\tnonActive\tended\tsearchStale6h\tsearchStale24h\n"
 
 for file in "${OUT_DIR}"/*.json; do
   jq -r --arg file "$(basename "$file")" '
@@ -162,8 +162,12 @@ for file in "${OUT_DIR}"/*.json; do
       ((.searchPlan.tierCounts.A // 0 | tostring) + "/" +
        (.searchPlan.tierCounts.B // 0 | tostring) + "/" +
        (.searchPlan.tierCounts.C // 0 | tostring)),
-      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) > (6 * 3600)))) | length),
-      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) > (24 * 3600)))) | length)
+      (.qa.invariants.sampleEventActiveOnly // true),
+      (.qa.invariants.sampleEventOpenNowOnly // true),
+      (.qa.violations.nonActiveSamples // 0),
+      (.qa.violations.endedSamples // 0),
+      (.qa.freshness.staleSamples6h // 0),
+      (.qa.freshness.staleSamples24h // 0)
     ] | @tsv
   ' "$file"
 done | sort

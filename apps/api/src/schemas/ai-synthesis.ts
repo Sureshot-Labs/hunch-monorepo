@@ -88,16 +88,34 @@ export const synthesisInputV1Schema = z
       })
       .strict(),
     markets: z.array(synthesisInputMarketSnapshotV1Schema).min(1),
-    freshness: z
-      .object({
-        is_fresh_tier_a: z.boolean(),
-        is_fresh_tier_b: z.boolean().optional(),
-        book_age_sec: z.number().min(0).nullable(),
-        trade_age_sec: z.number().min(0).nullable(),
-        wallet_age_sec: z.number().min(0).nullable().optional(),
-        reasons: z.array(z.string().min(1)).default([]),
-      })
-      .strict(),
+    freshness: z.preprocess(
+      raw => {
+        if (!raw || typeof raw !== "object") return raw;
+        const obj = raw as Record<string, unknown>;
+        if (
+          obj.market_age_sec == null &&
+          typeof obj.book_age_sec === "number"
+        ) {
+          return {
+            ...obj,
+            market_age_sec: obj.book_age_sec,
+          };
+        }
+        return raw;
+      },
+      z
+        .object({
+          is_fresh_tier_a: z.boolean(),
+          is_fresh_tier_b: z.boolean().optional(),
+          market_age_sec: z.number().min(0).nullable(),
+          // Backward compatibility for old payloads/reports.
+          book_age_sec: z.number().min(0).nullable().optional(),
+          trade_age_sec: z.number().min(0).nullable(),
+          wallet_age_sec: z.number().min(0).nullable().optional(),
+          reasons: z.array(z.string().min(1)).default([]),
+        })
+        .strict(),
+    ),
     mapping: z
       .object({
         link_confidence: zProb,

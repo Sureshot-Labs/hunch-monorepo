@@ -51,6 +51,7 @@ type MarketRow = {
   venue: string;
   market_title: string | null;
   event_title: string | null;
+  event_status: string | null;
   market_category: string | null;
   event_category: string | null;
   market_open_time: Date | string | null;
@@ -80,6 +81,8 @@ type TopicAggregate = {
   sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleEventStatus: string | null;
+  sampleEventEndDate: Date | string | null;
   sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: Set<string>;
   sourceTopicKeys: Set<string>;
@@ -105,6 +108,8 @@ type TopicSummaryRow = {
   sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleEventStatus: string | null;
+  sampleEventEndDate: Date | string | null;
   sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: string[];
   sourceTopicKeys: string[];
@@ -164,6 +169,7 @@ type Args = {
   webExcludedDomains: string[];
   xExcludedHandles: string[];
   maxSearchTopics: number;
+  strictInvariants: boolean;
   json: boolean;
   out: string | null;
   help: boolean;
@@ -1012,6 +1018,7 @@ function resolveArgs(argv: string[]): Args {
       ["polymarket", "kalshi"],
     ),
     maxSearchTopics: parsePositiveInt(parseFlag(argv, "--max-search-topics"), 300),
+    strictInvariants: parseBoolean(parseFlag(argv, "--strict-invariants"), false),
     json: hasFlag(argv, "--json"),
     out: parseFlag(argv, "--out") ?? null,
     help: hasFlag(argv, "--help"),
@@ -1073,6 +1080,7 @@ Options:
   --web-excluded-domains <csv>  web_search excluded domains (max 5)
   --x-excluded-handles <csv>    x_search excluded handles (max 10)
   --max-search-topics <n>       Max topics used in search volume model (default: 300)
+  --strict-invariants <bool>    Exit non-zero when active/open-now invariants fail (default: false)
   --json                 Print JSON summary instead of text table
   --out <path>           Write JSON summary to file
   --help                 Show this help
@@ -2273,6 +2281,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.venue,
         m.title as market_title,
         e.title as event_title,
+        e.status::text as event_status,
         m.category as market_category,
         e.category as event_category,
         m.open_time as market_open_time,
@@ -2327,6 +2336,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.venue,
         m.title as market_title,
         e.title as event_title,
+        e.status::text as event_status,
         m.category as market_category,
         e.category as event_category,
         m.open_time as market_open_time,
@@ -2349,6 +2359,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
       venue,
       market_title,
       event_title,
+      event_status,
       market_category,
       event_category,
       market_open_time,
@@ -3177,6 +3188,8 @@ async function main(): Promise<void> {
         sampleVenue: row.venue,
         sampleEventTitle: row.event_title,
         sampleMarketTitle: row.market_title,
+        sampleEventStatus: row.event_status,
+        sampleEventEndDate: row.event_end_date,
         sampleMarketUpdatedAt: row.market_updated_at,
         candidateEntities: new Set(),
         sourceTopicKeys: new Set(),
@@ -3218,6 +3231,8 @@ async function main(): Promise<void> {
       sampleVenue: topic.sampleVenue,
       sampleEventTitle: topic.sampleEventTitle,
       sampleMarketTitle: topic.sampleMarketTitle,
+      sampleEventStatus: topic.sampleEventStatus,
+      sampleEventEndDate: topic.sampleEventEndDate,
       sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       candidateEntities: Array.from(topic.candidateEntities).sort(),
       sourceTopicKeys: Array.from(topic.sourceTopicKeys).sort(),
@@ -3272,6 +3287,8 @@ async function main(): Promise<void> {
       merged.sampleVenue = topic.sampleVenue;
       merged.sampleEventTitle = topic.sampleEventTitle;
       merged.sampleMarketTitle = topic.sampleMarketTitle;
+      merged.sampleEventStatus = topic.sampleEventStatus;
+      merged.sampleEventEndDate = topic.sampleEventEndDate;
       merged.sampleMarketUpdatedAt = topic.sampleMarketUpdatedAt;
       merged.archetype = topic.archetype;
       merged.entitySource = topic.entitySource;
@@ -3325,6 +3342,8 @@ async function main(): Promise<void> {
       sampleEventId: topic.sampleEventId,
       sampleMarketId: topic.sampleMarketId,
       sampleVenue: topic.sampleVenue,
+      sampleEventStatus: topic.sampleEventStatus,
+      sampleEventEndDate: topic.sampleEventEndDate,
       sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       tierScore: topicScores.get(topic.topicKey) ?? null,
       candidateEntities: topic.candidateEntities.slice(0, 10),
@@ -3372,6 +3391,26 @@ async function main(): Promise<void> {
   const rowsUsed = rows.length - skippedByCategory;
   const duplicates = Math.max(0, rowsUsed - topics.length);
   const duplicateRate = rowsUsed > 0 ? duplicates / rowsUsed : 0;
+  const nowMs = Date.now();
+  const nonActiveSamples = searchTopics.filter(
+    item => (item.sampleEventStatus ?? "").toUpperCase() !== "ACTIVE",
+  ).length;
+  const endedSamples = searchTopics.filter(item => {
+    if (!item.sampleEventEndDate) return false;
+    const ts = new Date(item.sampleEventEndDate).getTime();
+    return Number.isFinite(ts) && ts <= nowMs;
+  }).length;
+  const staleSamples6h = searchTopics.filter(item => {
+    if (!item.sampleMarketUpdatedAt) return false;
+    const ts = new Date(item.sampleMarketUpdatedAt).getTime();
+    return Number.isFinite(ts) && nowMs - ts > 6 * 3600 * 1000;
+  }).length;
+  const staleSamples24h = searchTopics.filter(item => {
+    if (!item.sampleMarketUpdatedAt) return false;
+    const ts = new Date(item.sampleMarketUpdatedAt).getTime();
+    return Number.isFinite(ts) && nowMs - ts > 24 * 3600 * 1000;
+  }).length;
+  const invariantViolations = nonActiveSamples + endedSamples;
 
   const constraintCollisions = Array.from(fingerprintToConstraints.entries())
     .filter(([, constraints]) => constraints.size > 1)
@@ -3499,6 +3538,20 @@ async function main(): Promise<void> {
       topicsModeled: searchTopics.length,
       queryExamples: topicSearchPreview,
     },
+    qa: {
+      invariants: {
+        sampleEventActiveOnly: nonActiveSamples === 0,
+        sampleEventOpenNowOnly: endedSamples === 0,
+      },
+      violations: {
+        nonActiveSamples,
+        endedSamples,
+      },
+      freshness: {
+        staleSamples6h,
+        staleSamples24h,
+      },
+    },
     topTopics: topics.slice(0, args.showTop),
     topConstraintCollisions: constraintCollisions.slice(0, args.showTop),
   };
@@ -3537,6 +3590,9 @@ async function main(): Promise<void> {
   console.log(
     `[topics:dry-run] tier_calls_daily_raw A=${summary.searchPlan.estimatedCallsByTier.A.dailyRaw} B=${summary.searchPlan.estimatedCallsByTier.B.dailyRaw} C=${summary.searchPlan.estimatedCallsByTier.C.dailyRaw}`,
   );
+  console.log(
+    `[topics:dry-run] qa active_only=${summary.qa.invariants.sampleEventActiveOnly} open_now_only=${summary.qa.invariants.sampleEventOpenNowOnly} stale6h=${summary.qa.freshness.staleSamples6h} stale24h=${summary.qa.freshness.staleSamples24h}`,
+  );
   console.log("[topics:dry-run] sample_venue_distribution");
   console.table(
     Object.entries(sampleVenueDistribution).map(([venue, count]) => ({
@@ -3570,6 +3626,8 @@ async function main(): Promise<void> {
     category: item.category,
     entity: item.entity,
     marketCount: item.marketCount,
+    sampleEventStatus: item.sampleEventStatus ?? "",
+    sampleEventEndDate: item.sampleEventEndDate ?? "",
     combinedPrompt:
       item.pack.combinedCount > 0
         ? item.promptCombined.slice(0, 80)
@@ -3581,6 +3639,13 @@ async function main(): Promise<void> {
   }));
   console.log("[topics:dry-run] query_examples");
   console.table(queryPrintable);
+
+  if (args.strictInvariants && invariantViolations > 0) {
+    console.error(
+      `[topics:dry-run] strict invariant failure: non_active=${nonActiveSamples} ended=${endedSamples}`,
+    );
+    process.exitCode = 2;
+  }
 }
 
 main()

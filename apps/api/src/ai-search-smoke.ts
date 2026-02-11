@@ -216,6 +216,7 @@ type Args = {
   stage1Turns: number;
   maxCallsPerTopic: number;
   maxToolAttemptsPerTopic: number;
+  strictProvenance: boolean;
   priceInputPerM: number;
   priceOutputPerM: number;
   priceWebPer1k: number;
@@ -278,6 +279,14 @@ function parseNonNegativeFloat(value: string | undefined, fallback: number): num
   return parsed;
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value == null) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 function parseMode(value: string | undefined): SearchMode {
   if (!value) return "combined";
   const normalized = value.trim().toLowerCase();
@@ -328,6 +337,7 @@ function usage(): never {
       "  --stage1-turns <n>          Turns used in first pass before optional second pass (default: 3)",
       "  --max-calls-per-topic <n>   Max API calls per topic (default: 2)",
       "  --max-tool-attempts <n>     Soft cap on tool attempts per topic (default: 20)",
+      "  --strict-provenance <bool>  Fail when OK/PARTIAL outputs miss provenance/evidence checks (default: true)",
       "  --price-input-per-m <usd>   Input token price per 1M tokens (default: 0.20)",
       "  --price-output-per-m <usd>  Output token price per 1M tokens (default: 0.50)",
       "  --price-web-per-1k <usd>    Web search tool price per 1k calls (default: 5)",
@@ -392,6 +402,7 @@ function resolveArgs(argv: string[]): Args {
       1,
       Math.min(200, parsePositiveInt(parseFlag(argv, "--max-tool-attempts"), 20)),
     ),
+    strictProvenance: parseBoolean(parseFlag(argv, "--strict-provenance"), true),
     priceInputPerM: parseNonNegativeFloat(
       parseFlag(argv, "--price-input-per-m") ?? process.env.XAI_PRICE_INPUT_PER_M,
       0.2,
@@ -1420,6 +1431,27 @@ async function main(): Promise<void> {
       ? 0
       : Math.round(results.reduce((acc, row) => acc + row.durationMs, 0) / results.length);
 
+  const qaViolations = {
+    missingProvenanceForSupported: results.filter(
+      row =>
+        (row.parsed.status === "OK" || row.parsed.status === "PARTIAL") &&
+        row.parsed.supportsTopicCount >= row.minEvidence &&
+        !row.provenanceOk,
+    ).length,
+    belowEvidenceThresholdForOkPartial: results.filter(
+      row =>
+        (row.parsed.status === "OK" || row.parsed.status === "PARTIAL") &&
+        row.parsed.supportsTopicCount < row.minEvidence,
+    ).length,
+    okWithoutEvidence: results.filter(
+      row => row.parsed.status === "OK" && row.parsed.evidenceCount === 0,
+    ).length,
+  };
+  const qaViolationTotal =
+    qaViolations.missingProvenanceForSupported +
+    qaViolations.belowEvidenceThresholdForOkPartial +
+    qaViolations.okWithoutEvidence;
+
   const report = {
     generatedAt: new Date().toISOString(),
     topicsFile: args.topicsFile,
@@ -1435,6 +1467,7 @@ async function main(): Promise<void> {
     stage1Turns: args.stage1Turns,
     maxCallsPerTopic: args.maxCallsPerTopic,
     maxToolAttemptsPerTopic: args.maxToolAttemptsPerTopic,
+    strictProvenance: args.strictProvenance,
     pricing: {
       inputPerMillionUsd: args.priceInputPerM,
       outputPerMillionUsd: args.priceOutputPerM,
@@ -1497,6 +1530,11 @@ async function main(): Promise<void> {
       provenanceOk: results.filter(row => row.provenanceOk).length,
       provenanceMissing: results.filter(row => !row.provenanceOk).length,
     },
+    qa: {
+      strictProvenance: args.strictProvenance,
+      violationTotal: qaViolationTotal,
+      violations: qaViolations,
+    },
     results,
   };
 
@@ -1507,6 +1545,9 @@ async function main(): Promise<void> {
 
   console.log(
     `[ai-search-smoke] calls=${report.totals.callsExecuted} planned=${report.totals.callsPlanned} success=${success} failed=${failed} avg_ms=${averageMs}`,
+  );
+  console.log(
+    `[ai-search-smoke] qa strict=${args.strictProvenance} violations=${qaViolationTotal} missing_prov=${qaViolations.missingProvenanceForSupported} below_min_ev=${qaViolations.belowEvidenceThresholdForOkPartial} ok_without_ev=${qaViolations.okWithoutEvidence}`,
   );
   console.table(
     results.map(row => ({
@@ -1533,6 +1574,13 @@ async function main(): Promise<void> {
       preview: row.outputPreview.slice(0, 80),
     })),
   );
+
+  if (args.strictProvenance && qaViolationTotal > 0) {
+    console.error(
+      `[ai-search-smoke] strict provenance failure: ${qaViolationTotal} violation(s)`,
+    );
+    process.exitCode = 2;
+  }
 }
 
 main().catch(error => {

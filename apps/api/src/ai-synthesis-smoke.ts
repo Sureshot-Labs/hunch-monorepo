@@ -421,11 +421,24 @@ function chooseRepresentativePrice(input: SynthesisInputV1): number | null {
   );
 }
 
+function isEventClosed(input: SynthesisInputV1): boolean {
+  if (input.event.status !== "ACTIVE") return true;
+  if (!input.event.end_date) return false;
+  const endTs = new Date(input.event.end_date).getTime();
+  if (!Number.isFinite(endTs)) return false;
+  return endTs <= Date.now();
+}
+
 function evaluatePublishGate(input: SynthesisInputV1, output: SynthesisOutputV1): GateResult {
   const reasonCodes = new Set<string>(output.publish_recommendation.reason_codes);
   const representativePrice = chooseRepresentativePrice(input);
 
   let decision = output.publish_recommendation.decision;
+
+  if (isEventClosed(input)) {
+    decision = "skip_external_publish";
+    reasonCodes.add("EVENT_NOT_ACTIVE");
+  }
 
   if (input.mapping.link_confidence < input.policy.min_link_confidence) {
     decision = "store_weak_signal";
@@ -892,8 +905,16 @@ function buildSynthesisInput(
   const bestTradeAgeSec = tradeAgeCandidates.length
     ? Math.min(...tradeAgeCandidates)
     : null;
-  const isFreshTierA = bestAgeSec == null ? false : bestAgeSec <= 1800;
-  const isFreshTierB = bestAgeSec == null ? false : bestAgeSec <= 7200;
+  const marketFreshTierA = bestAgeSec != null && bestAgeSec <= 1800;
+  const tradeFreshTierA = bestTradeAgeSec != null && bestTradeAgeSec <= 1800;
+  const marketFreshTierB = bestAgeSec != null && bestAgeSec <= 7200;
+  const tradeFreshTierB = bestTradeAgeSec != null && bestTradeAgeSec <= 7200;
+  const isFreshTierA = marketFreshTierA || tradeFreshTierA;
+  const isFreshTierB = marketFreshTierB || tradeFreshTierB;
+  const freshnessReasons: string[] = [];
+  if (bestAgeSec == null) freshnessReasons.push("missing_market_update_ts");
+  if (bestTradeAgeSec == null) freshnessReasons.push("missing_trade_rollup_update_ts");
+  if (!isFreshTierA) freshnessReasons.push("stale_market_and_trade_data");
 
   const linkConfidence = (() => {
     const status = context.searchResult?.parsed.status;
@@ -944,15 +965,10 @@ function buildSynthesisInput(
     freshness: {
       is_fresh_tier_a: isFreshTierA,
       is_fresh_tier_b: isFreshTierB,
-      book_age_sec: bestAgeSec,
+      market_age_sec: bestAgeSec,
       trade_age_sec: bestTradeAgeSec,
       wallet_age_sec: null,
-      reasons:
-        bestAgeSec == null
-          ? ["missing_market_update_ts"]
-          : bestTradeAgeSec == null
-            ? ["missing_trade_rollup_update_ts"]
-            : [],
+      reasons: freshnessReasons,
     },
     mapping: {
       link_confidence: linkConfidence,
