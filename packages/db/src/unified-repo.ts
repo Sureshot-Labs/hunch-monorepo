@@ -1,6 +1,69 @@
 import { chunkArray } from "@hunch/shared";
 import { Pool } from "pg";
 
+type BookTopCacheEntry = {
+  bestBid: number | null;
+  bestAsk: number | null;
+  lastWrittenAtMs: number;
+};
+
+const BOOK_TOP_DEDUPE_EPSILON = 1e-9;
+const BOOK_TOP_CACHE_MAX = 200_000;
+const BOOK_TOP_CACHE_PRUNE_BATCH = 20_000;
+const BOOK_TOP_HEARTBEAT_MS = (() => {
+  const raw = process.env.UNIFIED_BOOK_TOP_HEARTBEAT_MS;
+  if (!raw) return 0;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
+})();
+const bookTopWriteCache = new Map<string, BookTopCacheEntry>();
+
+function isBookTopValueEqual(a: number | null, b: number | null): boolean {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return Math.abs(a - b) <= BOOK_TOP_DEDUPE_EPSILON;
+}
+
+function setBookTopCache(tokenId: string, entry: BookTopCacheEntry): void {
+  if (bookTopWriteCache.has(tokenId)) {
+    bookTopWriteCache.delete(tokenId);
+  }
+  bookTopWriteCache.set(tokenId, entry);
+
+  if (bookTopWriteCache.size <= BOOK_TOP_CACHE_MAX) return;
+  for (let i = 0; i < BOOK_TOP_CACHE_PRUNE_BATCH; i += 1) {
+    const oldest = bookTopWriteCache.keys().next().value;
+    if (!oldest) break;
+    bookTopWriteCache.delete(oldest);
+  }
+}
+
+function shouldSkipBookTopWrite(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+): boolean {
+  const prev = bookTopWriteCache.get(tokenId);
+  if (!prev) {
+    return false;
+  }
+
+  const unchanged =
+    isBookTopValueEqual(prev.bestBid, bestBid) &&
+    isBookTopValueEqual(prev.bestAsk, bestAsk);
+  if (!unchanged) {
+    return false;
+  }
+
+  if (BOOK_TOP_HEARTBEAT_MS > 0) {
+    return tsMs - prev.lastWrittenAtMs < BOOK_TOP_HEARTBEAT_MS;
+  }
+
+  return true;
+}
+
 // Types for unified tables
 export interface UnifiedEventRow {
   id: string; // venue:venue_event_id
@@ -706,6 +769,13 @@ export async function writeUnifiedBookTop(
   bestAsk: number | null,
   ts: Date,
 ): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
+
+  const tsMs = ts.getTime();
+  if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {
+    return;
+  }
+
   const mid =
     bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
   const spread =
@@ -727,6 +797,12 @@ export async function writeUnifiedBookTop(
       spread,
     ],
   );
+
+  setBookTopCache(tokenId, {
+    bestBid,
+    bestAsk,
+    lastWrittenAtMs: tsMs,
+  });
 }
 
 export async function writeUnifiedLastTrade(

@@ -1464,6 +1464,8 @@ Implemented deterministic hardening (P0 + P1):
 - low-signal outcome label guard for unknown topics (`A/B`, `Player X`, `Team N`, `Yes/No`), using event-only subject when needed
 - random sampling mode (`--order-by random`) for stress testing
 - improved crypto symbol resolver (`MegaETH`-style detection) without generic token bleed
+- open-now gating is now enforced as a hard invariant in extraction (no opt-out for live planning)
+- freshness gating is now defaulted in extraction (`maxMarketAgeHours=24`) and propagated into modeled query metadata (`sampleMarketUpdatedAt`)
 
 ### 30.2 Before/after quality on the same benchmark slice
 
@@ -1720,3 +1722,53 @@ Next validation required:
 1. run matched replay (`N >= 30` topics) on combined mode only,
 2. capture `cost/topic` p50/p95, tool-call distribution, provenance pass rate, latency p95,
 3. set hard scheduler caps from p95 costs (not mean-only).
+
+### 30.13 Post-hardening topic quality audit (2026-02-11)
+
+Audit run:
+
+- command profile: `limit=500`, `sampling=per-venue`, `order-by=trending`, `maxMarketAgeHours=24`
+- artifact: `/tmp/ai_topics_audit.json`
+
+Observed extractor output:
+
+- `rows=500`, `used=500`
+- `uniqueTopics=412`
+- `uniqueSearchTopics=176`
+- executable modeled topics (`searchPlan.queryExamples`): `34`
+- tier mix in modeled topics: `A=3`, `B=7`, `C=24`
+- category mix in modeled topics: `crypto=3`, `politics=10`, `sports=21`
+- venue mix in modeled topics: `kalshi=24`, `polymarket=8`, `limitless=2`
+- modeled `marketCount` distribution:
+  - `min=2`, `p50=2`, `p90=18`, `max=23`, `avg=5.74`
+- freshness on modeled topics (from `sampleMarketUpdatedAt`):
+  - `count=34`, `missing=0`
+  - `max age ~22.52h`
+  - `p90 age ~22.02h`
+  - `>24h = 0`
+  - `>12h = 10`
+
+Cost model for this audit shape (not launch-capped):
+
+- estimated calls/day raw: `660`
+- estimated calls/day after cache: `429`
+- per-tier raw calls/day: `A=432`, `B=84`, `C=144`
+
+Interpretation:
+
+- freshness/open-now hardening is working for modeled topics (`0` modeled topics older than 24h).
+- unknown topics are no longer promoted into modeled query execution.
+- modeled set is still skewed toward sports+Kalshi long tail in C-tier.
+- this 500-row stress profile is useful for quality diagnostics but exceeds cost-first launch envelope unless topic caps are enforced.
+
+### 30.14 Immediate tuning actions from this audit
+
+1. Keep launch scheduler on capped modeled set (`~top50 per-venue`) and do not schedule all modeled topics from stress profiles.
+2. Rebalance modeled-topic selection with venue/category quotas (reduce sports/Kalshi C-tail dominance).
+3. Raise C-tier eligibility (`marketCount >= 3`) unless topic score is above an explicit override threshold.
+4. Tighten A/B freshness windows (for example, A<=12h) while keeping C<=24h.
+5. Continue weekly matrix + random audits with the same metric pack and add drift alerts for:
+   - category share,
+   - venue share,
+   - p90 sample age,
+   - estimated calls/day after cache.
