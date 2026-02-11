@@ -218,6 +218,55 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * GET /watchlist/ids
+   * Lightweight list of favorited market ids for star-state hydration.
+   */
+  z.get(
+    "/watchlist/ids",
+    {
+      preHandler: createAuthMiddleware(),
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const { rows } = await pool.query<{ market_id: string }>(
+          `
+          select market_id
+          from user_watchlist
+          where user_id = $1
+          order by created_at desc
+          `,
+          [user.id],
+        );
+
+        const ids = Array.from(
+          new Set(
+            rows.map((row) => row.market_id).filter(Boolean),
+          ),
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          count: ids.length,
+          ids,
+        });
+      } catch (error) {
+        app.log.error({ error, userId: user.id }, "Failed to fetch watchlist ids");
+        reply.code(500);
+        return reply.send({
+          error: "Failed to fetch watchlist ids",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
    * DELETE /watchlist/:marketId
    * Remove a market from user's watchlist
    */

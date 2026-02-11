@@ -154,6 +154,7 @@ type Args = {
   out: string | null;
   model: string;
   maxTopics: number;
+  maxContextMarkets: number;
   maxSampleMarketAgeHours: number;
   topicKeys: Set<string>;
   includeStatuses: Set<SearchStatus>;
@@ -202,15 +203,56 @@ function mergeUsage(a: OpenRouterUsage, b: OpenRouterUsage): OpenRouterUsage {
   };
 }
 
-function buildSynthesisRepairPromptV1(rawOutput: string): string {
+function buildSynthesisRepairPromptWithReason(
+  rawOutput: string,
+  reason: string | undefined,
+): string {
   return [
     "Repair the malformed model output into valid synthesis_output_v1 JSON.",
     "Return exactly one JSON object and nothing else.",
     "Do not add markdown/code fences/explanations.",
     "Keep facts unchanged; only fix structure and schema compliance.",
+    ...(reason ? [`Repair reason: ${reason}`] : []),
     "Malformed output:",
     rawOutput,
   ].join("\n");
+}
+
+const SUMMARY_HYGIENE_FORBIDDEN: Array<{ token: string; pattern: RegExp }> = [
+  { token: "fallback", pattern: /\bfallback\b/i },
+  { token: "_source", pattern: /_source\b/i },
+  { token: "tier-a", pattern: /\btier[-\s]?a\b/i },
+  { token: "tier-b", pattern: /\btier[-\s]?b\b/i },
+  { token: "tier-c", pattern: /\btier[-\s]?c\b/i },
+  { token: "link_confidence", pattern: /\blink_confidence\b/i },
+  { token: "supports_topic_count", pattern: /\bsupports_topic_count\b/i },
+  { token: "supports_topic", pattern: /\bsupports_topic\b/i },
+  { token: "data_completeness_score", pattern: /\bdata_completeness_score\b/i },
+  { token: "policy.", pattern: /\bpolicy\./i },
+  { token: "open_interest_fallback", pattern: /\bopen_interest_fallback\b/i },
+  {
+    token: "market_volume_total_fallback",
+    pattern: /\bmarket_volume_total_fallback\b/i,
+  },
+  { token: "trade_rollup", pattern: /\btrade_rollup\b/i },
+];
+
+function collectSummaryHygieneViolations(text: string): string[] {
+  const out: string[] = [];
+  for (const item of SUMMARY_HYGIENE_FORBIDDEN) {
+    if (item.pattern.test(text)) {
+      out.push(item.token);
+    }
+  }
+  return out;
+}
+
+function validateUserFacingSummary(output: SynthesisOutputV1): void {
+  const joined = `${output.summary_short}\n${output.summary_long}`;
+  const violations = collectSummaryHygieneViolations(joined);
+  if (violations.length > 0) {
+    throw new Error(`summary_hygiene_violation:${violations.join(",")}`);
+  }
 }
 
 function parseFlag(argv: string[], name: string): string | undefined {
@@ -278,6 +320,10 @@ function parseArgs(argv: string[]): Args {
       env.aiClusterModelFinal ??
       "openai/gpt-5.2",
     maxTopics: parsePositiveInt(parseFlag(argv, "--max-topics"), 3),
+    maxContextMarkets: Math.min(
+      10,
+      parsePositiveInt(parseFlag(argv, "--max-context-markets"), 5),
+    ),
     maxSampleMarketAgeHours: parseNonNegativeFloat(
       parseFlag(argv, "--max-sample-market-age-hours"),
       24,
@@ -305,6 +351,7 @@ Optional:
   --topic-keys <k1,k2,...>       Restrict to specific topic keys
   --statuses <list>              Filter search statuses: OK,PARTIAL,NO_EVIDENCE,INVALID (default: OK,PARTIAL,NO_EVIDENCE)
   --max-topics <n>               Max topics to synthesize (default: 3)
+  --max-context-markets <n>      Max market snapshots per event context (default: 5, max: 10)
   --max-sample-market-age-hours <n>  Skip topics whose sample market is older than N hours (default: 24, 0 disables)
   --model <id>                   OpenRouter model (default: openai/gpt-5.2)
   --concurrency <n>              Parallel synthesis calls (default: 2)
@@ -533,6 +580,13 @@ function parseMessageContent(content: unknown): string {
   return "";
 }
 
+function parseAndValidateSynthesisOutput(rawText: string): SynthesisOutputV1 {
+  const parsed = parsePossibleJson(rawText);
+  const output = parseSynthesisOutputV1(parsed);
+  validateUserFacingSummary(output);
+  return output;
+}
+
 async function callOpenRouter(
   args: Args,
   systemPrompt: string,
@@ -736,7 +790,7 @@ async function fetchMarketByTitle(eventId: string, title: string): Promise<Marke
   return result.rows[0] ?? null;
 }
 
-async function fetchTopMarket(eventId: string): Promise<MarketRow | null> {
+async function fetchTopMarkets(eventId: string, limit: number): Promise<MarketRow[]> {
   const sql = `
     ${MARKET_SELECT_SQL}
     where m.event_id = $1
@@ -747,10 +801,10 @@ async function fetchTopMarket(eventId: string): Promise<MarketRow | null> {
       coalesce(nullif(m.volume_24h, 0), nullif(mt.volume_24h, 0), nullif(m.volume_total, 0)) desc nulls last,
       coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0)) desc nulls last,
       coalesce(m.updated_at_db, m.updated_at) desc nulls last
-    limit 1
+    limit $2
   `;
-  const result = await pool.query<MarketRow>(sql, [eventId]);
-  return result.rows[0] ?? null;
+  const result = await pool.query<MarketRow>(sql, [eventId, Math.max(1, limit)]);
+  return result.rows;
 }
 
 function runHash(topicKey: string): string {
@@ -827,48 +881,41 @@ function estimateAgeSec(iso: string | null): number | null {
 function buildSynthesisInput(
   context: ResolvedTopicContext,
   event: EventRow,
-  sampleMarket: MarketRow | null,
-  topMarket: MarketRow | null,
+  selectedMarkets: MarketRow[],
+  sampleMarketId: string | null,
+  topByVolumeMarketId: string | null,
   mappingReason: string,
 ): SynthesisInputV1 {
   const marketItems: SynthesisInputV1["markets"] = [];
-  if (sampleMarket) {
+  let topByVolumeAssigned = false;
+  for (const market of selectedMarkets) {
+    const role: SynthesisInputV1["markets"][number]["role"] =
+      sampleMarketId != null && market.id === sampleMarketId
+        ? "sample"
+        : !topByVolumeAssigned &&
+            topByVolumeMarketId != null &&
+            market.id === topByVolumeMarketId
+          ? "top_by_volume"
+          : "linked";
+    if (role === "top_by_volume") {
+      topByVolumeAssigned = true;
+    }
     marketItems.push({
-      role: "sample",
-      market_id: sampleMarket.id,
-      title: sampleMarket.title,
-      status: sampleMarket.status,
-      best_bid: sampleMarket.best_bid,
-      best_ask: sampleMarket.best_ask,
-      last_price: sampleMarket.last_price,
-      volume_24h: sampleMarket.volume_24h,
-      volume_24h_source: sampleMarket.volume_24h_source ?? undefined,
-      liquidity: sampleMarket.liquidity,
-      liquidity_source: sampleMarket.liquidity_source ?? undefined,
+      role,
+      market_id: market.id,
+      title: market.title,
+      status: market.status,
+      best_bid: market.best_bid,
+      best_ask: market.best_ask,
+      last_price: market.last_price,
+      volume_24h: market.volume_24h,
+      volume_24h_source: market.volume_24h_source ?? undefined,
+      liquidity: market.liquidity,
+      liquidity_source: market.liquidity_source ?? undefined,
       implied_mid: deriveImpliedMid(
-        sampleMarket.best_bid,
-        sampleMarket.best_ask,
-        sampleMarket.last_price,
-      ),
-    });
-  }
-  if (topMarket && (!sampleMarket || topMarket.id !== sampleMarket.id)) {
-    marketItems.push({
-      role: "top_by_volume",
-      market_id: topMarket.id,
-      title: topMarket.title,
-      status: topMarket.status,
-      best_bid: topMarket.best_bid,
-      best_ask: topMarket.best_ask,
-      last_price: topMarket.last_price,
-      volume_24h: topMarket.volume_24h,
-      volume_24h_source: topMarket.volume_24h_source ?? undefined,
-      liquidity: topMarket.liquidity,
-      liquidity_source: topMarket.liquidity_source ?? undefined,
-      implied_mid: deriveImpliedMid(
-        topMarket.best_bid,
-        topMarket.best_ask,
-        topMarket.last_price,
+        market.best_bid,
+        market.best_ask,
+        market.last_price,
       ),
     });
   }
@@ -892,13 +939,15 @@ function buildSynthesisInput(
   );
 
   const ageCandidates = [
-    estimateAgeSec(sampleMarket?.market_updated_at ?? null),
-    estimateAgeSec(topMarket?.market_updated_at ?? null),
+    ...selectedMarkets.map(market =>
+      estimateAgeSec(market.market_updated_at ?? null),
+    ),
     estimateAgeSec(event.event_updated_at),
   ].filter((value): value is number => value != null);
   const tradeAgeCandidates = [
-    estimateAgeSec(sampleMarket?.trade_updated_at ?? null),
-    estimateAgeSec(topMarket?.trade_updated_at ?? null),
+    ...selectedMarkets.map(market =>
+      estimateAgeSec(market.trade_updated_at ?? null),
+    ),
     estimateAgeSec(event.trade_updated_at),
   ].filter((value): value is number => value != null);
   const bestAgeSec = ageCandidates.length ? Math.min(...ageCandidates) : null;
@@ -922,10 +971,7 @@ function buildSynthesisInput(
     if (status === "PARTIAL") return 0.65;
     return 0.55;
   })();
-  const dataCompletenessScore = computeDataCompletenessScore(
-    event,
-    [sampleMarket, topMarket].filter((item): item is MarketRow => item != null),
-  );
+  const dataCompletenessScore = computeDataCompletenessScore(event, selectedMarkets);
   const strongInternalCorroboration =
     isFreshTierA &&
     (event.volume_24h != null ||
@@ -1045,15 +1091,32 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
       mappingReason = "sample_event_title_and_market_title_match";
     }
   }
-  const topMarket = await fetchTopMarket(event.id);
+  const topMarkets = await fetchTopMarkets(event.id, args.maxContextMarkets);
+  const selectedMarkets: MarketRow[] = [];
+  const selectedMarketIds = new Set<string>();
+  const pushUniqueMarket = (market: MarketRow | null): void => {
+    if (!market || selectedMarketIds.has(market.id)) return;
+    selectedMarketIds.add(market.id);
+    selectedMarkets.push(market);
+  };
+  pushUniqueMarket(sampleMarket);
+  for (const market of topMarkets) {
+    pushUniqueMarket(market);
+    if (selectedMarkets.length >= args.maxContextMarkets) break;
+  }
+  const topByVolumeMarketId =
+    topMarkets.find(market => market.id !== sampleMarket?.id)?.id ??
+    topMarkets[0]?.id ??
+    null;
 
   let synthesisInput: SynthesisInputV1;
   try {
     synthesisInput = buildSynthesisInput(
       context,
       event,
-      sampleMarket,
-      topMarket,
+      selectedMarkets,
+      sampleMarket?.id ?? null,
+      topByVolumeMarketId,
       mappingReason,
     );
   } catch (error) {
@@ -1109,22 +1172,25 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
     let rawOutputText = raw.content;
     usageForError = usage;
     rawOutputForError = rawOutputText;
-    let parsed: unknown;
+    let synthesisOutput: SynthesisOutputV1;
     try {
-      parsed = parsePossibleJson(raw.content);
-    } catch {
+      synthesisOutput = parseAndValidateSynthesisOutput(rawOutputText);
+    } catch (firstError) {
       schemaRepairAttempted = true;
       try {
         const repairRaw = await callOpenRouter(
           args,
           systemPrompt,
-          buildSynthesisRepairPromptV1(raw.content),
+          buildSynthesisRepairPromptWithReason(
+            rawOutputText,
+            firstError instanceof Error ? firstError.message : String(firstError),
+          ),
         );
         usage = mergeUsage(usage, repairRaw.usage);
         rawOutputText = repairRaw.content;
         usageForError = usage;
         rawOutputForError = rawOutputText;
-        parsed = parsePossibleJson(repairRaw.content);
+        synthesisOutput = parseAndValidateSynthesisOutput(rawOutputText);
         schemaRepairSuccess = true;
       } catch (repairError) {
         schemaRepairError =
@@ -1132,7 +1198,6 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
         throw repairError;
       }
     }
-    const synthesisOutput = parseSynthesisOutputV1(parsed);
     const gate = evaluatePublishGate(synthesisInput, synthesisOutput);
     const tokenCostUsd =
       (usage.promptTokens * args.priceInputPerM) / 1_000_000 +
@@ -1168,8 +1233,10 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
       (completionTokens * args.priceOutputPerM) / 1_000_000;
     const parseLikeError =
       message.includes("SynthesisOutputV1") ||
+      message.includes("summary_hygiene_violation") ||
       message.toLowerCase().includes("json") ||
-      message.toLowerCase().includes("parse");
+      message.toLowerCase().includes("parse") ||
+      message.toLowerCase().includes("validation");
     return {
       topicKey: context.topicKey,
       tier: context.tier,

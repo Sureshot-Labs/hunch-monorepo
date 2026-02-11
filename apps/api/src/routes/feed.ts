@@ -11,6 +11,7 @@ import type { FeedEvent, TokenPair } from "../server-types.js";
 import { feedQuerySchema } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
+  fetchFavoriteFeedEventPage,
   fetchFeedEventIds,
   fetchFeedMarkets,
   fetchFeedMarketsDirect,
@@ -523,6 +524,219 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       );
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(body);
+    },
+  );
+
+  /**
+   * GET /feed/favorites
+   * Feed-like response scoped to the authenticated user's watchlist markets.
+   * Keeps /watchlist unchanged for compatibility while reusing feed filters/sorting.
+   */
+  z.get(
+    "/feed/favorites",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        querystring: feedQuerySchema,
+      },
+    },
+    async (req, reply) => {
+      const user = req.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const q = req.query;
+      const limit = q.limit;
+      const offset = q.offset;
+      const minVol = q.min_volume24hr;
+      const minLiquidity = q.min_liquidity;
+      const search = q.q;
+      const view: "events" | "markets" =
+        q.view === "markets" ? "markets" : "events";
+      const eventScope: "grouped" | "single" | undefined =
+        q.event_scope === "grouped"
+          ? "grouped"
+          : q.event_scope === "single"
+            ? "single"
+            : undefined;
+      const venues = q.venue;
+      const category = q.category;
+      const categories = q.categories;
+      const filter = q.filter;
+      const sort = q.sort;
+      const sortDir: "asc" | "desc" =
+        q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
+      const minProb = q.min_prob;
+      const maxProb = q.max_prob;
+      const maxSpread = q.max_spread;
+      const endWithinHours = q.end_within_hours;
+      const ageWithinHours = q.age_within_hours;
+
+      const { rows: favoriteRows } = await pool.query<{ market_id: string }>(
+        `
+        select w.market_id
+        from user_watchlist w
+        join unified_markets m on m.id = w.market_id
+        where w.user_id = $1
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > now())
+          and (m.close_time is null or m.close_time > now())
+        `,
+        [user.id],
+      );
+
+      const favoriteMarketIds = Array.from(
+        new Set(favoriteRows.map((row) => row.market_id).filter(Boolean)),
+      );
+
+      if (!favoriteMarketIds.length) {
+        return reply.send({
+          count: 0,
+          limit,
+          offset,
+          minVolume24h: minVol,
+          data: [],
+        });
+      }
+
+      const nowTs = new Date();
+      const nowParam = nowTs.toISOString();
+      const sevenDaysAgo = new Date(
+        nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const sevenDaysFromNow = new Date(
+        nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const endWithin =
+        endWithinHours != null
+          ? new Date(
+              nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+      const ageSince =
+        ageWithinHours != null
+          ? new Date(
+              nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+
+      const baseInputs = {
+        minVol,
+        minLiquidity,
+        marketIds: favoriteMarketIds,
+        q: search,
+        view,
+        eventScope,
+        venues,
+        category,
+        categories,
+        filter,
+        sort,
+        sortDir,
+        minProb,
+        maxProb,
+        maxSpread,
+        endWithin,
+        ageSince,
+        nowParam,
+        sevenDaysAgo,
+        sevenDaysFromNow,
+      };
+
+      let data: FeedEvent[] = [];
+      let responseCount = 0;
+      let totalEvents = 0;
+      let totalMarkets = 0;
+      if (view === "markets") {
+        const summary = await fetchFavoriteFeedEventPage(pool, {
+          ...baseInputs,
+          limit: 1,
+          offset: 0,
+        });
+        totalEvents = summary.totalEvents;
+        totalMarkets = summary.totalMarkets;
+        const rows = await fetchFeedMarketsDirect(pool, {
+          ...baseInputs,
+          limit,
+          offset,
+        });
+        if (!rows.length) {
+          return reply.send({
+            count: 0,
+            limit,
+            offset,
+            minVolume24h: minVol,
+            data: [],
+          });
+        }
+        data = rows.map((rRow) => {
+          const market = buildFeedMarket(rRow);
+          return { ...buildFeedEvent(rRow), markets: [market] };
+        });
+        responseCount = totalMarkets;
+      } else {
+        // event_scope in favorites mode is favorites-relative:
+        // grouped/single is evaluated on favorited markets that match filters.
+        const summary = await fetchFavoriteFeedEventPage(pool, {
+          ...baseInputs,
+          limit,
+          offset,
+        });
+        totalEvents = summary.totalEvents;
+        totalMarkets = summary.totalMarkets;
+        if (!summary.eventIds.length) {
+          return reply.send({
+            count: 0,
+            limit,
+            offset,
+            minVolume24h: minVol,
+            totalEvents: 0,
+            totalMarkets: 0,
+            data: [],
+          });
+        }
+        const allRows = await fetchFeedMarkets(pool, {
+          ...baseInputs,
+          limit,
+          offset,
+        }, summary.eventIds);
+        const eventMap: Record<string, FeedEvent> = {};
+        for (const rRow of allRows) {
+          const eventId = String(rRow.event_id);
+          if (!eventMap[eventId]) {
+            eventMap[eventId] = buildFeedEvent(rRow);
+          }
+          eventMap[eventId].markets.push(buildFeedMarket(rRow));
+        }
+        data = summary.eventIds
+          .map((eventId) => eventMap[eventId])
+          .filter((event): event is FeedEvent => Boolean(event));
+        responseCount = totalEvents;
+      }
+
+      if (data.length) {
+        const tokenIds: string[] = [];
+        for (const event of data) {
+          for (const market of event.markets) {
+            const tokens = market.tokens;
+            if (tokens?.yes) tokenIds.push(tokens.yes);
+            if (tokens?.no) tokenIds.push(tokens.no);
+          }
+        }
+        if (tokenIds.length) void markHotTokens({ tokenIds });
+      }
+
+      return reply.send({
+        count: responseCount,
+        limit,
+        offset,
+        minVolume24h: minVol,
+        totalEvents,
+        totalMarkets,
+        data,
+      });
     },
   );
 

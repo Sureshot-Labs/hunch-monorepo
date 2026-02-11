@@ -7,6 +7,7 @@ export type FeedInputs = {
   offset: number;
   minVol: number;
   minLiquidity: number;
+  marketIds?: string[];
   q?: string;
   view?: "events" | "markets";
   eventScope?: "grouped" | "single";
@@ -24,6 +25,12 @@ export type FeedInputs = {
   nowParam: string;
   sevenDaysAgo: string;
   sevenDaysFromNow: string;
+};
+
+export type FavoriteFeedEventPage = {
+  eventIds: string[];
+  totalEvents: number;
+  totalMarkets: number;
 };
 
 function createParamBuilder() {
@@ -551,6 +558,9 @@ export async function fetchFeedMarkets(
   const eventIdsParam = add(eventIds);
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
+  const marketIdsParam = inputs.marketIds?.length
+    ? add(inputs.marketIds)
+    : null;
   const yesMidExpr = `
     case
       when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
@@ -568,6 +578,9 @@ export async function fetchFeedMarkets(
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
   ];
+  if (marketIdsParam) {
+    marketWhere.push(`m.id = ANY(${marketIdsParam}::text[])`);
+  }
 
   if (inputs.minLiquidity > 0) {
     marketWhere.push(
@@ -632,6 +645,7 @@ export async function fetchFeedMarkets(
         from unified_markets m
         left join unified_market_change_24h mc on mc.market_id = m.id
         where m.event_id = ANY(${eventIdsParam}::text[])
+          ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
           and m.status = 'ACTIVE'
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
@@ -810,6 +824,9 @@ export async function fetchFeedMarketsDirect(
   `;
   const supportedLimitlessMarketExpr = "true";
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const marketIdsParam = inputs.marketIds?.length
+    ? add(inputs.marketIds)
+    : null;
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
   const hasSearch = Boolean(inputs.q);
@@ -858,6 +875,7 @@ export async function fetchFeedMarketsDirect(
       join unified_events e on e.id = m.event_id
       ${searchMarketJoin}
       where m.status = 'ACTIVE'
+        ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
         and e.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
@@ -891,6 +909,9 @@ export async function fetchFeedMarketsDirect(
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
   ];
+  if (marketIdsParam) {
+    where.push(`m.id = ANY(${marketIdsParam}::text[])`);
+  }
 
   if (inputs.venues?.length) {
     where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -1155,11 +1176,277 @@ export async function fetchFeedMarketsDirect(
       limit 1
     ) no_top on true
     order by m.ord, m.venue_market_id
-    limit ${limitParam} offset ${offsetParam}
   `;
 
   const { rows } = await pool.query<FeedMarketRow>(marketSql, params);
   return rows;
+}
+
+export async function fetchFavoriteFeedEventPage(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<FavoriteFeedEventPage> {
+  if (!inputs.marketIds?.length) {
+    return { eventIds: [], totalEvents: 0, totalMarkets: 0 };
+  }
+
+  const { params, add } = createParamBuilder();
+  const supportedLimitlessMarketExpr = "true";
+  const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const marketIdsParam = add(inputs.marketIds);
+  const nowParam = add(inputs.nowParam);
+  const nowCloseParam = add(inputs.nowParam);
+  const hasSearch = Boolean(inputs.q);
+  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
+  const searchCte = hasSearch
+    ? `
+      search_events as materialized (
+        select e.id
+        from unified_events e
+        where e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
+            e.title ilike ${searchParam} or
+            e.description ilike ${searchParam} or
+            e.category ilike ${searchParam} or
+            e.slug ilike ${searchParam}
+          )
+        union
+        select m.event_id as id
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
+            m.title ilike ${searchParam} or
+            m.description ilike ${searchParam} or
+            m.category ilike ${searchParam} or
+            m.slug ilike ${searchParam}
+          )
+      )
+    `
+    : "";
+  const searchEventJoin = hasSearch
+    ? "join search_events se on se.id = e.id"
+    : "";
+  const searchMarketJoin = hasSearch
+    ? "join search_events se on se.id = m.event_id"
+    : "";
+  const marketCountCte = `
+    market_count as (
+      select m.event_id, count(*) as market_count
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      ${searchMarketJoin}
+      where m.status = 'ACTIVE'
+        and m.id = ANY(${marketIdsParam}::text[])
+        and e.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and ${supportedLimitlessMarketExpr}
+      group by m.event_id
+    )
+  `;
+  const marketVolumeDisplayExpr = `
+    case
+      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
+      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+      else null
+    end
+  `;
+  const marketLiquidityDisplayExpr = `
+    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
+  `;
+  const yesMidExpr = `
+    case
+      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
+      else coalesce(m.best_bid, m.best_ask)
+    end
+  `;
+  const change24hCteParts: string[] = [];
+  if (inputs.sort === "change24h") {
+    change24hCteParts.push(`
+      market_change as (
+        select market_id, change_24h
+        from unified_market_change_24h
+      )
+    `);
+  }
+  const where: string[] = [
+    "m.status = 'ACTIVE'",
+    "e.status = 'ACTIVE'",
+    `m.id = ANY(${marketIdsParam}::text[])`,
+    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
+    `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
+    supportedLimitlessMarketExpr,
+  ];
+
+  if (inputs.venues?.length) {
+    where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
+  }
+  if (inputs.categories?.length) {
+    where.push(
+      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
+    );
+  } else if (inputs.category) {
+    where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
+  }
+  if (inputs.filter === "newest") {
+    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
+  } else if (inputs.filter === "endingsoon") {
+    where.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`);
+  }
+  if (inputs.endWithin) {
+    where.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
+    );
+  }
+  if (inputs.ageSince) {
+    where.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
+    );
+  }
+  if (inputs.minLiquidity > 0) {
+    where.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
+  }
+  if (inputs.minVol > 1e-9) {
+    where.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
+  }
+  if (inputs.minProb != null) {
+    where.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    where.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
+  }
+  if (inputs.maxSpread != null) {
+    where.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
+  if (inputs.eventScope === "grouped") {
+    where.push("emc.market_count > 1");
+  } else if (inputs.eventScope === "single") {
+    where.push("emc.market_count = 1");
+  }
+
+  let marketOrder = "";
+  if (inputs.sort === "totalvol")
+    marketOrder = `${marketVolumeDisplayExpr} ${sortDir} nulls last, m.venue_market_id`;
+  else if (inputs.sort === "liquidity")
+    marketOrder = `${marketLiquidityDisplayExpr} ${sortDir} nulls last, m.venue_market_id`;
+  else if (inputs.sort === "openinterest")
+    marketOrder = `m.open_interest ${sortDir} nulls last, m.venue_market_id`;
+  else if (inputs.sort === "change24h")
+    marketOrder = `change_24h ${sortDir} nulls last, m.venue_market_id`;
+  else if (inputs.sort === "time")
+    marketOrder = `coalesce(m.close_time, m.expiration_time, e.end_date) ${sortDir} nulls last, m.venue_market_id`;
+  else if (inputs.filter === "newest")
+    marketOrder = "e.start_date desc nulls last, m.venue_market_id";
+  else if (inputs.filter === "endingsoon")
+    marketOrder = "e.end_date asc nulls last, m.venue_market_id";
+  else if (inputs.sort === "trending_v2") {
+    const marketTrendExpr = `
+      case
+        when m.venue = 'limitless'
+          then (coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))
+        else coalesce(trade_24h.volume_24h, 0)
+      end
+    `;
+    marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
+  } else if (inputs.sort == null || inputs.sort === "trending") {
+    marketOrder = `
+      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
+       case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
+       case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
+      ) ${sortDir} nulls last, m.venue_market_id
+    `;
+  } else marketOrder = "e.start_date desc nulls last, m.venue_market_id";
+
+  const needsMarketCount =
+    inputs.eventScope === "grouped" || inputs.eventScope === "single";
+  const marketCountJoin = needsMarketCount
+    ? "join market_count emc on emc.event_id = m.event_id"
+    : "";
+  const change24hCandidateJoin =
+    inputs.sort === "change24h"
+      ? "left join market_change mc on mc.market_id = m.id"
+      : "";
+  const tradeJoin =
+    inputs.sort === "trending_v2"
+      ? `left join lateral (
+          select t.volume_24h
+          from unified_market_trade_24h t
+          where t.market_id = m.id
+          limit 1
+        ) trade_24h on true`
+      : "";
+  const change24hCandidateExpr =
+    inputs.sort === "change24h" ? "mc.change_24h" : "null";
+  const marketOrderExpr = marketOrder || "m.venue_market_id";
+  const limitParam = add(inputs.limit);
+  const offsetParam = add(inputs.offset);
+
+  const marketCandidatesSql = `
+    select
+      m.id,
+      m.event_id
+      ${inputs.sort === "change24h" ? `, (${change24hCandidateExpr}) as change_24h` : ""}
+      , row_number() over (order by ${marketOrderExpr}) as ord
+    from unified_markets m
+    join unified_events e on e.id = m.event_id
+    ${searchEventJoin}
+    ${marketCountJoin}
+    ${change24hCandidateJoin}
+    ${tradeJoin}
+    where ${where.join(" and ")}
+  `;
+
+  const withParts: string[] = [];
+  if (searchCte) withParts.push(searchCte);
+  if (needsMarketCount) withParts.push(marketCountCte);
+  if (change24hCteParts.length) withParts.push(...change24hCteParts);
+  withParts.push(`market_candidates as (${marketCandidatesSql})`);
+  const withClause = `with ${withParts.join(",\n")}`;
+
+  const sql = `
+    ${withClause}
+    select
+      coalesce((select count(*) from market_candidates), 0)::int as total_markets,
+      coalesce((select count(*) from (select distinct event_id from market_candidates) t), 0)::int as total_events,
+      coalesce(
+        (
+          select array_agg(page.event_id order by page.first_ord)
+          from (
+            select event_id, min(ord) as first_ord
+            from market_candidates
+            group by event_id
+            order by first_ord
+            limit ${limitParam} offset ${offsetParam}
+          ) page
+        ),
+        '{}'::text[]
+      ) as event_ids
+  `;
+
+  const { rows } = await pool.query<{
+    total_markets: number;
+    total_events: number;
+    event_ids: string[] | null;
+  }>(sql, params);
+  const row = rows[0];
+  if (!row) return { eventIds: [], totalEvents: 0, totalMarkets: 0 };
+
+  return {
+    eventIds: Array.isArray(row.event_ids) ? row.event_ids : [],
+    totalEvents: Number(row.total_events ?? 0),
+    totalMarkets: Number(row.total_markets ?? 0),
+  };
 }
 
 export type MarketDetailsRow = {
