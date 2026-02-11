@@ -19,6 +19,8 @@ import { env } from "./env.js";
 interface CleanupOptions {
   dryRun: boolean;
   deleteMode: boolean;
+  confirmDelete: boolean;
+  deleteOrphanedEvents: boolean;
 }
 
 interface ExpiredMarket {
@@ -87,6 +89,12 @@ async function cleanupExpiredMarkets(
   pool: Pool,
   options: CleanupOptions,
 ): Promise<CleanupStats> {
+  if (options.deleteMode && !options.confirmDelete) {
+    throw new Error(
+      "Delete mode requires --confirm-delete to prevent accidental destructive runs",
+    );
+  }
+
   console.log("🔍 Scanning for expired markets...");
 
   const expiredMarkets = await getExpiredMarkets(pool);
@@ -122,11 +130,15 @@ async function cleanupExpiredMarkets(
       );
     });
 
-    if (orphanedEvents.length > 0) {
+    if (options.deleteOrphanedEvents && orphanedEvents.length > 0) {
       console.log("\nOrphaned events that would be deleted:");
       orphanedEvents.forEach((eventId, index) => {
         console.log(`${index + 1}. ${eventId}`);
       });
+    } else if (orphanedEvents.length > 0) {
+      console.log(
+        "\nOrphaned events found, but deletion is disabled (use --delete-orphaned-events to enable).",
+      );
     }
 
     return {
@@ -171,7 +183,7 @@ async function cleanupExpiredMarkets(
 
   // Clean up orphaned events
   let deletedEvents = 0;
-  if (orphanedEvents.length > 0) {
+  if (options.deleteOrphanedEvents && orphanedEvents.length > 0) {
     console.log("\n🧹 Cleaning up orphaned events...");
 
     for (const eventId of orphanedEvents) {
@@ -183,6 +195,12 @@ async function cleanupExpiredMarkets(
         console.error(`❌ Error deleting event ${eventId}:`, error);
       }
     }
+  }
+
+  if (!options.deleteOrphanedEvents && orphanedEvents.length > 0) {
+    console.log(
+      `\nℹ️  Skipped deleting ${orphanedEvents.length} orphaned events (enable with --delete-orphaned-events).`,
+    );
   }
 
   console.log("\n✅ Cleanup completed!");
@@ -201,6 +219,8 @@ async function main() {
   const options: CleanupOptions = {
     dryRun: args.includes("--dry-run"),
     deleteMode: args.includes("--delete"),
+    confirmDelete: args.includes("--confirm-delete"),
+    deleteOrphanedEvents: args.includes("--delete-orphaned-events"),
   };
 
   console.log("🧹 Expired Markets Cleanup Service");
@@ -210,9 +230,18 @@ async function main() {
     console.log("Mode: DRY RUN (no changes will be made)");
   } else if (options.deleteMode) {
     console.log("Mode: DELETE (markets will be permanently deleted)");
+    if (!options.confirmDelete) {
+      console.log(
+        "⚠️  Missing --confirm-delete (required). Aborting before any destructive action.",
+      );
+      process.exit(1);
+    }
   } else {
     console.log("Mode: UPDATE (markets will be marked as CLOSED)");
   }
+  console.log(
+    `Delete orphaned events: ${options.deleteOrphanedEvents ? "enabled" : "disabled"}`,
+  );
 
   const pool = new Pool({ connectionString: env.dbUrl });
 

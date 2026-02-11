@@ -145,7 +145,7 @@ fi
 echo
 echo "[ai-topics-matrix] outputs: ${OUT_DIR}"
 echo "[ai-topics-matrix] summary"
-printf "file\trows\tuniqueSearch\tunknownTopics\tunknownMarkets\tplaceholderTopics\tcallsDayAfterCache\ttierA/B/C\n"
+printf "file\trows\tuniqueSearch\tunknownTopics\tunknownMarkets\tplaceholderTopics\tcallsDayAfterCache\ttierA/B/C\tsearchStale6h\tsearchStale24h\n"
 
 for file in "${OUT_DIR}"/*.json; do
   jq -r --arg file "$(basename "$file")" '
@@ -161,7 +161,9 @@ for file in "${OUT_DIR}"/*.json; do
       (.searchPlan.estimatedCalls.dailyAfterCache // 0),
       ((.searchPlan.tierCounts.A // 0 | tostring) + "/" +
        (.searchPlan.tierCounts.B // 0 | tostring) + "/" +
-       (.searchPlan.tierCounts.C // 0 | tostring))
+       (.searchPlan.tierCounts.C // 0 | tostring)),
+      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | fromdateiso8601)) > (6 * 3600)))) | length),
+      ((.searchPlan.queryExamples // []) | map(select(.sampleMarketUpdatedAt != null and ((now - (.sampleMarketUpdatedAt | fromdateiso8601)) > (24 * 3600)))) | length)
     ] | @tsv
   ' "$file"
 done | sort

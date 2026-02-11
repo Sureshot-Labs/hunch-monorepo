@@ -2,6 +2,7 @@ import { readFile, writeFile } from "fs/promises";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { config } from "dotenv";
+import { createHash } from "crypto";
 
 const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
 console.log(`[ai-search-smoke] Loading env from ${envPath}`);
@@ -27,9 +28,37 @@ const TRUSTED_WEB_DOMAINS = [
   "theblock.co",
 ];
 
-type SearchMode = "web" | "x" | "both";
+type SearchMode = "combined";
 type Tier = "A" | "B" | "C";
-type QueryType = "web_news" | "x_signal";
+type QueryType = "combined";
+
+type ToolUsageDetails = {
+  web_search_calls: number;
+  x_search_calls: number;
+  code_interpreter_calls: number;
+  file_search_calls: number;
+  mcp_calls: number;
+  document_search_calls: number;
+};
+
+type UsageMetrics = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  numServerSideToolsUsed: number;
+  toolUsageDetails: ToolUsageDetails;
+  providerCostUsdTicks: number | null;
+};
+
+type CostEstimate = {
+  inputCostUsd: number;
+  outputCostUsd: number;
+  tokenCostUsd: number;
+  toolCostUsd: number;
+  totalCostUsd: number;
+};
 
 type RetrievalPlan = {
   intentAnchor?: string;
@@ -38,9 +67,7 @@ type RetrievalPlan = {
   aliasTerms?: string[];
   minEvidence?: number;
   strict?: {
-    webNewsPrompt?: string;
-    webDriversPrompt?: string;
-    xSignalPrompt?: string;
+    combinedPrompt?: string;
   };
 };
 
@@ -50,9 +77,11 @@ type QueryExample = {
   category: string;
   entity: string;
   marketCount: number;
-  promptWebNews: string;
-  promptWebDrivers: string;
-  promptXSignal: string;
+  sampleEventId?: string | null;
+  sampleMarketId?: string | null;
+  sampleVenue?: string | null;
+  sampleMarketUpdatedAt?: string | null;
+  promptCombined: string;
   retrievalPlan?: RetrievalPlan;
   webSearchTool: {
     type: "web_search";
@@ -69,8 +98,7 @@ type QueryExample = {
     allowed_x_handles?: string[];
   };
   pack: {
-    webCount: number;
-    xCount: number;
+    combinedCount: number;
   };
 };
 
@@ -82,16 +110,21 @@ type TopicsSummary = {
 };
 
 type PlannedCall = {
+  callId: string;
   topicKey: string;
   tier: Tier;
   category: string;
   entity: string;
   marketCount: number;
+  sampleEventId: string | null;
+  sampleMarketId: string | null;
+  sampleVenue: string | null;
+  sampleMarketUpdatedAt: string | null;
   queryType: QueryType;
   prompt: string;
   minEvidence: number;
   intentAnchor: string | null;
-  tool: Record<string, unknown>;
+  tools: Array<Record<string, unknown>>;
 };
 
 type ParsedStructuredResult = {
@@ -111,21 +144,32 @@ type XaiCallRaw = {
   ok: boolean;
   status: number;
   durationMs: number;
+  attempts: number;
+  retried: boolean;
   prompt: string;
   outputText: string;
   outputPreview: string;
   outputTextLength: number;
   citationsCount: number;
+  toolAttemptCount: number;
+  successfulToolCount: number;
+  usage: UsageMetrics;
+  costEstimate: CostEstimate;
   serverSideToolUsage: unknown;
   error?: string;
 };
 
 type SmokeResult = {
+  callId: string;
   topicKey: string;
   tier: Tier;
   category: string;
   entity: string;
   marketCount: number;
+  sampleEventId: string | null;
+  sampleMarketId: string | null;
+  sampleVenue: string | null;
+  sampleMarketUpdatedAt: string | null;
   queryType: QueryType;
   ok: boolean;
   status: number;
@@ -138,7 +182,22 @@ type SmokeResult = {
   outputTextLength: number;
   parsed: ParsedStructuredResult;
   citationsCount: number;
+  toolAttemptCount: number;
+  successfulToolCount: number;
+  usage: UsageMetrics;
+  costEstimate: CostEstimate;
   serverSideToolUsage: unknown;
+  toolCallCount: number;
+  provenanceOk: boolean;
+  provenanceReason: string;
+  stagesExecuted: number;
+  stageTurns: number[];
+  earlyStop: boolean;
+  earlyStopReason: string | null;
+  toolBudgetExceeded: boolean;
+  toolAttemptsBudget: number;
+  attempts: number;
+  retried: boolean;
   error?: string;
 };
 
@@ -150,10 +209,49 @@ type Args = {
   maxTopics: number;
   maxOutputTokens: number;
   timeoutSec: number;
+  concurrency: number;
+  maxRetries: number;
+  retryBaseMs: number;
+  maxTurns: number;
+  stage1Turns: number;
+  maxCallsPerTopic: number;
+  maxToolAttemptsPerTopic: number;
+  priceInputPerM: number;
+  priceOutputPerM: number;
+  priceWebPer1k: number;
+  priceXPer1k: number;
   out: string | null;
   dryRun: boolean;
   verbose: boolean;
   baseUrl: string;
+};
+
+const ZERO_TOOL_USAGE: ToolUsageDetails = {
+  web_search_calls: 0,
+  x_search_calls: 0,
+  code_interpreter_calls: 0,
+  file_search_calls: 0,
+  mcp_calls: 0,
+  document_search_calls: 0,
+};
+
+const ZERO_USAGE: UsageMetrics = {
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  reasoningTokens: 0,
+  cachedInputTokens: 0,
+  numServerSideToolsUsed: 0,
+  toolUsageDetails: ZERO_TOOL_USAGE,
+  providerCostUsdTicks: null,
+};
+
+const ZERO_COST: CostEstimate = {
+  inputCostUsd: 0,
+  outputCostUsd: 0,
+  tokenCostUsd: 0,
+  toolCostUsd: 0,
+  totalCostUsd: 0,
 };
 
 function parseFlag(argv: string[], name: string): string | undefined {
@@ -173,9 +271,20 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseNonNegativeFloat(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
 function parseMode(value: string | undefined): SearchMode {
-  if (value === "web" || value === "x" || value === "both") return value;
-  return "both";
+  if (value && value !== "combined") {
+    console.warn(
+      `[ai-search-smoke] --mode=${value} is deprecated; forcing mode=combined`,
+    );
+  }
+  return "combined";
 }
 
 function parseTiers(value: string | undefined): Set<Tier> {
@@ -199,12 +308,23 @@ function usage(): never {
       "",
       "Options:",
       "  --topics-file <path>        ai-topics-dry-run JSON output file",
-      "  --mode <web|x|both>         Which tool prompts to execute (default: both)",
+      "  --mode <combined>           Query mode (default: combined)",
       "  --tiers <csv>               Topic tiers to include, e.g. A,B (default: A,B,C)",
       "  --max-topics <n>            Max topics to test (default: 8)",
       "  --model <name>              xAI model (default: grok-4-1-fast-reasoning)",
       "  --max-output-tokens <n>     Max output tokens per call (default: 600)",
       "  --timeout-sec <n>           Per-call timeout seconds (default: 120)",
+      "  --concurrency <n>           Max in-flight calls (default: 2)",
+      "  --max-retries <n>           Retry attempts for transient failures (default: 1)",
+      "  --retry-base-ms <n>         Base backoff in ms for retries (default: 800)",
+      "  --max-turns <n>             Max assistant/tool-call turns per topic (default: 6)",
+      "  --stage1-turns <n>          Turns used in first pass before optional second pass (default: 3)",
+      "  --max-calls-per-topic <n>   Max API calls per topic (default: 2)",
+      "  --max-tool-attempts <n>     Soft cap on tool attempts per topic (default: 20)",
+      "  --price-input-per-m <usd>   Input token price per 1M tokens (default: 0.20)",
+      "  --price-output-per-m <usd>  Output token price per 1M tokens (default: 0.50)",
+      "  --price-web-per-1k <usd>    Web search tool price per 1k calls (default: 5)",
+      "  --price-x-per-1k <usd>      X search tool price per 1k calls (default: 5)",
       "  --base-url <url>            Responses endpoint base (default: https://api.x.ai/v1)",
       "  --out <path>                Write JSON report to file",
       "  --dry-run                   Print planned calls only (no API requests)",
@@ -212,7 +332,7 @@ function usage(): never {
       "",
       "Examples:",
       "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:topics:dry-run -- --limit 50 --sampling per-venue --json --out /tmp/topics.json",
-      "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/topics.json --tiers A,B --max-topics 6 --mode both --out /tmp/ai-search-smoke.json",
+      "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/topics.json --tiers A,B --max-topics 6 --mode combined --out /tmp/ai-search-smoke.json",
     ].join("\n"),
   );
   process.exit(1);
@@ -221,6 +341,15 @@ function usage(): never {
 function resolveArgs(argv: string[]): Args {
   const topicsFile = parseFlag(argv, "--topics-file");
   if (!topicsFile) usage();
+
+  const maxTurns = Math.max(
+    1,
+    Math.min(20, parsePositiveInt(parseFlag(argv, "--max-turns"), 6)),
+  );
+  const stage1Turns = Math.max(
+    1,
+    Math.min(maxTurns, parsePositiveInt(parseFlag(argv, "--stage1-turns"), 3)),
+  );
 
   return {
     topicsFile,
@@ -233,6 +362,44 @@ function resolveArgs(argv: string[]): Args {
     maxTopics: parsePositiveInt(parseFlag(argv, "--max-topics"), 8),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 600),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 120),
+    concurrency: Math.max(
+      1,
+      Math.min(8, parsePositiveInt(parseFlag(argv, "--concurrency"), 2)),
+    ),
+    maxRetries: Math.max(
+      0,
+      Math.min(3, parsePositiveInt(parseFlag(argv, "--max-retries"), 1)),
+    ),
+    retryBaseMs: Math.max(
+      100,
+      Math.min(5_000, parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 800)),
+    ),
+    maxTurns,
+    stage1Turns,
+    maxCallsPerTopic: Math.max(
+      1,
+      Math.min(3, parsePositiveInt(parseFlag(argv, "--max-calls-per-topic"), 2)),
+    ),
+    maxToolAttemptsPerTopic: Math.max(
+      1,
+      Math.min(200, parsePositiveInt(parseFlag(argv, "--max-tool-attempts"), 20)),
+    ),
+    priceInputPerM: parseNonNegativeFloat(
+      parseFlag(argv, "--price-input-per-m") ?? process.env.XAI_PRICE_INPUT_PER_M,
+      0.2,
+    ),
+    priceOutputPerM: parseNonNegativeFloat(
+      parseFlag(argv, "--price-output-per-m") ?? process.env.XAI_PRICE_OUTPUT_PER_M,
+      0.5,
+    ),
+    priceWebPer1k: parseNonNegativeFloat(
+      parseFlag(argv, "--price-web-per-1k") ?? process.env.XAI_PRICE_WEB_PER_1K,
+      5,
+    ),
+    priceXPer1k: parseNonNegativeFloat(
+      parseFlag(argv, "--price-x-per-1k") ?? process.env.XAI_PRICE_X_PER_1K,
+      5,
+    ),
     out: parseFlag(argv, "--out") ?? null,
     dryRun: hasFlag(argv, "--dry-run"),
     verbose: hasFlag(argv, "--verbose"),
@@ -281,16 +448,172 @@ function extractOutputText(payload: unknown): string {
   return parts.join("\n\n");
 }
 
-function extractCitationsCount(payload: unknown): number {
-  if (!payload || typeof payload !== "object") return 0;
-  const citations = (payload as Record<string, unknown>).citations;
-  if (!Array.isArray(citations)) return 0;
-  return citations.length;
+function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
+  if (!payload || typeof payload !== "object") return [];
+  const output = (payload as Record<string, unknown>).output;
+  if (!Array.isArray(output)) return [];
+  return output.filter(
+    item => item && typeof item === "object",
+  ) as Array<Record<string, unknown>>;
 }
 
-function extractServerSideToolUsage(payload: unknown): unknown {
+function extractCitationsCount(payload: unknown): number {
+  const urls = new Set<string>();
+  if (payload && typeof payload === "object") {
+    const citations = (payload as Record<string, unknown>).citations;
+    if (Array.isArray(citations)) {
+      for (const citation of citations) {
+        if (!citation || typeof citation !== "object") continue;
+        const url = (citation as Record<string, unknown>).url;
+        if (typeof url === "string" && url.trim().length > 0) {
+          urls.add(url.trim());
+        }
+      }
+    }
+  }
+  const outputItems = extractOutputItems(payload);
+  for (const output of outputItems) {
+    if (output.type !== "message") continue;
+    const content = output.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const annotations = (block as Record<string, unknown>).annotations;
+      if (!Array.isArray(annotations)) continue;
+      for (const annotation of annotations) {
+        if (!annotation || typeof annotation !== "object") continue;
+        const url = (annotation as Record<string, unknown>).url;
+        if (typeof url === "string" && url.trim().length > 0) {
+          urls.add(url.trim());
+        }
+      }
+    }
+  }
+  return urls.size;
+}
+
+function extractServerSideToolUsage(payload: unknown): Record<string, unknown> | null {
   if (!payload || typeof payload !== "object") return null;
-  return (payload as Record<string, unknown>).server_side_tool_usage ?? null;
+  const top = (payload as Record<string, unknown>).server_side_tool_usage;
+  if (top && typeof top === "object" && !Array.isArray(top)) {
+    return top as Record<string, unknown>;
+  }
+  const usage = (payload as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const details = (usage as Record<string, unknown>).server_side_tool_usage_details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    return details as Record<string, unknown>;
+  }
+  return null;
+}
+
+function extractSuccessfulToolCount(payload: unknown): number {
+  if (!payload || typeof payload !== "object") return 0;
+  const usage = (payload as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object") return 0;
+  const direct = (usage as Record<string, unknown>).num_server_side_tools_used;
+  if (typeof direct === "number" && Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+  const details = extractServerSideToolUsage(payload);
+  if (!details) return 0;
+  return Object.values(details).reduce<number>((sum, value) => {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return sum + value;
+    }
+    return sum;
+  }, 0);
+}
+
+function extractUsageMetrics(payload: unknown): UsageMetrics {
+  if (!payload || typeof payload !== "object") return ZERO_USAGE;
+  const usage = (payload as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object") return ZERO_USAGE;
+  const obj = usage as Record<string, unknown>;
+  const inputTokens = Number(obj.input_tokens ?? obj.prompt_tokens ?? 0);
+  const outputTokens = Number(obj.output_tokens ?? obj.completion_tokens ?? 0);
+  const totalTokens = Number(obj.total_tokens ?? inputTokens + outputTokens);
+  const inputDetails =
+    obj.input_tokens_details && typeof obj.input_tokens_details === "object"
+      ? (obj.input_tokens_details as Record<string, unknown>)
+      : obj.prompt_tokens_details && typeof obj.prompt_tokens_details === "object"
+        ? (obj.prompt_tokens_details as Record<string, unknown>)
+        : null;
+  const outputDetails =
+    obj.output_tokens_details && typeof obj.output_tokens_details === "object"
+      ? (obj.output_tokens_details as Record<string, unknown>)
+      : obj.completion_tokens_details &&
+          typeof obj.completion_tokens_details === "object"
+        ? (obj.completion_tokens_details as Record<string, unknown>)
+        : null;
+  const cachedInputTokens = Number(inputDetails?.cached_tokens ?? 0);
+  const reasoningTokens = Number(outputDetails?.reasoning_tokens ?? 0);
+  const numServerSideToolsUsed = Number(obj.num_server_side_tools_used ?? 0);
+  const providerCostUsdTicksRaw = obj.cost_in_usd_ticks;
+  const providerCostUsdTicks =
+    typeof providerCostUsdTicksRaw === "number" && Number.isFinite(providerCostUsdTicksRaw)
+      ? providerCostUsdTicksRaw
+      : null;
+  const detailsRaw = obj.server_side_tool_usage_details;
+  const detailsObj =
+    detailsRaw && typeof detailsRaw === "object" && !Array.isArray(detailsRaw)
+      ? (detailsRaw as Record<string, unknown>)
+      : null;
+  const toolUsageDetails: ToolUsageDetails = {
+    web_search_calls: Number(detailsObj?.web_search_calls ?? 0),
+    x_search_calls: Number(detailsObj?.x_search_calls ?? 0),
+    code_interpreter_calls: Number(detailsObj?.code_interpreter_calls ?? 0),
+    file_search_calls: Number(detailsObj?.file_search_calls ?? 0),
+    mcp_calls: Number(detailsObj?.mcp_calls ?? 0),
+    document_search_calls: Number(detailsObj?.document_search_calls ?? 0),
+  };
+  return {
+    inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
+    outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
+    totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
+    reasoningTokens: Number.isFinite(reasoningTokens) ? reasoningTokens : 0,
+    cachedInputTokens: Number.isFinite(cachedInputTokens) ? cachedInputTokens : 0,
+    numServerSideToolsUsed: Number.isFinite(numServerSideToolsUsed)
+      ? numServerSideToolsUsed
+      : 0,
+    toolUsageDetails,
+    providerCostUsdTicks,
+  };
+}
+
+function computeEstimatedCost(args: Args, usage: UsageMetrics): CostEstimate {
+  const inputCostUsd = (usage.inputTokens / 1_000_000) * args.priceInputPerM;
+  const outputCostUsd = (usage.outputTokens / 1_000_000) * args.priceOutputPerM;
+  const tokenCostUsd = inputCostUsd + outputCostUsd;
+  const toolCostUsd =
+    (usage.toolUsageDetails.web_search_calls / 1_000) * args.priceWebPer1k +
+    (usage.toolUsageDetails.x_search_calls / 1_000) * args.priceXPer1k;
+  return {
+    inputCostUsd,
+    outputCostUsd,
+    tokenCostUsd,
+    toolCostUsd,
+    totalCostUsd: tokenCostUsd + toolCostUsd,
+  };
+}
+
+function extractToolAttemptCount(payload: unknown): number {
+  if (!payload || typeof payload !== "object") return 0;
+  const topToolCalls = (payload as Record<string, unknown>).tool_calls;
+  if (Array.isArray(topToolCalls)) return topToolCalls.length;
+  const outputItems = extractOutputItems(payload);
+  return outputItems.filter(output => {
+    const type = output.type;
+    if (typeof type !== "string") return false;
+    return (
+      type === "web_search_call" ||
+      type === "x_search_call" ||
+      type === "custom_tool_call" ||
+      type === "code_interpreter_call" ||
+      type === "file_search_call" ||
+      type === "mcp_call"
+    );
+  }).length;
 }
 
 function normalizeDomain(raw: string): string {
@@ -438,12 +761,9 @@ function parseStructuredOutput(raw: string): ParsedStructuredResult {
   };
 }
 
-function resolveTopicPrompt(topic: QueryExample, queryType: QueryType): string {
+function resolveTopicPrompt(topic: QueryExample): string {
   const strict = topic.retrievalPlan?.strict;
-  if (queryType === "web_news") {
-    return strict?.webNewsPrompt ?? topic.promptWebNews;
-  }
-  return strict?.xSignalPrompt ?? topic.promptXSignal;
+  return strict?.combinedPrompt ?? topic.promptCombined;
 }
 
 function resolveMinEvidence(topic: QueryExample): number {
@@ -460,53 +780,68 @@ function resolveIntentAnchor(topic: QueryExample): string | null {
   return compact.length > 0 ? compact : null;
 }
 
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort((a, b) => a.localeCompare(b));
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(",")}}`;
+}
+
+function buildCallId(call: Omit<PlannedCall, "callId">): string {
+  const payload = [
+    call.topicKey,
+    call.queryType,
+    call.prompt,
+    stableStringify(call.tools),
+  ].join("|");
+  return createHash("sha256").update(payload).digest("hex");
+}
+
 function buildPlannedCalls(topics: QueryExample[], args: Args): PlannedCall[] {
   const calls: PlannedCall[] = [];
+  const seen = new Set<string>();
   for (const topic of topics) {
     if (!args.tiers.has(topic.tier)) continue;
+    if (!Number.isFinite(topic.pack.combinedCount) || topic.pack.combinedCount <= 0) {
+      continue;
+    }
     const minEvidence = resolveMinEvidence(topic);
     const intentAnchor = resolveIntentAnchor(topic);
-    if (args.mode === "web" || args.mode === "both") {
-      if (topic.pack.webCount > 0) {
-        calls.push({
-          topicKey: topic.topicKey,
-          tier: topic.tier,
-          category: topic.category,
-          entity: topic.entity,
-          marketCount: topic.marketCount,
-          queryType: "web_news",
-          prompt: resolveTopicPrompt(topic, "web_news"),
-          minEvidence,
-          intentAnchor,
-          tool: topic.webSearchTool,
-        });
-      }
-    }
-    if (args.mode === "x" || args.mode === "both") {
-      if (topic.pack.xCount > 0) {
-        calls.push({
-          topicKey: topic.topicKey,
-          tier: topic.tier,
-          category: topic.category,
-          entity: topic.entity,
-          marketCount: topic.marketCount,
-          queryType: "x_signal",
-          prompt: resolveTopicPrompt(topic, "x_signal"),
-          minEvidence,
-          intentAnchor,
-          tool: topic.xSearchTool,
-        });
-      }
-    }
+    const next: Omit<PlannedCall, "callId"> = {
+      topicKey: topic.topicKey,
+      tier: topic.tier,
+      category: topic.category,
+      entity: topic.entity,
+      marketCount: topic.marketCount,
+      sampleEventId: topic.sampleEventId ?? null,
+      sampleMarketId: topic.sampleMarketId ?? null,
+      sampleVenue: topic.sampleVenue ?? null,
+      sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt ?? null,
+      queryType: "combined",
+      prompt: resolveTopicPrompt(topic),
+      minEvidence,
+      intentAnchor,
+      tools: [topic.webSearchTool, topic.xSearchTool],
+    };
+    const callId = buildCallId(next);
+    if (seen.has(callId)) continue;
+    seen.add(callId);
+    calls.push({ ...next, callId });
   }
   return calls;
 }
 
-async function callXai(
+async function callXaiOnce(
   apiKey: string,
   args: Args,
   prompt: string,
-  tool: Record<string, unknown>,
+  tools: Array<Record<string, unknown>>,
+  maxTurns: number,
 ): Promise<XaiCallRaw> {
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -525,6 +860,7 @@ async function callXai(
       body: JSON.stringify({
         model: args.model,
         max_output_tokens: args.maxOutputTokens,
+        max_turns: maxTurns,
         input: [
           {
             role: "system",
@@ -535,7 +871,7 @@ async function callXai(
             content: prompt,
           },
         ],
-        tools: [tool],
+        tools,
       }),
       signal: controller.signal,
     });
@@ -550,16 +886,23 @@ async function callXai(
     const outputText = extractOutputText(payload);
     const payloadText = stringifyPayload(payload);
     const resolvedOutputText = outputText || payloadText;
+    const usage = extractUsageMetrics(payload);
 
     return {
       ok: response.ok,
       status: response.status,
       durationMs: Date.now() - startedAt,
+      attempts: 1,
+      retried: false,
       prompt,
       outputText: resolvedOutputText,
       outputPreview: preview(resolvedOutputText),
       outputTextLength: resolvedOutputText.length,
       citationsCount: extractCitationsCount(payload),
+      toolAttemptCount: extractToolAttemptCount(payload),
+      successfulToolCount: extractSuccessfulToolCount(payload),
+      usage,
+      costEstimate: computeEstimatedCost(args, usage),
       serverSideToolUsage: extractServerSideToolUsage(payload),
       ...(response.ok
         ? {}
@@ -576,17 +919,204 @@ async function callXai(
       ok: false,
       status: 0,
       durationMs: Date.now() - startedAt,
+      attempts: 1,
+      retried: false,
       prompt,
       outputText: "",
       outputPreview: "",
       outputTextLength: 0,
       citationsCount: 0,
+      toolAttemptCount: 0,
+      successfulToolCount: 0,
+      usage: ZERO_USAGE,
+      costEstimate: ZERO_COST,
       serverSideToolUsage: null,
       error: message,
     };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function isRetriableFailure(raw: XaiCallRaw): boolean {
+  if (raw.ok) return false;
+  if (raw.status === 429) return true;
+  if (raw.status >= 500 && raw.status < 600) return true;
+  if (raw.status === 0) return true;
+  const message = raw.error?.toLowerCase() ?? "";
+  return (
+    message.includes("abort") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("network")
+  );
+}
+
+function computeBackoffMs(baseMs: number, attempt: number): number {
+  const exp = Math.min(attempt, 6);
+  const jitterFactor = 0.75 + Math.random() * 0.5;
+  return Math.round(baseMs * 2 ** exp * jitterFactor);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolveSleep => setTimeout(resolveSleep, ms));
+}
+
+async function callXaiWithRetry(
+  apiKey: string,
+  args: Args,
+  prompt: string,
+  tools: Array<Record<string, unknown>>,
+  maxTurns: number,
+): Promise<XaiCallRaw> {
+  let attempts = 0;
+  let last: XaiCallRaw | null = null;
+  const totalAttempts = args.maxRetries + 1;
+  while (attempts < totalAttempts) {
+    const currentAttempt = attempts + 1;
+    const raw = await callXaiOnce(apiKey, args, prompt, tools, maxTurns);
+    attempts = currentAttempt;
+    last = raw;
+    if (!isRetriableFailure(raw) || currentAttempt >= totalAttempts) {
+      return {
+        ...raw,
+        attempts: currentAttempt,
+        retried: currentAttempt > 1,
+      };
+    }
+    const backoffMs = computeBackoffMs(args.retryBaseMs, attempts - 1);
+    if (args.verbose) {
+      console.log(
+        `[ai-search-smoke] retry ${currentAttempt}/${totalAttempts - 1} after ${backoffMs}ms status=${raw.status} err=${raw.error ?? "unknown"}`,
+      );
+    }
+    await sleep(backoffMs);
+  }
+  return {
+    ...(last ?? {
+      ok: false,
+      status: 0,
+      durationMs: 0,
+      prompt,
+      outputText: "",
+      outputPreview: "",
+      outputTextLength: 0,
+      citationsCount: 0,
+      toolAttemptCount: 0,
+      successfulToolCount: 0,
+      usage: ZERO_USAGE,
+      costEstimate: ZERO_COST,
+      serverSideToolUsage: null,
+      error: "retry_exhausted_without_response",
+    }),
+    attempts,
+    retried: attempts > 1,
+  };
+}
+
+function extractToolCallCount(usage: unknown): number {
+  if (!usage) return 0;
+  if (Array.isArray(usage)) {
+    return usage.reduce((sum, item) => {
+      if (!item || typeof item !== "object") return sum;
+      const count = (item as Record<string, unknown>).count;
+      if (typeof count === "number" && Number.isFinite(count) && count > 0) {
+        return sum + count;
+      }
+      return sum + 1;
+    }, 0);
+  }
+  if (typeof usage === "object") {
+    const obj = usage as Record<string, unknown>;
+    let sum = 0;
+    for (const value of Object.values(obj)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        sum += value;
+        continue;
+      }
+      if (value && typeof value === "object") {
+        const nested = value as Record<string, unknown>;
+        const count = nested.count;
+        if (typeof count === "number" && Number.isFinite(count) && count > 0) {
+          sum += count;
+        }
+      }
+    }
+    return sum;
+  }
+  return 0;
+}
+
+function evaluateProvenance(raw: XaiCallRaw): { ok: boolean; reason: string; toolCallCount: number } {
+  const toolCallCount = Math.max(
+    extractToolCallCount(raw.serverSideToolUsage),
+    raw.successfulToolCount,
+  );
+  const citationsOk = raw.citationsCount > 0;
+  const toolsOk = toolCallCount > 0;
+  const attemptedTools = raw.toolAttemptCount > 0;
+  if (citationsOk || toolsOk) {
+    const reason = [
+      citationsOk ? `citations:${raw.citationsCount}` : null,
+      toolsOk ? `tool_calls:${toolCallCount}` : null,
+      attemptedTools ? `tool_attempts:${raw.toolAttemptCount}` : null,
+    ]
+      .filter(Boolean)
+      .join(",");
+    return { ok: true, reason, toolCallCount };
+  }
+  return {
+    ok: false,
+    reason: "missing_citations_and_tool_usage",
+    toolCallCount,
+  };
+}
+
+function meetsEvidenceThreshold(
+  parsed: ParsedStructuredResult,
+  minEvidence: number,
+  provenanceOk: boolean,
+): boolean {
+  return (
+    provenanceOk &&
+    parsed.valid &&
+    parsed.status !== "INVALID" &&
+    parsed.supportsTopicCount >= minEvidence
+  );
+}
+
+function parsedStatusScore(status: ParsedStructuredResult["status"]): number {
+  if (status === "OK") return 3;
+  if (status === "PARTIAL") return 2;
+  if (status === "NO_EVIDENCE") return 1;
+  return 0;
+}
+
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, Math.min(sorted.length - 1, idx))];
+}
+
+async function runWithConcurrency<TInput, TOutput>(
+  items: TInput[],
+  concurrency: number,
+  worker: (item: TInput) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const results = new Array<TOutput>(items.length);
+  let index = 0;
+  const size = Math.max(1, Math.min(concurrency, items.length));
+  const runners = Array.from({ length: size }, async () => {
+    while (true) {
+      const current = index;
+      index += 1;
+      if (current >= items.length) return;
+      results[current] = await worker(items[current]);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 async function main(): Promise<void> {
@@ -618,54 +1148,221 @@ async function main(): Promise<void> {
 
   if (args.dryRun) {
     const dry = plannedCalls.map(item => ({
+      callId: item.callId,
       topicKey: item.topicKey,
       tier: item.tier,
       category: item.category,
       entity: item.entity,
       queryType: item.queryType,
+      sampleEventId: item.sampleEventId,
+      sampleMarketId: item.sampleMarketId,
+      sampleVenue: item.sampleVenue,
+      sampleMarketUpdatedAt: item.sampleMarketUpdatedAt,
       prompt: item.prompt,
       minEvidence: item.minEvidence,
       intentAnchor: item.intentAnchor,
-      tool: item.tool,
+      tools: item.tools,
     }));
     console.log(JSON.stringify({ plannedCalls: dry }, null, 2));
     return;
   }
 
-  const results: SmokeResult[] = [];
-  for (const call of plannedCalls) {
-    const strictRaw = await callXai(resolvedApiKey, args, call.prompt, call.tool);
-    const strictParsed = parseStructuredOutput(strictRaw.outputText);
+  const results = await runWithConcurrency(
+    plannedCalls,
+    args.concurrency,
+    async call => {
+      const topicStartedAt = Date.now();
+      const stageTurns: number[] = [];
+      const firstTurns = Math.max(1, Math.min(args.stage1Turns, args.maxTurns));
+      stageTurns.push(firstTurns);
+      const remainingTurns = Math.max(0, args.maxTurns - firstTurns);
+      const extraCalls = Math.max(0, args.maxCallsPerTopic - 1);
+      if (extraCalls > 0 && remainingTurns > 0) {
+        const base = Math.floor(remainingTurns / extraCalls);
+        let rem = remainingTurns % extraCalls;
+        for (let i = 0; i < extraCalls; i += 1) {
+          const turns = base + (rem > 0 ? 1 : 0);
+          if (turns > 0) stageTurns.push(turns);
+          rem = Math.max(0, rem - 1);
+        }
+      }
 
-    const strictResult: SmokeResult = {
-      topicKey: call.topicKey,
-      tier: call.tier,
-      category: call.category,
-      entity: call.entity,
-      marketCount: call.marketCount,
-      queryType: call.queryType,
-      ok: strictRaw.ok,
-      status: strictRaw.status,
-      durationMs: strictRaw.durationMs,
-      prompt: strictRaw.prompt,
-      intentAnchor: call.intentAnchor,
-      minEvidence: call.minEvidence,
-      outputText: strictRaw.outputText,
-      outputPreview: strictRaw.outputPreview,
-      outputTextLength: strictRaw.outputTextLength,
-      parsed: strictParsed,
-      citationsCount: strictRaw.citationsCount,
-      serverSideToolUsage: strictRaw.serverSideToolUsage,
-      ...(strictRaw.error ? { error: strictRaw.error } : {}),
-    };
-    results.push(strictResult);
+      const stageRuns: Array<{
+        turns: number;
+        raw: XaiCallRaw;
+        parsed: ParsedStructuredResult;
+        provenance: { ok: boolean; reason: string; toolCallCount: number };
+      }> = [];
 
-    if (args.verbose) {
-      console.log(
-        `[ai-search-smoke] ${strictRaw.ok ? "OK" : "ERR"} ${strictRaw.status} ${strictRaw.durationMs}ms ${call.tier} ${call.queryType} ${call.entity} parsed=${strictParsed.status} ev=${strictParsed.supportsTopicCount}/${call.minEvidence} trusted=${strictParsed.trustedEvidenceCount} domains=${strictParsed.uniqueDomainCount}`,
+      const usageAcc: UsageMetrics = {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        reasoningTokens: 0,
+        cachedInputTokens: 0,
+        numServerSideToolsUsed: 0,
+        toolUsageDetails: {
+          web_search_calls: 0,
+          x_search_calls: 0,
+          code_interpreter_calls: 0,
+          file_search_calls: 0,
+          mcp_calls: 0,
+          document_search_calls: 0,
+        },
+        providerCostUsdTicks: 0,
+      };
+      const costAcc: CostEstimate = {
+        inputCostUsd: 0,
+        outputCostUsd: 0,
+        tokenCostUsd: 0,
+        toolCostUsd: 0,
+        totalCostUsd: 0,
+      };
+
+      let totalToolAttempts = 0;
+      let totalSuccessfulTools = 0;
+      let totalToolCalls = 0;
+      let attemptsTotal = 0;
+      let retriedAny = false;
+      let earlyStop = false;
+      let earlyStopReason: string | null = null;
+      let toolBudgetExceeded = false;
+
+      for (const turns of stageTurns) {
+        const raw = await callXaiWithRetry(
+          resolvedApiKey,
+          args,
+          call.prompt,
+          call.tools,
+          turns,
+        );
+        const parsed = parseStructuredOutput(raw.outputText);
+        const provenance = evaluateProvenance(raw);
+        stageRuns.push({ turns, raw, parsed, provenance });
+
+        usageAcc.inputTokens += raw.usage.inputTokens;
+        usageAcc.outputTokens += raw.usage.outputTokens;
+        usageAcc.totalTokens += raw.usage.totalTokens;
+        usageAcc.reasoningTokens += raw.usage.reasoningTokens;
+        usageAcc.cachedInputTokens += raw.usage.cachedInputTokens;
+        usageAcc.numServerSideToolsUsed += raw.usage.numServerSideToolsUsed;
+        usageAcc.toolUsageDetails.web_search_calls +=
+          raw.usage.toolUsageDetails.web_search_calls;
+        usageAcc.toolUsageDetails.x_search_calls +=
+          raw.usage.toolUsageDetails.x_search_calls;
+        usageAcc.toolUsageDetails.code_interpreter_calls +=
+          raw.usage.toolUsageDetails.code_interpreter_calls;
+        usageAcc.toolUsageDetails.file_search_calls +=
+          raw.usage.toolUsageDetails.file_search_calls;
+        usageAcc.toolUsageDetails.mcp_calls += raw.usage.toolUsageDetails.mcp_calls;
+        usageAcc.toolUsageDetails.document_search_calls +=
+          raw.usage.toolUsageDetails.document_search_calls;
+        usageAcc.providerCostUsdTicks =
+          (usageAcc.providerCostUsdTicks ?? 0) + (raw.usage.providerCostUsdTicks ?? 0);
+
+        costAcc.inputCostUsd += raw.costEstimate.inputCostUsd;
+        costAcc.outputCostUsd += raw.costEstimate.outputCostUsd;
+        costAcc.tokenCostUsd += raw.costEstimate.tokenCostUsd;
+        costAcc.toolCostUsd += raw.costEstimate.toolCostUsd;
+        costAcc.totalCostUsd += raw.costEstimate.totalCostUsd;
+
+        totalToolAttempts += raw.toolAttemptCount;
+        totalSuccessfulTools += raw.successfulToolCount;
+        totalToolCalls += provenance.toolCallCount;
+        attemptsTotal += raw.attempts;
+        retriedAny = retriedAny || raw.retried;
+
+        if (meetsEvidenceThreshold(parsed, call.minEvidence, provenance.ok)) {
+          earlyStop = true;
+          earlyStopReason = "evidence_threshold_met";
+          break;
+        }
+        if (totalToolAttempts >= args.maxToolAttemptsPerTopic) {
+          earlyStop = true;
+          earlyStopReason = "tool_attempt_budget_reached";
+          toolBudgetExceeded = true;
+          break;
+        }
+      }
+
+      const selected = stageRuns.reduce(
+        (best, current) => {
+          if (!best) return current;
+          const bestScore =
+            parsedStatusScore(best.parsed.status) * 100 +
+            (best.provenance.ok ? 20 : 0) +
+            Math.min(19, best.parsed.supportsTopicCount);
+          const currentScore =
+            parsedStatusScore(current.parsed.status) * 100 +
+            (current.provenance.ok ? 20 : 0) +
+            Math.min(19, current.parsed.supportsTopicCount);
+          if (currentScore > bestScore) return current;
+          if (currentScore === bestScore && current.raw.ok && !best.raw.ok) return current;
+          return best;
+        },
+        null as
+          | {
+              turns: number;
+              raw: XaiCallRaw;
+              parsed: ParsedStructuredResult;
+              provenance: { ok: boolean; reason: string; toolCallCount: number };
+            }
+          | null,
       );
-    }
-  }
+
+      if (!selected) {
+        throw new Error("No stage results collected");
+      }
+
+      const strictResult: SmokeResult = {
+        callId: call.callId,
+        topicKey: call.topicKey,
+        tier: call.tier,
+        category: call.category,
+        entity: call.entity,
+        marketCount: call.marketCount,
+        queryType: call.queryType,
+        sampleEventId: call.sampleEventId,
+        sampleMarketId: call.sampleMarketId,
+        sampleVenue: call.sampleVenue,
+        sampleMarketUpdatedAt: call.sampleMarketUpdatedAt,
+        ok: selected.raw.ok,
+        status: selected.raw.status,
+        durationMs: Date.now() - topicStartedAt,
+        prompt: selected.raw.prompt,
+        intentAnchor: call.intentAnchor,
+        minEvidence: call.minEvidence,
+        outputText: selected.raw.outputText,
+        outputPreview: selected.raw.outputPreview,
+        outputTextLength: selected.raw.outputTextLength,
+        parsed: selected.parsed,
+        citationsCount: selected.raw.citationsCount,
+        toolAttemptCount: totalToolAttempts,
+        successfulToolCount: totalSuccessfulTools,
+        usage: usageAcc,
+        costEstimate: costAcc,
+        serverSideToolUsage: selected.raw.serverSideToolUsage,
+        toolCallCount: totalToolCalls,
+        provenanceOk: selected.provenance.ok,
+        provenanceReason: selected.provenance.reason,
+        stagesExecuted: stageRuns.length,
+        stageTurns: stageRuns.map(run => run.turns),
+        earlyStop,
+        earlyStopReason,
+        toolBudgetExceeded,
+        toolAttemptsBudget: args.maxToolAttemptsPerTopic,
+        attempts: attemptsTotal,
+        retried: retriedAny,
+        ...(selected.raw.error ? { error: selected.raw.error } : {}),
+      };
+      if (args.verbose) {
+        console.log(
+          `[ai-search-smoke] ${selected.raw.ok ? "OK" : "ERR"} ${selected.raw.status} ${strictResult.durationMs}ms ${call.tier} ${call.queryType} ${call.entity} parsed=${selected.parsed.status} ev=${selected.parsed.supportsTopicCount}/${call.minEvidence} trusted=${selected.parsed.trustedEvidenceCount} domains=${selected.parsed.uniqueDomainCount} prov=${selected.provenance.ok ? "OK" : "MISS"} stages=${strictResult.stagesExecuted} turns=${strictResult.stageTurns.join("+")} early_stop=${strictResult.earlyStopReason ?? "none"} tool_attempts=${totalToolAttempts}/${args.maxToolAttemptsPerTopic} tool_success=${totalSuccessfulTools}`,
+        );
+      }
+      return strictResult;
+    },
+  );
 
   const success = results.filter(row => row.ok).length;
   const failed = results.length - success;
@@ -682,6 +1379,19 @@ async function main(): Promise<void> {
     tiers: Array.from(args.tiers),
     maxTopics: args.maxTopics,
     timeoutSec: args.timeoutSec,
+    concurrency: args.concurrency,
+    maxRetries: args.maxRetries,
+    retryBaseMs: args.retryBaseMs,
+    maxTurns: args.maxTurns,
+    stage1Turns: args.stage1Turns,
+    maxCallsPerTopic: args.maxCallsPerTopic,
+    maxToolAttemptsPerTopic: args.maxToolAttemptsPerTopic,
+    pricing: {
+      inputPerMillionUsd: args.priceInputPerM,
+      outputPerMillionUsd: args.priceOutputPerM,
+      webPer1kUsd: args.priceWebPer1k,
+      xPer1kUsd: args.priceXPer1k,
+    },
     totals: {
       topicsSelected: selectedTopics.length,
       callsPlanned: plannedCalls.length,
@@ -690,22 +1400,51 @@ async function main(): Promise<void> {
       failed,
       successRate: results.length > 0 ? Number((success / results.length).toFixed(4)) : 0,
       averageMs,
+      retried: results.filter(row => row.retried).length,
+      earlyStopped: results.filter(row => row.earlyStop).length,
+      toolBudgetExceeded: results.filter(row => row.toolBudgetExceeded).length,
+      toolAttemptsTotal: results.reduce((sum, row) => sum + row.toolAttemptCount, 0),
+      toolAttemptsP95: percentile(
+        results.map(row => row.toolAttemptCount),
+        95,
+      ),
+      stageCallsTotal: results.reduce((sum, row) => sum + row.stagesExecuted, 0),
+      stageCallsP95: percentile(
+        results.map(row => row.stagesExecuted),
+        95,
+      ),
+      inputTokens: results.reduce((sum, row) => sum + row.usage.inputTokens, 0),
+      outputTokens: results.reduce((sum, row) => sum + row.usage.outputTokens, 0),
+      estimatedInputCostUsd: Number(
+        results.reduce((sum, row) => sum + row.costEstimate.inputCostUsd, 0).toFixed(6),
+      ),
+      estimatedOutputCostUsd: Number(
+        results.reduce((sum, row) => sum + row.costEstimate.outputCostUsd, 0).toFixed(6),
+      ),
+      estimatedTokenCostUsd: Number(
+        results.reduce((sum, row) => sum + row.costEstimate.tokenCostUsd, 0).toFixed(6),
+      ),
+      estimatedToolCostUsd: Number(
+        results.reduce((sum, row) => sum + row.costEstimate.toolCostUsd, 0).toFixed(6),
+      ),
+      estimatedTotalCostUsd: Number(
+        results.reduce((sum, row) => sum + row.costEstimate.totalCostUsd, 0).toFixed(6),
+      ),
+      providerCostUsdTicks: results.reduce(
+        (sum, row) => sum + (row.usage.providerCostUsdTicks ?? 0),
+        0,
+      ),
     },
     byQueryType: {
-      web_news: results.filter(row => row.queryType === "web_news").length,
-      x_signal: results.filter(row => row.queryType === "x_signal").length,
+      combined: results.filter(row => row.queryType === "combined").length,
     },
     parsedSummary: {
       ok: results.filter(row => row.parsed.status === "OK").length,
       partial: results.filter(row => row.parsed.status === "PARTIAL").length,
       noEvidence: results.filter(row => row.parsed.status === "NO_EVIDENCE").length,
       invalid: results.filter(row => row.parsed.status === "INVALID").length,
-      webNewsStrictNoTrusted: results.filter(
-        row =>
-          row.queryType === "web_news" &&
-          row.parsed.evidenceCount > 0 &&
-          row.parsed.trustedEvidenceCount === 0,
-      ).length,
+      provenanceOk: results.filter(row => row.provenanceOk).length,
+      provenanceMissing: results.filter(row => !row.provenanceOk).length,
     },
     results,
   };
@@ -730,6 +1469,15 @@ async function main(): Promise<void> {
       trusted: `${row.parsed.trustedEvidenceCount}/${row.parsed.evidenceCount}`,
       domains: row.parsed.uniqueDomainCount,
       citations: row.citationsCount,
+      tools: row.toolCallCount,
+      attempts_tool: row.toolAttemptCount,
+      success_tool: row.successfulToolCount,
+      stages: row.stagesExecuted,
+      turns: row.stageTurns.join("+"),
+      early_stop: row.earlyStopReason ?? "-",
+      prov: row.provenanceOk ? "ok" : row.provenanceReason,
+      attempts: row.attempts,
+      est_cost_usd: Number(row.costEstimate.totalCostUsd.toFixed(5)),
       entity: row.entity,
       preview: row.outputPreview.slice(0, 80),
     })),

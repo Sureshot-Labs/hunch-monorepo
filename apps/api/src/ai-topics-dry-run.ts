@@ -56,6 +56,7 @@ type MarketRow = {
   market_open_time: Date | string | null;
   market_expiration_time: Date | string | null;
   market_close_time: Date | string | null;
+  market_updated_at: Date | string | null;
   event_end_date: Date | string | null;
   event_start_date: Date | string | null;
 };
@@ -74,8 +75,12 @@ type TopicAggregate = {
   venues: Set<string>;
   marketIds: Set<string>;
   eventIds: Set<string>;
+  sampleEventId: string;
+  sampleMarketId: string;
+  sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: Set<string>;
   sourceTopicKeys: Set<string>;
 };
@@ -95,8 +100,12 @@ type TopicSummaryRow = {
   eventCount: number;
   venueCount: number;
   venues: string[];
+  sampleEventId: string;
+  sampleMarketId: string;
+  sampleVenue: string;
   sampleEventTitle: string | null;
   sampleMarketTitle: string | null;
+  sampleMarketUpdatedAt: Date | string | null;
   candidateEntities: string[];
   sourceTopicKeys: string[];
   searchIntentKey?: string;
@@ -119,6 +128,7 @@ type Args = {
   includeUnknownTopics: boolean;
   unknownMinMarketCount: number;
   searchMinMarketCount: number;
+  maxMarketAgeHours: number;
   sportsKeywordMinMarketCount: number;
   cacheHitRate: number;
   tieringMode: "threshold" | "score";
@@ -131,6 +141,9 @@ type Args = {
   tierACadenceMinutes: number;
   tierBCadenceMinutes: number;
   tierCCadenceMinutes: number;
+  tierACombinedCount: number;
+  tierBCombinedCount: number;
+  tierCCombinedCount: number;
   tierAWebCount: number;
   tierAXCount: number;
   tierBWebCount: number;
@@ -841,6 +854,12 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 
 function resolveArgs(argv: string[]): Args {
   const searchCategoriesParsed = parseCategories(parseFlag(argv, "--search-categories"));
+  const requireOpenNowFlag = parseFlag(argv, "--require-open-now");
+  if (requireOpenNowFlag != null && !parseBoolean(requireOpenNowFlag, true)) {
+    console.warn(
+      "[topics:dry-run] --require-open-now=false is ignored; open-now filtering is always enforced for AI topic extraction.",
+    );
+  }
   return {
     limit: parsePositiveInt(parseFlag(argv, "--limit"), 5000),
     venues: parseCsv(parseFlag(argv, "--venues")),
@@ -855,7 +874,8 @@ function resolveArgs(argv: string[]): Args {
     ),
     minLiquidity: parseNonNegativeNumber(parseFlag(argv, "--min-liquidity"), 0),
     maxSpread: parseOptionalNonNegativeNumber(parseFlag(argv, "--max-spread")),
-    requireOpenNow: parseBoolean(parseFlag(argv, "--require-open-now"), true),
+    // Always enforce open-now filtering in AI topic extraction.
+    requireOpenNow: true,
     orderBy: parseOrderBy(parseFlag(argv, "--order-by")),
     sampling: parseSampling(parseFlag(argv, "--sampling")),
     perVenueQuota: (() => {
@@ -877,6 +897,10 @@ function resolveArgs(argv: string[]): Args {
     searchMinMarketCount: parsePositiveInt(
       parseFlag(argv, "--search-min-market-count"),
       2,
+    ),
+    maxMarketAgeHours: parseNonNegativeNumber(
+      parseFlag(argv, "--max-market-age-hours"),
+      24,
     ),
     sportsKeywordMinMarketCount: parsePositiveInt(
       parseFlag(argv, "--sports-keyword-min-market-count"),
@@ -919,6 +943,18 @@ function resolveArgs(argv: string[]): Args {
     tierCCadenceMinutes: parsePositiveInt(
       parseFlag(argv, "--tier-c-cadence-minutes"),
       240,
+    ),
+    tierACombinedCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-a-combined-count"),
+      1,
+    ),
+    tierBCombinedCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-b-combined-count"),
+      1,
+    ),
+    tierCCombinedCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-c-combined-count"),
+      1,
     ),
     tierAWebCount: parseNonNegativeInt(parseFlag(argv, "--tier-a-web-count"), 1),
     tierAXCount: parseNonNegativeInt(parseFlag(argv, "--tier-a-x-count"), 1),
@@ -982,7 +1018,7 @@ Options:
   --min-volume24h <n>   Minimum 24h volume filter (default: 1e-9)
   --min-liquidity <n>   Minimum liquidity/open-interest proxy filter (default: 0)
   --max-spread <n>      Optional max spread filter (requires best bid+ask)
-  --require-open-now <bool>  Exclude expired/closed markets by time (default: true)
+  --require-open-now <bool>  Ignored (open-now filtering is always enabled for AI topic extraction)
   --order-by <mode>     Sampling order: trending|updated|random (default: trending)
   --sampling <mode>      Sampling strategy: per-venue|global (default: per-venue)
   --per-venue-quota <n>  Optional fixed quota per venue (default: auto from limit)
@@ -991,6 +1027,7 @@ Options:
   --include-unknown-topics <bool> Include unknown entities in search modeling (default: true)
   --unknown-min-market-count <n>  Min marketCount for unknown topics (default: 3)
   --search-min-market-count <n>   Min marketCount for modeled search topics (default: 2)
+  --max-market-age-hours <n>      Require market updated_at within this many hours (default: 24)
   --sports-keyword-min-market-count <n>  Min marketCount for sports keyword topics (default: 3)
   --cache-hit-rate <f>   Estimated cache-hit rate for external search [0..1] (default: 0.35)
   --tiering-mode <mode>  Tiering strategy: score|threshold (default: score)
@@ -1003,6 +1040,9 @@ Options:
   --tier-a-cadence-minutes <n>  Tier A refresh cadence in minutes (default: 10)
   --tier-b-cadence-minutes <n>  Tier B refresh cadence in minutes (default: 120)
   --tier-c-cadence-minutes <n>  Tier C refresh cadence in minutes (default: 240)
+  --tier-a-combined-count <n>   Tier A combined web+x requests per refresh (default: 1)
+  --tier-b-combined-count <n>   Tier B combined web+x requests per refresh (default: 1)
+  --tier-c-combined-count <n>   Tier C combined web+x requests per refresh (default: 1)
   --tier-a-web-count <n>        Tier A web_search calls per refresh (default: 1)
   --tier-a-x-count <n>          Tier A x_search calls per refresh (default: 1)
   --tier-b-web-count <n>        Tier B web_search calls per refresh (default: 1)
@@ -2047,7 +2087,7 @@ function marketLiquidityDisplayExpr(alias = "m"): string {
 
 function marketOrderByClause(args: Args): string {
   if (args.orderBy === "updated") {
-    return "m.updated_at desc nulls last, m.id desc";
+    return "coalesce(m.updated_at_db, m.updated_at) desc nulls last, m.id desc";
   }
   if (args.orderBy === "random") {
     return "random(), m.id";
@@ -2057,7 +2097,7 @@ function marketOrderByClause(args: Args): string {
   return `
     coalesce(${volumeExpr}, 0) desc nulls last,
     coalesce(${liquidityExpr}, 0) desc nulls last,
-    m.updated_at desc nulls last,
+    coalesce(m.updated_at_db, m.updated_at) desc nulls last,
     m.id desc
   `;
 }
@@ -2097,6 +2137,13 @@ function buildMarketWhere(args: Args, baseParams: SqlParam[]): string {
     );
   }
 
+  if (args.maxMarketAgeHours > 0) {
+    baseParams.push(args.maxMarketAgeHours);
+    parts.push(
+      `coalesce(m.updated_at_db, m.updated_at) is not null and coalesce(m.updated_at_db, m.updated_at) >= (now() - ($${baseParams.length}::double precision * interval '1 hour'))`,
+    );
+  }
+
   return parts.join(" and ");
 }
 
@@ -2127,6 +2174,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.open_time as market_open_time,
         m.expiration_time as market_expiration_time,
         m.close_time as market_close_time,
+        coalesce(m.updated_at_db, m.updated_at) as market_updated_at,
         e.end_date as event_end_date,
         e.start_date as event_start_date
       from unified_markets m
@@ -2180,6 +2228,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
         m.open_time as market_open_time,
         m.expiration_time as market_expiration_time,
         m.close_time as market_close_time,
+        coalesce(m.updated_at_db, m.updated_at) as market_updated_at,
         e.end_date as event_end_date,
         e.start_date as event_start_date,
         row_number() over (
@@ -2201,6 +2250,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
       market_open_time,
       market_expiration_time,
       market_close_time,
+      market_updated_at,
       event_end_date,
       event_start_date
     from ranked
@@ -2502,9 +2552,7 @@ function buildSearchQueries(
   tier: "A" | "B" | "C",
   args: Args,
 ): {
-  promptWebNews: string;
-  promptWebDrivers: string;
-  promptXSignal: string;
+  promptCombined: string;
   webSearchTool: {
     type: "web_search";
     filters: {
@@ -2524,9 +2572,7 @@ function buildSearchQueries(
     aliasTerms: string[];
     minEvidence: number;
     strict: {
-      webNewsPrompt: string;
-      webDriversPrompt: string;
-      xSignalPrompt: string;
+      combinedPrompt: string;
     };
   };
 } {
@@ -2558,19 +2604,11 @@ function buildSearchQueries(
     compactWhitespace(`${base} ${termInstruction}`);
 
   if (topic.category === "crypto") {
-    const strictWebNews = withInstructions(
-      `Find credible web reporting from the last ${lookbackHours} hours about ${entity}. Focus on regulation, macro events, exchange incidents, ETF/institutional flows, and on-chain catalysts.${candidateSuffix}${suffix}`,
-    );
-    const strictWebDrivers = withInstructions(
-      `Summarize the strongest concrete drivers behind recent ${entity} moves in the last ${lookbackHours} hours. Require source-backed claims and separate confirmed facts from rumors.${candidateSuffix}${suffix}`,
-    );
-    const strictXSignal = withInstructions(
-      `Find high-signal X posts from the last ${lookbackHours} hours discussing catalysts for ${entity}. Return concise claim summaries with links and source handles.${candidateSuffix}${suffix}`,
+    const strictCombined = withInstructions(
+      `Use web_search and x_search together to collect verifiable evidence from the last ${lookbackHours} hours about ${entity}. Prioritize concrete catalysts and primary sources. Return only evidence directly relevant to the topic.${candidateSuffix}${suffix}`,
     );
     return {
-      promptWebNews: strictWebNews,
-      promptWebDrivers: strictWebDrivers,
-      promptXSignal: strictXSignal,
+      promptCombined: strictCombined,
       webSearchTool: {
         type: "web_search",
         filters: webFilters,
@@ -2588,9 +2626,7 @@ function buildSearchQueries(
         aliasTerms,
         minEvidence: 2,
         strict: {
-          webNewsPrompt: strictWebNews,
-          webDriversPrompt: strictWebDrivers,
-          xSignalPrompt: strictXSignal,
+          combinedPrompt: strictCombined,
         },
       },
     };
@@ -2606,19 +2642,11 @@ function buildSearchQueries(
     const focusLine = electionLike
       ? "Focus on polling, endorsements, fundraising, legal rulings, filings, and official statements."
       : "Focus on official statements, policy/legal decisions, sanctions, diplomatic developments, and verifiable timeline changes.";
-    const strictWebNews = withInstructions(
-      `Find credible web reporting from the last ${lookbackHours} hours for ${politicsStem}. ${focusLine}${candidateSuffix}${suffix}`,
-    );
-    const strictWebDrivers = withInstructions(
-      `Explain the strongest new drivers for ${politicsStem} over the last ${lookbackHours} hours, with clear source attribution and uncertainty notes.${candidateSuffix}${suffix}`,
-    );
-    const strictXSignal = withInstructions(
-      `Find high-signal X posts from the last ${lookbackHours} hours about ${politicsStem}. Prioritize primary reporting, campaign/official accounts, and verifiable documents.${candidateSuffix}${suffix}`,
+    const strictCombined = withInstructions(
+      `Use web_search and x_search together to gather verifiable political evidence from the last ${lookbackHours} hours for ${politicsStem}. ${focusLine} Prioritize official statements, filings, and major newsroom coverage.${candidateSuffix}${suffix}`,
     );
     return {
-      promptWebNews: strictWebNews,
-      promptWebDrivers: strictWebDrivers,
-      promptXSignal: strictXSignal,
+      promptCombined: strictCombined,
       webSearchTool: {
         type: "web_search",
         filters: webFilters,
@@ -2636,27 +2664,17 @@ function buildSearchQueries(
         aliasTerms,
         minEvidence: 2,
         strict: {
-          webNewsPrompt: strictWebNews,
-          webDriversPrompt: strictWebDrivers,
-          xSignalPrompt: strictXSignal,
+          combinedPrompt: strictCombined,
         },
       },
     };
   }
   if (topic.category === "sports") {
-    const strictWebNews = withInstructions(
-      `Find credible web reporting from the last ${lookbackHours} hours about ${entity}. Focus on injuries, lineup changes, suspensions, travel/weather, and coaching updates.${candidateSuffix}${suffix}`,
-    );
-    const strictWebDrivers = withInstructions(
-      `Summarize concrete pre-game or pre-event factors for ${entity} in the last ${lookbackHours} hours, with cited sources and confidence notes.${candidateSuffix}${suffix}`,
-    );
-    const strictXSignal = withInstructions(
-      `Find high-signal X posts from the last ${lookbackHours} hours about ${entity}. Prefer team/league reporters and official injury/status announcements.${candidateSuffix}${suffix}`,
+    const strictCombined = withInstructions(
+      `Use web_search and x_search together to gather sports evidence from the last ${lookbackHours} hours about ${entity}. Focus on injuries, lineup/status changes, suspensions, and official announcements.${candidateSuffix}${suffix}`,
     );
     return {
-      promptWebNews: strictWebNews,
-      promptWebDrivers: strictWebDrivers,
-      promptXSignal: strictXSignal,
+      promptCombined: strictCombined,
       webSearchTool: {
         type: "web_search",
         filters: webFilters,
@@ -2674,26 +2692,16 @@ function buildSearchQueries(
         aliasTerms,
         minEvidence: 2,
         strict: {
-          webNewsPrompt: strictWebNews,
-          webDriversPrompt: strictWebDrivers,
-          xSignalPrompt: strictXSignal,
+          combinedPrompt: strictCombined,
         },
       },
     };
   }
-  const strictWebNews = withInstructions(
-    `Find credible web reporting from the last ${lookbackHours} hours about ${entity}.${candidateSuffix}${suffix}`,
-  );
-  const strictWebDrivers = withInstructions(
-    `Identify concrete, source-backed drivers and new developments about ${entity} from the last ${lookbackHours} hours.${candidateSuffix}${suffix}`,
-  );
-  const strictXSignal = withInstructions(
-    `Find high-signal X posts from the last ${lookbackHours} hours about ${entity}, with links and source handles.${candidateSuffix}${suffix}`,
+  const strictCombined = withInstructions(
+    `Use web_search and x_search together to gather verifiable evidence from the last ${lookbackHours} hours about ${entity}. Keep only directly relevant claims with sources.${candidateSuffix}${suffix}`,
   );
   return {
-    promptWebNews: strictWebNews,
-    promptWebDrivers: strictWebDrivers,
-    promptXSignal: strictXSignal,
+    promptCombined: strictCombined,
     webSearchTool: {
       type: "web_search",
       filters: webFilters,
@@ -2711,9 +2719,7 @@ function buildSearchQueries(
       aliasTerms,
       minEvidence: 1,
       strict: {
-        webNewsPrompt: strictWebNews,
-        webDriversPrompt: strictWebDrivers,
-        xSignalPrompt: strictXSignal,
+        combinedPrompt: strictCombined,
       },
     },
   };
@@ -2966,13 +2972,14 @@ function cadenceForTier(tier: "A" | "B" | "C", args: Args): number {
 function countsForTier(
   tier: "A" | "B" | "C",
   args: Args,
-): { webCount: number; xCount: number } {
+): { combinedCount: number } {
   if (tier === "C" && !args.tierCEnabled) {
-    return { webCount: 0, xCount: 0 };
+    return { combinedCount: 0 };
   }
 
-  // Cost-first fixed pack: always one web query + one X query per topic run.
-  return { webCount: 1, xCount: 1 };
+  if (tier === "A") return { combinedCount: args.tierACombinedCount };
+  if (tier === "B") return { combinedCount: args.tierBCombinedCount };
+  return { combinedCount: args.tierCCombinedCount };
 }
 
 function windowForTier(
@@ -3036,8 +3043,12 @@ async function main(): Promise<void> {
         venues: new Set(),
         marketIds: new Set(),
         eventIds: new Set(),
+        sampleEventId: row.event_id,
+        sampleMarketId: row.market_id,
+        sampleVenue: row.venue,
         sampleEventTitle: row.event_title,
         sampleMarketTitle: row.market_title,
+        sampleMarketUpdatedAt: row.market_updated_at,
         candidateEntities: new Set(),
         sourceTopicKeys: new Set(),
       };
@@ -3073,8 +3084,12 @@ async function main(): Promise<void> {
       eventCount: topic.eventIds.size,
       venueCount: topic.venues.size,
       venues: Array.from(topic.venues).sort(),
+      sampleEventId: topic.sampleEventId,
+      sampleMarketId: topic.sampleMarketId,
+      sampleVenue: topic.sampleVenue,
       sampleEventTitle: topic.sampleEventTitle,
       sampleMarketTitle: topic.sampleMarketTitle,
+      sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       candidateEntities: Array.from(topic.candidateEntities).sort(),
       sourceTopicKeys: Array.from(topic.sourceTopicKeys).sort(),
     }))
@@ -3123,8 +3138,12 @@ async function main(): Promise<void> {
       merged.constraint = topic.constraint;
       merged.constraintHash = topic.constraintHash;
       merged.timeBucket = topic.timeBucket;
+      merged.sampleEventId = topic.sampleEventId;
+      merged.sampleMarketId = topic.sampleMarketId;
+      merged.sampleVenue = topic.sampleVenue;
       merged.sampleEventTitle = topic.sampleEventTitle;
       merged.sampleMarketTitle = topic.sampleMarketTitle;
+      merged.sampleMarketUpdatedAt = topic.sampleMarketUpdatedAt;
       merged.archetype = topic.archetype;
       merged.entitySource = topic.entitySource;
       merged.unknownReason = topic.unknownReason;
@@ -3158,14 +3177,8 @@ async function main(): Promise<void> {
     const queries = buildSearchQueries(topic, tier, args);
     const pack = countsForTier(tier, args);
     const enabledPrompts: string[] = [];
-    if (pack.webCount > 0) {
-      enabledPrompts.push("prompt_web_news");
-      if (pack.webCount > 1) {
-        enabledPrompts.push("prompt_web_driver");
-      }
-    }
-    if (pack.xCount > 0) {
-      enabledPrompts.push("prompt_x_signal");
+    if (pack.combinedCount > 0) {
+      enabledPrompts.push("prompt_combined");
     }
     return {
       topicKey: topic.topicKey,
@@ -3179,17 +3192,18 @@ async function main(): Promise<void> {
       entitySource: topic.entitySource,
       unknownReason: topic.unknownReason,
       marketCount: topic.marketCount,
+      sampleEventId: topic.sampleEventId,
+      sampleMarketId: topic.sampleMarketId,
+      sampleVenue: topic.sampleVenue,
+      sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
       tierScore: topicScores.get(topic.topicKey) ?? null,
       candidateEntities: topic.candidateEntities.slice(0, 10),
-      promptWebNews: queries.promptWebNews,
-      promptWebDrivers: queries.promptWebDrivers,
-      promptXSignal: queries.promptXSignal,
+      promptCombined: queries.promptCombined,
       retrievalPlan: queries.retrievalPlan,
       webSearchTool: queries.webSearchTool,
       xSearchTool: queries.xSearchTool,
       pack: {
-        webCount: pack.webCount,
-        xCount: pack.xCount,
+        combinedCount: pack.combinedCount,
         mode: tier === "B" ? args.tierBMode : "normal",
         enabledPrompts,
       },
@@ -3208,7 +3222,7 @@ async function main(): Promise<void> {
       const cadence = cadenceForTier(tier, args);
       const runsPerDay = 1440 / cadence;
       const pack = countsForTier(tier, args);
-      const queriesPerRefresh = pack.webCount + pack.xCount;
+      const queriesPerRefresh = pack.combinedCount;
       acc[tier] += runsPerDay * queriesPerRefresh;
       return acc;
     },
@@ -3262,6 +3276,7 @@ async function main(): Promise<void> {
         includeUnknownTopics: args.includeUnknownTopics,
         unknownMinMarketCount: args.unknownMinMarketCount,
         searchMinMarketCount: args.searchMinMarketCount,
+        maxMarketAgeHours: args.maxMarketAgeHours,
         sportsKeywordMinMarketCount: args.sportsKeywordMinMarketCount,
         cacheHitRate: args.cacheHitRate,
         tierAMarketThreshold: args.tierAMarketThreshold,
@@ -3274,6 +3289,9 @@ async function main(): Promise<void> {
         tierACadenceMinutes: args.tierACadenceMinutes,
         tierBCadenceMinutes: args.tierBCadenceMinutes,
         tierCCadenceMinutes: args.tierCCadenceMinutes,
+        tierACombinedCount: args.tierACombinedCount,
+        tierBCombinedCount: args.tierBCombinedCount,
+        tierCCombinedCount: args.tierCCombinedCount,
         tierALookbackHours: args.tierALookbackHours,
         tierBLookbackHours: args.tierBLookbackHours,
         tierCLookbackHours: args.tierCLookbackHours,
@@ -3404,17 +3422,17 @@ async function main(): Promise<void> {
     tier: item.tier,
     tierScore: item.tierScore ?? "",
     searchIntentKey: item.searchIntentKey,
-    pack: `${item.pack.webCount}w/${item.pack.xCount}x`,
+    pack: `${item.pack.combinedCount}combined`,
     mode: item.pack.mode,
     cadenceMinutes: item.cadenceMinutes,
     lookbackHours: item.lookbackHours,
     category: item.category,
     entity: item.entity,
     marketCount: item.marketCount,
-    webPrompt:
-      item.pack.webCount > 0 ? item.promptWebNews.slice(0, 80) : "(disabled)",
-    xPrompt:
-      item.pack.xCount > 0 ? item.promptXSignal.slice(0, 80) : "(disabled)",
+    combinedPrompt:
+      item.pack.combinedCount > 0
+        ? item.promptCombined.slice(0, 80)
+        : "(disabled)",
     xDateRange: `${item.xSearchTool.from_date}->${item.xSearchTool.to_date}`,
     webExcludedDomains:
       item.webSearchTool.filters.excluded_domains?.join(",") ?? "",

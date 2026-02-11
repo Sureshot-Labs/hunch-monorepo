@@ -198,11 +198,11 @@ const nonActiveSweepEnabledSetting = parseOptionalBool(
 const nonActiveSweepEnabled = nonActiveSweepEnabledSetting ?? true;
 const nonActiveSweepEvery = clampInt(
   parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_EVERY),
-  { min: 1, max: 10_000, fallback: 6 },
+  { min: 1, max: 10_000, fallback: 2 },
 );
 const nonActiveSweepMaxPages = clampInt(
   parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_MAX_PAGES),
-  { min: 1, max: 10_000, fallback: 2 },
+  { min: 1, max: 10_000, fallback: 20 },
 );
 const nonActiveSweepPageSize = clampInt(
   parseOptionalInt(process.env.DFLOW_NON_ACTIVE_SWEEP_PAGE_SIZE),

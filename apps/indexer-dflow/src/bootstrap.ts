@@ -379,6 +379,31 @@ async function fetchTickersForTokenIds(
   return out;
 }
 
+async function fetchTickersForEventIds(eventIds: string[]): Promise<string[]> {
+  if (!eventIds.length) return [];
+  const { rows } = await pool.query<{ venue_market_id: string | null }>(
+    `
+      select m.venue_market_id
+      from unified_markets m
+      where m.venue = 'kalshi'
+        and m.event_id = any($1::text[])
+        and m.venue_market_id is not null
+      order by m.updated_at desc nulls last
+    `,
+    [eventIds],
+  );
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const ticker = row.venue_market_id;
+    if (!ticker || seen.has(ticker)) continue;
+    seen.add(ticker);
+    out.push(ticker);
+  }
+  return out;
+}
+
 async function fetchHotTickersOrdered(): Promise<string[]> {
   const hotTokenIds = await fetchHotTokenIds();
   const positionTokenIds = await fetchPositionTokenIds();
@@ -648,12 +673,51 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
 
     if (mints.length) {
       const batches = chunkArray(mints, STATUS_BATCH_LIMIT);
-      const markets: TDflowMarket[] = [];
+      const marketsByTicker = new Map<string, TDflowMarket>();
       for (const batch of batches) {
         const result = await fetchMarketsBatch({ mints: batch });
-        markets.push(...result);
+        for (const market of result) {
+          if (!market.ticker) continue;
+          marketsByTicker.set(market.ticker, market);
+        }
       }
 
+      const initialTickers = Array.from(marketsByTicker.keys());
+      const initialEventInfoByTicker =
+        await fetchMarketEventInfoByTickers(initialTickers);
+      const initialEventIds = Array.from(
+        new Set(
+          Array.from(initialEventInfoByTicker.values()).map(
+            (info) => info.eventId,
+          ),
+        ),
+      );
+
+      let siblingTickersFetched = 0;
+      if (initialEventIds.length) {
+        const siblingTickers = await fetchTickersForEventIds(initialEventIds);
+        const missingSiblingTickers = siblingTickers.filter(
+          (ticker) => !marketsByTicker.has(ticker),
+        );
+        if (missingSiblingTickers.length) {
+          const tickerBatches = chunkArray(
+            missingSiblingTickers,
+            STATUS_BATCH_LIMIT,
+          );
+          for (const batch of tickerBatches) {
+            const result = await fetchMarketsBatch({ tickers: batch });
+            for (const market of result) {
+              if (!market.ticker) continue;
+              if (!marketsByTicker.has(market.ticker)) {
+                siblingTickersFetched += 1;
+              }
+              marketsByTicker.set(market.ticker, market);
+            }
+          }
+        }
+      }
+
+      const markets = Array.from(marketsByTicker.values());
       const tickers = markets
         .map((market) => market.ticker)
         .filter((ticker): ticker is string => Boolean(ticker));
@@ -711,6 +775,14 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
         } catch (err) {
           log.warn("DFlow embed enqueue failed", err);
         }
+      }
+
+      if (siblingTickersFetched > 0) {
+        log.info("DFlow hot status sibling refresh", {
+          initialTickers: initialTickers.length,
+          siblingTickersFetched,
+          totalTickers: markets.length,
+        });
       }
     }
   }

@@ -16,6 +16,8 @@ import { env } from "./env.js";
 
 interface DeleteOptions {
   dryRun: boolean;
+  confirmDelete: boolean;
+  deleteOrphanedEvents: boolean;
 }
 
 interface ClosedMarket {
@@ -76,6 +78,12 @@ async function deleteClosedMarkets(
   pool: Pool,
   options: DeleteOptions,
 ): Promise<DeleteStats> {
+  if (!options.dryRun && !options.confirmDelete) {
+    throw new Error(
+      "Destructive delete requires --confirm-delete to prevent accidental data loss",
+    );
+  }
+
   console.log("🔍 Scanning for closed markets...");
 
   const closedMarkets = await getClosedMarkets(pool);
@@ -139,11 +147,15 @@ async function deleteClosedMarkets(
       console.log(`... and ${closedMarkets.length - 20} more`);
     }
 
-    if (orphanedEvents.length > 0) {
+    if (options.deleteOrphanedEvents && orphanedEvents.length > 0) {
       console.log("\nOrphaned events that would be deleted:");
       orphanedEvents.forEach((eventId, index) => {
         console.log(`${index + 1}. ${eventId}`);
       });
+    } else if (orphanedEvents.length > 0) {
+      console.log(
+        "\nOrphaned events found, but deletion is disabled (use --delete-orphaned-events to enable).",
+      );
     }
 
     return {
@@ -180,7 +192,7 @@ async function deleteClosedMarkets(
 
   // Clean up orphaned events
   let deletedEvents = 0;
-  if (orphanedEvents.length > 0) {
+  if (options.deleteOrphanedEvents && orphanedEvents.length > 0) {
     console.log("\n🧹 Cleaning up orphaned events...");
 
     for (const eventId of orphanedEvents) {
@@ -192,6 +204,12 @@ async function deleteClosedMarkets(
         console.error(`❌ Error deleting event ${eventId}:`, error);
       }
     }
+  }
+
+  if (!options.deleteOrphanedEvents && orphanedEvents.length > 0) {
+    console.log(
+      `\nℹ️  Skipped deleting ${orphanedEvents.length} orphaned events (enable with --delete-orphaned-events).`,
+    );
   }
 
   console.log("\n✅ Deletion completed!");
@@ -209,6 +227,8 @@ async function main() {
   const args = process.argv.slice(2);
   const options: DeleteOptions = {
     dryRun: args.includes("--dry-run"),
+    confirmDelete: args.includes("--confirm-delete"),
+    deleteOrphanedEvents: args.includes("--delete-orphaned-events"),
   };
 
   console.log("🗑️  Delete Closed Markets Service");
@@ -221,7 +241,16 @@ async function main() {
     console.log(
       "⚠️  WARNING: This will permanently delete all closed markets!",
     );
+    if (!options.confirmDelete) {
+      console.log(
+        "⚠️  Missing --confirm-delete (required). Aborting before any destructive action.",
+      );
+      process.exit(1);
+    }
   }
+  console.log(
+    `Delete orphaned events: ${options.deleteOrphanedEvents ? "enabled" : "disabled"}`,
+  );
 
   const pool = new Pool({ connectionString: env.dbUrl });
 

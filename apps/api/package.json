@@ -20,6 +20,7 @@
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
     "ai:topics:dry-run": "tsx src/ai-topics-dry-run.ts",
     "ai:search:smoke": "tsx src/ai-search-smoke.ts",
+    "ai:synthesis:smoke": "tsx src/ai-synthesis-smoke.ts",
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
