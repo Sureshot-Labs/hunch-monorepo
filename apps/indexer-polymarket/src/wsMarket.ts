@@ -242,7 +242,11 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
               side: side ?? "BUY",
               ts: new Date(ts),
               txHash:
-                typeof m.tx_hash === "string"
+                typeof m.transaction_hash === "string"
+                  ? m.transaction_hash
+                  : typeof m.transactionHash === "string"
+                    ? m.transactionHash
+                    : typeof m.tx_hash === "string"
                   ? m.tx_hash
                   : typeof m.txHash === "string"
                     ? m.txHash
