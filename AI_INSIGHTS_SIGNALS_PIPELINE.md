@@ -283,8 +283,8 @@ The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validate
   - `--sampling global|per-venue`
   - `--order-by trending|updated`
 - deterministic external retrieval pack generation is active:
-  - launch prompt set (`prompt_web_news`, `prompt_x_signal`) with strict no-fallback execution
-  - legacy `prompt_web_driver` remains code-path-compatible but is intentionally disabled in launch profile
+  - launch prompt set (`prompt_combined`) with strict no-fallback execution
+  - one combined retrieval call per topic run (`web_search + x_search`)
   - xAI tool payload shape with:
     - `web_search.filters.excluded_domains`
     - `x_search.from_date`
@@ -315,6 +315,50 @@ Cost implication from tool invocations only (`$5 / 1000` calls, token costs excl
 - top-100 global: about `$1.52/day`
 - top-200 global: about `$2.93/day`
 - top-50 per-venue: about `$0.57/day`
+
+### 5.1.2 End-to-end retrieval probe (10-topic sample, 2026-02-10)
+
+Executed with current launch contract:
+
+- 10 executable topics (A=2, B=2, C=6)
+- exactly 1 combined call per topic (`web_search + x_search`)
+- no fallback prompts and no extra driver pass
+
+Observed outcome (`/tmp/ai-search-10-results.json`, simulated mapping in `AI_SEARCH_10_SIMULATION.md`):
+
+- parse status:
+  - `OK=6`, `PARTIAL=1`, `NO_EVIDENCE=3`
+- support threshold:
+  - pass `7/10`, fail `3/10`
+- provenance gate:
+  - pass `10/10` (all runs had citations/tool metadata)
+- average tool calls per topic:
+  - `9.0`
+- average latency per topic:
+  - `43.8s`
+- full-cost estimate (tools + tokens):
+  - total `$0.503924` for 10 topics
+  - average `$0.050392` per topic
+
+Simulated next-stage decision quality (same 10 topics):
+
+- `publish_candidate=2`
+- `publish_context_only=4`
+- `store_weak_signal=1`
+- `skip_external_publish=3`
+
+Implications for launch:
+
+- current retrieval quality is usable, but only a subset is directly actionable.
+- sports C-tier dominates call volume and should remain aggressively shed first.
+- `NO_EVIDENCE` topics should not trigger fallback calls in launch mode.
+- if local odds are already extreme, keep output as context-only even when external evidence is strong.
+
+Cost-first operating point from measured data:
+
+- at `92` topics/day: about `$4.64/day` expected.
+- at `100` topics/day: about `$5.04/day` expected.
+- this already includes token spend from the probe profile.
 
 ### 5.2 Topic score and ranking
 
@@ -550,15 +594,12 @@ Prompt/query policy:
 
 Per topic, generate a deterministic retrieval pack:
 
-1. `prompt_web_news`
-- intent: current facts and key drivers relevant to entity + constraint.
-
-2. `prompt_x_signal`
-- intent: real-time social signal and source-linked claims.
+1. `prompt_combined`
+- intent: gather verifiable current facts and key drivers relevant to entity + constraint, using `web_search` and `x_search` in one request.
 
 Launch rule:
 
-- strict two-call pattern per executable topic run: exactly `1 web_news + 1 x_signal`
+- strict one-call pattern per executable topic run: exactly `1 combined` request with both tools enabled
 - no fallback prompt family and no extra driver call during launch
 
 Tool policy attached to each pack:
@@ -574,9 +615,9 @@ Search dedupe rule (required before scheduling):
 
 Minimum pack by tier (launch default):
 
-- Tier A: `1 web + 1 x`
-- Tier B: `1 web + 1 x`
-- Tier C: `1 web + 1 x` (or disabled by scheduler)
+- Tier A: `1 combined`
+- Tier B: `1 combined`
+- Tier C: `1 combined` (or disabled by scheduler)
 
 Budget is controlled by cadence, per-run topic caps, and tier shedding, not by adding/removing query families.
 
@@ -612,6 +653,63 @@ Persist for each run:
 - final structured signal + narrative.
 
 Without this, production debugging will be painful.
+
+### 7.8 Stage1 synthesis prompt contract (internal-first grounding)
+
+Yes: this should be explicitly part of the plan. Stage1 is intentionally grounded in internal market data first; external evidence is an augment, not a replacement.
+
+Prompt shape (recommended):
+
+System prompt (stable, versioned):
+
+- You are a market-insight synthesizer for prediction markets.
+- Use provided structured inputs only; do not invent facts, prices, or timestamps.
+- Internal telemetry (`event`, `markets`, `freshness`, `microstructure`, `wallet`) is primary.
+- External evidence is secondary and must be cited via evidence IDs.
+- If evidence is weak/contradictory/stale, return a low-confidence or non-publish decision.
+- Output strictly valid JSON following `SynthesisOutputV1`.
+
+User payload (runtime JSON):
+
+- `topic`:
+  - `topic_key`, `tier`, `category`, `entity`, `intent_anchor`
+- `event`:
+  - `event_id`, `venue`, `title`, `status`, `volume_24h`, `liquidity`, `end_date`
+- `markets`:
+  - sample market + top market snapshots (`best_bid`, `best_ask`, `last_price`, `volume_24h`, `liquidity`)
+- `freshness`:
+  - source ages and boolean freshness flags
+- `mapping`:
+  - `link_confidence`, `reasons`
+- `external_evidence`:
+  - `status`, `supports_topic_count`, `evidence_count`, and normalized evidence items
+- `policy`:
+  - `min_evidence`, `min_confidence`, `min_link_confidence`
+
+Required model behavior:
+
+1. Decide if evidence meets policy threshold.
+2. Evaluate if current local pricing is already extreme (`~<=0.08` or `~>=0.92`) and downgrade edge claims.
+3. Produce:
+  - `summary_short`, `summary_long`,
+  - structured `signals[]`,
+  - `confidence`, `quality_score`, `risk_flags[]`,
+  - `publish_recommendation.decision` with reason codes.
+4. Return `INSUFFICIENT_EVIDENCE` or `STALE` when gates fail.
+
+Stage1 output JSON contract:
+
+- must match `SynthesisOutputV1` (Section 4 objects + serving contracts in Sections 8/9),
+- must include `publish_recommendation` and `evidence_refs`,
+- must include explicit `reason_codes` for explainability/debugging.
+
+Draft implementation artifacts:
+
+- `apps/api/src/schemas/ai-synthesis.ts`
+  - `synthesisInputV1Schema`
+  - `synthesisOutputV1Schema`
+  - `buildSynthesisSystemPromptV1()` (embeds explicit output JSON Schema)
+  - `buildSynthesisUserPromptV1(input)`
 
 ## 8) Proposed Storage Additions
 
@@ -699,10 +797,16 @@ Serving rules:
 
 - Daily budget cap (`AI_INSIGHTS_DAILY_BUDGET_USD`)
 - Per-run max tokens stage1/stage2
-- Hard cap on external tool calls per run (e.g. max 3)
+- Bound tool-call explosion with `max_turns` and observed tool-usage caps (do not assume one tool call per request).
 - Hard cap on topic refreshes per cycle (e.g. max 200 topics/hour)
 - External news call cap per topic window (e.g. max 1-2 pulls per 10-15m bucket)
 - Provider-level quotas (web vs X vs premium API)
+
+Launch budget baseline (measured):
+
+- average external retrieval cost is currently ~`$0.050/topic` under one-call combined mode.
+- with a cost-first target of `~100 topics/day`, expected retrieval spend is about `$5/day`.
+- keep default daily cap at `<= $10/day` until mapping + publish gates are calibrated on larger samples.
 
 ### 10.2 Priority shedding
 
@@ -819,19 +923,21 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_MAX_CONCURRENCY=2`
 - `AI_INSIGHTS_STAGE1_MODEL=openai/gpt-5-nano`
 - `AI_INSIGHTS_STAGE2_MODEL=openai/gpt-5.2`
-- `AI_INSIGHTS_DAILY_BUDGET_USD=25`
-- `AI_INSIGHTS_TOPIC_REFRESH_MAX_PER_HOUR=200`
+- `AI_INSIGHTS_DAILY_BUDGET_USD=10`
+- `AI_INSIGHTS_TOPIC_REFRESH_MAX_PER_HOUR=30`
 - `AI_INSIGHTS_TOPIC_EXPANSION_MAX=8`
 - `AI_INSIGHTS_TIER_A_REFRESH_MIN=10`
 - `AI_INSIGHTS_TIER_B_REFRESH_MIN=120`
 - `AI_INSIGHTS_MIN_CONFIDENCE=0.62`
 - `AI_INSIGHTS_MIN_LINK_CONFIDENCE=0.70`
-- `AI_INSIGHTS_MAX_EXTERNAL_CALLS=3`
+- `AI_INSIGHTS_MAX_EXTERNAL_CALLS=1`
 - `AI_INSIGHTS_NEWS_PROVIDER=xai_tools`
 - `AI_INSIGHTS_XAI_TOOLS=web_search,x_search`
 - `XAI_API_KEY=<secret>`
 - `AI_INSIGHTS_NEWS_CACHE_TTL_SEC=900`
-- `AI_INSIGHTS_NEWS_MAX_CALLS_PER_TOPIC_WINDOW=2`
+- `AI_INSIGHTS_NEWS_MAX_CALLS_PER_TOPIC_WINDOW=1`
+- `AI_INSIGHTS_TARGET_TOPICS_PER_DAY=100`
+- `AI_INSIGHTS_RETRIEVAL_MODE=combined_only`
 - `AI_INSIGHTS_WEB_EXCLUDED_DOMAINS=polymarket.com,kalshi.com,limitless.exchange,hunch.trade`
 - `AI_INSIGHTS_X_EXCLUDED_HANDLES=polymarket,kalshi`
 - `AI_INSIGHTS_TIER_A_LOOKBACK_HOURS=24`
@@ -1237,7 +1343,18 @@ Cost model (per day):
   - topics processed,
   - `web_search` calls,
   - `x_search` calls,
-  - cache hit rate.
+- cache hit rate.
+
+Observed launch baseline from live smoke tests (xAI tools, strict no-fallback):
+
+- per topic run (`1 combined` request with `tools=[web_search,x_search]`):
+  - observed server-side tool calls: ~`10 web + 9 x` (can vary by topic/prompt),
+  - estimated cost per topic: `~$0.1087` (tool + token),
+  - tool cost dominates token cost.
+- with `$10/day` cap and this baseline:
+  - effective capacity is about `~92 topics/day` before safety margin.
+- implication:
+  - scheduler/topic cadence must be set by observed `num_server_side_tools_used` and `server_side_tool_usage_details`, not by request count alone.
 
 Operational rule:
 
@@ -1378,7 +1495,7 @@ Interpretation:
 Command used:
 
 - `hunch-monorepo/scripts/ai-topics-matrix.sh --mode wide --wide-limits "50 100 200"`
-- output dir example: `/tmp/ai-topics-matrix-20260210021328`
+- output dir example: `/tmp/ai-topics-matrix-20260210201446`
 
 All profiles below:
 
@@ -1387,38 +1504,38 @@ All profiles below:
 - default cadences (`A=10m`, `B=120m`, `C=240m`)
 - tool price model only: `$0.005/call`
 
-| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | calls/day after cache | tool $/day | tier A/B/C | sample kalshi/poly/limitless |
-|---|---:|---:|---:|---:|---:|---|---|
-| `wide_global_50` | 50 | 39 | `0/50` (`0%`) | 152.1 | 0.761 | `0/0/39` | `47/2/1` |
-| `wide_global_100` | 100 | 75 | `0/100` (`0%`) | 304.2 | 1.521 | `0/1/74` | `94/5/1` |
-| `wide_global_200` | 200 | 144 | `0/200` (`0%`) | 585.0 | 2.925 | `0/2/142` | `189/10/1` |
-| `wide_pervenue_50` | 50 | 29 | `0/50` (`0%`) | 113.1 | 0.566 | `0/0/29` | `17/16/17` |
-| `wide_pervenue_100` | 100 | 63 | `0/100` (`0%`) | 257.4 | 1.287 | `0/1/62` | `34/32/34` |
-| `wide_pervenue_200` | 200 | 122 | `2/200` (`1%`) | 487.5 | 2.438 | `0/1/121` | `67/66/67` |
+| Profile | rows | uniqueSearchTopics | unknownMarketCoverage | calls/day after cache | tool $/day | tier A/B/C |
+|---|---:|---:|---:|---:|---:|---|
+| `wide_global_50` | 50 | 25 | `0/50` (`0%`) | 241.8 | 1.209 | `1/2/8` |
+| `wide_global_100` | 100 | 54 | `0/100` (`0%`) | 265.2 | 1.326 | `2/4/12` |
+| `wide_global_200` | 200 | 111 | `0/200` (`0%`) | 444.6 | 2.223 | `3/8/26` |
+| `wide_pervenue_50` | 50 | 15 | `1/50` (`2%`) | 117.0 | 0.585 | `1/2/2` |
+| `wide_pervenue_100` | 100 | 39 | `2/100` (`2%`) | 245.7 | 1.229 | `2/3/9` |
+| `wide_pervenue_200` | 200 | 93 | `8/200` (`4%`) | 257.4 | 1.287 | `2/4/10` |
 
 Conclusion:
 
-- `global` remains heavily Kalshi-skewed at top limits.
-- `per-venue` keeps cross-venue diversity while staying well under a `$10/day` tool budget.
-- static threshold-only tiering is not enough on small top-N slices; balancing promotion is required for non-zero A/B.
+- `per-venue limit=50` is the best low-cost deterministic launch slice.
+- `global` runs create many more search topics at small limits and consume budget much faster.
+- tier auto-promotion is active and keeps A/B non-zero (`1/2/2` on top50 per-venue).
 
 ### 30.4 Random-stress validation (2026-02-10 matrix, hardened resolver)
 
 Command used:
 
-- `hunch-monorepo/scripts/ai-topics-matrix.sh --mode random --random-limit 200 --random-runs 5`
+- `hunch-monorepo/scripts/ai-topics-matrix.sh --mode random --random-limit 200 --random-runs 3`
 
-Matrix: 10 runs (`limit=200`, `order-by=random`):
+Matrix: 6 runs (`limit=200`, `order-by=random`):
 
-- 5x `sampling=global`
-- 5x `sampling=per-venue`
+- 3x `sampling=global`
+- 3x `sampling=per-venue`
 
 Average results:
 
 | Group | avg unknown topic % | avg unknown market % | avg uniqueSearchTopics | avg calls/day after cache | tool $/day |
 |---|---:|---:|---:|---:|---:|
-| `global` | `12.79%` (`13.2/103.2`) | `12.10%` (`24.2/200`) | `103.2` | `435.24` | `2.176` |
-| `per-venue` | `7.59%` (`8.8/116.0`) | `6.60%` (`13.2/200`) | `116.0` | `471.12` | `2.356` |
+| `global` | `24.76%` (`25.67/103.67`) | `18.50%` (`37.0/200`) | `103.67` | `141.7` | `0.709` |
+| `per-venue` | `21.28%` (`21.0/98.67`) | `14.17%` (`28.33/200`) | `98.67` | `130.0` | `0.650` |
 
 Residual unknowns are concentrated in low-information placeholders:
 
@@ -1442,7 +1559,7 @@ Recommended initial execution mode:
 
 Cadence/options:
 
-- default query packs now assume both tools for all tiers (`web + x`) to keep source diversity consistent.
+- query packs assume one combined query per topic run with both tools enabled (`web + x` in one request).
 - balancing promotion (current default):
   - `tier-auto-promote-a=true`, `tier-auto-promote-a-min-market-count=2`
   - `tier-auto-promote-b=true`, `tier-auto-promote-b-min-topics=2`, `tier-auto-promote-b-min-market-count=2`
@@ -1450,10 +1567,13 @@ Cadence/options:
 
 Measured top50 result with balancing enabled:
 
-- `wide_global_50`: `tier A/B/C = 1/2/36`, `calls/day after cache = 592.8`, tool cost/day `~$2.964`
-- `wide_pervenue_50`: `tier A/B/C = 1/2/23`, `calls/day after cache = 491.4`, tool cost/day `~$2.457`
+- baseline (`A=10m`, `B=120m`, `C=240m`): `tier A/B/C = 1/2/2`, `calls/day after cache = 117.0`, tool cost/day `~$0.585`
+- tuned target for ~100/day: `A=12m`, `B=120m`, `C=240m`:
+  - `tier A/B/C = 1/2/2`
+  - `calls/day after cache = 101.4`
+  - tool cost/day `~$0.507`
 
-This is still below `$10/day` for tool invocations only; token/model budget remains separately capped via hard budget + shedding.
+Both are below `$10/day` for tool invocations only; token/model budget remains separately capped via hard budget + shedding.
 
 ### 30.6 Next high-impact improvements
 
@@ -1537,16 +1657,16 @@ Use this before wiring scheduler/worker execution:
 
 2. Execute live xAI tool calls for top tiers:
 
-- `XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 8 --mode both --out /tmp/ai-search-smoke.json --verbose`
+- `XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 8 --mode combined --out /tmp/ai-search-smoke.json --verbose`
 
 3. Optional dry-run to inspect payload shape only:
 
-- `pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 4 --mode both --dry-run`
+- `pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/ai-topics-smoke.json --tiers A,B --max-topics 4 --mode combined --dry-run`
 
 Notes:
 
-- `ai:search:smoke` sends one tool-enabled request per planned prompt (`web_news`, `x_signal`) with system-level JSON enforcement.
-- It records HTTP status, latency, citations count, and output preview for quick quality/cost checks.
+- `ai:search:smoke` sends one tool-enabled request per topic using `tools=[web_search, x_search]` with system-level JSON enforcement.
+- It records HTTP status, latency, citations count, server-side tool usage, provenance pass/fail, and cost estimates.
 
 ### 30.10 Focused QA on real retrieval (selected topics 4, 8, 1)
 
@@ -1555,15 +1675,15 @@ Run setup:
 - source plan: `/tmp/ai-topics-picked-4-8-1.json`
 - smoke output: `/tmp/ai-search-smoke-picked-4-8-1.json`
 - olympics web retry output: `/tmp/ai-search-smoke-olympics-web-retry.json`
-- calls: strict `web_news + x_signal`, `maxTopics=3`, no fallback lane
+- calls: strict combined retrieval (`web_search + x_search` in one request), `maxTopics=3`, no fallback lane
 
 Observed outcomes:
 
-| Topic | Web | X | Expected Stage-3/4 action |
-|---|---|---|---|
-| `keyword:busan-mayoral-election` | `NO_EVIDENCE (0/2)` | `NO_EVIDENCE (0/2)` | suppress topic (no mapping, no publish) |
-| `keyword:prime-minister-israel-election` | `PARTIAL (3/2)` | `OK (6/2)` | proceed to mapping for Israel PM event/candidate markets |
-| `keyword:olympics` | first call `502`, retry `OK (6/2)` | `OK (5/2)` | proceed to mapping; tag transient provider error for reliability metrics |
+| Topic | Combined result | Expected Stage-3/4 action |
+|---|---|---|
+| `keyword:busan-mayoral-election` | `NO_EVIDENCE (0/2)` | suppress topic (no mapping, no publish) |
+| `keyword:prime-minister-israel-election` | support threshold met (`OK/PARTIAL`) | proceed to mapping for Israel PM event/candidate markets |
+| `keyword:olympics` | transient provider errors still possible; bounded retry required | proceed only when support threshold passes |
 
 Interpretation:
 
@@ -1577,4 +1697,26 @@ Interpretation:
 2. Add bounded retry + idempotency for external calls (`max_retries=1`, jittered backoff, no fan-out amplification).
 3. Wire strict threshold-aware support checks for numeric markets before `supports_topic=true`.
 4. Run weekly `top50 per-venue` replay matrix and track suppression/pass ratios by category/tier.
-5. Start mapping-stage canary using only topics that pass both web and x support thresholds.
+5. Start mapping-stage canary using only topics that pass combined support + provenance thresholds.
+
+### 30.12 Cost baseline and retrieval-mode decision (updated)
+
+Current baseline (from live smoke instrumentation):
+
+- combined mode (`tools=[web_search,x_search]`) is now the smoke-path default.
+- observed combined sample:
+  - successful server-side tool calls can still fan out (example run: `14` successful calls),
+  - estimated cost for that sample: `~$0.07824`,
+  - provenance gate passed via citations + tool usage.
+
+Cost-first baseline for launch remains:
+
+- target budget cap: `$10/day` total retrieval budget (tool + token),
+- conservative practical capacity: `~92 topics/day` (from earlier measured split baseline),
+- current deterministic launch target (`per-venue limit=50`, `A=12m`) projects `~101.4 calls/day after cache` before model-token adjustments.
+
+Next validation required:
+
+1. run matched replay (`N >= 30` topics) on combined mode only,
+2. capture `cost/topic` p50/p95, tool-call distribution, provenance pass rate, latency p95,
+3. set hard scheduler caps from p95 costs (not mean-only).
