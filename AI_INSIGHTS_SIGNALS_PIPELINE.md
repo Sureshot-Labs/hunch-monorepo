@@ -1864,3 +1864,86 @@ Interpretation:
    - venue share,
    - p90 sample age,
    - estimated server-side tool calls/day after cache (est).
+
+### 30.15 Low-yield demotion rule (runtime scheduler, not smoke scripts)
+
+Purpose:
+- reduce wasted calls on topics that repeatedly return `NO_EVIDENCE`,
+- keep A-tier fresh for high-yield topics under strict budget.
+
+Scope:
+- this belongs to production scheduling/state (`ai_topic_schedule` + run history),
+- smoke scripts should only simulate and report expected demotions/promotions.
+
+State fields to track per topic:
+- `consecutive_no_evidence`
+- `rolling_runs_7d`
+- `rolling_hits_7d` (`parsed.status=OK` and `evidence_count >= min_evidence`)
+- `last_hit_at`
+- `cooldown_until`
+- `current_tier` (`A|B|C`)
+- `pinned` (never auto-demote)
+
+Demotion policy (initial deterministic contract):
+- `A -> B` when `consecutive_no_evidence >= 3` OR `rolling_hits_7d / rolling_runs_7d < 0.20` (min 6 runs)
+- `B -> C` when `consecutive_no_evidence >= 5` OR `rolling_hits_7d / rolling_runs_7d < 0.15` (min 10 runs)
+- `C -> paused` when `consecutive_no_evidence >= 8` (pause for 7 days, then re-probe once)
+
+Promotion policy:
+- `C -> B` when last 5 runs have `>=2` hits and at least one trusted source hit
+- `B -> A` when last 5 runs have `>=3` hits and p95 cost/topic stays within budget envelope
+
+Safety guards:
+- never demote pinned/high-priority compliance topics,
+- max one tier change per topic per 24h,
+- max global demotions per hour to avoid oscillation during provider incidents.
+
+Acceptance criteria:
+- reduce `NO_EVIDENCE` call share by at least 30% week-over-week on the same launch profile,
+- keep A-tier hit rate above 60%,
+- maintain budget cap with no hard-stop days.
+
+### 30.16 Script behavior improvement plan (`ai-topics-dry-run`, `ai-search-smoke`, `ai-synthesis-smoke`)
+
+Goal:
+- make scripts reliable QA/calibration tools for runtime policy, not one-off probes.
+
+1) Cross-script contract alignment
+- define shared output contract version (e.g., `qa_contract_v1`) with stable key names:
+  - run metadata, topic id/tier, freshness, parsed status, evidence counts, cost, gate decision
+- add strict schema checks between script stages; fail fast on contract drift.
+
+2) `ai-topics-dry-run` upgrades
+- add `--launch-profile` presets (`top50_per_venue`, `top100_per_venue`, `stress500_global`)
+- add optional `--emit-demotion-preview` to estimate which topics would demote under 30.15 rules
+- add explicit modeled-topic quality summary:
+  - per-tier hit priors, category/venue share, p50/p90 `marketCount`, age distribution
+- keep unknown/unresolved topics visible in diagnostics, excluded from modeled execution by default.
+
+3) `ai-search-smoke` upgrades
+- classify outcomes explicitly:
+  - `OK`, `NO_EVIDENCE`, `PROVIDER_LIMIT`, `PROVIDER_ERROR`, `TIMEOUT`, `SCHEMA_INVALID`
+- separate topic-quality misses from provider failures in summary tables
+- keep strict provenance gate and include exact reason counters
+- add deterministic sampling seed for repeatable matrix comparisons
+- export full raw response option (`--save-raw`) for forensic QA.
+
+4) `ai-synthesis-smoke` upgrades
+- enforce user-facing language lint in QA mode:
+  - reject internal jargon/fallback-source wording in `summary_short/summary_long`
+- require claim-to-evidence linkage (`signals[].evidence_refs` non-empty for non-`none` signals)
+- standardize gate output summary:
+  - `publish_context_only`, `skip_external_publish`, `skip_stale`, `skip_low_confidence`
+- add freshness decision trace block to simplify stale-case debugging.
+
+5) New combined harness (`ai-e2e-smoke`)
+- orchestrate topics -> search -> synthesis in one run id
+- produce one consolidated JSON + markdown report
+- include:
+  - cost envelope, hit-rate, stale-rate, gate distribution, top failures, recommended config deltas.
+
+Execution order:
+1. contract alignment,
+2. search/synthesis error taxonomy and gate summaries,
+3. demotion-preview outputs,
+4. combined harness.

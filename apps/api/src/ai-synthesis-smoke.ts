@@ -12,10 +12,17 @@ import {
   type SynthesisOutputV1,
 } from "./schemas/ai-synthesis.js";
 
+const QA_CONTRACT_VERSION = "qa_contract_v1";
+
 type Tier = "A" | "B" | "C";
 type SearchStatus = "OK" | "PARTIAL" | "NO_EVIDENCE" | "INVALID";
 
 type TopicsDryRunFile = {
+  qaContract?: {
+    version?: string;
+    script?: string;
+    generatedAt?: string;
+  };
   topTopics?: Array<{
     topicKey: string;
     category: string;
@@ -48,6 +55,11 @@ type TopicsDryRunFile = {
 };
 
 type SearchResultFile = {
+  qaContract?: {
+    version?: string;
+    script?: string;
+    generatedAt?: string;
+  };
   results: Array<{
     topicKey: string;
     tier: Tier;
@@ -660,6 +672,30 @@ async function callOpenRouter(
 async function readJsonFile<T>(path: string): Promise<T> {
   const raw = await readFile(resolve(path), "utf8");
   return JSON.parse(raw) as T;
+}
+
+function validateTopicsContract(file: TopicsDryRunFile): void {
+  const version = file.qaContract?.version;
+  if (version && version !== QA_CONTRACT_VERSION) {
+    throw new Error(
+      `Invalid topics contract: expected ${QA_CONTRACT_VERSION}, got ${version}`,
+    );
+  }
+  if (!file.searchPlan?.queryExamples || !Array.isArray(file.searchPlan.queryExamples)) {
+    throw new Error("Invalid topics file: expected searchPlan.queryExamples array");
+  }
+}
+
+function validateSearchContract(file: SearchResultFile): void {
+  const version = file.qaContract?.version;
+  if (version && version !== QA_CONTRACT_VERSION) {
+    throw new Error(
+      `Invalid search contract: expected ${QA_CONTRACT_VERSION}, got ${version}`,
+    );
+  }
+  if (!Array.isArray(file.results)) {
+    throw new Error("Invalid search file: expected results array");
+  }
 }
 
 const EVENT_SELECT_SQL = `
@@ -1294,18 +1330,48 @@ async function main() {
 
   const args = parseArgs(argv);
   const topics = await readJsonFile<TopicsDryRunFile>(args.topicsFile);
+  validateTopicsContract(topics);
   const search = args.searchResultsFile
     ? await readJsonFile<SearchResultFile>(args.searchResultsFile)
     : null;
+  if (search) {
+    validateSearchContract(search);
+  }
 
   const contextByKey = buildContextIndex(topics, args.maxSampleMarketAgeHours);
   enrichWithSearchResults(contextByKey, search, args.includeStatuses);
 
-  let contexts = [...contextByKey.values()];
-  if (args.topicKeys.size > 0) {
-    contexts = contexts.filter(item => args.topicKeys.has(item.topicKey));
+  const orderedTopicKeys: string[] = [];
+  const seenTopicKeys = new Set<string>();
+
+  const pushKey = (topicKey: string): void => {
+    if (seenTopicKeys.has(topicKey)) return;
+    seenTopicKeys.add(topicKey);
+    orderedTopicKeys.push(topicKey);
+  };
+
+  if (search) {
+    for (const item of search.results) {
+      if (!args.includeStatuses.has(item.parsed.status)) continue;
+      pushKey(item.topicKey);
+    }
+  } else {
+    for (const topicKey of contextByKey.keys()) {
+      pushKey(topicKey);
+    }
   }
-  contexts = contexts.slice(0, args.maxTopics);
+
+  let filteredTopicKeys = orderedTopicKeys;
+  if (args.topicKeys.size > 0) {
+    filteredTopicKeys = filteredTopicKeys.filter(topicKey =>
+      args.topicKeys.has(topicKey),
+    );
+  }
+
+  const contexts = filteredTopicKeys
+    .map(topicKey => contextByKey.get(topicKey))
+    .filter((item): item is ResolvedTopicContext => item != null)
+    .slice(0, args.maxTopics);
 
   if (!contexts.length) {
     throw new Error("No topics selected for synthesis");
@@ -1364,8 +1430,19 @@ async function main() {
       schemaRepairSuccess: 0,
     },
   );
+  const gateReasonCounts = results.reduce<Record<string, number>>((acc, item) => {
+    for (const reason of item.gate?.reasonCodes ?? []) {
+      acc[reason] = (acc[reason] ?? 0) + 1;
+    }
+    return acc;
+  }, {});
 
   const report = {
+    qaContract: {
+      version: QA_CONTRACT_VERSION,
+      script: "ai-synthesis-smoke",
+      generatedAt: new Date().toISOString(),
+    },
     generatedAt: new Date().toISOString(),
     model: args.model,
     topicsFile: resolve(args.topicsFile),
@@ -1377,6 +1454,10 @@ async function main() {
     totals: {
       ...totals,
       averageMs: totals.total ? totals.totalMs / totals.total : 0,
+    },
+    gateSummary: {
+      decisionCounts: totals.gateCounts,
+      reasonCounts: gateReasonCounts,
     },
     results,
   };

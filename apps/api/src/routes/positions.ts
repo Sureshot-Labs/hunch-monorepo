@@ -20,15 +20,6 @@ import {
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
-  const normalizeVenues = (
-    venue: string | undefined,
-    venues: string[] | undefined,
-  ): string[] | undefined => {
-    if (venues && venues.length) return Array.from(new Set(venues));
-    if (venue) return [venue];
-    return undefined;
-  };
-
   const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
   const isEthAddress = (address: string): boolean => ETH_ADDRESS_RE.test(address);
@@ -91,9 +82,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     userId: string,
     walletAddress: string | undefined,
     requestedWallets: string[] | undefined,
-    venue: string | undefined,
-    venues: string[] | undefined,
-    expandPolymarketFunders = true,
   ): Promise<string[]> => {
     if (requestedWallets && requestedWallets.length) {
       const wallets = await AuthService.getUserWallets(userId);
@@ -108,54 +96,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         .map((address) => walletMap.get(address))
         .filter((address): address is string => Boolean(address));
       const uniqueResolved = Array.from(new Set(resolved));
-      const venueList = normalizeVenues(venue, venues);
-      const relevantWallets = (() => {
-        if (!venueList?.length) return wallets;
-        const hasKalshi = venueList.includes("kalshi");
-        const hasEvmVenue = venueList.some((item) => item !== "kalshi");
-        if (hasKalshi && hasEvmVenue) return wallets;
-        if (hasKalshi) {
-          return wallets.filter((wallet) => wallet.walletType === "solana");
-        }
-        return wallets.filter((wallet) => wallet.walletType !== "solana");
-      })();
-      const relevantSet = new Set(
-        relevantWallets
-          .map((wallet) => wallet.walletAddress.toLowerCase())
-          .filter(Boolean),
-      );
-      const resolvedSet = new Set(
-        uniqueResolved.map((address) => address.toLowerCase()),
-      );
-      const isAllRelevantWallets =
-        relevantSet.size > 0 &&
-        resolvedSet.size === relevantSet.size &&
-        Array.from(relevantSet).every((address) => resolvedSet.has(address));
-
-      if (!isAllRelevantWallets) {
-        return uniqueResolved;
-      }
-
-      if (
-        expandPolymarketFunders &&
-        (!venueList || venueList.includes("polymarket"))
-      ) {
-        const { rows } = await pool.query<{ wallet_address: string | null }>(
-          `
-            select distinct wallet_address
-            from positions
-            where user_id = $1
-              and venue = 'polymarket'
-              and wallet_address is not null
-          `,
-          [userId],
-        );
-        const extra = rows
-          .map((row) => row.wallet_address)
-          .filter((address): address is string => Boolean(address));
-        return Array.from(new Set([...uniqueResolved, ...extra]));
-      }
-
       return uniqueResolved;
     }
 
@@ -225,8 +165,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
-          venue,
-          query.venues,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -312,8 +250,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
-          venue,
-          venues,
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -448,9 +384,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               user.id,
               walletAddress,
               query.wallets,
-              query.venue,
-              query.venues,
-              false,
             )
           : [walletAddress];
         const expandedWalletAddresses = query.wallets?.length
@@ -458,8 +391,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               user.id,
               walletAddress,
               query.wallets,
-              query.venue,
-              query.venues,
             )
           : baseWalletAddresses;
         if (baseWalletAddresses.length === 0) {
@@ -567,8 +498,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 user.id,
                 walletAddress,
                 query.wallets,
-                "polymarket",
-                undefined,
               )
             : [];
           const kalshiWallets = venuesToSync.includes("kalshi")
