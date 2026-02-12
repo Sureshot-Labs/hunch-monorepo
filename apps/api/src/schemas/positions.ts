@@ -81,6 +81,12 @@ export const positionsByTokenQuerySchema = z.object({
     .catch(false),
 });
 
+export const positionsPnlSummaryQuerySchema = positionsQuerySchema.pick({
+  venue: true,
+  venues: true,
+  wallets: true,
+});
+
 export const positionVisibilitySchema = z.object({
   venue: zVenue,
   walletAddress: z.string().min(1),

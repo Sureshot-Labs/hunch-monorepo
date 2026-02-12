@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { pool } from "../db.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import {
+  fetchPositionPnlSummaryForUserWallet,
   fetchPositionsForUserWallet,
   fetchPositionsForUserWalletByTokenIds,
   setPositionHidden,
@@ -14,6 +15,7 @@ import { getRedis } from "../redis.js";
 import {
   positionVisibilitySchema,
   positionsByTokenQuerySchema,
+  positionsPnlSummaryQuerySchema,
   positionsQuerySchema,
 } from "../schemas/positions.js";
 
@@ -215,6 +217,65 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch positions",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /positions/pnl
+   * Get aggregated portfolio pnl metrics for current user wallets.
+   */
+  z.get(
+    "/positions/pnl",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: positionsPnlSummaryQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const venue = query.venue;
+      const venues = query.venues;
+      const responseVenue =
+        venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
+
+      try {
+        const walletAddresses = await resolveWalletAddresses(
+          user.id,
+          walletAddress,
+          query.wallets,
+        );
+        if (walletAddresses.length === 0) {
+          reply.code(400);
+          return reply.send({ error: "No wallets available to query." });
+        }
+
+        const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+          userId: user.id,
+          walletAddresses,
+          venue,
+          venues,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        if (responseVenue) return reply.send({ summary, venue: responseVenue });
+        return reply.send({ summary });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Failed to fetch position pnl summary",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to fetch position pnl summary",
           message: error instanceof Error ? error.message : "Unknown error",
         });
       }
