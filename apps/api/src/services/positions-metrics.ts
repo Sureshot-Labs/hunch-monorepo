@@ -412,6 +412,7 @@ async function fetchPositionSnapshots(
       where user_id = $1
         and (wallet_address is null or wallet_address = $2)
         and venue = $3
+        and position_scope = 'own'
     `,
     [inputs.userId, inputs.walletAddress, inputs.venue],
   );

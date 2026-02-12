@@ -138,7 +138,7 @@ export async function fetchPositionsForUserWallet(
   if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and wallet_address = any($2::text[])";
+    "where user_id = $1 and wallet_address = any($2::text[]) and position_scope = 'own'";
   const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
@@ -215,7 +215,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
   if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and wallet_address = any($2::text[])";
+    "where user_id = $1 and wallet_address = any($2::text[]) and position_scope = 'own'";
   const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
@@ -294,6 +294,7 @@ export async function setPositionHidden(
       where user_id = $3
         and venue = $4
         and token_id = $5
+        and position_scope = 'own'
         and ${walletClause}
     `,
     [
@@ -314,12 +315,15 @@ export type WalletTokenBalance = {
   size: string;
 };
 
+type PositionScope = "own" | "followed";
+
 async function upsertLongPositionsInTx(
   client: PoolClient,
   inputs: {
     userId: string;
     walletAddress: string;
     venue: Position["venue"];
+    positionScope: PositionScope;
     positions: WalletTokenBalance[];
   },
 ): Promise<number> {
@@ -335,6 +339,7 @@ async function upsertLongPositionsInTx(
         user_id,
         wallet_address,
         venue,
+        position_scope,
         token_id,
         side,
         size,
@@ -349,6 +354,7 @@ async function upsertLongPositionsInTx(
         $1,
         $2,
         $3,
+        $4,
         v.token_id,
         'LONG',
         v.size::numeric,
@@ -357,15 +363,27 @@ async function upsertLongPositionsInTx(
         now(),
         now(),
         now()
-      from unnest($4::text[], $5::text[]) as v(token_id, size)
+      from unnest($5::text[], $6::text[]) as v(token_id, size)
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
         side = 'LONG',
         size = excluded.size,
+        position_scope = case
+          when positions.position_scope = 'own' or excluded.position_scope = 'own'
+            then 'own'
+          else 'followed'
+        end,
         last_updated_at = now(),
         updated_at = now()
     `,
-    [inputs.userId, inputs.walletAddress, inputs.venue, tokenIds, sizes],
+    [
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.venue,
+      inputs.positionScope,
+      tokenIds,
+      sizes,
+    ],
   );
 
   return result.rowCount ?? 0;
@@ -377,6 +395,7 @@ async function markMissingPositionsFlatInTx(
     userId: string;
     walletAddress: string;
     venue: Position["venue"];
+    positionScope: PositionScope;
     heldTokenIds: string[];
     tokenIdLike?: string;
   },
@@ -384,6 +403,10 @@ async function markMissingPositionsFlatInTx(
   let whereClause = "where user_id = $1 and wallet_address = $2 and venue = $3";
   const params: PgParams = [inputs.userId, inputs.walletAddress, inputs.venue];
   let paramCount = 3;
+
+  paramCount += 1;
+  whereClause += ` and position_scope = $${paramCount}`;
+  params.push(inputs.positionScope);
 
   if (inputs.tokenIdLike) {
     paramCount += 1;
@@ -426,10 +449,12 @@ export async function syncWalletPositionsFromTokenBalances(
     userId: string;
     walletAddress: string;
     venue: Position["venue"];
+    positionScope?: PositionScope;
     tokenBalances: WalletTokenBalance[];
     tokenIdLike?: string;
   },
 ): Promise<SyncWalletPositionsResult> {
+  const positionScope: PositionScope = inputs.positionScope ?? "own";
   const heldTokenIds = inputs.tokenBalances.map((b) => b.tokenId);
 
   const { rows: knownRows } = await pool.query<{ token_id: string }>(
@@ -452,6 +477,7 @@ export async function syncWalletPositionsFromTokenBalances(
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
       venue: inputs.venue,
+      positionScope,
       positions: knownTokenBalances,
     });
 
@@ -459,6 +485,7 @@ export async function syncWalletPositionsFromTokenBalances(
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
       venue: inputs.venue,
+      positionScope,
       heldTokenIds,
       tokenIdLike: inputs.tokenIdLike,
     });
@@ -495,6 +522,7 @@ export async function autoHideResolvedLosingPositions(
       where p.user_id = $1
         and p.wallet_address = $2
         and p.venue = $3
+        and p.position_scope = 'own'
         and p.token_id = ut.token_id
         and ut.venue = $3
         and (p.is_hidden is null or p.is_hidden = false)
@@ -550,6 +578,7 @@ export async function updatePositionMetrics(
       where p.user_id = $5
         and (p.wallet_address is null or p.wallet_address = $6)
         and p.venue = $7
+        and p.position_scope = 'own'
         and p.token_id = v.token_id
     `,
     [

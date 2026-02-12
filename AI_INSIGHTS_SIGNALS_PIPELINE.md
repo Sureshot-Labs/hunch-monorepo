@@ -295,6 +295,10 @@ The following is implemented in `apps/api/src/ai-topics-dry-run.ts` and validate
     - default: `category|entity_type|entity`
     - threshold/time-sensitive topics: `category|entity_type|entity|constraint_class`
   - original topic granularity retained for internal diagnostics.
+- mention-style event hardening is active:
+  - mention/speech patterns now include `mention|name|say|says|said|speak|speech`,
+  - mention target extraction is event-first (pre-verb + quoted target aware) before market fallback,
+  - known mention events (for example SOTU phrase markets) now resolve to person entities instead of low-signal tokens.
 
 Validation snapshot (same quality gates, global sampling, trending order):
 
@@ -362,6 +366,27 @@ Cost-first operating point from measured data:
 - at `100` topics/day: about `$5.04/day` expected.
 - this already includes token spend from the probe profile.
 
+### 5.1.3 Focused mention-market E2E probe (2026-02-12)
+
+Executed on one mention topic from `kalshi:KXTRUMPMENTION-26FEB28`:
+
+- topic: `v1:cat=politics:ent=person:trump:c=8031e3dcca632a0a:t=2026-01-09`
+- retrieval mode: strict combined (`web_search + x_search`), no fallback family
+- search result:
+  - `status=200`, `parsed.status=OK`, `supportsTopic=8/2`,
+  - trusted evidence `2`, unique domains `8`, citations `44`,
+  - server-side tools: `web=3`, `x=4` (7 successful total),
+  - estimated search cost: `~$0.0405`.
+- synthesis result for same topic/event:
+  - gate decision: `publish_context_only`,
+  - signal: `none`, direction `mixed`, confidence `0.66`,
+  - estimated synthesis token cost: `~$0.00117`.
+
+Implication:
+
+- mention-market detection is now viable for topic generation and retrieval.
+- the gate correctly prefers context-only output when linkage to exact phrase outcomes is weak.
+
 ### 5.2 Topic score and ranking
 
 Proposed topic score:
@@ -379,9 +404,9 @@ Where:
 
 ### 5.3 Retrieval cadence by topic tier
 
-- Tier A topics: every 10-15 minutes (launch default currently 12m).
+- Tier A topics: every 10 minutes (launch default).
 - Tier B topics: every 120 minutes (launch default; tighten to 60m only after budget/quality calibration).
-- Tier C topics: every 4-6 hours or on-demand.
+- Tier C topics: every 240 minutes (launch default) or on-demand.
 - Event-driven boost: temporarily promote affected topics to Tier A.
 
 ### 5.4 Evidence to market/event mapping
@@ -986,7 +1011,7 @@ Phase 4: external source expansion + optimization
 - `AI_INSIGHTS_MAX_SERVER_SIDE_TOOL_CALLS_PER_HOUR=120`
 - `AI_INSIGHTS_TOPIC_REFRESH_MAX_PER_HOUR=30`
 - `AI_INSIGHTS_TOPIC_EXPANSION_MAX=8`
-- `AI_INSIGHTS_TIER_A_REFRESH_MIN=12`
+- `AI_INSIGHTS_TIER_A_REFRESH_MIN=10`
 - `AI_INSIGHTS_TIER_B_REFRESH_MIN=120`
 - `AI_INSIGHTS_MIN_CONFIDENCE=0.62`
 - `AI_INSIGHTS_MIN_LINK_CONFIDENCE=0.70`
@@ -1433,14 +1458,17 @@ Cost model (per day):
 
 Observed launch baseline from live smoke tests (xAI tools, strict no-fallback):
 
-- per topic run (`1 combined` request with `tools=[web_search,x_search]`):
-  - observed server-side tool calls: ~`10 web + 9 x` (can vary by topic/prompt),
-  - estimated cost per topic: `~$0.1087` (tool + token),
-  - tool cost dominates token cost.
-- with `$10/day` cap and this baseline:
-  - effective capacity is about `~92 topics/day` before safety margin.
-- implication:
-  - scheduler/topic cadence must be set by observed `num_server_side_tools_used` and `server_side_tool_usage_details`, not by request count alone.
+| Probe | Topics | Successful server-side tool calls/topic | Estimated cost/topic (tool+token) |
+|---|---:|---:|---:|
+| 10-topic replay (`2026-02-10`) | 10 | `~9` | `~$0.050392` |
+| Combined sample (`2026-02-10`) | 1 | `14` | `~$0.07824` |
+| Mention-topic E2E (`2026-02-12`) | 1 | `7` | `~$0.040496` (search) |
+
+Notes:
+
+- tool fanout and token use vary materially by topic/query complexity.
+- planning/scheduler caps must use observed p95 `server_side_tool_calls/topic` and p95 `cost/topic`, not request count.
+- do not use a single-point average as a hard budget baseline.
 
 Operational rule:
 
@@ -1556,8 +1584,12 @@ Implemented deterministic hardening (P0 + P1):
 - low-signal outcome label guard for unknown topics (`A/B`, `Player X`, `Team N`, `Yes/No`), using event-only subject when needed
 - random sampling mode (`--order-by random`) for stress testing
 - improved crypto symbol resolver (`MegaETH`-style detection) without generic token bleed
+- mention/speech detector hardening for phrase markets:
+  - detects `mention|name|say|says|said|speak|speech`,
+  - event-first mention target extraction before market-label fallback
 - open-now gating is now enforced as a hard invariant in extraction (no opt-out for live planning)
 - freshness gating is now defaulted in extraction (`maxMarketAgeHours=24`) and propagated into modeled query metadata (`sampleMarketUpdatedAt`)
+- residual noise still exists for some phrase/outcome markets and is handled by downstream gating (`publish_context_only` when linkage is weak).
 
 ### 30.2 Before/after quality on the same benchmark slice
 
@@ -1798,22 +1830,24 @@ Interpretation:
 Current baseline (from live smoke instrumentation):
 
 - combined mode (`tools=[web_search,x_search]`) is now the smoke-path default.
-- observed combined sample:
-  - successful server-side tool calls can still fan out (example run: `14` successful calls),
-  - estimated cost for that sample: `~$0.07824`,
-  - provenance gate passed via citations + tool usage.
+- validated samples now span:
+  - `~$0.040496/topic` (mention-topic, 7 successful server-side tool calls),
+  - `~$0.050392/topic` (10-topic replay average, ~9 calls/topic),
+  - `~$0.07824/topic` (higher-fanout sample, 14 calls/topic).
+- provenance gate passed in these probes via citations + tool usage metadata.
 
-Cost-first baseline for launch remains:
+Cost-first launch policy:
 
 - target budget cap: `$10/day` total retrieval budget (tool + token),
-- conservative practical capacity: `~92 topics/day` (from earlier measured split baseline),
-- current deterministic launch target (`per-venue limit=50`, `A=12m`) projects `~101.4 server-side tool calls/day after cache (est)` before model-token adjustments.
+- planning baseline should use p95 `cost/topic` and p95 `server_side_tool_calls/topic`,
+- current deterministic launch target (`per-venue limit=50`, `A=10m`) remains within envelope, but must be recalibrated from replay p95 before production scheduler lock.
 
 Next validation required:
 
 1. run matched replay (`N >= 30` topics) on combined mode only,
 2. capture `cost/topic` p50/p95, tool-call distribution, provenance pass rate, latency p95,
-3. set hard scheduler caps from p95 costs (not mean-only).
+3. set hard scheduler caps from p95 costs (not mean-only),
+4. re-check scheduler plan against daily budget with explicit worst-case headroom.
 
 ### 30.13 Post-hardening topic quality audit (2026-02-11)
 
@@ -1908,6 +1942,14 @@ Acceptance criteria:
 Goal:
 - make scripts reliable QA/calibration tools for runtime policy, not one-off probes.
 
+Implemented now:
+
+- shared `qa_contract_v1` blocks across outputs,
+- raw-response capture in search smoke (`--save-raw`),
+- combined harness exists (`ai-e2e-smoke`) for topics -> search -> synthesis.
+
+Remaining hardening:
+
 1) Cross-script contract alignment
 - define shared output contract version (e.g., `qa_contract_v1`) with stable key names:
   - run metadata, topic id/tier, freshness, parsed status, evidence counts, cost, gate decision
@@ -1941,9 +1983,33 @@ Goal:
 - produce one consolidated JSON + markdown report
 - include:
   - cost envelope, hit-rate, stale-rate, gate distribution, top failures, recommended config deltas.
+- keep the harness focused on deterministic one-topic and small-batch probes for reproducible QA.
 
 Execution order:
 1. contract alignment,
 2. search/synthesis error taxonomy and gate summaries,
 3. demotion-preview outputs,
 4. combined harness.
+
+### 30.17 Latest mention-market validation snapshot (2026-02-12)
+
+Scope:
+
+- focused one-topic E2E run on `kalshi:KXTRUMPMENTION-26FEB28`.
+
+Validated behavior:
+
+- topic extraction resolves mention market into `person:trump` topic key (no low-signal token entity),
+- combined retrieval returns `OK` with provenance metadata and sufficient support evidence,
+- synthesis returns `publish_context_only` instead of directional overclaim when phrase linkage is weak.
+
+Measured costs for this run:
+
+- search: `~$0.040496` (`web=3`, `x=4`, 7 successful server-side tool calls),
+- synthesis: `~$0.001166` token cost.
+
+Outstanding cleanup from this snapshot:
+
+1. suppress residual `keyword:unknown` byproducts attached to phrase-option markets when event-level person/entity topic is already selected;
+2. keep candidate-set expansion constrained to event-local entities to avoid unrelated optional-term bleed;
+3. run matched replay (`N>=30`) and re-baseline p50/p95 costs before locking scheduler caps.

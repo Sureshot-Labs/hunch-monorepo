@@ -772,6 +772,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           from positions p
           join unified_tokens ut on ut.token_id = p.token_id
           where p.user_id = $1
+            and p.position_scope = 'own'
         )
         select
           i.market_id,
@@ -882,6 +883,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           from positions p
           join unified_tokens ut on ut.token_id = p.token_id
           where p.user_id = $1
+            and p.position_scope = 'own'
         )
         select
           i.market_id,
