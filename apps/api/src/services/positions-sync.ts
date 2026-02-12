@@ -800,9 +800,11 @@ export type PositionsSyncResult = {
   flattenedPositions: number;
 };
 
+type PositionScope = "own" | "followed";
+
 async function syncKalshiPositionsFromSolana(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string },
+  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
 ): Promise<PositionsSyncResult> {
   const balances = await fetchSolanaTokenBalancesByOwner({
     rpcUrls: env.solanaRpcUrls,
@@ -827,30 +829,33 @@ async function syncKalshiPositionsFromSolana(
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
     venue: "kalshi",
+    positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "sol:%",
   });
 
-  const [kalshiMetrics, kalshiNotifications] = await Promise.allSettled([
-    recomputePositionMetricsForWallet(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "kalshi",
-    }),
-    notifyResolvedPositions(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: "kalshi",
-    }),
-  ]);
-  if (kalshiMetrics.status === "rejected") {
-    console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
-  }
-  if (kalshiNotifications.status === "rejected") {
-    console.error(
-      "Kalshi resolved position notification failed",
-      kalshiNotifications.reason,
-    );
+  if (inputs.positionScope === "own") {
+    const [kalshiMetrics, kalshiNotifications] = await Promise.allSettled([
+      recomputePositionMetricsForWallet(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "kalshi",
+      }),
+      notifyResolvedPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "kalshi",
+      }),
+    ]);
+    if (kalshiMetrics.status === "rejected") {
+      console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
+    }
+    if (kalshiNotifications.status === "rejected") {
+      console.error(
+        "Kalshi resolved position notification failed",
+        kalshiNotifications.reason,
+      );
+    }
   }
 
   return {
@@ -865,15 +870,17 @@ async function syncKalshiPositionsFromSolana(
 
 async function syncPolymarketPositionsFromPolygon(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string },
+  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
 ): Promise<PositionsSyncResult> {
-  try {
-    await syncPolymarketTradesForSigner(pool, {
-      userId: inputs.userId,
-      signerAddress: inputs.walletAddress,
-    });
-  } catch (error) {
-    console.error("Polymarket trade sync failed", error);
+  if (inputs.positionScope !== "followed") {
+    try {
+      await syncPolymarketTradesForSigner(pool, {
+        userId: inputs.userId,
+        signerAddress: inputs.walletAddress,
+      });
+    } catch (error) {
+      console.error("Polymarket trade sync failed", error);
+    }
   }
 
   const funder =
@@ -958,6 +965,7 @@ async function syncPolymarketPositionsFromPolygon(
       userId: inputs.userId,
       walletAddress: owner,
       venue: "polymarket",
+      positionScope: inputs.positionScope,
       tokenBalances: held,
     });
     heldTokens += result.heldTokens;
@@ -965,26 +973,31 @@ async function syncPolymarketPositionsFromPolygon(
     upsertedPositions += result.upsertedPositions;
     flattenedPositions += result.flattenedPositions;
 
-    const [pmMetrics, pmNotifications] = await Promise.allSettled([
-      recomputePositionMetricsForWallet(pool, {
-        userId: inputs.userId,
-        walletAddress: owner,
-        venue: "polymarket",
-      }),
-      notifyResolvedPositions(pool, {
-        userId: inputs.userId,
-        walletAddress: owner,
-        venue: "polymarket",
-      }),
-    ]);
-    if (pmMetrics.status === "rejected") {
-      console.error("Polymarket position metrics update failed", pmMetrics.reason);
-    }
-    if (pmNotifications.status === "rejected") {
-      console.error(
-        "Polymarket resolved position notification failed",
-        pmNotifications.reason,
-      );
+    if (inputs.positionScope === "own") {
+      const [pmMetrics, pmNotifications] = await Promise.allSettled([
+        recomputePositionMetricsForWallet(pool, {
+          userId: inputs.userId,
+          walletAddress: owner,
+          venue: "polymarket",
+        }),
+        notifyResolvedPositions(pool, {
+          userId: inputs.userId,
+          walletAddress: owner,
+          venue: "polymarket",
+        }),
+      ]);
+      if (pmMetrics.status === "rejected") {
+        console.error(
+          "Polymarket position metrics update failed",
+          pmMetrics.reason,
+        );
+      }
+      if (pmNotifications.status === "rejected") {
+        console.error(
+          "Polymarket resolved position notification failed",
+          pmNotifications.reason,
+        );
+      }
     }
 
   }
@@ -1008,7 +1021,7 @@ async function syncPolymarketPositionsFromPolygon(
 
 async function syncLimitlessPositionsFromPortfolio(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string },
+  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
 ): Promise<PositionsSyncResult> {
   const creds = await AuthService.getVenueCredentials(
     inputs.userId,
@@ -1066,34 +1079,38 @@ async function syncLimitlessPositionsFromPortfolio(
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
     venue: "limitless",
+    positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "limitless:%",
   });
 
-  const [limitlessMetrics, limitlessNotifications] =
-    await Promise.allSettled([
-      recomputePositionMetricsForWallet(pool, {
-        userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
-        venue: "limitless",
-      }),
-      notifyResolvedPositions(pool, {
-        userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
-        venue: "limitless",
-      }),
-    ]);
-  if (limitlessMetrics.status === "rejected") {
-    console.error(
-      "Limitless position metrics update failed",
-      limitlessMetrics.reason,
+  if (inputs.positionScope === "own") {
+    const [limitlessMetrics, limitlessNotifications] = await Promise.allSettled(
+      [
+        recomputePositionMetricsForWallet(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          venue: "limitless",
+        }),
+        notifyResolvedPositions(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          venue: "limitless",
+        }),
+      ],
     );
-  }
-  if (limitlessNotifications.status === "rejected") {
-    console.error(
-      "Limitless resolved position notification failed",
-      limitlessNotifications.reason,
-    );
+    if (limitlessMetrics.status === "rejected") {
+      console.error(
+        "Limitless position metrics update failed",
+        limitlessMetrics.reason,
+      );
+    }
+    if (limitlessNotifications.status === "rejected") {
+      console.error(
+        "Limitless resolved position notification failed",
+        limitlessNotifications.reason,
+      );
+    }
   }
 
   return {
@@ -1112,9 +1129,11 @@ export async function syncPositionsForUserWallet(
     userId: string;
     walletAddress: string;
     venue?: Position["venue"];
+    positionScope?: PositionScope;
   },
 ): Promise<PositionsSyncResult> {
   const requestedVenue = inputs.venue;
+  const positionScope: PositionScope = inputs.positionScope ?? "own";
 
   if (
     requestedVenue &&
@@ -1137,11 +1156,13 @@ export async function syncPositionsForUserWallet(
       return syncLimitlessPositionsFromPortfolio(pool, {
         userId: inputs.userId,
         walletAddress: inputs.walletAddress,
+        positionScope,
       });
     }
     return syncPolymarketPositionsFromPolygon(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
+      positionScope,
     });
   }
 
@@ -1154,5 +1175,6 @@ export async function syncPositionsForUserWallet(
   return syncKalshiPositionsFromSolana(pool, {
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
+    positionScope,
   });
 }

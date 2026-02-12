@@ -494,6 +494,7 @@ async function fetchPnlRank(
         select user_id,
                coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
         from positions
+        where position_scope = 'own'
         group by user_id
       )
       select count(*)::text as higher
@@ -526,6 +527,7 @@ export async function fetchRewardsLeaderboardRows(
           select user_id,
                  coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
           from positions
+          where position_scope = 'own'
           group by user_id
         ),
         volume as (
@@ -591,6 +593,7 @@ export async function fetchRewardsLeaderboardRows(
         select user_id,
                coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
         from positions
+        where position_scope = 'own'
         group by user_id
       ),
       ranked as (
@@ -656,6 +659,7 @@ export async function fetchRewardsLeaderboardMe(
                coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
         from positions
         where user_id = $1
+          and position_scope = 'own'
         group by user_id
       )
       select

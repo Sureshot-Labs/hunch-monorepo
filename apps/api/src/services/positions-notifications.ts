@@ -39,6 +39,7 @@ export async function notifyResolvedPositions(
       where p.user_id = $1
         and p.wallet_address = $2
         and p.venue = $3
+        and p.position_scope = 'own'
         and p.size > 0
         and m.resolved_outcome is not null
         and upper(m.resolved_outcome) in ('YES', 'NO')

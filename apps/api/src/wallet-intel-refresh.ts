@@ -767,6 +767,7 @@ async function snapshotFollowedWalletPositions(
       where p.user_id = $1
         and p.wallet_address = $2
         and p.venue = $3
+        and p.position_scope = 'followed'
         and p.size > 0
         and (p.is_hidden is null or p.is_hidden = false)
     `,
@@ -2158,6 +2159,7 @@ async function runSnapshot(snapshotAt: Date) {
             userId: followed.user_id,
             walletAddress: followed.address,
             venue: "polymarket",
+            positionScope: "followed",
           });
         } catch (error) {
           console.error(
@@ -2203,6 +2205,7 @@ async function runSnapshot(snapshotAt: Date) {
             userId: followed.user_id,
             walletAddress: followed.address,
             venue: "limitless",
+            positionScope: "followed",
           });
         } catch (error) {
           if (isLimitlessSessionMissing(error)) {
@@ -2255,6 +2258,7 @@ async function runSnapshot(snapshotAt: Date) {
             userId: followed.user_id,
             walletAddress: followed.address,
             venue: "kalshi",
+            positionScope: "followed",
           });
         } catch (error) {
           console.error(
