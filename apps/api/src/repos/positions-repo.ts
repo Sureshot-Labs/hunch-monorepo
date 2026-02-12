@@ -22,6 +22,23 @@ type PositionRow = {
   updated_at: Date;
 };
 
+type PositionPnlSummaryRow = {
+  open_positions_count: string;
+  positions_count: string;
+  realized_pnl_all_time: string | null;
+  unrealized_cost_basis_current: string | null;
+  unrealized_pnl_current: string | null;
+};
+
+export type PositionPnlSummary = {
+  openPositionsCount: number;
+  positionsCount: number;
+  realizedPnlAllTime: number;
+  unrealizedCostBasisCurrent: number;
+  unrealizedPnlCurrent: number;
+  unrealizedPnlPercentCurrent: number | null;
+};
+
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 function isEthAddress(address: string | null | undefined): address is string {
@@ -112,6 +129,109 @@ function mapPositionRow(row: PositionRow): Position {
   };
 }
 
+function parseNumeric(value: string | null | undefined): number {
+  if (value == null) return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function resolveVenueList(inputs: {
+  venue?: string;
+  venues?: string[];
+}): string[] | undefined {
+  return inputs.venues?.length
+    ? Array.from(new Set(inputs.venues))
+    : inputs.venue
+      ? [inputs.venue]
+      : undefined;
+}
+
+export async function fetchPositionPnlSummaryForUserWallet(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddresses: string[];
+    venue?: string;
+    venues?: string[];
+  },
+): Promise<PositionPnlSummary> {
+  const venueList = resolveVenueList(inputs);
+  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
+  const walletAddresses = shouldExpandFunders
+    ? await expandPolymarketWallets(pool, {
+        userId: inputs.userId,
+        walletAddresses: inputs.walletAddresses,
+      })
+    : inputs.walletAddresses;
+
+  if (walletAddresses.length === 0) {
+    return {
+      openPositionsCount: 0,
+      positionsCount: 0,
+      realizedPnlAllTime: 0,
+      unrealizedCostBasisCurrent: 0,
+      unrealizedPnlCurrent: 0,
+      unrealizedPnlPercentCurrent: null,
+    };
+  }
+
+  let whereClause =
+    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
+  const params: PgParams = [inputs.userId, walletAddresses];
+  let paramCount = 2;
+
+  if (venueList?.length) {
+    paramCount += 1;
+    whereClause += ` and p.venue = any($${paramCount}::text[])`;
+    params.push(venueList);
+  }
+
+  const { rows } = await pool.query<PositionPnlSummaryRow>(
+    `
+      select
+        count(*)::text as positions_count,
+        count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
+        coalesce(sum(p.realized_pnl), 0)::text as realized_pnl_all_time,
+        coalesce(sum(case
+          when p.side <> 'FLAT' and p.size > 0 then p.unrealized_pnl
+          else 0
+        end), 0)::text as unrealized_pnl_current,
+        coalesce(sum(case
+          when p.side <> 'FLAT' and p.size > 0 and p.average_price is not null
+            then p.average_price * p.size
+          else 0
+        end), 0)::text as unrealized_cost_basis_current
+      from positions p
+      ${whereClause}
+    `,
+    params,
+  );
+
+  const row = rows[0];
+  const realizedPnlAllTime = parseNumeric(row?.realized_pnl_all_time);
+  const unrealizedPnlCurrent = parseNumeric(row?.unrealized_pnl_current);
+  const unrealizedCostBasisCurrent = parseNumeric(
+    row?.unrealized_cost_basis_current,
+  );
+  const unrealizedPnlPercentCurrent =
+    unrealizedCostBasisCurrent > 0
+      ? (unrealizedPnlCurrent / unrealizedCostBasisCurrent) * 100
+      : null;
+
+  return {
+    openPositionsCount: parseNumeric(row?.open_positions_count),
+    positionsCount: parseNumeric(row?.positions_count),
+    realizedPnlAllTime,
+    unrealizedCostBasisCurrent,
+    unrealizedPnlCurrent,
+    unrealizedPnlPercentCurrent:
+      unrealizedPnlPercentCurrent != null &&
+      Number.isFinite(unrealizedPnlPercentCurrent)
+        ? unrealizedPnlPercentCurrent
+        : null,
+  };
+}
+
 export async function fetchPositionsForUserWallet(
   pool: Pool,
   inputs: {
@@ -123,11 +243,7 @@ export async function fetchPositionsForUserWallet(
     minSize?: number;
   },
 ): Promise<Position[]> {
-  const venueList = inputs.venues?.length
-    ? Array.from(new Set(inputs.venues))
-    : inputs.venue
-      ? [inputs.venue]
-      : undefined;
+  const venueList = resolveVenueList(inputs);
   const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
@@ -200,11 +316,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
-  const venueList = inputs.venues?.length
-    ? Array.from(new Set(inputs.venues))
-    : inputs.venue
-      ? [inputs.venue]
-      : undefined;
+  const venueList = resolveVenueList(inputs);
   const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
