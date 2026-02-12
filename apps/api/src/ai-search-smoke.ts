@@ -28,6 +28,8 @@ const TRUSTED_WEB_DOMAINS = [
   "theblock.co",
 ];
 
+const QA_CONTRACT_VERSION = "qa_contract_v1";
+
 type SearchMode = "combined" | "web_only" | "internal_only";
 type Tier = "A" | "B" | "C";
 type QueryType = "combined" | "web_only" | "internal_only";
@@ -103,11 +105,24 @@ type QueryExample = {
 };
 
 type TopicsSummary = {
+  qaContract?: {
+    version?: string;
+    script?: string;
+    generatedAt?: string;
+  };
   generatedAt: string;
   searchPlan: {
     queryExamples: QueryExample[];
   };
 };
+
+type SearchOutcomeClass =
+  | "OK"
+  | "NO_EVIDENCE"
+  | "PROVIDER_LIMIT"
+  | "PROVIDER_ERROR"
+  | "TIMEOUT"
+  | "SCHEMA_INVALID";
 
 type PlannedCall = {
   callId: string;
@@ -156,6 +171,7 @@ type XaiCallRaw = {
   usage: UsageMetrics;
   costEstimate: CostEstimate;
   serverSideToolUsage: unknown;
+  rawResponse: unknown | null;
   error?: string;
 };
 
@@ -181,6 +197,7 @@ type SmokeResult = {
   outputPreview: string;
   outputTextLength: number;
   parsed: ParsedStructuredResult;
+  outcomeClass: SearchOutcomeClass;
   citationsCount: number;
   toolAttemptCount: number;
   successfulToolCount: number;
@@ -198,6 +215,7 @@ type SmokeResult = {
   toolAttemptsBudget: number;
   attempts: number;
   retried: boolean;
+  rawResponse?: unknown;
   error?: string;
 };
 
@@ -217,6 +235,8 @@ type Args = {
   maxCallsPerTopic: number;
   maxToolAttemptsPerTopic: number;
   strictProvenance: boolean;
+  sampleSeed: number | null;
+  saveRaw: boolean;
   priceInputPerM: number;
   priceOutputPerM: number;
   priceWebPer1k: number;
@@ -279,6 +299,13 @@ function parseNonNegativeFloat(value: string | undefined, fallback: number): num
   return parsed;
 }
 
+function parseInteger(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value == null) return fallback;
   const normalized = value.trim().toLowerCase();
@@ -313,7 +340,7 @@ function parseTiers(value: string | undefined): Set<Tier> {
   return new Set(parsed);
 }
 
-function usage(): never {
+function usage(exitCode = 1): never {
   console.error(
     [
       "Usage:",
@@ -338,6 +365,8 @@ function usage(): never {
       "  --max-calls-per-topic <n>   Max API calls per topic (default: 2)",
       "  --max-tool-attempts <n>     Soft cap on tool attempts per topic (default: 20)",
       "  --strict-provenance <bool>  Fail when OK/PARTIAL outputs miss provenance/evidence checks (default: true)",
+      "  --sample-seed <n>           Deterministic topic sampling seed (optional)",
+      "  --save-raw                  Save raw response payloads in output JSON",
       "  --price-input-per-m <usd>   Input token price per 1M tokens (default: 0.20)",
       "  --price-output-per-m <usd>  Output token price per 1M tokens (default: 0.50)",
       "  --price-web-per-1k <usd>    Web search tool price per 1k calls (default: 5)",
@@ -353,7 +382,7 @@ function usage(): never {
       "  XAI_API_KEY=... pnpm -C hunch-monorepo -F api run ai:search:smoke -- --topics-file /tmp/topics.json --tiers A --max-topics 6 --mode web_only --out /tmp/ai-search-smoke-web.json",
     ].join("\n"),
   );
-  process.exit(1);
+  process.exit(exitCode);
 }
 
 function resolveArgs(argv: string[]): Args {
@@ -403,6 +432,8 @@ function resolveArgs(argv: string[]): Args {
       Math.min(200, parsePositiveInt(parseFlag(argv, "--max-tool-attempts"), 20)),
     ),
     strictProvenance: parseBoolean(parseFlag(argv, "--strict-provenance"), true),
+    sampleSeed: parseInteger(parseFlag(argv, "--sample-seed")),
+    saveRaw: hasFlag(argv, "--save-raw"),
     priceInputPerM: parseNonNegativeFloat(
       parseFlag(argv, "--price-input-per-m") ?? process.env.XAI_PRICE_INPUT_PER_M,
       0.2,
@@ -880,6 +911,81 @@ function buildPlannedCalls(topics: QueryExample[], args: Args): PlannedCall[] {
   return calls;
 }
 
+function validateTopicsContract(summary: TopicsSummary): void {
+  const version = summary.qaContract?.version;
+  if (version && version !== QA_CONTRACT_VERSION) {
+    throw new Error(
+      `Invalid topics file contract: expected ${QA_CONTRACT_VERSION}, got ${version}`,
+    );
+  }
+  if (!summary.searchPlan || !Array.isArray(summary.searchPlan.queryExamples)) {
+    throw new Error("Invalid topics file: expected searchPlan.queryExamples array");
+  }
+}
+
+function deterministicTopicOrder(
+  topics: QueryExample[],
+  seed: number | null,
+): QueryExample[] {
+  if (seed == null) return topics;
+  return [...topics].sort((a, b) => {
+    const ha = createHash("sha1")
+      .update(`${seed}|${a.topicKey}`)
+      .digest("hex");
+    const hb = createHash("sha1")
+      .update(`${seed}|${b.topicKey}`)
+      .digest("hex");
+    return ha.localeCompare(hb);
+  });
+}
+
+function hasProviderLimitSignal(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /tool limit|rate limit|quota|too many requests|429/i.test(text);
+}
+
+function classifyOutcome(result: SmokeResult): SearchOutcomeClass {
+  if (!result.ok) {
+    if (
+      result.status === 429 ||
+      hasProviderLimitSignal(result.error) ||
+      hasProviderLimitSignal(result.outputText)
+    ) {
+      return "PROVIDER_LIMIT";
+    }
+    if (
+      result.status === 408 ||
+      /abort|timeout|timed out/i.test(result.error ?? "")
+    ) {
+      return "TIMEOUT";
+    }
+    return "PROVIDER_ERROR";
+  }
+
+  if (result.parsed.status === "INVALID") {
+    return "SCHEMA_INVALID";
+  }
+
+  if (result.parsed.status === "NO_EVIDENCE") {
+    if (
+      hasProviderLimitSignal(result.parsed.notes) ||
+      hasProviderLimitSignal(result.outputText)
+    ) {
+      return "PROVIDER_LIMIT";
+    }
+    return "NO_EVIDENCE";
+  }
+
+  if (
+    result.parsed.status === "PARTIAL" &&
+    result.parsed.supportsTopicCount < result.minEvidence
+  ) {
+    return "NO_EVIDENCE";
+  }
+
+  return "OK";
+}
+
 async function callXaiOnce(
   apiKey: string,
   args: Args,
@@ -948,6 +1054,7 @@ async function callXaiOnce(
       usage,
       costEstimate: computeEstimatedCost(args, usage),
       serverSideToolUsage: extractServerSideToolUsage(payload),
+      rawResponse: payload,
       ...(response.ok
         ? {}
         : {
@@ -975,6 +1082,7 @@ async function callXaiOnce(
       usage: ZERO_USAGE,
       costEstimate: ZERO_COST,
       serverSideToolUsage: null,
+      rawResponse: null,
       error: message,
     };
   } finally {
@@ -1051,6 +1159,7 @@ async function callXaiWithRetry(
       usage: ZERO_USAGE,
       costEstimate: ZERO_COST,
       serverSideToolUsage: null,
+      rawResponse: null,
       error: "retry_exhausted_without_response",
     }),
     attempts,
@@ -1168,7 +1277,11 @@ async function runWithConcurrency<TInput, TOutput>(
 }
 
 async function main(): Promise<void> {
-  const args = resolveArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (hasFlag(argv, "--help")) {
+    usage(0);
+  }
+  const args = resolveArgs(argv);
   const apiKey = process.env.XAI_API_KEY?.trim();
   if (!apiKey && !args.dryRun) {
     console.error("[ai-search-smoke] Missing XAI_API_KEY.");
@@ -1178,14 +1291,11 @@ async function main(): Promise<void> {
 
   const raw = await readFile(args.topicsFile, "utf8");
   const summary = JSON.parse(raw) as TopicsSummary;
-  const queryExamples = summary.searchPlan?.queryExamples;
-  if (!Array.isArray(queryExamples)) {
-    throw new Error(
-      "Invalid topics file: expected searchPlan.queryExamples array",
-    );
-  }
-
-  const selectedTopics = queryExamples.slice(0, args.maxTopics);
+  validateTopicsContract(summary);
+  const queryExamples = summary.searchPlan.queryExamples;
+  const eligibleTopics = queryExamples.filter(topic => args.tiers.has(topic.tier));
+  const orderedTopics = deterministicTopicOrder(eligibleTopics, args.sampleSeed);
+  const selectedTopics = orderedTopics.slice(0, args.maxTopics);
   const plannedCalls = buildPlannedCalls(selectedTopics, args);
   if (plannedCalls.length === 0) {
     console.log(
@@ -1211,7 +1321,14 @@ async function main(): Promise<void> {
       intentAnchor: item.intentAnchor,
       tools: item.tools,
     }));
-    const dryPayload = { plannedCalls: dry };
+    const dryPayload = {
+      qaContract: {
+        version: QA_CONTRACT_VERSION,
+        script: "ai-search-smoke",
+        generatedAt: new Date().toISOString(),
+      },
+      plannedCalls: dry,
+    };
     if (args.out) {
       await writeFile(args.out, JSON.stringify(dryPayload, null, 2), "utf8");
       console.error(`[ai-search-smoke] wrote ${args.out}`);
@@ -1396,6 +1513,7 @@ async function main(): Promise<void> {
         outputPreview: selected.raw.outputPreview,
         outputTextLength: selected.raw.outputTextLength,
         parsed: selected.parsed,
+        outcomeClass: "OK",
         citationsCount: selected.raw.citationsCount,
         toolAttemptCount: totalToolAttempts,
         successfulToolCount: totalSuccessfulTools,
@@ -1413,11 +1531,13 @@ async function main(): Promise<void> {
         toolAttemptsBudget: args.maxToolAttemptsPerTopic,
         attempts: attemptsTotal,
         retried: retriedAny,
+        ...(args.saveRaw ? { rawResponse: selected.raw.rawResponse } : {}),
         ...(selected.raw.error ? { error: selected.raw.error } : {}),
       };
+      strictResult.outcomeClass = classifyOutcome(strictResult);
       if (args.verbose) {
         console.log(
-          `[ai-search-smoke] ${selected.raw.ok ? "OK" : "ERR"} ${selected.raw.status} ${strictResult.durationMs}ms ${call.tier} ${call.queryType} ${call.entity} parsed=${selected.parsed.status} ev=${selected.parsed.supportsTopicCount}/${call.minEvidence} trusted=${selected.parsed.trustedEvidenceCount} domains=${selected.parsed.uniqueDomainCount} prov=${selected.provenance.ok ? "OK" : "MISS"} stages=${strictResult.stagesExecuted} turns=${strictResult.stageTurns.join("+")} early_stop=${strictResult.earlyStopReason ?? "none"} tool_attempts=${totalToolAttempts}/${args.maxToolAttemptsPerTopic} tool_success=${totalSuccessfulTools}`,
+          `[ai-search-smoke] ${selected.raw.ok ? "OK" : "ERR"} ${selected.raw.status} ${strictResult.durationMs}ms ${call.tier} ${call.queryType} ${call.entity} parsed=${selected.parsed.status} outcome=${strictResult.outcomeClass} ev=${selected.parsed.supportsTopicCount}/${call.minEvidence} trusted=${selected.parsed.trustedEvidenceCount} domains=${selected.parsed.uniqueDomainCount} prov=${selected.provenance.ok ? "OK" : "MISS"} stages=${strictResult.stagesExecuted} turns=${strictResult.stageTurns.join("+")} early_stop=${strictResult.earlyStopReason ?? "none"} tool_attempts=${totalToolAttempts}/${args.maxToolAttemptsPerTopic} tool_success=${totalSuccessfulTools}`,
         );
       }
       return strictResult;
@@ -1451,8 +1571,33 @@ async function main(): Promise<void> {
     qaViolations.missingProvenanceForSupported +
     qaViolations.belowEvidenceThresholdForOkPartial +
     qaViolations.okWithoutEvidence;
+  const outcomeSummary = results.reduce<Record<SearchOutcomeClass, number>>(
+    (acc, row) => {
+      acc[row.outcomeClass] += 1;
+      return acc;
+    },
+    {
+      OK: 0,
+      NO_EVIDENCE: 0,
+      PROVIDER_LIMIT: 0,
+      PROVIDER_ERROR: 0,
+      TIMEOUT: 0,
+      SCHEMA_INVALID: 0,
+    },
+  );
+  const qualityMisses =
+    outcomeSummary.NO_EVIDENCE + outcomeSummary.SCHEMA_INVALID;
+  const providerFailures =
+    outcomeSummary.PROVIDER_ERROR +
+    outcomeSummary.PROVIDER_LIMIT +
+    outcomeSummary.TIMEOUT;
 
   const report = {
+    qaContract: {
+      version: QA_CONTRACT_VERSION,
+      script: "ai-search-smoke",
+      generatedAt: new Date().toISOString(),
+    },
     generatedAt: new Date().toISOString(),
     topicsFile: args.topicsFile,
     model: args.model,
@@ -1468,6 +1613,8 @@ async function main(): Promise<void> {
     maxCallsPerTopic: args.maxCallsPerTopic,
     maxToolAttemptsPerTopic: args.maxToolAttemptsPerTopic,
     strictProvenance: args.strictProvenance,
+    sampleSeed: args.sampleSeed,
+    saveRaw: args.saveRaw,
     pricing: {
       inputPerMillionUsd: args.priceInputPerM,
       outputPerMillionUsd: args.priceOutputPerM,
@@ -1530,9 +1677,12 @@ async function main(): Promise<void> {
       provenanceOk: results.filter(row => row.provenanceOk).length,
       provenanceMissing: results.filter(row => !row.provenanceOk).length,
     },
+    outcomeSummary,
     qa: {
       strictProvenance: args.strictProvenance,
       violationTotal: qaViolationTotal,
+      qualityMisses,
+      providerFailures,
       violations: qaViolations,
     },
     results,
@@ -1549,10 +1699,14 @@ async function main(): Promise<void> {
   console.log(
     `[ai-search-smoke] qa strict=${args.strictProvenance} violations=${qaViolationTotal} missing_prov=${qaViolations.missingProvenanceForSupported} below_min_ev=${qaViolations.belowEvidenceThresholdForOkPartial} ok_without_ev=${qaViolations.okWithoutEvidence}`,
   );
+  console.log(
+    `[ai-search-smoke] outcomes ok=${outcomeSummary.OK} no_evidence=${outcomeSummary.NO_EVIDENCE} schema_invalid=${outcomeSummary.SCHEMA_INVALID} provider_limit=${outcomeSummary.PROVIDER_LIMIT} provider_error=${outcomeSummary.PROVIDER_ERROR} timeout=${outcomeSummary.TIMEOUT}`,
+  );
   console.table(
     results.map(row => ({
       tier: row.tier,
       type: row.queryType,
+      outcome: row.outcomeClass,
       status: row.status,
       ok: row.ok,
       ms: row.durationMs,

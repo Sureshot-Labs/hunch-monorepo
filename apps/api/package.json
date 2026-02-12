@@ -21,6 +21,7 @@
     "ai:topics:dry-run": "tsx src/ai-topics-dry-run.ts",
     "ai:search:smoke": "tsx src/ai-search-smoke.ts",
     "ai:synthesis:smoke": "tsx src/ai-synthesis-smoke.ts",
+    "ai:e2e:smoke": "tsx src/ai-e2e-smoke.ts",
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",

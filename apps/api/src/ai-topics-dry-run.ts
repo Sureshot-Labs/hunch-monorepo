@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { pool } from "./db.js";
 
+const QA_CONTRACT_VERSION = "qa_contract_v1";
+
 type Category = "crypto" | "politics" | "sports" | "other";
 
 type EntityType = "ticker" | "match" | "person" | "country" | "keyword";
@@ -118,6 +120,7 @@ type TopicSummaryRow = {
 };
 
 type Args = {
+  launchProfile: "custom" | "top50_per_venue" | "top100_per_venue" | "stress500_global";
   limit: number;
   venues: string[];
   categories: Category[];
@@ -170,6 +173,7 @@ type Args = {
   xExcludedHandles: string[];
   maxSearchTopics: number;
   strictInvariants: boolean;
+  emitDemotionPreview: boolean;
   json: boolean;
   out: string | null;
   help: boolean;
@@ -524,6 +528,24 @@ const SPORTS_COMPETITION_OR_AWARD_PATTERN =
 const POLITICS_CANDIDATE_PATTERN =
   /\b(nominee|next (?:prime minister|president|chancellor|leader)|election winner|next government|coalition|who will|who(?:'s| is) out|leaders? out|out in \d{4})\b/i;
 
+const MENTION_MARKET_PATTERN =
+  /\b(mention|mentions|mentioned|name|names|named|say|says|said|speak|speaks|spoke|speech)\b/i;
+
+const MENTION_STOP_TOKENS = new Set([
+  "mention",
+  "mentions",
+  "mentioned",
+  "name",
+  "names",
+  "named",
+  "during",
+  "before",
+  "after",
+  "by",
+  "state",
+  "union",
+]);
+
 const SPORTS_NOISE_PATTERNS = [
   /\bmore markets?\b/gi,
   /\bmore props?\b/gi,
@@ -726,7 +748,7 @@ const CRYPTO_TEXT_CUE_PATTERN =
   /\b(bitcoin|btc|ethereum|eth|solana|sol|dogecoin|doge|xrp|ripple|usdc|usdt|tether|crypto|token|blockchain|onchain|on-chain|defi|market cap|fdv)\b/i;
 
 const POLITICS_TEXT_CUE_PATTERN =
-  /\b(election|president|presidential|prime minister|government|coalition|parliament|senate|house|ceasefire|sanction|tariff|war|strike|nominee|court|fed chair|leader)\b/i;
+  /\b(election|president|presidential|prime minister|government|coalition|parliament|senate|house|ceasefire|sanction|tariff|war|strike|nominee|court|fed chair|leader|state of the union|sotu|address)\b/i;
 
 const SPORTS_TEXT_CUE_PATTERN =
   /\b(vs\.?|@|match|game|season|champion|championship|mvp|playoff|playoffs|world cup|olympics?|nba|nfl|mlb|nhl|ncaa|premier league|la liga|serie a|bundesliga|ligue 1)\b/i;
@@ -861,12 +883,57 @@ function parseTieringMode(
   return value === "threshold" ? "threshold" : "score";
 }
 
+function parseLaunchProfile(
+  value: string | undefined,
+): Args["launchProfile"] {
+  if (value === "top50_per_venue") return "top50_per_venue";
+  if (value === "top100_per_venue") return "top100_per_venue";
+  if (value === "stress500_global") return "stress500_global";
+  return "custom";
+}
+
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value == null) return fallback;
   const normalized = value.trim().toLowerCase();
   if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, Math.min(sorted.length - 1, idx))];
+}
+
+function applyLaunchProfile(base: Args): Args {
+  if (base.launchProfile === "top50_per_venue") {
+    return {
+      ...base,
+      sampling: "per-venue",
+      perVenueQuota: 50,
+      maxSearchTopics: Math.min(base.maxSearchTopics, 120),
+    };
+  }
+  if (base.launchProfile === "top100_per_venue") {
+    return {
+      ...base,
+      sampling: "per-venue",
+      perVenueQuota: 100,
+      maxSearchTopics: Math.min(base.maxSearchTopics, 220),
+    };
+  }
+  if (base.launchProfile === "stress500_global") {
+    return {
+      ...base,
+      sampling: "global",
+      limit: Math.min(base.limit, 500),
+      perVenueQuota: null,
+      maxSearchTopics: Math.min(base.maxSearchTopics, 300),
+    };
+  }
+  return base;
 }
 
 function resolveArgs(argv: string[]): Args {
@@ -877,7 +944,8 @@ function resolveArgs(argv: string[]): Args {
       "[topics:dry-run] --require-open-now=false is ignored; open-now filtering is always enforced for AI topic extraction.",
     );
   }
-  return {
+  const base: Args = {
+    launchProfile: parseLaunchProfile(parseFlag(argv, "--launch-profile")),
     limit: parsePositiveInt(parseFlag(argv, "--limit"), 5000),
     venues: parseCsv(parseFlag(argv, "--venues")),
     categories: parseCategories(parseFlag(argv, "--categories")),
@@ -1019,16 +1087,22 @@ function resolveArgs(argv: string[]): Args {
     ),
     maxSearchTopics: parsePositiveInt(parseFlag(argv, "--max-search-topics"), 300),
     strictInvariants: parseBoolean(parseFlag(argv, "--strict-invariants"), false),
+    emitDemotionPreview: parseBoolean(
+      parseFlag(argv, "--emit-demotion-preview"),
+      false,
+    ),
     json: hasFlag(argv, "--json"),
     out: parseFlag(argv, "--out") ?? null,
     help: hasFlag(argv, "--help"),
   };
+  return applyLaunchProfile(base);
 }
 
 function printHelp(): void {
   console.log(`Usage: pnpm -C hunch-monorepo -F api run ai:topics:dry-run -- [options]
 
 Options:
+  --launch-profile <name>  Preset: top50_per_venue|top100_per_venue|stress500_global
   --limit <n>            Max active market rows to scan (default: 5000)
   --venues <csv>         Filter venues, e.g. polymarket,kalshi
   --categories <csv>     Filter categories, e.g. crypto,politics,sports
@@ -1081,6 +1155,7 @@ Options:
   --x-excluded-handles <csv>    x_search excluded handles (max 10)
   --max-search-topics <n>       Max topics used in search volume model (default: 300)
   --strict-invariants <bool>    Exit non-zero when active/open-now invariants fail (default: false)
+  --emit-demotion-preview <bool>  Include runtime demotion-rule preview diagnostics (default: false)
   --json                 Print JSON summary instead of text table
   --out <path>           Write JSON summary to file
   --help                 Show this help
@@ -1566,6 +1641,12 @@ function detectEntityArchetype(
   const event = `${eventTitle ?? ""}`;
   const market = `${marketTitle ?? ""}`;
   const combined = `${event} ${market}`.toLowerCase();
+  if (
+    (category === "politics" || category === "other") &&
+    MENTION_MARKET_PATTERN.test(combined)
+  ) {
+    return "candidate_list";
+  }
   if (category === "sports") {
     if (HEAD_TO_HEAD_PATTERN.test(combined)) return "head_to_head";
     if (SPORTS_COMPETITION_OR_AWARD_PATTERN.test(combined)) {
@@ -1665,6 +1746,85 @@ function extractEventAnchorKeyword(text: string): string | null {
   const anchor = normalizeSlug(tokens.slice(0, 5).join("-"));
   if (!anchor || isPlaceholderEntitySlug(anchor)) return null;
   return anchor;
+}
+
+function extractMentionTarget(text: string): string | null {
+  if (!text) return null;
+  if (!MENTION_MARKET_PATTERN.test(text)) return null;
+
+  const quoted = text.match(/["']([^"']{2,80})["']/);
+  if (quoted?.[1]) {
+    const slug = normalizeSlug(quoted[1]);
+    if (
+      slug &&
+      !isPlaceholderEntitySlug(slug) &&
+      !QUESTION_ENTITY_BLOCKLIST.has(slug) &&
+      !KEYWORD_NOISE.has(slug) &&
+      !MENTION_STOP_TOKENS.has(slug)
+    ) {
+      return slug;
+    }
+  }
+
+  const mentionMatch = text.match(MENTION_MARKET_PATTERN);
+  if (!mentionMatch || mentionMatch.index == null) return null;
+  const prefix = text.slice(0, mentionMatch.index);
+  const suffix = text.slice(mentionMatch.index + mentionMatch[0].length);
+
+  const prefixPhrases = extractCapitalizedPhrases(prefix).filter(
+    phrase =>
+      !isPlaceholderEntitySlug(phrase) &&
+      !QUESTION_ENTITY_BLOCKLIST.has(phrase) &&
+      !KEYWORD_NOISE.has(phrase) &&
+      !MENTION_STOP_TOKENS.has(phrase) &&
+      !MONTH_TOKENS.has(phrase) &&
+      !DAY_TOKENS.has(phrase),
+  );
+  if (prefixPhrases.length > 0) {
+    return prefixPhrases[prefixPhrases.length - 1];
+  }
+
+  const phraseCandidates = extractCapitalizedPhrases(suffix).filter(
+    phrase =>
+      !isPlaceholderEntitySlug(phrase) &&
+      !QUESTION_ENTITY_BLOCKLIST.has(phrase) &&
+      !KEYWORD_NOISE.has(phrase) &&
+      !MENTION_STOP_TOKENS.has(phrase) &&
+      !MONTH_TOKENS.has(phrase) &&
+      !DAY_TOKENS.has(phrase),
+  );
+  if (phraseCandidates.length > 0) {
+    return phraseCandidates[0];
+  }
+
+  const prefixTokens = tokenizeNormalized(normalizeTitle(prefix, "other")).filter(
+    token =>
+      !QUESTION_ENTITY_BLOCKLIST.has(token) &&
+      !KEYWORD_NOISE.has(token) &&
+      !MENTION_STOP_TOKENS.has(token) &&
+      !MONTH_TOKENS.has(token) &&
+      !DAY_TOKENS.has(token) &&
+      !TEMPORAL_TOKENS.has(token) &&
+      !isPlaceholderEntitySlug(token),
+  );
+  if (prefixTokens.length > 0) {
+    const anchor = normalizeSlug(prefixTokens.slice(-2).join("-"));
+    if (anchor && !isPlaceholderEntitySlug(anchor)) return anchor;
+  }
+
+  const tokens = tokenizeNormalized(normalizeTitle(suffix, "other")).filter(
+    token =>
+      !QUESTION_ENTITY_BLOCKLIST.has(token) &&
+      !KEYWORD_NOISE.has(token) &&
+      !MENTION_STOP_TOKENS.has(token) &&
+      !MONTH_TOKENS.has(token) &&
+      !DAY_TOKENS.has(token) &&
+      !TEMPORAL_TOKENS.has(token) &&
+      !isPlaceholderEntitySlug(token),
+  );
+  if (tokens.length === 0) return null;
+  const anchor = normalizeSlug(tokens.slice(0, 3).join("-"));
+  return anchor && !isPlaceholderEntitySlug(anchor) ? anchor : null;
 }
 
 function extractCandidateEntityFromText(
@@ -1769,6 +1929,50 @@ function resolveEntity(
   const rawEntitySource = candidateFirst
     ? marketTitle?.trim() || eventTitle?.trim() || rawText
     : eventTitle?.trim() || marketTitle?.trim() || rawText;
+
+  const isMentionMarket =
+    (category === "politics" || category === "other") &&
+    MENTION_MARKET_PATTERN.test(rawText);
+  if (isMentionMarket) {
+    const marketCandidate =
+      marketTitle && !isLowSignalOutcomeLabel(marketTitle)
+        ? extractCandidateEntityFromText(marketTitle, category)
+        : null;
+    const mentionCandidate =
+      extractMentionTarget(eventTitle ?? "") ??
+      extractMentionTarget(rawText) ??
+      extractCandidateEntityFromText(eventTitle ?? "", category) ??
+      marketCandidate;
+    if (mentionCandidate) {
+      const normalizedCandidate = normalizeSlug(mentionCandidate);
+      if (
+        normalizedCandidate &&
+        !QUESTION_ENTITY_BLOCKLIST.has(normalizedCandidate) &&
+        !KEYWORD_NOISE.has(normalizedCandidate) &&
+        !MENTION_STOP_TOKENS.has(normalizedCandidate) &&
+        !isPlaceholderEntitySlug(normalizedCandidate)
+      ) {
+        const mappedCountry =
+          POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ?? normalizedCandidate;
+        if (POLITICS_COUNTRIES.has(mappedCountry)) {
+          return {
+            type: "country",
+            value: mappedCountry,
+            source: "market",
+            archetype,
+            unknownReason: null,
+          };
+        }
+        return {
+          type: category === "politics" ? "person" : "keyword",
+          value: normalizedCandidate,
+          source: "market",
+          archetype,
+          unknownReason: null,
+        };
+      }
+    }
+  }
 
   if (category === "crypto") {
     for (const candidate of CRYPTO_MAP) {
@@ -2484,6 +2688,15 @@ function entityTerm(topic: TopicSummaryRow): string {
 }
 
 function candidateIntentAnchor(topic: TopicSummaryRow): string | null {
+  if (MENTION_MARKET_PATTERN.test(topic.sampleEventTitle ?? "")) {
+    const mentionAnchor =
+      extractMentionTarget(topic.sampleEventTitle ?? "") ??
+      extractMentionTarget(topic.sampleMarketTitle ?? "") ??
+      (topic.entity !== "unknown" ? topic.entity : null);
+    if (mentionAnchor) {
+      return normalizeSlug(mentionAnchor);
+    }
+  }
   if (topic.archetype !== "candidate_list") return null;
   const source = compactWhitespace(topic.sampleEventTitle ?? "");
   if (!source) return null;
@@ -2491,6 +2704,7 @@ function candidateIntentAnchor(topic: TopicSummaryRow): string | null {
   const tokens = tokenizeNormalized(normalized)
     .filter(token => !QUESTION_ENTITY_BLOCKLIST.has(token))
     .filter(token => !KEYWORD_NOISE.has(token))
+    .filter(token => !MENTION_STOP_TOKENS.has(token))
     .filter(token => !GENERIC_TOKENS.has(token))
     .filter(token => !MONTH_TOKENS.has(token))
     .filter(token => !DAY_TOKENS.has(token));
@@ -3367,6 +3581,111 @@ async function main(): Promise<void> {
     };
   });
 
+  const modeledTopicMarketCounts = searchTopics.map(topic => topic.marketCount);
+  const modeledAgesHours = searchTopics
+    .map(topic => {
+      const ts = topic.sampleMarketUpdatedAt
+        ? new Date(topic.sampleMarketUpdatedAt).getTime()
+        : Number.NaN;
+      if (!Number.isFinite(ts)) return null;
+      return Math.max(0, (Date.now() - ts) / (1000 * 3600));
+    })
+    .filter((value): value is number => value != null);
+
+  const modeledByCategory = searchTopics.reduce<Record<string, number>>(
+    (acc, topic) => {
+      acc[topic.category] = (acc[topic.category] ?? 0) + 1;
+      return acc;
+    },
+    {},
+  );
+  const modeledByVenue = searchTopics.reduce<Record<string, number>>((acc, topic) => {
+    for (const venue of topic.venues) {
+      acc[venue] = (acc[venue] ?? 0) + 1;
+    }
+    return acc;
+  }, {});
+
+  const demotionPreview = args.emitDemotionPreview
+    ? (() => {
+        const suggestions = searchTopics
+          .map(topic => {
+            const currentTier = topicTiers.get(topic.topicKey) ?? "C";
+            const reasons: string[] = [];
+            let riskScore = 0;
+
+            if (topic.unknownReason) {
+              reasons.push(`unknown_reason:${topic.unknownReason}`);
+              riskScore += 4;
+            }
+            if (topic.marketCount <= 2) {
+              reasons.push("low_market_count");
+              riskScore += 3;
+            } else if (topic.marketCount <= 4) {
+              reasons.push("thin_market_count");
+              riskScore += 1;
+            }
+            if (
+              topic.category === "politics" &&
+              topic.archetype === "candidate_list"
+            ) {
+              reasons.push("candidate_list_low_hit_risk");
+              riskScore += 2;
+            }
+            const ageHours = topic.sampleMarketUpdatedAt
+              ? Math.max(
+                  0,
+                  (Date.now() -
+                    new Date(topic.sampleMarketUpdatedAt).getTime()) /
+                    (1000 * 3600),
+                )
+              : null;
+            if (ageHours != null && ageHours > 12) {
+              reasons.push("sample_age_gt_12h");
+              riskScore += 1;
+            }
+
+            let suggestedTier = currentTier;
+            let action = "keep";
+            if (riskScore >= 6) {
+              suggestedTier =
+                currentTier === "A" ? "B" : currentTier === "B" ? "C" : "C";
+              action = suggestedTier === currentTier ? "monitor" : "demote";
+            } else if (riskScore >= 4 && currentTier === "A") {
+              suggestedTier = "B";
+              action = "demote";
+            }
+
+            return {
+              topicKey: topic.topicKey,
+              entity: `${topic.entityType}:${topic.entity}`,
+              category: topic.category,
+              currentTier,
+              suggestedTier,
+              riskScore,
+              action,
+              reasons,
+              marketCount: topic.marketCount,
+              sampleVenue: topic.sampleVenue,
+            };
+          })
+          .filter(item => item.action !== "keep")
+          .sort((a, b) => b.riskScore - a.riskScore);
+
+        return {
+          enabled: true,
+          candidateCount: suggestions.length,
+          byAction: suggestions.reduce<Record<string, number>>((acc, item) => {
+            acc[item.action] = (acc[item.action] ?? 0) + 1;
+            return acc;
+          }, {}),
+          topCandidates: suggestions.slice(0, 30),
+        };
+      })()
+    : {
+        enabled: false,
+      };
+
   const estimatedDailyRawByTier = searchTopics.reduce<Record<"A" | "B" | "C", number>>(
     (acc, topic) => {
       const tier = topicTiers.get(topic.topicKey) ?? "C";
@@ -3421,6 +3740,11 @@ async function main(): Promise<void> {
     .sort((a, b) => b.constraintVariants - a.constraintVariants);
 
   const summary = {
+    qaContract: {
+      version: QA_CONTRACT_VERSION,
+      script: "ai-topics-dry-run",
+      generatedAt: new Date().toISOString(),
+    },
     generatedAt: new Date().toISOString(),
     options: args,
     totals: {
@@ -3536,6 +3860,42 @@ async function main(): Promise<void> {
         },
       },
       topicsModeled: searchTopics.length,
+      modeledQuality: {
+        marketCount: {
+          min:
+            modeledTopicMarketCounts.length > 0
+              ? Math.min(...modeledTopicMarketCounts)
+              : 0,
+          p50: percentile(modeledTopicMarketCounts, 50),
+          p90: percentile(modeledTopicMarketCounts, 90),
+          max:
+            modeledTopicMarketCounts.length > 0
+              ? Math.max(...modeledTopicMarketCounts)
+              : 0,
+          avg:
+            modeledTopicMarketCounts.length > 0
+              ? Number(
+                  (
+                    modeledTopicMarketCounts.reduce((sum, n) => sum + n, 0) /
+                    modeledTopicMarketCounts.length
+                  ).toFixed(2),
+                )
+              : 0,
+        },
+        sampleAgeHours: {
+          count: modeledAgesHours.length,
+          p50: percentile(modeledAgesHours, 50),
+          p90: percentile(modeledAgesHours, 90),
+          max:
+            modeledAgesHours.length > 0
+              ? Number(Math.max(...modeledAgesHours).toFixed(2))
+              : 0,
+          over12h: modeledAgesHours.filter(age => age > 12).length,
+          over24h: modeledAgesHours.filter(age => age > 24).length,
+        },
+        byCategory: modeledByCategory,
+        byVenue: modeledByVenue,
+      },
       queryExamples: topicSearchPreview,
     },
     qa: {
@@ -3554,6 +3914,7 @@ async function main(): Promise<void> {
     },
     topTopics: topics.slice(0, args.showTop),
     topConstraintCollisions: constraintCollisions.slice(0, args.showTop),
+    demotionPreview,
   };
 
   if (args.out) {
@@ -3569,6 +3930,7 @@ async function main(): Promise<void> {
   console.log(
     `[topics:dry-run] rows=${summary.totals.rowsFetched} used=${summary.totals.rowsUsed} unique_topics=${summary.totals.uniqueTopics} unique_search_topics=${summary.totals.uniqueSearchTopics}`,
   );
+  console.log(`[topics:dry-run] launch_profile=${args.launchProfile}`);
   console.log(
     `[topics:dry-run] quality_filters min_volume24h=${args.minVolume24h} min_liquidity=${args.minLiquidity} max_spread=${args.maxSpread ?? "none"} require_open_now=${args.requireOpenNow} order_by=${args.orderBy}`,
   );
@@ -3593,6 +3955,15 @@ async function main(): Promise<void> {
   console.log(
     `[topics:dry-run] qa active_only=${summary.qa.invariants.sampleEventActiveOnly} open_now_only=${summary.qa.invariants.sampleEventOpenNowOnly} stale6h=${summary.qa.freshness.staleSamples6h} stale24h=${summary.qa.freshness.staleSamples24h}`,
   );
+  if (
+    args.emitDemotionPreview &&
+    summary.demotionPreview.enabled &&
+    "candidateCount" in summary.demotionPreview
+  ) {
+    console.log(
+      `[topics:dry-run] demotion_preview candidates=${summary.demotionPreview.candidateCount} actions=${JSON.stringify(summary.demotionPreview.byAction)}`,
+    );
+  }
   console.log("[topics:dry-run] sample_venue_distribution");
   console.table(
     Object.entries(sampleVenueDistribution).map(([venue, count]) => ({
