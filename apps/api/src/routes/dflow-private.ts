@@ -15,6 +15,7 @@ import {
   extractDflowErrorMessage,
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
+import { verifyProofAddress } from "../services/proof-client.js";
 import {
   buildTradeNotification,
   createNotificationSafe,
@@ -40,6 +41,11 @@ const DEFAULT_USDC_DECIMALS = 6;
 type FeeExtractionResult = {
   amountRaw: string;
   feeAccount?: string | null;
+};
+
+type MintPair = {
+  inputMint: string;
+  outputMint: string;
 };
 
 function isSolanaWallet(address: string): boolean {
@@ -150,6 +156,147 @@ function computeFeeFromBps(inputs: {
   if (!Number.isFinite(amountNum)) return null;
   const feeNum = (amountNum * inputs.feeBps) / 10_000;
   return (feeNum / Math.pow(10, inputs.decimals)).toString();
+}
+
+function isBuyIntent(inputMint: string | null | undefined): boolean {
+  return Boolean(inputMint && inputMint === env.solanaUsdcMint);
+}
+
+function isProofBypassed(user: { kalshiProofBypass: boolean }): boolean {
+  return user.kalshiProofBypass;
+}
+
+function sendProofRequired(reply: {
+  code: (status: number) => void;
+  send: (payload: unknown) => void;
+}, walletAddress: string) {
+  reply.code(403);
+  reply.send({
+    error: "Kalshi buy requires identity verification",
+    code: "proof_required",
+    venue: "kalshi",
+    wallet: walletAddress,
+    proofUrl: "https://dflow.net/proof",
+  });
+}
+
+function sendProofUnavailable(reply: {
+  code: (status: number) => void;
+  send: (payload: unknown) => void;
+}) {
+  reply.code(503);
+  reply.send({
+    error: "Verification service unavailable",
+    code: "proof_check_unavailable",
+    venue: "kalshi",
+  });
+}
+
+function readMintPairFromRecord(record: Record<string, unknown>): MintPair | null {
+  const inputRaw = record.inputMint ?? record.input_mint;
+  const outputRaw = record.outputMint ?? record.output_mint;
+  if (typeof inputRaw !== "string" || typeof outputRaw !== "string") {
+    return null;
+  }
+  const inputMint = inputRaw.trim();
+  const outputMint = outputRaw.trim();
+  if (!inputMint || !outputMint) return null;
+  return { inputMint, outputMint };
+}
+
+function findMintPair(value: unknown, depth = 0): MintPair | null {
+  if (depth > 8) return null;
+  if (!value || typeof value !== "object") return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = findMintPair(item, depth + 1);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = readMintPairFromRecord(record);
+  if (direct) return direct;
+
+  const preferredKeys = [
+    "quoteResponse",
+    "route",
+    "quote",
+    "order",
+    "swap",
+    "result",
+    "data",
+  ];
+  for (const key of preferredKeys) {
+    if (!(key in record)) continue;
+    const nested = findMintPair(record[key], depth + 1);
+    if (nested) return nested;
+  }
+
+  for (const nestedValue of Object.values(record)) {
+    const nested = findMintPair(nestedValue, depth + 1);
+    if (nested) return nested;
+  }
+
+  return null;
+}
+
+async function enforceKalshiProof(args: {
+  user: { id: string; kalshiProofBypass: boolean };
+  walletAddress: string;
+  inputMint: string | null;
+  outputMint: string | null;
+  hasDeterministicIntent: boolean;
+  app: {
+    log: {
+      warn: (obj: unknown, msg: string) => void;
+    };
+  };
+  reply: {
+    code: (status: number) => void;
+    send: (payload: unknown) => void;
+  };
+}): Promise<boolean> {
+  if (!env.kalshiProofEnabled) return true;
+  if (isProofBypassed(args.user)) return true;
+
+  if (!args.hasDeterministicIntent || !args.inputMint || !args.outputMint) {
+    args.app.log.warn(
+      {
+        userId: args.user.id,
+        walletAddress: args.walletAddress,
+      },
+      "Kalshi proof gate denied request: unable to derive buy/sell intent",
+    );
+    sendProofUnavailable(args.reply);
+    return false;
+  }
+
+  if (!isBuyIntent(args.inputMint)) return true;
+
+  const proofCheck = await verifyProofAddress({
+    address: args.walletAddress,
+  });
+
+  if (proofCheck.ok) {
+    if (proofCheck.verified) return true;
+    sendProofRequired(args.reply, args.walletAddress);
+    return false;
+  }
+
+  args.app.log.warn(
+    {
+      userId: args.user.id,
+      walletAddress: args.walletAddress,
+      error: proofCheck.error,
+      status: proofCheck.status,
+    },
+    "Kalshi proof gate verification unavailable",
+  );
+  sendProofUnavailable(args.reply);
+  return false;
 }
 
 // Mounted under /trade/kalshi and /trade/dflow (alias).
@@ -287,6 +434,17 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const proofAllowed = await enforceKalshiProof({
+        user,
+        walletAddress,
+        inputMint: query.inputMint,
+        outputMint: query.outputMint,
+        hasDeterministicIntent: true,
+        app,
+        reply,
+      });
+      if (!proofAllowed) return;
+
       const hotTokenIds = [query.inputMint, query.outputMint]
         .filter(
           (mint): mint is string =>
@@ -368,6 +526,17 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!ensureDflowReady(reply)) return;
 
       const query = request.query;
+
+      const proofAllowed = await enforceKalshiProof({
+        user,
+        walletAddress,
+        inputMint: query.inputMint,
+        outputMint: query.outputMint,
+        hasDeterministicIntent: true,
+        app,
+        reply,
+      });
+      if (!proofAllowed) return;
 
       const hotTokenIds = [query.inputMint, query.outputMint]
         .filter(
@@ -453,6 +622,18 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           error: "userPublicKey must match the selected wallet",
         });
       }
+
+      const mintPair = findMintPair(body.quoteResponse);
+      const proofAllowed = await enforceKalshiProof({
+        user,
+        walletAddress,
+        inputMint: mintPair?.inputMint ?? null,
+        outputMint: mintPair?.outputMint ?? null,
+        hasDeterministicIntent: Boolean(mintPair),
+        app,
+        reply,
+      });
+      if (!proofAllowed) return;
 
       const upstream = await dflowRequest({
         baseUrl: env.dflowQuoteBase,

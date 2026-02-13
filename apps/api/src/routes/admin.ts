@@ -32,6 +32,7 @@ import {
   adminRewardsPolicySchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
+  adminUserKalshiProofBypassSchema,
   adminUserActivityQuerySchema,
   adminUserMergeSchema,
   adminUserParamsSchema,
@@ -822,6 +823,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         username: string | null;
         display_name: string | null;
         is_admin: boolean | null;
+        kalshi_proof_bypass: boolean | null;
         is_active: boolean | null;
         last_login_at: Date | null;
         created_at: Date;
@@ -838,6 +840,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             u.username,
             u.display_name,
             u.is_admin,
+            u.kalshi_proof_bypass,
             u.is_active,
             u.last_login_at,
             u.created_at,
@@ -887,6 +890,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           username: row.username,
           displayName: row.display_name,
           isAdmin: Boolean(row.is_admin),
+          kalshiProofBypass: Boolean(row.kalshi_proof_bypass),
           isActive: row.is_active ?? true,
           lastLoginAt: row.last_login_at,
           createdAt: row.created_at,
@@ -917,12 +921,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         username: string | null;
         display_name: string | null;
         is_admin: boolean | null;
+        kalshi_proof_bypass: boolean | null;
         is_active: boolean | null;
         last_login_at: Date | null;
         created_at: Date;
       }>(
         `
-          select id, email, username, display_name, is_admin, is_active, last_login_at, created_at
+          select id, email, username, display_name, is_admin, kalshi_proof_bypass, is_active, last_login_at, created_at
           from users
           where id = $1
           limit 1
@@ -1003,6 +1008,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           username: user.username,
           displayName: user.display_name,
           isAdmin: Boolean(user.is_admin),
+          kalshiProofBypass: Boolean(user.kalshi_proof_bypass),
           isActive: user.is_active ?? true,
           lastLoginAt: user.last_login_at,
           createdAt: user.created_at,
@@ -1454,6 +1460,42 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, isActive: rows[0].is_active });
+    },
+  );
+
+  z.post(
+    "/admin/users/:id/kalshi-proof-bypass",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: {
+        params: adminUserParamsSchema,
+        body: adminUserKalshiProofBypassSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body;
+
+      const { rows } = await pool.query<{ kalshi_proof_bypass: boolean }>(
+        `
+          update users
+          set kalshi_proof_bypass = $2
+          where id = $1
+          returning kalshi_proof_bypass
+        `,
+        [id, body.kalshiProofBypass],
+      );
+
+      if (!rows.length) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        kalshiProofBypass: rows[0].kalshi_proof_bypass,
+      });
     },
   );
 

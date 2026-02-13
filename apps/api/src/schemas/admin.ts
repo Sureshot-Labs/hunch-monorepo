@@ -79,6 +79,10 @@ export const adminUserActiveSchema = z.object({
   isActive: z.coerce.boolean(),
 });
 
+export const adminUserKalshiProofBypassSchema = z.object({
+  kalshiProofBypass: z.coerce.boolean(),
+});
+
 export const adminUserMergeSchema = z
   .object({
     sourceId: z.string().uuid().optional(),
@@ -133,5 +137,8 @@ export type AdminUserActivityQuery = z.infer<
 >;
 export type AdminUserAdminBody = z.infer<typeof adminUserAdminSchema>;
 export type AdminUserActiveBody = z.infer<typeof adminUserActiveSchema>;
+export type AdminUserKalshiProofBypassBody = z.infer<
+  typeof adminUserKalshiProofBypassSchema
+>;
 export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
