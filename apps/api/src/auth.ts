@@ -1220,15 +1220,19 @@ export class AuthService {
         : []),
     ].join(", ");
 
+    const normalizedWallet = walletAddress.trim();
+    const walletClause = ETH_ADDRESS_RE.test(normalizedWallet)
+      ? "lower(wallet_address) = lower($3)"
+      : "wallet_address = $3";
     const result = await pool.query<VenueCredentialsRow>(
       `SELECT ${selectedColumns}
        FROM user_venue_credentials
        WHERE user_id = $1
          AND venue = $2
-         AND wallet_address = $3
+         AND ${walletClause}
          AND is_active = true
        LIMIT 1`,
-      [userId, venue, walletAddress],
+      [userId, venue, normalizedWallet],
     );
 
     if (result.rows.length === 0) {

@@ -95,12 +95,38 @@ function pickIcon(input: {
 function extractVenueInfo(
   market: TLimitlessMarketItem | TLimitlessMarket,
 ): { exchange?: string; adapter?: string } | undefined {
-  const venue = (market as { venue?: { exchange?: unknown; adapter?: unknown } })
-    .venue;
-  if (!venue) return undefined;
+  const venue = (
+    market as {
+      venue?: {
+        exchange?: unknown;
+        exchangeAddress?: unknown;
+        adapter?: unknown;
+      };
+      exchange?: unknown;
+      exchangeAddress?: unknown;
+    }
+  ).venue;
+  const exchangeFromVenue =
+    venue && typeof venue.exchange === "string" ? venue.exchange : undefined;
+  const exchangeAddressFromVenue =
+    venue && typeof venue.exchangeAddress === "string"
+      ? venue.exchangeAddress
+      : undefined;
+  const exchangeFromRoot =
+    typeof (market as { exchange?: unknown }).exchange === "string"
+      ? ((market as { exchange?: string }).exchange ?? undefined)
+      : undefined;
+  const exchangeAddressFromRoot =
+    typeof (market as { exchangeAddress?: unknown }).exchangeAddress === "string"
+      ? ((market as { exchangeAddress?: string }).exchangeAddress ?? undefined)
+      : undefined;
   const exchange =
-    typeof venue.exchange === "string" ? venue.exchange : undefined;
-  const adapter = typeof venue.adapter === "string" ? venue.adapter : undefined;
+    exchangeFromVenue ??
+    exchangeAddressFromVenue ??
+    exchangeFromRoot ??
+    exchangeAddressFromRoot;
+  const adapter =
+    venue && typeof venue.adapter === "string" ? venue.adapter : undefined;
   if (!exchange && !adapter) return undefined;
   return { exchange, adapter };
 }

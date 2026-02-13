@@ -25,6 +25,8 @@ import {
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const POLYMARKET_RECENT_FLAT_PROTECT_SEC = 15;
+const POLYMARKET_FLATTEN_GRACE_SEC = 15;
 
 function isEthAddress(address: string): boolean {
   return ETH_ADDRESS_RE.test(address);
@@ -283,6 +285,9 @@ async function fetchPolymarketCandidateTokenIds(
   inputs: { userId: string; walletAddresses: string[]; limit: number },
 ): Promise<string[]> {
   if (inputs.walletAddresses.length === 0) return [];
+  const normalizedWallets = inputs.walletAddresses.map((address) =>
+    address.toLowerCase(),
+  );
   const { rows } = await pool.query<{ token_id: string }>(
     `
       with watchlist_tokens as (
@@ -301,8 +306,8 @@ async function fetchPolymarketCandidateTokenIds(
         where user_id = $1
           and (
             wallet_address is null
-            or wallet_address = any($2::text[])
-            or signer_address = any($2::text[])
+            or lower(wallet_address) = any($2::text[])
+            or lower(signer_address) = any($2::text[])
           )
           and venue = 'polymarket'
           and token_id is not null
@@ -311,7 +316,7 @@ async function fetchPolymarketCandidateTokenIds(
         select token_id
         from positions
         where user_id = $1
-          and wallet_address = any($2::text[])
+          and lower(wallet_address) = any($2::text[])
           and venue = 'polymarket'
       )
       select distinct token_id
@@ -327,7 +332,7 @@ async function fetchPolymarketCandidateTokenIds(
         and token_id ~ '^[0-9]+$'
       limit $3
     `,
-    [inputs.userId, inputs.walletAddresses, inputs.limit],
+    [inputs.userId, normalizedWallets, inputs.limit],
   );
 
   return rows
@@ -340,6 +345,9 @@ async function fetchLimitlessCandidateTokenIds(
   inputs: { userId: string; walletAddresses: string[]; limit: number },
 ): Promise<string[]> {
   if (inputs.walletAddresses.length === 0) return [];
+  const normalizedWallets = inputs.walletAddresses.map((address) =>
+    address.toLowerCase(),
+  );
   const { rows } = await pool.query<{ token_id: string }>(
     `
       with watchlist_tokens as (
@@ -365,7 +373,7 @@ async function fetchLimitlessCandidateTokenIds(
         select token_id
         from orders
         where user_id = $1
-          and (wallet_address is null or wallet_address = any($2::text[]))
+          and (wallet_address is null or lower(wallet_address) = any($2::text[]))
           and venue = 'limitless'
           and token_id is not null
       ),
@@ -373,7 +381,7 @@ async function fetchLimitlessCandidateTokenIds(
         select token_id
         from positions
         where user_id = $1
-          and wallet_address = any($2::text[])
+          and lower(wallet_address) = any($2::text[])
           and venue = 'limitless'
       )
       select distinct regexp_replace(token_id, '^limitless:', '') as token_id
@@ -389,7 +397,7 @@ async function fetchLimitlessCandidateTokenIds(
         and regexp_replace(token_id, '^limitless:', '') ~ '^[0-9]+$'
       limit $3
     `,
-    [inputs.userId, inputs.walletAddresses, inputs.limit],
+    [inputs.userId, normalizedWallets, inputs.limit],
   );
 
   return rows
@@ -440,17 +448,18 @@ async function fetchPolymarketFunderAddress(
   pool: Pool,
   inputs: { userId: string; walletAddress: string },
 ): Promise<string | null> {
+  const signerAddress = inputs.walletAddress.toLowerCase();
   const { rows } = await pool.query<{ funder_address: string | null }>(
     `
       select funder_address
       from user_venue_credentials
       where user_id = $1
-        and wallet_address = $2
+        and lower(wallet_address) = $2
         and venue = 'polymarket'
         and is_active = true
       limit 1
     `,
-    [inputs.userId, inputs.walletAddress],
+    [inputs.userId, signerAddress],
   );
   const funder = rows[0]?.funder_address ?? null;
   if (!funder) return null;
@@ -478,7 +487,7 @@ async function syncPolymarketTradesForSigner(
       join orders o on o.id = of.order_id
       where o.user_id = $1
         and o.venue = 'polymarket'
-        and (o.signer_address = $2 or o.wallet_address = $2)
+        and (lower(o.signer_address) = lower($2) or lower(o.wallet_address) = lower($2))
     `,
     [inputs.userId, inputs.signerAddress],
   );
@@ -724,6 +733,15 @@ async function syncPolymarketTradesForSigner(
       set filled_size = agg.filled_size,
           average_fill_price = agg.average_fill_price,
           filled_at = agg.filled_at,
+          status = case
+            when o.status in ('cancelled', 'rejected', 'expired') then o.status
+            when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
+              then 'matched'
+            when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
+              then 'filled'
+            when agg.filled_size > 0 then 'partially_filled'
+            else o.status
+          end,
           last_update = now()
       from agg
       where o.id = agg.order_id
@@ -832,6 +850,8 @@ async function syncKalshiPositionsFromSolana(
     positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "sol:%",
+    flattenGraceSec: env.positionsSyncFlattenGraceSec,
+    protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
   });
 
   if (inputs.positionScope === "own") {
@@ -967,6 +987,12 @@ async function syncPolymarketPositionsFromPolygon(
       venue: "polymarket",
       positionScope: inputs.positionScope,
       tokenBalances: held,
+      // Short grace avoids flattening fresh matched BUYs before Polygon state
+      // catches up, while still converging quickly.
+      flattenGraceSec: POLYMARKET_FLATTEN_GRACE_SEC,
+      // Prevent immediate stale RPC snapshots from reopening freshly flattened
+      // rows right after matched sells.
+      protectRecentFlatsSec: POLYMARKET_RECENT_FLAT_PROTECT_SEC,
     });
     heldTokens += result.heldTokens;
     knownTokens += result.knownTokens;
@@ -1082,6 +1108,7 @@ async function syncLimitlessPositionsFromPortfolio(
     positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "limitless:%",
+    flattenGraceSec: 0,
   });
 
   if (inputs.positionScope === "own") {

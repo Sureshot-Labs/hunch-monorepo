@@ -20,6 +20,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import {
   syncLimitlessHistoryForWallet,
@@ -70,6 +71,100 @@ function parseNumberish(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function normalizeLimitlessPrice(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  const normalized = value > 1 ? value / 100 : value;
+  if (!Number.isFinite(normalized) || normalized <= 0 || normalized > 1) {
+    return null;
+  }
+  return normalized;
+}
+
+function normalizeLimitlessAmount(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  return value > 1_000_000 ? value / 1_000_000 : value;
+}
+
+function isImmediateExecutionStatus(status: string | null | undefined): boolean {
+  if (!status) return false;
+  const normalized = status.trim().toLowerCase();
+  return (
+    normalized === "matched" ||
+    normalized === "filled" ||
+    normalized === "partially_filled" ||
+    normalized === "complete"
+  );
+}
+
+function extractLimitlessImmediateFill(
+  payload: unknown,
+  side: "BUY" | "SELL",
+  fallback: { price: number | null; size: number | null },
+): { shares: number; notionalUsd: number } | null {
+  const record = isRecord(payload)
+    ? isRecord(payload.order)
+      ? payload.order
+      : payload
+    : null;
+  if (!record) return null;
+
+  const sharesCandidates = [
+    normalizeLimitlessAmount(
+      parseNumberish(
+        record.outcomeTokenAmount ??
+          record.outcome_token_amount ??
+          record.size ??
+          record.amount ??
+          record.quantity,
+      ),
+    ),
+    normalizeLimitlessAmount(
+      parseNumberish(side === "BUY" ? record.takerAmount : record.makerAmount),
+    ),
+    fallback.size,
+  ];
+  const shares = sharesCandidates.find(
+    (value): value is number => value != null && Number.isFinite(value) && value > 0,
+  );
+  if (shares == null) return null;
+
+  const priceCandidates = [
+    normalizeLimitlessPrice(
+      parseNumberish(
+        record.price ??
+          record.orderPrice ??
+          record.limitPrice ??
+          record.outcomeTokenPrice ??
+          record.outcome_token_price,
+      ),
+    ),
+    normalizeLimitlessPrice(fallback.price),
+  ];
+  const unitPrice =
+    priceCandidates.find(
+      (value): value is number =>
+        value != null && Number.isFinite(value) && value > 0,
+    ) ?? null;
+
+  const notionalCandidates = [
+    normalizeLimitlessAmount(
+      parseNumberish(record.collateralAmount ?? record.collateral_amount),
+    ),
+    normalizeLimitlessAmount(
+      parseNumberish(side === "BUY" ? record.makerAmount : record.takerAmount),
+    ),
+    unitPrice != null ? unitPrice * shares : null,
+  ];
+  const notionalUsd =
+    notionalCandidates.find(
+      (value): value is number =>
+        value != null && Number.isFinite(value) && value > 0,
+    ) ?? null;
+
+  if (notionalUsd == null) return null;
+  return { shares, notionalUsd };
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -1195,7 +1290,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           upstream.payload.order.status) ||
         "submitted";
 
-      await storeOrder(pool, {
+      const stored = await storeOrder(pool, {
         userId: user.id,
         walletAddress: signer,
         signerAddress: signer,
@@ -1211,6 +1306,42 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         rawError: null,
         orderPayload,
       });
+
+      if (
+        stored.kind === "stored" &&
+        request.body.orderType === "FOK" &&
+        tokenId &&
+        isImmediateExecutionStatus(status)
+      ) {
+        const immediateFill = extractLimitlessImmediateFill(upstream.payload, side, {
+          price,
+          size,
+        });
+        if (immediateFill) {
+          try {
+            await applyOptimisticPositionTrade(pool, {
+              userId: user.id,
+              walletAddress: signer,
+              venue: "limitless",
+              tokenId,
+              side,
+              shares: immediateFill.shares,
+              notionalUsd: immediateFill.notionalUsd,
+            });
+          } catch (error) {
+            app.log.warn(
+              {
+                error,
+                userId: user.id,
+                walletAddress: signer,
+                tokenId,
+                side,
+              },
+              "Limitless optimistic position update failed",
+            );
+          }
+        }
+      }
 
       void createNotificationSafe(
         pool,
@@ -1283,7 +1414,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const venueOrderId = `amm:${txHash}:${tokenId}`;
       const now = new Date();
 
-      await storeOrder(pool, {
+      const stored = await storeOrder(pool, {
         userId: user.id,
         walletAddress: signer,
         signerAddress: signer,
@@ -1307,6 +1438,37 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         lastUpdate: now,
         filledAt: now,
       });
+
+      const fallbackNotional =
+        amountUsd != null && Number.isFinite(amountUsd) && amountUsd > 0
+          ? amountUsd
+          : price != null && Number.isFinite(price) && price > 0
+            ? price * size
+            : null;
+      if (stored.kind === "stored" && fallbackNotional != null) {
+        try {
+          await applyOptimisticPositionTrade(pool, {
+            userId: user.id,
+            walletAddress: signer,
+            venue: "limitless",
+            tokenId,
+            side,
+            shares: size,
+            notionalUsd: fallbackNotional,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
+              userId: user.id,
+              walletAddress: signer,
+              tokenId,
+              side,
+            },
+            "Limitless AMM optimistic position update failed",
+          );
+        }
+      }
 
       void createNotificationSafe(
         pool,

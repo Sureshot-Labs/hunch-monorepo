@@ -258,6 +258,10 @@ export const env = {
     "POSITIONS_SYNC_CONCURRENCY_SOLANA",
     2,
   ),
+  positionsSyncFlattenGraceSec: optionalNonNegativeInt(
+    "POSITIONS_SYNC_FLATTEN_GRACE_SEC",
+    45,
+  ),
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",

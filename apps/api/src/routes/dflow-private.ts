@@ -20,6 +20,7 @@ import {
   buildTradeNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
@@ -70,6 +71,16 @@ function parseNumberish(value: unknown): string | null {
     return trimmed;
   }
   return null;
+}
+
+function normalizeRawAmountToUi(
+  value: string | number | null | undefined,
+  decimals: number,
+): number | null {
+  if (value == null) return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return numeric / Math.pow(10, decimals);
 }
 
 function parseBigInt(value: string): bigint | null {
@@ -769,6 +780,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         const usdcMint = env.solanaUsdcMint;
         let notionalUsd: number | null = null;
+        let volumeInserted = false;
         if (body.inputMint === usdcMint && body.amountIn != null) {
           const decimals = body.inputDecimals ?? 6;
           notionalUsd = Number(body.amountIn) / Math.pow(10, decimals);
@@ -778,7 +790,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
 
         if (notionalUsd != null && Number.isFinite(notionalUsd) && notionalUsd > 0) {
-          await pool.query(
+          const volumeResult = await pool.query(
             `
               insert into volume_events (
                 id,
@@ -798,6 +810,58 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             `,
             [user.id, walletAddress, execution.id, notionalUsd],
           );
+          volumeInserted = (volumeResult.rowCount ?? 0) > 0;
+        }
+
+        const inputDecimals = body.inputDecimals ?? DEFAULT_USDC_DECIMALS;
+        const outputDecimals = body.outputDecimals ?? DEFAULT_USDC_DECIMALS;
+        const inputAmountUi = normalizeRawAmountToUi(body.amountIn ?? null, inputDecimals);
+        const outputAmountUi = normalizeRawAmountToUi(
+          body.amountOut ?? null,
+          outputDecimals,
+        );
+
+        if (
+          body.side &&
+          volumeInserted &&
+          notionalUsd != null &&
+          Number.isFinite(notionalUsd) &&
+          notionalUsd > 0
+        ) {
+          const tokenMint =
+            body.side === "BUY" ? body.outputMint ?? null : body.inputMint ?? null;
+          const shares =
+            body.side === "BUY" ? outputAmountUi ?? null : inputAmountUi ?? null;
+          if (
+            tokenMint &&
+            tokenMint !== usdcMint &&
+            shares != null &&
+            Number.isFinite(shares) &&
+            shares > 0
+          ) {
+            try {
+              await applyOptimisticPositionTrade(pool, {
+                userId: user.id,
+                walletAddress,
+                venue: "kalshi",
+                tokenId: `sol:${tokenMint}`,
+                side: body.side,
+                shares,
+                notionalUsd,
+              });
+            } catch (error) {
+              app.log.warn(
+                {
+                  error,
+                  userId: user.id,
+                  walletAddress,
+                  tokenMint,
+                  side: body.side,
+                },
+                "DFlow optimistic position update failed",
+              );
+            }
+          }
         }
 
         if (body.purpose !== "redeem") {

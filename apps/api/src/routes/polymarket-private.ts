@@ -30,6 +30,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import {
   extractOrderArray,
   extractOrderId,
@@ -89,6 +90,25 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function extractPolymarketOrderStatus(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const direct = payload.status;
+  if (typeof direct === "string" && direct.trim()) {
+    return direct.trim();
+  }
+  if (isRecord(payload.order)) {
+    const nested = payload.order.status;
+    if (typeof nested === "string" && nested.trim()) {
+      return nested.trim();
+    }
+  }
+  const result = payload.result;
+  if (typeof result === "string" && result.trim()) {
+    return result.trim();
+  }
+  return null;
 }
 
 function normalizeOrderSide(value: unknown): PolymarketSide | null {
@@ -175,6 +195,144 @@ function parseNumberish(value: unknown): number | null {
     const parsed = Number(trimmed);
     return Number.isFinite(parsed) ? parsed : null;
   }
+  return null;
+}
+
+function isImmediateExecutionStatus(status: string | null | undefined): boolean {
+  if (!status) return false;
+  const normalized = status.trim().toLowerCase();
+  // FOK is fill-or-kill: partial execution status should not be treated as
+  // canonical immediate fill for optimistic position writes.
+  return normalized === "matched" || normalized === "filled";
+}
+
+function readRecordField(
+  record: Record<string, unknown> | null,
+  keys: string[],
+): unknown {
+  if (!record) return undefined;
+  for (const key of keys) {
+    if (key in record) return record[key];
+  }
+  return undefined;
+}
+
+function parsePositiveNumber(value: unknown): number | null {
+  const numeric = parseNumberish(value);
+  if (numeric == null || !Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric;
+}
+
+function parsePositiveMicroToUi(value: unknown): number | null {
+  const numeric = parsePositiveNumber(value);
+  if (numeric == null) return null;
+  const ui = numeric / 1_000_000;
+  if (!Number.isFinite(ui) || ui <= 0) return null;
+  return ui;
+}
+
+function extractPolymarketImmediateFill(inputs: {
+  payload: unknown;
+  side: PolymarketSide;
+  status: string;
+  fallbackPrice: number | null;
+  fallbackSize: number | null;
+}): { shares: number; notionalUsd: number; fromPayload: boolean } | null {
+  const payloadRecord = isRecord(inputs.payload) ? inputs.payload : null;
+  const orderRecord = payloadRecord
+    ? (isRecord(payloadRecord.order) ? payloadRecord.order : payloadRecord)
+    : null;
+
+  const statusNormalized = inputs.status.trim().toLowerCase();
+  const side =
+    normalizeOrderSide(
+      readRecordField(orderRecord, ["side", "orderSide", "order_side"])
+    ) ?? inputs.side;
+
+  const payloadShares =
+    parsePositiveNumber(
+      readRecordField(orderRecord, [
+        "filled_size",
+        "filledSize",
+        "size_matched",
+        "sizeMatched",
+        "matched_amount",
+        "matchedAmount",
+      ])
+    ) ??
+    parsePositiveMicroToUi(
+      readRecordField(
+        orderRecord,
+        side === "BUY"
+          ? [
+              "filled_taker_amount",
+              "filledTakerAmount",
+            ]
+          : [
+              "filled_maker_amount",
+              "filledMakerAmount",
+            ]
+      )
+    );
+
+  const payloadPrice = parsePositiveNumber(
+    readRecordField(orderRecord, [
+      "average_fill_price",
+      "averageFillPrice",
+      "fill_price",
+      "fillPrice",
+      "price",
+    ])
+  );
+
+  const payloadNotional =
+    parsePositiveMicroToUi(
+      readRecordField(
+        orderRecord,
+        side === "BUY"
+          ? [
+              "filled_maker_amount",
+              "filledMakerAmount",
+            ]
+          : [
+              "filled_taker_amount",
+              "filledTakerAmount",
+            ]
+      )
+    ) ??
+    (payloadShares != null && payloadPrice != null
+      ? payloadShares * payloadPrice
+      : null);
+
+  if (
+    payloadShares != null &&
+    payloadNotional != null &&
+    Number.isFinite(payloadShares) &&
+    payloadShares > 0 &&
+    Number.isFinite(payloadNotional) &&
+    payloadNotional > 0
+  ) {
+    return { shares: payloadShares, notionalUsd: payloadNotional, fromPayload: true };
+  }
+
+  // Never fallback to full requested size for partial fills.
+  if (statusNormalized === "partially_filled") return null;
+
+  if (
+    inputs.fallbackPrice != null &&
+    inputs.fallbackSize != null &&
+    Number.isFinite(inputs.fallbackPrice) &&
+    Number.isFinite(inputs.fallbackSize) &&
+    inputs.fallbackPrice > 0 &&
+    inputs.fallbackSize > 0
+  ) {
+    return {
+      shares: inputs.fallbackSize,
+      notionalUsd: inputs.fallbackPrice * inputs.fallbackSize,
+      fromPayload: false,
+    };
+  }
+
   return null;
 }
 
@@ -1732,10 +1890,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const tokenId = extractTokenId(order);
       const { price, size } = derivePriceAndSize(order, side);
-      const statusRaw =
-        isRecord(upstream.payload) && typeof upstream.payload.status === "string"
-          ? upstream.payload.status
-          : "submitted";
+      const statusRaw = extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
 
       const stored = await storeOrder(pool, {
         userId: user.id,
@@ -1759,6 +1914,43 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
         feeDeadline,
       });
+
+      if (stored.kind === "stored" && orderType === "FOK" && tokenId) {
+        const immediateFill = extractPolymarketImmediateFill({
+          payload: upstream.payload,
+          side,
+          status: statusRaw,
+          fallbackPrice: price,
+          fallbackSize: size,
+        });
+        const canApplyOptimistic =
+          immediateFill != null &&
+          (isImmediateExecutionStatus(statusRaw) || immediateFill.fromPayload);
+        if (canApplyOptimistic && immediateFill) {
+          try {
+            await applyOptimisticPositionTrade(pool, {
+              userId: user.id,
+              walletAddress: funder,
+              venue: "polymarket",
+              tokenId,
+              side,
+              shares: immediateFill.shares,
+              notionalUsd: immediateFill.notionalUsd,
+            });
+          } catch (error) {
+            app.log.warn(
+              {
+                error,
+                userId: user.id,
+                walletAddress: funder,
+                tokenId,
+                side,
+              },
+              "Polymarket optimistic position update failed",
+            );
+          }
+        }
+      }
 
       void createNotificationSafe(
         pool,

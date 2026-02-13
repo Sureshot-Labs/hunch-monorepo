@@ -89,12 +89,52 @@ function pickString(
     : undefined;
 }
 
+function pickFirstString(
+  obj: Record<string, unknown> | null,
+  keys: readonly string[],
+): string | undefined {
+  if (!obj) return undefined;
+  for (const key of keys) {
+    const value = pickString(obj, key);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function pickVenueField(
+  obj: Record<string, unknown> | null,
+  key: string,
+): string | undefined {
+  if (!obj) return undefined;
+  const venue = obj.venue;
+  if (!isRecord(venue)) return undefined;
+  const value = venue[key];
+  return typeof value === "string" && value.trim().length ? value : undefined;
+}
+
 function extractLimitlessMeta(
   marketMeta: unknown,
   eventMeta: unknown,
 ): LimitlessMeta {
   const market = parseMetadata(marketMeta);
   const event = parseMetadata(eventMeta);
+  const venueExchange =
+    pickFirstString(market, [
+      "venueExchange",
+      "exchangeAddress",
+      "exchange",
+      "negRiskExchange",
+    ]) ??
+    pickVenueField(market, "exchange") ??
+    pickVenueField(market, "exchangeAddress") ??
+    pickFirstString(event, [
+      "venueExchange",
+      "exchangeAddress",
+      "exchange",
+      "negRiskExchange",
+    ]) ??
+    pickVenueField(event, "exchange") ??
+    pickVenueField(event, "exchangeAddress");
 
   return {
     negRiskRequestId: pickString(market, "negRiskRequestId"),
@@ -102,8 +142,7 @@ function extractLimitlessMeta(
       pickString(market, "negRiskMarketId") ?? pickString(event, "negRiskMarketId"),
     venueAdapter:
       pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
-    venueExchange:
-      pickString(market, "venueExchange") ?? pickString(event, "venueExchange"),
+    venueExchange,
     marketAddress: pickString(market, "address"),
     tradeType: pickString(market, "tradeType"),
   };

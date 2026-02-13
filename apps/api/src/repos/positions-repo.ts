@@ -1,5 +1,7 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import { tx } from "@hunch/infra";
+import { UNREALIZED_PNL_COMPONENT_SQL } from "../lib/pnl-sql.js";
+import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import type { Position } from "../order-types.js";
 import type { PgParams } from "../server-types.js";
 
@@ -70,15 +72,37 @@ async function expandPolymarketWallets(
       ).values(),
     );
   }
-  const { rows } = await pool.query<{ funder_address: string | null }>(
+  const { rows } = await pool.query<{
+    funder_address: string | null;
+    order_wallet: string | null;
+  }>(
     `
-      select distinct funder_address
-      from user_venue_credentials
-      where user_id = $1
-        and lower(wallet_address) = any($2::text[])
-        and venue = 'polymarket'
-        and is_active = true
-        and funder_address is not null
+      with current_funders as (
+        select distinct funder_address
+        from user_venue_credentials
+        where user_id = $1
+          and lower(wallet_address) = any($2::text[])
+          and venue = 'polymarket'
+          and is_active = true
+          and funder_address is not null
+      ),
+      historical_order_wallets as (
+        select distinct wallet_address as order_wallet
+        from orders
+        where user_id = $1
+          and venue = 'polymarket'
+          and lower(signer_address) = any($2::text[])
+          and wallet_address is not null
+      )
+      select
+        current_funders.funder_address,
+        null::text as order_wallet
+      from current_funders
+      union all
+      select
+        null::text as funder_address,
+        historical_order_wallets.order_wallet
+      from historical_order_wallets
     `,
     [inputs.userId, evmWallets],
   );
@@ -93,6 +117,12 @@ async function expandPolymarketWallets(
     if (!isEthAddress(funder)) continue;
     const key = normalizeWalletKey(funder);
     if (key) merged.set(key, funder);
+  }
+  for (const row of rows) {
+    const orderWallet = row.order_wallet;
+    if (!isEthAddress(orderWallet)) continue;
+    const key = normalizeWalletKey(orderWallet);
+    if (key) merged.set(key, orderWallet);
   }
   return Array.from(merged.values());
 }
@@ -192,16 +222,28 @@ export async function fetchPositionPnlSummaryForUserWallet(
         count(*)::text as positions_count,
         count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
         coalesce(sum(p.realized_pnl), 0)::text as realized_pnl_all_time,
-        coalesce(sum(case
-          when p.side <> 'FLAT' and p.size > 0 then p.unrealized_pnl
-          else 0
-        end), 0)::text as unrealized_pnl_current,
+        coalesce(sum(${UNREALIZED_PNL_COMPONENT_SQL}), 0)::text as unrealized_pnl_current,
         coalesce(sum(case
           when p.side <> 'FLAT' and p.size > 0 and p.average_price is not null
             then p.average_price * p.size
           else 0
         end), 0)::text as unrealized_cost_basis_current
       from positions p
+      left join lateral (
+        select
+          umt.market_id,
+          umt.outcome_side
+        from unified_market_tokens umt
+        where umt.token_id = p.token_id
+          and umt.outcome_side in ('YES', 'NO')
+        order by
+          case when umt.venue = p.venue then 0 else 1 end,
+          umt.updated_at desc,
+          umt.market_id asc
+        limit 1
+      ) umt on true
+      left join unified_markets m
+        on m.id = umt.market_id
       ${whereClause}
     `,
     params,
@@ -437,12 +479,19 @@ async function upsertLongPositionsInTx(
     venue: Position["venue"];
     positionScope: PositionScope;
     positions: WalletTokenBalance[];
+    protectRecentFlatsSec?: number;
   },
 ): Promise<number> {
   if (inputs.positions.length === 0) return 0;
 
   const tokenIds = inputs.positions.map((p) => p.tokenId);
   const sizes = inputs.positions.map((p) => p.size);
+  const protectRecentFlatsSec =
+    inputs.protectRecentFlatsSec != null &&
+    Number.isFinite(inputs.protectRecentFlatsSec) &&
+    inputs.protectRecentFlatsSec > 0
+      ? Math.trunc(inputs.protectRecentFlatsSec)
+      : 0;
 
   const result = await client.query(
     `
@@ -478,8 +527,36 @@ async function upsertLongPositionsInTx(
       from unnest($5::text[], $6::text[]) as v(token_id, size)
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
-        side = 'LONG',
-        size = excluded.size,
+        side = case
+          when $7::int > 0
+            and positions.last_updated_at > now() - ($7::int * interval '1 second')
+            and positions.side = 'FLAT'
+            and positions.size = 0
+            and excluded.size > 0
+          then positions.side
+          when $7::int > 0
+            and positions.last_updated_at > now() - ($7::int * interval '1 second')
+            and positions.side = 'LONG'
+            and positions.size > excluded.size
+            and excluded.size > 0
+          then positions.side
+          else 'LONG'
+        end,
+        size = case
+          when $7::int > 0
+            and positions.last_updated_at > now() - ($7::int * interval '1 second')
+            and positions.side = 'FLAT'
+            and positions.size = 0
+            and excluded.size > 0
+          then positions.size
+          when $7::int > 0
+            and positions.last_updated_at > now() - ($7::int * interval '1 second')
+            and positions.side = 'LONG'
+            and positions.size > excluded.size
+            and excluded.size > 0
+          then positions.size
+          else excluded.size
+        end,
         position_scope = case
           when positions.position_scope = 'own' or excluded.position_scope = 'own'
             then 'own'
@@ -495,6 +572,7 @@ async function upsertLongPositionsInTx(
       inputs.positionScope,
       tokenIds,
       sizes,
+      protectRecentFlatsSec,
     ],
   );
 
@@ -510,6 +588,7 @@ async function markMissingPositionsFlatInTx(
     positionScope: PositionScope;
     heldTokenIds: string[];
     tokenIdLike?: string;
+    flattenGraceSec?: number;
   },
 ): Promise<number> {
   let whereClause = "where user_id = $1 and wallet_address = $2 and venue = $3";
@@ -529,6 +608,16 @@ async function markMissingPositionsFlatInTx(
   paramCount += 1;
   whereClause += ` and not (token_id = any($${paramCount}::text[]))`;
   params.push(inputs.heldTokenIds);
+
+  if (
+    inputs.flattenGraceSec != null &&
+    Number.isFinite(inputs.flattenGraceSec) &&
+    inputs.flattenGraceSec > 0
+  ) {
+    paramCount += 1;
+    whereClause += ` and last_updated_at < now() - ($${paramCount} * interval '1 second')`;
+    params.push(Math.trunc(inputs.flattenGraceSec));
+  }
 
   whereClause += " and (side <> 'FLAT' or size <> 0)";
 
@@ -564,10 +653,16 @@ export async function syncWalletPositionsFromTokenBalances(
     positionScope?: PositionScope;
     tokenBalances: WalletTokenBalance[];
     tokenIdLike?: string;
+    flattenGraceSec?: number;
+    protectRecentFlatsSec?: number;
   },
 ): Promise<SyncWalletPositionsResult> {
   const positionScope: PositionScope = inputs.positionScope ?? "own";
-  const heldTokenIds = inputs.tokenBalances.map((b) => b.tokenId);
+  const filteredTokenBalances = inputs.tokenBalances.filter((balance) => {
+    const parsed = Number(balance.size);
+    return Number.isFinite(parsed) && parsed >= MIN_POSITION_SIZE;
+  });
+  const heldTokenIds = filteredTokenBalances.map((b) => b.tokenId);
 
   const { rows: knownRows } = await pool.query<{ token_id: string }>(
     `
@@ -580,7 +675,7 @@ export async function syncWalletPositionsFromTokenBalances(
   );
 
   const knownSet = new Set(knownRows.map((row) => row.token_id));
-  const knownTokenBalances = inputs.tokenBalances.filter((b) =>
+  const knownTokenBalances = filteredTokenBalances.filter((b) =>
     knownSet.has(b.tokenId),
   );
 
@@ -591,6 +686,7 @@ export async function syncWalletPositionsFromTokenBalances(
       venue: inputs.venue,
       positionScope,
       positions: knownTokenBalances,
+      protectRecentFlatsSec: inputs.protectRecentFlatsSec,
     });
 
     const flattenedPositions = await markMissingPositionsFlatInTx(client, {
@@ -600,6 +696,7 @@ export async function syncWalletPositionsFromTokenBalances(
       positionScope,
       heldTokenIds,
       tokenIdLike: inputs.tokenIdLike,
+      flattenGraceSec: inputs.flattenGraceSec,
     });
 
     return { upsertedPositions, flattenedPositions };

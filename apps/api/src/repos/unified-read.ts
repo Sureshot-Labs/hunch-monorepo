@@ -1885,7 +1885,6 @@ export async function fetchMarketsByTokenIds(
       select best_bid, best_ask
       from unified_book_top
       where token_id = token_yes.token_id
-        and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
       order by ts desc
       limit 1
@@ -1894,7 +1893,6 @@ export async function fetchMarketsByTokenIds(
       select best_bid, best_ask
       from unified_book_top
       where token_id = token_no.token_id
-        and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
       order by ts desc
       limit 1

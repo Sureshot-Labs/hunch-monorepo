@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { AuthService, createAuthMiddleware } from "../auth.js";
+import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { pool } from "../db.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
+import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
   fetchPositionPnlSummaryForUserWallet,
   fetchPositionsForUserWallet,
@@ -80,31 +82,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
-  const resolveWalletAddresses = async (
-    userId: string,
-    walletAddress: string | undefined,
-    requestedWallets: string[] | undefined,
-  ): Promise<string[]> => {
-    if (requestedWallets && requestedWallets.length) {
-      const wallets = await AuthService.getUserWallets(userId);
-      const walletMap = new Map(
-        wallets.map((wallet) => [
-          wallet.walletAddress.toLowerCase(),
-          wallet.walletAddress,
-        ]),
-      );
-      const resolved = requestedWallets
-        .map((address) => address.trim().toLowerCase())
-        .map((address) => walletMap.get(address))
-        .filter((address): address is string => Boolean(address));
-      const uniqueResolved = Array.from(new Set(resolved));
-      return uniqueResolved;
-    }
-
-    if (!walletAddress) return [];
-    return [walletAddress];
-  };
-
   const resolveTokenIdsForFilter = async (
     marketId: string | undefined,
     eventId: string | undefined,
@@ -163,7 +140,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
@@ -177,6 +154,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           query.marketId,
           query.eventId,
         );
+        const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
 
         const positions =
           tokenIds != null
@@ -189,7 +167,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                   venue,
                   venues,
                   includeHidden: query.includeHidden,
-                  minSize: query.minSize,
+                  minSize: effectiveMinSize,
                 })
             : await fetchPositionsForUserWallet(pool, {
                 userId: user.id,
@@ -197,7 +175,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 venue,
                 venues,
                 includeHidden: query.includeHidden,
-                minSize: query.minSize,
+                minSize: effectiveMinSize,
               });
 
         if (positions.length) {
@@ -248,7 +226,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
@@ -307,7 +285,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
@@ -317,6 +295,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
+        const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
         const positions = await fetchPositionsForUserWalletByTokenIds(pool, {
           userId: user.id,
           walletAddresses,
@@ -324,7 +303,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           venue,
           venues,
           includeHidden: query.includeHidden,
-          minSize: query.minSize,
+          minSize: effectiveMinSize,
         });
 
         if (positions.length) {
@@ -420,6 +399,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venues = query.venues;
       const usingVenueList = Boolean(venues && venues.length);
+      const forceSync = query.force === true;
 
       try {
         if (!query.wallets || query.wallets.length === 0) {
@@ -441,14 +421,14 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const baseWalletAddresses = query.wallets?.length
-          ? await resolveWalletAddresses(
+          ? await resolveRequestedWalletAddresses(
               user.id,
               walletAddress,
               query.wallets,
             )
           : [walletAddress];
         const expandedWalletAddresses = query.wallets?.length
-          ? await resolveWalletAddresses(
+          ? await resolveRequestedWalletAddresses(
               user.id,
               walletAddress,
               query.wallets,
@@ -484,7 +464,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         };
 
         const executeTask = async (task: SyncTask) => {
-          if (r && cooldownSec > 0) {
+          if (!forceSync && r && cooldownSec > 0) {
             const key = `positions:sync:${user.id}:${task.walletAddress}:${
               task.venue ?? "all"
             }`;
@@ -555,7 +535,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           );
 
           const polymarketWallets = venuesToSync.includes("polymarket")
-            ? await resolveWalletAddresses(
+            ? await resolveRequestedWalletAddresses(
                 user.id,
                 walletAddress,
                 query.wallets,

@@ -45,6 +45,9 @@ type MarkRow = {
   best_bid: string | null;
   best_ask: string | null;
   mid: string | null;
+  outcome_side: string | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,6 +114,29 @@ function normalizeSide(value: unknown): "BUY" | "SELL" | null {
     if (value === 0) return "BUY";
     if (value === 1) return "SELL";
   }
+  return null;
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
+function resolveResolvedMark(row: MarkRow): number | null {
+  const side = row.outcome_side?.toUpperCase();
+  if (side !== "YES" && side !== "NO") return null;
+
+  const resolvedOutcome = row.resolved_outcome?.toUpperCase();
+  if (resolvedOutcome === "YES" || resolvedOutcome === "NO") {
+    return resolvedOutcome === side ? 1 : 0;
+  }
+
+  const resolvedPctRaw = parseNumber(row.resolved_outcome_pct);
+  if (resolvedPctRaw != null) {
+    const yesPrice = clamp01(resolvedPctRaw / 10000);
+    return side === "YES" ? yesPrice : 1 - yesPrice;
+  }
+
   return null;
 }
 
@@ -431,20 +457,39 @@ async function fetchMarksByToken(
 
   const { rows } = await pool.query<MarkRow>(
     `
-      select distinct on (token_id)
-        token_id,
-        best_bid,
-        best_ask,
-        mid
-      from unified_book_top
-      where token_id = any($1::text[])
-      order by token_id, ts desc
+      select
+        mt.token_id,
+        top.best_bid,
+        top.best_ask,
+        top.mid,
+        mt.outcome_side,
+        m.resolved_outcome,
+        m.resolved_outcome_pct::text as resolved_outcome_pct
+      from unified_market_tokens mt
+      left join lateral (
+        select
+          ubt.best_bid,
+          ubt.best_ask,
+          ubt.mid
+        from unified_book_top ubt
+        where ubt.token_id = mt.token_id
+        order by ubt.ts desc
+        limit 1
+      ) top on true
+      left join unified_markets m
+        on m.id = mt.market_id
+      where mt.token_id = any($1::text[])
     `,
     [tokenIds],
   );
 
   const map = new Map<string, number | null>();
   for (const row of rows) {
+    const resolvedMark = resolveResolvedMark(row);
+    if (resolvedMark != null) {
+      map.set(row.token_id, resolvedMark);
+      continue;
+    }
     const bid = parseNumber(row.best_bid);
     const ask = parseNumber(row.best_ask);
     const mid = parseNumber(row.mid);

@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { EFFECTIVE_PNL_SQL } from "../lib/pnl-sql.js";
 import type { PgParams } from "../server-types.js";
 
 export type RewardsPolicyRow = {
@@ -456,6 +457,83 @@ function mapLeaderboardRow(row: RewardsLeaderboardRowDb): RewardsLeaderboardRow 
   };
 }
 
+function buildConnectedWalletScopeSql(userIdPlaceholder?: string): string {
+  const userWhere = userIdPlaceholder
+    ? `where uw.user_id = ${userIdPlaceholder}`
+    : "";
+  const userAnd = userIdPlaceholder
+    ? `and uvc.user_id = ${userIdPlaceholder}`
+    : "";
+  const userAndOrders = userIdPlaceholder
+    ? `and o.user_id = ${userIdPlaceholder}`
+    : "";
+
+  return `
+    wallet_scope as (
+      select distinct
+        uw.user_id,
+        case
+          when uw.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(uw.wallet_address)
+          else uw.wallet_address
+        end as wallet_key
+      from user_wallets uw
+      ${userWhere}
+      union
+      select distinct
+        uvc.user_id,
+        lower(uvc.funder_address) as wallet_key
+      from user_venue_credentials uvc
+      join user_wallets uw
+        on uw.user_id = uvc.user_id
+       and lower(uw.wallet_address) = lower(uvc.wallet_address)
+      where uvc.venue = 'polymarket'
+        and uvc.is_active = true
+        and uvc.funder_address is not null
+        ${userAnd}
+      union
+      select distinct
+        o.user_id,
+        lower(o.wallet_address) as wallet_key
+      from orders o
+      join user_wallets uw
+        on uw.user_id = o.user_id
+       and lower(uw.wallet_address) = lower(o.signer_address)
+      where o.venue = 'polymarket'
+        and o.wallet_address is not null
+        ${userAndOrders}
+    )
+  `;
+}
+
+function buildPnlCteSql(userIdPlaceholder?: string): string {
+  const userFilter = userIdPlaceholder
+    ? `and p.user_id = ${userIdPlaceholder}`
+    : "";
+  return `
+    ${buildConnectedWalletScopeSql(userIdPlaceholder)},
+    pnl as (
+      select
+        p.user_id,
+        coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::numeric as pnl_usd
+      from positions p
+      join wallet_scope ws
+        on ws.user_id = p.user_id
+       and ws.wallet_key = case
+         when p.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(p.wallet_address)
+         else p.wallet_address
+       end
+      left join unified_market_tokens umt
+        on umt.token_id = p.token_id
+       and umt.outcome_side in ('YES', 'NO')
+      left join unified_markets m
+        on m.id = umt.market_id
+      where p.position_scope = 'own'
+        ${userFilter}
+      group by p.user_id
+    )
+  `;
+}
+
 async function fetchVolumeRank(
   pool: DbQuery,
   inputs: { value: number; startAt: Date | null },
@@ -490,12 +568,12 @@ async function fetchPnlRank(
 ): Promise<number> {
   const { rows } = await pool.query<{ higher: string | null }>(
     `
-      with totals as (
-        select user_id,
-               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
-        from positions
-        where position_scope = 'own'
-        group by user_id
+      with ${buildPnlCteSql()},
+      totals as (
+        select
+          user_id,
+          pnl_usd
+        from pnl
       )
       select count(*)::text as higher
       from totals
@@ -523,13 +601,7 @@ export async function fetchRewardsLeaderboardRows(
 
     const { rows } = await pool.query<RewardsLeaderboardRowDb>(
       `
-        with pnl as (
-          select user_id,
-                 coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
-          from positions
-          where position_scope = 'own'
-          group by user_id
-        ),
+        with ${buildPnlCteSql()},
         volume as (
           select user_id,
                  coalesce(sum(notional_usd), 0)::numeric as volume_usd
@@ -589,13 +661,7 @@ export async function fetchRewardsLeaderboardRows(
         ${whereClause}
         group by user_id
       ),
-      pnl as (
-        select user_id,
-               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
-        from positions
-        where position_scope = 'own'
-        group by user_id
-      ),
+      ${buildPnlCteSql()},
       ranked as (
         select
           user_id,
@@ -654,14 +720,7 @@ export async function fetchRewardsLeaderboardMe(
         ${volumeWhereClause}
         group by user_id
       ),
-      pnl as (
-        select user_id,
-               coalesce(sum(realized_pnl + unrealized_pnl), 0)::numeric as pnl_usd
-        from positions
-        where user_id = $1
-          and position_scope = 'own'
-        group by user_id
-      )
+      ${buildPnlCteSql("$1")}
       select
         u.id as user_id,
         0 as rank,

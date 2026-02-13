@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { AuthService, createAuthMiddleware } from "../auth.js";
+import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
   fetchUnifiedOrderById,
   fetchUnifiedOrders,
@@ -64,30 +65,6 @@ const OPEN_ORDER_STATUSES: string[] = [
 export const ordersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
-  const resolveWalletAddresses = async (
-    userId: string,
-    walletAddress: string | undefined,
-    requestedWallets: string[] | undefined,
-  ): Promise<string[]> => {
-    if (requestedWallets && requestedWallets.length) {
-      const wallets = await AuthService.getUserWallets(userId);
-      const walletMap = new Map(
-        wallets.map((wallet) => [
-          wallet.walletAddress.toLowerCase(),
-          wallet.walletAddress,
-        ]),
-      );
-      const resolved = requestedWallets
-        .map((address) => address.trim().toLowerCase())
-        .map((address) => walletMap.get(address))
-        .filter((address): address is string => Boolean(address));
-      return Array.from(new Set(resolved));
-    }
-
-    if (!walletAddress) return [];
-    return [walletAddress];
-  };
-
   const resolveMarketIds = async (
     eventId: string | undefined,
   ): Promise<string[]> => {
@@ -124,7 +101,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
@@ -211,7 +188,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
@@ -299,7 +276,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       try {
-        const walletAddresses = await resolveWalletAddresses(
+        const walletAddresses = await resolveRequestedWalletAddresses(
           user.id,
           walletAddress,
           query.wallets,
