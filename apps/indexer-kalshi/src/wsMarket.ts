@@ -8,6 +8,7 @@ import { env } from "./env";
 import { redis } from "./redis";
 import { pool } from "./db";
 import { writeUnifiedBookTop } from "@hunch/db";
+import { createTopTickGate } from "@hunch/infra";
 
 // derive top-of-book from ws orderbook payload
 function deriveTop(ob: { yes?: [number, number][]; no?: [number, number][] }) {
@@ -68,6 +69,35 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let lastPong = Date.now();
 let msgCount = 0;
 let msgCountStartTime = Date.now();
+
+async function publishKalshiTopNow(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
+  const tick = {
+    token_id: tokenId,
+    best_bid: bestBid,
+    best_ask: bestAsk,
+    ts: tsMs,
+  };
+  const tickJson = JSON.stringify(tick);
+  await Promise.all([
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
+    redis.set(`top:${tokenId}`, tickJson, { EX: 60 }),
+    redis.publish(`prices:${tokenId}`, tickJson),
+  ]);
+}
+
+const topTickGate = createTopTickGate({
+  onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
+    void publishKalshiTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
+      console.warn("[WS] deferred top publish failed", tokenId, String(error));
+    });
+  },
+});
 
 function clearTimers() {
   if (pingTimer) {
@@ -156,32 +186,40 @@ function connect() {
       await redis.set(`book:kalshi:${t}`, JSON.stringify(m.data), { EX: 5 });
 
       const top = deriveTop(m.data);
-      const ts = new Date();
-      const tsMs = ts.getTime();
+      const tsMs = Date.now();
       const yesTokenId = `kalshi:${t}:YES`;
       const noTokenId = `kalshi:${t}:NO`;
+      const publishYes = topTickGate.shouldPublish({
+        tokenId: yesTokenId,
+        bestBid: top.yesBid,
+        bestAsk: top.yesAsk,
+        tsMs,
+      });
+      const publishNo = topTickGate.shouldPublish({
+        tokenId: noTokenId,
+        bestBid: top.noBid,
+        bestAsk: top.noAsk,
+        tsMs,
+      });
 
-      const yesTick = {
-        token_id: yesTokenId,
-        best_bid: top.yesBid,
-        best_ask: top.yesAsk,
-        ts: tsMs,
-      };
-      const noTick = {
-        token_id: noTokenId,
-        best_bid: top.noBid,
-        best_ask: top.noAsk,
-        ts: tsMs,
-      };
+      if (!publishYes && !publishNo) {
+        msgCount += 1;
+        return;
+      }
 
-      await Promise.all([
-        writeUnifiedBookTop(pool, yesTokenId, top.yesBid, top.yesAsk, ts),
-        writeUnifiedBookTop(pool, noTokenId, top.noBid, top.noAsk, ts),
-        redis.set(`top:${yesTokenId}`, JSON.stringify(yesTick), { EX: 60 }),
-        redis.set(`top:${noTokenId}`, JSON.stringify(noTick), { EX: 60 }),
-        redis.publish(`prices:${yesTokenId}`, JSON.stringify(yesTick)),
-        redis.publish(`prices:${noTokenId}`, JSON.stringify(noTick)),
-      ]);
+      const writes: Array<Promise<unknown>> = [];
+      if (publishYes) {
+        writes.push(
+          publishKalshiTopNow(yesTokenId, top.yesBid, top.yesAsk, tsMs),
+        );
+      }
+      if (publishNo) {
+        writes.push(
+          publishKalshiTopNow(noTokenId, top.noBid, top.noAsk, tsMs),
+        );
+      }
+
+      await Promise.all(writes);
 
       msgCount += 1;
     } catch (e) {

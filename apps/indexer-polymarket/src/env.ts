@@ -30,6 +30,31 @@ function parseOptionalFloat(v: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function parseBoolean(
+  v: string | undefined,
+  fallback: boolean,
+): boolean {
+  if (v == null || v.trim() === "") return fallback;
+  const normalized = v.trim().toLowerCase();
+  if (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  ) {
+    return true;
+  }
+  if (
+    normalized === "0" ||
+    normalized === "false" ||
+    normalized === "no" ||
+    normalized === "off"
+  ) {
+    return false;
+  }
+  return fallback;
+}
+
 function clampFloat(
   v: number | undefined,
   { min, max, fallback }: { min: number; max: number; fallback: number },
@@ -113,6 +138,10 @@ const wsHotShare = clampFloat(wsHotShareRaw, {
   max: 1,
   fallback: 0.5,
 });
+const wsCustomFeatureEnabled = parseBoolean(
+  process.env.POLYMARKET_WS_CUSTOM_FEATURE_ENABLED,
+  true,
+);
 
 export const env = {
   dbUrl: req("DATABASE_URL"),
@@ -136,4 +165,5 @@ export const env = {
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
   wsHotShare,
+  wsCustomFeatureEnabled,
 };

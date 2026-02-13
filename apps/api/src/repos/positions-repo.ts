@@ -193,7 +193,34 @@ export async function fetchPositionPnlSummaryForUserWallet(
         count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
         coalesce(sum(p.realized_pnl), 0)::text as realized_pnl_all_time,
         coalesce(sum(case
-          when p.side <> 'FLAT' and p.size > 0 then p.unrealized_pnl
+          when p.side <> 'FLAT' and p.size > 0 then
+            coalesce(
+              case
+                when p.average_price is not null
+                 and umt.outcome_side in ('YES', 'NO')
+                 and upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
+                  then (
+                    case
+                      when upper(m.resolved_outcome) = 'YES' and umt.outcome_side = 'YES' then 1::numeric
+                      when upper(m.resolved_outcome) = 'NO' and umt.outcome_side = 'NO' then 1::numeric
+                      else 0::numeric
+                    end * p.size
+                  ) - (p.average_price * p.size)
+                when p.average_price is not null
+                 and umt.outcome_side in ('YES', 'NO')
+                 and m.resolved_outcome_pct is not null
+                  then (
+                    case
+                      when umt.outcome_side = 'YES'
+                        then least(greatest(m.resolved_outcome_pct::numeric / 10000.0, 0::numeric), 1::numeric)
+                      else 1::numeric - least(greatest(m.resolved_outcome_pct::numeric / 10000.0, 0::numeric), 1::numeric)
+                    end * p.size
+                  ) - (p.average_price * p.size)
+                else null
+              end,
+              p.unrealized_pnl,
+              0
+            )
           else 0
         end), 0)::text as unrealized_pnl_current,
         coalesce(sum(case
@@ -202,6 +229,21 @@ export async function fetchPositionPnlSummaryForUserWallet(
           else 0
         end), 0)::text as unrealized_cost_basis_current
       from positions p
+      left join lateral (
+        select
+          umt.market_id,
+          umt.outcome_side
+        from unified_market_tokens umt
+        where umt.token_id = p.token_id
+          and umt.outcome_side in ('YES', 'NO')
+        order by
+          case when umt.venue = p.venue then 0 else 1 end,
+          umt.updated_at desc,
+          umt.market_id asc
+        limit 1
+      ) umt on true
+      left join unified_markets m
+        on m.id = umt.market_id
       ${whereClause}
     `,
     params,

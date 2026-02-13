@@ -5,6 +5,7 @@ import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -192,14 +193,13 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             }
           }
 
-          const acceptingOrders =
-            row.pm_accepting_orders != null
-              ? Boolean(row.pm_accepting_orders)
-              : row.market_status === "ACTIVE" &&
-                (row.expiration_time == null ||
-                  new Date(String(row.expiration_time)) > now) &&
-                (row.close_time == null ||
-                  new Date(String(row.close_time)) > now);
+          const acceptingOrders = computeAcceptingOrders({
+            status: row.market_status,
+            closeTime: row.close_time,
+            expirationTime: row.expiration_time,
+            pmAcceptingOrders: row.pm_accepting_orders,
+            nowMs: now.getTime(),
+          });
           const tradeType =
             row.venue === "limitless" ? limitlessMeta?.tradeType ?? null : null;
           const marketAddress =
@@ -517,10 +517,12 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
             market.pm_order_min_size != null
               ? Number(market.pm_order_min_size)
               : null,
-          acceptingOrders:
-            market.pm_accepting_orders != null
-              ? Boolean(market.pm_accepting_orders)
-              : null,
+          acceptingOrders: computeAcceptingOrders({
+            status: market.market_status,
+            closeTime: market.close_time,
+            expirationTime: market.expiration_time,
+            pmAcceptingOrders: market.pm_accepting_orders,
+          }),
           negRisk:
             market.venue === "polymarket"
               ? market.pm_neg_risk != null

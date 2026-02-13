@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   watchlistAddBodySchema,
@@ -177,7 +178,12 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
             openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
             liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
-            acceptingOrders: r.market_status === "ACTIVE",
+            acceptingOrders: computeAcceptingOrders({
+              status: typeof r.market_status === "string" ? r.market_status : null,
+              closeTime: r.close_time,
+              expirationTime: r.expiration_time,
+              pmAcceptingOrders: r.pm_accepting_orders,
+            }),
             tokens,
             conditionId: (r.condition_id as string | null) || null,
             category: r.market_category ?? null,

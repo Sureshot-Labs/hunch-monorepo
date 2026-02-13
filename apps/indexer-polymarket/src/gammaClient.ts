@@ -30,6 +30,15 @@ function resolveEventsUrl(): string {
   return `${base}/events`;
 }
 
+function resolveMarketsUrl(): string {
+  const base = env.gammaBase.replace(/\/+$/, "");
+  return `${base}/markets`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value != null;
+}
+
 function setOptionalBool(
   sp: URLSearchParams,
   k: string,
@@ -197,4 +206,42 @@ export async function fetchEventsByIds(
   }
 
   return out;
+}
+
+function extractFirstMarketPayload(payload: unknown): Record<string, unknown> | null {
+  if (Array.isArray(payload)) {
+    const first = payload[0];
+    return isRecord(first) ? first : null;
+  }
+  if (!isRecord(payload)) return null;
+  const data = payload.data;
+  if (Array.isArray(data)) {
+    const first = data[0];
+    return isRecord(first) ? first : null;
+  }
+  return payload;
+}
+
+export async function fetchMarketById(
+  marketId: string,
+): Promise<Record<string, unknown> | null> {
+  const encoded = encodeURIComponent(marketId);
+  const directUrl = `${resolveMarketsUrl()}/${encoded}`;
+  const queryUrl = `${resolveMarketsUrl()}?id=${encoded}&limit=1&offset=0`;
+
+  for (const url of [directUrl, queryUrl]) {
+    try {
+      const response = await fetch(url, {
+        headers: { accept: "application/json" },
+      });
+      if (!response.ok) continue;
+      const payload = await response.json();
+      const market = extractFirstMarketPayload(payload);
+      if (market) return market;
+    } catch {
+      // Try fallback URL before failing.
+    }
+  }
+
+  return null;
 }

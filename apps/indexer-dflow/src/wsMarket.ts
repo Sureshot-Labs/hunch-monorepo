@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import PQueue from "p-queue";
 import { writeUnifiedBookTop } from "@hunch/db";
+import { createTopTickGate } from "@hunch/infra";
 
 import { env } from "./env.js";
 import { log } from "./log.js";
@@ -38,6 +39,16 @@ const missingTickers = new Set<string>();
 let msgCount = 0;
 let msgCountStart = Date.now();
 let msgLogTimer: NodeJS.Timeout | null = null;
+const topTickGate = createTopTickGate({
+  onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
+    void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
+      log.warn("Deferred top tick publish failed", {
+        tokenId,
+        error: String(error),
+      });
+    });
+  },
+});
 
 function bindRedisErrorOnce() {
   if (redisBound) return;
@@ -98,8 +109,22 @@ async function publishTokenTop(
   ts: Date,
 ): Promise<void> {
   if (bestBid == null && bestAsk == null) return;
-
   const tsMs = ts.getTime();
+  if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
+    return;
+  }
+
+  await publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs);
+}
+
+async function publishTokenTopNow(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
+
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -121,7 +146,7 @@ async function publishTokenTop(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, ts),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
 }
