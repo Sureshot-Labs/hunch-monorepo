@@ -34,6 +34,9 @@ export type WatchlistRow = {
   market_image: string | null;
   market_icon: string | null;
   market_status: unknown;
+  close_time: unknown;
+  expiration_time: unknown;
+  pm_accepting_orders: boolean | null;
   last_update: unknown;
 };
 
@@ -86,10 +89,15 @@ export async function fetchWatchlistPage(
       m.image as market_image,
       m.icon as market_icon,
       m.status as market_status,
+      m.close_time,
+      m.expiration_time,
+      pm.accepting_orders as pm_accepting_orders,
       m.updated_at as last_update
     FROM user_watchlist w
     JOIN unified_markets m ON m.id = w.market_id
     JOIN unified_events e ON e.id = m.event_id
+    LEFT JOIN polymarket_markets pm
+      ON pm.id = m.venue_market_id AND m.venue = 'polymarket'
     WHERE w.user_id = $1
     ${statusFilter}
     ORDER BY w.created_at DESC

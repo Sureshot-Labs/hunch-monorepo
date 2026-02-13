@@ -3,7 +3,10 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getRedisStatus } from "../redis.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
-import { subscribeToPriceTicks } from "../lib/prices-stream-manager.js";
+import {
+  subscribeToMarketStates,
+  subscribeToPriceTicks,
+} from "../lib/prices-stream-manager.js";
 
 /**
  * GET /prices/stream
@@ -81,12 +84,23 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
           } catch {
             // ignore malformed cache entries
           }
+
+          try {
+            const state = await r.get(`market_state:${id}`);
+            if (state) {
+              const parsed = parseJson(state);
+              if (parsed) send("market_state", parsed);
+            }
+          } catch {
+            // ignore malformed cache entries
+          }
         }),
       );
 
-      let unsubscribe: (() => void) | null = null;
+      let unsubscribeTicks: (() => void) | null = null;
+      let unsubscribeMarketState: (() => void) | null = null;
       try {
-        unsubscribe = await subscribeToPriceTicks(ids, (payload) => {
+        unsubscribeTicks = await subscribeToPriceTicks(ids, (payload) => {
           send("tick", payload);
         });
       } catch (err) {
@@ -98,6 +112,14 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
           // ignore; connection may already be closed
         }
         return;
+      }
+
+      try {
+        unsubscribeMarketState = await subscribeToMarketStates(ids, (payload) => {
+          send("market_state", payload);
+        });
+      } catch (err) {
+        request.log.warn({ err }, "market-state SSE subscribe failed");
       }
 
       // heartbeat so proxies don’t kill idle streams
@@ -112,7 +134,8 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       // cleanup
       request.raw.on("close", () => {
         clearInterval(hb);
-        unsubscribe?.();
+        unsubscribeTicks?.();
+        unsubscribeMarketState?.();
       });
     },
   );

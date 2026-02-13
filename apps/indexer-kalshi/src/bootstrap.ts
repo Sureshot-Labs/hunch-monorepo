@@ -14,12 +14,54 @@ import {
 import { pool } from "./db";
 import {
   buildTopMarketsText,
+  createTopTickGate,
   enqueueEmbedItems,
   type EmbedQueueItem,
 } from "@hunch/infra";
 import PQueue from "p-queue";
 import { getOrderbookTop } from "./orderbookClient";
 import { v4 as uuid } from "uuid";
+
+async function publishKalshiTopNow(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
+  await writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs));
+  await redis.set(
+    `book:${tokenId}`,
+    JSON.stringify({
+      token_id: tokenId,
+      bids: bestBid != null ? [{ price: String(bestBid), size: "NA" }] : [],
+      asks: bestAsk != null ? [{ price: String(bestAsk), size: "NA" }] : [],
+      timestamp: tsMs.toString(),
+    }),
+    { EX: 5 },
+  );
+  const tick = {
+    token_id: tokenId,
+    best_bid: bestBid,
+    best_ask: bestAsk,
+    ts: tsMs,
+  };
+  const tickJson = JSON.stringify(tick);
+  await redis.set(`top:${tokenId}`, tickJson, { EX: 60 });
+  await redis.publish(`prices:${tokenId}`, tickJson);
+}
+
+const topTickGate = createTopTickGate({
+  onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
+    void publishKalshiTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
+      console.warn(
+        "[kalshi] Deferred top tick publish failed",
+        tokenId,
+        String(error),
+      );
+    });
+  },
+});
 
 function parseKalshiTicker(tokenId: string): string | null {
   if (!tokenId.startsWith("kalshi:")) return null;
@@ -180,38 +222,18 @@ export async function bootstrapKalshi() {
           const tops = await getOrderbookTop(t);
           for (const s of tops) {
             const tokenId = `kalshi:${t}:${s.side}`;
-            await writeUnifiedBookTop(
-              pool,
-              tokenId,
-              s.bestBid,
-              s.bestAsk,
-              s.ts,
-            );
-            await redis.set(
-              `book:${tokenId}`,
-              JSON.stringify({
-                token_id: tokenId,
-                bids:
-                  s.bestBid != null
-                    ? [{ price: String(s.bestBid), size: "NA" }]
-                    : [],
-                asks:
-                  s.bestAsk != null
-                    ? [{ price: String(s.bestAsk), size: "NA" }]
-                    : [],
-                timestamp: s.ts.getTime().toString(),
-              }),
-              { EX: 5 },
-            );
-            const tick = {
-              token_id: tokenId,
-              best_bid: s.bestBid,
-              best_ask: s.bestAsk,
-              ts: s.ts.getTime(),
-            };
-            const tickJson = JSON.stringify(tick);
-            await redis.set(`top:${tokenId}`, tickJson, { EX: 60 });
-            await redis.publish(`prices:${tokenId}`, tickJson);
+            const tsMs = s.ts.getTime();
+            if (
+              !topTickGate.shouldPublish({
+                tokenId,
+                bestBid: s.bestBid,
+                bestAsk: s.bestAsk,
+                tsMs,
+              })
+            ) {
+              continue;
+            }
+            await publishKalshiTopNow(tokenId, s.bestBid, s.bestAsk, tsMs);
           }
         } catch (e) {
           console.warn("book snapshot failed for", t, String(e));

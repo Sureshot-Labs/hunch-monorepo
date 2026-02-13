@@ -4,6 +4,7 @@ import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
   buildTopMarketsText,
   enqueueEmbedItems,
+  createTopTickGate,
   type EmbedQueueItem,
 } from "@hunch/infra";
 import {
@@ -52,6 +53,16 @@ type SyncCounters = {
 const STATUS_BATCH_LIMIT = 100;
 const STATUS_POSITION_TOKEN_LIMIT = 200;
 const TRADE_MIN_SIZE = 1e-9;
+const topTickGate = createTopTickGate({
+  onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
+    void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
+      log.warn("Deferred top tick publish failed", {
+        tokenId,
+        error: String(error),
+      });
+    });
+  },
+});
 
 type TradeSide = "BUY" | "SELL";
 
@@ -180,12 +191,27 @@ async function publishTokenTop(
   ts: Date,
 ): Promise<void> {
   if (bestBid == null && bestAsk == null) return;
+  const tsMs = ts.getTime();
+  if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
+    return;
+  }
+
+  await publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs);
+}
+
+async function publishTokenTopNow(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
 
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
     best_ask: bestAsk,
-    ts: ts.getTime(),
+    ts: tsMs,
   };
   const tickJson = JSON.stringify(tick);
 
@@ -193,7 +219,7 @@ async function publishTokenTop(
     token_id: tokenId,
     bids: buildBookSide(bestBid),
     asks: buildBookSide(bestAsk),
-    timestamp: ts.getTime().toString(),
+    timestamp: tsMs.toString(),
   };
 
   const multi = redis.multi();
@@ -202,7 +228,7 @@ async function publishTokenTop(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, ts),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
 }

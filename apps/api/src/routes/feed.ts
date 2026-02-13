@@ -6,6 +6,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
+import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import { feedQuerySchema } from "../schemas/feed.js";
@@ -120,28 +121,12 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
 
   const marketStatus =
     typeof rRow.market_status === "string" ? rRow.market_status : null;
-  const closeTime =
-    rRow.market_close_time instanceof Date
-      ? rRow.market_close_time.getTime()
-      : typeof rRow.market_close_time === "string"
-        ? Date.parse(rRow.market_close_time)
-        : null;
-  const expirationTime =
-    rRow.market_expiration_time instanceof Date
-      ? rRow.market_expiration_time.getTime()
-      : typeof rRow.market_expiration_time === "string"
-        ? Date.parse(rRow.market_expiration_time)
-        : null;
-  const nowMs = Date.now();
-  const isClosedByTime =
-    (closeTime != null && !Number.isNaN(closeTime) && closeTime <= nowMs) ||
-    (expirationTime != null &&
-      !Number.isNaN(expirationTime) &&
-      expirationTime <= nowMs);
-  const acceptingOrders =
-    marketStatus != null
-      ? marketStatus === "ACTIVE" && !isClosedByTime
-      : !isClosedByTime;
+  const acceptingOrders = computeAcceptingOrders({
+    status: marketStatus,
+    closeTime: rRow.market_close_time,
+    expirationTime: rRow.market_expiration_time,
+    pmAcceptingOrders: rRow.pm_accepting_orders ?? null,
+  });
 
   return {
     venue: String(rRow.venue),

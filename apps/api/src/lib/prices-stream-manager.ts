@@ -2,10 +2,10 @@ import type { RedisClientType as RedisClient } from "redis";
 
 import { getRedis } from "../redis.js";
 
-type TickListener = (payload: unknown) => void;
+type StreamListener = (payload: unknown) => void;
 
 type ChannelState = {
-  listeners: Set<TickListener>;
+  listeners: Set<StreamListener>;
   subscribed: boolean;
   inFlight: Promise<void> | null;
   handler: (message: string) => void;
@@ -16,8 +16,8 @@ let sharedSubscriberPromise: Promise<RedisClient | null> | null = null;
 
 const channels = new Map<string, ChannelState>();
 
-function channelName(tokenId: string): string {
-  return `prices:${tokenId}`;
+function channelName(prefix: string, tokenId: string): string {
+  return `${prefix}:${tokenId}`;
 }
 
 function parseJson(data: string): unknown | null {
@@ -87,9 +87,8 @@ async function getSharedSubscriber(): Promise<RedisClient | null> {
 
 async function ensureChannelSubscribed(
   sub: RedisClient,
-  tokenId: string,
+  channel: string,
 ): Promise<void> {
-  const channel = channelName(tokenId);
   const state = getOrCreateChannelState(channel);
 
   if (state.inFlight) await state.inFlight;
@@ -110,9 +109,8 @@ async function ensureChannelSubscribed(
 
 async function maybeUnsubscribe(
   sub: RedisClient,
-  tokenId: string,
+  channel: string,
 ): Promise<void> {
-  const channel = channelName(tokenId);
   const state = getOrCreateChannelState(channel);
 
   if (state.inFlight) await state.inFlight;
@@ -127,9 +125,10 @@ async function maybeUnsubscribe(
   }
 }
 
-export async function subscribeToPriceTicks(
+async function subscribeToChannels(
+  prefix: string,
   tokenIds: string[],
-  listener: TickListener,
+  listener: StreamListener,
 ): Promise<() => void> {
   const uniqueTokenIds = Array.from(new Set(tokenIds));
   if (uniqueTokenIds.length === 0) return () => undefined;
@@ -140,23 +139,39 @@ export async function subscribeToPriceTicks(
   }
 
   for (const tokenId of uniqueTokenIds) {
-    const channel = channelName(tokenId);
+    const channel = channelName(prefix, tokenId);
     const state = getOrCreateChannelState(channel);
     state.listeners.add(listener);
   }
 
   await Promise.all(
-    uniqueTokenIds.map((id) => ensureChannelSubscribed(sub, id)),
+    uniqueTokenIds.map((id) => ensureChannelSubscribed(sub, channelName(prefix, id))),
   );
 
   return () => {
     for (const tokenId of uniqueTokenIds) {
-      const channel = channelName(tokenId);
+      const channel = channelName(prefix, tokenId);
       const state = channels.get(channel);
       if (!state) continue;
       state.listeners.delete(listener);
     }
 
-    void Promise.all(uniqueTokenIds.map((id) => maybeUnsubscribe(sub, id)));
+    void Promise.all(
+      uniqueTokenIds.map((id) => maybeUnsubscribe(sub, channelName(prefix, id))),
+    );
   };
+}
+
+export async function subscribeToPriceTicks(
+  tokenIds: string[],
+  listener: StreamListener,
+): Promise<() => void> {
+  return subscribeToChannels("prices", tokenIds, listener);
+}
+
+export async function subscribeToMarketStates(
+  tokenIds: string[],
+  listener: StreamListener,
+): Promise<() => void> {
+  return subscribeToChannels("market_state", tokenIds, listener);
 }

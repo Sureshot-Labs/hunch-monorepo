@@ -472,6 +472,7 @@ export type FeedMarketRow = {
   market_title: string | null;
   market_type: string | null;
   market_status: string | null;
+  pm_accepting_orders: boolean | null;
   market_open_time: unknown;
   market_close_time: unknown;
   market_expiration_time: unknown;
@@ -725,6 +726,7 @@ export async function fetchFeedMarkets(
       m.title as market_title,
       m.market_type as market_type,
       m.status as market_status,
+      pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
       m.close_time as market_close_time,
       m.expiration_time as market_expiration_time,
@@ -760,6 +762,8 @@ export async function fetchFeedMarkets(
     from event_order eo
     join unified_events e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
+    left join polymarket_markets pm
+      on pm.id = m.venue_market_id and m.venue = 'polymarket'
     ${yesTopJoin}
     ${yes24hJoin}
     ${marketChangeJoin}
@@ -1130,6 +1134,7 @@ export async function fetchFeedMarketsDirect(
       m.title as market_title,
       m.market_type as market_type,
       m.status as market_status,
+      pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
       m.close_time as market_close_time,
       m.expiration_time as market_expiration_time,
@@ -1164,6 +1169,8 @@ export async function fetchFeedMarketsDirect(
       m.created_at as market_created_at
     from unified_events e
     join market_base m on m.event_id = e.id
+    left join polymarket_markets pm
+      on pm.id = m.venue_market_id and m.venue = 'polymarket'
     ${yesTopJoin}
     ${yes24hJoin}
     ${marketChangeJoin}

@@ -23,6 +23,7 @@ import {
 } from "@hunch/db";
 import {
   buildTopMarketsText,
+  createTopTickGate,
   enqueueEmbedItems,
   isPgSetupIssue,
   type EmbedQueueItem,
@@ -32,6 +33,16 @@ import { ensureRedis, redis } from "./redis.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 
 const detailCache = new Map<string, TLimitlessMarket>();
+const topTickGate = createTopTickGate({
+  onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
+    void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
+      log.warn("Deferred top tick publish failed", {
+        tokenId,
+        error: String(error),
+      });
+    });
+  },
+});
 
 function prefixLimitlessToken(tokenId?: string | null): string | undefined {
   if (!tokenId) return undefined;
@@ -51,6 +62,21 @@ async function publishTokenTop(
 ): Promise<void> {
   if (bestBid == null && bestAsk == null) return;
   const tsMs = ts.getTime();
+  if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
+    return;
+  }
+
+  await publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs, snapshot);
+}
+
+async function publishTokenTopNow(
+  tokenId: string,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tsMs: number,
+  snapshot?: unknown,
+): Promise<void> {
+  if (bestBid == null && bestAsk == null) return;
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -73,7 +99,7 @@ async function publishTokenTop(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, ts),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
 }

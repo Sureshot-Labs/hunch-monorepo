@@ -5,6 +5,7 @@ import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -199,18 +200,12 @@ function resolveTokenPair(row: EventDetailsRow): TokenPair {
 }
 
 function isAcceptingOrders(row: EventDetailsRow): boolean {
-  if (row.pm_accepting_orders != null) {
-    return Boolean(row.pm_accepting_orders);
-  }
-  if (row.market_status !== "ACTIVE") return false;
-
-  const now = Math.floor(Date.now() / 1000);
-  const closeTs = parseTimestampSeconds(row.close_time);
-  if (closeTs != null && closeTs <= now) return false;
-  const expirationTs = parseTimestampSeconds(row.expiration_time);
-  if (expirationTs != null && expirationTs <= now) return false;
-
-  return true;
+  return computeAcceptingOrders({
+    status: row.market_status,
+    closeTime: row.close_time,
+    expirationTime: row.expiration_time,
+    pmAcceptingOrders: row.pm_accepting_orders,
+  });
 }
 
 function selectLimitlessRepresentative(
@@ -532,14 +527,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           }
 
           // Determine if market is accepting orders
-          const acceptingOrders =
-            row.pm_accepting_orders != null
-              ? Boolean(row.pm_accepting_orders)
-              : row.market_status === "ACTIVE" &&
-                (row.expiration_time === null ||
-                  new Date(String(row.expiration_time)) > new Date()) &&
-                (row.close_time === null ||
-                  new Date(String(row.close_time)) > new Date());
+          const acceptingOrders = computeAcceptingOrders({
+            status: row.market_status,
+            closeTime: row.close_time,
+            expirationTime: row.expiration_time,
+            pmAcceptingOrders: row.pm_accepting_orders,
+          });
 
           event.markets.push({
             marketId: row.market_id,
