@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { verifyProofAddress } from "../services/proof-client.js";
 import { fetchSolanaBalanceLamports, fetchSolanaMintDecimals, fetchSolanaTokenBalanceByOwnerAndMint, formatUiAmount } from "../services/solana-rpc.js";
 import {
   fetchErc20BalanceOf,
@@ -834,11 +835,47 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               if (solBalance <= 0n) reasons.push("insufficient_sol");
               if (usdcAmount <= 0n) reasons.push("insufficient_usdc");
 
+              const proofBypass =
+                user.kalshiProofBypass ? "user" : "none";
+              let proofVerified = false;
+              let proofRequiredForBuy = false;
+              let proofReason:
+                | "required"
+                | "unavailable"
+                | "disabled"
+                | "bypassed"
+                | undefined;
+
+              if (!env.kalshiProofEnabled) {
+                proofReason = "disabled";
+              } else if (proofBypass !== "none") {
+                proofReason = "bypassed";
+              } else {
+                const proofCheck = await verifyProofAddress({
+                  address: walletAddress,
+                  forceRefresh: refresh,
+                });
+                if (proofCheck.ok) {
+                  proofVerified = proofCheck.verified;
+                  if (!proofCheck.verified) {
+                    proofRequiredForBuy = true;
+                    proofReason = "required";
+                  }
+                } else {
+                  proofRequiredForBuy = true;
+                  proofReason = "unavailable";
+                }
+              }
+
               response.kalshi = {
                 supported: true,
                 ready: reasons.length === 0,
                 reasons,
                 hasCredentials: Boolean(creds),
+                proofVerified,
+                proofRequiredForBuy,
+                proofBypass,
+                ...(proofReason ? { proofReason } : {}),
                 sol: {
                   balance: formatUiAmount(solBalance, 9),
                   balanceRaw: solBalance.toString(),

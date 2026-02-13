@@ -143,6 +143,17 @@ const dflowGeoBlockDefaultRaw = process.env.DFLOW_GEO_BLOCK_DEFAULT
 const dflowGeoBlockDefault: "allow" | "block" =
   dflowGeoBlockDefaultRaw === "allow" ? "allow" : "block";
 
+const kalshiProofEnabled =
+  parseOptionalBool(process.env.KALSHI_PROOF_ENABLED) ?? false;
+const kalshiProofCacheVerifiedTtlMs = optionalPositiveInt(
+  "KALSHI_PROOF_CACHE_VERIFIED_TTL_MS",
+  600_000,
+);
+const kalshiProofCacheUnverifiedTtlMs = optionalNonNegativeInt(
+  "KALSHI_PROOF_CACHE_UNVERIFIED_TTL_MS",
+  20_000,
+);
+
 if (dflowGeoBlockEnabled && dflowGeoBlockCountries.length === 0) {
   throw new Error(
     "[env] DFLOW_GEO_BLOCK_COUNTRIES is required when DFLOW_GEO_BLOCK_ENABLED=true",
@@ -551,4 +562,7 @@ export const env = {
   dflowGeoBlockEnabled,
   dflowGeoBlockCountries,
   dflowGeoBlockDefault,
+  kalshiProofEnabled,
+  kalshiProofCacheVerifiedTtlMs,
+  kalshiProofCacheUnverifiedTtlMs,
 };

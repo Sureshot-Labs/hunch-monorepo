@@ -7,6 +7,8 @@ type ScriptOptions = {
   userId?: string;
   grant: boolean;
   revoke: boolean;
+  proofBypassOn: boolean;
+  proofBypassOff: boolean;
   show: boolean;
   listAdmins: boolean;
 };
@@ -26,6 +28,8 @@ function parseArgs(): ScriptOptions {
     userId: getValue("--user-id"),
     grant: hasFlag("--grant"),
     revoke: hasFlag("--revoke"),
+    proofBypassOn: hasFlag("--proof-bypass-on"),
+    proofBypassOff: hasFlag("--proof-bypass-off"),
     show: hasFlag("--show"),
     listAdmins: hasFlag("--list-admins"),
   };
@@ -41,6 +45,7 @@ async function fetchUsersByWallet(wallet: string) {
     email: string | null;
     username: string | null;
     is_admin: boolean;
+    kalshi_proof_bypass: boolean;
     wallet_address: string;
     is_primary: boolean;
     last_login_at: Date | null;
@@ -50,6 +55,7 @@ async function fetchUsersByWallet(wallet: string) {
              u.email,
              u.username,
              u.is_admin,
+             u.kalshi_proof_bypass,
              u.last_login_at,
              w.wallet_address,
              w.is_primary
@@ -69,9 +75,10 @@ async function fetchUserById(userId: string) {
     email: string | null;
     username: string | null;
     is_admin: boolean;
+    kalshi_proof_bypass: boolean;
   }>(
     `
-      select id, email, username, is_admin
+      select id, email, username, is_admin, kalshi_proof_bypass
       from users
       where id = $1
       limit 1
@@ -86,6 +93,13 @@ async function setAdmin(userId: string, isAdmin: boolean) {
     userId,
     isAdmin,
   ]);
+}
+
+async function setKalshiProofBypass(userId: string, enabled: boolean) {
+  await pool.query(
+    `update users set kalshi_proof_bypass = $2 where id = $1`,
+    [userId, enabled],
+  );
 }
 
 async function listAdmins() {
@@ -143,6 +157,7 @@ async function main() {
             email: user.email,
             username: user.username,
             isAdmin: user.is_admin,
+            kalshiProofBypass: user.kalshi_proof_bypass,
             wallet: "wallet_address" in user ? user.wallet_address : undefined,
           },
           null,
@@ -152,13 +167,33 @@ async function main() {
       return;
     }
 
-    if (options.grant === options.revoke) {
-      throw new Error("Use --grant or --revoke");
+    const adminToggleCount =
+      Number(options.grant) + Number(options.revoke);
+    const proofToggleCount =
+      Number(options.proofBypassOn) + Number(options.proofBypassOff);
+
+    if (adminToggleCount > 1 || proofToggleCount > 1) {
+      throw new Error(
+        "Use only one toggle per group: --grant/--revoke and --proof-bypass-on/--proof-bypass-off",
+      );
+    }
+    if (adminToggleCount + proofToggleCount !== 1) {
+      throw new Error(
+        "Use exactly one action: --grant | --revoke | --proof-bypass-on | --proof-bypass-off",
+      );
     }
 
-    await setAdmin(user.id, options.grant);
+    if (adminToggleCount === 1) {
+      await setAdmin(user.id, options.grant);
+      console.log(
+        `${options.grant ? "Granted" : "Revoked"} admin for ${user.id}`,
+      );
+      return;
+    }
+
+    await setKalshiProofBypass(user.id, options.proofBypassOn);
     console.log(
-      `${options.grant ? "Granted" : "Revoked"} admin for ${user.id}`,
+      `${options.proofBypassOn ? "Enabled" : "Disabled"} kalshi proof bypass for ${user.id}`,
     );
   } finally {
     await pool.end();

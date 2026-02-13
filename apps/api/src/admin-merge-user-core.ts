@@ -9,6 +9,7 @@ type UserRow = {
   privy_user_id: string | null;
   referral_code: string | null;
   is_admin: boolean | null;
+  kalshi_proof_bypass: boolean | null;
   last_login_at: Date | null;
 };
 
@@ -69,6 +70,7 @@ export async function fetchUser(userId: string): Promise<UserRow | null> {
              privy_user_id,
              referral_code,
              is_admin,
+             kalshi_proof_bypass,
              last_login_at
       from users
       where id = $1
@@ -486,7 +488,8 @@ export async function mergeUsers(
                 privy_user_id = coalesce(privy_user_id, $6),
                 referral_code = coalesce(referral_code, $7),
                 is_admin = is_admin or $8,
-                last_login_at = greatest(coalesce(last_login_at, $9), $9)
+                kalshi_proof_bypass = kalshi_proof_bypass or $9,
+                last_login_at = greatest(coalesce(last_login_at, $10), $10)
             where id = $1
           `,
           [
@@ -498,6 +501,7 @@ export async function mergeUsers(
             source.privy_user_id,
             source.referral_code,
             source.is_admin ?? false,
+            source.kalshi_proof_bypass ?? false,
             source.last_login_at,
           ],
         )
@@ -508,10 +512,16 @@ export async function mergeUsers(
           `
             update users
             set is_admin = is_admin or $2,
-                last_login_at = greatest(coalesce(last_login_at, $3), $3)
+                kalshi_proof_bypass = kalshi_proof_bypass or $3,
+                last_login_at = greatest(coalesce(last_login_at, $4), $4)
             where id = $1
           `,
-          [target.id, source.is_admin ?? false, source.last_login_at],
+          [
+            target.id,
+            source.is_admin ?? false,
+            source.kalshi_proof_bypass ?? false,
+            source.last_login_at,
+          ],
         )
       ).rowCount ?? 0;
     }
