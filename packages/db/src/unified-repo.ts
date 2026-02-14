@@ -324,9 +324,27 @@ export async function upsertUnifiedMarket(
       open_time = EXCLUDED.open_time,
       close_time = EXCLUDED.close_time,
       expiration_time = EXCLUDED.expiration_time,
-      best_bid = EXCLUDED.best_bid,
-      best_ask = EXCLUDED.best_ask,
-      last_price = EXCLUDED.last_price,
+      best_bid = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(EXCLUDED.metadata->>'tradeType', '') = 'amm'
+          AND EXCLUDED.best_bid IS NULL
+        THEN unified_markets.best_bid
+        ELSE EXCLUDED.best_bid
+      END,
+      best_ask = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(EXCLUDED.metadata->>'tradeType', '') = 'amm'
+          AND EXCLUDED.best_ask IS NULL
+        THEN unified_markets.best_ask
+        ELSE EXCLUDED.best_ask
+      END,
+      last_price = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(EXCLUDED.metadata->>'tradeType', '') = 'amm'
+          AND EXCLUDED.last_price IS NULL
+        THEN unified_markets.last_price
+        ELSE EXCLUDED.last_price
+      END,
       volume_total = EXCLUDED.volume_total,
       volume_24h = EXCLUDED.volume_24h,
       open_interest = EXCLUDED.open_interest,
@@ -492,9 +510,27 @@ export async function upsertUnifiedMarkets(
       open_time = excluded.open_time,
       close_time = excluded.close_time,
       expiration_time = excluded.expiration_time,
-      best_bid = excluded.best_bid,
-      best_ask = excluded.best_ask,
-      last_price = excluded.last_price,
+      best_bid = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(excluded.metadata->>'tradeType', '') = 'amm'
+          AND excluded.best_bid IS NULL
+        THEN unified_markets.best_bid
+        ELSE excluded.best_bid
+      END,
+      best_ask = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(excluded.metadata->>'tradeType', '') = 'amm'
+          AND excluded.best_ask IS NULL
+        THEN unified_markets.best_ask
+        ELSE excluded.best_ask
+      END,
+      last_price = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(excluded.metadata->>'tradeType', '') = 'amm'
+          AND excluded.last_price IS NULL
+        THEN unified_markets.last_price
+        ELSE excluded.last_price
+      END,
       volume_total = excluded.volume_total,
       volume_24h = excluded.volume_24h,
       open_interest = excluded.open_interest,

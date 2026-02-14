@@ -1,6 +1,9 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import { tx } from "@hunch/infra";
-import { UNREALIZED_PNL_COMPONENT_SQL } from "../lib/pnl-sql.js";
+import {
+  EFFECTIVE_PNL_SQL,
+  UNREALIZED_PNL_COMPONENT_SQL,
+} from "../lib/pnl-sql.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import type { Position } from "../order-types.js";
 import type { PgParams } from "../server-types.js";
@@ -27,7 +30,7 @@ type PositionRow = {
 type PositionPnlSummaryRow = {
   open_positions_count: string;
   positions_count: string;
-  realized_pnl_all_time: string | null;
+  total_pnl_all_time: string | null;
   unrealized_cost_basis_current: string | null;
   unrealized_pnl_current: string | null;
 };
@@ -221,10 +224,21 @@ export async function fetchPositionPnlSummaryForUserWallet(
       select
         count(*)::text as positions_count,
         count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
-        coalesce(sum(p.realized_pnl), 0)::text as realized_pnl_all_time,
-        coalesce(sum(${UNREALIZED_PNL_COMPONENT_SQL}), 0)::text as unrealized_pnl_current,
+        coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::text as total_pnl_all_time,
         coalesce(sum(case
-          when p.side <> 'FLAT' and p.size > 0 and p.average_price is not null
+          when p.side <> 'FLAT'
+            and p.size > 0
+            and m.resolved_outcome is null
+            and m.resolved_outcome_pct is null
+            then ${UNREALIZED_PNL_COMPONENT_SQL}
+          else 0
+        end), 0)::text as unrealized_pnl_current,
+        coalesce(sum(case
+          when p.side <> 'FLAT'
+            and p.size > 0
+            and m.resolved_outcome is null
+            and m.resolved_outcome_pct is null
+            and p.average_price is not null
             then p.average_price * p.size
           else 0
         end), 0)::text as unrealized_cost_basis_current
@@ -250,11 +264,12 @@ export async function fetchPositionPnlSummaryForUserWallet(
   );
 
   const row = rows[0];
-  const realizedPnlAllTime = parseNumeric(row?.realized_pnl_all_time);
+  const totalPnlAllTime = parseNumeric(row?.total_pnl_all_time);
   const unrealizedPnlCurrent = parseNumeric(row?.unrealized_pnl_current);
   const unrealizedCostBasisCurrent = parseNumeric(
     row?.unrealized_cost_basis_current,
   );
+  const realizedPnlAllTime = totalPnlAllTime - unrealizedPnlCurrent;
   const unrealizedPnlPercentCurrent =
     unrealizedCostBasisCurrent > 0
       ? (unrealizedPnlCurrent / unrealizedCostBasisCurrent) * 100
