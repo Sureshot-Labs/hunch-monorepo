@@ -5,6 +5,10 @@ import {
   storeOrder,
   updateOrderFromHistory,
 } from "../repos/orders-repo.js";
+import {
+  normalizeLimitlessRawTokenId,
+  normalizeLimitlessScopedTokenId,
+} from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   extractLimitlessMessage,
@@ -47,13 +51,6 @@ function normalizeOrderId(value: unknown): string | null {
     return value.toString();
   }
   return null;
-}
-
-function normalizeLimitlessTokenId(value: string | null): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  return trimmed.startsWith("limitless:") ? trimmed : `limitless:${trimmed}`;
 }
 
 function extractLimitlessHistoryEntries(
@@ -175,6 +172,92 @@ function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
+
+function normalizeRawLimitlessTokenIdFromUnknown(value: unknown): string | null {
+  return typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "bigint"
+    ? normalizeLimitlessRawTokenId(value)
+    : null;
+}
+
+function extractLimitlessPositionTokenIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => normalizeRawLimitlessTokenIdFromUnknown(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function extractLimitlessTokenPairFromMarket(
+  market: Record<string, unknown> | null,
+): LimitlessTokenPair | null {
+  if (!market) return null;
+  const tokensRecord = isRecord(market.tokens)
+    ? market.tokens
+    : isRecord(market.token)
+      ? market.token
+      : null;
+  const positionIds = extractLimitlessPositionTokenIds(
+    market.position_ids ?? market.positionIds,
+  );
+
+  const tokenYes =
+    normalizeRawLimitlessTokenIdFromUnknown(
+      tokensRecord
+        ? (tokensRecord.yes ?? tokensRecord.YES ?? tokensRecord[0])
+        : null,
+    ) ?? positionIds[0] ?? null;
+  const tokenNo =
+    normalizeRawLimitlessTokenIdFromUnknown(
+      tokensRecord
+        ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1])
+        : null,
+    ) ?? positionIds[1] ?? null;
+
+  if (!tokenYes && !tokenNo) return null;
+  return { tokenYes, tokenNo };
+}
+
+function extractLimitlessTokenPairFromHistoryEntry(
+  entry: Record<string, unknown>,
+): LimitlessTokenPair | null {
+  const market = isRecord(entry.market) ? entry.market : null;
+  return extractLimitlessTokenPairFromMarket(market);
+}
+
+function mergeLimitlessTokenPair(
+  primary: LimitlessTokenPair | null,
+  fallback: LimitlessTokenPair | null,
+): LimitlessTokenPair | null {
+  if (!primary && !fallback) return null;
+  const tokenYes = primary?.tokenYes ?? fallback?.tokenYes ?? null;
+  const tokenNo = primary?.tokenNo ?? fallback?.tokenNo ?? null;
+  if (!tokenYes && !tokenNo) return null;
+  return { tokenYes, tokenNo };
+}
+
+async function fetchLimitlessTokenPairBySlug(inputs: {
+  slug: string;
+  sessionCookie: string;
+}): Promise<LimitlessTokenPair | null> {
+  const slug = inputs.slug.trim();
+  if (!slug) return null;
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(slug)}`,
+    sessionCookie: inputs.sessionCookie,
+  });
+  if (!upstream.ok) return null;
+  const payload = upstream.payload;
+  const market = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  return extractLimitlessTokenPairFromMarket(market);
+}
+
 function buildHistoryVenueOrderId(
   entry: Record<string, unknown>,
   strategy: string | null,
@@ -267,17 +350,18 @@ export async function syncLimitlessHistoryForWallet(
 
     for (const row of rows) {
       tokensByMarketId.set(row.venue_market_id, {
-        tokenYes: row.token_yes,
-        tokenNo: row.token_no,
+        tokenYes: normalizeLimitlessRawTokenId(row.token_yes),
+        tokenNo: normalizeLimitlessRawTokenId(row.token_no),
       });
       if (row.slug) {
         tokensBySlug.set(row.slug, {
-          tokenYes: row.token_yes,
-          tokenNo: row.token_no,
+          tokenYes: normalizeLimitlessRawTokenId(row.token_yes),
+          tokenNo: normalizeLimitlessRawTokenId(row.token_no),
         });
       }
     }
   }
+  const fetchedBySlug = new Map<string, LimitlessTokenPair | null>();
 
   let storedNew = 0;
   let alreadyKnown = 0;
@@ -319,9 +403,29 @@ export async function syncLimitlessHistoryForWallet(
 
     const marketId = extractHistoryMarketId(entry);
     const marketSlug = extractHistoryMarketSlug(entry);
-    const tokenMeta =
+    let tokenMeta =
       (marketId ? tokensByMarketId.get(marketId) : undefined) ??
-      (marketSlug ? tokensBySlug.get(marketSlug) : undefined);
+      (marketSlug ? tokensBySlug.get(marketSlug) : undefined) ??
+      extractLimitlessTokenPairFromHistoryEntry(entry);
+    if (marketSlug && (!tokenMeta?.tokenYes || !tokenMeta?.tokenNo)) {
+      if (!fetchedBySlug.has(marketSlug)) {
+        fetchedBySlug.set(
+          marketSlug,
+          await fetchLimitlessTokenPairBySlug({
+            slug: marketSlug,
+            sessionCookie: inputs.sessionCookie,
+          }),
+        );
+      }
+      tokenMeta = mergeLimitlessTokenPair(
+        tokenMeta ?? null,
+        fetchedBySlug.get(marketSlug) ?? null,
+      );
+      if (tokenMeta) {
+        tokensBySlug.set(marketSlug, tokenMeta);
+        if (marketId) tokensByMarketId.set(marketId, tokenMeta);
+      }
+    }
     if (!tokenMeta) {
       skippedNoMarket += 1;
       continue;
@@ -333,7 +437,7 @@ export async function syncLimitlessHistoryForWallet(
         : outcomeIndex === 1
           ? tokenMeta.tokenNo
           : null;
-    const tokenId = normalizeLimitlessTokenId(rawTokenId);
+    const tokenId = normalizeLimitlessScopedTokenId(rawTokenId);
     if (!tokenId) {
       skippedNoToken += 1;
       continue;

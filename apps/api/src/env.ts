@@ -484,6 +484,9 @@ export const env = {
   limitlessNegRiskAddress:
     process.env.LIMITLESS_NEGRISK_ADDRESS?.trim() ||
     "0xe3E00BA3a9888d1DE4834269f62ac008b4BB5C47",
+  limitlessNegRiskRequestAddress:
+    process.env.LIMITLESS_NEGRISK_REQUEST_ADDRESS?.trim() ||
+    "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
   polymarketUsdcAddress:

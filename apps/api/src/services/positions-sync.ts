@@ -6,6 +6,7 @@ import {
 } from "../repos/positions-repo.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
@@ -58,11 +59,6 @@ function parseBalanceString(value: unknown): string | null {
   return null;
 }
 
-function normalizeLimitlessTokenId(value: string): string {
-  const trimmed = value.trim();
-  return trimmed.startsWith("limitless:") ? trimmed : `limitless:${trimmed}`;
-}
-
 function extractPositionIds(value: unknown): string[] {
   const output: string[] = [];
   const visit = (input: unknown) => {
@@ -86,7 +82,8 @@ function addTokenBalance(
   size: string,
 ) {
   if (!tokenId || !size) return;
-  const normalized = normalizeLimitlessTokenId(tokenId);
+  const normalized = normalizeLimitlessScopedTokenId(tokenId);
+  if (!normalized) return;
   if (seen.has(normalized)) return;
   const numeric = Number(size);
   if (!Number.isFinite(numeric) || numeric <= 0) return;
@@ -434,8 +431,10 @@ async function fetchLimitlessOnchainTokenBalances(
     for (const tokenId of chunk) {
       const balance = chunkBalances.get(tokenId) ?? 0n;
       if (balance <= 0n) continue;
+      const scopedTokenId = normalizeLimitlessScopedTokenId(tokenId);
+      if (!scopedTokenId) continue;
       balances.push({
-        tokenId: normalizeLimitlessTokenId(tokenId),
+        tokenId: scopedTokenId,
         size: ethers.formatUnits(balance, 6),
       });
     }

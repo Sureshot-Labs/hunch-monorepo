@@ -4,9 +4,14 @@ import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import {
+  normalizeLimitlessRawTokenId,
+  normalizeLimitlessScopedTokenId,
+} from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
 import { storeOrder } from "../repos/orders-repo.js";
 import {
+  fetchErc1155BalancesByOwner,
   fetchEvmCode,
   fetchErc1155IsApprovedForAll,
 } from "../services/polygon-rpc.js";
@@ -402,13 +407,6 @@ function normalizeOrderId(value: unknown): string | null {
   return null;
 }
 
-function normalizeLimitlessTokenId(value: string | null): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  return trimmed.startsWith("limitless:") ? trimmed : `limitless:${trimmed}`;
-}
-
 function extractLimitlessOrderId(record: Record<string, unknown>): string | null {
   return normalizeOrderId(readOrderField(record, ["id", "orderId", "order_id"]));
 }
@@ -419,7 +417,7 @@ function extractLimitlessTokenId(
   const raw = normalizeOrderId(
     readOrderField(record, ["tokenId", "token_id", "outcomeTokenId"]),
   );
-  return normalizeLimitlessTokenId(raw);
+  return normalizeLimitlessScopedTokenId(raw);
 }
 
 function extractLimitlessOrderSide(
@@ -504,6 +502,168 @@ function extractLimitlessCanceledIds(
     })
     .filter((entry): entry is string => Boolean(entry));
   return ids.length ? ids : fallback;
+}
+
+function extractLimitlessMarketExchangeAddress(payload: unknown): string | null {
+  const marketRecord = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  if (!marketRecord) return null;
+
+  const directCandidates = [
+    marketRecord.negRiskExchange,
+    marketRecord.exchangeAddress,
+    marketRecord.exchange,
+    marketRecord.venueExchange,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+      return ethers.getAddress(candidate.trim());
+    }
+  }
+
+  const venue = marketRecord.venue;
+  if (isRecord(venue)) {
+    const nestedCandidates = [venue.exchangeAddress, venue.exchange];
+    for (const candidate of nestedCandidates) {
+      if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+        return ethers.getAddress(candidate.trim());
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
+  const marketRecord = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  if (!marketRecord) return null;
+
+  const directCandidates = [marketRecord.negRiskAdapter, marketRecord.adapter];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+      return ethers.getAddress(candidate.trim());
+    }
+  }
+
+  const venue = marketRecord.venue;
+  if (isRecord(venue)) {
+    const nestedCandidates = [venue.adapter];
+    for (const candidate of nestedCandidates) {
+      if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+        return ethers.getAddress(candidate.trim());
+      }
+    }
+  }
+
+  return null;
+}
+
+type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
+
+function normalizeRawLimitlessTokenIdFromUnknown(value: unknown): string | null {
+  return typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "bigint"
+    ? normalizeLimitlessRawTokenId(value)
+    : null;
+}
+
+function extractLimitlessPositionTokenIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => normalizeRawLimitlessTokenIdFromUnknown(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null {
+  const marketRecord = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  if (!marketRecord) return null;
+
+  const tokensRecord = isRecord(marketRecord.tokens)
+    ? marketRecord.tokens
+    : isRecord(marketRecord.token)
+      ? marketRecord.token
+      : null;
+  const positionIds = extractLimitlessPositionTokenIds(
+    marketRecord.position_ids ?? marketRecord.positionIds,
+  );
+
+  const tokenYes =
+    normalizeRawLimitlessTokenIdFromUnknown(
+      tokensRecord
+        ? (tokensRecord.yes ?? tokensRecord.YES ?? tokensRecord[0])
+        : null,
+    ) ?? positionIds[0] ?? null;
+  const tokenNo =
+    normalizeRawLimitlessTokenIdFromUnknown(
+      tokensRecord
+        ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1])
+        : null,
+    ) ?? positionIds[1] ?? null;
+
+  if (!tokenYes && !tokenNo) return null;
+  return { tokenYes, tokenNo };
+}
+
+async function resolveLimitlessTokenPairForSlug(inputs: {
+  slug: string;
+  sessionCookie: string;
+}): Promise<LimitlessTokenPair | null> {
+  const slug = inputs.slug.trim();
+  if (!slug) return null;
+
+  const dbRow = await pool.query<{
+    token_yes: string | null;
+    token_no: string | null;
+  }>(
+    `
+      select token_yes, token_no
+      from unified_markets
+      where venue = 'limitless'
+        and slug = $1
+      limit 1
+    `,
+    [slug],
+  );
+  const dbTokenYes = normalizeLimitlessRawTokenId(dbRow.rows[0]?.token_yes ?? null);
+  const dbTokenNo = normalizeLimitlessRawTokenId(dbRow.rows[0]?.token_no ?? null);
+  if (dbTokenYes && dbTokenNo) {
+    return { tokenYes: dbTokenYes, tokenNo: dbTokenNo };
+  }
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(slug)}`,
+    sessionCookie: inputs.sessionCookie,
+  });
+  if (!upstream.ok) {
+    return dbTokenYes || dbTokenNo
+      ? { tokenYes: dbTokenYes, tokenNo: dbTokenNo }
+      : null;
+  }
+
+  const upstreamTokens = extractLimitlessTokenPair(upstream.payload);
+  if (!upstreamTokens) {
+    return dbTokenYes || dbTokenNo
+      ? { tokenYes: dbTokenYes, tokenNo: dbTokenNo }
+      : null;
+  }
+
+  return {
+    tokenYes: upstreamTokens.tokenYes ?? dbTokenYes,
+    tokenNo: upstreamTokens.tokenNo ?? dbTokenNo,
+  };
 }
 
 export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
@@ -852,14 +1012,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           request.query.clobSpender ?? env.limitlessClobAddress;
         const negRiskSpender =
           request.query.negRiskSpender ?? env.limitlessNegRiskAddress;
+        const adapterSpender = request.query.adapterSpender ?? null;
         const ammSpender = request.query.ammSpender ?? null;
+        const tokenId = normalizeLimitlessRawTokenId(request.query.tokenId);
         const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
         const [
           code,
           snapshot,
           approvedClob,
           approvedNegRisk,
+          approvedAdapter,
           approvedAmm,
+          tokenBalanceMap,
         ] = await Promise.all([
           fetchEvmCode({
             rpcUrl: env.baseRpcUrl,
@@ -892,6 +1056,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 operator: negRiskSpender,
               })
             : Promise.resolve(null),
+          adapterSpender
+            ? fetchErc1155IsApprovedForAll({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                operator: adapterSpender,
+              })
+            : Promise.resolve(null),
           ammSpender
             ? fetchErc1155IsApprovedForAll({
                 rpcUrl: env.baseRpcUrl,
@@ -901,12 +1074,23 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 operator: ammSpender,
               })
             : Promise.resolve(null),
+          tokenId
+            ? fetchErc1155BalancesByOwner({
+                rpcUrl: env.baseRpcUrl,
+                timeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: conditionalTokensAddress,
+                owner: signer,
+                tokenIds: [tokenId],
+              })
+            : Promise.resolve(null),
         ]);
 
         const usdcBalance = snapshot.usdcBalance;
         const allowanceClob = snapshot.allowanceClob;
         const allowanceNegRisk = snapshot.allowanceNegRisk;
         const allowanceAmm = snapshot.allowanceAmm;
+        const tokenBalanceRaw =
+          tokenId && tokenBalanceMap ? tokenBalanceMap.get(tokenId) ?? 0n : null;
 
         const isContract = typeof code === "string" && code.length > 2;
 
@@ -955,12 +1139,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           },
           conditionalTokens: {
             contractAddress: conditionalTokensAddress,
+            ...(tokenId
+              ? {
+                  tokenBalance: {
+                    tokenId,
+                    balance: ethers.formatUnits(tokenBalanceRaw ?? 0n, 6),
+                    balanceRaw: (tokenBalanceRaw ?? 0n).toString(),
+                  },
+                }
+              : {}),
             isApprovedForAll: {
               ...(clobSpender
                 ? { clob: approvedClob ?? false }
                 : {}),
               ...(negRiskSpender
                 ? { negRisk: approvedNegRisk ?? false }
+                : {}),
+              ...(adapterSpender
+                ? { adapter: approvedAdapter ?? false }
                 : {}),
               ...(ammSpender
                 ? { amm: approvedAmm ?? false }
@@ -1141,9 +1337,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       let orderForUpstream: Record<string, unknown>;
+      let coercedMakerAmount: number | null = null;
       let coercedTakerAmount: number | null = null;
       let coercedNonce: number | null = null;
       let coercedPrice: number | null = null;
+      let coercedSideValue: number | null = null;
       try {
         const salt = coerceOrderNumber(order.salt, "salt");
         const makerAmount = coerceOrderNumber(order.makerAmount, "makerAmount");
@@ -1186,9 +1384,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        coercedMakerAmount = makerAmount;
         coercedTakerAmount = takerAmount;
         coercedNonce = nonce;
         coercedPrice = price;
+        coercedSideValue = sideValue;
         orderForUpstream = {
           ...order,
           salt,
@@ -1234,6 +1434,95 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             error: "GTC orders require a price.",
           });
         }
+        if (
+          coercedMakerAmount == null ||
+          coercedTakerAmount == null ||
+          coercedSideValue == null
+        ) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC orders require makerAmount, takerAmount, and side.",
+          });
+        }
+        const priceRaw = Math.round(coercedPrice * 1_000_000);
+        if (priceRaw <= 0 || priceRaw >= 1_000_000) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC price must be between 0 and 1.",
+          });
+        }
+        if (priceRaw % 1_000 !== 0) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC price must align to 0.001 tick size.",
+          });
+        }
+        const sharesRaw =
+          coercedSideValue === 0 ? coercedTakerAmount : coercedMakerAmount;
+        if (sharesRaw <= 0) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC share size must be positive.",
+          });
+        }
+        if (sharesRaw % 1_000 !== 0) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC size must align to 0.001 shares.",
+          });
+        }
+        const quoteRaw =
+          coercedSideValue === 0 ? coercedMakerAmount : coercedTakerAmount;
+        if (quoteRaw <= 0) {
+          reply.code(400);
+          return reply.send({
+            error: "GTC quote size must be positive.",
+          });
+        }
+        const numerator = BigInt(sharesRaw) * BigInt(priceRaw);
+        const denominator = BigInt(1_000_000);
+        const expectedQuote =
+          coercedSideValue === 0
+            ? Number((numerator + denominator - BigInt(1)) / denominator)
+            : Number(numerator / denominator);
+        if (Math.abs(expectedQuote - quoteRaw) > 1) {
+          reply.code(400);
+          return reply.send({
+            error:
+              "GTC order amounts are not aligned with price tick and share size.",
+          });
+        }
+      }
+
+      const requestedRawTokenId = normalizeRawLimitlessTokenIdFromUnknown(
+        orderForUpstream.tokenId,
+      );
+      if (!requestedRawTokenId) {
+        reply.code(400);
+        return reply.send({ error: "Order tokenId is invalid." });
+      }
+      const marketTokens = await resolveLimitlessTokenPairForSlug({
+        slug: request.body.marketSlug,
+        sessionCookie,
+      });
+      const allowedRawTokenIds = [
+        marketTokens?.tokenYes ?? null,
+        marketTokens?.tokenNo ?? null,
+      ].filter((entry): entry is string => Boolean(entry));
+      if (!allowedRawTokenIds.length) {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Unable to validate market tokens for this marketSlug. Please refresh and retry.",
+        });
+      }
+      if (!allowedRawTokenIds.includes(requestedRawTokenId)) {
+        reply.code(400);
+        return reply.send({
+          error: "Order tokenId does not belong to marketSlug.",
+          marketSlug: request.body.marketSlug,
+          tokenId: requestedRawTokenId,
+        });
       }
 
       const orderPayload = {
@@ -1274,7 +1563,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const tokenId = normalizeLimitlessTokenId(
+      const tokenId = normalizeLimitlessScopedTokenId(
         typeof order.tokenId === "string"
           ? order.tokenId
           : String(order.tokenId ?? ""),
@@ -1393,7 +1682,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const tokenId = normalizeLimitlessTokenId(request.body.tokenId);
+      const tokenId = normalizeLimitlessScopedTokenId(request.body.tokenId);
       if (!tokenId) {
         reply.code(400);
         return reply.send({ error: "tokenId is required" });
@@ -1735,6 +2024,63 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           skipped,
           errors,
         },
+      });
+    },
+  );
+
+  /**
+   * GET /market/exchange
+   * Resolve canonical exchange address for a market slug directly from Limitless.
+   */
+  z.get(
+    "/market/exchange",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessOpenOrdersQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const creds = await AuthService.getVenueCredentials(
+        user.id,
+        "limitless",
+        signer,
+      );
+      const sessionCookie = creds?.apiSecret?.trim();
+
+      const upstream = await limitlessRequest({
+        method: "GET",
+        requestPath: `/markets/${encodeURIComponent(request.query.slug)}`,
+        ...(sessionCookie ? { sessionCookie } : {}),
+      });
+
+      if (!upstream.ok) {
+        reply.code(502);
+        return reply.send({
+          error: "Limitless market exchange fetch failed",
+          status: upstream.status,
+          payload: upstream.payload,
+        });
+      }
+
+      const exchangeAddress = extractLimitlessMarketExchangeAddress(
+        upstream.payload,
+      );
+      const adapterAddress = extractLimitlessMarketAdapterAddress(
+        upstream.payload,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        marketSlug: request.query.slug,
+        exchangeAddress,
+        adapterAddress,
       });
     },
   );

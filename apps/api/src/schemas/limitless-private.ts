@@ -102,6 +102,8 @@ export const limitlessRedemptionQuerySchema = z.object({
 export const limitlessAccountQuerySchema = z.object({
   clobSpender: zEthAddress.optional(),
   negRiskSpender: zEthAddress.optional(),
+  adapterSpender: zEthAddress.optional(),
   ammSpender: zEthAddress.optional(),
+  tokenId: z.string().optional(),
   verifySession: z.coerce.boolean().optional(),
 });
