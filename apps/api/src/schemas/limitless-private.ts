@@ -65,6 +65,16 @@ export const limitlessOpenOrdersQuerySchema = z.object({
   slug: zRequiredString("slug is required"),
 });
 
+export const limitlessMarketExchangeQuerySchema = z.object({
+  slug: zRequiredString("slug is required"),
+  side: z
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toUpperCase() : v),
+      z.enum(["BUY", "SELL"]),
+    )
+    .optional(),
+});
+
 export const limitlessHistoryQuerySchema = z.object({
   page: zPage,
   limit: zLimit,

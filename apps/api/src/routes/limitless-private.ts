@@ -36,6 +36,7 @@ import {
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessHistoryQuerySchema,
+  limitlessMarketExchangeQuerySchema,
   limitlessOpenOrdersQuerySchema,
   limitlessOrderBodySchema,
   limitlessOrderIdParamsSchema,
@@ -60,6 +61,21 @@ function toChecksumAddress(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Legacy Limitless markets sometimes expose only exchange in /markets payload.
+// For these, SELL CT approvals may require a separate operator not returned by API.
+const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> = {
+  [normalizeAddress("0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6")]:
+    "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
+};
+
+function resolveLimitlessLegacyOperatorForExchange(
+  exchangeAddress: string | null,
+): string | null {
+  if (!exchangeAddress) return null;
+  const mapped = LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
+  return mapped ?? null;
 }
 
 function parseFeeRateBps(value: unknown): number | undefined {
@@ -573,7 +589,20 @@ function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
     : null;
   if (!marketRecord) return null;
 
-  const directCandidates = [marketRecord.negRiskAdapter, marketRecord.adapter];
+  // Approval target priority:
+  // 1) operator/operatorAddress when provided (current Limitless UI behavior)
+  // 2) adapter-style fields for older payload variants
+  const directCandidates = [
+    marketRecord.operator,
+    marketRecord.operatorAddress,
+    marketRecord.negRiskOperator,
+    marketRecord.negRiskOperatorAddress,
+    marketRecord.negRiskAdapter,
+    marketRecord.adapter,
+    marketRecord.adapterAddress,
+    marketRecord.venueAdapter,
+    marketRecord.exchangeAdapter,
+  ];
   for (const candidate of directCandidates) {
     if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
       return ethers.getAddress(candidate.trim());
@@ -582,12 +611,45 @@ function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
 
   const venue = marketRecord.venue;
   if (isRecord(venue)) {
-    const nestedCandidates = [venue.adapter];
+    const nestedCandidates = [
+      venue.operator,
+      venue.operatorAddress,
+      venue.negRiskOperator,
+      venue.negRiskOperatorAddress,
+      venue.adapter,
+      venue.adapterAddress,
+      venue.exchangeAdapter,
+    ];
     for (const candidate of nestedCandidates) {
       if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
         return ethers.getAddress(candidate.trim());
       }
     }
+  }
+
+  return null;
+}
+
+function extractLimitlessExpectedExchangeAddress(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+
+  const nestedPayload = isRecord(payload.payload) ? payload.payload : null;
+  const candidates: unknown[] = [
+    payload.message,
+    payload.error,
+    nestedPayload?.message,
+    nestedPayload?.error,
+  ];
+
+  const pattern =
+    /exchange address for this market:\s*(0x[a-fA-F0-9]{40})/i;
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const match = candidate.match(pattern);
+    if (!match?.[1]) continue;
+    const value = match[1].trim();
+    if (!ethers.isAddress(value)) continue;
+    return ethers.getAddress(value);
   }
 
   return null;
@@ -2162,7 +2224,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     "/market/exchange",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: limitlessOpenOrdersQuerySchema },
+      schema: { querystring: limitlessMarketExchangeQuerySchema },
     },
     async (request, reply) => {
       const user = request.user;
@@ -2200,13 +2262,84 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const adapterAddress = extractLimitlessMarketAdapterAddress(
         upstream.payload,
       );
+      let canonicalExchangeAddress = exchangeAddress;
+      let canonicalAdapterAddress = adapterAddress;
+
+      if (sessionCookie && isEvmWallet(signer)) {
+        const signerChecksum = toChecksumAddress(signer);
+        const tokenPair = extractLimitlessTokenPair(upstream.payload);
+        const probeTokenId = tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? null;
+        const storedProfile = extractProfile(creds?.additionalData ?? null);
+        const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
+        const liveProfile = await fetchLimitlessProfileForAddress({
+          address: signer,
+          sessionCookie,
+        });
+        const profile = mergeProfiles(
+          sessionProfile,
+          mergeProfiles(storedProfile, liveProfile),
+        );
+        const ownerId = profile?.id;
+
+        if (signerChecksum && ownerId && probeTokenId) {
+          const probeSide = request.query.side === "SELL" ? 1 : 0;
+          try {
+            const probe = await limitlessRequest({
+              method: "POST",
+              requestPath: "/orders",
+              sessionCookie,
+              body: {
+                order: {
+                  salt: Date.now() * 1000,
+                  maker: signerChecksum,
+                  signer: signerChecksum,
+                  taker: "0x0000000000000000000000000000000000000000",
+                  tokenId: probeTokenId,
+                  makerAmount: 1_000_000,
+                  takerAmount: 1,
+                  expiration: "0",
+                  nonce: 0,
+                  feeRateBps: 300,
+                  side: probeSide,
+                  signatureType: 0,
+                  signature: `0x${"0".repeat(130)}`,
+                },
+                orderType: "FOK",
+                marketSlug: request.query.slug,
+                ownerId,
+              },
+            });
+            if (!probe.ok) {
+              const probedExchange = extractLimitlessExpectedExchangeAddress(
+                probe.payload,
+              );
+              if (probedExchange) {
+                canonicalExchangeAddress = probedExchange;
+              }
+            }
+          } catch (error) {
+            app.log.warn(
+              { error, slug: request.query.slug },
+              "Limitless canonical exchange probe failed",
+            );
+          }
+        }
+      }
+
+      // Null-only fallback for legacy markets: when upstream payload does not
+      // provide adapter/operator, derive known operator from canonical exchange.
+      if (!canonicalAdapterAddress) {
+        canonicalAdapterAddress = resolveLimitlessLegacyOperatorForExchange(
+          canonicalExchangeAddress ?? exchangeAddress ?? null,
+        );
+      }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
         marketSlug: request.query.slug,
-        exchangeAddress,
-        adapterAddress,
+        exchangeAddress: canonicalExchangeAddress,
+        adapterAddress: canonicalAdapterAddress,
       });
     },
   );
