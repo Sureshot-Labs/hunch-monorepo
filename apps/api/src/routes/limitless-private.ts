@@ -54,6 +54,14 @@ function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function toChecksumAddress(value: string): string | null {
+  try {
+    return ethers.getAddress(value.trim());
+  } catch {
+    return null;
+  }
+}
+
 function parseFeeRateBps(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value);
@@ -254,6 +262,9 @@ function extractProfile(value: unknown): LimitlessProfile | null {
           : typeof profileRaw.wallet_address === "string"
             ? profileRaw.wallet_address
             : null;
+  const normalizedAccount = account
+    ? toChecksumAddress(account) ?? account.trim()
+    : null;
   const client =
     typeof profileRaw.client === "string"
       ? profileRaw.client
@@ -289,7 +300,7 @@ function extractProfile(value: unknown): LimitlessProfile | null {
       : undefined;
   return {
     ...(id != null ? { id } : {}),
-    ...(account ? { account } : {}),
+    ...(normalizedAccount ? { account: normalizedAccount } : {}),
     ...(client ? { client } : {}),
     ...(rank ? { rank } : {}),
   };
@@ -309,6 +320,10 @@ function mergeProfiles(
   extra: LimitlessProfile | null,
 ): LimitlessProfile | null {
   if (!base && !extra) return null;
+  const accountCandidate = base?.account ?? extra?.account ?? null;
+  const accountNormalized = accountCandidate
+    ? toChecksumAddress(accountCandidate) ?? accountCandidate.trim()
+    : null;
   const rankFeeRateBps = base?.rank?.feeRateBps ?? extra?.rank?.feeRateBps;
   const rankName = base?.rank?.name ?? extra?.rank?.name;
   const rank =
@@ -320,14 +335,27 @@ function mergeProfiles(
       : undefined;
   return {
     ...(base?.id ?? extra?.id ? { id: base?.id ?? extra?.id } : {}),
-    ...(base?.account ?? extra?.account
-      ? { account: base?.account ?? extra?.account }
-      : {}),
+    ...(accountNormalized ? { account: accountNormalized } : {}),
     ...(base?.client ?? extra?.client
       ? { client: base?.client ?? extra?.client }
       : {}),
     ...(rank ? { rank } : {}),
   };
+}
+
+async function fetchLimitlessProfileForAddress(inputs: {
+  address: string;
+  sessionCookie?: string | null;
+}): Promise<LimitlessProfile | null> {
+  const address = toChecksumAddress(inputs.address);
+  if (!address) return null;
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/profiles/${encodeURIComponent(address)}`,
+    ...(inputs.sessionCookie ? { sessionCookie: inputs.sessionCookie } : {}),
+  });
+  if (!upstream.ok) return null;
+  return extractProfile(upstream.payload);
 }
 
 function getHeaderValue(
@@ -780,6 +808,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           error: "x-account must match the selected wallet",
         });
       }
+      const checksumAccount = toChecksumAddress(account);
+      if (!checksumAccount) {
+        reply.code(400);
+        return reply.send({ error: "x-account is not a valid EVM address" });
+      }
 
       const referralCode =
         (typeof body.referralCode === "string" && body.referralCode.trim()) ||
@@ -792,7 +825,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         method: "POST",
         requestPath: "/auth/login",
         headers: {
-          "x-account": account,
+          "x-account": checksumAccount,
           "x-signing-message": signingMessage,
           "x-signature": signature,
         },
@@ -825,14 +858,14 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const profile = extractProfile(upstream.payload);
       const profileSafe: LimitlessProfile | null = profile
         ? { ...profile, client: profile.client ?? clientType }
-        : { account, client: clientType };
+        : { account: checksumAccount, client: clientType };
 
       try {
         await AuthService.createOrUpdateVenueCredentials(
           user.id,
           signer,
           "limitless",
-          profileSafe?.account ?? account,
+          profileSafe?.account ?? checksumAccount,
           sessionCookie,
           profileSafe ? { profile: profileSafe } : undefined,
         );
@@ -923,30 +956,47 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         "limitless",
         signer,
       );
-      const sessionCookie = creds?.apiSecret?.trim();
-      if (!sessionCookie) {
-        reply.code(400);
-        return reply.send({ error: "Limitless session not found" });
-      }
-
-      const upstream = await limitlessRequest({
-        method: "POST",
-        requestPath: "/auth/logout",
-        sessionCookie,
-        body: {},
-      });
-
-      if (!upstream.ok) {
-        reply.code(502);
-        return reply.send({
-          error: "Limitless logout failed",
-          status: upstream.status,
-          payload: upstream.payload,
+      const sessionCookie = creds?.apiSecret?.trim() ?? null;
+      let upstream:
+        | Awaited<ReturnType<typeof limitlessRequest>>
+        | null = null;
+      if (sessionCookie) {
+        upstream = await limitlessRequest({
+          method: "POST",
+          requestPath: "/auth/logout",
+          sessionCookie,
+          body: {},
         });
       }
 
+      const deactivatedCount = await AuthService.deactivateVenueCredentials(
+        user.id,
+        "limitless",
+        signer,
+      );
+
+      if (upstream && !upstream.ok) {
+        app.log.warn(
+          {
+            userId: user.id,
+            walletAddress: signer,
+            status: upstream.status,
+          },
+          "Limitless upstream logout failed; local credentials were deactivated",
+        );
+      }
+
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ ok: true, payload: upstream.payload });
+      return reply.send({
+        ok: true,
+        disconnected: true,
+        deactivatedCount,
+        upstream: upstream
+          ? upstream.ok
+            ? { ok: true, payload: upstream.payload }
+            : { ok: false, status: upstream.status, payload: upstream.payload }
+          : { ok: false, reason: "missing_session_cookie" },
+      });
     },
   );
 
@@ -962,30 +1012,34 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const user = request.user;
-      const signer = request.walletAddress;
-      if (!user || !signer) {
+      const signerRaw = request.walletAddress;
+      if (!user || !signerRaw) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
 
-      if (!isEvmWallet(signer)) {
+      if (!isEvmWallet(signerRaw)) {
         reply.code(400);
         return reply.send({
           error: "Limitless account snapshot requires an EVM wallet address",
+        });
+      }
+      const signer = toChecksumAddress(signerRaw);
+      if (!signer) {
+        reply.code(400);
+        return reply.send({
+          error: "Limitless account snapshot requires a valid EVM wallet address",
         });
       }
 
       const creds = await AuthService.getVenueCredentials(
         user.id,
         "limitless",
-        signer,
+        signerRaw,
       );
       const sessionCookie = creds?.apiSecret?.trim();
+      const storedProfile = extractProfile(creds?.additionalData ?? null);
       const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
-      const profile = mergeProfiles(
-        extractProfile(creds?.additionalData ?? null),
-        sessionProfile,
-      );
       const verifySession = request.query.verifySession === true;
       let sessionValid: boolean | null = null;
       let hasCredentials = Boolean(creds);
@@ -1016,6 +1070,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         const ammSpender = request.query.ammSpender ?? null;
         const tokenId = normalizeLimitlessRawTokenId(request.query.tokenId);
         const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
+        const effectiveSessionProfile =
+          verifySession && sessionValid === false ? null : sessionProfile;
         const [
           code,
           snapshot,
@@ -1024,6 +1080,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           approvedAdapter,
           approvedAmm,
           tokenBalanceMap,
+          liveProfile,
         ] = await Promise.all([
           fetchEvmCode({
             rpcUrl: env.baseRpcUrl,
@@ -1083,7 +1140,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 tokenIds: [tokenId],
               })
             : Promise.resolve(null),
+          hasCredentials
+            ? fetchLimitlessProfileForAddress({
+                address: signer,
+                sessionCookie,
+              })
+            : Promise.resolve(null),
         ]);
+
+        const profile = mergeProfiles(
+          effectiveSessionProfile,
+          mergeProfiles(storedProfile, liveProfile),
+        );
 
         const usdcBalance = snapshot.usdcBalance;
         const allowanceClob = snapshot.allowanceClob;
@@ -1297,17 +1365,66 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const verify = await limitlessRequest({
+        method: "GET",
+        requestPath: "/auth/verify-auth",
+        sessionCookie,
+      });
+      if (!verify.ok) {
+        await AuthService.deactivateVenueCredentials(user.id, "limitless", signer);
+        reply.code(400);
+        return reply.send({
+          error: "Limitless session is invalid. Reconnect Limitless and retry.",
+          status: verify.status,
+          payload: verify.payload,
+        });
+      }
+      const verifiedProfile = extractProfile(verify.payload);
+      const verifiedAccount =
+        typeof verifiedProfile?.account === "string"
+          ? toChecksumAddress(verifiedProfile.account)
+          : null;
+      if (
+        verifiedAccount &&
+        normalizeAddress(verifiedAccount) !== normalizeAddress(signer)
+      ) {
+        await AuthService.deactivateVenueCredentials(user.id, "limitless", signer);
+        reply.code(400);
+        return reply.send({
+          error:
+            "Limitless session belongs to a different account. Reconnect Limitless for this wallet.",
+          expected: signer,
+          actual: verifiedAccount,
+        });
+      }
+
+      const storedProfile = extractProfile(creds?.additionalData ?? null);
       const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
+      const liveProfile = await fetchLimitlessProfileForAddress({
+        address: signer,
+        sessionCookie,
+      });
       const profile = mergeProfiles(
-        extractProfile(creds?.additionalData ?? null),
-        sessionProfile,
+        mergeProfiles(verifiedProfile, sessionProfile),
+        mergeProfiles(storedProfile, liveProfile),
       );
-      const ownerId = request.body.ownerId ?? profile?.id;
+      const ownerId = profile?.id;
       if (!ownerId) {
         reply.code(400);
         return reply.send({
           error: "Limitless ownerId not available (connect first)",
         });
+      }
+      if (request.body.ownerId != null && request.body.ownerId !== ownerId) {
+        app.log.warn(
+          {
+            userId: user.id,
+            walletAddress: signer,
+            requestedOwnerId: request.body.ownerId,
+            sessionOwnerId: ownerId,
+          },
+          "Ignoring client-supplied Limitless ownerId; using session ownerId",
+        );
       }
 
       const order = request.body.order;
@@ -1325,6 +1442,13 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "Order maker must match the selected wallet",
+        });
+      }
+      const checksumSigner = toChecksumAddress(signer);
+      if (!checksumSigner) {
+        reply.code(400);
+        return reply.send({
+          error: "Selected wallet is not a valid EVM address",
         });
       }
 
@@ -1391,6 +1515,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         coercedSideValue = sideValue;
         orderForUpstream = {
           ...order,
+          maker: checksumSigner,
+          signer: checksumSigner,
           salt,
           makerAmount,
           takerAmount,

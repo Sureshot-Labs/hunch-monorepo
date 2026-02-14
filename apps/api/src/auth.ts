@@ -1086,6 +1086,29 @@ export class AuthService {
         : null;
     const funderAddressValue = funderAddress ?? null;
 
+    const normalizedWallet = walletAddress.trim();
+    const isEthWallet = ETH_ADDRESS_RE.test(normalizedWallet);
+    let walletAddressKey = normalizedWallet;
+
+    if (isEthWallet) {
+      const existing = await pool.query<{ wallet_address: string }>(
+        `
+          select wallet_address
+          from user_venue_credentials
+          where user_id = $1
+            and venue = $2
+            and lower(wallet_address) = lower($3)
+          order by
+            last_used_at desc nulls last,
+            updated_at desc,
+            created_at desc
+          limit 1
+        `,
+        [userId, venue, normalizedWallet],
+      );
+      walletAddressKey = existing.rows[0]?.wallet_address ?? normalizedWallet;
+    }
+
     const result = await pool.query(
       `INSERT INTO user_venue_credentials (
           user_id,
@@ -1114,7 +1137,7 @@ export class AuthService {
        RETURNING id, user_id, wallet_address, venue, api_key, additional_data, funder_address, funder_updated_at, is_active, created_at, updated_at, last_used_at`,
       [
         userId,
-        walletAddress,
+        walletAddressKey,
         venue,
         apiKey,
         secretEnc,
@@ -1125,6 +1148,24 @@ export class AuthService {
     );
 
     const row = result.rows[0];
+
+    // Keep at most one active credential row for the same EVM wallet (case-insensitive),
+    // while still allowing multiple different wallets per user+venue.
+    if (isEthWallet && row?.id) {
+      await pool.query(
+        `
+          update user_venue_credentials
+          set is_active = false,
+              updated_at = now()
+          where user_id = $1
+            and venue = $2
+            and lower(wallet_address) = lower($3)
+            and id <> $4
+            and is_active = true
+        `,
+        [userId, venue, walletAddressKey, row.id],
+      );
+    }
 
     // Map snake_case to camelCase
     return {
@@ -1158,6 +1199,11 @@ export class AuthService {
       );
     }
 
+    const normalizedWallet = walletAddress.trim();
+    const isEthWallet = ETH_ADDRESS_RE.test(normalizedWallet);
+    const walletClause = isEthWallet
+      ? "lower(wallet_address) = lower($2)"
+      : "wallet_address = $2";
     const funderAddressValue = funderAddress ? funderAddress.trim() : null;
 
     const result = await pool.query<{
@@ -1171,12 +1217,12 @@ export class AuthService {
             updated_at = now(),
             last_used_at = now()
         where user_id = $1
-          and wallet_address = $2
+          and ${walletClause}
           and venue = $3
           and is_active = true
         returning funder_address, funder_updated_at
       `,
-      [userId, walletAddress, venue, funderAddressValue],
+      [userId, normalizedWallet, venue, funderAddressValue],
     );
 
     const row = result.rows[0];
@@ -1190,6 +1236,30 @@ export class AuthService {
       funderAddress: row.funder_address,
       funderUpdatedAt: row.funder_updated_at,
     };
+  }
+
+  static async deactivateVenueCredentials(
+    userId: string,
+    venue: "polymarket" | "kalshi" | "limitless",
+    walletAddress: string,
+  ): Promise<number> {
+    const normalizedWallet = walletAddress.trim();
+    const walletClause = ETH_ADDRESS_RE.test(normalizedWallet)
+      ? "lower(wallet_address) = lower($3)"
+      : "wallet_address = $3";
+    const result = await pool.query(
+      `
+        update user_venue_credentials
+        set is_active = false,
+            updated_at = now()
+        where user_id = $1
+          and venue = $2
+          and ${walletClause}
+          and is_active = true
+      `,
+      [userId, venue, normalizedWallet],
+    );
+    return result.rowCount ?? 0;
   }
 
   /**
@@ -1231,6 +1301,10 @@ export class AuthService {
          AND venue = $2
          AND ${walletClause}
          AND is_active = true
+       ORDER BY
+         last_used_at DESC NULLS LAST,
+         updated_at DESC,
+         created_at DESC
        LIMIT 1`,
       [userId, venue, normalizedWallet],
     );
