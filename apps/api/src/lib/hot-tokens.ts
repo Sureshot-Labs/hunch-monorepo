@@ -10,6 +10,13 @@ const HOT_KEYS: Record<HotVenue, string> = {
   limitless: "hot:tokens:limitless",
 };
 
+const HOT_STREAM_KEYS: Record<HotVenue, string> = {
+  polymarket: "hot:tokens:stream:polymarket",
+  kalshi: "hot:tokens:stream:kalshi",
+  dflow: "hot:tokens:stream:dflow",
+  limitless: "hot:tokens:stream:limitless",
+};
+
 function normalizeTokenId(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
@@ -23,11 +30,21 @@ function inferVenue(tokenId: string): HotVenue | null {
   return null;
 }
 
-export async function markHotTokens(inputs: {
+type MarkHotInputs = {
   tokenIds: Array<string | null | undefined>;
   venue?: HotVenue;
-}): Promise<void> {
-  if (env.hotTokensMax <= 0) return;
+};
+
+async function markTokensForKeySet(
+  inputs: MarkHotInputs,
+  options: {
+    keys: Record<HotVenue, string>;
+    maxTokens: number;
+    ttlSec: number;
+    logLabel: string;
+  },
+): Promise<void> {
+  if (options.maxTokens <= 0) return;
 
   const r = await getRedis();
   if (!r) return;
@@ -40,21 +57,21 @@ export async function markHotTokens(inputs: {
     const venue = inputs.venue ?? inferVenue(tokenId);
     if (!venue) continue;
     const set = byVenue.get(venue) ?? new Set<string>();
-    if (set.size < env.hotTokensMax) set.add(tokenId);
+    if (set.size < options.maxTokens) set.add(tokenId);
     byVenue.set(venue, set);
   }
 
   if (!byVenue.size) return;
 
   const now = Date.now();
-  const cutoff = now - env.hotTokensTtlSec * 1000;
+  const cutoff = now - options.ttlSec * 1000;
 
   try {
     for (const [venue, tokensSet] of byVenue.entries()) {
-      const tokens = Array.from(tokensSet).slice(0, env.hotTokensMax);
+      const tokens = Array.from(tokensSet).slice(0, options.maxTokens);
       if (!tokens.length) continue;
 
-      const key = HOT_KEYS[venue];
+      const key = options.keys[venue];
       const multi = r.multi();
       multi.zAdd(
         key,
@@ -64,11 +81,29 @@ export async function markHotTokens(inputs: {
       await multi.exec();
 
       const size = await r.zCard(key);
-      if (size > env.hotTokensMax) {
-        await r.zRemRangeByRank(key, 0, size - env.hotTokensMax - 1);
+      if (size > options.maxTokens) {
+        await r.zRemRangeByRank(key, 0, size - options.maxTokens - 1);
       }
     }
   } catch (error) {
-    console.warn("[hot-tokens] failed to mark hot tokens", error);
+    console.warn(`[hot-tokens] ${options.logLabel}`, error);
   }
+}
+
+export async function markHotTokens(inputs: MarkHotInputs): Promise<void> {
+  await markTokensForKeySet(inputs, {
+    keys: HOT_KEYS,
+    maxTokens: env.hotTokensMax,
+    ttlSec: env.hotTokensTtlSec,
+    logLabel: "failed to mark hot tokens",
+  });
+}
+
+export async function markStreamHotTokens(inputs: MarkHotInputs): Promise<void> {
+  await markTokensForKeySet(inputs, {
+    keys: HOT_STREAM_KEYS,
+    maxTokens: env.hotStreamTokensMax,
+    ttlSec: env.hotStreamTokensTtlSec,
+    logLabel: "failed to mark stream hot tokens",
+  });
 }

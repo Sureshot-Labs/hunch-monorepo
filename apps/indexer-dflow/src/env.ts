@@ -149,6 +149,15 @@ const refreshMinutes = clampInt(refreshMinutesRaw, {
   fallback: 10,
 });
 
+const wsRefreshSecRaw = parseOptionalInt(
+  process.env.DFLOW_WS_REFRESH_SEC ?? process.env.INDEXER_WS_REFRESH_SEC,
+);
+const wsRefreshSec = clampInt(wsRefreshSecRaw, {
+  min: 10,
+  max: 3600,
+  fallback: 60,
+});
+
 const pageSizeRaw = parseOptionalInt(process.env.DFLOW_PAGE_SIZE);
 const pageSize = clampInt(pageSizeRaw, { min: 1, max: 500, fallback: 100 });
 
@@ -227,13 +236,29 @@ const nonActiveSweepStatuses =
 const hotTokensTtlSec = clampInt(parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC), {
   min: 60,
   max: 7 * 24 * 60 * 60,
-  fallback: 600,
+  fallback: 1800,
 });
 const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
   min: 10,
   max: 50_000,
-  fallback: 1000,
+  fallback: 5000,
 });
+const hotStreamTokensTtlSec = clampInt(
+  parseOptionalInt(process.env.HOT_STREAM_TOKENS_TTL_SEC),
+  {
+    min: 60,
+    max: 7 * 24 * 60 * 60,
+    fallback: 1800,
+  },
+);
+const hotStreamTokensMax = clampInt(
+  parseOptionalInt(process.env.HOT_STREAM_TOKENS_MAX),
+  {
+    min: 10,
+    max: 50_000,
+    fallback: 5000,
+  },
+);
 
 const isInitializedSetting = parseOptionalBool(
   process.env.DFLOW_IS_INITIALIZED,
@@ -308,6 +333,7 @@ export const env = {
 
   // Indexer knobs (shared defaults used by other indexers too)
   refreshMinutes,
+  wsRefreshSec,
   pageSize,
   hotEnabledSetting,
   hotEnabled,
@@ -326,6 +352,8 @@ export const env = {
   nonActiveSweepStatuses,
   hotTokensTtlSec,
   hotTokensMax,
+  hotStreamTokensTtlSec,
+  hotStreamTokensMax,
   isInitializedSetting,
   isInitialized: isInitializedSetting,
   requireInitializedSetting,

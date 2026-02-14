@@ -233,15 +233,52 @@ async function publishTokenTopNow(
   ]);
 }
 
-async function fetchHotTokenIds(): Promise<string[]> {
-  if (env.hotTokensMax <= 0) return [];
-  await ensureRedis();
+function clampHotProbeLimit(limit: number): number {
+  return Math.max(200, Math.min(2000, Math.trunc(limit)));
+}
 
-  const key = "hot:tokens:dflow";
-  const cutoff = Date.now() - env.hotTokensTtlSec * 1000;
-  try {
+async function fetchHotTokenIds(limit?: number): Promise<string[]> {
+  if (env.hotTokensMax <= 0 && env.hotStreamTokensMax <= 0) return [];
+  await ensureRedis();
+  const mergedCap = Math.max(env.hotTokensMax, env.hotStreamTokensMax);
+  const resolvedLimit =
+    typeof limit === "number" && Number.isFinite(limit)
+      ? Math.max(0, Math.trunc(limit))
+      : mergedCap;
+  if (resolvedLimit <= 0) return [];
+
+  const readHotSet = async (
+    key: string,
+    maxTokens: number,
+    ttlSec: number,
+  ): Promise<string[]> => {
+    const readMax = Math.min(maxTokens, resolvedLimit);
+    if (readMax <= 0) return [];
+    const cutoff = Date.now() - ttlSec * 1000;
     await redis.zRemRangeByScore(key, 0, cutoff);
-    return await redis.zRange(key, 0, env.hotTokensMax - 1, { REV: true });
+    return redis.zRange(key, 0, readMax - 1, { REV: true });
+  };
+
+  try {
+    const [streamIds, hotIds] = await Promise.all([
+      readHotSet(
+        "hot:tokens:stream:dflow",
+        env.hotStreamTokensMax,
+        env.hotStreamTokensTtlSec,
+      ),
+      readHotSet("hot:tokens:dflow", env.hotTokensMax, env.hotTokensTtlSec),
+    ]);
+
+    const maxOut = Math.min(mergedCap, resolvedLimit);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const tokenId of [...streamIds, ...hotIds]) {
+      if (seen.has(tokenId)) continue;
+      seen.add(tokenId);
+      out.push(tokenId);
+      if (out.length >= maxOut) break;
+    }
+    return out;
   } catch (error) {
     log.warn("Failed to fetch hot tokens", error);
     return [];
@@ -431,7 +468,7 @@ async function fetchTickersForEventIds(eventIds: string[]): Promise<string[]> {
 }
 
 async function fetchHotTickersOrdered(): Promise<string[]> {
-  const hotTokenIds = await fetchHotTokenIds();
+  const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
   const positionTokenIds = await fetchPositionTokenIds();
 
   const hotTickers = await fetchTickersForTokenIds(hotTokenIds);
@@ -478,7 +515,9 @@ async function fetchTopTickers(limit: number): Promise<string[]> {
 }
 
 async function fetchTradeTokenIds(): Promise<string[]> {
-  const hotTokenIds = await fetchHotTokenIds();
+  const hotTokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.tradesTokenLimit * 8),
+  );
   const positionTokenIds = await fetchPositionTokenIds();
   const tokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]))
     .filter((tokenId) => tokenId.startsWith("sol:"));
@@ -627,7 +666,7 @@ function deriveNoAsk(yesBid: number | null): number | null {
 }
 
 async function refreshHotTokenTops(): Promise<number> {
-  const tokenIds = await fetchHotTokenIds();
+  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 10));
   if (!tokenIds.length) return 0;
 
   const { rows } = await pool.query<{
@@ -682,7 +721,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
   await ensureRedis();
   await pool.query("select 1");
 
-  const hotTokenIds = await fetchHotTokenIds();
+  const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
   const positionTokenIds = await fetchPositionTokenIds();
 
   const allTokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));

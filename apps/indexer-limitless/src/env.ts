@@ -90,6 +90,13 @@ const refreshMinutes = Math.max(
   Number.isFinite(refreshMinutesRaw) ? refreshMinutesRaw : 5,
 );
 
+const wsRefreshSec = clampInt(
+  parseOptionalInt(
+    process.env.LIMITLESS_WS_REFRESH_SEC ?? process.env.INDEXER_WS_REFRESH_SEC,
+  ),
+  { min: 10, max: 3600, fallback: 60 },
+);
+
 const httpDelayRaw = Number(process.env.LIMITLESS_HTTP_MIN_DELAY_MS ?? "500");
 const limitlessHttpMinDelayMs = Math.max(
   0,
@@ -110,13 +117,25 @@ const limitlessHttpBackoffMs = Math.max(
 
 const hotTokensTtlSec = clampInt(
   parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC),
-  { min: 60, max: 7 * 24 * 60 * 60, fallback: 600 }
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 }
 );
 const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
   min: 10,
   max: 50_000,
-  fallback: 1000,
+  fallback: 5000,
 });
+const hotStreamTokensTtlSec = clampInt(
+  parseOptionalInt(process.env.HOT_STREAM_TOKENS_TTL_SEC),
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 }
+);
+const hotStreamTokensMax = clampInt(
+  parseOptionalInt(process.env.HOT_STREAM_TOKENS_MAX),
+  {
+    min: 10,
+    max: 50_000,
+    fallback: 5000
+  }
+);
 
 const wsHotShareRaw = parseOptionalFloat(
   process.env.LIMITLESS_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
@@ -143,12 +162,15 @@ export const env = {
   bootstrapMaxPages,
   // minutes between refreshes
   refreshMinutes,
+  wsRefreshSec,
 
   limitlessHttpMinDelayMs,
   limitlessHttpMaxRetries,
   limitlessHttpBackoffMs,
   hotTokensTtlSec,
   hotTokensMax,
+  hotStreamTokensTtlSec,
+  hotStreamTokensMax,
 
   // AMM prices are % (0..100) in /markets/active; CLOB prices are 0..1.
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",

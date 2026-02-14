@@ -13,6 +13,7 @@ import { env } from "./env.js";
 
 let running = false;
 let wsStarted = false;
+let wsRefreshRunning = false;
 
 async function periodicBootstrap() {
   if (running) return; // skip if one is running
@@ -20,8 +21,30 @@ async function periodicBootstrap() {
   try {
     await syncHotWindow();
     await syncHotEventStatuses();
-    const tokenIds = await selectWsTokenIds();
+    if (wsStarted) {
+      const hotTokenIds = await selectHotTokenIds();
+      log.info("Polymarket hot refresh snapshot", {
+        hotTokens: hotTokenIds.length,
+      });
+      if (hotTokenIds.length > 0) await snapshotBooks(hotTokenIds);
+    }
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`bootstrap blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic bootstrap err", e);
+    }
+  } finally {
+    running = false;
+  }
+}
 
+async function periodicWsRefresh() {
+  if (wsRefreshRunning) return;
+  wsRefreshRunning = true;
+  try {
+    const tokenIds = await selectWsTokenIds();
     if (!wsStarted && tokenIds.length > 0) {
       const hotTokenIds = await selectHotTokenIds();
       const combined =
@@ -36,31 +59,24 @@ async function periodicBootstrap() {
       await snapshotBooks(combined);
       startMarketWS(tokenIds);
       wsStarted = true;
-    } else if (wsStarted) {
-      updateMarketWSSubscriptions(tokenIds);
-      const hotTokenIds = await selectHotTokenIds();
-      log.info("Polymarket hot refresh snapshot", {
-        wsTokens: tokenIds.length,
-        hotTokens: hotTokenIds.length,
-      });
-      if (hotTokenIds.length > 0) {
-        await snapshotBooks(hotTokenIds);
-      }
+      return;
     }
+    if (wsStarted) updateMarketWSSubscriptions(tokenIds);
   } catch (e) {
     if (isPgSetupIssue(e)) {
-      log.warn(`bootstrap blocked: ${formatPgError(e)}`);
+      log.warn(`ws refresh blocked: ${formatPgError(e)}`);
       log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
     } else {
-      log.warn("periodic bootstrap err", e);
+      log.warn("periodic ws refresh err", e);
     }
   } finally {
-    running = false;
+    wsRefreshRunning = false;
   }
 }
 
 async function main() {
   await periodicBootstrap();
+  await periodicWsRefresh();
   void syncCatchUpFromCursor().catch((e) => {
     if (isPgSetupIssue(e)) {
       log.warn(`catch-up blocked: ${formatPgError(e)}`);
@@ -72,6 +88,8 @@ async function main() {
 
   // Keep refreshing background data to catch new/changed markets.
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
+  // Refresh WS desired subscriptions independently from HTTP refresh cadence.
+  setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
 }
 
 main().catch((e) => {

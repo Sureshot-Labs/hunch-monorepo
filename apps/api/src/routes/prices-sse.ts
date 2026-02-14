@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { env } from "../env.js";
 import { getRedisStatus } from "../redis.js";
-import { markHotTokens } from "../lib/hot-tokens.js";
+import { markHotTokens, markStreamHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
 import {
   subscribeToMarketStates,
@@ -39,6 +40,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
 
       const ids = request.query.token_id;
       void markHotTokens({ tokenIds: ids });
+      void markStreamHotTokens({ tokenIds: ids });
 
       // SSE headers
       reply.raw.setHeader("Content-Type", "text/event-stream");
@@ -131,9 +133,16 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         }
       }, 20000);
 
+      // Keep currently subscribed tokens sticky while the stream is open.
+      const stickyMarkIntervalMs = Math.max(5, env.hotStreamMarkIntervalSec) * 1000;
+      const sticky = setInterval(() => {
+        void markStreamHotTokens({ tokenIds: ids });
+      }, stickyMarkIntervalMs);
+
       // cleanup
       request.raw.on("close", () => {
         clearInterval(hb);
+        clearInterval(sticky);
         unsubscribeTicks?.();
         unsubscribeMarketState?.();
       });

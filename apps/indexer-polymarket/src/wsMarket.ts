@@ -552,19 +552,34 @@ async function setResolvedByVenueMarketId(
 
 function sendSubscribe(ws: WebSocket, ids: string[]) {
   if (!ids.length) return;
-  const payload = {
-    type: "MARKET",
-    assets_ids: ids,
-    asset_ids: ids,
-    custom_feature_enabled: env.wsCustomFeatureEnabled,
-  };
-  ws.send(JSON.stringify(payload));
+  for (let i = 0; i < ids.length; i += env.wsSubChunkSize) {
+    const chunk = ids.slice(i, i + env.wsSubChunkSize);
+    const payload = {
+      type: "MARKET",
+      assets_ids: chunk,
+      asset_ids: chunk,
+      custom_feature_enabled: env.wsCustomFeatureEnabled,
+    };
+    ws.send(JSON.stringify(payload));
+  }
 }
 
 function sendUnsubscribe(ws: WebSocket, ids: string[]) {
   if (!ids.length) return;
-  const payload = { type: "UNSUBSCRIBE", assets_ids: ids, asset_ids: ids };
-  ws.send(JSON.stringify(payload));
+  for (let i = 0; i < ids.length; i += env.wsSubChunkSize) {
+    const chunk = ids.slice(i, i + env.wsSubChunkSize);
+    const payload = { type: "UNSUBSCRIBE", assets_ids: chunk, asset_ids: chunk };
+    ws.send(JSON.stringify(payload));
+  }
+}
+
+function fullResubscribe(ws: WebSocket): void {
+  const ids = desiredTokenIds.slice(0, env.wsSubset);
+  sendSubscribe(ws, ids);
+  log.info("WS full resubscribe", {
+    total: ids.length,
+    chunks: Math.ceil(ids.length / env.wsSubChunkSize),
+  });
 }
 
 function syncSubscriptions(ws: WebSocket, desiredIds: string[]) {
@@ -1099,12 +1114,15 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
   currentWs = ws;
 
   let pingInterval: NodeJS.Timeout | null = null;
+  let resubscribeInterval: NodeJS.Timeout | null = null;
+  let lastMessageAt = Date.now();
 
   if (!shutdownBound) {
     shutdownBound = true;
     const shutdown = () => {
       try {
         if (pingInterval) clearInterval(pingInterval);
+        if (resubscribeInterval) clearInterval(resubscribeInterval);
       } catch {
         // ignore
       }
@@ -1124,6 +1142,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     bindRedisErrorOnce();
     await ensureRedis();
     syncSubscriptions(ws, desiredTokenIds);
+    lastMessageAt = Date.now();
 
     pingInterval = setInterval(() => {
       try {
@@ -1132,9 +1151,23 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
         // ignore
       }
     }, 20_000);
+
+    resubscribeInterval = setInterval(() => {
+      try {
+        const staleForMs = Date.now() - lastMessageAt;
+        if (staleForMs < env.wsResubscribeSec * 1000) return;
+        log.info("WS stale; running full resubscribe", {
+          staleMs: staleForMs,
+        });
+        fullResubscribe(ws);
+      } catch {
+        // ignore
+      }
+    }, env.wsResubscribeSec * 1000);
   });
 
   ws.on("message", (raw) => {
+    lastMessageAt = Date.now();
     const text = String(raw);
     if (text === "PONG" || text === "PING") return;
 
@@ -1148,6 +1181,12 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     void mq
       .add(async () => {
         try {
+          if (Array.isArray(msg)) {
+            for (const entry of msg) {
+              await handleWsMessage(entry);
+            }
+            return;
+          }
           await handleWsMessage(msg);
         } catch (error) {
           log.warn("WS message handler error", error);
@@ -1160,6 +1199,7 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
 
   ws.on("close", (code, reason) => {
     if (pingInterval) clearInterval(pingInterval);
+    if (resubscribeInterval) clearInterval(resubscribeInterval);
     log.warn("WS closed", code, reason.toString());
 
     const max = 30_000;

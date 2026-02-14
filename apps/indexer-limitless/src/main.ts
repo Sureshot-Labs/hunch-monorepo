@@ -9,6 +9,7 @@ import { env } from "./env.js";
 import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 
 let bootstrapping = false;
+let wsRefreshRunning = false;
 
 async function periodicBootstrap() {
   if (bootstrapping) return; // skip if one is running
@@ -16,8 +17,6 @@ async function periodicBootstrap() {
   try {
     await bootstrapLimitless();
     await syncHotLimitlessMarkets();
-    const slugs = await resolveHotSlugsForWs();
-    updateMarketWSSubscriptions(slugs);
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -27,6 +26,24 @@ async function periodicBootstrap() {
     }
   } finally {
     bootstrapping = false;
+  }
+}
+
+async function periodicWsRefresh() {
+  if (wsRefreshRunning) return;
+  wsRefreshRunning = true;
+  try {
+    const slugs = await resolveHotSlugsForWs();
+    updateMarketWSSubscriptions(slugs);
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`ws refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic ws refresh err", e);
+    }
+  } finally {
+    wsRefreshRunning = false;
   }
 }
 
@@ -41,6 +58,8 @@ async function main() {
   startMarketWS(slugs);
   // Keep refreshing background data every 5 minutes to catch new/changed markets.
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
+  // Refresh WS desired subscriptions independently from HTTP refresh cadence.
+  setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
 }
 
 main().catch((e) => {

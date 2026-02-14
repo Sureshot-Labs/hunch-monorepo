@@ -83,6 +83,33 @@ const refreshMinutes = clampInt(refreshMinutesRaw, {
   fallback: 10,
 });
 
+const wsRefreshSecRaw = parseOptionalInt(
+  process.env.POLYMARKET_WS_REFRESH_SEC ?? process.env.INDEXER_WS_REFRESH_SEC,
+);
+const wsRefreshSec = clampInt(wsRefreshSecRaw, {
+  min: 10,
+  max: 3600,
+  fallback: 60,
+});
+const wsResubscribeSecRaw = parseOptionalInt(
+  process.env.POLYMARKET_WS_RESUBSCRIBE_SEC ??
+    process.env.INDEXER_WS_RESUBSCRIBE_SEC,
+);
+const wsResubscribeSec = clampInt(wsResubscribeSecRaw, {
+  min: 10,
+  max: 3600,
+  fallback: 60,
+});
+const wsSubChunkSizeRaw = parseOptionalInt(
+  process.env.POLYMARKET_WS_SUB_CHUNK_SIZE ??
+    process.env.INDEXER_WS_SUB_CHUNK_SIZE,
+);
+const wsSubChunkSize = clampInt(wsSubChunkSizeRaw, {
+  min: 10,
+  max: 1000,
+  fallback: 250,
+});
+
 const hotLookbackMinutesRaw = parseOptionalInt(
   process.env.POLYMARKET_HOT_LOOKBACK_MIN,
 );
@@ -120,14 +147,30 @@ const hotTokensTtlSecRaw = parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC);
 const hotTokensTtlSec = clampInt(hotTokensTtlSecRaw, {
   min: 60,
   max: 7 * 24 * 60 * 60,
-  fallback: 600,
+  fallback: 1800,
 });
 
 const hotTokensMaxRaw = parseOptionalInt(process.env.HOT_TOKENS_MAX);
 const hotTokensMax = clampInt(hotTokensMaxRaw, {
   min: 10,
   max: 50_000,
-  fallback: 1000,
+  fallback: 5000,
+});
+
+const hotStreamTokensTtlSecRaw = parseOptionalInt(
+  process.env.HOT_STREAM_TOKENS_TTL_SEC,
+);
+const hotStreamTokensTtlSec = clampInt(hotStreamTokensTtlSecRaw, {
+  min: 60,
+  max: 7 * 24 * 60 * 60,
+  fallback: 1800,
+});
+
+const hotStreamTokensMaxRaw = parseOptionalInt(process.env.HOT_STREAM_TOKENS_MAX);
+const hotStreamTokensMax = clampInt(hotStreamTokensMaxRaw, {
+  min: 10,
+  max: 50_000,
+  fallback: 5000,
 });
 
 const wsHotShareRaw = parseOptionalFloat(
@@ -154,12 +197,17 @@ export const env = {
     "wss://ws-subscriptions-clob.polymarket.com/ws/market",
   pageSize,
   refreshMinutes,
+  wsRefreshSec,
+  wsResubscribeSec,
+  wsSubChunkSize,
   hotLookbackMinutes,
   hotMaxPages,
   overlapPages,
   // bootstrapLimit removed - now fetching all events
   hotTokensTtlSec,
   hotTokensMax,
+  hotStreamTokensTtlSec,
+  hotStreamTokensMax,
   hotStatusMaxEvents,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),

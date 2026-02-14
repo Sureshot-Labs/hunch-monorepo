@@ -277,6 +277,12 @@ WS orderbook streaming (best bid/ask) is always a subset:
 
 - `INDEXER_WS_SUBSET=200` (max subscribed tokens)
 - `INDEXER_TOP_BOOK_SNAPSHOT=150` (how many tokens to snapshot once at startup)
+- `INDEXER_WS_REFRESH_SEC=60` (how often to recompute and resubscribe WS targets, independent from HTTP refresh)
+- `INDEXER_WS_RESUBSCRIBE_SEC=60` (how often to re-send full WS subscriptions to heal drift)
+- `INDEXER_WS_SUB_CHUNK_SIZE=250` (batch size for subscribe/unsubscribe frames)
+- Optional per-indexer overrides: `POLYMARKET_WS_REFRESH_SEC`, `DFLOW_WS_REFRESH_SEC`, `LIMITLESS_WS_REFRESH_SEC`
+- `HOT_TOKENS_TTL_SEC=1800` and `HOT_TOKENS_MAX=5000` (global hot-token retention/cap)
+- `HOT_STREAM_TOKENS_TTL_SEC=1800`, `HOT_STREAM_TOKENS_MAX=5000`, `HOT_STREAM_MARK_INTERVAL_SEC=60` (sticky retention for actively streamed token sets)
 
 ---
 

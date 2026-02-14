@@ -13,6 +13,8 @@ import { log } from "./log.js";
 import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 
 let running = false;
+let wsRefreshRunning = false;
+let wsStarted = false;
 let bootstrapRuns = 0;
 
 async function periodicBootstrap() {
@@ -27,8 +29,6 @@ async function periodicBootstrap() {
       await syncNonActiveSweep();
     }
     await syncRecentTrades();
-    const tickers = await resolveHotTickersForWs();
-    updateMarketWSSubscriptions(tickers);
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -41,10 +41,34 @@ async function periodicBootstrap() {
   }
 }
 
+async function periodicWsRefresh() {
+  if (wsRefreshRunning) return;
+  wsRefreshRunning = true;
+  try {
+    const tickers = await resolveHotTickersForWs();
+    if (!wsStarted && tickers.length > 0) {
+      const ws = startMarketWS(tickers);
+      wsStarted = ws != null;
+      return;
+    }
+    updateMarketWSSubscriptions(tickers);
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`ws refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic ws refresh err", e);
+    }
+  } finally {
+    wsRefreshRunning = false;
+  }
+}
+
 async function main() {
   await periodicBootstrap();
   const tickers = await resolveHotTickersForWs();
-  startMarketWS(tickers);
+  const ws = startMarketWS(tickers);
+  wsStarted = ws != null;
 
   void syncCatchUpFromCursor().catch((e) => {
     if (isPgSetupIssue(e)) {
@@ -56,6 +80,7 @@ async function main() {
   });
 
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
+  setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
 }
 
 main().catch((e) => {
