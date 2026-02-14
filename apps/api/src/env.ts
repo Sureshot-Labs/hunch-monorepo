@@ -228,6 +228,14 @@ const walletIntelSignalWeightNovelty = optionalNonNegativeNumber(
   "WALLET_INTEL_SIGNAL_WEIGHT_NOVELTY",
   0.1,
 );
+const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
+  "POSITIONS_SYNC_FLATTEN_GRACE_SEC",
+  45,
+);
+const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
+  "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
+  positionsSyncFlattenGraceSec,
+);
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -258,10 +266,8 @@ export const env = {
     "POSITIONS_SYNC_CONCURRENCY_SOLANA",
     2,
   ),
-  positionsSyncFlattenGraceSec: optionalNonNegativeInt(
-    "POSITIONS_SYNC_FLATTEN_GRACE_SEC",
-    45,
-  ),
+  positionsSyncFlattenGraceSec,
+  limitlessPositionsSyncFlattenGraceSec,
   hotTokensTtlSec: optionalPositiveInt("HOT_TOKENS_TTL_SEC", 600),
   hotTokensMax: optionalPositiveInt("HOT_TOKENS_MAX", 1000),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",

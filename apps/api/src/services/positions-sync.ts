@@ -47,15 +47,45 @@ function normalizeFillSide(value: string | null | undefined): "BUY" | "SELL" | n
   return null;
 }
 
-function parseBalanceString(value: unknown): string | null {
+function normalizeLimitlessSnapshotBalance(value: unknown): string | null {
+  if (typeof value === "bigint") {
+    if (value <= 0n) return null;
+    return ethers.formatUnits(value, 6);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (Number.isInteger(value)) {
+      return ethers.formatUnits(BigInt(Math.trunc(value)), 6);
+    }
+    return value.toString();
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (/^[0-9]+$/.test(trimmed)) {
+      try {
+        const raw = BigInt(trimmed);
+        if (raw <= 0n) return null;
+        return ethers.formatUnits(raw, 6);
+      } catch {
+        return null;
+      }
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return trimmed;
+  }
+  return null;
+}
+
+function parseTokenIdString(value: unknown): string | null {
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed.length ? trimmed : null;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    return value.toString();
+    return String(Math.trunc(value));
   }
-  if (typeof value === "bigint") return value.toString();
   return null;
 }
 
@@ -73,6 +103,58 @@ function extractPositionIds(value: unknown): string[] {
   };
   visit(value);
   return output;
+}
+
+function resolveLimitlessMarketTokenId(
+  market: Record<string, unknown> | null,
+  side: "yes" | "no",
+  fallback: string | null,
+): string | null {
+  if (!market) return fallback;
+  const nested =
+    (isRecord(market.tokens) ? market.tokens : null) ??
+    (isRecord(market.token) ? market.token : null);
+  if (nested) {
+    const nestedTokenId = parseTokenIdString(nested[side]);
+    if (nestedTokenId) return nestedTokenId;
+  }
+
+  const sideSuffix = side === "yes" ? "yes" : "no";
+  const candidates = [
+    market[`${sideSuffix}PositionId`],
+    market[`${sideSuffix}_position_id`],
+    market[`${sideSuffix}TokenId`],
+    market[`${sideSuffix}_token_id`],
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseTokenIdString(candidate);
+    if (parsed) return parsed;
+  }
+
+  return fallback;
+}
+
+function mergeWalletTokenBalances(
+  ...sources: WalletTokenBalance[][]
+): WalletTokenBalance[] {
+  const merged = new Map<string, { numeric: number; size: string }>();
+  for (const source of sources) {
+    for (const balance of source) {
+      const tokenId = balance.tokenId;
+      const size = balance.size;
+      if (!tokenId || !size) continue;
+      const numeric = Number(size);
+      if (!Number.isFinite(numeric) || numeric <= 0) continue;
+      const existing = merged.get(tokenId);
+      if (!existing || numeric > existing.numeric) {
+        merged.set(tokenId, { numeric, size });
+      }
+    }
+  }
+  return Array.from(merged.entries()).map(([tokenId, value]) => ({
+    tokenId,
+    size: value.size,
+  }));
 }
 
 function addTokenBalance(
@@ -98,8 +180,8 @@ function extractTokenBalancesFromMap(
   yesToken: string | null,
   noToken: string | null,
 ) {
-  const yesValue = parseBalanceString(tokenBalances.yes);
-  const noValue = parseBalanceString(tokenBalances.no);
+  const yesValue = normalizeLimitlessSnapshotBalance(tokenBalances.yes);
+  const noValue = normalizeLimitlessSnapshotBalance(tokenBalances.no);
   if (yesValue && yesToken) {
     addTokenBalance(output, seen, yesToken, yesValue);
   }
@@ -109,7 +191,7 @@ function extractTokenBalancesFromMap(
 
   for (const [key, value] of Object.entries(tokenBalances)) {
     if (key === "yes" || key === "no") continue;
-    const size = parseBalanceString(value);
+    const size = normalizeLimitlessSnapshotBalance(value);
     if (!size) continue;
     addTokenBalance(output, seen, key, size);
   }
@@ -132,7 +214,7 @@ function extractTokenBalancesFromArray(
             : typeof entry.id === "string"
               ? entry.id
               : null;
-    const size = parseBalanceString(
+    const size = normalizeLimitlessSnapshotBalance(
       entry.balance ?? entry.amount ?? entry.size ?? entry.value,
     );
     if (!tokenId || !size) continue;
@@ -193,18 +275,16 @@ function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
     const positionIdsRaw =
       (market && (market.position_ids ?? market.positionIds)) ?? null;
     const positionIds = extractPositionIds(positionIdsRaw);
-    const yesToken =
-      market && isRecord(market.tokens) && typeof market.tokens.yes === "string"
-        ? market.tokens.yes
-        : market && isRecord(market.token) && typeof market.token.yes === "string"
-          ? market.token.yes
-        : positionIds[0] ?? null;
-    const noToken =
-      market && isRecord(market.tokens) && typeof market.tokens.no === "string"
-        ? market.tokens.no
-        : market && isRecord(market.token) && typeof market.token.no === "string"
-          ? market.token.no
-        : positionIds[1] ?? null;
+    const yesToken = resolveLimitlessMarketTokenId(
+      market,
+      "yes",
+      positionIds[0] ?? null,
+    );
+    const noToken = resolveLimitlessMarketTokenId(
+      market,
+      "no",
+      positionIds[1] ?? null,
+    );
 
     const tokenBalances =
       entry.tokensBalance ??
@@ -1085,13 +1165,20 @@ async function syncLimitlessPositionsFromPortfolio(
     console.error("Limitless history sync failed", error);
   }
 
-  let tokenBalances = extractLimitlessTokenBalances(upstream.payload);
-  if (tokenBalances.length === 0) {
-    tokenBalances = await fetchLimitlessOnchainTokenBalances(pool, {
+  const snapshotTokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  let onchainTokenBalances: WalletTokenBalance[] = [];
+  try {
+    onchainTokenBalances = await fetchLimitlessOnchainTokenBalances(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
     });
+  } catch (error) {
+    console.error("Limitless on-chain balance sync failed", error);
   }
+  const tokenBalances = mergeWalletTokenBalances(
+    snapshotTokenBalances,
+    onchainTokenBalances,
+  );
 
   if (tokenBalances.length) {
     void markHotTokens({
@@ -1107,7 +1194,8 @@ async function syncLimitlessPositionsFromPortfolio(
     positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "limitless:%",
-    flattenGraceSec: 0,
+    flattenGraceSec: env.limitlessPositionsSyncFlattenGraceSec,
+    protectRecentFlatsSec: env.limitlessPositionsSyncFlattenGraceSec,
   });
 
   if (inputs.positionScope === "own") {

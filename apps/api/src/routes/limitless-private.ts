@@ -113,18 +113,7 @@ function normalizeLimitlessPrice(value: number | null): number | null {
 
 function normalizeLimitlessAmount(value: number | null): number | null {
   if (value == null || !Number.isFinite(value) || value <= 0) return null;
-  return value > 1_000_000 ? value / 1_000_000 : value;
-}
-
-function isImmediateExecutionStatus(status: string | null | undefined): boolean {
-  if (!status) return false;
-  const normalized = status.trim().toLowerCase();
-  return (
-    normalized === "matched" ||
-    normalized === "filled" ||
-    normalized === "partially_filled" ||
-    normalized === "complete"
-  );
+  return value >= 1_000_000 ? value / 1_000_000 : value;
 }
 
 function extractLimitlessImmediateFill(
@@ -139,21 +128,23 @@ function extractLimitlessImmediateFill(
     : null;
   if (!record) return null;
 
-  const sharesCandidates = [
-    normalizeLimitlessAmount(
-      parseNumberish(
-        record.outcomeTokenAmount ??
-          record.outcome_token_amount ??
-          record.size ??
-          record.amount ??
-          record.quantity,
-      ),
+  const outcomeShares = normalizeLimitlessAmount(
+    parseNumberish(
+      record.outcomeTokenAmount ??
+        record.outcome_token_amount ??
+        record.size ??
+        record.amount ??
+        record.quantity,
     ),
-    normalizeLimitlessAmount(
-      parseNumberish(side === "BUY" ? record.takerAmount : record.makerAmount),
-    ),
-    fallback.size,
-  ];
+  );
+  const sideAmountRaw = parseNumberish(
+    side === "BUY" ? record.takerAmount : record.makerAmount,
+  );
+  const sideShares =
+    side === "BUY" && sideAmountRaw != null && sideAmountRaw <= 1
+      ? null
+      : normalizeLimitlessAmount(sideAmountRaw);
+  const sharesCandidates = [outcomeShares, fallback.size, sideShares];
   const shares = sharesCandidates.find(
     (value): value is number => value != null && Number.isFinite(value) && value > 0,
   );
@@ -399,10 +390,17 @@ function deriveSize(
   takerAmount: number | null,
 ): number | null {
   if (!side) return null;
-  if (orderType !== "GTC") return null;
+  if (orderType !== "GTC" && orderType !== "FOK") return null;
   const shares = side === "BUY" ? takerAmount : makerAmount;
   if (shares == null) return null;
-  return shares / 1_000_000;
+  const normalized = normalizeLimitlessAmount(shares);
+  if (normalized == null || !Number.isFinite(normalized) || normalized <= 0) {
+    return null;
+  }
+  if (orderType === "FOK" && side === "BUY" && shares <= 1) {
+    return null;
+  }
+  return normalized;
 }
 
 function readOrderField(
@@ -1787,16 +1785,16 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (
         stored.kind === "stored" &&
         request.body.orderType === "FOK" &&
-        tokenId &&
-        isImmediateExecutionStatus(status)
+        tokenId
       ) {
         const immediateFill = extractLimitlessImmediateFill(upstream.payload, side, {
           price,
           size,
         });
+        let optimisticApplied = false;
         if (immediateFill) {
           try {
-            await applyOptimisticPositionTrade(pool, {
+            const optimisticResult = await applyOptimisticPositionTrade(pool, {
               userId: user.id,
               walletAddress: signer,
               venue: "limitless",
@@ -1805,6 +1803,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               shares: immediateFill.shares,
               notionalUsd: immediateFill.notionalUsd,
             });
+            optimisticApplied = optimisticResult.applied;
           } catch (error) {
             app.log.warn(
               {
@@ -1818,6 +1817,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             );
           }
         }
+        app.log.debug(
+          {
+            userId: user.id,
+            walletAddress: signer,
+            tokenId,
+            side,
+            status,
+            hasImmediateFill: Boolean(immediateFill),
+            optimisticApplied,
+          },
+          "Limitless optimistic position evaluation",
+        );
       }
 
       void createNotificationSafe(
@@ -1840,6 +1851,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         orderId: venueOrderId,
+        status,
         payload: upstream.payload,
       });
     },
