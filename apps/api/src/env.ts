@@ -197,6 +197,30 @@ const walletIntelWhaleMarketLimit = optionalNonNegativeInt(
   "WALLET_INTEL_WHALE_MARKET_LIMIT",
   50,
 );
+const walletIntelWatchlistMarketLimit = optionalPositiveInt(
+  "WALLET_INTEL_WATCHLIST_MARKET_LIMIT",
+  200,
+);
+const walletIntelFollowedWalletLimit = optionalPositiveInt(
+  "WALLET_INTEL_FOLLOWED_WALLET_LIMIT",
+  500,
+);
+const walletIntelTokenLimitPoly = optionalPositiveInt(
+  "WALLET_INTEL_TOKEN_LIMIT_POLY",
+  2_000,
+);
+const walletIntelTokenLimitLimitless = optionalPositiveInt(
+  "WALLET_INTEL_TOKEN_LIMIT_LIMITLESS",
+  2_000,
+);
+const walletIntelTokenLimitKalshi = optionalPositiveInt(
+  "WALLET_INTEL_TOKEN_LIMIT_KALSHI",
+  2_000,
+);
+const walletIntelBackfillMaxSteps = optionalPositiveInt(
+  "WALLET_INTEL_BACKFILL_MAX_STEPS",
+  6,
+);
 const walletIntelSelectionModePoly = parseEnum(
   process.env.WALLET_INTEL_SELECTION_MODE_POLY,
   ["trade_24h", "trade_1h", "volume_24h", "liquidity", "hybrid"],
@@ -345,6 +369,11 @@ export const env = {
   walletIntelMarketLimitPerVenue,
   walletIntelMarketLimitKalshi,
   walletIntelWhaleMarketLimit,
+  walletIntelWatchlistMarketLimit,
+  walletIntelFollowedWalletLimit,
+  walletIntelTokenLimitPoly,
+  walletIntelTokenLimitLimitless,
+  walletIntelTokenLimitKalshi,
   walletIntelSelectionModePoly,
   walletIntelSelectionModeKalshi,
   walletIntelSelectionModeLimitless,
@@ -360,6 +389,7 @@ export const env = {
     "WALLET_INTEL_BACKFILL_SNAPSHOTS",
     0,
   ),
+  walletIntelBackfillMaxSteps,
   walletIntelRetentionDaysSnapshots: optionalNonNegativeInt(
     "WALLET_INTEL_RETENTION_DAYS_SNAPSHOTS",
     0,

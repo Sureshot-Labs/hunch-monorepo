@@ -10,7 +10,7 @@ import { isRecord } from "./lib/type-guards.js";
 import { limitlessRequest } from "./services/limitless-client.js";
 import { fetchErc1155BalancesByOwner } from "./services/polygon-rpc.js";
 import { inspectSafeWallet } from "./services/polymarket-funder.js";
-import { fetchSolanaTokenBalancesByOwnerMints } from "./services/solana-rpc.js";
+import { fetchSolanaTokenBalancesByOwner } from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
 
@@ -209,17 +209,22 @@ function addHours(date: Date, hours: number): Date {
 }
 
 function parseBackfillSnapshots(): number {
+  const clamp = (value: number): number =>
+    Math.max(
+      0,
+      Math.min(Math.floor(value), env.walletIntelBackfillMaxSteps),
+    );
   const arg = process.argv.find((entry) => entry.startsWith("--backfill="));
   if (arg) {
     const raw = arg.split("=")[1];
     const parsed = Number(raw);
     if (Number.isFinite(parsed) && parsed > 0) {
-      return Math.floor(parsed);
+      return clamp(parsed);
     }
   }
   const envValue = env.walletIntelBackfillSnapshots ?? 0;
   if (Number.isFinite(envValue) && envValue > 0) {
-    return Math.floor(envValue);
+    return clamp(envValue);
   }
   return 0;
 }
@@ -308,6 +313,11 @@ function normalizeOnchainTokenId(
     return trimmed.replace(/^kalshi:/, "").replace(/^sol:/, "");
   }
   return trimmed;
+}
+
+function capTokenIds(tokenIds: string[], limit: number): string[] {
+  if (tokenIds.length <= limit) return tokenIds;
+  return tokenIds.slice(0, limit);
 }
 
 function parseMetadataSource(metadata: unknown): string | null {
@@ -672,18 +682,24 @@ async function snapshotFollowedWalletHoldingsSolana(
   },
 ): Promise<number> {
   if (inputs.tokenMints.length === 0) return 0;
-  let balances: Map<string, number>;
+  const targetMints = new Set(
+    inputs.tokenMints
+      .map((mint) => mint.trim())
+      .filter((mint) => mint.length > 0),
+  );
+  if (targetMints.size === 0) return 0;
+  let balances: Awaited<ReturnType<typeof fetchSolanaTokenBalancesByOwner>>;
   try {
-    balances = await fetchSolanaTokenBalancesByOwnerMints({
+    balances = await fetchSolanaTokenBalancesByOwner({
       rpcUrls: env.solanaRpcUrls,
       timeoutMs: env.solanaRpcTimeoutMs,
       owner: inputs.address,
-      mints: inputs.tokenMints,
+      includeToken2022: true,
     });
   } catch (error) {
     console.error(
       "[wallets:intel:refresh] solana balances fetch failed",
-      { wallet: inputs.address, mints: inputs.tokenMints.length },
+      { wallet: inputs.address, mints: targetMints.size },
       error,
     );
     return 0;
@@ -691,7 +707,10 @@ async function snapshotFollowedWalletHoldingsSolana(
 
   let inserted = 0;
 
-  for (const [mint, amount] of balances.entries()) {
+  for (const balance of balances) {
+    const mint = balance.mint;
+    if (!targetMints.has(mint)) continue;
+    const amount = Number(balance.uiAmountString);
     const entry = inputs.tokenIndex.get(mint);
     if (!entry) continue;
     if (!Number.isFinite(amount) || amount <= 0) continue;
@@ -1897,14 +1916,20 @@ async function runSnapshot(snapshotAt: Date) {
       volume_24h: number | null;
     }>(
       `
-        select distinct um.id, um.venue, um.volume_24h
-        from user_watchlist uw
-        join wallet_follows wf on wf.user_id = uw.user_id
-        join unified_markets um on um.id = uw.market_id
-        where um.status = 'ACTIVE'
-          and um.venue in ('polymarket', 'limitless', 'kalshi')
-          and (um.venue != 'kalshi' or um.is_initialized is true)
+        select id, venue, volume_24h
+        from (
+          select distinct um.id, um.venue, um.volume_24h
+          from user_watchlist uw
+          join wallet_follows wf on wf.user_id = uw.user_id
+          join unified_markets um on um.id = uw.market_id
+          where um.status = 'ACTIVE'
+            and um.venue in ('polymarket', 'limitless', 'kalshi')
+            and (um.venue != 'kalshi' or um.is_initialized is true)
+        ) selected
+        order by volume_24h desc nulls last
+        limit $1
       `,
+      [env.walletIntelWatchlistMarketLimit],
     );
 
     const whaleMarkets =
@@ -1945,6 +1970,16 @@ async function runSnapshot(snapshotAt: Date) {
     }
 
     const marketRows = Array.from(marketMap.values());
+    console.log(
+      "[wallets:intel:refresh] market selection",
+      {
+        selected: marketRows.length,
+        base: markets.rows.length,
+        perVenue: marketsPerVenueRows.length,
+        watchlist: watchlistMarkets.rows.length,
+        whale: whaleMarkets.rows.length,
+      },
+    );
     const selectedMarketIds = marketRows.map((row) => row.id);
     const limitlessPriceBackfills = await backfillLimitlessPrices(
       client,
@@ -2135,6 +2170,19 @@ async function runSnapshot(snapshotAt: Date) {
       });
     }
 
+    tokenIdsByVenue.polymarket = capTokenIds(
+      tokenIdsByVenue.polymarket,
+      env.walletIntelTokenLimitPoly,
+    );
+    tokenIdsByVenue.limitless = capTokenIds(
+      tokenIdsByVenue.limitless,
+      env.walletIntelTokenLimitLimitless,
+    );
+    tokenIdsByVenue.kalshi = capTokenIds(
+      tokenIdsByVenue.kalshi,
+      env.walletIntelTokenLimitKalshi,
+    );
+
     const followedWallets = await client.query<{
       user_id: string;
       wallet_id: string;
@@ -2145,8 +2193,36 @@ async function runSnapshot(snapshotAt: Date) {
         select wf.user_id, w.id as wallet_id, w.address, w.chain
         from wallet_follows wf
         join wallets w on w.id = wf.wallet_id
+        order by wf.created_at desc
+        limit $1
       `,
+      [env.walletIntelFollowedWalletLimit],
     );
+
+    const followedByChain = { polygon: 0, base: 0, solana: 0 };
+    for (const followed of followedWallets.rows) {
+      followedByChain[followed.chain] += 1;
+    }
+    const estPolygonHoldingsRpcCalls =
+      followedByChain.polygon *
+      Math.ceil(tokenIdsByVenue.polymarket.length / 200);
+    const estBaseHoldingsRpcCalls =
+      followedByChain.base * Math.ceil(tokenIdsByVenue.limitless.length / 200);
+    const estSolanaHoldingsRpcCalls = followedByChain.solana * 2;
+    console.log("[wallets:intel:refresh] followed fanout", {
+      followed: followedWallets.rows.length,
+      followedByChain,
+      tokenIds: {
+        polymarket: tokenIdsByVenue.polymarket.length,
+        limitless: tokenIdsByVenue.limitless.length,
+        kalshi: tokenIdsByVenue.kalshi.length,
+      },
+      holdingsRpcEstimate: {
+        polygon: estPolygonHoldingsRpcCalls,
+        base: estBaseHoldingsRpcCalls,
+        solana: estSolanaHoldingsRpcCalls,
+      },
+    });
 
     let followedProcessed = 0;
     let followedRows = 0;
