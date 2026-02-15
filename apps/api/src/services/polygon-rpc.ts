@@ -1,5 +1,6 @@
 import { abis } from "@hunch/contracts";
 import { Interface, ethers } from "ethers";
+import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 
 type JsonRpcError = {
@@ -28,8 +29,8 @@ const multicallIface = new Interface([
   "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
 ]);
 
-const CODE_CACHE_TTL_MS = 60_000;
-const APPROVAL_CACHE_TTL_MS = 30_000;
+const CODE_CACHE_TTL_MS = env.evmCodeCacheTtlMs;
+const APPROVAL_CACHE_TTL_MS = env.evmApprovalCacheTtlMs;
 
 type CacheEntry<T> = { value: T; expiresAt: number };
 
@@ -51,8 +52,12 @@ function createTimedCache<T>(ttlMs: number) {
     store.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
-  async function load(key: string, loader: () => Promise<T>): Promise<T> {
-    if (ttlMs <= 0) return loader();
+  async function load(
+    key: string,
+    loader: () => Promise<T>,
+    options?: { bypass?: boolean },
+  ): Promise<T> {
+    if (ttlMs <= 0 || options?.bypass) return loader();
     const cached = get(key);
     if (cached != null) return cached;
     const pending = inflight.get(key);
@@ -348,12 +353,15 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
   contractAddress: string;
   owner: string;
   operator: string;
+  bypassCache?: boolean;
 }): Promise<boolean> {
   const contractAddress = ethers.getAddress(inputs.contractAddress);
   const owner = ethers.getAddress(inputs.owner);
   const operator = ethers.getAddress(inputs.operator);
   const cacheKey = `${inputs.rpcUrl}:${contractAddress}:${owner}:${operator}`.toLowerCase();
-  return approvalCache.load(cacheKey, async () => {
+  return approvalCache.load(
+    cacheKey,
+    async () => {
     const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
       owner,
       operator,
@@ -373,8 +381,10 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
     if (typeof value !== "boolean") {
       throw new Error("Polygon RPC: invalid isApprovedForAll result");
     }
-    return value;
-  });
+      return value;
+    },
+    { bypass: inputs.bypassCache === true },
+  );
 }
 
 export async function fetchEvmMulticall(inputs: {

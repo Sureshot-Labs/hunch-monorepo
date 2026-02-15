@@ -12,6 +12,12 @@ export const walletBalancesQuerySchema = z.object({
   chains: zCsvString("chains is required").optional(),
 });
 
+export const walletBalancesBatchQuerySchema = z.object({
+  wallets: zCsvString("wallets is required"),
+  tokens: zCsvString("tokens is required").optional(),
+  chains: zCsvString("chains is required").optional(),
+});
+
 export const walletVenueStatusQuerySchema = z.object({
   walletAddress: z.string().optional(),
   wallets: zCsvString("wallets is required").optional(),

@@ -20,6 +20,10 @@ const zOrderType = z.preprocess(
 
 const zPage = z.coerce.number().int().min(1).catch(1);
 const zLimit = z.coerce.number().int().min(1).max(200).catch(100);
+const zOptionalBool = z
+  .union([z.boolean(), z.string(), z.undefined()])
+  .transform((v) => v === true || v === "true")
+  .catch(false);
 
 const limitlessOrderSchema = z
   .object({
@@ -116,4 +120,5 @@ export const limitlessAccountQuerySchema = z.object({
   ammSpender: zEthAddress.optional(),
   tokenId: z.string().optional(),
   verifySession: z.coerce.boolean().optional(),
+  refresh: zOptionalBool.optional(),
 });

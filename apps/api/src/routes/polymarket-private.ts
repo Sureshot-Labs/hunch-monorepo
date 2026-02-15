@@ -11,6 +11,7 @@ import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveBatchBodySchema,
+  polymarketAccountQuerySchema,
   polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
   polymarketOrderHashBodySchema,
@@ -45,6 +46,17 @@ const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
 const MARKET_SHARES_MICRO_STEP = 100n; // 4 decimals in 6-decimal share units
 const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
 
+type PolymarketAccountPayload = Record<string, unknown>;
+type PolymarketAccountCacheEntry = {
+  value: PolymarketAccountPayload;
+  expiresAt: number;
+};
+const polymarketAccountCache = new Map<string, PolymarketAccountCacheEntry>();
+const polymarketAccountInflight = new Map<
+  string,
+  Promise<PolymarketAccountPayload>
+>();
+
 type PolymarketSide = "BUY" | "SELL";
 type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
 type PolymarketClobOrderType = "GTC" | "GTD" | "FOK";
@@ -60,6 +72,41 @@ const USDC_SCALE = 1_000_000n;
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function buildPolymarketAccountCacheKey(inputs: {
+  userId: string;
+  signer: string;
+  funder: string;
+  funderUpdatedAt: string | null;
+}): string {
+  return [
+    inputs.userId,
+    normalizeAddress(inputs.signer),
+    normalizeAddress(inputs.funder),
+    inputs.funderUpdatedAt ?? "none",
+  ].join("|");
+}
+
+function readPolymarketAccountCache(
+  key: string,
+): PolymarketAccountPayload | null {
+  if (env.polymarketAccountCacheTtlMs <= 0) return null;
+  const entry = polymarketAccountCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    polymarketAccountCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function writePolymarketAccountCache(key: string, value: PolymarketAccountPayload) {
+  if (env.polymarketAccountCacheTtlMs <= 0) return;
+  polymarketAccountCache.set(key, {
+    value,
+    expiresAt: Date.now() + env.polymarketAccountCacheTtlMs,
+  });
 }
 
 function getPolymarketBuilderCreds() {
@@ -1268,7 +1315,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/account",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: polymarketAccountQuerySchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const signer = request.walletAddress;
@@ -1292,114 +1342,155 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const funder = credsInfo?.funderAddress ?? signer;
       const funderSource = credsInfo?.funderAddress ? "credentials" : "signer";
+      const funderUpdatedAtValue =
+        credsInfo?.funderUpdatedAt instanceof Date
+          ? credsInfo.funderUpdatedAt.toISOString()
+          : credsInfo?.funderUpdatedAt ?? null;
+      const refresh = request.query.refresh === true;
+      const cacheEnabled = !refresh && env.polymarketAccountCacheTtlMs > 0;
+      const cacheKey = buildPolymarketAccountCacheKey({
+        userId: user.id,
+        signer,
+        funder,
+        funderUpdatedAt: funderUpdatedAtValue,
+      });
+
+      if (cacheEnabled) {
+        const cached = readPolymarketAccountCache(cacheKey);
+        if (cached) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cached);
+        }
+        const inflight = polymarketAccountInflight.get(cacheKey);
+        if (inflight) {
+          const payload = await inflight;
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(payload);
+        }
+      }
 
       try {
         const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
         const negRiskAdapterAddress =
           env.polymarketNegRiskAdapterAddress?.trim() || "";
-        const [code, snapshot] = await Promise.all([
-          fetchEvmCode({
-            rpcUrl: env.polygonRpcUrl,
-            timeoutMs: env.polygonRpcTimeoutMs,
-            address: funder,
-          }),
-          fetchPolymarketOnchainSnapshot({
-            rpcUrl: env.polygonRpcUrl,
-            timeoutMs: env.polygonRpcTimeoutMs,
+        const computePromise = (async (): Promise<PolymarketAccountPayload> => {
+          const [code, snapshot] = await Promise.all([
+            fetchEvmCode({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              address: funder,
+            }),
+            fetchPolymarketOnchainSnapshot({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              signer,
+              funder,
+              includeFeeCollectorNonce: true,
+              negRiskAdapterAddress,
+              feeCollectorAddress,
+            }),
+          ]);
+
+          const usdcBalance = snapshot.usdcBalance;
+          const allowanceExchange = snapshot.allowanceExchange;
+          const allowanceNegRisk = snapshot.allowanceNegRisk;
+          const okExchange = snapshot.okExchange;
+          const okNegRisk = snapshot.okNegRisk;
+          const okNegRiskAdapter = snapshot.okNegRiskAdapter;
+          const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
+          const allowanceFeeCollector = snapshot.allowanceFeeCollector;
+          const feeCollectorNonce = snapshot.feeCollectorNonce;
+
+          const isContract = typeof code === "string" && code.length > 2;
+
+          return {
+            ok: true,
+            venue: "polymarket",
+            chainId: 137,
             signer,
             funder,
-            includeFeeCollectorNonce: true,
-            negRiskAdapterAddress,
-            feeCollectorAddress,
-          }),
-        ]);
-
-        const usdcBalance = snapshot.usdcBalance;
-        const allowanceExchange = snapshot.allowanceExchange;
-        const allowanceNegRisk = snapshot.allowanceNegRisk;
-        const okExchange = snapshot.okExchange;
-        const okNegRisk = snapshot.okNegRisk;
-        const okNegRiskAdapter = snapshot.okNegRiskAdapter;
-        const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
-        const allowanceFeeCollector = snapshot.allowanceFeeCollector;
-        const feeCollectorNonce = snapshot.feeCollectorNonce;
-
-        const isContract = typeof code === "string" && code.length > 2;
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          venue: "polymarket",
-          chainId: 137,
-          signer,
-          funder,
-          funderSource,
-          funderUpdatedAt: credsInfo?.funderUpdatedAt ?? null,
-          funderIsContract: isContract,
-          rpcUrl: env.polygonRpcUrl,
-          negRiskAdapterAddress: negRiskAdapterAddress || null,
-          usdc: {
-            tokenAddress: env.polymarketUsdcAddress,
-            decimals: 6,
-            balance: ethers.formatUnits(usdcBalance, 6),
-            balanceRaw: usdcBalance.toString(),
-            allowance: {
-              exchange: {
-                spender: env.polymarketExchangeAddress,
-                allowance: ethers.formatUnits(allowanceExchange, 6),
-                allowanceRaw: allowanceExchange.toString(),
-              },
-              negRiskExchange: {
-                spender: env.polymarketNegRiskExchangeAddress,
-                allowance: ethers.formatUnits(allowanceNegRisk, 6),
-                allowanceRaw: allowanceNegRisk.toString(),
-              },
-              ...(negRiskAdapterAddress
-                ? {
-                    negRiskAdapter: {
-                      spender: negRiskAdapterAddress,
-                      allowance: ethers.formatUnits(
-                        allowanceNegRiskAdapter ?? 0n,
-                        6,
-                      ),
-                      allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
-                    },
-                  }
-                : {}),
-              ...(feeCollectorAddress
-                ? {
-                    feeCollector: {
-                      spender: feeCollectorAddress,
-                      allowance: ethers.formatUnits(
-                        allowanceFeeCollector ?? 0n,
-                        6,
-                      ),
-                      allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
-                    },
-                  }
-                : {}),
-            },
-          },
-          conditionalTokens: {
-            contractAddress: env.polymarketConditionalTokensAddress,
-            isApprovedForAll: {
-              exchange: okExchange,
-              negRiskExchange: okNegRisk,
-              ...(negRiskAdapterAddress
-                ? { negRiskAdapter: okNegRiskAdapter }
-                : {}),
-            },
-          },
-          ...(feeCollectorAddress
-            ? {
-                feeCollector: {
-                  address: feeCollectorAddress,
-                  nonce: feeCollectorNonce?.toString() ?? null,
+            funderSource,
+            funderUpdatedAt: credsInfo?.funderUpdatedAt ?? null,
+            funderIsContract: isContract,
+            rpcUrl: env.polygonRpcUrl,
+            negRiskAdapterAddress: negRiskAdapterAddress || null,
+            usdc: {
+              tokenAddress: env.polymarketUsdcAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(usdcBalance, 6),
+              balanceRaw: usdcBalance.toString(),
+              allowance: {
+                exchange: {
+                  spender: env.polymarketExchangeAddress,
+                  allowance: ethers.formatUnits(allowanceExchange, 6),
+                  allowanceRaw: allowanceExchange.toString(),
                 },
-              }
-            : {}),
-          hasCredentials: Boolean(credsInfo),
-        });
+                negRiskExchange: {
+                  spender: env.polymarketNegRiskExchangeAddress,
+                  allowance: ethers.formatUnits(allowanceNegRisk, 6),
+                  allowanceRaw: allowanceNegRisk.toString(),
+                },
+                ...(negRiskAdapterAddress
+                  ? {
+                      negRiskAdapter: {
+                        spender: negRiskAdapterAddress,
+                        allowance: ethers.formatUnits(
+                          allowanceNegRiskAdapter ?? 0n,
+                          6,
+                        ),
+                        allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
+                      },
+                    }
+                  : {}),
+                ...(feeCollectorAddress
+                  ? {
+                      feeCollector: {
+                        spender: feeCollectorAddress,
+                        allowance: ethers.formatUnits(
+                          allowanceFeeCollector ?? 0n,
+                          6,
+                        ),
+                        allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
+                      },
+                    }
+                  : {}),
+              },
+            },
+            conditionalTokens: {
+              contractAddress: env.polymarketConditionalTokensAddress,
+              isApprovedForAll: {
+                exchange: okExchange,
+                negRiskExchange: okNegRisk,
+                ...(negRiskAdapterAddress
+                  ? { negRiskAdapter: okNegRiskAdapter }
+                  : {}),
+              },
+            },
+            ...(feeCollectorAddress
+              ? {
+                  feeCollector: {
+                    address: feeCollectorAddress,
+                    nonce: feeCollectorNonce?.toString() ?? null,
+                  },
+                }
+              : {}),
+            hasCredentials: Boolean(credsInfo),
+          };
+        })();
+
+        if (cacheEnabled) {
+          polymarketAccountInflight.set(cacheKey, computePromise);
+        }
+        try {
+          const payload = await computePromise;
+          if (cacheEnabled) {
+            writePolymarketAccountCache(cacheKey, payload);
+          }
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(payload);
+        } finally {
+          polymarketAccountInflight.delete(cacheKey);
+        }
       } catch (error) {
         app.log.error(
           { error, userId: user.id, signer, funder },

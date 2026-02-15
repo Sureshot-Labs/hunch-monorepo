@@ -9,6 +9,10 @@ const zOrderType = z.preprocess(
 );
 
 const zAmountType = z.enum(["usd", "shares"]);
+const zOptionalBool = z
+  .union([z.boolean(), z.string(), z.undefined()])
+  .transform((v) => v === true || v === "true")
+  .catch(false);
 
 const polymarketOrderSchema = z
   .object({
@@ -92,6 +96,10 @@ export const polymarketMarketInfoQuerySchema = z
   .refine((v) => Boolean(v.tokenId || v.marketId || v.conditionId), {
     message: "tokenId, marketId, or conditionId is required",
   });
+
+export const polymarketAccountQuerySchema = z.object({
+  refresh: zOptionalBool.optional(),
+});
 
 export const polymarketOrderParamsQuerySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),

@@ -70,12 +70,61 @@ const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> = 
     "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
 };
 
+type LimitlessAccountPayload = Record<string, unknown>;
+type LimitlessAccountCacheEntry = {
+  value: LimitlessAccountPayload;
+  expiresAt: number;
+};
+const limitlessAccountCache = new Map<string, LimitlessAccountCacheEntry>();
+const limitlessAccountInflight = new Map<string, Promise<LimitlessAccountPayload>>();
+
 function resolveLimitlessLegacyOperatorForExchange(
   exchangeAddress: string | null,
 ): string | null {
   if (!exchangeAddress) return null;
   const mapped = LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
   return mapped ?? null;
+}
+
+function buildLimitlessAccountCacheKey(inputs: {
+  userId: string;
+  signer: string;
+  clobSpender: string;
+  negRiskSpender: string;
+  adapterSpender: string;
+  ammSpender: string;
+  tokenId: string;
+  credsUpdatedAt: string | null;
+}): string {
+  return [
+    inputs.userId,
+    normalizeAddress(inputs.signer),
+    normalizeAddress(inputs.clobSpender),
+    normalizeAddress(inputs.negRiskSpender),
+    normalizeAddress(inputs.adapterSpender),
+    normalizeAddress(inputs.ammSpender),
+    inputs.tokenId,
+    inputs.credsUpdatedAt ?? "none",
+  ].join("|");
+}
+
+function readLimitlessAccountCache(key: string): LimitlessAccountPayload | null {
+  if (env.limitlessAccountCacheTtlMs <= 0) return null;
+  const entry = limitlessAccountCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    limitlessAccountCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function writeLimitlessAccountCache(key: string, value: LimitlessAccountPayload) {
+  if (env.limitlessAccountCacheTtlMs <= 0) return;
+  limitlessAccountCache.set(key, {
+    value,
+    expiresAt: Date.now() + env.limitlessAccountCacheTtlMs,
+  });
 }
 
 function parseFeeRateBps(value: unknown): number | undefined {
@@ -1098,11 +1147,52 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         signerRaw,
       );
       const sessionCookie = creds?.apiSecret?.trim();
+      const credsUpdatedAtValue =
+        creds?.updatedAt instanceof Date
+          ? creds.updatedAt.toISOString()
+          : creds?.updatedAt ?? null;
       const storedProfile = extractProfile(creds?.additionalData ?? null);
       const sessionProfile = extractProfileFromSessionCookie(sessionCookie);
       const verifySession = request.query.verifySession === true;
+      const refresh = request.query.refresh === true;
       let sessionValid: boolean | null = null;
       let hasCredentials = Boolean(creds);
+
+      const clobSpender = request.query.clobSpender ?? env.limitlessClobAddress;
+      const negRiskSpender =
+        request.query.negRiskSpender ?? env.limitlessNegRiskAddress;
+      const adapterSpender = request.query.adapterSpender ?? null;
+      const ammSpender = request.query.ammSpender ?? null;
+      const tokenId = normalizeLimitlessRawTokenId(request.query.tokenId);
+
+      const cacheEnabled =
+        !refresh &&
+        !verifySession &&
+        env.limitlessAccountCacheTtlMs > 0;
+      const cacheKey = buildLimitlessAccountCacheKey({
+        userId: user.id,
+        signer,
+        clobSpender: clobSpender ?? "none",
+        negRiskSpender: negRiskSpender ?? "none",
+        adapterSpender: adapterSpender ?? "none",
+        ammSpender: ammSpender ?? "none",
+        tokenId: tokenId ?? "none",
+        credsUpdatedAt: credsUpdatedAtValue,
+      });
+
+      if (cacheEnabled) {
+        const cached = readLimitlessAccountCache(cacheKey);
+        if (cached) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cached);
+        }
+        const inflight = limitlessAccountInflight.get(cacheKey);
+        if (inflight) {
+          const payload = await inflight;
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(payload);
+        }
+      }
 
       if (verifySession) {
         if (!sessionCookie) {
@@ -1122,179 +1212,183 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const clobSpender =
-          request.query.clobSpender ?? env.limitlessClobAddress;
-        const negRiskSpender =
-          request.query.negRiskSpender ?? env.limitlessNegRiskAddress;
-        const adapterSpender = request.query.adapterSpender ?? null;
-        const ammSpender = request.query.ammSpender ?? null;
-        const tokenId = normalizeLimitlessRawTokenId(request.query.tokenId);
         const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
         const effectiveSessionProfile =
           verifySession && sessionValid === false ? null : sessionProfile;
-        const [
-          code,
-          snapshot,
-          approvedClob,
-          approvedNegRisk,
-          approvedAdapter,
-          approvedAmm,
-          tokenBalanceMap,
-          liveProfile,
-        ] = await Promise.all([
-          fetchEvmCode({
+        const computePromise = (async (): Promise<LimitlessAccountPayload> => {
+          const [
+            code,
+            snapshot,
+            approvedClob,
+            approvedNegRisk,
+            approvedAdapter,
+            approvedAmm,
+            tokenBalanceMap,
+            liveProfile,
+          ] = await Promise.all([
+            fetchEvmCode({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              address: signer,
+            }),
+            fetchLimitlessOnchainSnapshot({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              owner: signer,
+              clobAddress: clobSpender,
+              negRiskAddress: negRiskSpender,
+              ammAddress: ammSpender,
+            }),
+            clobSpender
+              ? fetchErc1155IsApprovedForAll({
+                  rpcUrl: env.baseRpcUrl,
+                  timeoutMs: env.baseRpcTimeoutMs,
+                  contractAddress: conditionalTokensAddress,
+                  owner: signer,
+                  operator: clobSpender,
+                  bypassCache: refresh,
+                })
+              : Promise.resolve(null),
+            negRiskSpender
+              ? fetchErc1155IsApprovedForAll({
+                  rpcUrl: env.baseRpcUrl,
+                  timeoutMs: env.baseRpcTimeoutMs,
+                  contractAddress: conditionalTokensAddress,
+                  owner: signer,
+                  operator: negRiskSpender,
+                  bypassCache: refresh,
+                })
+              : Promise.resolve(null),
+            adapterSpender
+              ? fetchErc1155IsApprovedForAll({
+                  rpcUrl: env.baseRpcUrl,
+                  timeoutMs: env.baseRpcTimeoutMs,
+                  contractAddress: conditionalTokensAddress,
+                  owner: signer,
+                  operator: adapterSpender,
+                  bypassCache: refresh,
+                })
+              : Promise.resolve(null),
+            ammSpender
+              ? fetchErc1155IsApprovedForAll({
+                  rpcUrl: env.baseRpcUrl,
+                  timeoutMs: env.baseRpcTimeoutMs,
+                  contractAddress: conditionalTokensAddress,
+                  owner: signer,
+                  operator: ammSpender,
+                  bypassCache: refresh,
+                })
+              : Promise.resolve(null),
+            tokenId
+              ? fetchErc1155BalancesByOwner({
+                  rpcUrl: env.baseRpcUrl,
+                  timeoutMs: env.baseRpcTimeoutMs,
+                  contractAddress: conditionalTokensAddress,
+                  owner: signer,
+                  tokenIds: [tokenId],
+                })
+              : Promise.resolve(null),
+            hasCredentials
+              ? fetchLimitlessProfileForAddress({
+                  address: signer,
+                  sessionCookie,
+                })
+              : Promise.resolve(null),
+          ]);
+
+          const profile = mergeProfiles(
+            effectiveSessionProfile,
+            mergeProfiles(storedProfile, liveProfile),
+          );
+
+          const usdcBalance = snapshot.usdcBalance;
+          const allowanceClob = snapshot.allowanceClob;
+          const allowanceNegRisk = snapshot.allowanceNegRisk;
+          const allowanceAmm = snapshot.allowanceAmm;
+          const tokenBalanceRaw =
+            tokenId && tokenBalanceMap ? tokenBalanceMap.get(tokenId) ?? 0n : null;
+
+          const isContract = typeof code === "string" && code.length > 2;
+
+          return {
+            ok: true,
+            venue: "limitless",
+            chainId: 8453,
+            signer,
+            signerIsContract: isContract,
             rpcUrl: env.baseRpcUrl,
-            timeoutMs: env.baseRpcTimeoutMs,
-            address: signer,
-          }),
-          fetchLimitlessOnchainSnapshot({
-            rpcUrl: env.baseRpcUrl,
-            timeoutMs: env.baseRpcTimeoutMs,
-            owner: signer,
-            clobAddress: clobSpender,
-            negRiskAddress: negRiskSpender,
-            ammAddress: ammSpender,
-          }),
-          clobSpender
-            ? fetchErc1155IsApprovedForAll({
-                rpcUrl: env.baseRpcUrl,
-                timeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: conditionalTokensAddress,
-                owner: signer,
-                operator: clobSpender,
-              })
-            : Promise.resolve(null),
-          negRiskSpender
-            ? fetchErc1155IsApprovedForAll({
-                rpcUrl: env.baseRpcUrl,
-                timeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: conditionalTokensAddress,
-                owner: signer,
-                operator: negRiskSpender,
-              })
-            : Promise.resolve(null),
-          adapterSpender
-            ? fetchErc1155IsApprovedForAll({
-                rpcUrl: env.baseRpcUrl,
-                timeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: conditionalTokensAddress,
-                owner: signer,
-                operator: adapterSpender,
-              })
-            : Promise.resolve(null),
-          ammSpender
-            ? fetchErc1155IsApprovedForAll({
-                rpcUrl: env.baseRpcUrl,
-                timeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: conditionalTokensAddress,
-                owner: signer,
-                operator: ammSpender,
-              })
-            : Promise.resolve(null),
-          tokenId
-            ? fetchErc1155BalancesByOwner({
-                rpcUrl: env.baseRpcUrl,
-                timeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: conditionalTokensAddress,
-                owner: signer,
-                tokenIds: [tokenId],
-              })
-            : Promise.resolve(null),
-          hasCredentials
-            ? fetchLimitlessProfileForAddress({
-                address: signer,
-                sessionCookie,
-              })
-            : Promise.resolve(null),
-        ]);
-
-        const profile = mergeProfiles(
-          effectiveSessionProfile,
-          mergeProfiles(storedProfile, liveProfile),
-        );
-
-        const usdcBalance = snapshot.usdcBalance;
-        const allowanceClob = snapshot.allowanceClob;
-        const allowanceNegRisk = snapshot.allowanceNegRisk;
-        const allowanceAmm = snapshot.allowanceAmm;
-        const tokenBalanceRaw =
-          tokenId && tokenBalanceMap ? tokenBalanceMap.get(tokenId) ?? 0n : null;
-
-        const isContract = typeof code === "string" && code.length > 2;
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          venue: "limitless",
-          chainId: 8453,
-          signer,
-          signerIsContract: isContract,
-          rpcUrl: env.baseRpcUrl,
-          usdc: {
-            tokenAddress: env.limitlessUsdcAddress,
-            decimals: 6,
-            balance: ethers.formatUnits(usdcBalance, 6),
-            balanceRaw: usdcBalance.toString(),
-            allowance: {
-              ...(clobSpender
-                ? {
-                  clob: {
-                    spender: clobSpender,
-                    allowance: ethers.formatUnits(allowanceClob ?? 0n, 6),
-                    allowanceRaw: (allowanceClob ?? 0n).toString(),
-                  },
-                }
-                : {}),
-              ...(negRiskSpender
-                ? {
-                  negRisk: {
-                    spender: negRiskSpender,
-                    allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
-                    allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
-                  },
-                }
-                : {}),
-              ...(ammSpender
-                ? {
-                  amm: {
-                    spender: ammSpender,
-                    allowance: ethers.formatUnits(allowanceAmm ?? 0n, 6),
-                    allowanceRaw: (allowanceAmm ?? 0n).toString(),
-                  },
-                }
-                : {}),
+            usdc: {
+              tokenAddress: env.limitlessUsdcAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(usdcBalance, 6),
+              balanceRaw: usdcBalance.toString(),
+              allowance: {
+                ...(clobSpender
+                  ? {
+                      clob: {
+                        spender: clobSpender,
+                        allowance: ethers.formatUnits(allowanceClob ?? 0n, 6),
+                        allowanceRaw: (allowanceClob ?? 0n).toString(),
+                      },
+                    }
+                  : {}),
+                ...(negRiskSpender
+                  ? {
+                      negRisk: {
+                        spender: negRiskSpender,
+                        allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
+                        allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
+                      },
+                    }
+                  : {}),
+                ...(ammSpender
+                  ? {
+                      amm: {
+                        spender: ammSpender,
+                        allowance: ethers.formatUnits(allowanceAmm ?? 0n, 6),
+                        allowanceRaw: (allowanceAmm ?? 0n).toString(),
+                      },
+                    }
+                  : {}),
+              },
             },
-          },
-          conditionalTokens: {
-            contractAddress: conditionalTokensAddress,
-            ...(tokenId
-              ? {
-                  tokenBalance: {
-                    tokenId,
-                    balance: ethers.formatUnits(tokenBalanceRaw ?? 0n, 6),
-                    balanceRaw: (tokenBalanceRaw ?? 0n).toString(),
-                  },
-                }
-              : {}),
-            isApprovedForAll: {
-              ...(clobSpender
-                ? { clob: approvedClob ?? false }
+            conditionalTokens: {
+              contractAddress: conditionalTokensAddress,
+              ...(tokenId
+                ? {
+                    tokenBalance: {
+                      tokenId,
+                      balance: ethers.formatUnits(tokenBalanceRaw ?? 0n, 6),
+                      balanceRaw: (tokenBalanceRaw ?? 0n).toString(),
+                    },
+                  }
                 : {}),
-              ...(negRiskSpender
-                ? { negRisk: approvedNegRisk ?? false }
-                : {}),
-              ...(adapterSpender
-                ? { adapter: approvedAdapter ?? false }
-                : {}),
-              ...(ammSpender
-                ? { amm: approvedAmm ?? false }
-                : {}),
+              isApprovedForAll: {
+                ...(clobSpender ? { clob: approvedClob ?? false } : {}),
+                ...(negRiskSpender ? { negRisk: approvedNegRisk ?? false } : {}),
+                ...(adapterSpender ? { adapter: approvedAdapter ?? false } : {}),
+                ...(ammSpender ? { amm: approvedAmm ?? false } : {}),
+              },
             },
-          },
-          profile: profile ?? null,
-          hasCredentials,
-          ...(sessionValid == null ? {} : { sessionValid }),
-        });
+            profile: profile ?? null,
+            hasCredentials,
+            ...(sessionValid == null ? {} : { sessionValid }),
+          };
+        })();
+
+        if (cacheEnabled) {
+          limitlessAccountInflight.set(cacheKey, computePromise);
+        }
+        try {
+          const payload = await computePromise;
+          if (cacheEnabled) {
+            writeLimitlessAccountCache(cacheKey, payload);
+          }
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(payload);
+        } finally {
+          limitlessAccountInflight.delete(cacheKey);
+        }
       } catch (error) {
         app.log.error(
           { error, userId: user.id, signer },

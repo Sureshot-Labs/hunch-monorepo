@@ -454,6 +454,30 @@ export const env = {
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
+  walletBalancesBatchMaxWallets: optionalPositiveInt(
+    "WALLET_BALANCES_BATCH_MAX_WALLETS",
+    20,
+  ),
+  walletBalancesBatchConcurrency: optionalPositiveInt(
+    "WALLET_BALANCES_BATCH_CONCURRENCY",
+    4,
+  ),
+  polymarketAccountCacheTtlMs: optionalNonNegativeInt(
+    "POLYMARKET_ACCOUNT_CACHE_TTL_MS",
+    5_000,
+  ),
+  limitlessAccountCacheTtlMs: optionalNonNegativeInt(
+    "LIMITLESS_ACCOUNT_CACHE_TTL_MS",
+    5_000,
+  ),
+  evmCodeCacheTtlMs: optionalNonNegativeInt(
+    "EVM_CODE_CACHE_TTL_MS",
+    10 * 60_000,
+  ),
+  evmApprovalCacheTtlMs: optionalNonNegativeInt(
+    "EVM_APPROVAL_CACHE_TTL_MS",
+    2_000,
+  ),
   solanaRpcUrls,
   solanaRpcUrl: solanaRpcUrls[0],
   solanaRpcTimeoutMs: optionalPositiveInt("SOLANA_RPC_TIMEOUT_MS", 10_000),
