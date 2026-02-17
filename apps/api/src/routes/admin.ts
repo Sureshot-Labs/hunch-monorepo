@@ -1,18 +1,21 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { abis } from "@hunch/contracts";
 import { getEmbedStreamKey, type RedisClientType } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { abis } from "../lib/contracts.js";
+import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { fetchActiveRewardsPolicy } from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
 import { getRewardsPolicy } from "../services/rewards.js";
+import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
+import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
@@ -29,6 +32,7 @@ import {
   adminFeePolicySchema,
   adminDebridgeConfigSchema,
   adminPointsSchema,
+  adminRewardsTreasuryQuerySchema,
   adminRewardsPolicySchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
@@ -858,7 +862,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             limit 1
           ) primary_wallet on true
           left join lateral (
-            select coalesce(sum(notional_usd), 0)::text as total
+            select coalesce(sum(points_awarded), 0)::text as total
             from volume_events
             where user_id = u.id
           ) points on true
@@ -976,7 +980,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       );
 
       const { rows: pointsRows } = await pool.query<{ total: string | null }>(
-        `select coalesce(sum(notional_usd), 0)::text as total from volume_events where user_id = $1`,
+        `select coalesce(sum(points_awarded), 0)::text as total from volume_events where user_id = $1`,
         [id],
       );
 
@@ -1663,6 +1667,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.get(
+    "/admin/rewards/treasury",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { querystring: adminRewardsTreasuryQuerySchema },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      if (query.chainId && !normalizeRewardsChainId(query.chainId)) {
+        reply.code(400);
+        return reply.send({
+          error: "Unsupported chainId. Allowed: 137, 8453, solana",
+        });
+      }
+      const report = await getRewardsTreasuryReport(pool, {
+        chainId: query.chainId ?? null,
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        report,
+      });
+    },
+  );
+
   z.post(
     "/admin/rewards/policy",
     {
@@ -1730,29 +1759,21 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const sourceId = body.sourceId?.trim() ?? `manual:${randomUUID()}`;
       const venue = body.venue?.trim() ?? "admin";
 
-      const { rows } = await pool.query<{ id: string }>(
-        `
-          insert into volume_events (
-            id,
-            user_id,
-            wallet_address,
-            venue,
-            source_type,
-            source_id,
-            notional_usd,
-            created_at
-          )
-          values (
-            gen_random_uuid(),
-            $1, $2, $3, $4, $5, $6, now()
-          )
-          on conflict (user_id, source_type, source_id) do nothing
-          returning id
-        `,
-        [userId, walletAddress, venue, sourceType, sourceId, body.amount],
-      );
+      const inserted = await insertVolumeEventsWithMultiplier(pool, {
+        userId,
+        walletAddress,
+        venue,
+        sourceType,
+        events: [
+          {
+            sourceId,
+            notionalUsd: body.amount,
+            createdAt: new Date(),
+          },
+        ],
+      });
 
-      if (!rows.length) {
+      if (!inserted.inserted) {
         reply.code(409);
         return reply.send({
           error: "Volume event already exists",
@@ -1764,7 +1785,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         event: {
-          id: rows[0].id,
+          id: inserted.ids[0] ?? null,
           userId,
           walletAddress,
           venue,

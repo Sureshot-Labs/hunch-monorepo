@@ -163,6 +163,15 @@ importers:
         specifier: ^4.19.2
         version: 4.20.5
 
+  apps/finance-worker:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.11.30
+        version: 20.19.17
+      tsx:
+        specifier: ^4.19.2
+        version: 4.20.5
+
   apps/indexer-dflow:
     dependencies:
       '@hunch/db':

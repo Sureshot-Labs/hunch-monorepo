@@ -127,6 +127,10 @@ export const adminPointsSchema = z
     }
   });
 
+export const adminRewardsTreasuryQuerySchema = z.object({
+  chainId: z.string().trim().min(1).optional(),
+});
+
 export type AdminFeePolicyBody = z.infer<typeof adminFeePolicySchema>;
 export type AdminDebridgeConfigBody = z.infer<typeof adminDebridgeConfigSchema>;
 export type AdminRewardsPolicyBody = z.infer<typeof adminRewardsPolicySchema>;
@@ -142,3 +146,6 @@ export type AdminUserKalshiProofBypassBody = z.infer<
 >;
 export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
+export type AdminRewardsTreasuryQuery = z.infer<
+  typeof adminRewardsTreasuryQuerySchema
+>;

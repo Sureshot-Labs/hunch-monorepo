@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { pool } from "./db.js";
+import { insertVolumeEventsWithMultiplier } from "./services/rewards-multiplier.js";
 
 type ScriptOptions = {
   wallet?: string;
@@ -181,29 +182,21 @@ async function main() {
       return;
     }
 
-    const { rows } = await pool.query<{ id: string }>(
-      `
-        insert into volume_events (
-          id,
-          user_id,
-          wallet_address,
-          venue,
-          source_type,
-          source_id,
-          notional_usd,
-          created_at
-        )
-        values (
-          gen_random_uuid(),
-          $1, $2, $3, $4, $5, $6, now()
-        )
-        on conflict (user_id, source_type, source_id) do nothing
-        returning id
-      `,
-      [user.id, walletAddress ?? null, venue, sourceType, sourceId, amount],
-    );
+    const inserted = await insertVolumeEventsWithMultiplier(pool, {
+      userId: user.id,
+      walletAddress: walletAddress ?? null,
+      venue,
+      sourceType,
+      events: [
+        {
+          sourceId,
+          notionalUsd: amount,
+          createdAt: new Date(),
+        },
+      ],
+    });
 
-    if (!rows.length) {
+    if (!inserted.inserted) {
       throw new Error("Volume event already exists for that source_id");
     }
 

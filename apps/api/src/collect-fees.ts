@@ -1,9 +1,12 @@
 #!/usr/bin/env tsx
 
-import { abis } from "@hunch/contracts";
+import { tx } from "@hunch/infra";
 import { ethers } from "ethers";
+import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { abis } from "./lib/contracts.js";
+import { resolveFeeEventSnapshotAtWrite } from "./services/rewards-fee-snapshot.js";
 
 type FeeOrderRow = {
   user_id: string;
@@ -47,8 +50,9 @@ type FeeAuthStruct = {
   deadline: string;
 };
 
-type ScriptOptions = {
+export type CollectFeesOptions = {
   dryRun: boolean;
+  readOnly: boolean;
   limit: number;
   maxAttempts: number;
   dustRemainingMicro: bigint;
@@ -65,9 +69,12 @@ const DEFAULT_DUST_REMAINING = 1000n;
 const DEFAULT_TX_CONFIRMATIONS = 1;
 const DEFAULT_TX_TIMEOUT_MS = 120_000;
 const USDC_DECIMALS = 6n;
+const NOTHING_TO_CHARGE_SELECTOR = "0x35d06979";
+let scriptReadOnly = false;
 
-function parseArgs(): ScriptOptions {
-  const args = process.argv.slice(2);
+export function parseCollectFeesArgs(
+  args: string[] = process.argv.slice(2),
+): CollectFeesOptions {
   const getValue = (flag: string): string | undefined => {
     const idx = args.indexOf(flag);
     if (idx === -1) return undefined;
@@ -99,8 +106,10 @@ function parseArgs(): ScriptOptions {
     ? Math.max(0, Math.trunc(txTimeoutParsed))
     : DEFAULT_TX_TIMEOUT_MS;
 
+  const readOnly = hasFlag("--read-only");
   return {
-    dryRun: hasFlag("--dry-run"),
+    dryRun: hasFlag("--dry-run") || readOnly,
+    readOnly,
     includeExpired: hasFlag("--include-expired"),
     archiveLegacy: hasFlag("--archive-legacy"),
     limit: Number.isFinite(limit) ? Math.trunc(limit) : DEFAULT_LIMIT,
@@ -257,6 +266,35 @@ function truncateError(value: string, max = 500): string {
   return `${value.slice(0, max - 3)}...`;
 }
 
+function includesSelector(value: unknown, selector: string): boolean {
+  const target = selector.toLowerCase();
+  const seen = new Set<object>();
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const current = stack.pop();
+    if (current == null) continue;
+    if (typeof current === "string") {
+      if (current.toLowerCase().includes(target)) return true;
+      continue;
+    }
+    if (typeof current !== "object") continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    for (const nested of Object.values(current as Record<string, unknown>)) {
+      stack.push(nested);
+    }
+  }
+  return false;
+}
+
+function isNothingToChargeError(error: unknown): boolean {
+  return includesSelector(error, NOTHING_TO_CHARGE_SELECTOR);
+}
+
 function formatUsdcAmount(raw: bigint): string {
   const divisor = 10n ** USDC_DECIMALS;
   const integer = raw / divisor;
@@ -272,42 +310,78 @@ async function insertFeeEvent(inputs: {
   feeAmount: bigint;
   txHash: string;
 }) {
+  if (scriptReadOnly) return;
   const amount = formatUsdcAmount(inputs.feeAmount);
-  await pool.query(
-    `
-      insert into fee_events (
-        id,
-        user_id,
-        wallet_address,
-        venue,
-        chain_id,
-        source_type,
-        source_id,
-        fee_amount,
-        fee_asset,
-        fee_usd,
-        tx_hash,
-        collected_at,
-        status,
-        created_at,
-        updated_at
-      )
-      values (
-        gen_random_uuid(),
-        $1, $2, 'polymarket', '137', 'order', $3,
-        $4, 'USDC', $4, $5, now(), 'collected', now(), now()
-      )
-      on conflict (user_id, source_type, source_id)
-      do update set
-        fee_amount = excluded.fee_amount,
-        fee_usd = excluded.fee_usd,
-        tx_hash = excluded.tx_hash,
-        collected_at = excluded.collected_at,
-        status = excluded.status,
-        updated_at = now()
-    `,
-    [inputs.userId, inputs.walletAddress, inputs.orderHash, amount, inputs.txHash],
-  );
+  await tx(pool, async (client) => {
+    const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
+      userId: inputs.userId,
+      eventTime: new Date(),
+      feeUsd: amount,
+    });
+
+    const result = await client.query<{ id: string }>(
+      `
+        insert into fee_events (
+          id,
+          user_id,
+          wallet_address,
+          venue,
+          chain_id,
+          source_type,
+          source_id,
+          fee_amount,
+          fee_asset,
+          fee_usd,
+          cashback_bps_applied,
+          referral_bps_applied,
+          cashback_earned_usdc,
+          referral_earned_usdc,
+          liability_snapshot_source,
+          tx_hash,
+          collected_at,
+          status,
+          created_at,
+          updated_at
+        )
+        values (
+          gen_random_uuid(),
+          $1, $2, 'polymarket', '137', 'order', $3,
+          $4, 'USDC', $4, $5, $6, $7, $8, $9, $10, now(), 'collected', now(), now()
+        )
+        on conflict (user_id, source_type, source_id)
+        do update set
+          tx_hash = excluded.tx_hash,
+          collected_at = excluded.collected_at,
+          status = excluded.status,
+          updated_at = now()
+        where fee_events.fee_amount = excluded.fee_amount
+          and fee_events.fee_usd = excluded.fee_usd
+          and fee_events.cashback_bps_applied = excluded.cashback_bps_applied
+          and fee_events.referral_bps_applied = excluded.referral_bps_applied
+          and fee_events.cashback_earned_usdc = excluded.cashback_earned_usdc
+          and fee_events.referral_earned_usdc = excluded.referral_earned_usdc
+          and fee_events.liability_snapshot_source = excluded.liability_snapshot_source
+        returning id
+      `,
+      [
+        inputs.userId,
+        inputs.walletAddress,
+        inputs.orderHash,
+        amount,
+        snapshot.cashbackBpsApplied,
+        snapshot.referralBpsApplied,
+        snapshot.cashbackEarnedUsdc,
+        snapshot.referralEarnedUsdc,
+        snapshot.liabilitySnapshotSource,
+        inputs.txHash,
+      ],
+    );
+    if (!result.rows.length) {
+      throw new Error(
+        `fee_events immutable economic mismatch for source_id=${inputs.orderHash}`,
+      );
+    }
+  });
 }
 
 function rowLabel(row: FeeOrderRow, orderHash?: string): string {
@@ -318,7 +392,7 @@ function rowLabel(row: FeeOrderRow, orderHash?: string): string {
 }
 
 async function fetchPendingOrders(
-  options: ScriptOptions,
+  options: CollectFeesOptions,
   feeCollectorAddress: string,
 ): Promise<FeeOrderRow[]> {
   const params: Array<string | number> = [options.maxAttempts];
@@ -377,6 +451,7 @@ async function updateFeeSuccess(
   attempts: number,
   txHash: string,
 ): Promise<void> {
+  if (scriptReadOnly) return;
   await pool.query(
     `
       UPDATE orders
@@ -396,6 +471,7 @@ async function updateFeeError(
   attempts: number,
   error: string,
 ): Promise<void> {
+  if (scriptReadOnly) return;
   await pool.query(
     `
       UPDATE orders
@@ -413,6 +489,7 @@ async function archiveFeeError(
   attempts: number,
   error: string,
 ): Promise<void> {
+  if (scriptReadOnly) return;
   await pool.query(
     `
       UPDATE orders
@@ -426,8 +503,31 @@ async function archiveFeeError(
   );
 }
 
-async function main() {
-  const options = parseArgs();
+async function updateFeeNote(id: string, note: string): Promise<void> {
+  if (scriptReadOnly) return;
+  await pool.query(
+    `
+      UPDATE orders
+      SET fee_collect_error = $1
+      WHERE id = $2
+    `,
+    [truncateError(note), id],
+  );
+}
+
+export type CollectFeesRunResult = {
+  dryRunCount: number;
+  collected: number;
+  skippedLive: number;
+  skippedNoCharge: number;
+  skippedNothing: number;
+  skippedError: number;
+};
+
+export async function runCollectFees(
+  options: CollectFeesOptions,
+): Promise<CollectFeesRunResult> {
+  scriptReadOnly = options.readOnly;
   const feeCollectorAddress = env.feeCollectorAddress?.trim();
   const privateKey = env.feeCollectorPrivateKey;
 
@@ -449,7 +549,7 @@ async function main() {
 
   const orders = await fetchPendingOrders(options, feeCollectorAddress);
   console.log(
-    `Found ${orders.length} pending fee orders (dryRun=${options.dryRun})`,
+    `Found ${orders.length} pending fee orders (dryRun=${options.dryRun}, readOnly=${options.readOnly})`,
   );
   if (orders.length > 0) {
     console.log(
@@ -701,6 +801,12 @@ async function main() {
       await updateFeeSuccess(row.id, attempts, tx.hash);
       collected += 1;
     } catch (error) {
+      if (isNothingToChargeError(error)) {
+        console.log(`Skip ${label}: nothing to charge yet (on-chain)`);
+        skippedNothing += 1;
+        await updateFeeNote(row.id, "NothingToCharge");
+        continue;
+      }
       const message =
         error instanceof Error ? error.message : "Unknown collectFee error";
       console.log(`Error ${label}: ${message}`);
@@ -712,10 +818,30 @@ async function main() {
   console.log(
     `Done. dryRun=${dryRunCount}, collected=${collected}, skippedLive=${skippedLive}, skippedNoCharge=${skippedNoCharge}, skippedNothing=${skippedNothing}, skippedError=${skippedError}`,
   );
-  await pool.end();
+  return {
+    dryRunCount,
+    collected,
+    skippedLive,
+    skippedNoCharge,
+    skippedNothing,
+    skippedError,
+  };
 }
 
-main().catch((error) => {
-  console.error("[collect-fees]", error);
-  process.exitCode = 1;
-});
+function isDirectExecution(metaUrl: string): boolean {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+  return pathToFileURL(entrypoint).href === metaUrl;
+}
+
+if (isDirectExecution(import.meta.url)) {
+  runCollectFees(parseCollectFeesArgs())
+    .then(async () => {
+      await pool.end();
+    })
+    .catch(async (error) => {
+      console.error("[collect-fees]", error);
+      process.exitCode = 1;
+      await pool.end();
+    });
+}

@@ -19,6 +19,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
+import { insertVolumeEventsWithMultiplier } from "./rewards-multiplier.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -752,47 +753,17 @@ async function syncPolymarketTradesForSigner(
   );
 
   if (volumeSourceIds.length) {
-    await pool.query(
-      `
-        with input as (
-          select *
-          from unnest(
-            $1::uuid[],
-            $2::text[],
-            $3::numeric[],
-            $4::timestamptz[]
-          ) as t(user_id, source_id, notional_usd, created_at)
-        )
-        insert into volume_events (
-          id,
-          user_id,
-          wallet_address,
-          venue,
-          source_type,
-          source_id,
-          notional_usd,
-          created_at
-        )
-        select
-          gen_random_uuid(),
-          t.user_id,
-          $5,
-          'polymarket',
-          'order',
-          t.source_id,
-          t.notional_usd,
-          t.created_at
-        from input t
-        on conflict (user_id, source_type, source_id) do nothing
-      `,
-      [
-        Array(volumeSourceIds.length).fill(inputs.userId),
-        volumeSourceIds,
-        volumeNotionals,
-        volumeTimes,
-        inputs.signerAddress,
-      ],
-    );
+    await insertVolumeEventsWithMultiplier(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.signerAddress,
+      venue: "polymarket",
+      sourceType: "order",
+      events: volumeSourceIds.map((sourceId, index) => ({
+        sourceId,
+        notionalUsd: volumeNotionals[index] ?? 0,
+        createdAt: volumeTimes[index] ?? new Date(),
+      })),
+    });
   }
 
   await pool.query(

@@ -9,5 +9,5 @@ services:
     image: ${HUNCH_BACKEND_IMAGE}
   ai-worker:
     image: ${HUNCH_BACKEND_IMAGE}
-  fee-collector:
+  finance-worker:
     image: ${HUNCH_BACKEND_IMAGE}

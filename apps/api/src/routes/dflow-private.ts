@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { tx } from "@hunch/infra";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -20,6 +21,8 @@ import {
   buildTradeNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { resolveFeeEventSnapshotAtWrite } from "../services/rewards-fee-snapshot.js";
+import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import {
   fetchSolanaBalanceLamports,
@@ -790,27 +793,20 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
 
         if (notionalUsd != null && Number.isFinite(notionalUsd) && notionalUsd > 0) {
-          const volumeResult = await pool.query(
-            `
-              insert into volume_events (
-                id,
-                user_id,
-                wallet_address,
-                venue,
-                source_type,
-                source_id,
-                notional_usd,
-                created_at
-              )
-              values (
-                gen_random_uuid(),
-                $1, $2, 'kalshi', 'execution', $3, $4, now()
-              )
-              on conflict (user_id, source_type, source_id) do nothing
-            `,
-            [user.id, walletAddress, execution.id, notionalUsd],
-          );
-          volumeInserted = (volumeResult.rowCount ?? 0) > 0;
+          const volumeResult = await insertVolumeEventsWithMultiplier(pool, {
+            userId: user.id,
+            walletAddress,
+            venue: "kalshi",
+            sourceType: "execution",
+            events: [
+              {
+                sourceId: execution.id,
+                notionalUsd,
+                createdAt: new Date(),
+              },
+            ],
+          });
+          volumeInserted = volumeResult.inserted > 0;
         }
 
         const inputDecimals = body.inputDecimals ?? DEFAULT_USDC_DECIMALS;
@@ -944,6 +940,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             const feeAmountNumber =
               feeAmountUi != null ? Number(feeAmountUi) : NaN;
             if (Number.isFinite(feeAmountNumber) && feeAmountNumber > 0) {
+              const feeAmountUsd = feeAmountUi;
+              if (!feeAmountUsd) {
+                throw new Error("Missing fee amount for frozen liability snapshot");
+              }
               const signature = body.txSignature?.trim() || "";
               const statusResult = signature
                 ? await fetchSolanaSignatureStatus({
@@ -959,50 +959,77 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
                     ? "failed"
                     : "pending";
               const collectedAt = status === "collected" ? new Date() : null;
-
-              await pool.query(
-                `
-                  insert into fee_events (
-                    id,
-                    user_id,
-                    wallet_address,
-                    venue,
-                    chain_id,
-                    source_type,
-                    source_id,
-                    fee_amount,
-                    fee_asset,
-                    fee_usd,
-                    tx_hash,
-                    collected_at,
+              await tx(pool, async (client) => {
+                const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
+                  userId: user.id,
+                  eventTime: new Date(),
+                  feeUsd: feeAmountUsd,
+                });
+                const result = await client.query<{ id: string }>(
+                  `
+                    insert into fee_events (
+                      id,
+                      user_id,
+                      wallet_address,
+                      venue,
+                      chain_id,
+                      source_type,
+                      source_id,
+                      fee_amount,
+                      fee_asset,
+                      fee_usd,
+                      cashback_bps_applied,
+                      referral_bps_applied,
+                      cashback_earned_usdc,
+                      referral_earned_usdc,
+                      liability_snapshot_source,
+                      tx_hash,
+                      collected_at,
+                      status,
+                      created_at,
+                      updated_at
+                    )
+                    values (
+                      gen_random_uuid(),
+                      $1, $2, 'kalshi', 'solana', 'execution', $3,
+                      $4, 'USDC', $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
+                    )
+                    on conflict (user_id, source_type, source_id)
+                    do update set
+                      tx_hash = excluded.tx_hash,
+                      collected_at = excluded.collected_at,
+                      status = excluded.status,
+                      updated_at = now()
+                    where fee_events.fee_amount = excluded.fee_amount
+                      and fee_events.fee_usd = excluded.fee_usd
+                      and fee_events.cashback_bps_applied = excluded.cashback_bps_applied
+                      and fee_events.referral_bps_applied = excluded.referral_bps_applied
+                      and fee_events.cashback_earned_usdc = excluded.cashback_earned_usdc
+                      and fee_events.referral_earned_usdc = excluded.referral_earned_usdc
+                      and fee_events.liability_snapshot_source = excluded.liability_snapshot_source
+                    returning id
+                  `,
+                  [
+                    user.id,
+                    walletAddress,
+                    execution.id,
+                    feeAmountUsd,
+                    snapshot.cashbackBpsApplied,
+                    snapshot.referralBpsApplied,
+                    snapshot.cashbackEarnedUsdc,
+                    snapshot.referralEarnedUsdc,
+                    snapshot.liabilitySnapshotSource,
+                    signature || null,
+                    collectedAt,
                     status,
-                    created_at,
-                    updated_at
-                  )
-                  values (
-                    gen_random_uuid(),
-                    $1, $2, 'kalshi', 'solana', 'execution', $3,
-                    $4, 'USDC', $4, $5, $6, $7, now(), now()
-                  )
-                  on conflict (user_id, source_type, source_id)
-                  do update set
-                    fee_amount = excluded.fee_amount,
-                    fee_usd = excluded.fee_usd,
-                    tx_hash = excluded.tx_hash,
-                    collected_at = excluded.collected_at,
-                    status = excluded.status,
-                    updated_at = now()
-                `,
-                [
-                  user.id,
-                  walletAddress,
-                  execution.id,
-                  feeAmountUi,
-                  signature || null,
-                  collectedAt,
-                  status,
-                ],
-              );
+                  ],
+                );
+                if (!result.rows.length) {
+                  throw new Error(
+                    `fee_events immutable economic mismatch for source_id=${execution.id}`,
+                  );
+                }
+              });
             }
           }
         }

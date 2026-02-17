@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 
+import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { reconcileSolanaFeeEvents } from "./services/fee-reconcile.js";
 
-type ScriptOptions = {
+export type ReconcileFeesOptions = {
   dryRun: boolean;
   limit: number;
   minAgeSec: number;
@@ -12,8 +13,9 @@ type ScriptOptions = {
 const DEFAULT_LIMIT = 25;
 const DEFAULT_MIN_AGE_SEC = 60;
 
-function parseArgs(): ScriptOptions {
-  const args = process.argv.slice(2);
+export function parseReconcileFeesArgs(
+  args: string[] = process.argv.slice(2),
+): ReconcileFeesOptions {
   const getValue = (flag: string): string | undefined => {
     const idx = args.indexOf(flag);
     if (idx === -1) return undefined;
@@ -37,8 +39,9 @@ function parseArgs(): ScriptOptions {
   };
 }
 
-async function main() {
-  const options = parseArgs();
+export async function runReconcileFees(
+  options: ReconcileFeesOptions,
+) {
   const summary = await reconcileSolanaFeeEvents(pool, options);
   console.log(
     [
@@ -51,11 +54,23 @@ async function main() {
       `dryRun=${options.dryRun ? 1 : 0}`,
     ].join(" "),
   );
-  await pool.end();
+  return summary;
 }
 
-main().catch((error) => {
-  console.error("[fees:reconcile]", error);
-  process.exitCode = 1;
-  void pool.end();
-});
+function isDirectExecution(metaUrl: string): boolean {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+  return pathToFileURL(entrypoint).href === metaUrl;
+}
+
+if (isDirectExecution(import.meta.url)) {
+  runReconcileFees(parseReconcileFeesArgs())
+    .then(async () => {
+      await pool.end();
+    })
+    .catch(async (error) => {
+      console.error("[fees:reconcile]", error);
+      process.exitCode = 1;
+      await pool.end();
+    });
+}
