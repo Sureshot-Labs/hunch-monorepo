@@ -200,11 +200,11 @@ async function main() {
     envSnippet,
     deploy: {
       feeCollectorV2Command:
-        `pnpm -C hunch-monorepo/packages/contracts deploy -- --network polygon ` +
-        `--treasury ${evmHot.address} ` +
-        `--collateral ${DEFAULT_POLYGON_USDC} ` +
-        `--exchange ${DEFAULT_POLYMARKET_EXCHANGE} ` +
-        `--negRiskExchange ${DEFAULT_POLYMARKET_NEG_RISK_EXCHANGE}`,
+        `HARDHAT_NETWORK=polygon ` +
+        `FEE_COLLECTOR_TREASURY=${evmHot.address} ` +
+        `FEE_COLLECTOR_COLLATERAL=${DEFAULT_POLYGON_USDC} ` +
+        `FEE_COLLECTOR_EXCHANGES=${DEFAULT_POLYMARKET_EXCHANGE},${DEFAULT_POLYMARKET_NEG_RISK_EXCHANGE} ` +
+        `pnpm -C hunch-monorepo/packages/contracts run deploy`,
       reminder:
         "After deploy: set HUNCH_FEE_COLLECTOR_ADDRESS to deployed contract address.",
     },

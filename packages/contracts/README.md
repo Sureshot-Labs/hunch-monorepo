@@ -35,23 +35,30 @@ POLYGON_RPC_URL=...
 POLYGON_DEPLOYER_KEY=...
 ```
 
+Fallbacks supported if `POLYGON_DEPLOYER_KEY` is not set:
+- `HUNCH_FEE_COLLECTOR_PRIVATE_KEY`
+- `HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_POLYGON`
+- `HUNCH_REWARDS_PAYOUT_PRIVATE_KEY`
+
 Then:
 
 ```bash
-pnpm -C packages/contracts deploy -- --network polygon \
-  --treasury 0xYourTreasury \
-  --collateral 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 \
-  --exchange 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E \
-  --negRiskExchange 0xC5d563A36AE78145C45a50134d48A1215220f80a
+HARDHAT_NETWORK=polygon \
+  FEE_COLLECTOR_TREASURY=0xYourTreasury \
+  FEE_COLLECTOR_COLLATERAL=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 \
+  FEE_COLLECTOR_EXCHANGE=0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E \
+  FEE_COLLECTOR_NEG_RISK_EXCHANGE=0xC5d563A36AE78145C45a50134d48A1215220f80a \
+  pnpm -C packages/contracts run deploy
 ```
 
 You can also pass an explicit allowlist:
 
 ```bash
-pnpm -C packages/contracts deploy -- --network polygon \
-  --treasury 0xYourTreasury \
-  --collateral 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 \
-  --exchanges 0x4bFb...,0xC5d5...
+HARDHAT_NETWORK=polygon \
+  FEE_COLLECTOR_TREASURY=0xYourTreasury \
+  FEE_COLLECTOR_COLLATERAL=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 \
+  FEE_COLLECTOR_EXCHANGES=0x4bFb...,0xC5d5... \
+  pnpm -C packages/contracts run deploy
 ```
 
 ## v2 fee flow (high level)

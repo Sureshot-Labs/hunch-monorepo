@@ -1,8 +1,38 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
+import { config as dotenvConfig } from "dotenv";
+import { resolve } from "node:path";
 
-const polygonRpcUrl = process.env.POLYGON_RPC_URL;
-const polygonDeployerKey = process.env.POLYGON_DEPLOYER_KEY;
+// Load env from both package-local and monorepo-root locations.
+dotenvConfig({ path: resolve(__dirname, ".env"), override: false });
+dotenvConfig({ path: resolve(__dirname, "../../.env"), override: false });
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function normalizeHexPrivateKey(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.startsWith("0x") ? value : `0x${value}`;
+}
+
+const polygonRpcUrl = firstNonEmpty(
+  process.env.POLYGON_RPC_URL,
+  process.env.HUNCH_POLYGON_RPC_URL,
+);
+
+const polygonDeployerKey = normalizeHexPrivateKey(
+  firstNonEmpty(
+    process.env.POLYGON_DEPLOYER_KEY,
+    process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY,
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_POLYGON,
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY,
+  ),
+);
 
 const networks: HardhatUserConfig["networks"] = {};
 if (polygonRpcUrl && polygonDeployerKey) {

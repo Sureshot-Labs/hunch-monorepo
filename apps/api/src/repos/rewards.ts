@@ -10,6 +10,31 @@ export type RewardsPolicyRow = {
   created_at: Date;
 };
 
+export type RewardsMultiplierPolicyRow = {
+  id: string;
+  effective_at: Date;
+  global_multiplier: string;
+  referral_rules: unknown;
+  tier_rules: unknown;
+  notes: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type RewardsMultiplierOverrideRow = {
+  user_id: string;
+  multiplier: string;
+  reason: string | null;
+  effective_at: Date;
+  expires_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  wallet_address: string | null;
+  email: string | null;
+  username: string | null;
+  display_name: string | null;
+};
+
 export type ReferralRow = {
   id: string;
   referrer_user_id: string;
@@ -53,6 +78,211 @@ export async function fetchActiveRewardsPolicy(
     `,
   );
   return rows[0] ?? null;
+}
+
+export async function fetchActiveRewardsMultiplierPolicy(
+  pool: DbQuery,
+  asOf: Date = new Date(),
+): Promise<RewardsMultiplierPolicyRow | null> {
+  const { rows } = await pool.query<RewardsMultiplierPolicyRow>(
+    `
+      select
+        id,
+        effective_at,
+        global_multiplier::text as global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes,
+        created_at,
+        updated_at
+      from rewards_multiplier_policy
+      where effective_at <= $1
+      order by effective_at desc, created_at desc
+      limit 1
+    `,
+    [asOf],
+  );
+  return rows[0] ?? null;
+}
+
+export async function insertRewardsMultiplierPolicy(
+  pool: DbQuery,
+  inputs: {
+    effectiveAt: Date;
+    globalMultiplier: number;
+    referralRules: unknown;
+    tierRules: unknown;
+    notes?: string | null;
+  },
+): Promise<RewardsMultiplierPolicyRow> {
+  const { rows } = await pool.query<RewardsMultiplierPolicyRow>(
+    `
+      insert into rewards_multiplier_policy (
+        effective_at,
+        global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes
+      )
+      values ($1, $2, $3, $4, $5)
+      returning
+        id,
+        effective_at,
+        global_multiplier::text as global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes,
+        created_at,
+        updated_at
+    `,
+    [
+      inputs.effectiveAt,
+      inputs.globalMultiplier,
+      JSON.stringify(inputs.referralRules),
+      JSON.stringify(inputs.tierRules),
+      inputs.notes ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function listRewardsMultiplierOverrides(
+  pool: DbQuery,
+  inputs: { q?: string; limit: number; offset: number },
+): Promise<{ total: number; rows: RewardsMultiplierOverrideRow[] }> {
+  const params: PgParams = [];
+  const whereParts: string[] = [];
+  if (inputs.q?.trim()) {
+    params.push(`%${inputs.q.trim()}%`);
+    const placeholder = `$${params.length}`;
+    whereParts.push(
+      `(o.user_id::text ilike ${placeholder}
+        or coalesce(u.email, '') ilike ${placeholder}
+        or coalesce(u.username, '') ilike ${placeholder}
+        or coalesce(u.display_name, '') ilike ${placeholder}
+        or coalesce(w.wallet_address, '') ilike ${placeholder})`,
+    );
+  }
+  const whereSql = whereParts.length ? `where ${whereParts.join(" and ")}` : "";
+
+  const countSql = `
+    select count(*)::text as total
+    from rewards_multiplier_user_overrides o
+    left join users u on u.id = o.user_id
+    left join user_wallets w on w.user_id = o.user_id and w.is_primary = true
+    ${whereSql}
+  `;
+  const { rows: countRows } = await pool.query<{ total: string }>(countSql, params);
+
+  const dataParams: PgParams = [...params, inputs.limit, inputs.offset];
+  const rowsSql = `
+    select
+      o.user_id,
+      o.multiplier::text as multiplier,
+      o.reason,
+      o.effective_at,
+      o.expires_at,
+      o.created_at,
+      o.updated_at,
+      w.wallet_address,
+      u.email,
+      u.username,
+      u.display_name
+    from rewards_multiplier_user_overrides o
+    left join users u on u.id = o.user_id
+    left join user_wallets w on w.user_id = o.user_id and w.is_primary = true
+    ${whereSql}
+    order by o.updated_at desc, o.user_id asc
+    limit $${dataParams.length - 1}
+    offset $${dataParams.length}
+  `;
+  const { rows } = await pool.query<RewardsMultiplierOverrideRow>(
+    rowsSql,
+    dataParams,
+  );
+
+  return { total: Number(countRows[0]?.total ?? 0), rows };
+}
+
+export async function upsertRewardsMultiplierOverride(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    multiplier: number;
+    reason?: string | null;
+    effectiveAt: Date;
+    expiresAt?: Date | null;
+  },
+): Promise<RewardsMultiplierOverrideRow> {
+  const { rows } = await pool.query<RewardsMultiplierOverrideRow>(
+    `
+      insert into rewards_multiplier_user_overrides (
+        user_id,
+        multiplier,
+        reason,
+        effective_at,
+        expires_at
+      )
+      values ($1, $2, $3, $4, $5)
+      on conflict (user_id)
+      do update set
+        multiplier = excluded.multiplier,
+        reason = excluded.reason,
+        effective_at = excluded.effective_at,
+        expires_at = excluded.expires_at,
+        updated_at = now()
+      returning
+        user_id,
+        multiplier::text as multiplier,
+        reason,
+        effective_at,
+        expires_at,
+        created_at,
+        updated_at,
+        (
+          select wallet_address
+          from user_wallets uw
+          where uw.user_id = rewards_multiplier_user_overrides.user_id
+            and uw.is_primary = true
+          order by uw.created_at asc
+          limit 1
+        ) as wallet_address,
+        (
+          select email
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as email,
+        (
+          select username
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as username,
+        (
+          select display_name
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as display_name
+    `,
+    [
+      inputs.userId,
+      inputs.multiplier,
+      inputs.reason ?? null,
+      inputs.effectiveAt,
+      inputs.expiresAt ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function deleteRewardsMultiplierOverride(
+  pool: DbQuery,
+  userId: string,
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `delete from rewards_multiplier_user_overrides where user_id = $1`,
+    [userId],
+  );
+  return Number(rowCount ?? 0) > 0;
 }
 
 export async function fetchUserReferralCode(

@@ -57,6 +57,96 @@ export const adminRewardsPolicySchema = z.object({
   }
 });
 
+const multiplierValueSchema = z.coerce.number().positive().finite();
+
+export const adminRewardsMultiplierPolicySchema = z
+  .object({
+    effectiveAt: z.string().datetime().optional(),
+    globalMultiplier: multiplierValueSchema,
+    referralRules: z
+      .array(
+        z.object({
+          minReferrals: z.coerce.number().int().min(0),
+          multiplier: multiplierValueSchema,
+        }),
+      )
+      .default([]),
+    tierRules: z
+      .array(
+        z.object({
+          minPoints: z.coerce.number().min(0),
+          multiplier: multiplierValueSchema,
+        }),
+      )
+      .default([]),
+    notes: z.string().trim().max(2000).optional(),
+  })
+  .superRefine((value, ctx) => {
+    const referralThresholds = new Set<number>();
+    for (const [index, rule] of value.referralRules.entries()) {
+      if (referralThresholds.has(rule.minReferrals)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["referralRules", index, "minReferrals"],
+          message: `Duplicate referral threshold: ${rule.minReferrals}`,
+        });
+      }
+      referralThresholds.add(rule.minReferrals);
+    }
+
+    const tierThresholds = new Set<number>();
+    for (const [index, rule] of value.tierRules.entries()) {
+      if (tierThresholds.has(rule.minPoints)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tierRules", index, "minPoints"],
+          message: `Duplicate tier threshold: ${rule.minPoints}`,
+        });
+      }
+      tierThresholds.add(rule.minPoints);
+    }
+  });
+
+export const adminRewardsMultiplierOverridesQuerySchema = z.object({
+  q: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminRewardsMultiplierOverrideSchema = z
+  .object({
+    userId: z.string().uuid().optional(),
+    walletAddress: z.string().trim().min(1).optional(),
+    multiplier: multiplierValueSchema,
+    reason: z.string().trim().max(500).optional(),
+    effectiveAt: z.string().datetime().optional(),
+    expiresAt: z.string().datetime().nullable().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.userId && !value.walletAddress) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide userId or walletAddress",
+      });
+    }
+
+    if (value.expiresAt && value.effectiveAt) {
+      const effectiveAt = Date.parse(value.effectiveAt);
+      const expiresAt = Date.parse(value.expiresAt);
+      if (Number.isFinite(effectiveAt) && Number.isFinite(expiresAt) && expiresAt <= effectiveAt) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["expiresAt"],
+          message: "expiresAt must be later than effectiveAt",
+        });
+      }
+    }
+  });
+
+export const adminRewardsMultiplierOverrideParamsSchema = z.object({
+  userId: z.string().uuid(),
+});
+
 export const adminUsersQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -134,6 +224,18 @@ export const adminRewardsTreasuryQuerySchema = z.object({
 export type AdminFeePolicyBody = z.infer<typeof adminFeePolicySchema>;
 export type AdminDebridgeConfigBody = z.infer<typeof adminDebridgeConfigSchema>;
 export type AdminRewardsPolicyBody = z.infer<typeof adminRewardsPolicySchema>;
+export type AdminRewardsMultiplierPolicyBody = z.infer<
+  typeof adminRewardsMultiplierPolicySchema
+>;
+export type AdminRewardsMultiplierOverridesQuery = z.infer<
+  typeof adminRewardsMultiplierOverridesQuerySchema
+>;
+export type AdminRewardsMultiplierOverrideBody = z.infer<
+  typeof adminRewardsMultiplierOverrideSchema
+>;
+export type AdminRewardsMultiplierOverrideParams = z.infer<
+  typeof adminRewardsMultiplierOverrideParamsSchema
+>;
 export type AdminUsersQuery = z.infer<typeof adminUsersQuerySchema>;
 export type AdminUserParams = z.infer<typeof adminUserParamsSchema>;
 export type AdminUserActivityQuery = z.infer<
