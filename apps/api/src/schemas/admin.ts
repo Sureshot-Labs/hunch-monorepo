@@ -130,14 +130,20 @@ export const adminRewardsMultiplierOverrideSchema = z
       });
     }
 
-    if (value.expiresAt && value.effectiveAt) {
-      const effectiveAt = Date.parse(value.effectiveAt);
+    if (value.expiresAt) {
+      const effectiveAt = value.effectiveAt
+        ? Date.parse(value.effectiveAt)
+        : Date.now();
       const expiresAt = Date.parse(value.expiresAt);
-      if (Number.isFinite(effectiveAt) && Number.isFinite(expiresAt) && expiresAt <= effectiveAt) {
+      if (
+        Number.isFinite(effectiveAt) &&
+        Number.isFinite(expiresAt) &&
+        expiresAt <= effectiveAt
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["expiresAt"],
-          message: "expiresAt must be later than effectiveAt",
+          message: "expiresAt must be later than effectiveAt (or now)",
         });
       }
     }

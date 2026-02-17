@@ -169,7 +169,14 @@ export async function listRewardsMultiplierOverrides(
     select count(*)::text as total
     from rewards_multiplier_user_overrides o
     left join users u on u.id = o.user_id
-    left join user_wallets w on w.user_id = o.user_id and w.is_primary = true
+    left join lateral (
+      select wallet_address
+      from user_wallets uw
+      where uw.user_id = o.user_id
+        and uw.is_primary = true
+      order by uw.created_at asc
+      limit 1
+    ) w on true
     ${whereSql}
   `;
   const { rows: countRows } = await pool.query<{ total: string }>(countSql, params);
@@ -190,7 +197,14 @@ export async function listRewardsMultiplierOverrides(
       u.display_name
     from rewards_multiplier_user_overrides o
     left join users u on u.id = o.user_id
-    left join user_wallets w on w.user_id = o.user_id and w.is_primary = true
+    left join lateral (
+      select wallet_address
+      from user_wallets uw
+      where uw.user_id = o.user_id
+        and uw.is_primary = true
+      order by uw.created_at asc
+      limit 1
+    ) w on true
     ${whereSql}
     order by o.updated_at desc, o.user_id asc
     limit $${dataParams.length - 1}
