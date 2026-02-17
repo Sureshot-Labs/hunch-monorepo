@@ -498,15 +498,40 @@ export class AuthService {
       );
       userId = userByPrivyId.rows[0]?.id ?? null;
 
-      // Note: we no longer fall back to wallet-based lookup for Privy auth.
+      // Backward-compatibility path:
+      // if Privy user id changes (e.g. app migration) recover the account by linked wallet ownership.
+      if (!userId) {
+        const matchedUserIds = new Set<string>();
+        for (const wallet of privyWallets) {
+          const match = ETH_ADDRESS_RE.test(wallet.address)
+            ? "lower(wallet_address) = lower($2)"
+            : "wallet_address = $2";
+
+          const owner = await client.query<{ user_id: string }>(
+            `SELECT user_id
+             FROM user_wallets
+             WHERE wallet_type = $1
+               AND ${match}
+             LIMIT 2`,
+            [wallet.walletType, wallet.address],
+          );
+
+          for (const row of owner.rows) matchedUserIds.add(row.user_id);
+          if (matchedUserIds.size > 1) break;
+        }
+
+        if (matchedUserIds.size > 1) {
+          throw new WalletAlreadyExistsError(
+            "Privy wallets resolve to multiple users; merge users before login",
+          );
+        }
+
+        if (matchedUserIds.size === 1) {
+          userId = matchedUserIds.values().next().value ?? null;
+        }
+      }
 
       if (userId) {
-        const normalizeAddress = (input: string): string => {
-          const trimmed = input.trim();
-          if (ETH_ADDRESS_RE.test(trimmed)) return trimmed.toLowerCase();
-          return trimmed;
-        };
-
         for (const wallet of privyWallets) {
           const match =
             wallet.walletType === "ethereum"
@@ -549,11 +574,11 @@ export class AuthService {
         ]);
 
         const linkedWalletSet = new Set(
-          privyWallets.map((w) => normalizeAddress(w.address)),
+          privyWallets.map((w) => normalizeWalletAddress(w.address)),
         );
         const walletIdsToDelete: string[] = [];
         for (const wallet of existingWallets.rows) {
-          const normalized = normalizeAddress(wallet.wallet_address);
+          const normalized = normalizeWalletAddress(wallet.wallet_address);
           if (!linkedWalletSet.has(normalized))
             walletIdsToDelete.push(wallet.id);
         }
