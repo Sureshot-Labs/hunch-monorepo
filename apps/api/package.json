@@ -17,6 +17,7 @@
     "fees:reconcile": "tsx src/reconcile-fees.ts",
     "rewards:payout": "tsx src/rewards-payout.ts",
     "rewards:treasury:sweep": "tsx src/rewards-treasury-sweep.ts",
+    "rewards:wallets:generate": "tsx src/rewards-wallets-generate.ts",
     "rewards:migration:preflight": "tsx src/rewards-migration-preflight.ts",
     "ai:embed:backfill": "tsx src/ai-embed-backfill.ts",
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
