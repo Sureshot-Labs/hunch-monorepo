@@ -3,6 +3,8 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { getEmbedStreamKey, tx, type RedisClientType } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
+import bs58 from "bs58";
+import { Keypair } from "@solana/web3.js";
 import type { PoolClient } from "pg";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -66,6 +68,7 @@ const POLYGON_MULTICALL_ADDRESS =
 const EMBED_INDEX_MARKET = "idx:ai:embed:market";
 const EMBED_INDEX_EVENT = "idx:ai:embed:event";
 const EMBED_DLQ_KEY = "ai:embed:dead";
+const SOLANA_LAMPORT_DECIMALS = 9;
 
 const DEBRIDGE_CHAIN_META: Record<
   string,
@@ -430,6 +433,18 @@ async function fetchErc20Balance(inputs: {
   return typeof value === "bigint" ? value : 0n;
 }
 
+function loadSolanaKeypair(secret: string): Keypair {
+  const trimmed = secret.trim();
+  if (!trimmed) {
+    throw new Error("Missing HUNCH_REWARDS_SOLANA_SECRET_KEY");
+  }
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed) as number[];
+    return Keypair.fromSecretKey(Uint8Array.from(parsed));
+  }
+  return Keypair.fromSecretKey(bs58.decode(trimmed));
+}
+
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -451,6 +466,87 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       let dflowFeeError: string | null = null;
       let dflowFeeOwner: string | null = null;
       let dflowFeeMint: string | null = null;
+      const rewardsHotWallets: {
+        polygon: {
+          chainId: "137";
+          chainLabel: "Polygon";
+          nativeAsset: "POL";
+          address: string | null;
+          configured: boolean;
+          nativeBalance: string | null;
+          nativeBalanceRaw: string | null;
+          usdcBalance: string | null;
+          usdcBalanceRaw: string | null;
+          coldAddress: string | null;
+          error: string | null;
+        };
+        base: {
+          chainId: "8453";
+          chainLabel: "Base";
+          nativeAsset: "ETH";
+          address: string | null;
+          configured: boolean;
+          nativeBalance: string | null;
+          nativeBalanceRaw: string | null;
+          usdcBalance: string | null;
+          usdcBalanceRaw: string | null;
+          coldAddress: string | null;
+          error: string | null;
+        };
+        solana: {
+          chainId: "solana";
+          chainLabel: "Solana";
+          nativeAsset: "SOL";
+          address: string | null;
+          configured: boolean;
+          nativeBalance: string | null;
+          nativeBalanceRaw: string | null;
+          usdcBalance: string | null;
+          usdcBalanceRaw: string | null;
+          coldAddress: string | null;
+          error: string | null;
+        };
+      } = {
+        polygon: {
+          chainId: "137",
+          chainLabel: "Polygon",
+          nativeAsset: "POL",
+          address: null,
+          configured: false,
+          nativeBalance: null,
+          nativeBalanceRaw: null,
+          usdcBalance: null,
+          usdcBalanceRaw: null,
+          coldAddress: env.rewardsTreasuryColdAddressPolygon || null,
+          error: null,
+        },
+        base: {
+          chainId: "8453",
+          chainLabel: "Base",
+          nativeAsset: "ETH",
+          address: null,
+          configured: false,
+          nativeBalance: null,
+          nativeBalanceRaw: null,
+          usdcBalance: null,
+          usdcBalanceRaw: null,
+          coldAddress: env.rewardsTreasuryColdAddressBase || null,
+          error: null,
+        },
+        solana: {
+          chainId: "solana",
+          chainLabel: "Solana",
+          nativeAsset: "SOL",
+          address: null,
+          configured: false,
+          nativeBalance: null,
+          nativeBalanceRaw: null,
+          usdcBalance: null,
+          usdcBalanceRaw: null,
+          coldAddress: env.rewardsTreasuryColdAddressSolana || null,
+          error: null,
+        },
+      };
 
       const debridgeConfig = await getDebridgeConfig();
       const debridgeRecipients = Object.entries(
@@ -581,6 +677,121 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
+      const rewardsPayoutKeyPolygon =
+        env.rewardsPayoutPrivateKeyPolygon?.trim() ||
+        env.rewardsPayoutPrivateKey?.trim() ||
+        "";
+      if (rewardsPayoutKeyPolygon) {
+        rewardsHotWallets.polygon.configured = true;
+        try {
+          const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+          const wallet = new ethers.Wallet(rewardsPayoutKeyPolygon, provider);
+          const usdcAddress =
+            env.rewardsUsdcAddressPolygon?.trim() || env.polymarketUsdcAddress;
+          const [nativeBalance, usdcBalance] = await Promise.all([
+            provider.getBalance(wallet.address),
+            fetchErc20Balance({
+              tokenAddress: usdcAddress,
+              owner: wallet.address,
+              rpcUrl: env.polygonRpcUrl,
+              multicallAddress: POLYGON_MULTICALL_ADDRESS,
+            }),
+          ]);
+
+          rewardsHotWallets.polygon.address = wallet.address;
+          rewardsHotWallets.polygon.nativeBalance = ethers.formatEther(
+            nativeBalance,
+          );
+          rewardsHotWallets.polygon.nativeBalanceRaw = nativeBalance.toString();
+          rewardsHotWallets.polygon.usdcBalance = ethers.formatUnits(
+            usdcBalance,
+            6,
+          );
+          rewardsHotWallets.polygon.usdcBalanceRaw = usdcBalance.toString();
+        } catch (error) {
+          rewardsHotWallets.polygon.error =
+            error instanceof Error
+              ? error.message
+              : "Rewards Polygon wallet fetch failed";
+        }
+      }
+
+      const rewardsPayoutKeyBase =
+        env.rewardsPayoutPrivateKeyBase?.trim() ||
+        env.rewardsPayoutPrivateKey?.trim() ||
+        "";
+      if (rewardsPayoutKeyBase) {
+        rewardsHotWallets.base.configured = true;
+        try {
+          const provider = new ethers.JsonRpcProvider(env.baseRpcUrl);
+          const wallet = new ethers.Wallet(rewardsPayoutKeyBase, provider);
+          const usdcAddress =
+            env.rewardsUsdcAddressBase?.trim() || env.limitlessUsdcAddress;
+          const [nativeBalance, usdcBalance] = await Promise.all([
+            provider.getBalance(wallet.address),
+            fetchErc20Balance({
+              tokenAddress: usdcAddress,
+              owner: wallet.address,
+              rpcUrl: env.baseRpcUrl,
+              multicallAddress: env.baseMulticallAddress,
+            }),
+          ]);
+
+          rewardsHotWallets.base.address = wallet.address;
+          rewardsHotWallets.base.nativeBalance = ethers.formatEther(
+            nativeBalance,
+          );
+          rewardsHotWallets.base.nativeBalanceRaw = nativeBalance.toString();
+          rewardsHotWallets.base.usdcBalance = ethers.formatUnits(
+            usdcBalance,
+            6,
+          );
+          rewardsHotWallets.base.usdcBalanceRaw = usdcBalance.toString();
+        } catch (error) {
+          rewardsHotWallets.base.error =
+            error instanceof Error
+              ? error.message
+              : "Rewards Base wallet fetch failed";
+        }
+      }
+
+      const rewardsPayoutSolanaSecret = env.rewardsSolanaSecretKey?.trim() || "";
+      if (rewardsPayoutSolanaSecret) {
+        rewardsHotWallets.solana.configured = true;
+        try {
+          const keypair = loadSolanaKeypair(rewardsPayoutSolanaSecret);
+          const ownerAddress = keypair.publicKey.toBase58();
+          const [nativeBalance, usdcBalance] = await Promise.all([
+            fetchSolanaBalanceLamports({
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+              owner: ownerAddress,
+            }),
+            fetchSolanaTokenBalanceByOwnerAndMint({
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+              owner: ownerAddress,
+              mint: env.solanaUsdcMint,
+            }),
+          ]);
+
+          rewardsHotWallets.solana.address = ownerAddress;
+          rewardsHotWallets.solana.nativeBalance = formatUiAmount(
+            nativeBalance,
+            SOLANA_LAMPORT_DECIMALS,
+          );
+          rewardsHotWallets.solana.nativeBalanceRaw = nativeBalance.toString();
+          rewardsHotWallets.solana.usdcBalance = usdcBalance?.uiAmountString ?? "0";
+          rewardsHotWallets.solana.usdcBalanceRaw =
+            usdcBalance?.amount.toString() ?? "0";
+        } catch (error) {
+          rewardsHotWallets.solana.error =
+            error instanceof Error
+              ? error.message
+              : "Rewards Solana wallet fetch failed";
+        }
+      }
+
       const pendingFeeParams: Array<string | number> = [
         MAX_FEE_COLLECT_ATTEMPTS,
       ];
@@ -669,6 +880,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           recipients: debridgeRecipientBalances,
           source: debridgeConfig.source,
         },
+        rewardsHotWallets,
       });
     },
   );
@@ -1493,6 +1705,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params;
       const body = request.body;
+      const actorUserId = request.user?.id;
+
+      if (!body.isAdmin && actorUserId && actorUserId === id) {
+        reply.code(400);
+        return reply.send({ error: "Cannot revoke admin from yourself" });
+      }
 
       const { rows } = await pool.query<{ is_admin: boolean }>(
         `
@@ -1523,6 +1741,50 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params;
       const body = request.body;
+      const actorUserId = request.user?.id;
+
+      if (!body.isActive) {
+        if (actorUserId && actorUserId === id) {
+          reply.code(400);
+          return reply.send({ error: "Cannot deactivate yourself" });
+        }
+
+        const { rows: targetRows } = await pool.query<{
+          is_admin: boolean;
+          is_active: boolean;
+        }>(
+          `
+            select is_admin, is_active
+            from users
+            where id = $1
+          `,
+          [id],
+        );
+
+        if (!targetRows.length) {
+          reply.code(404);
+          return reply.send({ error: "User not found" });
+        }
+
+        const target = targetRows[0];
+        if (target.is_admin && target.is_active) {
+          const { rows: adminRows } = await pool.query<{ count: string }>(
+            `
+              select count(*)::text as count
+              from users
+              where is_admin = true
+                and is_active = true
+                and id <> $1
+            `,
+            [id],
+          );
+          const otherActiveAdmins = Number(adminRows[0]?.count ?? 0);
+          if (otherActiveAdmins === 0) {
+            reply.code(400);
+            return reply.send({ error: "Cannot deactivate the last active admin" });
+          }
+        }
+      }
 
       const { rows } = await pool.query<{ is_active: boolean }>(
         `
