@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { getEmbedStreamKey, type RedisClientType } from "@hunch/infra";
+import { getEmbedStreamKey, tx, type RedisClientType } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
+import type { PoolClient } from "pg";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { abis } from "../lib/contracts.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
+import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
@@ -1863,12 +1865,16 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           : body.expiresAt
             ? new Date(body.expiresAt)
             : null;
-      const row = await upsertRewardsMultiplierOverride(pool, {
-        userId,
-        multiplier: Number(body.multiplier),
-        reason: body.reason?.trim() || null,
-        effectiveAt,
-        expiresAt,
+      const row = await tx(pool, async (client: PoolClient) => {
+        return withRewardsUserAdvisoryXactLock(client, userId, () =>
+          upsertRewardsMultiplierOverride(client, {
+            userId,
+            multiplier: Number(body.multiplier),
+            reason: body.reason?.trim() || null,
+            effectiveAt,
+            expiresAt,
+          }),
+        );
       });
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1898,9 +1904,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       schema: { params: adminRewardsMultiplierOverrideParamsSchema },
     },
     async (request, reply) => {
-      const removed = await deleteRewardsMultiplierOverride(
-        pool,
-        request.params.userId,
+      const removed = await tx(pool, async (client: PoolClient) =>
+        withRewardsUserAdvisoryXactLock(client, request.params.userId, () =>
+          deleteRewardsMultiplierOverride(client, request.params.userId),
+        ),
       );
       if (!removed) {
         reply.code(404);

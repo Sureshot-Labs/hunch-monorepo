@@ -9,14 +9,21 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { REWARDS_CHAIN_IDS, normalizeRewardsChainId, type RewardsChainId } from "./lib/rewards-chain.js";
 import { withRewardsChainLocks } from "./lib/rewards-locks.js";
-import { usdcMicroFromUnsafeNumber, usdcMicroToDecimalString } from "./lib/usdc.js";
-import { getRewardsTreasuryReport } from "./services/rewards-treasury.js";
+import {
+  parseUsdcToMicro,
+  usdcMicroToDecimalString,
+} from "./lib/usdc.js";
+import {
+  capTreasurySweepAmountMicro,
+  getRewardsTreasuryReport,
+} from "./services/rewards-treasury.js";
 
 export type RewardsTreasurySweepOptions = {
   execute: boolean;
   dryRun: boolean;
   chainId?: string;
-  maxUsd?: number;
+  maxUsd?: string;
+  maxMicro?: bigint;
 };
 
 export function parseRewardsTreasurySweepArgs(
@@ -32,13 +39,18 @@ export function parseRewardsTreasurySweepArgs(
 
   const chainRaw = getValue("--chain");
   const maxUsdRaw = getValue("--max-usd");
-  const maxUsdParsed = maxUsdRaw ? Number(maxUsdRaw) : Number.NaN;
+  const parsedMaxMicro = maxUsdRaw ? parseUsdcToMicro(maxUsdRaw) : null;
+
+  if (maxUsdRaw && (!parsedMaxMicro || parsedMaxMicro <= 0n)) {
+    throw new Error("--max-usd must be a positive USDC amount (up to 6 decimals)");
+  }
 
   return {
     execute: hasFlag("--execute"),
     dryRun: !hasFlag("--execute"),
     chainId: chainRaw?.trim(),
-    maxUsd: Number.isFinite(maxUsdParsed) && maxUsdParsed > 0 ? maxUsdParsed : undefined,
+    maxUsd: maxUsdRaw?.trim(),
+    maxMicro: parsedMaxMicro ?? undefined,
   };
 }
 
@@ -450,17 +462,15 @@ export async function runRewardsTreasurySweep(
       return;
     }
 
-    const minSweepMicro = usdcMicroFromUnsafeNumber(
-      env.rewardsTreasuryMinSweepUsd,
-    );
+    const minSweepMicro = env.rewardsTreasuryMinSweepMicro;
 
     const actions: PlannedSweepAction[] = report.chains.map((chain) => {
-      const capped = options.maxUsd != null
-        ? Math.min(chain.sweepableNow, options.maxUsd)
-        : chain.sweepableNow;
-      const amountMicro = usdcMicroFromUnsafeNumber(Math.max(0, capped));
-      const hotBalanceNowMicro = usdcMicroFromUnsafeNumber(
-        chain.controlledHotBalance,
+      const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
+      const reserveFloorMicro = BigInt(chain.reserveFloorMicro);
+      const hotBalanceNowMicro = BigInt(chain.controlledHotBalanceMicro);
+      const amountMicro = capTreasurySweepAmountMicro(
+        sweepableNowMicro,
+        options.maxMicro,
       );
       const hotBalanceLeftIfAppliedMicro =
         hotBalanceNowMicro > amountMicro ? hotBalanceNowMicro - amountMicro : 0n;
@@ -491,12 +501,8 @@ export async function runRewardsTreasurySweep(
         hotBalanceLeftIfApplied: usdcMicroToDecimalString(
           hotBalanceLeftIfAppliedMicro,
         ),
-        reserveFloorNow: usdcMicroToDecimalString(
-          usdcMicroFromUnsafeNumber(chain.reserveFloor),
-        ),
-        sweepableNow: usdcMicroToDecimalString(
-          usdcMicroFromUnsafeNumber(chain.sweepableNow),
-        ),
+        reserveFloorNow: usdcMicroToDecimalString(reserveFloorMicro),
+        sweepableNow: usdcMicroToDecimalString(sweepableNowMicro),
         shouldSweep,
         reason,
         executed: false,
@@ -562,7 +568,7 @@ export async function runRewardsTreasurySweep(
           status,
           liabilityMode: report.liabilityMode,
           includePending: report.includePending,
-          minSweepUsd: env.rewardsTreasuryMinSweepUsd,
+          minSweepUsd: usdcMicroToDecimalString(minSweepMicro),
           actions: actions.map((action) => ({
             ...action,
             amountMicro: action.amountMicro.toString(),

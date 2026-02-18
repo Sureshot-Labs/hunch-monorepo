@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 import { EFFECTIVE_PNL_SQL } from "../lib/pnl-sql.js";
 import type { PgParams } from "../server-types.js";
 
@@ -64,6 +65,25 @@ export type RewardsLeaderboardRow = {
   username: string | null;
   walletAddress: string | null;
 };
+
+const USDC_MICRO_FACTOR = 1_000_000n;
+
+function decimalToMicroFloor(value: string | null | undefined): bigint {
+  const raw = value?.trim() ?? "0";
+  if (!raw) return 0n;
+  const normalized = raw.replace(/_/g, "");
+  if (!/^\d+(\.\d+)?$/.test(normalized)) return 0n;
+  const [whole, fraction = ""] = normalized.split(".");
+  const wholeMicro = BigInt(whole) * USDC_MICRO_FACTOR;
+  const fractionMicro = BigInt((fraction + "000000").slice(0, 6));
+  return wholeMicro + fractionMicro;
+}
+
+function microToDecimalString(value: bigint): string {
+  const whole = value / USDC_MICRO_FACTOR;
+  const fraction = value % USDC_MICRO_FACTOR;
+  return `${whole.toString()}.${fraction.toString().padStart(6, "0")}`;
+}
 
 export async function fetchActiveRewardsPolicy(
   pool: DbQuery,
@@ -472,10 +492,16 @@ export async function fetchFeeTotalsByChain(
   );
   const totals: Record<string, { pending: string; collected: string }> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = {
-      pending: row.pending ?? "0",
-      collected: row.collected ?? "0",
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const pendingMicro =
+      decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
+    const collectedMicro =
+      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+    totals[canonicalChainId] = {
+      pending: microToDecimalString(pendingMicro),
+      collected: microToDecimalString(collectedMicro),
     };
   }
   return totals;
@@ -567,10 +593,16 @@ export async function fetchReferralFeeTotalsByChain(
   );
   const totals: Record<string, { pending: string; collected: string }> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = {
-      pending: row.pending ?? "0",
-      collected: row.collected ?? "0",
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const pendingMicro =
+      decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
+    const collectedMicro =
+      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+    totals[canonicalChainId] = {
+      pending: microToDecimalString(pendingMicro),
+      collected: microToDecimalString(collectedMicro),
     };
   }
   return totals;
@@ -608,8 +640,11 @@ export async function fetchClaimedTotalsByChain(
   );
   const totals: Record<string, string> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = row.total ?? "0";
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existingMicro = decimalToMicroFloor(totals[canonicalChainId]);
+    const currentMicro = decimalToMicroFloor(row.total);
+    totals[canonicalChainId] = microToDecimalString(existingMicro + currentMicro);
   }
   return totals;
 }

@@ -14,3 +14,12 @@ export async function acquireRewardsUserAdvisoryXactLock(
     normalizeUserLockKey(userId),
   ]);
 }
+
+export async function withRewardsUserAdvisoryXactLock<T>(
+  client: PoolClient,
+  userId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  await acquireRewardsUserAdvisoryXactLock(client, userId);
+  return run();
+}

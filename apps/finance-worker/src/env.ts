@@ -26,12 +26,14 @@ function parseOptionalChain(key: string): string | undefined {
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
-function parseOptionalPositiveNumber(key: string): number | undefined {
+function parseOptionalPositiveUsdcString(key: string): string | undefined {
   const raw = readEnv(key);
   if (!raw) return undefined;
-  const parsed = Number(raw);
+  const normalized = raw.trim();
+  if (!normalized) return undefined;
+  const parsed = Number(normalized);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-  return parsed;
+  return normalized;
 }
 
 const enabled = parseBool(process.env.HUNCH_FINANCE_WORKER_ENABLED, false);
@@ -75,7 +77,7 @@ export const env = {
     false,
   ),
   treasurySweepChainId: parseOptionalChain("HUNCH_FINANCE_SWEEP_CHAIN_ID"),
-  treasurySweepMaxUsd: parseOptionalPositiveNumber(
+  treasurySweepMaxUsd: parseOptionalPositiveUsdcString(
     "HUNCH_FINANCE_SWEEP_MAX_USD",
   ),
 
@@ -96,6 +98,24 @@ export const env = {
   ),
   payoutPrepareLimit: parsePositiveInt(
     readEnv("HUNCH_FINANCE_PAYOUT_PREPARE_LIMIT"),
+    25,
+  ),
+
+  payoutSendEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_PAYOUT_SEND_ENABLED"),
+    false,
+  ),
+  payoutSendIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_PAYOUT_SEND_INTERVAL_SEC"),
+    900,
+  ),
+  payoutSendExecute: parseBool(
+    readEnv("HUNCH_FINANCE_PAYOUT_SEND_EXECUTE"),
+    false,
+  ),
+  payoutSendChainId: parseOptionalChain("HUNCH_FINANCE_PAYOUT_SEND_CHAIN_ID"),
+  payoutSendLimit: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_PAYOUT_SEND_LIMIT"),
     25,
   ),
 

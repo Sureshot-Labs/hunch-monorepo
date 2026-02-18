@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 
 const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
 config({ path: envPath, override: true });
@@ -268,6 +269,19 @@ const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
 const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
   positionsSyncFlattenGraceSec,
+);
+const rewardsTreasuryMinSweepUsdRaw =
+  process.env.HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD?.trim() || "0";
+const rewardsTreasuryMinSweepMicro = parseUsdcToMicro(
+  rewardsTreasuryMinSweepUsdRaw,
+);
+if (rewardsTreasuryMinSweepMicro == null) {
+  throw new Error(
+    "[env] Invalid HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD (must be non-negative decimal with up to 6 decimals)",
+  );
+}
+const rewardsTreasuryMinSweepUsd = Number(
+  usdcMicroToDecimalString(rewardsTreasuryMinSweepMicro),
 );
 
 export const env = {
@@ -616,10 +630,9 @@ export const env = {
   rewardsTreasuryIncludePending:
     parseOptionalBool(process.env.HUNCH_REWARDS_TREASURY_INCLUDE_PENDING) ??
     true,
-  rewardsTreasuryMinSweepUsd: optionalNonNegativeNumber(
-    "HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD",
-    0,
-  ),
+  rewardsTreasuryMinSweepUsdRaw,
+  rewardsTreasuryMinSweepUsd,
+  rewardsTreasuryMinSweepMicro,
   rewardsTreasuryColdAddressPolygon:
     process.env.HUNCH_REWARDS_TREASURY_COLD_ADDRESS_POLYGON?.trim() || "",
   rewardsTreasuryColdAddressBase:

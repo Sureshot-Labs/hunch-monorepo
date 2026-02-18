@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { normalizeRewardsChainId } from "./lib/rewards-chain.js";
+import { withRewardsUserAdvisoryXactLock } from "./lib/rewards-user-lock.js";
 import {
   parseUsdcToMicro,
   parseUsdcToMicroFloor,
@@ -15,6 +16,7 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  capTreasurySweepAmountMicro,
   computeTreasuryChainMath,
 } from "./services/rewards-treasury.js";
 import {
@@ -23,7 +25,7 @@ import {
 
 type TestCase = {
   name: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 };
 
 function toNumber(value: bigint): number {
@@ -115,6 +117,17 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "treasury sweep cap uses micro precision without float round-trip",
+    run: () => {
+      assert.equal(
+        capTreasurySweepAmountMicro(1_000_001n, 1_000_000n),
+        1_000_000n,
+      );
+      assert.equal(capTreasurySweepAmountMicro(999_999n, 1_000_000n), 999_999n);
+      assert.equal(capTreasurySweepAmountMicro(999_999n, undefined), 999_999n);
+    },
+  },
+  {
     name: "treasury chain math keeps deficit and sweep mutually exclusive",
     run: () => {
       const computed = computeTreasuryChainMath({
@@ -162,6 +175,58 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "cashback breakdown excludes non-canonical chains and merges aliases",
+    run: () => {
+      const breakdown = computeCashbackBreakdown({
+        feeTotalsByChain: {
+          polygon: { pending: "1", collected: "2" },
+          "137": { pending: "0.5", collected: "0.25" },
+          unknown: { pending: "9", collected: "9" },
+        },
+        referralFeeTotalsByChain: {
+          matic: { pending: "0.1", collected: "0.2" },
+          "137": { pending: "0.4", collected: "0.3" },
+        },
+        claimedTotalsByChain: {
+          polygon: "0.5",
+          "137": "0.05",
+          unknown: "4",
+        },
+      });
+
+      assert.deepEqual(Object.keys(breakdown.cashbackByChain), ["137"]);
+      assert.equal(breakdown.cashbackByChain["137"]?.pending, 2);
+      assert.equal(breakdown.cashbackByChain["137"]?.collected, 2.75);
+      assert.equal(breakdown.cashbackByChain["137"]?.claimable, 2.2);
+      assert.equal(breakdown.totalClaimable, 2.2);
+    },
+  },
+  {
+    name: "user advisory lock helper acquires lock before executing callback",
+    run: async () => {
+      const calls: string[] = [];
+      const client = {
+        query: async (sql: string) => {
+          calls.push(sql);
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      const result = await withRewardsUserAdvisoryXactLock(
+        client,
+        "USER-ID",
+        async () => {
+          calls.push("callback");
+          return "ok";
+        },
+      );
+
+      assert.equal(result, "ok");
+      assert.equal(calls[0], "select pg_advisory_xact_lock(hashtext($1)::bigint)");
+      assert.equal(calls[1], "callback");
+    },
+  },
+  {
     name: "migration preflight blocks mutable rewards migration set",
     run: () => {
       const blocked = resolveBlockedRewardsMigrations([
@@ -190,7 +255,7 @@ const tests: TestCase[] = [
 let passed = 0;
 for (const test of tests) {
   try {
-    test.run();
+    await test.run();
     passed += 1;
   } catch (error) {
     console.error(`[rewards-tests] failed: ${test.name}`);

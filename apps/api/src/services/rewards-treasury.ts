@@ -359,6 +359,15 @@ export function computeTreasuryChainMath(
   };
 }
 
+export function capTreasurySweepAmountMicro(
+  sweepableNowMicro: bigint,
+  maxMicro?: bigint,
+): bigint {
+  if (sweepableNowMicro <= 0n) return 0n;
+  if (!maxMicro || maxMicro <= 0n) return sweepableNowMicro;
+  return sweepableNowMicro > maxMicro ? maxMicro : sweepableNowMicro;
+}
+
 export type RewardsTreasuryReport = {
   liabilityMode: "event_time_frozen";
   includePending: boolean;
@@ -368,24 +377,40 @@ export type RewardsTreasuryReport = {
   };
   chains: Array<{
     chainId: string;
+    grossCollectedFeesMicro: string;
     grossCollectedFees: number;
+    liabilityCollectedMicro: string;
     liabilityCollected: number;
+    liabilityPendingMicro: string;
     liabilityPending: number;
+    claimedConfirmedMicro: string;
     claimedConfirmed: number;
+    claimedOpenNonFailedMicro: string;
     claimedOpenNonFailed: number;
+    claimedNonFailedMicro: string;
     claimedNonFailed: number;
+    claimableNowMicro: string;
     claimableNow: number;
+    outstandingCollectedPayableMicro: string;
     outstandingCollectedPayable: number;
     safetyBuffer: {
+      bufferUsdMicro: string;
       bufferUsd: number;
       bufferPct: number;
+      bufferAppliedMicro: string;
       bufferApplied: number;
     };
+    reserveFloorMicro: string;
     reserveFloor: number;
+    controlledHotBalanceMicro: string;
     controlledHotBalance: number;
+    protocolReceivableBalanceMicro: string;
     protocolReceivableBalance: number;
+    deficitNowMicro: string;
     deficitNow: number;
+    economicSurplusMicro: string;
     economicSurplus: number;
+    sweepableNowMicro: string;
     sweepableNow: number;
     payoutAddressConfigured: boolean;
     hotBalanceAvailable: boolean;
@@ -451,26 +476,43 @@ export async function getRewardsTreasuryReport(
 
       chains.push({
         chainId,
+        grossCollectedFeesMicro: grossCollectedFeesMicro.toString(),
         grossCollectedFees: microToNumber(grossCollectedFeesMicro),
+        liabilityCollectedMicro: liabilityCollectedMicro.toString(),
         liabilityCollected: microToNumber(liabilityCollectedMicro),
+        liabilityPendingMicro: liabilityPendingMicro.toString(),
         liabilityPending: microToNumber(liabilityPendingMicro),
+        claimedConfirmedMicro: claimedConfirmedMicro.toString(),
         claimedConfirmed: microToNumber(claimedConfirmedMicro),
+        claimedOpenNonFailedMicro: claimedOpenNonFailedMicro.toString(),
         claimedOpenNonFailed: microToNumber(claimedOpenNonFailedMicro),
+        claimedNonFailedMicro: claimedNonFailedMicro.toString(),
         claimedNonFailed: microToNumber(claimedNonFailedMicro),
+        claimableNowMicro: computed.claimableNowMicro.toString(),
         claimableNow: microToNumber(computed.claimableNowMicro),
+        outstandingCollectedPayableMicro:
+          computed.outstandingCollectedPayableMicro.toString(),
         outstandingCollectedPayable: microToNumber(
           computed.outstandingCollectedPayableMicro,
         ),
         safetyBuffer: {
+          bufferUsdMicro: numberToMicroCeil(env.rewardsTreasuryBufferUsd).toString(),
           bufferUsd: microToNumber(numberToMicroCeil(env.rewardsTreasuryBufferUsd)),
           bufferPct: env.rewardsTreasuryBufferPct,
+          bufferAppliedMicro: computed.bufferAppliedMicro.toString(),
           bufferApplied: microToNumber(computed.bufferAppliedMicro),
         },
+        reserveFloorMicro: computed.reserveFloorMicro.toString(),
         reserveFloor: microToNumber(computed.reserveFloorMicro),
+        controlledHotBalanceMicro: controlledHotBalanceMicro.toString(),
         controlledHotBalance: microToNumber(controlledHotBalanceMicro),
+        protocolReceivableBalanceMicro: protocolReceivableBalanceMicro.toString(),
         protocolReceivableBalance: microToNumber(protocolReceivableBalanceMicro),
+        deficitNowMicro: computed.deficitNowMicro.toString(),
         deficitNow: microToNumber(computed.deficitNowMicro),
+        economicSurplusMicro: computed.economicSurplusMicro.toString(),
         economicSurplus: microToNumber(computed.economicSurplusMicro),
+        sweepableNowMicro: computed.sweepableNowMicro.toString(),
         sweepableNow: microToNumber(computed.sweepableNowMicro),
         payoutAddressConfigured: Boolean(resolvePayoutAddress(chainId)),
         hotBalanceAvailable: hotBalance.available,

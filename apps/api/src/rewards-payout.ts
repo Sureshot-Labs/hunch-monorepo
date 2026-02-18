@@ -75,6 +75,7 @@ type SolanaChainConfig = {
 type ChainConfig = EvmChainConfig | SolanaChainConfig;
 
 const DEFAULT_LIMIT = 25;
+const STALE_SUBMITTED_NO_TX_MIN_AGE_SEC = 300;
 
 const ERC20_ABI = [
   "function transfer(address to, uint256 value) returns (bool)",
@@ -298,6 +299,73 @@ async function reservePendingClaims(
   return rows;
 }
 
+async function fetchStaleSubmittedWithoutTxClaims(
+  chainIds: string[],
+  limit: number,
+  minAgeSec: number,
+): Promise<ClaimRow[]> {
+  const { rows } = await pool.query<ClaimRow>(
+    `
+      select
+        id,
+        user_id,
+        wallet_address,
+        chain_id,
+        amount_usdc::text as amount_usdc,
+        status,
+        tx_hash,
+        created_at
+      from reward_claims
+      where status = 'submitted'
+        and tx_hash is null
+        and chain_id = any($1::text[])
+        and updated_at <= now() - ($3::int * interval '1 second')
+      order by updated_at asc
+      limit $2
+    `,
+    [chainIds, limit, minAgeSec],
+  );
+  return rows;
+}
+
+async function failStaleSubmittedWithoutTxClaims(
+  chainIds: string[],
+  limit: number,
+  minAgeSec: number,
+): Promise<ClaimRow[]> {
+  const { rows } = await pool.query<ClaimRow>(
+    `
+      with next as (
+        select id
+        from reward_claims
+        where status = 'submitted'
+          and tx_hash is null
+          and chain_id = any($1::text[])
+          and updated_at <= now() - ($3::int * interval '1 second')
+        order by updated_at asc
+        limit $2
+        for update skip locked
+      )
+      update reward_claims r
+      set status = 'failed',
+          updated_at = now()
+      from next
+      where r.id = next.id
+      returning
+        r.id,
+        r.user_id,
+        r.wallet_address,
+        r.chain_id,
+        r.amount_usdc::text as amount_usdc,
+        r.status,
+        r.tx_hash,
+        r.created_at
+    `,
+    [chainIds, limit, minAgeSec],
+  );
+  return rows;
+}
+
 async function markClaimStatus(inputs: {
   id: string;
   status: "submitted" | "confirmed" | "failed";
@@ -464,6 +532,44 @@ export async function runRewardsPayout(
 
   const chainFilter = chainId ? [chainId] : supportedChains;
   return withRewardsChainLocks(pool, chainFilter, async () => {
+    const staleMinAgeSec = STALE_SUBMITTED_NO_TX_MIN_AGE_SEC;
+    if (options.dryRun) {
+      const stale = await fetchStaleSubmittedWithoutTxClaims(
+        chainFilter,
+        options.limit,
+        staleMinAgeSec,
+      );
+      if (stale.length) {
+        console.log(
+          `Dry run: ${stale.length} stale submitted claims without tx hash (>${staleMinAgeSec}s old) would be failed`,
+        );
+        stale.forEach((claim) => {
+          console.log(
+            `${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`,
+          );
+        });
+      }
+    } else {
+      const failedStale = await failStaleSubmittedWithoutTxClaims(
+        chainFilter,
+        options.limit,
+        staleMinAgeSec,
+      );
+      if (failedStale.length) {
+        console.warn(
+          `Failed ${failedStale.length} stale submitted claims without tx hash (>${staleMinAgeSec}s old)`,
+        );
+        failedStale.forEach((claim) => {
+          console.warn(
+            `${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`,
+          );
+        });
+        for (const claim of failedStale) {
+          await notifyClaimStatus(claim, "failed");
+        }
+      }
+    }
+
     if (options.failPending) {
       const pending = await fetchPendingClaims(chainFilter, options.limit);
       if (options.dryRun) {

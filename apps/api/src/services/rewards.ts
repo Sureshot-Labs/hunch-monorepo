@@ -22,6 +22,10 @@ import {
   setUserReferralCode,
 } from "../repos/rewards.js";
 import {
+  normalizeRewardsChainId,
+  type RewardsChainId,
+} from "../lib/rewards-chain.js";
+import {
   parseUsdcToMicroFloor,
   usdcMicroToDecimalString,
 } from "../lib/usdc.js";
@@ -317,11 +321,51 @@ export function computeCashbackBreakdown(inputs: {
   referralFeeTotalsByChain: ChainFeeTotalsRaw;
   claimedTotalsByChain: ChainClaimedTotalsRaw;
 }) {
-  const chainIds = new Set<string>([
-    ...Object.keys(inputs.feeTotalsByChain),
-    ...Object.keys(inputs.referralFeeTotalsByChain),
-    ...Object.keys(inputs.claimedTotalsByChain),
-  ]);
+  type ChainRollup = {
+    feePending: bigint;
+    feeCollected: bigint;
+    referralPending: bigint;
+    referralCollected: bigint;
+    claimed: bigint;
+  };
+
+  const byChain = new Map<RewardsChainId, ChainRollup>();
+  const ensureChain = (chainId: RewardsChainId): ChainRollup => {
+    const existing = byChain.get(chainId);
+    if (existing) return existing;
+    const created: ChainRollup = {
+      feePending: 0n,
+      feeCollected: 0n,
+      referralPending: 0n,
+      referralCollected: 0n,
+      claimed: 0n,
+    };
+    byChain.set(chainId, created);
+    return created;
+  };
+
+  for (const [chainId, values] of Object.entries(inputs.feeTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.feePending += parseMicro(values.pending);
+    bucket.feeCollected += parseMicro(values.collected);
+  }
+
+  for (const [chainId, values] of Object.entries(inputs.referralFeeTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.referralPending += parseMicro(values.pending);
+    bucket.referralCollected += parseMicro(values.collected);
+  }
+
+  for (const [chainId, claimed] of Object.entries(inputs.claimedTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.claimed += parseMicro(claimed);
+  }
 
   const cashbackByChain: Record<
     string,
@@ -337,22 +381,12 @@ export function computeCashbackBreakdown(inputs: {
   let totalReferralCollectedMicro = 0n;
   let totalClaimableMicro = 0n;
 
-  for (const chainId of chainIds) {
-    const feeTotals = inputs.feeTotalsByChain[chainId] ?? {
-      pending: "0",
-      collected: "0",
-    };
-    const referralTotals = inputs.referralFeeTotalsByChain[chainId] ?? {
-      pending: "0",
-      collected: "0",
-    };
-    const claimed = inputs.claimedTotalsByChain[chainId] ?? "0";
-
-    const feePendingMicro = parseMicro(feeTotals.pending);
-    const feeCollectedMicro = parseMicro(feeTotals.collected);
-    const referralPendingSourceMicro = parseMicro(referralTotals.pending);
-    const referralCollectedSourceMicro = parseMicro(referralTotals.collected);
-    const claimedMicro = parseMicro(claimed);
+  for (const [chainId, bucket] of byChain.entries()) {
+    const feePendingMicro = bucket.feePending;
+    const feeCollectedMicro = bucket.feeCollected;
+    const referralPendingSourceMicro = bucket.referralPending;
+    const referralCollectedSourceMicro = bucket.referralCollected;
+    const claimedMicro = bucket.claimed;
 
     const cashbackPendingMicro = feePendingMicro;
     const cashbackCollectedMicro = feeCollectedMicro;

@@ -97,6 +97,25 @@ function buildJobs(): ScheduledJob[] {
           chainId: env.payoutPrepareChainId,
         }),
     },
+    {
+      name: "payout_send",
+      enabled: env.payoutSendEnabled,
+      intervalSec: env.payoutSendIntervalSec,
+      timeoutSec: env.jobTimeoutSec,
+      maxRetries: env.maxRetries,
+      retryBackoffSec: env.retryBackoffSec,
+      jitterSec: env.jitterSec,
+      lockKey: resolveFundsLockKey(env.payoutSendChainId),
+      run: () =>
+        runRewardsPayoutJob({
+          dryRun: !allowExecute || !env.payoutSendExecute,
+          confirmOnly: false,
+          sendOnly: false,
+          failPending: false,
+          limit: env.payoutSendLimit,
+          chainId: env.payoutSendChainId,
+        }),
+    },
   ];
 }
 
