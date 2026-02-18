@@ -35,6 +35,7 @@
     "polycurl": "tsx src/polyclob.ts",
     "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",
+    "pretest:rewards": "pnpm -C ../../packages/infra run build",
     "test:rewards": "tsx src/rewards-tests.ts",
     "lint": "eslint .",
     "check": "pnpm run lint && pnpm run typecheck",
