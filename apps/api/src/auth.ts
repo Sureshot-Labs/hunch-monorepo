@@ -480,7 +480,7 @@ export class AuthService {
       await client.query("BEGIN");
 
       // Extract user data from Privy
-      const email = privyUser.email?.address;
+      const email = privyUser.email?.address?.trim() ?? null;
       const privyUserId = privyUser.id;
       const privyWallets = PrivyService.extractWallets(privyUser);
       const primaryWallet = privyWallets[0];
@@ -531,7 +531,42 @@ export class AuthService {
         }
       }
 
+      // Secondary recovery path:
+      // if Privy DID changed and wallet matching is inconclusive, recover by email.
+      if (!userId && email) {
+        const userByEmail = await client.query<{ id: string }>(
+          `SELECT id
+             FROM users
+            WHERE lower(email) = lower($1)
+            LIMIT 2`,
+          [email],
+        );
+
+        if (userByEmail.rows.length > 1) {
+          throw new Error(
+            "Multiple users share this email; merge users before login",
+          );
+        }
+
+        userId = userByEmail.rows[0]?.id ?? null;
+      }
+
       if (userId) {
+        if (email) {
+          const emailConflict = await client.query<{ id: string }>(
+            `SELECT id
+               FROM users
+              WHERE lower(email) = lower($1)
+                AND id <> $2
+              LIMIT 1`,
+            [email, userId],
+          );
+
+          if (emailConflict.rows.length > 0) {
+            throw new Error("Email already linked to another account");
+          }
+        }
+
         for (const wallet of privyWallets) {
           const match =
             wallet.walletType === "ethereum"
@@ -562,7 +597,7 @@ export class AuthService {
            last_login_at = now(),
            updated_at = now()
            WHERE id = $3`,
-          [email || null, privyUserId, userId],
+          [email, privyUserId, userId],
         );
 
         // Remove wallets that were unlinked in Privy (and dependent venue creds).
@@ -655,7 +690,7 @@ export class AuthService {
           `INSERT INTO users (email, privy_user_id, last_login_at)
            VALUES ($1, $2, now())
            RETURNING id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
-          [email || null, privyUserId],
+          [email, privyUserId],
         );
 
         userId = userResult.rows[0].id;
