@@ -6,6 +6,10 @@ export const rewardsReferralsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+export const rewardsReferralCodeUpdateBodySchema = z.object({
+  code: z.string().trim().min(1).max(32),
+});
+
 const rewardsChainIdSchema = z
   .string()
   .trim()

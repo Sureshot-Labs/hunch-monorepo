@@ -333,12 +333,45 @@ export async function fetchUserReferralCode(
 export async function setUserReferralCode(
   pool: DbQuery,
   userId: string,
-  referralCode: string,
+  referralCode: string | null,
 ): Promise<void> {
   await pool.query(`update users set referral_code = $2 where id = $1`, [
     userId,
     referralCode,
   ]);
+}
+
+export async function clearUserReferralCodeIfMatches(
+  pool: DbQuery,
+  userId: string,
+  referralCode: string,
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `
+      update users
+      set referral_code = null
+      where id = $1
+        and upper(referral_code) = upper($2)
+    `,
+    [userId, referralCode],
+  );
+  return Number(rowCount ?? 0) > 0;
+}
+
+export async function lockUserReferralCodeByUserId(
+  pool: DbQuery,
+  userId: string,
+): Promise<{ id: string; referral_code: string | null } | null> {
+  const { rows } = await pool.query<{ id: string; referral_code: string | null }>(
+    `
+      select id, referral_code
+      from users
+      where id = $1
+      for update
+    `,
+    [userId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function findUserByReferralCode(

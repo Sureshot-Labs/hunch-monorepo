@@ -179,6 +179,11 @@ export const adminUserKalshiProofBypassSchema = z.object({
   kalshiProofBypass: z.coerce.boolean(),
 });
 
+export const adminUserReferralCodeSchema = z.object({
+  code: z.string().trim().min(1).max(32),
+  forceTransfer: z.coerce.boolean().optional(),
+});
+
 export const adminUserMergeSchema = z
   .object({
     sourceId: z.string().uuid().optional(),

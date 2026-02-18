@@ -13,6 +13,7 @@ import {
 import {
   computeCashbackBreakdown,
   resolveEffectiveBps,
+  setReferralCodeForUser,
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
@@ -30,6 +31,76 @@ type TestCase = {
 
 function toNumber(value: bigint): number {
   return Number(usdcMicroToDecimalString(value));
+}
+
+function createReferralDb(
+  seed: Array<{ id: string; referral_code: string | null }>,
+): import("./db.js").DbQuery {
+  const users = seed.map((row) => ({ ...row }));
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      const values = Array.isArray(params) ? params : [];
+      if (
+        sql.includes("from users") &&
+        sql.includes("where id = $1") &&
+        sql.includes("for update")
+      ) {
+        const userId = String(values[0] ?? "");
+        const row = users.find((user) => user.id === userId) ?? null;
+        return { rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [] };
+      }
+
+      if (sql.includes("upper(referral_code) = upper($1)")) {
+        const code = String(values[0] ?? "").toUpperCase();
+        const row =
+          users.find(
+            (user) => user.referral_code?.toUpperCase() === code,
+          ) ?? null;
+        return { rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [] };
+      }
+
+      if (sql.includes("update users set referral_code = $2 where id = $1")) {
+        const userId = String(values[0] ?? "");
+        const referralCode =
+          values[1] == null ? null : String(values[1]);
+        const conflict =
+          referralCode != null
+            ? users.find(
+                (user) =>
+                  user.id !== userId &&
+                  user.referral_code?.toUpperCase() ===
+                    referralCode.toUpperCase(),
+              )
+            : null;
+        if (conflict) {
+          const error = new Error("duplicate key") as Error & { code?: string };
+          error.code = "23505";
+          throw error;
+        }
+        const target = users.find((user) => user.id === userId);
+        if (target) target.referral_code = referralCode;
+        return { rows: [] };
+      }
+
+      if (
+        sql.includes("update users") &&
+        sql.includes("set referral_code = null") &&
+        sql.includes("upper(referral_code) = upper($2)")
+      ) {
+        const userId = String(values[0] ?? "");
+        const referralCode = String(values[1] ?? "").toUpperCase();
+        const target = users.find((user) => user.id === userId);
+        if (!target) return { rows: [], rowCount: 0 };
+        if (target.referral_code?.toUpperCase() !== referralCode) {
+          return { rows: [], rowCount: 0 };
+        }
+        target.referral_code = null;
+        return { rows: [], rowCount: 1 };
+      }
+
+      throw new Error(`Unhandled SQL in referral test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
 }
 
 const samplePolicy: RewardsPolicy = {
@@ -248,6 +319,57 @@ const tests: TestCase[] = [
         "0041_rewards_core.sql",
       ]);
       assert.deepEqual(blocked, []);
+    },
+  },
+  {
+    name: "set referral code succeeds when code is available",
+    run: async () => {
+      const db = createReferralDb([
+        { id: "user-a", referral_code: null },
+        { id: "user-b", referral_code: "TAKEN" },
+      ]);
+      const result = await setReferralCodeForUser(db, {
+        userId: "user-a",
+        referralCode: "  my-code  ",
+      });
+      assert.equal(result.code, "MYCODE");
+      assert.equal(result.transferredFromUserId, null);
+    },
+  },
+  {
+    name: "set referral code rejects conflicts without force transfer",
+    run: async () => {
+      const db = createReferralDb([
+        { id: "user-a", referral_code: null },
+        { id: "user-b", referral_code: "VIP" },
+      ]);
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-a",
+            referralCode: "vip",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "statusCode" in error &&
+          (error as Error & { statusCode?: number }).statusCode === 409,
+      );
+    },
+  },
+  {
+    name: "set referral code can force transfer ownership",
+    run: async () => {
+      const db = createReferralDb([
+        { id: "user-a", referral_code: null },
+        { id: "user-b", referral_code: "VIP" },
+      ]);
+      const result = await setReferralCodeForUser(db, {
+        userId: "user-a",
+        referralCode: "vip",
+        forceTransfer: true,
+      });
+      assert.equal(result.code, "VIP");
+      assert.equal(result.transferredFromUserId, "user-b");
     },
   },
 ];

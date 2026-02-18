@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DbQuery } from "../db.js";
 import {
+  clearUserReferralCodeIfMatches,
   fetchActiveRewardsPolicy,
   fetchClaimedTotalsByChain,
   fetchFeeTotalsByChain,
@@ -12,6 +13,7 @@ import {
   fetchUserPoints,
   fetchUserVolume,
   fetchUserReferralCode,
+  lockUserReferralCodeByUserId,
   findUserByReferralCode,
   insertReferral,
   insertRewardClaim,
@@ -237,6 +239,20 @@ function normalizeReferralCode(value: string): string | null {
   return sanitized.slice(0, 32);
 }
 
+function createReferralCodeError(
+  statusCode: number,
+  message: string,
+): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  return "code" in error && (error as { code?: unknown }).code === "23505";
+}
+
 function generateReferralCode(): string {
   const bytes = randomBytes(REFERRAL_CODE_LENGTH);
   let output = "";
@@ -314,6 +330,74 @@ export async function attachReferralCode(
     code: normalized,
     status: "pending",
   });
+}
+
+export async function setReferralCodeForUser(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    referralCode: string;
+    forceTransfer?: boolean;
+  },
+): Promise<{ code: string; transferredFromUserId: string | null }> {
+  const normalized = normalizeReferralCode(inputs.referralCode);
+  if (!normalized) {
+    throw createReferralCodeError(400, "Invalid referral code");
+  }
+
+  const targetId = inputs.userId;
+  const preOwner = await findUserByReferralCode(pool, normalized);
+  const lockIds = Array.from(
+    new Set([targetId, ...(preOwner?.id && preOwner.id !== targetId ? [preOwner.id] : [])]),
+  ).sort((a, b) => a.localeCompare(b));
+
+  let targetExists = false;
+  for (const userId of lockIds) {
+    const row = await lockUserReferralCodeByUserId(pool, userId);
+    if (userId === targetId && row) {
+      targetExists = true;
+    }
+  }
+
+  if (!targetExists) {
+    throw createReferralCodeError(404, "User not found");
+  }
+
+  const owner = await findUserByReferralCode(pool, normalized);
+  const ownerId = owner?.id ?? null;
+
+  if (ownerId && ownerId !== targetId && !inputs.forceTransfer) {
+    throw createReferralCodeError(409, "Referral code already taken");
+  }
+
+  if (ownerId && ownerId !== targetId && !lockIds.includes(ownerId)) {
+    throw createReferralCodeError(
+      409,
+      "Referral code changed during update, retry",
+    );
+  }
+
+  let transferredFromUserId: string | null = null;
+  if (ownerId && ownerId !== targetId) {
+    const cleared = await clearUserReferralCodeIfMatches(pool, ownerId, normalized);
+    if (cleared) {
+      transferredFromUserId = ownerId;
+    }
+  }
+
+  try {
+    await setUserReferralCode(pool, targetId, normalized);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw createReferralCodeError(409, "Referral code already taken");
+    }
+    throw error;
+  }
+
+  return {
+    code: normalized,
+    transferredFromUserId,
+  };
 }
 
 export function computeCashbackBreakdown(inputs: {

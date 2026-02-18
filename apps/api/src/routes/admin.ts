@@ -24,7 +24,7 @@ import {
   upsertRewardsMultiplierOverride,
 } from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
-import { getRewardsPolicy } from "../services/rewards.js";
+import { getRewardsPolicy, setReferralCodeForUser } from "../services/rewards.js";
 import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
@@ -52,6 +52,7 @@ import {
   adminUserActiveSchema,
   adminUserAdminSchema,
   adminUserKalshiProofBypassSchema,
+  adminUserReferralCodeSchema,
   adminUserActivityQuerySchema,
   adminUserMergeSchema,
   adminUserParamsSchema,
@@ -1120,6 +1121,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         is_active: boolean | null;
         last_login_at: Date | null;
         created_at: Date;
+        referral_code: string | null;
         wallet_address: string | null;
         points: string | null;
         fee_usd_total: string | null;
@@ -1137,6 +1139,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             u.is_active,
             u.last_login_at,
             u.created_at,
+            u.referral_code,
             primary_wallet.wallet_address,
             points.total as points,
             fees.total_fee_usd as fee_usd_total,
@@ -1187,6 +1190,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           isActive: row.is_active ?? true,
           lastLoginAt: row.last_login_at,
           createdAt: row.created_at,
+          referralCode: row.referral_code,
           walletAddress: row.wallet_address ?? null,
           points: Number(row.points ?? 0),
           feeUsdTotal: Number(row.fee_usd_total ?? 0),
@@ -1218,9 +1222,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         is_active: boolean | null;
         last_login_at: Date | null;
         created_at: Date;
+        referral_code: string | null;
       }>(
         `
-          select id, email, username, display_name, is_admin, kalshi_proof_bypass, is_active, last_login_at, created_at
+          select id, email, username, display_name, is_admin, kalshi_proof_bypass, is_active, last_login_at, created_at, referral_code
           from users
           where id = $1
           limit 1
@@ -1305,6 +1310,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           isActive: user.is_active ?? true,
           lastLoginAt: user.last_login_at,
           createdAt: user.created_at,
+          referralCode: user.referral_code,
         },
         wallets: walletRows.map((row) => ({
           id: row.id,
@@ -1839,6 +1845,55 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         kalshiProofBypass: rows[0].kalshi_proof_bypass,
       });
+    },
+  );
+
+  z.post(
+    "/admin/users/:id/referral-code",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: {
+        params: adminUserParamsSchema,
+        body: adminUserReferralCodeSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body;
+
+      try {
+        const result = await tx(pool, async (client: PoolClient) => {
+          return withRewardsUserAdvisoryXactLock(client, id, async () =>
+            setReferralCodeForUser(client, {
+              userId: id,
+              referralCode: body.code,
+              forceTransfer: Boolean(body.forceTransfer),
+            }),
+          );
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          code: result.code,
+          transferredFromUserId: result.transferredFromUserId,
+        });
+      } catch (error) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error &&
+          typeof (error as { statusCode?: unknown }).statusCode === "number"
+            ? (error as { statusCode: number }).statusCode
+            : 500;
+        reply.code(statusCode);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to update referral code",
+        });
+      }
     },
   );
 

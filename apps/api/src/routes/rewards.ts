@@ -13,6 +13,7 @@ import {
 import {
   rewardsClaimBodySchema,
   rewardsLeaderboardQuerySchema,
+  rewardsReferralCodeUpdateBodySchema,
   rewardsReferralsQuerySchema,
 } from "../schemas/rewards.js";
 import {
@@ -23,6 +24,7 @@ import {
   getRewardsClaimableByChainMicro,
   getRewardsReferrals,
   getRewardsSummary,
+  setReferralCodeForUser,
 } from "../services/rewards.js";
 import {
   buildRewardNotification,
@@ -77,6 +79,46 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       const code = await getOrCreateReferralCode(pool, user.id);
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, code });
+    },
+  );
+
+  z.patch(
+    "/rewards/referral-code",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: rewardsReferralCodeUpdateBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const result = await tx(pool, async (client: PoolClient) => {
+          await acquireRewardsUserAdvisoryXactLock(client, user.id);
+          return setReferralCodeForUser(client, {
+            userId: user.id,
+            referralCode: request.body.code,
+            forceTransfer: false,
+          });
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, code: result.code });
+      } catch (error) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error &&
+          typeof (error as { statusCode?: unknown }).statusCode === "number"
+            ? (error as { statusCode: number }).statusCode
+            : 500;
+        const message =
+          error instanceof Error ? error.message : "Failed to set referral code";
+        reply.code(statusCode);
+        return reply.send({ error: message });
+      }
     },
   );
 
