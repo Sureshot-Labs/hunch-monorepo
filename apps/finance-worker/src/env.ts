@@ -1,3 +1,10 @@
+import { config } from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+config({ path: envPath, override: true });
+
 function readEnv(key: string): string | undefined {
   const value = process.env[key];
   if (value == null) return undefined;

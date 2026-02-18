@@ -3,7 +3,7 @@ import {
   runFeesReconcileJob,
   runRewardsPayoutJob,
   runTreasurySweepJob,
-} from "../../api/src/jobs/finance-jobs.js";
+} from "./finance-jobs.js";
 import { env } from "./env.js";
 import { InMemoryLockManager } from "./locks.js";
 import { IntervalScheduler, type ScheduledJob } from "./scheduler.js";

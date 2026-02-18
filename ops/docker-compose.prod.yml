@@ -198,7 +198,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/finance-worker/dist/apps/finance-worker/src/main.js"]
+    command: ["node", "apps/finance-worker/dist/main.js"]
 
   nginx:
     image: nginx:1.27-alpine
