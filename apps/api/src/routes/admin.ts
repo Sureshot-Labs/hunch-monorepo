@@ -119,6 +119,12 @@ function isMissingTableError(error: unknown): boolean {
   return code === "42P01";
 }
 
+function isUniqueViolationError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "23505";
+}
+
 function parseAffiliateRecipientMap(raw: string): Record<string, string> {
   const trimmed = raw.trim();
   if (!trimmed) return {};
@@ -2168,6 +2174,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             error:
               "runtime_policies table is missing. Apply migrations before publishing policy overrides.",
+          });
+        }
+        if (isUniqueViolationError(error)) {
+          reply.code(409);
+          return reply.send({
+            error:
+              "A policy override already exists for this key and effectiveAt. Use a different effectiveAt.",
           });
         }
         throw error;

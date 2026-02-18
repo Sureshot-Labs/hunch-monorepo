@@ -343,7 +343,7 @@ System is ready for pre-MVP when all pass:
    - `HUNCH_FINANCE_EXECUTE=false` forces safe non-mutating operation where expected
 6. Validation suite
    - `pnpm -C hunch-monorepo -F api run typecheck`
-   - `pnpm -C hunch-monorepo -F api run test:rewards`
+   - `pnpm -C hunch-monorepo -F api run test -- rewards`
    - `pnpm -C hunch-monorepo check`
 
 ---
