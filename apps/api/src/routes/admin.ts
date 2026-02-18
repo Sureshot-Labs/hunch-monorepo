@@ -113,6 +113,12 @@ let cachedDebridgeConfig: { value: DebridgeConfig; expiresAt: number } | null =
   null;
 let debridgeConfigInflight: Promise<DebridgeConfig> | null = null;
 
+function isMissingTableError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "42P01";
+}
+
 function parseAffiliateRecipientMap(raw: string): Record<string, string> {
   const trimmed = raw.trim();
   if (!trimmed) return {};
@@ -2126,35 +2132,46 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
       const effectiveAt = body.effectiveAt ? new Date(body.effectiveAt) : new Date();
       const actorId = request.user?.id ?? null;
-      const row = await insertRuntimePolicy(pool, {
-        policyKey: key,
-        effectiveAt,
-        payload: parsed.data,
-        createdBy: actorId,
-      });
-      const resolved = await resolveIntelPolicy(pool, key);
+      try {
+        const row = await insertRuntimePolicy(pool, {
+          policyKey: key,
+          effectiveAt,
+          payload: parsed.data,
+          createdBy: actorId,
+        });
+        const resolved = await resolveIntelPolicy(pool, key);
 
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        ok: true,
-        policy: {
-          id: row.id,
-          key: row.policy_key,
-          effectiveAt: row.effective_at,
-          createdAt: row.created_at,
-          createdBy: row.created_by,
-          payload: row.payload,
-        },
-        resolved: {
-          source: resolved.source,
-          effectiveAt: resolved.effectiveAt,
-          createdAt: resolved.createdAt,
-          defaults: resolved.defaults,
-          override: resolved.override,
-          effective: resolved.effective,
-          invalidOverride: resolved.invalidOverride,
-        },
-      });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          policy: {
+            id: row.id,
+            key: row.policy_key,
+            effectiveAt: row.effective_at,
+            createdAt: row.created_at,
+            createdBy: row.created_by,
+            payload: row.payload,
+          },
+          resolved: {
+            source: resolved.source,
+            effectiveAt: resolved.effectiveAt,
+            createdAt: resolved.createdAt,
+            defaults: resolved.defaults,
+            override: resolved.override,
+            effective: resolved.effective,
+            invalidOverride: resolved.invalidOverride,
+          },
+        });
+      } catch (error) {
+        if (isMissingTableError(error)) {
+          reply.code(503);
+          return reply.send({
+            error:
+              "runtime_policies table is missing. Apply migrations before publishing policy overrides.",
+          });
+        }
+        throw error;
+      }
     },
   );
 

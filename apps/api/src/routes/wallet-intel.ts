@@ -1491,7 +1491,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const client = await pool.connect();
       try {
-        const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
+        const [refreshPolicy, signalsPolicy] = await Promise.all([
+          resolveWalletIntelRefreshPolicy(client),
+          resolveWalletIntelSignalsPolicy(client),
+        ]);
+        const signalConfig = signalsPolicy.effective;
         const candidates = await loadCandidateWallets(
           client,
           user.id,
@@ -1513,6 +1517,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           topChanges: query.topChanges,
           baselineDays: 30,
           enteredLateHours: 24,
+          signalConfig: {
+            maxOdds: signalConfig.maxOdds,
+            minStakeUsd: signalConfig.minStakeUsd,
+            minIdleDays: signalConfig.minIdleDays,
+            maxPriorMarkets: signalConfig.maxPriorMarkets,
+            minPayoutUsd: signalConfig.minPayoutUsd,
+            lateHours: signalConfig.lateHours,
+            veryLateHours: signalConfig.veryLateHours,
+            retentionDaysActivity: refreshPolicy.effective.retentionDaysActivity,
+            weightStake: signalConfig.weightStake,
+            weightOdds: signalConfig.weightOdds,
+            weightIdle: signalConfig.weightIdle,
+            weightNovelty: signalConfig.weightNovelty,
+            minScore: signalConfig.minScore,
+          },
         });
 
         const merged = candidates
@@ -1726,7 +1745,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               }
             }
 
-            if (signalConfig.requireOpenNow && !isOpenNow) continue;
+            if (!isOpenNow) continue;
             if ((change.signalScore ?? 0) < minScore) continue;
             if ((change.stakeUsd ?? 0) < minStakeUsd) continue;
             if (

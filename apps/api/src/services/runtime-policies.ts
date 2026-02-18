@@ -35,10 +35,7 @@ export type WalletIntelSignalsPolicy = {
   minScore: number;
   windowHoursDefault: number;
   windowHoursMax: number;
-  notificationsEnabled: boolean;
-  notifyMinScore: number;
   minDeltaUsd: number;
-  requireOpenNow: boolean;
   activeInvalidCloseSampleCap: number;
 };
 
@@ -81,9 +78,6 @@ export type WalletIntelRefreshPolicy = {
   dormantDays: number;
   whaleUsd: number;
   whaleUsdSolana: number;
-  rpcSoftFailMode: boolean;
-  maxHolderErrorsBeforeAbort: number;
-  selectionVenueWeights: Record<string, number>;
 };
 
 export type AiWhaleProfilesPolicy = {
@@ -115,10 +109,7 @@ export type AiClustersPolicy = {
   analysisMinVenueCount: number;
   analysisConcurrency: number;
   debugLogs: boolean;
-  stageATimeoutMs: number;
-  stageBTimeoutMs: number;
   maxClustersPerRun: number;
-  forceFinalOnly: boolean;
 };
 
 export type ArbitrageDefaultsPolicy = {
@@ -126,8 +117,6 @@ export type ArbitrageDefaultsPolicy = {
   minVenueCount: number;
   minSpread: number;
   minQualityScore: number;
-  minAnalysisConfidence: number;
-  maxOutlierRatio: number;
 };
 
 type IntelPolicyMap = {
@@ -170,10 +159,7 @@ const walletIntelSignalsSchema = z
     minScore: ratio,
     windowHoursDefault: positiveInt,
     windowHoursMax: positiveInt,
-    notificationsEnabled: z.coerce.boolean(),
-    notifyMinScore: ratio,
     minDeltaUsd: nonNegativeNumber,
-    requireOpenNow: z.coerce.boolean(),
     activeInvalidCloseSampleCap: nonNegativeInt.max(100),
   })
   .strict()
@@ -221,9 +207,6 @@ const walletIntelRefreshSchema = z
     dormantDays: positiveInt,
     whaleUsd: nonNegativeNumber,
     whaleUsdSolana: nonNegativeNumber,
-    rpcSoftFailMode: z.coerce.boolean(),
-    maxHolderErrorsBeforeAbort: nonNegativeInt,
-    selectionVenueWeights: z.record(z.string(), nonNegativeNumber),
   })
   .strict()
   .partial();
@@ -261,10 +244,7 @@ const aiClustersSchema = z
     analysisMinVenueCount: positiveInt.max(20),
     analysisConcurrency: positiveInt.max(20),
     debugLogs: z.coerce.boolean(),
-    stageATimeoutMs: positiveInt,
-    stageBTimeoutMs: positiveInt,
     maxClustersPerRun: positiveInt.max(2_000),
-    forceFinalOnly: z.coerce.boolean(),
   })
   .strict()
   .partial();
@@ -275,8 +255,6 @@ const arbitrageDefaultsSchema = z
     minVenueCount: positiveInt.max(10),
     minSpread: ratio,
     minQualityScore: ratio,
-    minAnalysisConfidence: ratio,
-    maxOutlierRatio: ratio,
   })
   .strict()
   .partial();
@@ -288,6 +266,8 @@ const policySchemas = {
   ai_clusters: aiClustersSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
 } as const;
+
+const warnedInvalidOverrides = new Set<string>();
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -310,10 +290,7 @@ function getDefaults(): IntelPolicyMap {
       minScore: env.walletIntelSignalMinScore,
       windowHoursDefault: env.walletIntelSignalWindowHoursDefault,
       windowHoursMax: env.walletIntelSignalWindowHoursMax,
-      notificationsEnabled: env.walletIntelSignalNotificationsEnabled,
-      notifyMinScore: env.walletIntelSignalNotifyMinScore,
       minDeltaUsd: 0,
-      requireOpenNow: true,
       activeInvalidCloseSampleCap: 5,
     },
     wallet_intel_refresh: {
@@ -345,9 +322,6 @@ function getDefaults(): IntelPolicyMap {
       dormantDays: env.walletIntelDormantDays,
       whaleUsd: env.walletIntelWhaleUsd,
       whaleUsdSolana: env.walletIntelWhaleUsdSolana,
-      rpcSoftFailMode: true,
-      maxHolderErrorsBeforeAbort: 100,
-      selectionVenueWeights: {},
     },
     ai_whale_profiles: {
       autoRun: env.aiWhaleProfileAutoRun,
@@ -377,18 +351,13 @@ function getDefaults(): IntelPolicyMap {
       analysisMinVenueCount: env.aiClusterAnalysisMinVenueCount,
       analysisConcurrency: env.aiClusterAnalysisConcurrency,
       debugLogs: env.aiClusterDebugLogs,
-      stageATimeoutMs: 45_000,
-      stageBTimeoutMs: 60_000,
       maxClustersPerRun: 400,
-      forceFinalOnly: false,
     },
     arbitrage_defaults: {
       limit: 24,
       minVenueCount: 2,
       minSpread: 0.05,
       minQualityScore: 0.6,
-      minAnalysisConfidence: 0.6,
-      maxOutlierRatio: 0.4,
     },
   };
 }
@@ -420,10 +389,7 @@ function normalizeSignalsPolicy(
     minScore: clamp(policy.minScore, 0, 1),
     windowHoursDefault,
     windowHoursMax,
-    notificationsEnabled: Boolean(policy.notificationsEnabled),
-    notifyMinScore: clamp(policy.notifyMinScore, 0, 1),
     minDeltaUsd: Math.max(0, policy.minDeltaUsd),
-    requireOpenNow: Boolean(policy.requireOpenNow),
     activeInvalidCloseSampleCap: clamp(
       Math.trunc(policy.activeInvalidCloseSampleCap),
       0,
@@ -441,12 +407,6 @@ function normalizeRefreshPolicy(
     Math.trunc(policy.marketLimitKalshi || marketLimitPerVenue),
   );
   const whaleUsd = Math.max(0, policy.whaleUsd);
-  const weights: Record<string, number> = {};
-  for (const [key, value] of Object.entries(policy.selectionVenueWeights)) {
-    if (!key.trim()) continue;
-    if (!Number.isFinite(value)) continue;
-    weights[key.trim().toLowerCase()] = Math.max(0, value);
-  }
   return {
     ...policy,
     marketLimit: Math.max(0, Math.trunc(policy.marketLimit)),
@@ -474,12 +434,6 @@ function normalizeRefreshPolicy(
     dormantDays: Math.max(1, Math.trunc(policy.dormantDays)),
     whaleUsd,
     whaleUsdSolana: Math.max(0, policy.whaleUsdSolana || whaleUsd),
-    rpcSoftFailMode: Boolean(policy.rpcSoftFailMode),
-    maxHolderErrorsBeforeAbort: Math.max(
-      0,
-      Math.trunc(policy.maxHolderErrorsBeforeAbort),
-    ),
-    selectionVenueWeights: weights,
   };
 }
 
@@ -523,10 +477,7 @@ function normalizeAiClustersPolicy(policy: AiClustersPolicy): AiClustersPolicy {
     analysisMinVenueCount: clamp(Math.trunc(policy.analysisMinVenueCount), 1, 20),
     analysisConcurrency: clamp(Math.trunc(policy.analysisConcurrency), 1, 20),
     debugLogs: Boolean(policy.debugLogs),
-    stageATimeoutMs: Math.max(1_000, Math.trunc(policy.stageATimeoutMs)),
-    stageBTimeoutMs: Math.max(1_000, Math.trunc(policy.stageBTimeoutMs)),
     maxClustersPerRun: Math.max(1, Math.trunc(policy.maxClustersPerRun)),
-    forceFinalOnly: Boolean(policy.forceFinalOnly),
   };
 }
 
@@ -538,8 +489,6 @@ function normalizeArbitrageDefaultsPolicy(
     minVenueCount: clamp(Math.trunc(policy.minVenueCount), 1, 10),
     minSpread: clamp(policy.minSpread, 0, 1),
     minQualityScore: clamp(policy.minQualityScore, 0, 1),
-    minAnalysisConfidence: clamp(policy.minAnalysisConfidence, 0, 1),
-    maxOutlierRatio: clamp(policy.maxOutlierRatio, 0, 1),
   };
 }
 
@@ -563,12 +512,49 @@ function normalizeMerged<K extends IntelPolicyKey>(
   }
 }
 
+function sanitizeOverridePayload(
+  key: IntelPolicyKey,
+  payload: unknown,
+): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  const record = { ...(payload as Record<string, unknown>) };
+  switch (key) {
+    case "wallet_intel_signals": {
+      delete record.requireOpenNow;
+      delete record.notificationsEnabled;
+      delete record.notifyMinScore;
+      return record;
+    }
+    case "wallet_intel_refresh": {
+      delete record.rpcSoftFailMode;
+      delete record.maxHolderErrorsBeforeAbort;
+      delete record.selectionVenueWeights;
+      return record;
+    }
+    case "ai_clusters": {
+      delete record.stageATimeoutMs;
+      delete record.stageBTimeoutMs;
+      delete record.forceFinalOnly;
+      return record;
+    }
+    case "arbitrage_defaults": {
+      delete record.minAnalysisConfidence;
+      delete record.maxOutlierRatio;
+      return record;
+    }
+    default:
+      return record;
+  }
+}
+
 function validateOverride<K extends IntelPolicyKey>(
   key: K,
   payload: unknown,
 ): { valid: boolean; value: Partial<IntelPolicyMap[K]> | null } {
   const schema = policySchemas[key];
-  const parsed = schema.safeParse(payload);
+  const parsed = schema.safeParse(sanitizeOverridePayload(key, payload));
   if (!parsed.success) return { valid: false, value: null };
   return { valid: true, value: parsed.data as Partial<IntelPolicyMap[K]> };
 }
@@ -605,6 +591,14 @@ function resolveFromRow<K extends IntelPolicyKey>(
 
   const parsed = validateOverride(key, row.payload);
   if (!parsed.valid || !parsed.value) {
+    const warnKey = `${key}:${row.effective_at.toISOString()}`;
+    if (!warnedInvalidOverrides.has(warnKey)) {
+      warnedInvalidOverrides.add(warnKey);
+      console.warn(
+        "[runtime-policies] Invalid policy override payload; falling back to env defaults",
+        { policyKey: key, effectiveAt: row.effective_at.toISOString() },
+      );
+    }
     return {
       key,
       source: "env",

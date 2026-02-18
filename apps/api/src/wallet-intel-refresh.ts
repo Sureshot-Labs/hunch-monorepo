@@ -1116,18 +1116,24 @@ async function refreshMetrics(
                 end
               else
                 case
-                  when l.outcome_side = 'YES' then coalesce(um.best_ask, um.best_bid, um.last_price)
+                  when l.outcome_side = 'YES' then greatest(
+                    0::numeric,
+                    least(1::numeric, coalesce(um.best_ask, um.best_bid, um.last_price))
+                  )
                   when l.outcome_side = 'NO' then
                     case
                       when coalesce(um.best_ask, um.best_bid, um.last_price) is null then null
-                      else 1 - coalesce(um.best_ask, um.best_bid, um.last_price)
+                      else 1::numeric - greatest(
+                        0::numeric,
+                        least(1::numeric, coalesce(um.best_ask, um.best_bid, um.last_price))
+                      )
                     end
                   else null
                 end * l.net_shares
             end as mark_value
           from legs l
           left join unified_markets um on um.id = l.market_id
-          where l.net_shares >= 0
+          where l.net_shares >= 1e-9
         ),
         pnl as (
           select
