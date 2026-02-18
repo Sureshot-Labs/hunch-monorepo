@@ -1,18 +1,30 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { abis } from "@hunch/contracts";
-import { getEmbedStreamKey, type RedisClientType } from "@hunch/infra";
+import { getEmbedStreamKey, tx, type RedisClientType } from "@hunch/infra";
 import { Interface, ethers } from "ethers";
+import type { PoolClient } from "pg";
 import { AuthService, createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { abis } from "../lib/contracts.js";
+import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
+import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
-import { fetchActiveRewardsPolicy } from "../repos/rewards.js";
+import {
+  deleteRewardsMultiplierOverride,
+  fetchActiveRewardsMultiplierPolicy,
+  fetchActiveRewardsPolicy,
+  insertRewardsMultiplierPolicy,
+  listRewardsMultiplierOverrides,
+  upsertRewardsMultiplierOverride,
+} from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
 import { getRewardsPolicy } from "../services/rewards.js";
+import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
+import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
@@ -29,6 +41,11 @@ import {
   adminFeePolicySchema,
   adminDebridgeConfigSchema,
   adminPointsSchema,
+  adminRewardsMultiplierOverrideParamsSchema,
+  adminRewardsMultiplierOverrideSchema,
+  adminRewardsMultiplierOverridesQuerySchema,
+  adminRewardsMultiplierPolicySchema,
+  adminRewardsTreasuryQuerySchema,
   adminRewardsPolicySchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
@@ -68,6 +85,16 @@ type DebridgeConfig = {
   source: "env" | "db";
 };
 
+type RewardsMultiplierReferralRule = {
+  minReferrals: number;
+  multiplier: number;
+};
+
+type RewardsMultiplierTierRule = {
+  minPoints: number;
+  multiplier: number;
+};
+
 let cachedDebridgeConfig: { value: DebridgeConfig; expiresAt: number } | null =
   null;
 let debridgeConfigInflight: Promise<DebridgeConfig> | null = null;
@@ -102,6 +129,60 @@ function parseAffiliateRecipientMap(raw: string): Record<string, string> {
     map[chainKey] = address;
   }
   return map;
+}
+
+function normalizePositiveNumber(input: unknown): number | null {
+  const value = Number(input);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+function normalizeNonNegativeNumber(input: unknown): number | null {
+  const value = Number(input);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+function normalizeMultiplierReferralRules(
+  raw: unknown,
+): RewardsMultiplierReferralRule[] {
+  if (!Array.isArray(raw)) return [];
+  const rules = raw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const record = entry as Record<string, unknown>;
+      const minReferrals = normalizeNonNegativeNumber(
+        record.minReferrals ?? record.minQualifiedReferrals ?? record.min_referrals,
+      );
+      const multiplier = normalizePositiveNumber(record.multiplier);
+      if (minReferrals == null || multiplier == null) return null;
+      return { minReferrals, multiplier };
+    })
+    .filter(Boolean) as RewardsMultiplierReferralRule[];
+
+  const deduped = new Map<number, RewardsMultiplierReferralRule>();
+  for (const rule of rules) deduped.set(rule.minReferrals, rule);
+  return [...deduped.values()].sort((a, b) => a.minReferrals - b.minReferrals);
+}
+
+function normalizeMultiplierTierRules(raw: unknown): RewardsMultiplierTierRule[] {
+  if (!Array.isArray(raw)) return [];
+  const rules = raw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const record = entry as Record<string, unknown>;
+      const minPoints = normalizeNonNegativeNumber(
+        record.minPoints ?? record.min_points,
+      );
+      const multiplier = normalizePositiveNumber(record.multiplier);
+      if (minPoints == null || multiplier == null) return null;
+      return { minPoints, multiplier };
+    })
+    .filter(Boolean) as RewardsMultiplierTierRule[];
+
+  const deduped = new Map<number, RewardsMultiplierTierRule>();
+  for (const rule of rules) deduped.set(rule.minPoints, rule);
+  return [...deduped.values()].sort((a, b) => a.minPoints - b.minPoints);
 }
 
 async function getDebridgeConfig(): Promise<DebridgeConfig> {
@@ -858,7 +939,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             limit 1
           ) primary_wallet on true
           left join lateral (
-            select coalesce(sum(notional_usd), 0)::text as total
+            select coalesce(sum(points_awarded), 0)::text as total
             from volume_events
             where user_id = u.id
           ) points on true
@@ -976,7 +1057,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       );
 
       const { rows: pointsRows } = await pool.query<{ total: string | null }>(
-        `select coalesce(sum(notional_usd), 0)::text as total from volume_events where user_id = $1`,
+        `select coalesce(sum(points_awarded), 0)::text as total from volume_events where user_id = $1`,
         [id],
       );
 
@@ -1642,6 +1723,202 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/rewards/multiplier-policy",
+    { preHandler: createAdminMiddleware() },
+    async (_request, reply) => {
+      const active = await fetchActiveRewardsMultiplierPolicy(pool);
+      const fallbackEffectiveAt = active?.effective_at ?? null;
+      const fallbackCreatedAt = active?.created_at ?? null;
+      const fallbackUpdatedAt = active?.updated_at ?? null;
+      const globalMultiplier = Number(active?.global_multiplier ?? 1);
+      const referralRules = normalizeMultiplierReferralRules(
+        active?.referral_rules ?? [],
+      );
+      const tierRules = normalizeMultiplierTierRules(active?.tier_rules ?? []);
+      const notes = active?.notes ?? null;
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        policy: {
+          effectiveAt: fallbackEffectiveAt,
+          globalMultiplier,
+          referralRules,
+          tierRules,
+          notes,
+        },
+        active: active
+          ? {
+              id: active.id,
+              effectiveAt: fallbackEffectiveAt,
+              globalMultiplier,
+              referralRules,
+              tierRules,
+              notes,
+              createdAt: fallbackCreatedAt,
+              updatedAt: fallbackUpdatedAt,
+            }
+          : null,
+      });
+    },
+  );
+
+  z.post(
+    "/admin/rewards/multiplier-policy",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { body: adminRewardsMultiplierPolicySchema },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      const inserted = await insertRewardsMultiplierPolicy(pool, {
+        effectiveAt: body.effectiveAt ? new Date(body.effectiveAt) : new Date(),
+        globalMultiplier: Number(body.globalMultiplier),
+        referralRules: body.referralRules,
+        tierRules: body.tierRules,
+        notes: body.notes?.trim() || null,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        policy: {
+          id: inserted.id,
+          effectiveAt: inserted.effective_at,
+          globalMultiplier: Number(inserted.global_multiplier),
+          referralRules: normalizeMultiplierReferralRules(inserted.referral_rules),
+          tierRules: normalizeMultiplierTierRules(inserted.tier_rules),
+          notes: inserted.notes ?? null,
+          createdAt: inserted.created_at,
+          updatedAt: inserted.updated_at,
+        },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/rewards/multiplier-overrides",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { querystring: adminRewardsMultiplierOverridesQuerySchema },
+    },
+    async (request, reply) => {
+      const limit = request.query.limit ?? 50;
+      const offset = request.query.offset ?? 0;
+      const result = await listRewardsMultiplierOverrides(pool, {
+        q: request.query.q,
+        limit,
+        offset,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.rows.map((row) => ({
+          userId: row.user_id,
+          walletAddress: row.wallet_address,
+          email: row.email,
+          username: row.username,
+          displayName: row.display_name,
+          multiplier: Number(row.multiplier),
+          reason: row.reason,
+          effectiveAt: row.effective_at,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })),
+        total: result.total,
+        limit,
+        offset,
+      });
+    },
+  );
+
+  z.post(
+    "/admin/rewards/multiplier-overrides",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { body: adminRewardsMultiplierOverrideSchema },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      let userId = body.userId ?? null;
+      if (!userId && body.walletAddress) {
+        try {
+          userId = await resolveUserIdByWallet(body.walletAddress);
+        } catch (error) {
+          reply.code(400);
+          return reply.send({
+            error: error instanceof Error ? error.message : "Wallet lookup failed",
+          });
+        }
+      }
+      if (!userId) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      const effectiveAt = body.effectiveAt ? new Date(body.effectiveAt) : new Date();
+      const expiresAt =
+        body.expiresAt === null
+          ? null
+          : body.expiresAt
+            ? new Date(body.expiresAt)
+            : null;
+      const row = await tx(pool, async (client: PoolClient) => {
+        return withRewardsUserAdvisoryXactLock(client, userId, () =>
+          upsertRewardsMultiplierOverride(client, {
+            userId,
+            multiplier: Number(body.multiplier),
+            reason: body.reason?.trim() || null,
+            effectiveAt,
+            expiresAt,
+          }),
+        );
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        override: {
+          userId: row.user_id,
+          walletAddress: row.wallet_address,
+          email: row.email,
+          username: row.username,
+          displayName: row.display_name,
+          multiplier: Number(row.multiplier),
+          reason: row.reason,
+          effectiveAt: row.effective_at,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        },
+      });
+    },
+  );
+
+  z.delete(
+    "/admin/rewards/multiplier-overrides/:userId",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { params: adminRewardsMultiplierOverrideParamsSchema },
+    },
+    async (request, reply) => {
+      const removed = await tx(pool, async (client: PoolClient) =>
+        withRewardsUserAdvisoryXactLock(client, request.params.userId, () =>
+          deleteRewardsMultiplierOverride(client, request.params.userId),
+        ),
+      );
+      if (!removed) {
+        reply.code(404);
+        return reply.send({ error: "Override not found" });
+      }
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true });
+    },
+  );
+
+  z.get(
     "/admin/rewards/policy",
     { preHandler: createAdminMiddleware() },
     async (_request, reply) => {
@@ -1659,6 +1936,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               createdAt: active.created_at,
             }
           : null,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/rewards/treasury",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { querystring: adminRewardsTreasuryQuerySchema },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      if (query.chainId && !normalizeRewardsChainId(query.chainId)) {
+        reply.code(400);
+        return reply.send({
+          error: "Unsupported chainId. Allowed: 137, 8453, solana",
+        });
+      }
+      const report = await getRewardsTreasuryReport(pool, {
+        chainId: query.chainId ?? null,
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        report,
       });
     },
   );
@@ -1730,29 +2032,21 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const sourceId = body.sourceId?.trim() ?? `manual:${randomUUID()}`;
       const venue = body.venue?.trim() ?? "admin";
 
-      const { rows } = await pool.query<{ id: string }>(
-        `
-          insert into volume_events (
-            id,
-            user_id,
-            wallet_address,
-            venue,
-            source_type,
-            source_id,
-            notional_usd,
-            created_at
-          )
-          values (
-            gen_random_uuid(),
-            $1, $2, $3, $4, $5, $6, now()
-          )
-          on conflict (user_id, source_type, source_id) do nothing
-          returning id
-        `,
-        [userId, walletAddress, venue, sourceType, sourceId, body.amount],
-      );
+      const inserted = await insertVolumeEventsWithMultiplier(pool, {
+        userId,
+        walletAddress,
+        venue,
+        sourceType,
+        events: [
+          {
+            sourceId,
+            notionalUsd: body.amount,
+            createdAt: new Date(),
+          },
+        ],
+      });
 
-      if (!rows.length) {
+      if (!inserted.inserted) {
         reply.code(409);
         return reply.send({
           error: "Volume event already exists",
@@ -1764,7 +2058,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         event: {
-          id: rows[0].id,
+          id: inserted.ids[0] ?? null,
           userId,
           walletAddress,
           venue,

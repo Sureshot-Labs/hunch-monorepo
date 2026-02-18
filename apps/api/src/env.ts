@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 
 const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
 config({ path: envPath, override: true });
@@ -35,6 +36,15 @@ function optionalNonNegativeNumber(name: string, fallback: number): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return n >= 0 ? n : fallback;
+}
+
+function optionalRatio01(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < 0 || n > 1) return fallback;
+  return n;
 }
 
 function parseOptionalBool(value: string | undefined): boolean | undefined {
@@ -259,6 +269,19 @@ const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
 const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
   positionsSyncFlattenGraceSec,
+);
+const rewardsTreasuryMinSweepUsdRaw =
+  process.env.HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD?.trim() || "0";
+const rewardsTreasuryMinSweepMicro = parseUsdcToMicro(
+  rewardsTreasuryMinSweepUsdRaw,
+);
+if (rewardsTreasuryMinSweepMicro == null) {
+  throw new Error(
+    "[env] Invalid HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD (must be non-negative decimal with up to 6 decimals)",
+  );
+}
+const rewardsTreasuryMinSweepUsd = Number(
+  usdcMicroToDecimalString(rewardsTreasuryMinSweepMicro),
 );
 
 export const env = {
@@ -596,12 +619,46 @@ export const env = {
   feeCollectorPrivateKey:
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
+  rewardsTreasuryBufferUsd: optionalNonNegativeNumber(
+    "HUNCH_REWARDS_TREASURY_BUFFER_USD",
+    0,
+  ),
+  rewardsTreasuryBufferPct: optionalRatio01(
+    "HUNCH_REWARDS_TREASURY_BUFFER_PCT",
+    0,
+  ),
+  rewardsTreasuryIncludePending:
+    parseOptionalBool(process.env.HUNCH_REWARDS_TREASURY_INCLUDE_PENDING) ??
+    true,
+  rewardsTreasuryMinSweepUsdRaw,
+  rewardsTreasuryMinSweepUsd,
+  rewardsTreasuryMinSweepMicro,
+  rewardsTreasuryColdAddressPolygon:
+    process.env.HUNCH_REWARDS_TREASURY_COLD_ADDRESS_POLYGON?.trim() || "",
+  rewardsTreasuryColdAddressBase:
+    process.env.HUNCH_REWARDS_TREASURY_COLD_ADDRESS_BASE?.trim() || "",
+  rewardsTreasuryColdAddressSolana:
+    process.env.HUNCH_REWARDS_TREASURY_COLD_ADDRESS_SOLANA?.trim() || "",
+  rewardsPayoutPrivateKeyPolygon:
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_POLYGON?.trim() ||
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() ||
+    "",
+  rewardsPayoutPrivateKeyBase:
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_BASE?.trim() ||
+    process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() ||
+    "",
   rewardsPayoutPrivateKey:
     process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
+  rewardsUsdcAddressPolygon:
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() || "",
+  rewardsUsdcAddressBase:
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
   rewardsUsdcPolygon:
     process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() || "",
   rewardsUsdcBase:
     process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
+  rewardsSolanaSecretKeyCanonical:
+    process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
   rewardsSolanaSecretKey:
     process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
 

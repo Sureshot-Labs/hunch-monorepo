@@ -1,6 +1,6 @@
-import { abis } from "@hunch/contracts";
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
+import { abis } from "../lib/contracts.js";
 import { isRecord } from "../lib/type-guards.js";
 
 type JsonRpcError = {

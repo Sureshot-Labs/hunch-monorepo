@@ -9,6 +9,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "check": "pnpm typecheck && pnpm lint",
+    "test:rewards": "pnpm -F api run test:rewards",
     "format": "prettier -w apps packages --ignore-path .gitignore --ignore-unknown",
     "format:check": "prettier -c apps packages --ignore-path .gitignore --ignore-unknown",
     "migrate": "pnpm --filter @hunch/db migrate",

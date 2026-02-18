@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 import { EFFECTIVE_PNL_SQL } from "../lib/pnl-sql.js";
 import type { PgParams } from "../server-types.js";
 
@@ -8,6 +9,31 @@ export type RewardsPolicyRow = {
   tiers: unknown;
   referral_bonus: unknown;
   created_at: Date;
+};
+
+export type RewardsMultiplierPolicyRow = {
+  id: string;
+  effective_at: Date;
+  global_multiplier: string;
+  referral_rules: unknown;
+  tier_rules: unknown;
+  notes: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type RewardsMultiplierOverrideRow = {
+  user_id: string;
+  multiplier: string;
+  reason: string | null;
+  effective_at: Date;
+  expires_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  wallet_address: string | null;
+  email: string | null;
+  username: string | null;
+  display_name: string | null;
 };
 
 export type ReferralRow = {
@@ -40,6 +66,25 @@ export type RewardsLeaderboardRow = {
   walletAddress: string | null;
 };
 
+const USDC_MICRO_FACTOR = 1_000_000n;
+
+function decimalToMicroFloor(value: string | null | undefined): bigint {
+  const raw = value?.trim() ?? "0";
+  if (!raw) return 0n;
+  const normalized = raw.replace(/_/g, "");
+  if (!/^\d+(\.\d+)?$/.test(normalized)) return 0n;
+  const [whole, fraction = ""] = normalized.split(".");
+  const wholeMicro = BigInt(whole) * USDC_MICRO_FACTOR;
+  const fractionMicro = BigInt((fraction + "000000").slice(0, 6));
+  return wholeMicro + fractionMicro;
+}
+
+function microToDecimalString(value: bigint): string {
+  const whole = value / USDC_MICRO_FACTOR;
+  const fraction = value % USDC_MICRO_FACTOR;
+  return `${whole.toString()}.${fraction.toString().padStart(6, "0")}`;
+}
+
 export async function fetchActiveRewardsPolicy(
   pool: DbQuery,
 ): Promise<RewardsPolicyRow | null> {
@@ -53,6 +98,225 @@ export async function fetchActiveRewardsPolicy(
     `,
   );
   return rows[0] ?? null;
+}
+
+export async function fetchActiveRewardsMultiplierPolicy(
+  pool: DbQuery,
+  asOf: Date = new Date(),
+): Promise<RewardsMultiplierPolicyRow | null> {
+  const { rows } = await pool.query<RewardsMultiplierPolicyRow>(
+    `
+      select
+        id,
+        effective_at,
+        global_multiplier::text as global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes,
+        created_at,
+        updated_at
+      from rewards_multiplier_policy
+      where effective_at <= $1
+      order by effective_at desc, created_at desc
+      limit 1
+    `,
+    [asOf],
+  );
+  return rows[0] ?? null;
+}
+
+export async function insertRewardsMultiplierPolicy(
+  pool: DbQuery,
+  inputs: {
+    effectiveAt: Date;
+    globalMultiplier: number;
+    referralRules: unknown;
+    tierRules: unknown;
+    notes?: string | null;
+  },
+): Promise<RewardsMultiplierPolicyRow> {
+  const { rows } = await pool.query<RewardsMultiplierPolicyRow>(
+    `
+      insert into rewards_multiplier_policy (
+        effective_at,
+        global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes
+      )
+      values ($1, $2, $3, $4, $5)
+      returning
+        id,
+        effective_at,
+        global_multiplier::text as global_multiplier,
+        referral_rules,
+        tier_rules,
+        notes,
+        created_at,
+        updated_at
+    `,
+    [
+      inputs.effectiveAt,
+      inputs.globalMultiplier,
+      JSON.stringify(inputs.referralRules),
+      JSON.stringify(inputs.tierRules),
+      inputs.notes ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function listRewardsMultiplierOverrides(
+  pool: DbQuery,
+  inputs: { q?: string; limit: number; offset: number },
+): Promise<{ total: number; rows: RewardsMultiplierOverrideRow[] }> {
+  const params: PgParams = [];
+  const whereParts: string[] = [];
+  if (inputs.q?.trim()) {
+    params.push(`%${inputs.q.trim()}%`);
+    const placeholder = `$${params.length}`;
+    whereParts.push(
+      `(o.user_id::text ilike ${placeholder}
+        or coalesce(u.email, '') ilike ${placeholder}
+        or coalesce(u.username, '') ilike ${placeholder}
+        or coalesce(u.display_name, '') ilike ${placeholder}
+        or coalesce(w.wallet_address, '') ilike ${placeholder})`,
+    );
+  }
+  const whereSql = whereParts.length ? `where ${whereParts.join(" and ")}` : "";
+
+  const countSql = `
+    select count(*)::text as total
+    from rewards_multiplier_user_overrides o
+    left join users u on u.id = o.user_id
+    left join lateral (
+      select wallet_address
+      from user_wallets uw
+      where uw.user_id = o.user_id
+        and uw.is_primary = true
+      order by uw.created_at asc
+      limit 1
+    ) w on true
+    ${whereSql}
+  `;
+  const { rows: countRows } = await pool.query<{ total: string }>(countSql, params);
+
+  const dataParams: PgParams = [...params, inputs.limit, inputs.offset];
+  const rowsSql = `
+    select
+      o.user_id,
+      o.multiplier::text as multiplier,
+      o.reason,
+      o.effective_at,
+      o.expires_at,
+      o.created_at,
+      o.updated_at,
+      w.wallet_address,
+      u.email,
+      u.username,
+      u.display_name
+    from rewards_multiplier_user_overrides o
+    left join users u on u.id = o.user_id
+    left join lateral (
+      select wallet_address
+      from user_wallets uw
+      where uw.user_id = o.user_id
+        and uw.is_primary = true
+      order by uw.created_at asc
+      limit 1
+    ) w on true
+    ${whereSql}
+    order by o.updated_at desc, o.user_id asc
+    limit $${dataParams.length - 1}
+    offset $${dataParams.length}
+  `;
+  const { rows } = await pool.query<RewardsMultiplierOverrideRow>(
+    rowsSql,
+    dataParams,
+  );
+
+  return { total: Number(countRows[0]?.total ?? 0), rows };
+}
+
+export async function upsertRewardsMultiplierOverride(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    multiplier: number;
+    reason?: string | null;
+    effectiveAt: Date;
+    expiresAt?: Date | null;
+  },
+): Promise<RewardsMultiplierOverrideRow> {
+  const { rows } = await pool.query<RewardsMultiplierOverrideRow>(
+    `
+      insert into rewards_multiplier_user_overrides (
+        user_id,
+        multiplier,
+        reason,
+        effective_at,
+        expires_at
+      )
+      values ($1, $2, $3, $4, $5)
+      on conflict (user_id)
+      do update set
+        multiplier = excluded.multiplier,
+        reason = excluded.reason,
+        effective_at = excluded.effective_at,
+        expires_at = excluded.expires_at,
+        updated_at = now()
+      returning
+        user_id,
+        multiplier::text as multiplier,
+        reason,
+        effective_at,
+        expires_at,
+        created_at,
+        updated_at,
+        (
+          select wallet_address
+          from user_wallets uw
+          where uw.user_id = rewards_multiplier_user_overrides.user_id
+            and uw.is_primary = true
+          order by uw.created_at asc
+          limit 1
+        ) as wallet_address,
+        (
+          select email
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as email,
+        (
+          select username
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as username,
+        (
+          select display_name
+          from users u
+          where u.id = rewards_multiplier_user_overrides.user_id
+        ) as display_name
+    `,
+    [
+      inputs.userId,
+      inputs.multiplier,
+      inputs.reason ?? null,
+      inputs.effectiveAt,
+      inputs.expiresAt ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+export async function deleteRewardsMultiplierOverride(
+  pool: DbQuery,
+  userId: string,
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `delete from rewards_multiplier_user_overrides where user_id = $1`,
+    [userId],
+  );
+  return Number(rowCount ?? 0) > 0;
 }
 
 export async function fetchUserReferralCode(
@@ -127,6 +391,17 @@ export async function fetchUserPoints(
   userId: string,
 ): Promise<number> {
   const { rows } = await pool.query<{ total: string | null }>(
+    `select coalesce(sum(points_awarded), 0)::text as total from volume_events where user_id = $1`,
+    [userId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
+export async function fetchUserVolume(
+  pool: DbQuery,
+  userId: string,
+): Promise<number> {
+  const { rows } = await pool.query<{ total: string | null }>(
     `select coalesce(sum(notional_usd), 0)::text as total from volume_events where user_id = $1`,
     [userId],
   );
@@ -143,10 +418,29 @@ export async function fetchFeeTotals(
   }>(
     `
       select
-        coalesce(sum(case when status = 'pending' then fee_usd else 0 end), 0)::text as pending,
-        coalesce(sum(case when status = 'collected' then fee_usd else 0 end), 0)::text as collected
+        coalesce(
+          sum(
+            case
+              when status = 'pending'
+                then cashback_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as pending,
+        coalesce(
+          sum(
+            case
+              when status = 'collected'
+                then cashback_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as collected
       from fee_events
       where user_id = $1
+        and liability_snapshot_source = 'event_time_frozen'
     `,
     [inputs.userId],
   );
@@ -160,7 +454,7 @@ export async function fetchFeeTotals(
 export async function fetchFeeTotalsByChain(
   pool: DbQuery,
   inputs: { userId: string },
-): Promise<Record<string, { pending: number; collected: number }>> {
+): Promise<Record<string, { pending: string; collected: string }>> {
   const { rows } = await pool.query<{
     chain_id: string | null;
     pending: string | null;
@@ -169,20 +463,45 @@ export async function fetchFeeTotalsByChain(
     `
       select
         coalesce(chain_id, 'unknown') as chain_id,
-        coalesce(sum(case when status = 'pending' then fee_usd else 0 end), 0)::text as pending,
-        coalesce(sum(case when status = 'collected' then fee_usd else 0 end), 0)::text as collected
+        coalesce(
+          sum(
+            case
+              when status = 'pending'
+                then cashback_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as pending,
+        coalesce(
+          sum(
+            case
+              when status = 'collected'
+                then cashback_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as collected
       from fee_events
       where user_id = $1
+        and liability_snapshot_source = 'event_time_frozen'
       group by chain_id
     `,
     [inputs.userId],
   );
-  const totals: Record<string, { pending: number; collected: number }> = {};
+  const totals: Record<string, { pending: string; collected: string }> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = {
-      pending: Number(row.pending ?? 0),
-      collected: Number(row.collected ?? 0),
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const pendingMicro =
+      decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
+    const collectedMicro =
+      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+    totals[canonicalChainId] = {
+      pending: microToDecimalString(pendingMicro),
+      collected: microToDecimalString(collectedMicro),
     };
   }
   return totals;
@@ -198,12 +517,30 @@ export async function fetchReferralFeeTotals(
   }>(
     `
       select
-        coalesce(sum(case when fe.status = 'pending' then fe.fee_usd else 0 end), 0)::text as pending,
-        coalesce(sum(case when fe.status = 'collected' then fe.fee_usd else 0 end), 0)::text as collected
+        coalesce(
+          sum(
+            case
+              when fe.status = 'pending'
+                then fe.referral_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as pending,
+        coalesce(
+          sum(
+            case
+              when fe.status = 'collected'
+                then fe.referral_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as collected
       from fee_events fe
       join referrals r on r.referred_user_id = fe.user_id
       where r.referrer_user_id = $1
-        and r.status = 'qualified'
+        and fe.liability_snapshot_source = 'event_time_frozen'
     `,
     [inputs.userId],
   );
@@ -217,7 +554,7 @@ export async function fetchReferralFeeTotals(
 export async function fetchReferralFeeTotalsByChain(
   pool: DbQuery,
   inputs: { userId: string },
-): Promise<Record<string, { pending: number; collected: number }>> {
+): Promise<Record<string, { pending: string; collected: string }>> {
   const { rows } = await pool.query<{
     chain_id: string | null;
     pending: string | null;
@@ -226,22 +563,46 @@ export async function fetchReferralFeeTotalsByChain(
     `
       select
         coalesce(fe.chain_id, 'unknown') as chain_id,
-        coalesce(sum(case when fe.status = 'pending' then fe.fee_usd else 0 end), 0)::text as pending,
-        coalesce(sum(case when fe.status = 'collected' then fe.fee_usd else 0 end), 0)::text as collected
+        coalesce(
+          sum(
+            case
+              when fe.status = 'pending'
+                then fe.referral_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as pending,
+        coalesce(
+          sum(
+            case
+              when fe.status = 'collected'
+                then fe.referral_earned_usdc
+              else 0
+            end
+          ),
+          0
+        )::text as collected
       from fee_events fe
       join referrals r on r.referred_user_id = fe.user_id
       where r.referrer_user_id = $1
-        and r.status = 'qualified'
+        and fe.liability_snapshot_source = 'event_time_frozen'
       group by fe.chain_id
     `,
     [inputs.userId],
   );
-  const totals: Record<string, { pending: number; collected: number }> = {};
+  const totals: Record<string, { pending: string; collected: string }> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = {
-      pending: Number(row.pending ?? 0),
-      collected: Number(row.collected ?? 0),
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const pendingMicro =
+      decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
+    const collectedMicro =
+      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+    totals[canonicalChainId] = {
+      pending: microToDecimalString(pendingMicro),
+      collected: microToDecimalString(collectedMicro),
     };
   }
   return totals;
@@ -261,7 +622,7 @@ export async function fetchQualifiedReferralCount(
 export async function fetchClaimedTotalsByChain(
   pool: DbQuery,
   inputs: { userId: string },
-): Promise<Record<string, number>> {
+): Promise<Record<string, string>> {
   const { rows } = await pool.query<{
     chain_id: string | null;
     total: string | null;
@@ -277,10 +638,13 @@ export async function fetchClaimedTotalsByChain(
     `,
     [inputs.userId],
   );
-  const totals: Record<string, number> = {};
+  const totals: Record<string, string> = {};
   for (const row of rows) {
-    const key = row.chain_id ?? "unknown";
-    totals[key] = Number(row.total ?? 0);
+    const canonicalChainId = normalizeRewardsChainId(row.chain_id);
+    if (!canonicalChainId) continue;
+    const existingMicro = decimalToMicroFloor(totals[canonicalChainId]);
+    const currentMicro = decimalToMicroFloor(row.total);
+    totals[canonicalChainId] = microToDecimalString(existingMicro + currentMicro);
   }
   return totals;
 }
@@ -328,7 +692,7 @@ export async function fetchReferralsForUser(
   }>(
     `
       with points as (
-        select user_id, coalesce(sum(notional_usd), 0)::text as points
+        select user_id, coalesce(sum(points_awarded), 0)::text as points
         from volume_events
         group by user_id
       )
@@ -371,7 +735,7 @@ export async function markQualifiedReferralsForUser(
   await pool.query(
     `
       with points as (
-        select user_id, coalesce(sum(notional_usd), 0) as points
+        select user_id, coalesce(sum(points_awarded), 0) as points
         from volume_events
         group by user_id
       )
@@ -396,7 +760,7 @@ export async function insertRewardClaim(
     userId: string;
     walletAddress: string;
     chainId: string;
-    amountUsd: number;
+    amountUsd: string;
     status: "pending" | "submitted" | "confirmed" | "failed";
     txHash?: string | null;
   },
@@ -562,6 +926,34 @@ async function fetchVolumeRank(
   return Number(rows[0]?.higher ?? 0) + 1;
 }
 
+async function fetchPointsRank(
+  pool: DbQuery,
+  inputs: { value: number; startAt: Date | null },
+): Promise<number> {
+  const params: PgParams = [inputs.value];
+  const whereClause = inputs.startAt ? "where created_at >= $2" : "";
+  if (inputs.startAt) {
+    params.push(inputs.startAt);
+  }
+
+  const { rows } = await pool.query<{ higher: string | null }>(
+    `
+      with totals as (
+        select user_id, coalesce(sum(points_awarded), 0)::numeric as points
+        from volume_events
+        ${whereClause}
+        group by user_id
+      )
+      select count(*)::text as higher
+      from totals
+      where points > $1
+    `,
+    params,
+  );
+
+  return Number(rows[0]?.higher ?? 0) + 1;
+}
+
 async function fetchPnlRank(
   pool: DbQuery,
   inputs: { value: number },
@@ -602,9 +994,10 @@ export async function fetchRewardsLeaderboardRows(
     const { rows } = await pool.query<RewardsLeaderboardRowDb>(
       `
         with ${buildPnlCteSql()},
-        volume as (
+        totals as (
           select user_id,
-                 coalesce(sum(notional_usd), 0)::numeric as volume_usd
+                 coalesce(sum(notional_usd), 0)::numeric as volume_usd,
+                 coalesce(sum(points_awarded), 0)::numeric as points
           from volume_events
           group by user_id
         ),
@@ -618,15 +1011,15 @@ export async function fetchRewardsLeaderboardRows(
         select
           r.user_id,
           r.rank,
-          coalesce(v.volume_usd, 0)::text as volume_usd,
-          coalesce(v.volume_usd, 0)::text as points,
+          coalesce(t.volume_usd, 0)::text as volume_usd,
+          coalesce(t.points, 0)::text as points,
           r.pnl_usd::text as pnl_usd,
           u.display_name,
           u.username,
           primary_wallet.wallet_address
         from ranked r
         join users u on u.id = r.user_id
-        left join volume v on v.user_id = r.user_id
+        left join totals t on t.user_id = r.user_id
         left join lateral (
           select wallet_address
           from user_wallets
@@ -642,6 +1035,7 @@ export async function fetchRewardsLeaderboardRows(
     return rows.map(mapLeaderboardRow);
   }
 
+  const metricColumn = inputs.metric === "points" ? "points" : "volume_usd";
   const params: PgParams = [];
   const whereClause = inputs.startAt ? "where created_at >= $1" : "";
   if (inputs.startAt) {
@@ -654,9 +1048,10 @@ export async function fetchRewardsLeaderboardRows(
 
   const { rows } = await pool.query<RewardsLeaderboardRowDb>(
     `
-      with volume as (
+      with totals as (
         select user_id,
-               coalesce(sum(notional_usd), 0)::numeric as volume_usd
+               coalesce(sum(notional_usd), 0)::numeric as volume_usd,
+               coalesce(sum(points_awarded), 0)::numeric as points
         from volume_events
         ${whereClause}
         group by user_id
@@ -666,14 +1061,15 @@ export async function fetchRewardsLeaderboardRows(
         select
           user_id,
           volume_usd,
-          dense_rank() over (order by volume_usd desc) as rank
-        from volume
+          points,
+          dense_rank() over (order by ${metricColumn} desc) as rank
+        from totals
       )
       select
         r.user_id,
         r.rank,
         r.volume_usd::text as volume_usd,
-        r.volume_usd::text as points,
+        r.points::text as points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
         u.display_name,
         u.username,
@@ -688,7 +1084,7 @@ export async function fetchRewardsLeaderboardRows(
         order by is_primary desc, created_at asc
         limit 1
       ) primary_wallet on true
-      order by r.volume_usd desc, r.user_id
+      order by r.${metricColumn} desc, r.user_id
       limit $${limitIdx} offset $${offsetIdx}
     `,
     params,
@@ -705,33 +1101,34 @@ export async function fetchRewardsLeaderboardMe(
   },
 ): Promise<RewardsLeaderboardRow | null> {
   const params: PgParams = [inputs.userId];
-  const volumeWhereClause = inputs.startAt ? "and created_at >= $2" : "";
+  const totalsWhereClause = inputs.startAt ? "and created_at >= $2" : "";
   if (inputs.startAt) {
     params.push(inputs.startAt);
   }
 
   const { rows } = await pool.query<RewardsLeaderboardRowDb>(
     `
-      with volume as (
+      with totals as (
         select user_id,
-               coalesce(sum(notional_usd), 0)::numeric as volume_usd
+               coalesce(sum(notional_usd), 0)::numeric as volume_usd,
+               coalesce(sum(points_awarded), 0)::numeric as points
         from volume_events
         where user_id = $1
-        ${volumeWhereClause}
+        ${totalsWhereClause}
         group by user_id
       ),
       ${buildPnlCteSql("$1")}
       select
         u.id as user_id,
         0 as rank,
-        coalesce(v.volume_usd, 0)::text as volume_usd,
-        coalesce(v.volume_usd, 0)::text as points,
+        coalesce(t.volume_usd, 0)::text as volume_usd,
+        coalesce(t.points, 0)::text as points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
         u.display_name,
         u.username,
         primary_wallet.wallet_address
       from users u
-      left join volume v on v.user_id = u.id
+      left join totals t on t.user_id = u.id
       left join pnl p on p.user_id = u.id
       left join lateral (
         select wallet_address
@@ -750,13 +1147,21 @@ export async function fetchRewardsLeaderboardMe(
   if (!row) return null;
 
   const mapped = mapLeaderboardRow(row);
-  const rank =
-    inputs.metric === "pnl"
-      ? await fetchPnlRank(pool, { value: mapped.pnlUsd })
-      : await fetchVolumeRank(pool, {
-          value: mapped.volumeUsd,
-          startAt: inputs.startAt,
-        });
+  const rank = await (async () => {
+    if (inputs.metric === "pnl") {
+      return fetchPnlRank(pool, { value: mapped.pnlUsd });
+    }
+    if (inputs.metric === "points") {
+      return fetchPointsRank(pool, {
+        value: mapped.points,
+        startAt: inputs.startAt,
+      });
+    }
+    return fetchVolumeRank(pool, {
+      value: mapped.volumeUsd,
+      startAt: inputs.startAt,
+    });
+  })();
 
   return { ...mapped, rank };
 }

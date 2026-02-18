@@ -10,6 +10,7 @@ import {
   fetchRewardsLeaderboardRows,
   fetchReferralsForUser,
   fetchUserPoints,
+  fetchUserVolume,
   fetchUserReferralCode,
   findUserByReferralCode,
   insertReferral,
@@ -20,7 +21,18 @@ import {
   markQualifiedReferralsForUser,
   setUserReferralCode,
 } from "../repos/rewards.js";
-import { reconcileSolanaFeeEvents } from "./fee-reconcile.js";
+import {
+  normalizeRewardsChainId,
+  type RewardsChainId,
+} from "../lib/rewards-chain.js";
+import {
+  parseUsdcToMicroFloor,
+  usdcMicroToDecimalString,
+} from "../lib/usdc.js";
+import {
+  resolveRewardsMultiplierAtEvent,
+  type RewardsMultiplierSource,
+} from "./rewards-multiplier.js";
 
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -46,8 +58,6 @@ const DEFAULT_POLICY = {
 };
 
 const OBSERVER_THRESHOLD = 500;
-const SOLANA_FEE_RECONCILE_LIMIT = 10;
-const SOLANA_FEE_RECONCILE_MIN_AGE_SEC = 60;
 
 type RewardsTier = {
   tier: number;
@@ -61,6 +71,22 @@ type ReferralBonus = {
   bonusBps: number;
 };
 
+type ChainFeeTotalsRaw = Record<string, { pending: string; collected: string }>;
+type ChainClaimedTotalsRaw = Record<string, string>;
+
+function parseMicro(value: string): bigint {
+  const parsed = parseUsdcToMicroFloor(value);
+  return parsed ?? 0n;
+}
+
+function microToNumber(value: bigint): number {
+  return Number(usdcMicroToDecimalString(value));
+}
+
+function maxMicro(value: bigint): bigint {
+  return value > 0n ? value : 0n;
+}
+
 function clampBps(value: number, max = 10_000): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(max, Math.max(0, value));
@@ -71,7 +97,7 @@ function maxBps(values: number[]): number {
   return Math.max(...values.map((value) => (Number.isFinite(value) ? value : 0)));
 }
 
-function resolveEffectiveBps(
+export function resolveEffectiveBps(
   policy: RewardsPolicy,
   tierBps: number,
   bonusBps: number,
@@ -290,13 +316,125 @@ export async function attachReferralCode(
   });
 }
 
+export function computeCashbackBreakdown(inputs: {
+  feeTotalsByChain: ChainFeeTotalsRaw;
+  referralFeeTotalsByChain: ChainFeeTotalsRaw;
+  claimedTotalsByChain: ChainClaimedTotalsRaw;
+}) {
+  type ChainRollup = {
+    feePending: bigint;
+    feeCollected: bigint;
+    referralPending: bigint;
+    referralCollected: bigint;
+    claimed: bigint;
+  };
+
+  const byChain = new Map<RewardsChainId, ChainRollup>();
+  const ensureChain = (chainId: RewardsChainId): ChainRollup => {
+    const existing = byChain.get(chainId);
+    if (existing) return existing;
+    const created: ChainRollup = {
+      feePending: 0n,
+      feeCollected: 0n,
+      referralPending: 0n,
+      referralCollected: 0n,
+      claimed: 0n,
+    };
+    byChain.set(chainId, created);
+    return created;
+  };
+
+  for (const [chainId, values] of Object.entries(inputs.feeTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.feePending += parseMicro(values.pending);
+    bucket.feeCollected += parseMicro(values.collected);
+  }
+
+  for (const [chainId, values] of Object.entries(inputs.referralFeeTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.referralPending += parseMicro(values.pending);
+    bucket.referralCollected += parseMicro(values.collected);
+  }
+
+  for (const [chainId, claimed] of Object.entries(inputs.claimedTotalsByChain)) {
+    const canonicalChainId = normalizeRewardsChainId(chainId);
+    if (!canonicalChainId) continue;
+    const bucket = ensureChain(canonicalChainId);
+    bucket.claimed += parseMicro(claimed);
+  }
+
+  const cashbackByChain: Record<
+    string,
+    { pending: number; collected: number; claimable: number }
+  > = {};
+  const referralByChain: Record<string, { pending: number; collected: number }> =
+    {};
+  const claimableByChainMicro: Record<string, bigint> = {};
+
+  let totalCashbackPendingMicro = 0n;
+  let totalCashbackCollectedMicro = 0n;
+  let totalReferralPendingMicro = 0n;
+  let totalReferralCollectedMicro = 0n;
+  let totalClaimableMicro = 0n;
+
+  for (const [chainId, bucket] of byChain.entries()) {
+    const feePendingMicro = bucket.feePending;
+    const feeCollectedMicro = bucket.feeCollected;
+    const referralPendingSourceMicro = bucket.referralPending;
+    const referralCollectedSourceMicro = bucket.referralCollected;
+    const claimedMicro = bucket.claimed;
+
+    const cashbackPendingMicro = feePendingMicro;
+    const cashbackCollectedMicro = feeCollectedMicro;
+    const referralPendingMicro = referralPendingSourceMicro;
+    const referralCollectedMicro = referralCollectedSourceMicro;
+
+    const totalCollectedMicro = cashbackCollectedMicro + referralCollectedMicro;
+    const claimableMicro = maxMicro(totalCollectedMicro - claimedMicro);
+    const totalPendingMicro = cashbackPendingMicro + referralPendingMicro;
+
+    cashbackByChain[chainId] = {
+      pending: microToNumber(totalPendingMicro),
+      collected: microToNumber(totalCollectedMicro),
+      claimable: microToNumber(claimableMicro),
+    };
+    referralByChain[chainId] = {
+      pending: microToNumber(referralPendingMicro),
+      collected: microToNumber(referralCollectedMicro),
+    };
+    claimableByChainMicro[chainId] = claimableMicro;
+
+    totalCashbackPendingMicro += cashbackPendingMicro;
+    totalCashbackCollectedMicro += cashbackCollectedMicro;
+    totalReferralPendingMicro += referralPendingMicro;
+    totalReferralCollectedMicro += referralCollectedMicro;
+    totalClaimableMicro += claimableMicro;
+  }
+
+  return {
+    cashbackByChain,
+    referralByChain,
+    claimableByChainMicro,
+    totalPending: microToNumber(totalCashbackPendingMicro + totalReferralPendingMicro),
+    totalCollected: microToNumber(
+      totalCashbackCollectedMicro + totalReferralCollectedMicro,
+    ),
+    totalClaimable: microToNumber(totalClaimableMicro),
+    totalReferralPending: microToNumber(totalReferralPendingMicro),
+    totalReferralCollected: microToNumber(totalReferralCollectedMicro),
+  };
+}
+
 export async function getRewardsSummary(
   pool: DbQuery,
   inputs: { userId: string },
-  options?: { skipReconcile?: boolean; skipReferralQualification?: boolean },
 ): Promise<{
   policy: RewardsPolicy;
-  clout: { points: number };
+  clout: { points: number; volumeUsd: number };
   tier: RewardsTier;
   nextTier: RewardsTier | null;
   progress: { pct: number; remaining: number | null };
@@ -314,26 +452,19 @@ export async function getRewardsSummary(
     collected: number;
     byChain: Record<string, { pending: number; collected: number }>;
   };
+  multiplier: {
+    value: number;
+    source: RewardsMultiplierSource;
+    asOf: Date;
+  };
 }> {
+  // Summary stays read-only; reconciliation/qualification mutations are handled outside this path.
   const policy = await getRewardsPolicy(pool);
-  if (!options?.skipReconcile) {
-    try {
-      await reconcileSolanaFeeEvents(pool, {
-        limit: SOLANA_FEE_RECONCILE_LIMIT,
-        minAgeSec: SOLANA_FEE_RECONCILE_MIN_AGE_SEC,
-      });
-    } catch {
-      // Best-effort only; summary should still render if RPC fails.
-    }
-  }
-  if (!options?.skipReferralQualification) {
-    await markQualifiedReferralsForUser(pool, {
-      userId: inputs.userId,
-      threshold: OBSERVER_THRESHOLD,
-    });
-  }
 
-  const points = await fetchUserPoints(pool, inputs.userId);
+  const [points, volumeUsd] = await Promise.all([
+    fetchUserPoints(pool, inputs.userId),
+    fetchUserVolume(pool, inputs.userId),
+  ]);
   const tier = resolveTier(points, policy.tiers);
   const nextTier = resolveNextTier(points, policy.tiers);
   const progressPct = nextTier
@@ -349,6 +480,11 @@ export async function getRewardsSummary(
 
   const feeTotalsByChain = await fetchFeeTotalsByChain(pool, {
     userId: inputs.userId,
+  });
+  const multiplierAsOf = new Date();
+  const multiplier = await resolveRewardsMultiplierAtEvent(pool, {
+    userId: inputs.userId,
+    eventTime: multiplierAsOf,
   });
   const qualifiedCount = await fetchQualifiedReferralCount(pool, {
     userId: inputs.userId,
@@ -366,91 +502,56 @@ export async function getRewardsSummary(
   const claimedTotalsByChain = await fetchClaimedTotalsByChain(pool, {
     userId: inputs.userId,
   });
-
-  const chainIds = new Set<string>([
-    ...Object.keys(feeTotalsByChain),
-    ...Object.keys(referralFeeTotalsByChain),
-    ...Object.keys(claimedTotalsByChain),
-  ]);
-
-  const cashbackByChain: Record<
-    string,
-    { pending: number; collected: number; claimable: number }
-  > = {};
-  const referralByChain: Record<string, { pending: number; collected: number }> =
-    {};
-
-  let totalCashbackPending = 0;
-  let totalCashbackCollected = 0;
-  let totalReferralPending = 0;
-  let totalReferralCollected = 0;
-  let totalClaimable = 0;
-
-  for (const chainId of chainIds) {
-    const feeTotals = feeTotalsByChain[chainId] ?? {
-      pending: 0,
-      collected: 0,
-    };
-    const referralTotals = referralFeeTotalsByChain[chainId] ?? {
-      pending: 0,
-      collected: 0,
-    };
-    const claimed = claimedTotalsByChain[chainId] ?? 0;
-
-    const cashbackPending =
-      (feeTotals.pending * cappedCashbackBps) / 10_000;
-    const cashbackCollected =
-      (feeTotals.collected * cappedCashbackBps) / 10_000;
-    const referralPending =
-      (referralTotals.pending * cappedBonusBps) / 10_000;
-    const referralCollected =
-      (referralTotals.collected * cappedBonusBps) / 10_000;
-
-    const totalCollected = cashbackCollected + referralCollected;
-    const claimable = Math.max(0, totalCollected - claimed);
-    const totalPending = cashbackPending + referralPending;
-
-    cashbackByChain[chainId] = {
-      pending: totalPending,
-      collected: totalCollected,
-      claimable,
-    };
-    referralByChain[chainId] = {
-      pending: referralPending,
-      collected: referralCollected,
-    };
-
-    totalCashbackPending += cashbackPending;
-    totalCashbackCollected += cashbackCollected;
-    totalReferralPending += referralPending;
-    totalReferralCollected += referralCollected;
-    totalClaimable += claimable;
-  }
-
-  const totalCollected = totalCashbackCollected + totalReferralCollected;
-  const totalPending = totalCashbackPending + totalReferralPending;
+  const computed = computeCashbackBreakdown({
+    feeTotalsByChain,
+    referralFeeTotalsByChain,
+    claimedTotalsByChain,
+  });
 
   return {
     policy,
-    clout: { points },
+    clout: { points, volumeUsd },
     tier,
     nextTier,
     progress: { pct: progressPct, remaining },
     cashback: {
-      pending: totalPending,
-      collected: totalCollected,
-      claimable: totalClaimable,
+      pending: computed.totalPending,
+      collected: computed.totalCollected,
+      claimable: computed.totalClaimable,
       bps: cappedCashbackBps,
-      byChain: cashbackByChain,
+      byChain: computed.cashbackByChain,
     },
     referralBonus: {
       qualifiedCount,
       bonusBps: cappedBonusBps,
-      pending: totalReferralPending,
-      collected: totalReferralCollected,
-      byChain: referralByChain,
+      pending: computed.totalReferralPending,
+      collected: computed.totalReferralCollected,
+      byChain: computed.referralByChain,
+    },
+    multiplier: {
+      value: multiplier.multiplierApplied,
+      source: multiplier.multiplierSource,
+      asOf: multiplierAsOf,
     },
   };
+}
+
+export async function getRewardsClaimableByChainMicro(
+  pool: DbQuery,
+  inputs: { userId: string },
+): Promise<Record<string, bigint>> {
+  const [feeTotalsByChain, referralFeeTotalsByChain, claimedTotalsByChain] =
+    await Promise.all([
+      fetchFeeTotalsByChain(pool, { userId: inputs.userId }),
+      fetchReferralFeeTotalsByChain(pool, { userId: inputs.userId }),
+      fetchClaimedTotalsByChain(pool, { userId: inputs.userId }),
+    ]);
+
+  return computeCashbackBreakdown({
+    feeTotalsByChain,
+    referralFeeTotalsByChain,
+    claimedTotalsByChain,
+  }).claimableByChainMicro;
 }
 
 export async function getRewardsReferrals(
@@ -497,7 +598,7 @@ export async function createRewardClaim(
     userId: string;
     walletAddress: string;
     chainId: string;
-    amountUsd: number;
+    amountUsd: string;
   },
 ): Promise<{ claimId: string }> {
   const claim = await insertRewardClaim(pool, {

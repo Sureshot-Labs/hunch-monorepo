@@ -4,6 +4,12 @@ import { tx } from "@hunch/infra";
 import type { PoolClient } from "pg";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
+import {
+  parseUsdcToMicro,
+  usdcDecimalStringHasValidScale,
+  usdcMicroToDecimalString,
+} from "../lib/usdc.js";
 import {
   rewardsClaimBodySchema,
   rewardsLeaderboardQuerySchema,
@@ -14,6 +20,7 @@ import {
   getOrCreateReferralCode,
   getRewardsLeaderboard,
   getRewardsPolicy,
+  getRewardsClaimableByChainMicro,
   getRewardsReferrals,
   getRewardsSummary,
 } from "../services/rewards.js";
@@ -156,7 +163,7 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const chainId = body.chainId.trim();
+      const chainId = body.chainId;
       const walletType = wallet.walletType?.toLowerCase() ?? "";
       const isSolanaChain = chainId === "solana";
       if (isSolanaChain && walletType !== "solana") {
@@ -174,52 +181,59 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const claim = await tx(pool, async (client: PoolClient) => {
-          await client.query(
-            "select pg_advisory_xact_lock(hashtext($1)::bigint)",
-            [user.id],
-          );
+          await acquireRewardsUserAdvisoryXactLock(client, user.id);
 
-          const summary = await getRewardsSummary(
+          const claimableByChain = await getRewardsClaimableByChainMicro(
             client,
             { userId: user.id },
-            { skipReconcile: true },
           );
-          const claimable =
-            summary.cashback.byChain?.[chainId]?.claimable ?? 0;
-          if (claimable <= 0) {
+          const claimableMicro = claimableByChain[chainId] ?? 0n;
+          if (claimableMicro <= 0n) {
             const error = new Error("No claimable cashback available");
             (error as Error & { statusCode?: number }).statusCode = 400;
             throw error;
           }
 
-          const requestedAmount = body.amount ?? claimable;
-          if (requestedAmount <= 0) {
+          if (body.amount && !usdcDecimalStringHasValidScale(body.amount)) {
+            const error = new Error("Claim amount supports up to 6 decimals");
+            (error as Error & { statusCode?: number }).statusCode = 400;
+            throw error;
+          }
+
+          const requestedAmountMicro = body.amount
+            ? parseUsdcToMicro(body.amount)
+            : claimableMicro;
+          if (!requestedAmountMicro || requestedAmountMicro <= 0n) {
             const error = new Error("Invalid claim amount");
             (error as Error & { statusCode?: number }).statusCode = 400;
             throw error;
           }
 
-          if (requestedAmount > claimable) {
+          if (requestedAmountMicro > claimableMicro) {
             const error = new Error("Claim amount exceeds claimable balance");
             (error as Error & { statusCode?: number }).statusCode = 400;
             throw error;
           }
 
+          const requestedAmountUsd = usdcMicroToDecimalString(requestedAmountMicro);
+
           const claim = await createRewardClaim(client, {
             userId: user.id,
             walletAddress: targetWallet,
             chainId,
-            amountUsd: requestedAmount,
+            amountUsd: requestedAmountUsd,
           });
-          return { claimId: claim.claimId, amount: requestedAmount };
+          return { claimId: claim.claimId, amountUsd: requestedAmountUsd };
         });
+
+        const amountNumber = Number(claim.amountUsd);
 
         void createNotificationSafe(
           pool,
           buildRewardNotification({
             userId: user.id,
             status: "submitted",
-            amountUsd: claim.amount,
+            amountUsd: Number.isFinite(amountNumber) ? amountNumber : 0,
             chainId,
             claimId: claim.claimId,
             walletAddress: targetWallet,
@@ -232,7 +246,7 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
           ok: true,
           claim: {
             id: claim.claimId,
-            amount: claim.amount,
+            amount: Number.isFinite(amountNumber) ? amountNumber : 0,
             status: "pending",
           },
         });
