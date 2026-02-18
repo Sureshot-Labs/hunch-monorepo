@@ -130,6 +130,7 @@ export const walletWhalesQuerySchema = z.object({
       "trades_30d",
       "exposure_usd",
       "winrate",
+      "pnl_30d",
     ])
     .default("last_activity"),
 });

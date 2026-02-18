@@ -232,6 +232,23 @@ export const adminRewardsTreasuryQuerySchema = z.object({
   chainId: z.string().trim().min(1).optional(),
 });
 
+export const adminIntelPolicyKeySchema = z.enum([
+  "wallet_intel_signals",
+  "wallet_intel_refresh",
+  "ai_whale_profiles",
+  "ai_clusters",
+  "arbitrage_defaults",
+]);
+
+export const adminIntelPolicyParamsSchema = z.object({
+  key: adminIntelPolicyKeySchema,
+});
+
+export const adminIntelPolicyBodySchema = z.object({
+  effectiveAt: z.string().datetime().optional(),
+  payload: z.record(z.string(), z.unknown()),
+});
+
 export type AdminFeePolicyBody = z.infer<typeof adminFeePolicySchema>;
 export type AdminDebridgeConfigBody = z.infer<typeof adminDebridgeConfigSchema>;
 export type AdminRewardsPolicyBody = z.infer<typeof adminRewardsPolicySchema>;
@@ -258,6 +275,8 @@ export type AdminUserKalshiProofBypassBody = z.infer<
   typeof adminUserKalshiProofBypassSchema
 >;
 export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
+export type AdminIntelPolicyParams = z.infer<typeof adminIntelPolicyParamsSchema>;
+export type AdminIntelPolicyBody = z.infer<typeof adminIntelPolicyBodySchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
 export type AdminRewardsTreasuryQuery = z.infer<
   typeof adminRewardsTreasuryQuerySchema

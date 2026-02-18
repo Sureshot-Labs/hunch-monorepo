@@ -10,11 +10,18 @@ import {
   scoreMarket,
   type ClusterMarketSummary,
 } from "./services/clusters.js";
+import {
+  getIntelPolicyDefaults,
+  resolveAiClustersPolicy,
+  type AiClustersPolicy,
+} from "./services/runtime-policies.js";
 
 const INDEX_KEY = "ai:cluster:index";
 const META_KEY = "ai:cluster:meta";
 const CLUSTER_KEY_PREFIX = "ai:cluster:";
 const CLUSTER_VERSION = "v1";
+
+let aiClustersPolicy: AiClustersPolicy = getIntelPolicyDefaults("ai_clusters");
 
 type SeedRow = {
   id: string;
@@ -203,12 +210,12 @@ function resolveOptions(args: string[]): Options {
     minVenueCount: clampNumber(parseNumber(parseFlag(args, "--min-venues")), {
       min: 1,
       max: 10,
-      fallback: env.aiClusterAnalysisMinVenueCount,
+      fallback: aiClustersPolicy.analysisMinVenueCount,
     }),
     minSpread: clampNumber(parseNumber(parseFlag(args, "--min-spread")), {
       min: 0,
       max: 1,
-      fallback: env.aiClusterAnalysisMinSpread,
+      fallback: aiClustersPolicy.analysisMinSpread,
     }),
     ttlSec: clampNumber(parseNumber(parseFlag(args, "--ttl-sec")), {
       min: 3600,
@@ -1273,7 +1280,7 @@ async function callOpenRouter(
     throw new Error("OPENROUTER_API_KEY missing");
   }
 
-  if (env.aiClusterDebugLogs) {
+  if (aiClustersPolicy.debugLogs) {
     const system = messages.find((message) => message.role === "system");
     const user = messages.find((message) => message.role === "user");
     console.info("[cluster] openrouter request", {
@@ -1309,7 +1316,7 @@ async function callOpenRouter(
   const payload = (await response.json()) as {
     choices?: Array<{ message?: { content?: unknown } }>;
   };
-  if (env.aiClusterDebugLogs) {
+  if (aiClustersPolicy.debugLogs) {
     console.info("[cluster] openrouter response", {
       model,
       payload: JSON.stringify(payload).slice(0, 2000),
@@ -1342,7 +1349,7 @@ async function callOpenRouter(
   };
 
   if (typeof content === "string") {
-    if (env.aiClusterDebugLogs && content.trim().length === 0) {
+    if (aiClustersPolicy.debugLogs && content.trim().length === 0) {
       console.warn("[cluster] openrouter empty content", {
         model,
         payload: JSON.stringify(payload).slice(0, 2000),
@@ -1357,7 +1364,7 @@ async function callOpenRouter(
       .map((part) => extractPart(part))
       .join("");
     if (joined.trim().length > 0) return joined;
-    if (env.aiClusterDebugLogs) {
+    if (aiClustersPolicy.debugLogs) {
       console.warn("[cluster] openrouter empty content", {
         model,
         payload: JSON.stringify(payload).slice(0, 2000),
@@ -1371,7 +1378,7 @@ async function callOpenRouter(
     if (unwrapped) return unwrapped;
     return "";
   }
-  if (env.aiClusterDebugLogs) {
+  if (aiClustersPolicy.debugLogs) {
     console.warn("[cluster] openrouter response missing content", {
       model,
       payload: JSON.stringify(payload).slice(0, 2000),
@@ -1391,9 +1398,9 @@ async function runStageAAnalysis(
   const user = `Given a cluster of prediction markets, identify the shared claim.\nReturn:\n- label: a short title (max 80 chars)\n- category: one of [macro, politics, sports, crypto, tech, culture, entertainment, climate, finance, other]\n- outliers: list of marketIds that do not match the shared claim\n- confidence: 0-1\n- query: a short web search query to find context\nRules:\n- label should be short, concrete, and degen-friendly\n- if the label matches a market title exactly, shorten it\n- do not include odds or prices in the label\n- only list outliers, not inliers\n- be conservative: only list outliers when clearly unrelated\n- query must be based on the label/theme only, never outliers\n\nCluster data (JSON):\n${JSON.stringify(input)}`;
 
   const fallbackModel =
-    env.aiClusterModelFallback &&
-    env.aiClusterModelFallback !== env.aiClusterModelFast
-      ? env.aiClusterModelFallback
+    aiClustersPolicy.modelFallback &&
+    aiClustersPolicy.modelFallback !== aiClustersPolicy.modelFast
+      ? aiClustersPolicy.modelFallback
       : null;
   const parseRaw = (raw: string) =>
     safeJsonParse<{
@@ -1417,7 +1424,7 @@ async function runStageAAnalysis(
       );
       return { raw, parsed: parseRaw(raw), model, error: null };
     } catch (error) {
-      if (env.aiClusterDebugLogs) {
+      if (aiClustersPolicy.debugLogs) {
         console.warn("[cluster] fast request failed", {
           clusterId: cluster.id,
           model,
@@ -1433,12 +1440,12 @@ async function runStageAAnalysis(
     }
   };
 
-  let result = await attempt(env.aiClusterModelFast);
+  let result = await attempt(aiClustersPolicy.modelFast);
   if (!result.parsed && fallbackModel) {
-    if (env.aiClusterDebugLogs) {
+    if (aiClustersPolicy.debugLogs) {
       console.warn("[cluster] fast fallback", {
         clusterId: cluster.id,
-        model: env.aiClusterModelFast,
+        model: aiClustersPolicy.modelFast,
         fallbackModel,
       });
     }
@@ -1446,7 +1453,7 @@ async function runStageAAnalysis(
   }
 
   if (!result.parsed) {
-    const shouldLog = env.aiClusterDebugLogs || fastParseFailures < 3;
+    const shouldLog = aiClustersPolicy.debugLogs || fastParseFailures < 3;
     if (shouldLog) {
       console.warn("[cluster] fast parse failed", {
         clusterId: cluster.id,
@@ -1454,7 +1461,7 @@ async function runStageAAnalysis(
         sample: result.raw.slice(0, 2000),
         error: result.error ?? null,
       });
-      if (env.aiClusterDebugLogs) {
+      if (aiClustersPolicy.debugLogs) {
         console.warn("[cluster] fast prompt", {
           clusterId: cluster.id,
           prompt: user.slice(0, 2000),
@@ -1554,9 +1561,9 @@ async function runStageBAnalysis(
   const user = `Given a cluster of prediction markets, return strict JSON with:\n- label (max 80 chars)\n- summary (2-4 short sentences)\n- category (one of [macro, politics, sports, crypto, tech, culture, entertainment, climate, finance, other])\n- outliers (list of marketIds)\n- confidence (0-1)\nRules:\n- first identify outliers; be conservative, only clearly unrelated\n- label and summary must reflect inliers only\n- never mention outliers or their topics in the summary\n- do not include market IDs in label or summary\n- if referencing markets, use plain titles or venue names only\n- keep it factual, no hype, no disclaimers\n- explain what is comparable vs not (definitions/time horizons)\n- note timing, venue/price divergence, liquidity/volume caveats, and any plausible spread signal when obvious\n\nCluster data (JSON):\n${JSON.stringify(input)}`;
 
   const fallbackModel =
-    env.aiClusterModelFallback &&
-    env.aiClusterModelFallback !== env.aiClusterModelFinal
-      ? env.aiClusterModelFallback
+    aiClustersPolicy.modelFallback &&
+    aiClustersPolicy.modelFallback !== aiClustersPolicy.modelFinal
+      ? aiClustersPolicy.modelFallback
       : null;
   const parseRaw = (raw: string) =>
     safeJsonParse<{
@@ -1580,7 +1587,7 @@ async function runStageBAnalysis(
       );
       return { raw, parsed: parseRaw(raw), model, error: null };
     } catch (error) {
-      if (env.aiClusterDebugLogs) {
+      if (aiClustersPolicy.debugLogs) {
         console.warn("[cluster] smart request failed", {
           clusterId: cluster.id,
           model,
@@ -1596,12 +1603,12 @@ async function runStageBAnalysis(
     }
   };
 
-  let result = await attempt(env.aiClusterModelFinal);
+  let result = await attempt(aiClustersPolicy.modelFinal);
   if (!result.parsed && fallbackModel) {
-    if (env.aiClusterDebugLogs) {
+    if (aiClustersPolicy.debugLogs) {
       console.warn("[cluster] smart fallback", {
         clusterId: cluster.id,
-        model: env.aiClusterModelFinal,
+        model: aiClustersPolicy.modelFinal,
         fallbackModel,
       });
     }
@@ -1609,7 +1616,7 @@ async function runStageBAnalysis(
   }
 
   if (!result.parsed) {
-    if (env.aiClusterDebugLogs) {
+    if (aiClustersPolicy.debugLogs) {
       console.warn("[cluster] smart parse failed", {
         clusterId: cluster.id,
         model: result.model,
@@ -1646,11 +1653,11 @@ async function runStageBAnalysis(
   const query = buildOutlierSafeQuery(safeLabel, inlierMarkets, outliers);
 
   let sources: AnalysisSource[] | null = null;
-  if (env.aiClusterUseWebContext && query) {
+  if (aiClustersPolicy.useWebContext && query) {
     try {
       sources = await fetchDuckDuckGoResults(
         query,
-        env.aiClusterWebMaxResults,
+        aiClustersPolicy.webMaxResults,
       );
     } catch (error) {
       console.warn(
@@ -1674,11 +1681,11 @@ async function runStageBAnalysis(
 }
 
 function shouldAnalyzeCluster(cluster: ClusterRecord): boolean {
-  if (cluster.venueCount < env.aiClusterAnalysisMinVenueCount) return false;
+  if (cluster.venueCount < aiClustersPolicy.analysisMinVenueCount) return false;
   const spread = cluster.priceSpread ?? 0;
-  if (spread < env.aiClusterAnalysisMinSpread) return false;
+  if (spread < aiClustersPolicy.analysisMinSpread) return false;
   const quality = cluster.qualityScore ?? 0;
-  if (quality < env.aiClusterAnalysisMinQuality) return false;
+  if (quality < aiClustersPolicy.analysisMinQuality) return false;
   return true;
 }
 
@@ -1703,12 +1710,12 @@ function shouldReuseAnalysis(
   if (!existing.analysisUpdatedAt) return null;
   if (existing.version !== CLUSTER_VERSION) return null;
   if (existing.marketIds !== JSON.stringify(cluster.marketIds)) return null;
-  if (env.aiClusterReanalyzeHours === 0) return null;
+  if (aiClustersPolicy.reanalyzeHours === 0) return null;
 
   const updatedAt = new Date(existing.analysisUpdatedAt);
   if (Number.isNaN(updatedAt.getTime())) return null;
   const ageMs = Date.now() - updatedAt.getTime();
-  if (ageMs > env.aiClusterReanalyzeHours * 3600 * 1000) return null;
+  if (ageMs > aiClustersPolicy.reanalyzeHours * 3600 * 1000) return null;
 
   const parsed = safeJsonParse<ClusterAnalysis>(existing.analysis);
   return parsed ?? null;
@@ -1718,7 +1725,7 @@ async function applyClusterAnalysis(
   redis: RedisClientType,
   clusters: ClusterRecord[],
 ): Promise<void> {
-  if (!env.aiClusterAnalysisEnabled) return;
+  if (!aiClustersPolicy.analysisEnabled) return;
   if (!env.openRouterKey) {
     console.warn("[cluster] OPENROUTER_API_KEY missing, skipping analysis");
     return;
@@ -1728,7 +1735,7 @@ async function applyClusterAnalysis(
   if (candidates.length === 0) return;
 
   const totalCandidates = candidates.length;
-  const maxStageB = Math.max(1, env.aiClusterMaxStageB);
+  const maxStageB = Math.max(1, aiClustersPolicy.maxStageB);
   const sortedForStageB = candidates
     .slice()
     .sort((a, b) => scoreStageB(b) - scoreStageB(a));
@@ -1791,22 +1798,23 @@ async function applyClusterAnalysis(
     pending: pending.length,
     reused: reusedCount,
     smartTargets: smartTargets.size,
-    concurrency: env.aiClusterAnalysisConcurrency,
-    reanalyzeHours: env.aiClusterReanalyzeHours,
-    modelFast: env.aiClusterModelFast,
-    modelSmart: env.aiClusterModelFinal,
-    webContext: env.aiClusterUseWebContext,
+    concurrency: aiClustersPolicy.analysisConcurrency,
+    reanalyzeHours: aiClustersPolicy.reanalyzeHours,
+    modelFast: aiClustersPolicy.modelFast,
+    modelSmart: aiClustersPolicy.modelFinal,
+    webContext: aiClustersPolicy.useWebContext,
   });
 
   if (pending.length === 0) return;
 
-  const concurrency = Math.max(1, env.aiClusterAnalysisConcurrency);
+  const concurrency = Math.max(1, aiClustersPolicy.analysisConcurrency);
   const totalPending = pending.length;
   const startedAt = Date.now();
   let processed = 0;
   let fastCount = 0;
   let smartCount = 0;
   let failedCount = 0;
+  let filteredCount = 0;
   const logProgress = (force = false) => {
     if (!force && processed % 10 !== 0 && processed !== totalPending) return;
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
@@ -1816,6 +1824,7 @@ async function applyClusterAnalysis(
       fast: fastCount,
       smart: smartCount,
       failed: failedCount,
+      filtered: filteredCount,
       elapsedSec,
     });
   };
@@ -1852,12 +1861,26 @@ async function applyClusterAnalysis(
           fastCount += 1;
         }
 
+        const outlierRatio =
+          cluster.marketCount > 0
+            ? (analysis.outliers?.length ?? 0) / cluster.marketCount
+            : 0;
+        const passesConfidence =
+          analysis.confidence >= aiClustersPolicy.minConfidence;
+        const passesOutlierRatio =
+          outlierRatio <= aiClustersPolicy.maxOutlierRatio;
+
         cluster.analysis = JSON.stringify(analysis);
-        cluster.analysisStatus = "ready";
+        cluster.analysisStatus =
+          passesConfidence && passesOutlierRatio ? "ready" : "filtered";
         cluster.analysisUpdatedAt = new Date().toISOString();
         cluster.analysisConfidence = analysis.confidence;
         cluster.analysisModel = analysis.model;
-        cluster.label = analysis.label || cluster.label;
+        if (passesConfidence && passesOutlierRatio) {
+          cluster.label = analysis.label || cluster.label;
+        } else {
+          filteredCount += 1;
+        }
         processed += 1;
         logProgress();
       } catch (error) {
@@ -2180,7 +2203,8 @@ async function buildClusters(
   }
 
   results.sort((a, b) => b.score - a.score);
-  return results;
+  const maxClusters = Math.max(1, aiClustersPolicy.maxClustersPerRun);
+  return results.slice(0, maxClusters);
 }
 
 async function storeClusters(
@@ -2252,6 +2276,9 @@ async function storeClusters(
 }
 
 async function main() {
+  const policy = await resolveAiClustersPolicy(pool);
+  aiClustersPolicy = policy.effective;
+
   const args = process.argv.slice(2);
   if (hasFlag(args, "--help")) {
     printHelp();

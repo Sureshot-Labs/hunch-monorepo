@@ -15,6 +15,7 @@ import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
+import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
   deleteRewardsMultiplierOverride,
   fetchActiveRewardsMultiplierPolicy,
@@ -27,6 +28,13 @@ import { mergeUsersById } from "../admin-merge-user-core.js";
 import { getRewardsPolicy, setReferralCodeForUser } from "../services/rewards.js";
 import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
+import {
+  getIntelPolicySchema,
+  INTEL_POLICY_KEYS,
+  resolveAllIntelPolicies,
+  resolveIntelPolicy,
+  type IntelPolicyKey,
+} from "../services/runtime-policies.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
@@ -41,6 +49,8 @@ import {
 } from "../services/solana-rpc.js";
 import {
   adminFeePolicySchema,
+  adminIntelPolicyBodySchema,
+  adminIntelPolicyParamsSchema,
   adminDebridgeConfigSchema,
   adminPointsSchema,
   adminRewardsMultiplierOverrideParamsSchema,
@@ -2034,6 +2044,115 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           referralCode: row.referral_code,
           effectiveAt: row.effective_at,
           createdAt: row.created_at,
+        },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/intel/policies",
+    { preHandler: createAdminMiddleware() },
+    async (_request, reply) => {
+      const resolved = await resolveAllIntelPolicies(pool);
+      const items = INTEL_POLICY_KEYS.map((key) => {
+        const item = resolved[key];
+        return {
+          key,
+          source: item.source,
+          effectiveAt: item.effectiveAt,
+          createdAt: item.createdAt,
+          defaults: item.defaults,
+          override: item.override,
+          effective: item.effective,
+          invalidOverride: item.invalidOverride,
+        };
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/intel/policies/:key",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { params: adminIntelPolicyParamsSchema },
+    },
+    async (request, reply) => {
+      const key = request.params.key as IntelPolicyKey;
+      const item = await resolveIntelPolicy(pool, key);
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        key,
+        source: item.source,
+        effectiveAt: item.effectiveAt,
+        createdAt: item.createdAt,
+        defaults: item.defaults,
+        override: item.override,
+        effective: item.effective,
+        invalidOverride: item.invalidOverride,
+      });
+    },
+  );
+
+  z.post(
+    "/admin/intel/policies/:key",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: {
+        params: adminIntelPolicyParamsSchema,
+        body: adminIntelPolicyBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const key = request.params.key as IntelPolicyKey;
+      const body = request.body;
+      const schema = getIntelPolicySchema(key);
+      const parsed = schema.safeParse(body.payload);
+      if (!parsed.success) {
+        reply.code(400);
+        return reply.send({
+          error: "Invalid policy payload",
+          issues: parsed.error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          })),
+        });
+      }
+
+      const effectiveAt = body.effectiveAt ? new Date(body.effectiveAt) : new Date();
+      const actorId = request.user?.id ?? null;
+      const row = await insertRuntimePolicy(pool, {
+        policyKey: key,
+        effectiveAt,
+        payload: parsed.data,
+        createdBy: actorId,
+      });
+      const resolved = await resolveIntelPolicy(pool, key);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        policy: {
+          id: row.id,
+          key: row.policy_key,
+          effectiveAt: row.effective_at,
+          createdAt: row.created_at,
+          createdBy: row.created_by,
+          payload: row.payload,
+        },
+        resolved: {
+          source: resolved.source,
+          effectiveAt: resolved.effectiveAt,
+          createdAt: resolved.createdAt,
+          defaults: resolved.defaults,
+          override: resolved.override,
+          effective: resolved.effective,
+          invalidOverride: resolved.invalidOverride,
         },
       });
     },

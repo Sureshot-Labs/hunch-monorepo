@@ -13,9 +13,23 @@ import { inspectSafeWallet } from "./services/polymarket-funder.js";
 import { fetchSolanaTokenBalancesByOwner } from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
+import {
+  getIntelPolicyDefaults,
+  resolveAiWhaleProfilesPolicy,
+  resolveWalletIntelRefreshPolicy,
+  type AiWhaleProfilesPolicy,
+  type WalletIntelRefreshPolicy,
+} from "./services/runtime-policies.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
+
+let walletIntelRefreshPolicy: WalletIntelRefreshPolicy = getIntelPolicyDefaults(
+  "wallet_intel_refresh",
+);
+let aiWhaleProfilesPolicy: AiWhaleProfilesPolicy = getIntelPolicyDefaults(
+  "ai_whale_profiles",
+);
 
 const VENUE_CHAIN: Record<string, Chain | null> = {
   polymarket: "polygon",
@@ -212,7 +226,7 @@ function parseBackfillSnapshots(): number {
   const clamp = (value: number): number =>
     Math.max(
       0,
-      Math.min(Math.floor(value), env.walletIntelBackfillMaxSteps),
+      Math.min(Math.floor(value), walletIntelRefreshPolicy.backfillMaxSteps),
     );
   const arg = process.argv.find((entry) => entry.startsWith("--backfill="));
   if (arg) {
@@ -222,7 +236,7 @@ function parseBackfillSnapshots(): number {
       return clamp(parsed);
     }
   }
-  const envValue = env.walletIntelBackfillSnapshots ?? 0;
+  const envValue = walletIntelRefreshPolicy.backfillSnapshots ?? 0;
   if (Number.isFinite(envValue) && envValue > 0) {
     return clamp(envValue);
   }
@@ -277,17 +291,17 @@ function parseRetentionConfig(): RetentionConfig {
     snapshotsDays: resolveRetentionDays(
       snapshotsRetention,
       globalRetention,
-      env.walletIntelRetentionDaysSnapshots ?? 0,
+      walletIntelRefreshPolicy.retentionDaysSnapshots ?? 0,
     ),
     activityDays: resolveRetentionDays(
       activityRetention,
       globalRetention,
-      env.walletIntelRetentionDaysActivity ?? 0,
+      walletIntelRefreshPolicy.retentionDaysActivity ?? 0,
     ),
     metricsDays: resolveRetentionDays(
       metricsRetention,
       globalRetention,
-      env.walletIntelRetentionDaysMetrics ?? 0,
+      walletIntelRefreshPolicy.retentionDaysMetrics ?? 0,
     ),
   };
 }
@@ -1042,10 +1056,87 @@ async function refreshMetrics(
 
   for (const entry of periods) {
     const whereSince = entry.since
-      ? `and occurred_at >= $3::timestamptz - interval '${entry.since}' and occurred_at <= $3::timestamptz`
-      : "and occurred_at <= $3::timestamptz";
+      ? `and wa.occurred_at >= $3::timestamptz - interval '${entry.since}' and wa.occurred_at <= $3::timestamptz`
+      : "and wa.occurred_at <= $3::timestamptz";
     await client.query(
       `
+        with base_events as (
+          select
+            wa.wallet_id,
+            wa.market_id,
+            upper(coalesce(wa.outcome_side, '')) as outcome_side,
+            coalesce(
+              wa.size_usd,
+              abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
+            ) as notional_usd,
+            (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
+              * coalesce(wa.delta_shares, 0) as signed_shares,
+            (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
+              * coalesce(
+                  wa.size_usd,
+                  abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
+                ) as signed_usd,
+            wa.occurred_at
+          from wallet_activity_events wa
+          where wa.wallet_id = any($1::uuid[])
+            and wa.activity_type in ('delta', 'trade')
+            ${whereSince}
+        ),
+        agg as (
+          select
+            wallet_id,
+            count(*)::int as trades_count,
+            sum(notional_usd) as volume_usd,
+            max(occurred_at) as last_trade_at
+          from base_events
+          group by wallet_id
+        ),
+        legs as (
+          select
+            wallet_id,
+            market_id,
+            outcome_side,
+            sum(signed_shares) as net_shares,
+            sum(signed_usd) as net_cost
+          from base_events
+          where outcome_side in ('YES', 'NO')
+          group by wallet_id, market_id, outcome_side
+        ),
+        leg_marks as (
+          select
+            l.wallet_id,
+            l.net_shares,
+            l.net_cost,
+            case
+              when upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
+                then case
+                  when l.outcome_side = upper(coalesce(um.resolved_outcome, ''))
+                    then l.net_shares
+                  else 0
+                end
+              else
+                case
+                  when l.outcome_side = 'YES' then coalesce(um.best_ask, um.best_bid, um.last_price)
+                  when l.outcome_side = 'NO' then
+                    case
+                      when coalesce(um.best_ask, um.best_bid, um.last_price) is null then null
+                      else 1 - coalesce(um.best_ask, um.best_bid, um.last_price)
+                    end
+                  else null
+                end * l.net_shares
+            end as mark_value
+          from legs l
+          left join unified_markets um on um.id = l.market_id
+          where l.net_shares >= 0
+        ),
+        pnl as (
+          select
+            wallet_id,
+            sum(mark_value - net_cost) as pnl_usd
+          from leg_marks
+          where mark_value is not null
+          group by wallet_id
+        )
         insert into wallet_metrics_snapshots (
           wallet_id,
           venue,
@@ -1053,25 +1144,25 @@ async function refreshMetrics(
           as_of,
           trades_count,
           volume_usd,
+          pnl_usd,
           last_trade_at
         )
         select
-          wallet_id,
+          agg.wallet_id,
           null,
           $2::text,
           $3::timestamptz,
-          count(*)::int,
-          sum(size_usd),
-          max(occurred_at)
-        from wallet_activity_events
-        where wallet_id = any($1::uuid[])
-          and activity_type in ('delta', 'trade')
-        ${whereSince}
-        group by wallet_id
+          agg.trades_count,
+          agg.volume_usd,
+          pnl.pnl_usd,
+          agg.last_trade_at
+        from agg
+        left join pnl on pnl.wallet_id = agg.wallet_id
         on conflict (wallet_id, venue, period, as_of)
         do update set
           trades_count = excluded.trades_count,
           volume_usd = excluded.volume_usd,
+          pnl_usd = excluded.pnl_usd,
           last_trade_at = excluded.last_trade_at,
           updated_at = now()
       `,
@@ -1818,9 +1909,9 @@ async function selectMarketsPerVenue(
   limitLimitless: number,
 ): Promise<MarketPickRow[]> {
   const rows: MarketPickRow[] = [];
-  const polyMode = env.walletIntelSelectionModePoly;
-  const kalshiMode = env.walletIntelSelectionModeKalshi;
-  const limitlessMode = env.walletIntelSelectionModeLimitless;
+  const polyMode = walletIntelRefreshPolicy.selectionModePoly;
+  const kalshiMode = walletIntelRefreshPolicy.selectionModeKalshi;
+  const limitlessMode = walletIntelRefreshPolicy.selectionModeLimitless;
 
   if (limitPoly > 0) {
     if (polyMode === "trade_1h") {
@@ -1867,10 +1958,10 @@ async function selectMarketsPerVenue(
 }
 
 async function runSnapshot(snapshotAt: Date) {
-  const holderLimit = env.walletIntelHolderLimit;
-  const marketLimit = env.walletIntelMarketLimit;
-  const marketLimitPerVenue = env.walletIntelMarketLimitPerVenue;
-  const marketLimitKalshi = env.walletIntelMarketLimitKalshi;
+  const holderLimit = walletIntelRefreshPolicy.holderLimit;
+  const marketLimit = walletIntelRefreshPolicy.marketLimit;
+  const marketLimitPerVenue = walletIntelRefreshPolicy.marketLimitPerVenue;
+  const marketLimitKalshi = walletIntelRefreshPolicy.marketLimitKalshi;
   const marketLimitPerVenueMax = Math.max(
     marketLimitPerVenue,
     marketLimitKalshi,
@@ -1897,7 +1988,7 @@ async function runSnapshot(snapshotAt: Date) {
         order by volume_24h desc nulls last
         limit $2
       `,
-      [env.walletIntelMinVolume24h, marketLimit],
+      [walletIntelRefreshPolicy.minVolume24h, marketLimit],
     );
 
     const marketsPerVenueRows =
@@ -1929,11 +2020,11 @@ async function runSnapshot(snapshotAt: Date) {
         order by volume_24h desc nulls last
         limit $1
       `,
-      [env.walletIntelWatchlistMarketLimit],
+      [walletIntelRefreshPolicy.watchlistMarketLimit],
     );
 
     const whaleMarkets =
-      env.walletIntelWhaleMarketLimit > 0
+      walletIntelRefreshPolicy.whaleMarketLimit > 0
         ? await client.query<{
             id: string;
             venue: string;
@@ -1951,7 +2042,7 @@ async function runSnapshot(snapshotAt: Date) {
               order by um.volume_24h desc nulls last
               limit $1
             `,
-            [env.walletIntelWhaleMarketLimit],
+            [walletIntelRefreshPolicy.whaleMarketLimit],
           )
         : { rows: [] };
 
@@ -2126,7 +2217,7 @@ async function runSnapshot(snapshotAt: Date) {
           if (
             chain === "solana" &&
             sizeUsd != null &&
-            sizeUsd >= env.walletIntelWhaleUsdSolana
+            sizeUsd >= walletIntelRefreshPolicy.whaleUsdSolana
           ) {
             await upsertWalletActivityEvent(client, {
               walletId,
@@ -2172,15 +2263,15 @@ async function runSnapshot(snapshotAt: Date) {
 
     tokenIdsByVenue.polymarket = capTokenIds(
       tokenIdsByVenue.polymarket,
-      env.walletIntelTokenLimitPoly,
+      walletIntelRefreshPolicy.tokenLimitPoly,
     );
     tokenIdsByVenue.limitless = capTokenIds(
       tokenIdsByVenue.limitless,
-      env.walletIntelTokenLimitLimitless,
+      walletIntelRefreshPolicy.tokenLimitLimitless,
     );
     tokenIdsByVenue.kalshi = capTokenIds(
       tokenIdsByVenue.kalshi,
-      env.walletIntelTokenLimitKalshi,
+      walletIntelRefreshPolicy.tokenLimitKalshi,
     );
 
     const followedWallets = await client.query<{
@@ -2196,7 +2287,7 @@ async function runSnapshot(snapshotAt: Date) {
         order by wf.created_at desc
         limit $1
       `,
-      [env.walletIntelFollowedWalletLimit],
+      [walletIntelRefreshPolicy.followedWalletLimit],
     );
 
     const followedByChain = { polygon: 0, base: 0, solana: 0 };
@@ -2388,10 +2479,10 @@ async function runSnapshot(snapshotAt: Date) {
     await refreshSystemTags(client, {
       walletIds,
       tagIds,
-      freshDays: env.walletIntelFreshDays,
-      dormantDays: env.walletIntelDormantDays,
-      whaleUsd: env.walletIntelWhaleUsd,
-      whaleUsdSolana: env.walletIntelWhaleUsdSolana,
+      freshDays: walletIntelRefreshPolicy.freshDays,
+      dormantDays: walletIntelRefreshPolicy.dormantDays,
+      whaleUsd: walletIntelRefreshPolicy.whaleUsd,
+      whaleUsdSolana: walletIntelRefreshPolicy.whaleUsdSolana,
       asOf: snapshotAt,
     });
 
@@ -2443,15 +2534,22 @@ async function runSnapshot(snapshotAt: Date) {
 }
 
 async function main() {
+  const [refreshPolicy, whalePolicy] = await Promise.all([
+    resolveWalletIntelRefreshPolicy(pool),
+    resolveAiWhaleProfilesPolicy(pool),
+  ]);
+  walletIntelRefreshPolicy = refreshPolicy.effective;
+  aiWhaleProfilesPolicy = whalePolicy.effective;
+
   const runAt = new Date();
-  const baseSnapshot = bucketDate(runAt, env.walletIntelSnapshotHours);
+  const baseSnapshot = bucketDate(runAt, walletIntelRefreshPolicy.snapshotHours);
   const backfillSteps = parseBackfillSnapshots();
   const retention = parseRetentionConfig();
   const snapshots: Date[] = [];
 
   if (backfillSteps > 0) {
     console.log(
-      `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${env.walletIntelSnapshotHours}`,
+      `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${walletIntelRefreshPolicy.snapshotHours}`,
     );
   }
 
@@ -2476,7 +2574,7 @@ async function main() {
 
   for (let step = backfillSteps; step >= 0; step -= 1) {
     snapshots.push(
-      addHours(baseSnapshot, -step * env.walletIntelSnapshotHours),
+      addHours(baseSnapshot, -step * walletIntelRefreshPolicy.snapshotHours),
     );
   }
 
@@ -2484,11 +2582,12 @@ async function main() {
     await runSnapshot(snapshotAt);
   }
 
-  if (env.aiWhaleProfileAutoRun) {
+  if (aiWhaleProfilesPolicy.autoRun) {
     const result = await runWhaleProfiles({
-      limit: env.aiWhaleProfileLimit,
-      marketLimit: env.aiWhaleProfileMarketLimit,
-      windowDays: env.aiWhaleProfileWindowDays,
+      limit: aiWhaleProfilesPolicy.limit,
+      marketLimit: aiWhaleProfilesPolicy.marketLimit,
+      windowDays: aiWhaleProfilesPolicy.windowDays,
+      policy: aiWhaleProfilesPolicy,
     });
     console.log("[wallets:intel:refresh] whale profiles", result);
   }

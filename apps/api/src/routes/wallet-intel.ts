@@ -16,6 +16,10 @@ import {
   type WalletActivityTopChange,
 } from "../services/wallet-activity-summary.js";
 import {
+  resolveWalletIntelRefreshPolicy,
+  resolveWalletIntelSignalsPolicy,
+} from "../services/runtime-policies.js";
+import {
   walletActivityQuerySchema,
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
@@ -170,6 +174,11 @@ async function loadCandidateWallets(
   userId: string,
   scope: "following" | "whales" | "all",
   categories: string[] | null,
+  options?: {
+    windowHours?: number;
+    minActivityUsd?: number;
+    minActivityShares?: number;
+  },
 ): Promise<CandidateWalletRow[]> {
   const categoryFilter = categories && categories.length > 0 ? categories : null;
   const baseTagsLateral = `
@@ -236,6 +245,22 @@ async function loadCandidateWallets(
       [userId, categoryFilter],
     );
     return rows.rows;
+  }
+
+  if (scope === "all") {
+    const windowHours = Math.max(1, Math.trunc(options?.windowHours ?? 24));
+    return loadSignalCandidateWallets(
+      client,
+      userId,
+      "all",
+      categories,
+      windowHours,
+      {
+        minActivityUsd: options?.minActivityUsd ?? env.walletIntelMinActivityUsd,
+        minActivityShares:
+          options?.minActivityShares ?? env.walletIntelMinActivityShares,
+      },
+    );
   }
 
   const rows = await client.query<CandidateWalletRow>(
@@ -341,7 +366,15 @@ async function loadSignalCandidateWallets(
   scope: "following" | "active" | "all",
   categories: string[] | null,
   windowHours: number,
+  activityThresholds?: {
+    minActivityUsd: number;
+    minActivityShares: number;
+  },
 ): Promise<CandidateWalletRow[]> {
+  const minActivityUsd =
+    activityThresholds?.minActivityUsd ?? env.walletIntelMinActivityUsd;
+  const minActivityShares =
+    activityThresholds?.minActivityShares ?? env.walletIntelMinActivityShares;
   const activeRows = await client.query<{ wallet_id: string }>(
     `
       select wah.wallet_id
@@ -358,8 +391,8 @@ async function loadSignalCandidateWallets(
     `,
     [
       windowHours,
-      env.walletIntelMinActivityUsd,
-      env.walletIntelMinActivityShares,
+      minActivityUsd,
+      minActivityShares,
     ],
   );
   const followingRows = await client.query<{ wallet_id: string }>(
@@ -931,6 +964,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               return "exposure.exposure_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "winrate":
               return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+            case "pnl_30d":
+              return "metrics.metrics_pnl desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "last_activity":
             default:
               return "activity.last_activity_at desc nulls last, whale_score desc nulls last, w.last_seen_at desc";
@@ -947,6 +982,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             has_trade_activity: boolean | null;
             has_holder_activity: boolean | null;
             metrics_volume: string | null;
+            metrics_pnl: string | null;
             metrics_trades: number | null;
             exposure_usd: string | null;
             whale_score: string | null;
@@ -974,6 +1010,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tags.tags,
               metrics.metrics,
               metrics.metrics_volume,
+              metrics.metrics_pnl,
               metrics.metrics_trades,
               exposure.exposure_usd,
               case
@@ -1021,6 +1058,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   'last_trade_at', s.last_trade_at
                 ) as metrics,
                 s.volume_usd as metrics_volume,
+                s.pnl_usd as metrics_pnl,
                 s.trades_count as metrics_trades
               from wallet_metrics_snapshots s
               where s.wallet_id = w.id and s.period = '30d'
@@ -1186,7 +1224,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               if (hasHolder) return "holder";
               return null;
             })(),
-            trackedExposureUsd: row.exposure_usd ? Number(row.exposure_usd) : null,
+            trackedExposureUsd:
+              row.exposure_usd != null ? Number(row.exposure_usd) : null,
+            approxPnlUsd: row.metrics_pnl != null ? Number(row.metrics_pnl) : null,
+            approxPnlPeriod: "30d" as const,
             inferredWinRate:
               row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
                 ? Number(row.inferred_wins) / Number(row.inferred_total)
@@ -1450,11 +1491,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const client = await pool.connect();
       try {
+        const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
         const candidates = await loadCandidateWallets(
           client,
           user.id,
           query.scope,
           categoryFilter,
+          {
+            windowHours: query.windowHours,
+            minActivityUsd: refreshPolicy.effective.minActivityUsd,
+            minActivityShares: refreshPolicy.effective.minActivityShares,
+          },
         );
         const walletIds = candidates.map((row) => row.id);
         if (walletIds.length === 0) {
@@ -1571,31 +1618,40 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ),
       );
 
-      const windowMax = Math.max(1, env.walletIntelSignalWindowHoursMax);
-      const windowDefault = Math.min(
-        Math.max(1, env.walletIntelSignalWindowHoursDefault),
-        windowMax,
-      );
-      const windowHours = Math.min(
-        Math.max(1, query.windowHours ?? windowDefault),
-        windowMax,
-      );
-      const minScore = query.minScore ?? env.walletIntelSignalMinScore;
-      const maxOdds = query.maxOdds ?? env.walletIntelSignalMaxOdds;
-      const minStakeUsd = query.minStakeUsd ?? env.walletIntelSignalMinStakeUsd;
-      const minIdleDays = query.minIdleDays ?? env.walletIntelSignalMinIdleDays;
-      const maxPriorMarkets =
-        query.maxPriorMarkets ?? env.walletIntelSignalMaxPriorMarkets;
-      const minPayoutUsd = query.minPayoutUsd ?? env.walletIntelSignalMinPayoutUsd;
-
       const client = await pool.connect();
       try {
+        const [signalsPolicy, refreshPolicy] = await Promise.all([
+          resolveWalletIntelSignalsPolicy(client),
+          resolveWalletIntelRefreshPolicy(client),
+        ]);
+        const signalConfig = signalsPolicy.effective;
+        const windowMax = Math.max(1, signalConfig.windowHoursMax);
+        const windowDefault = Math.min(
+          Math.max(1, signalConfig.windowHoursDefault),
+          windowMax,
+        );
+        const windowHours = Math.min(
+          Math.max(1, query.windowHours ?? windowDefault),
+          windowMax,
+        );
+        const minScore = query.minScore ?? signalConfig.minScore;
+        const maxOdds = query.maxOdds ?? signalConfig.maxOdds;
+        const minStakeUsd = query.minStakeUsd ?? signalConfig.minStakeUsd;
+        const minIdleDays = query.minIdleDays ?? signalConfig.minIdleDays;
+        const maxPriorMarkets =
+          query.maxPriorMarkets ?? signalConfig.maxPriorMarkets;
+        const minPayoutUsd = query.minPayoutUsd ?? signalConfig.minPayoutUsd;
+
         const candidates = await loadSignalCandidateWallets(
           client,
           user.id,
           query.scope,
           categoryFilter,
           windowHours,
+          {
+            minActivityUsd: refreshPolicy.effective.minActivityUsd,
+            minActivityShares: refreshPolicy.effective.minActivityShares,
+          },
         );
         const walletIds = candidates.map((row) => row.id);
         if (walletIds.length === 0) {
@@ -1613,6 +1669,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             minIdleDays,
             maxPriorMarkets,
             minPayoutUsd,
+            lateHours: signalConfig.lateHours,
+            veryLateHours: signalConfig.veryLateHours,
+            retentionDaysActivity: refreshPolicy.effective.retentionDaysActivity,
+            weightStake: signalConfig.weightStake,
+            weightOdds: signalConfig.weightOdds,
+            weightIdle: signalConfig.weightIdle,
+            weightNovelty: signalConfig.weightNovelty,
             minScore,
           },
         });
@@ -1650,7 +1713,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
             if (marketStatus === "ACTIVE" && (!hasValidCloseAt || closeAtMs <= nowMs)) {
               activeWithInvalidClose += 1;
-              if (activeInvalidSamples.length < 5) {
+              if (
+                activeInvalidSamples.length <
+                signalConfig.activeInvalidCloseSampleCap
+              ) {
                 activeInvalidSamples.push({
                   marketId: change.marketId,
                   marketStatus: change.marketStatus ?? null,
@@ -1660,9 +1726,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               }
             }
 
-            if (!isOpenNow) continue;
+            if (signalConfig.requireOpenNow && !isOpenNow) continue;
             if ((change.signalScore ?? 0) < minScore) continue;
             if ((change.stakeUsd ?? 0) < minStakeUsd) continue;
+            if (
+              signalConfig.minDeltaUsd > 0 &&
+              Math.abs(change.deltaUsd ?? 0) < signalConfig.minDeltaUsd
+            ) {
+              continue;
+            }
             if (change.odds == null || change.odds > maxOdds) continue;
             const passesIdleDays = (change.idleDays ?? 0) >= minIdleDays;
             const passesPriorMarkets =

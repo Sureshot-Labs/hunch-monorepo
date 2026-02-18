@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
   fetchWalletActivitySummaries,
   type WalletActivitySummary,
@@ -188,6 +189,7 @@ type WhaleProfileOptions = {
   limit: number;
   marketLimit: number;
   windowDays: number;
+  policy?: AiWhaleProfilesPolicy;
   force?: boolean;
   dryRun?: boolean;
 };
@@ -523,6 +525,7 @@ function buildProfileInput(
     recentSummary: WalletActivitySummary | null;
     recentWindowHours: number;
     recentTopChanges: number;
+    styleGuide: string;
   },
 ): WhaleProfileInput {
   const now = Date.now();
@@ -717,7 +720,7 @@ function buildProfileInput(
       currency: "USD",
       display_notes:
         "Write for end-users. Avoid jargon, avoid market IDs, no insider claims.",
-      style_guide: env.aiWhaleProfileStyleGuide,
+      style_guide: context.styleGuide,
     },
     wallet: {
       address: wallet.address,
@@ -779,6 +782,19 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     console.warn("[whale-profile] OPENROUTER_API_KEY missing, skipping");
     return { processed: 0, updated: 0, skipped: 0, failed: 0 };
   }
+
+  const policy: AiWhaleProfilesPolicy = options.policy ?? {
+    autoRun: env.aiWhaleProfileAutoRun,
+    limit: env.aiWhaleProfileLimit,
+    marketLimit: env.aiWhaleProfileMarketLimit,
+    windowDays: env.aiWhaleProfileWindowDays,
+    model: env.aiWhaleProfileModel,
+    styleGuide: env.aiWhaleProfileStyleGuide,
+    maxTokens: env.aiWhaleProfileMaxTokens,
+    maxTokensFallback: env.aiWhaleProfileMaxTokensFallback,
+    promptVersion: "v1",
+    strictNoInsiderLanguage: true,
+  };
 
   const limit = Math.max(1, options.limit);
   const marketLimit = Math.max(1, options.marketLimit);
@@ -1048,6 +1064,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         recentSummary,
         recentWindowHours,
         recentTopChanges,
+        styleGuide: policy.styleGuide,
       });
       const featuresHash = hashProfileInput(input);
       if (!options.force && existingMap.get(whale.id) === featuresHash) {
@@ -1091,7 +1108,9 @@ Rules:
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
  - Prefer evidence from top_events when available; fall back to top_markets.
  - Use summary.side_bias_label and summary.concentration_label as hints.
- - Style guide: ${env.aiWhaleProfileStyleGuide}
+ - Style guide: ${policy.styleGuide}
+ - Prompt version: ${policy.promptVersion}
+${policy.strictNoInsiderLanguage ? "- Never suggest insider information." : ""}
 
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
@@ -1101,12 +1120,12 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
       let profileRaw = "";
       try {
         profileRaw = await callOpenRouter(
-          env.aiWhaleProfileModel,
+          policy.model,
           [
             { role: "system", content: system },
             { role: "user", content: user },
           ],
-          env.aiWhaleProfileMaxTokens,
+          policy.maxTokens,
         );
       } catch (error) {
         failed += 1;
@@ -1121,12 +1140,12 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
       if (!parsed) {
         try {
           profileRaw = await callOpenRouter(
-            env.aiWhaleProfileModel,
+            policy.model,
             [
               { role: "system", content: system },
               { role: "user", content: compactUser },
             ],
-            env.aiWhaleProfileMaxTokensFallback,
+            policy.maxTokensFallback,
           );
           parsed = parseProfileJson(profileRaw);
         } catch (error) {
@@ -1186,7 +1205,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
           whale.id,
           JSON.stringify(normalized),
           featuresHash,
-          env.aiWhaleProfileModel,
+          policy.model,
           PROFILE_VERSION,
         ],
       );

@@ -1,5 +1,6 @@
-import { env } from "./env.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
+import { pool } from "./db.js";
+import { resolveAiWhaleProfilesPolicy } from "./services/runtime-policies.js";
 
 function readArg(
   name: string,
@@ -21,14 +22,14 @@ function readArg(
 }
 
 async function main() {
+  const policy = await resolveAiWhaleProfilesPolicy(pool);
+  const config = policy.effective;
   const limit =
-    (readArg("limit") as number | undefined) ?? env.aiWhaleProfileLimit;
+    (readArg("limit") as number | undefined) ?? config.limit;
   const marketLimit =
-    (readArg("market-limit") as number | undefined) ??
-    env.aiWhaleProfileMarketLimit;
+    (readArg("market-limit") as number | undefined) ?? config.marketLimit;
   const windowDays =
-    (readArg("window-days") as number | undefined) ??
-    env.aiWhaleProfileWindowDays;
+    (readArg("window-days") as number | undefined) ?? config.windowDays;
   const force = Boolean(readArg("force", false));
   const dryRun = Boolean(readArg("dry-run", false));
 
@@ -38,7 +39,7 @@ async function main() {
     windowDays,
     force,
     dryRun,
-    model: env.aiWhaleProfileModel,
+    model: config.model,
   });
 
   const result = await runWhaleProfiles({
@@ -47,6 +48,7 @@ async function main() {
     windowDays,
     force,
     dryRun,
+    policy: config,
   });
 
   console.log("[whale-profile] done", result);

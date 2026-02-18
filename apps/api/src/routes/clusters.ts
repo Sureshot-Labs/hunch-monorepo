@@ -7,6 +7,10 @@ import {
   type ClusterMarketSummary,
 } from "../services/clusters.js";
 import {
+  resolveAiClustersPolicy,
+  resolveArbitrageDefaultsPolicy,
+} from "../services/runtime-policies.js";
+import {
   clusterParamsSchema,
   clustersQuerySchema,
 } from "../schemas/clusters.js";
@@ -121,6 +125,18 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: clustersQuerySchema } },
     async (request, reply) => {
       const query = request.query;
+      const [arbitrageDefaults, aiClustersPolicy] = await Promise.all([
+        resolveArbitrageDefaultsPolicy(pool),
+        resolveAiClustersPolicy(pool),
+      ]);
+      const defaults = {
+        limit: arbitrageDefaults.effective.limit,
+        minVenueCount: arbitrageDefaults.effective.minVenueCount,
+        minSpread: arbitrageDefaults.effective.minSpread,
+        minQualityScore: arbitrageDefaults.effective.minQualityScore,
+        minAnalysisConfidence: aiClustersPolicy.effective.minConfidence,
+        maxOutlierRatio: aiClustersPolicy.effective.maxOutlierRatio,
+      };
       const { redis, status } = await getRedisStatus();
       if (!redis) {
         const error =
@@ -135,12 +151,12 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
 
       const generatedAt = meta.generated_at ?? null;
       if (!indexRaw) {
-        return { items: [], generatedAt };
+        return { items: [], generatedAt, defaults };
       }
 
       const ids = parseJson<string[]>(indexRaw, []);
       if (!ids.length) {
-        return { items: [], generatedAt };
+        return { items: [], generatedAt, defaults };
       }
 
       const fields: Array<keyof ClusterHash> = [
@@ -196,13 +212,13 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.minLiquidity >= minLiquidity,
         );
       }
-      const minVenueCount = query.minVenueCount;
+      const minVenueCount = query.minVenueCount ?? defaults.minVenueCount;
       if (minVenueCount != null) {
         filtered = filtered.filter(
           (cluster) => cluster.venueCount >= minVenueCount,
         );
       }
-      const minSpread = query.minSpread;
+      const minSpread = query.minSpread ?? defaults.minSpread;
       if (minSpread != null) {
         filtered = filtered.filter(
           (cluster) =>
@@ -210,7 +226,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.priceSpread >= minSpread,
         );
       }
-      const minQualityScore = query.minQualityScore;
+      const minQualityScore = query.minQualityScore ?? defaults.minQualityScore;
       if (minQualityScore != null) {
         filtered = filtered.filter(
           (cluster) =>
@@ -218,7 +234,8 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.qualityScore >= minQualityScore,
         );
       }
-      const minAnalysisConfidence = query.minAnalysisConfidence;
+      const minAnalysisConfidence =
+        query.minAnalysisConfidence ?? defaults.minAnalysisConfidence;
       if (minAnalysisConfidence != null) {
         filtered = filtered.filter(
           (cluster) =>
@@ -226,7 +243,8 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.analysis.confidence >= minAnalysisConfidence,
         );
       }
-      const maxOutlierRatio = query.maxOutlierRatio;
+      const maxOutlierRatio =
+        query.maxOutlierRatio ?? defaults.maxOutlierRatio;
       if (maxOutlierRatio != null) {
         filtered = filtered.filter((cluster) => {
           if (!cluster.analysis) return false;
@@ -236,9 +254,10 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const limit = query.limit ?? 20;
+      const limit = query.limit ?? defaults.limit;
       return {
         generatedAt,
+        defaults,
         items: filtered.slice(0, limit),
       };
     },
