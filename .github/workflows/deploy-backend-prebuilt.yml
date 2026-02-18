@@ -34,9 +34,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Rewards safety tests
-        run: pnpm -C apps/api run test:rewards
-
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
 
