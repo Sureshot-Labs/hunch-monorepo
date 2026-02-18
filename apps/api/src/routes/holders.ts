@@ -31,8 +31,15 @@ export const holdersRoutes: FastifyPluginAsync = async (app) => {
         return { error: "marketId is required" };
       }
 
+      const isPolymarket = marketId.startsWith("polymarket:");
       const cacheKey = `holders:v1:${marketId}:${limit}`;
-      const cacheTtl = env.holdersTtlSec > 0 ? env.holdersTtlSec : 300;
+      const cacheTtl = isPolymarket
+        ? env.holdersTtlSecPolymarket > 0
+          ? env.holdersTtlSecPolymarket
+          : 60
+        : env.holdersTtlSec > 0
+          ? env.holdersTtlSec
+          : 300;
       const r = await getRedis();
 
       if (r) {
