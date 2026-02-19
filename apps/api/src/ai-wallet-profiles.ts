@@ -32,6 +32,11 @@ async function main() {
     (readArg("window-days") as number | undefined) ?? config.windowDays;
   const force = Boolean(readArg("force", false));
   const dryRun = Boolean(readArg("dry-run", false));
+  const verbose = Boolean(readArg("verbose", false));
+  const logEvery = Math.max(
+    1,
+    Math.trunc((readArg("log-every", 10) as number) || 10),
+  );
 
   console.log("[whale-profile] start", {
     limit,
@@ -39,6 +44,8 @@ async function main() {
     windowDays,
     force,
     dryRun,
+    verbose,
+    logEvery,
     selectionMode: config.selectionMode,
     selectionRecentLimit: config.selectionRecentLimit,
     selectionPnlLimit: config.selectionPnlLimit,
@@ -53,6 +60,8 @@ async function main() {
     windowDays,
     force,
     dryRun,
+    verbose,
+    logEvery,
     policy: config,
   });
 

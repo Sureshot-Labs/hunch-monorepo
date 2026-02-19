@@ -162,6 +162,10 @@ type WhaleRow = {
   has_holder_activity: boolean | null;
   inferred_wins: number | null;
   inferred_total: number | null;
+  rank_recent: number | null;
+  rank_pnl: number | null;
+  rank_signal: number | null;
+  source_hits: number;
 };
 
 type WhaleMarketRow = {
@@ -195,6 +199,8 @@ type WhaleProfileOptions = {
   policy?: AiWhaleProfilesPolicy;
   force?: boolean;
   dryRun?: boolean;
+  verbose?: boolean;
+  logEvery?: number;
 };
 
 const clampNumber = (value: number, min: number, max: number) =>
@@ -806,6 +812,8 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const limit = Math.max(1, options.limit);
   const marketLimit = Math.max(1, options.marketLimit);
   const windowDays = Math.max(1, options.windowDays);
+  const verbose = Boolean(options.verbose);
+  const logEvery = Math.max(1, Math.trunc(options.logEvery ?? 10));
   const signalsWindowHours = Math.max(1, policy.selectionSignalsWindowHours);
   let selectRecentLimit = Math.max(0, Math.trunc(policy.selectionRecentLimit));
   let selectPnlLimit = Math.max(0, Math.trunc(policy.selectionPnlLimit));
@@ -826,6 +834,20 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   ) {
     selectRecentLimit = limit;
   }
+  console.log("[whale-profile] selection config", {
+    mode: policy.selectionMode,
+    limit,
+    marketLimit,
+    windowDays,
+    selectRecentLimit,
+    selectPnlLimit,
+    selectSignalsLimit,
+    signalsWindowHours,
+    force: Boolean(options.force),
+    dryRun: Boolean(options.dryRun),
+    verbose,
+    logEvery,
+  });
   // Keep recent-window inputs small and stable; hashing is bucketed below.
   const recentWindowHours = 24;
   const recentTopChanges = 3;
@@ -1015,7 +1037,15 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           wb.has_trade_activity,
           wb.has_holder_activity,
           wb.inferred_wins,
-          wb.inferred_total
+          wb.inferred_total,
+          r.rank_recent,
+          p.rank_pnl,
+          s.rank_signal,
+          (
+            case when $3 > 0 and r.rank_recent <= $3 then 1 else 0 end +
+            case when $4 > 0 and p.rank_pnl <= $4 then 1 else 0 end +
+            case when $5 > 0 and s.rank_signal <= $5 then 1 else 0 end
+          )::int as source_hits
         from whale_base wb
         join candidate_ids c on c.id = wb.id
         left join recent_ranked r on r.id = wb.id
@@ -1044,6 +1074,30 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         signalsWindowHours,
       ],
     );
+    const sourceCoverage = {
+      recent: whaleRows.rows.filter(
+        (row) => row.rank_recent != null && row.rank_recent <= selectRecentLimit,
+      ).length,
+      pnl: whaleRows.rows.filter(
+        (row) => row.rank_pnl != null && row.rank_pnl <= selectPnlLimit,
+      ).length,
+      signals: whaleRows.rows.filter(
+        (row) => row.rank_signal != null && row.rank_signal <= selectSignalsLimit,
+      ).length,
+      multiSource: whaleRows.rows.filter((row) => row.source_hits >= 2).length,
+    };
+    console.log("[whale-profile] selected wallets", {
+      count: whaleRows.rows.length,
+      sourceCoverage,
+      sample: whaleRows.rows.slice(0, 5).map((row) => ({
+        walletId: row.id,
+        chain: row.chain,
+        sourceHits: row.source_hits,
+        rankRecent: row.rank_recent,
+        rankPnl: row.rank_pnl,
+        rankSignal: row.rank_signal,
+      })),
+    });
 
     if (whaleRows.rows.length === 0) {
       return { processed: 0, updated: 0, skipped: 0, failed: 0 };
@@ -1061,6 +1115,11 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           baselineDays: windowDays,
         },
       );
+      console.log("[whale-profile] recent summary loaded", {
+        wallets: whaleIds.length,
+        summarized: recentSummaryMap.size,
+        windowHours: recentWindowHours,
+      });
     } catch (error) {
       console.warn("[whale-profile] recent summary failed", { error });
     }
@@ -1140,6 +1199,12 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       `,
       [whaleIds, marketLimit, windowDays],
     );
+    console.log("[whale-profile] top markets loaded", {
+      wallets: whaleIds.length,
+      rows: marketRows.rows.length,
+      marketLimit,
+      windowDays,
+    });
 
     const marketMap = new Map<string, WhaleMarketRow[]>();
     for (const row of marketRows.rows) {
@@ -1169,8 +1234,20 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     let skipped = 0;
     let failed = 0;
 
-    for (const whale of whaleRows.rows) {
+    for (const [index, whale] of whaleRows.rows.entries()) {
       processed += 1;
+      if (verbose) {
+        console.log("[whale-profile] wallet start", {
+          index: index + 1,
+          total: whaleRows.rows.length,
+          walletId: whale.id,
+          chain: whale.chain,
+          sourceHits: whale.source_hits,
+          rankRecent: whale.rank_recent,
+          rankPnl: whale.rank_pnl,
+          rankSignal: whale.rank_signal,
+        });
+      }
       const topMarkets = marketMap.get(whale.id) ?? [];
       const recentSummary = recentSummaryMap.get(whale.id) ?? null;
       const input = buildProfileInput(whale, topMarkets, {
@@ -1184,6 +1261,19 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       const featuresHash = hashProfileInput(input);
       if (!options.force && existingMap.get(whale.id) === featuresHash) {
         skipped += 1;
+        if (verbose) {
+          console.log("[whale-profile] wallet skipped (unchanged)", {
+            walletId: whale.id,
+          });
+        } else if (processed % logEvery === 0) {
+          console.log("[whale-profile] progress", {
+            processed,
+            total: whaleRows.rows.length,
+            updated,
+            skipped,
+            failed,
+          });
+        }
         continue;
       }
 
@@ -1246,8 +1336,18 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         failed += 1;
         console.warn("[whale-profile] openrouter error", {
           walletId: whale.id,
+          address: whale.address,
           error,
         });
+        if (!verbose && processed % logEvery === 0) {
+          console.log("[whale-profile] progress", {
+            processed,
+            total: whaleRows.rows.length,
+            updated,
+            skipped,
+            failed,
+          });
+        }
         continue;
       }
 
@@ -1267,8 +1367,18 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
           failed += 1;
           console.warn("[whale-profile] openrouter retry failed", {
             walletId: whale.id,
+            address: whale.address,
             error,
           });
+          if (!verbose && processed % logEvery === 0) {
+            console.log("[whale-profile] progress", {
+              processed,
+              total: whaleRows.rows.length,
+              updated,
+              skipped,
+              failed,
+            });
+          }
           continue;
         }
       }
@@ -1278,8 +1388,18 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         failed += 1;
         console.warn("[whale-profile] invalid json", {
           walletId: whale.id,
+          address: whale.address,
           raw: profileRaw.slice(0, 500),
         });
+        if (!verbose && processed % logEvery === 0) {
+          console.log("[whale-profile] progress", {
+            processed,
+            total: whaleRows.rows.length,
+            updated,
+            skipped,
+            failed,
+          });
+        }
         continue;
       }
 
@@ -1295,6 +1415,20 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
 
       if (options.dryRun) {
         updated += 1;
+        if (verbose) {
+          console.log("[whale-profile] wallet dry-run update", {
+            walletId: whale.id,
+            markets: topMarkets.length,
+          });
+        } else if (processed % logEvery === 0) {
+          console.log("[whale-profile] progress", {
+            processed,
+            total: whaleRows.rows.length,
+            updated,
+            skipped,
+            failed,
+          });
+        }
         continue;
       }
 
@@ -1325,6 +1459,20 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         ],
       );
       updated += 1;
+      if (verbose) {
+        console.log("[whale-profile] wallet updated", {
+          walletId: whale.id,
+          markets: topMarkets.length,
+        });
+      } else if (processed % logEvery === 0) {
+        console.log("[whale-profile] progress", {
+          processed,
+          total: whaleRows.rows.length,
+          updated,
+          skipped,
+          failed,
+        });
+      }
     }
 
     return { processed, updated, skipped, failed };
