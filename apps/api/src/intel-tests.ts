@@ -10,6 +10,14 @@ import {
   resolveIntelPolicy,
   resolveSignalWindowHours,
 } from "./services/runtime-policies.js";
+import {
+  evaluateSignalMarketWindow,
+  mergeWalletIdsForScope,
+} from "./services/wallet-intel-filters.js";
+import {
+  computeApproxLegPnlUsd,
+  NET_SHARES_EPSILON,
+} from "./services/wallet-intel-pnl.js";
 
 type TestCase = {
   name: string;
@@ -152,6 +160,147 @@ const tests: TestCase[] = [
       const resolved = await resolveIntelPolicy(db, "ai_whale_profiles");
       assert.equal(resolved.invalidOverride, true);
       assert.equal(resolved.source, "env");
+    },
+  },
+  {
+    name: "scope=all wallet candidates use following+active union with dedupe",
+    run: () => {
+      const merged = mergeWalletIdsForScope(
+        "all",
+        ["follow-a", "shared", "follow-b"],
+        ["active-a", "shared", "active-b"],
+      );
+      assert.deepEqual(merged, [
+        "follow-a",
+        "shared",
+        "follow-b",
+        "active-a",
+        "active-b",
+      ]);
+      assert.deepEqual(
+        mergeWalletIdsForScope("following", ["a", "b"], ["c"]),
+        ["a", "b"],
+      );
+      assert.deepEqual(mergeWalletIdsForScope("active", ["a"], ["b", "c"]), [
+        "b",
+        "c",
+      ]);
+    },
+  },
+  {
+    name: "signal market open-now gate requires ACTIVE unresolved with future close",
+    run: () => {
+      const nowMs = Date.UTC(2026, 1, 19, 12, 0, 0);
+      const future = new Date(nowMs + 60_000);
+      const past = new Date(nowMs - 60_000);
+
+      const open = evaluateSignalMarketWindow(
+        {
+          marketStatus: "ACTIVE",
+          resolvedOutcome: null,
+          closeTime: future,
+          expirationTime: null,
+        },
+        nowMs,
+      );
+      assert.equal(open.isOpenNow, true);
+      assert.equal(open.isActiveWithInvalidClose, false);
+
+      const missingClose = evaluateSignalMarketWindow(
+        {
+          marketStatus: "ACTIVE",
+          resolvedOutcome: null,
+          closeTime: null,
+          expirationTime: null,
+        },
+        nowMs,
+      );
+      assert.equal(missingClose.isOpenNow, false);
+      assert.equal(missingClose.isActiveWithInvalidClose, true);
+
+      const pastClose = evaluateSignalMarketWindow(
+        {
+          marketStatus: "ACTIVE",
+          resolvedOutcome: null,
+          closeTime: past,
+          expirationTime: null,
+        },
+        nowMs,
+      );
+      assert.equal(pastClose.isOpenNow, false);
+      assert.equal(pastClose.isActiveWithInvalidClose, true);
+
+      const resolved = evaluateSignalMarketWindow(
+        {
+          marketStatus: "ACTIVE",
+          resolvedOutcome: "YES",
+          closeTime: future,
+          expirationTime: null,
+        },
+        nowMs,
+      );
+      assert.equal(resolved.isOpenNow, false);
+      assert.equal(resolved.isResolved, true);
+    },
+  },
+  {
+    name: "approx pnl scenario matrix stays aligned with refresh formula semantics",
+    run: () => {
+      const buyHold = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 10,
+        netCost: 5,
+        markPrice: 0.6,
+      });
+      assert.ok(Math.abs((buyHold ?? 0) - 1) < 1e-9);
+
+      const buySell = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 6,
+        netCost: 2.8,
+        markPrice: 0.6,
+      });
+      assert.ok(Math.abs((buySell ?? 0) - 0.8) < 1e-9);
+
+      const resolvedWin = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 4,
+        netCost: 1.2,
+        resolvedOutcome: "YES",
+      });
+      assert.ok(Math.abs((resolvedWin ?? 0) - 2.8) < 1e-9);
+
+      const resolvedLoss = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 4,
+        netCost: 1.2,
+        resolvedOutcome: "NO",
+      });
+      assert.ok(Math.abs((resolvedLoss ?? 0) + 1.2) < 1e-9);
+
+      const clampedHigh = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 2,
+        netCost: 0.5,
+        markPrice: 1.8,
+      });
+      assert.ok(Math.abs((clampedHigh ?? 0) - 1.5) < 1e-9);
+
+      const clampedLow = computeApproxLegPnlUsd({
+        outcomeSide: "NO",
+        netShares: 3,
+        netCost: 1.2,
+        markPrice: -4,
+      });
+      assert.ok(Math.abs((clampedLow ?? 0) - 1.8) < 1e-9);
+
+      const nearZeroNetShares = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: NET_SHARES_EPSILON / 2,
+        netCost: 1,
+        markPrice: 0.9,
+      });
+      assert.equal(nearZeroNetShares, null);
     },
   },
 ];

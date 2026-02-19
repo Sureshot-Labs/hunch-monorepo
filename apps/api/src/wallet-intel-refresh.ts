@@ -20,6 +20,7 @@ import {
   type AiWhaleProfilesPolicy,
   type WalletIntelRefreshPolicy,
 } from "./services/runtime-policies.js";
+import { NET_SHARES_EPSILON } from "./services/wallet-intel-pnl.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -1105,7 +1106,7 @@ async function refreshMetrics(
         negative_legs as (
           select count(*)::int as negative_legs
           from legs
-          where net_shares < -1e-9
+          where net_shares < -${NET_SHARES_EPSILON}
         ),
         leg_marks as (
           select
@@ -1138,7 +1139,7 @@ async function refreshMetrics(
             end as mark_value
           from legs l
           left join unified_markets um on um.id = l.market_id
-          where l.net_shares >= 1e-9
+          where l.net_shares >= ${NET_SHARES_EPSILON}
         ),
         pnl as (
           select

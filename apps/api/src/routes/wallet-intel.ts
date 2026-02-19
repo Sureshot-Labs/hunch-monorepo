@@ -21,6 +21,10 @@ import {
   resolveWalletIntelSignalsPolicy,
 } from "../services/runtime-policies.js";
 import {
+  evaluateSignalMarketWindow,
+  mergeWalletIdsForScope,
+} from "../services/wallet-intel-filters.js";
+import {
   walletActivityQuerySchema,
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
@@ -403,16 +407,8 @@ async function loadSignalCandidateWallets(
 
   const activeIds = activeRows.rows.map((row) => row.wallet_id);
   const followingIds = followingRows.rows.map((row) => row.wallet_id);
-  const idSet = new Set<string>();
-
-  if (scope === "following" || scope === "all") {
-    for (const walletId of followingIds) idSet.add(walletId);
-  }
-  if (scope === "active" || scope === "all") {
-    for (const walletId of activeIds) idSet.add(walletId);
-  }
-
-  return loadWalletRowsByIds(client, userId, Array.from(idSet), categories);
+  const mergedWalletIds = mergeWalletIdsForScope(scope, followingIds, activeIds);
+  return loadWalletRowsByIds(client, userId, mergedWalletIds, categories);
 }
 
 export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
@@ -1717,20 +1713,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (query.lateBucket && change.lateBucket !== query.lateBucket) continue;
             if (change.action !== "OPENED" && change.action !== "INCREASED") continue;
 
-            const marketStatus = change.marketStatus?.trim().toUpperCase() ?? null;
-            const closeAt = change.closeTime ?? change.expirationTime;
-            const closeAtMs = closeAt?.getTime() ?? Number.NaN;
-            const hasValidCloseAt = Number.isFinite(closeAtMs);
-            const isResolved = Boolean(
-              change.resolvedOutcome && String(change.resolvedOutcome).trim().length > 0,
-            );
-            const isOpenNow =
-              marketStatus === "ACTIVE" &&
-              !isResolved &&
-              hasValidCloseAt &&
-              closeAtMs > nowMs;
-
-            if (marketStatus === "ACTIVE" && (!hasValidCloseAt || closeAtMs <= nowMs)) {
+            const marketWindow = evaluateSignalMarketWindow(change, nowMs);
+            if (marketWindow.isActiveWithInvalidClose) {
               activeWithInvalidClose += 1;
               if (
                 activeInvalidSamples.length <
@@ -1745,7 +1729,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               }
             }
 
-            if (!isOpenNow) continue;
+            if (!marketWindow.isOpenNow) continue;
             if ((change.signalScore ?? 0) < minScore) continue;
             if ((change.stakeUsd ?? 0) < minStakeUsd) continue;
             if (
