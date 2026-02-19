@@ -13,10 +13,35 @@ import { registerRoutes } from "./routes/index.js";
 import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
 
+function sanitizeErrorEnvelope(
+  payload: unknown,
+  statusCode: number,
+): Record<string, unknown> | unknown {
+  if (!isRecord(payload)) return payload;
+  const sanitized: Record<string, unknown> = { ...payload };
+  delete sanitized.message;
+  delete sanitized.stack;
+
+  if (statusCode < 500) return sanitized;
+
+  delete sanitized.details;
+  delete sanitized.payload;
+  delete sanitized.cause;
+  if (typeof sanitized.error !== "string" || sanitized.error.trim().length === 0) {
+    sanitized.error = "Internal server error";
+  }
+  return sanitized;
+}
+
 export async function buildApp() {
+  const trustProxy = env.trustProxy
+    ? env.trustProxyHops > 0
+      ? env.trustProxyHops
+      : true
+    : false;
   const app = Fastify({
     logger: true,
-    trustProxy: env.trustProxy,
+    trustProxy,
   }).withTypeProvider<ZodTypeProvider>();
 
   app.setValidatorCompiler(validatorCompiler);
@@ -27,6 +52,11 @@ export async function buildApp() {
   });
   app.addHook("onResponse", async (req, _reply) => {
     if (req._t0 != null) onReqEnd(req._t0);
+  });
+
+  app.addHook("preSerialization", async (_request, reply, payload) => {
+    if (reply.statusCode < 400) return payload;
+    return sanitizeErrorEnvelope(payload, reply.statusCode);
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -47,7 +77,26 @@ export async function buildApp() {
     }
 
     request.log.error({ error }, "Unhandled error");
-    reply.send(error);
+    const rawStatusCode =
+      isRecord(error) && typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+    const statusCode =
+      Number.isInteger(rawStatusCode) &&
+      rawStatusCode >= 400 &&
+      rawStatusCode <= 599
+        ? rawStatusCode
+        : 500;
+    if (statusCode >= 500) {
+      reply.code(statusCode).send({ error: "Internal server error" });
+      return;
+    }
+
+    const message =
+      error instanceof Error && error.message.trim().length > 0
+        ? error.message
+        : "Request failed";
+    reply.code(statusCode).send({ error: message });
   });
 
   if (env.enableSwagger) {

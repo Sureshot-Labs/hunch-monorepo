@@ -14,6 +14,7 @@ import {
   createAuthMiddleware,
 } from "../auth.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { PrivyService } from "../privy-service.js";
@@ -115,7 +116,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const body = request.body;
 
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const userAgent = request.headers["user-agent"] || "unknown";
 
       try {
@@ -123,6 +124,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           `auth:privy:${clientIp}`,
           20,
           60_000,
+          { onError: "fail_closed" },
         );
         if (!canProceed) {
           reply.code(429);
@@ -218,7 +220,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(401);
         return reply.send({
           error: "Authentication failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -250,7 +251,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       reply.code(500);
       return reply.send({
         error: "Logout failed",
-        message: error instanceof Error ? error.message : "Unknown error",
       });
     }
     },
@@ -317,7 +317,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to get user information",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -346,7 +345,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to delete user",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
 
@@ -419,7 +417,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: `Failed to update ${venue} credentials`,
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -466,7 +463,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to get venue credentials",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -587,7 +583,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Polymarket connect failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -642,7 +637,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "Polymarket funder update failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -738,7 +732,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Polymarket relayer signing failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -793,7 +786,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to update Polymarket credentials",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -833,7 +825,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to get user wallets",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -865,18 +856,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         assertWalletAddress(walletType, walletAddress);
-      } catch (error) {
+      } catch {
         reply.code(400);
         return reply.send({
-          error: error instanceof Error ? error.message : "Invalid wallet data",
+          error: "Invalid wallet data",
         });
       }
 
       try {
+        const clientIp = resolveSecurityClientIp(request);
         const canProceed = await checkRateLimit(
-          `auth:wallet-nonce:${request.ip || "unknown"}`,
+          `auth:wallet-nonce:${clientIp}`,
           30,
           60_000,
+          { onError: "fail_closed" },
         );
         if (!canProceed) {
           reply.code(429);
@@ -942,7 +935,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to create wallet nonce",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -977,18 +969,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         assertWalletAddress(walletType, walletAddress);
-      } catch (error) {
+      } catch {
         reply.code(400);
         return reply.send({
-          error: error instanceof Error ? error.message : "Invalid wallet data",
+          error: "Invalid wallet data",
         });
       }
 
       try {
+        const clientIp = resolveSecurityClientIp(request);
         const canProceed = await checkRateLimit(
-          `auth:add-wallet:${request.ip || "unknown"}`,
+          `auth:add-wallet:${clientIp}`,
           20,
           60_000,
+          { onError: "fail_closed" },
         );
         if (!canProceed) {
           reply.code(429);
@@ -1017,11 +1011,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           let recovered: string;
           try {
             recovered = ethers.verifyMessage(message, verificationSignature);
-          } catch (error) {
+          } catch {
             reply.code(400);
             return reply.send({
               error: "Invalid wallet signature",
-              message: error instanceof Error ? error.message : "Unknown error",
             });
           }
 
@@ -1075,7 +1068,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to add wallet",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1101,10 +1093,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       try {
+        const clientIp = resolveSecurityClientIp(request);
         const canProceed = await checkRateLimit(
-          `auth:remove-wallet:${request.ip || "unknown"}`,
+          `auth:remove-wallet:${clientIp}`,
           20,
           60_000,
+          { onError: "fail_closed" },
         );
         if (!canProceed) {
           reply.code(429);
@@ -1148,7 +1142,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to remove wallet",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

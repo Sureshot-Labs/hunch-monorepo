@@ -526,7 +526,6 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Wallet balance lookup failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -629,7 +628,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               walletType: wallet.walletType,
               balances: [] as WalletBalanceItem[],
               warnings: [] as string[],
-              error: error instanceof Error ? error.message : "Unknown error",
+              error: "Balance lookup failed",
             };
           }
         },
@@ -946,10 +945,14 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 venueStatusInflight.delete(cacheKey);
               }
             } catch (error) {
+              app.log.warn(
+                { error, walletAddress },
+                "Polymarket venue status lookup failed",
+              );
               response.polymarket = {
                 supported: true,
                 ready: false,
-                error: error instanceof Error ? error.message : "Unknown error",
+                error: "Polymarket status lookup failed",
               };
             }
 
@@ -1045,10 +1048,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 },
               };
             } catch (error) {
+              app.log.warn({ error, walletAddress }, "Kalshi venue status lookup failed");
               response.kalshi = {
                 supported: true,
                 ready: false,
-                error: error instanceof Error ? error.message : "Unknown error",
+                error: "Kalshi status lookup failed",
               };
             }
 

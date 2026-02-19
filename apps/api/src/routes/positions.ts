@@ -195,7 +195,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch positions",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -254,7 +253,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch position pnl summary",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -323,7 +321,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch positions by token",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -372,7 +369,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to update position visibility",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

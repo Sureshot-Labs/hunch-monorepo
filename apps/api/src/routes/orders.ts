@@ -161,7 +161,6 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch orders",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -249,7 +248,6 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch open orders",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -309,7 +307,6 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch order",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

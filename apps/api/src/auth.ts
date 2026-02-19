@@ -10,6 +10,7 @@ import {
   encryptCredentialsString,
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
+import { resolveSecurityClientIp } from "./lib/request-ip.js";
 import { checkRateLimit } from "./lib/rate-limit.js";
 
 // JWT secret - in production, this should be in environment variables
@@ -108,6 +109,19 @@ type UserWalletRow = {
   is_verified: boolean;
   created_at: Date;
   updated_at: Date;
+};
+
+type AuthSessionRow = {
+  id: string;
+  user_id: string;
+  wallet_address: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  is_active: boolean;
+  expires_at: Date;
+  created_at: Date;
+  last_accessed_at: Date;
+  csrf_token: string;
 };
 
 export interface VenueCredentials {
@@ -213,6 +227,48 @@ async function getVenueCredentialsDbFeatures(): Promise<VenueCredentialsDbFeatur
   })();
 
   return venueCredentialsDbFeaturesPromise;
+}
+
+type SessionDbFeatures = {
+  hasSessionTokenHash: boolean;
+  hasLegacySessionToken: boolean;
+  supportsHashOnlyWrites: boolean;
+};
+
+let sessionDbFeaturesPromise: Promise<SessionDbFeatures> | null = null;
+
+async function getSessionDbFeatures(): Promise<SessionDbFeatures> {
+  if (sessionDbFeaturesPromise) return sessionDbFeaturesPromise;
+
+  sessionDbFeaturesPromise = (async () => {
+    const result = await pool.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'user_sessions'
+         AND column_name = ANY($1::text[])`,
+      [["session_token_hash", "session_token"]],
+    );
+
+    const byColumn = new Map(
+      result.rows.map((row) => [row.column_name, row.is_nullable]),
+    );
+    const hasLegacySessionToken = byColumn.has("session_token");
+    const sessionTokenNullable = byColumn.get("session_token") === "YES";
+    return {
+      hasSessionTokenHash: byColumn.has("session_token_hash"),
+      hasLegacySessionToken,
+      supportsHashOnlyWrites:
+        byColumn.has("session_token_hash") &&
+        (!hasLegacySessionToken || sessionTokenNullable),
+    };
+  })();
+
+  return sessionDbFeaturesPromise;
+}
+
+function hashSessionToken(sessionToken: string): string {
+  return crypto.createHash("sha256").update(sessionToken).digest("hex");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -1559,13 +1615,129 @@ export class AuthService {
     userAgent?: string,
   ): Promise<AuthSession> {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const sessionTokenHash = hashSessionToken(sessionToken);
+    const dbFeatures = await getSessionDbFeatures();
 
-    const result = await pool.query(
-      `INSERT INTO user_sessions (user_id, session_token, wallet_address, ip_address, user_agent, expires_at) 
-       VALUES ($1, $2, $3, $4, $5, $6) 
-       RETURNING id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at, csrf_token`,
-      [userId, sessionToken, walletAddress, ipAddress, userAgent, expiresAt],
-    );
+    const result =
+      dbFeatures.hasSessionTokenHash && !dbFeatures.hasLegacySessionToken
+        ? await pool.query<AuthSessionRow>(
+            `INSERT INTO user_sessions (
+               user_id,
+               session_token_hash,
+               wallet_address,
+               ip_address,
+               user_agent,
+               expires_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING
+               id,
+               user_id,
+               wallet_address,
+               ip_address,
+               user_agent,
+               is_active,
+               expires_at,
+               created_at,
+               last_accessed_at,
+               csrf_token`,
+            [
+              userId,
+              sessionTokenHash,
+              walletAddress,
+              ipAddress,
+              userAgent,
+              expiresAt,
+            ],
+          )
+        : dbFeatures.supportsHashOnlyWrites
+          ? await pool.query<AuthSessionRow>(
+              `INSERT INTO user_sessions (
+                 user_id,
+                 session_token,
+                 session_token_hash,
+                 wallet_address,
+                 ip_address,
+                 user_agent,
+                 expires_at
+               )
+               VALUES ($1, NULL, $2, $3, $4, $5, $6)
+               RETURNING
+                 id,
+                 user_id,
+                 wallet_address,
+                 ip_address,
+                 user_agent,
+                 is_active,
+                 expires_at,
+                 created_at,
+                 last_accessed_at,
+                 csrf_token`,
+              [
+                userId,
+                sessionTokenHash,
+                walletAddress,
+                ipAddress,
+                userAgent,
+                expiresAt,
+              ],
+            )
+        : dbFeatures.hasSessionTokenHash
+        ? await pool.query<AuthSessionRow>(
+            `INSERT INTO user_sessions (
+               user_id,
+               session_token,
+               session_token_hash,
+               wallet_address,
+               ip_address,
+               user_agent,
+               expires_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING
+               id,
+               user_id,
+               wallet_address,
+               ip_address,
+               user_agent,
+               is_active,
+               expires_at,
+               created_at,
+               last_accessed_at,
+               csrf_token`,
+            [
+              userId,
+              sessionToken,
+              sessionTokenHash,
+              walletAddress,
+              ipAddress,
+              userAgent,
+              expiresAt,
+            ],
+          )
+      : await pool.query<AuthSessionRow>(
+          `INSERT INTO user_sessions (
+             user_id,
+             session_token,
+             wallet_address,
+             ip_address,
+             user_agent,
+             expires_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING
+             id,
+             user_id,
+             wallet_address,
+             ip_address,
+             user_agent,
+             is_active,
+             expires_at,
+             created_at,
+             last_accessed_at,
+             csrf_token`,
+          [userId, sessionToken, walletAddress, ipAddress, userAgent, expiresAt],
+        );
 
     const row = result.rows[0];
 
@@ -1573,10 +1745,10 @@ export class AuthService {
     return {
       id: row.id,
       userId: row.user_id,
-      sessionToken: row.session_token,
+      sessionToken,
       walletAddress: row.wallet_address,
-      ipAddress: row.ip_address,
-      userAgent: row.user_agent,
+      ipAddress: row.ip_address ?? undefined,
+      userAgent: row.user_agent ?? undefined,
       isActive: row.is_active,
       expiresAt: row.expires_at,
       createdAt: row.created_at,
@@ -1591,12 +1763,46 @@ export class AuthService {
   static async validateSession(
     sessionToken: string,
   ): Promise<AuthSession | null> {
-    const result = await pool.query(
-      `SELECT id, user_id, session_token, wallet_address, ip_address, user_agent, is_active, expires_at, created_at, last_accessed_at, csrf_token
-       FROM user_sessions 
-       WHERE session_token = $1 AND is_active = true AND expires_at > now()`,
-      [sessionToken],
-    );
+    const dbFeatures = await getSessionDbFeatures();
+    const sessionTokenHash = hashSessionToken(sessionToken);
+
+    const result = dbFeatures.hasSessionTokenHash
+      ? await pool.query<AuthSessionRow>(
+          `SELECT
+             id,
+             user_id,
+             wallet_address,
+             ip_address,
+             user_agent,
+             is_active,
+             expires_at,
+             created_at,
+             last_accessed_at,
+             csrf_token
+           FROM user_sessions
+           WHERE session_token_hash = $1
+             AND is_active = true
+             AND expires_at > now()`,
+          [sessionTokenHash],
+        )
+      : await pool.query<AuthSessionRow>(
+          `SELECT
+             id,
+             user_id,
+             wallet_address,
+             ip_address,
+             user_agent,
+             is_active,
+             expires_at,
+             created_at,
+             last_accessed_at,
+             csrf_token
+           FROM user_sessions
+           WHERE session_token = $1
+             AND is_active = true
+             AND expires_at > now()`,
+          [sessionToken],
+        );
 
     if (result.rows.length === 0) {
       return null;
@@ -1604,8 +1810,8 @@ export class AuthService {
 
     // Update last accessed time
     await pool.query(
-      "UPDATE user_sessions SET last_accessed_at = now() WHERE session_token = $1",
-      [sessionToken],
+      "UPDATE user_sessions SET last_accessed_at = now() WHERE id = $1",
+      [result.rows[0].id],
     );
 
     const row = result.rows[0];
@@ -1614,10 +1820,10 @@ export class AuthService {
     return {
       id: row.id,
       userId: row.user_id,
-      sessionToken: row.session_token,
+      sessionToken,
       walletAddress: row.wallet_address,
-      ipAddress: row.ip_address,
-      userAgent: row.user_agent,
+      ipAddress: row.ip_address ?? undefined,
+      userAgent: row.user_agent ?? undefined,
       isActive: row.is_active,
       expiresAt: row.expires_at,
       createdAt: row.created_at,
@@ -1630,6 +1836,14 @@ export class AuthService {
    * Invalidate session
    */
   static async invalidateSession(sessionToken: string): Promise<void> {
+    const dbFeatures = await getSessionDbFeatures();
+    if (dbFeatures.hasSessionTokenHash) {
+      await pool.query(
+        "UPDATE user_sessions SET is_active = false WHERE session_token_hash = $1",
+        [hashSessionToken(sessionToken)],
+      );
+      return;
+    }
     await pool.query(
       "UPDATE user_sessions SET is_active = false WHERE session_token = $1",
       [sessionToken],
@@ -1780,8 +1994,11 @@ export function createAdminMiddleware(options: AuthMiddlewareOptions = {}) {
       return reply.send({ error: "Admin access required" });
     }
 
-    const rateLimitKey = `admin:${request.ip || "unknown"}`;
-    const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000);
+    const clientIp = resolveSecurityClientIp(request);
+    const rateLimitKey = `admin:${clientIp}`;
+    const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000, {
+      onError: "fail_closed",
+    });
     if (!canProceed) {
       reply.code(429);
       return reply.send({ error: "Rate limit exceeded" });

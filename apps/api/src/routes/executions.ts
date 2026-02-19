@@ -79,7 +79,6 @@ export const executionsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch executions",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

@@ -986,7 +986,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to store Limitless credentials",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
 
@@ -1397,7 +1396,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Limitless account snapshot",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1476,7 +1474,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Limitless redemption status",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1681,10 +1678,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           signatureType,
           ...(price == null ? {} : { price }),
         };
-      } catch (error) {
+      } catch {
         reply.code(400);
         return reply.send({
-          error: error instanceof Error ? error.message : "Invalid order data.",
+          error: "Invalid order data.",
         });
       }
 
@@ -2720,7 +2717,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const upstream = await limitlessRequest({
         method: "DELETE",
-        requestPath: `/orders/all/${request.params.slug}`,
+        requestPath: `/orders/all/${encodeURIComponent(request.params.slug)}`,
         sessionCookie,
       });
 
@@ -2808,7 +2805,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const upstream = await limitlessRequest({
         method: "GET",
-        requestPath: `/markets/${request.query.slug}/user-orders`,
+        requestPath: `/markets/${encodeURIComponent(request.query.slug)}/user-orders`,
         sessionCookie,
       });
 

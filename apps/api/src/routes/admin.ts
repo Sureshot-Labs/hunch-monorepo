@@ -283,10 +283,10 @@ async function fetchIndexCount(
     ])) as unknown[];
     const count = toOptionalNumber(response?.[0]) ?? null;
     return { count, error: count == null ? "Invalid index count" : null };
-  } catch (error) {
+  } catch {
     return {
       count: null,
-      error: error instanceof Error ? error.message : "Index count failed",
+      error: "Index count failed",
     };
   }
 }
@@ -2312,10 +2312,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (!userId && body.walletAddress) {
         try {
           userId = await resolveUserIdByWallet(body.walletAddress);
-        } catch (error) {
+        } catch {
           reply.code(400);
           return reply.send({
-            error: error instanceof Error ? error.message : "Wallet lookup failed",
+            error: "Wallet lookup failed",
           });
         }
       }
@@ -2479,10 +2479,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (!userId && walletInput) {
         try {
           userId = await resolveUserIdByWallet(walletInput);
-        } catch (error) {
+        } catch {
           reply.code(400);
           return reply.send({
-            error: error instanceof Error ? error.message : "Wallet lookup failed",
+            error: "Wallet lookup failed",
           });
         }
       }
