@@ -154,6 +154,12 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     category: rRow.market_category ?? null,
     image: rRow.market_image ?? null,
     icon: rRow.market_icon ?? null,
+    lastPrice: rRow.last_price != null ? Number(rRow.last_price) : null,
+    resolvedOutcome: rRow.resolved_outcome ?? null,
+    resolvedOutcomePct:
+      rRow.resolved_outcome_pct != null
+        ? Number(rRow.resolved_outcome_pct)
+        : null,
     top: {
       yesBid:
         rRow.best_bid_yes != null

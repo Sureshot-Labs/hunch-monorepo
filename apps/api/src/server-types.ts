@@ -82,6 +82,9 @@ export type FeedMarket = {
   outcomes?: unknown;
   negRiskExchange?: string | null;
   negRiskAdapter?: string | null;
+  lastPrice?: number | null;
+  resolvedOutcome?: string | null;
+  resolvedOutcomePct?: number | null;
   top: {
     yesBid: number | null;
     yesAsk: number | null;

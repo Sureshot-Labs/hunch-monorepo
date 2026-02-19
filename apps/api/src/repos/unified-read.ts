@@ -489,6 +489,8 @@ export type FeedMarketRow = {
   best_bid_no: unknown;
   best_ask_no: unknown;
   last_price: unknown;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
   change_24h: unknown;
   outcomes: string | null;
   token_yes: unknown;
@@ -743,6 +745,8 @@ export async function fetchFeedMarkets(
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
       m.last_price,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
       (${change24hExpr}) as change_24h,
       m.outcomes,
       m.resolved_token_yes as token_yes,
@@ -1151,6 +1155,8 @@ export async function fetchFeedMarketsDirect(
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
       m.last_price,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
       (${change24hExpr}) as change_24h,
       m.outcomes,
       m.resolved_token_yes as token_yes,
