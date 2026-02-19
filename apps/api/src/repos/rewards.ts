@@ -47,6 +47,16 @@ export type ReferralRow = {
   updated_at: Date;
 };
 
+export type InboundReferralRow = {
+  referrer_user_id: string;
+  code: string;
+  status: string;
+  linked_at: Date;
+  qualified_at: Date | null;
+  referrer_username: string | null;
+  referrer_display_name: string | null;
+};
+
 export type RewardsLeaderboardMetric = "points" | "volume" | "pnl";
 export type RewardsLeaderboardInterval =
   | "daily"
@@ -417,6 +427,30 @@ export async function insertReferral(
     ],
   );
   return Boolean(rows[0]?.inserted);
+}
+
+export async function fetchInboundReferralForUser(
+  pool: DbQuery,
+  userId: string,
+): Promise<InboundReferralRow | null> {
+  const { rows } = await pool.query<InboundReferralRow>(
+    `
+      select
+        r.referrer_user_id,
+        r.code,
+        r.status,
+        r.created_at as linked_at,
+        r.qualified_at,
+        u.username as referrer_username,
+        u.display_name as referrer_display_name
+      from referrals r
+      left join users u on u.id = r.referrer_user_id
+      where r.referred_user_id = $1
+      limit 1
+    `,
+    [userId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function fetchUserPoints(

@@ -11,7 +11,9 @@ import {
   usdcMicroToDecimalString,
 } from "./lib/usdc.js";
 import {
+  attachReferralCodeForExistingUser,
   computeCashbackBreakdown,
+  getReferralAttachmentStatus,
   resolveEffectiveBps,
   setReferralCodeForUser,
   type RewardsPolicy,
@@ -99,6 +101,103 @@ function createReferralDb(
       }
 
       throw new Error(`Unhandled SQL in referral test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
+function createReferralAttachDb(seed: {
+  users: Array<{
+    id: string;
+    referral_code: string | null;
+    username?: string | null;
+    display_name?: string | null;
+  }>;
+  referrals?: Array<{
+    referrer_user_id: string;
+    referred_user_id: string;
+    code: string;
+    status: "pending" | "qualified" | "blocked";
+    qualified_at?: Date | null;
+    created_at?: Date;
+  }>;
+}): import("./db.js").DbQuery {
+  const users = seed.users.map((row) => ({
+    username: null,
+    display_name: null,
+    ...row,
+  }));
+  const referrals = (seed.referrals ?? []).map((row) => ({
+    qualified_at: null,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+    ...row,
+  }));
+
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      const values = Array.isArray(params) ? params : [];
+      if (
+        sql.includes("from referrals r") &&
+        sql.includes("where r.referred_user_id = $1")
+      ) {
+        const userId = String(values[0] ?? "");
+        const row = referrals.find((entry) => entry.referred_user_id === userId);
+        if (!row) return { rows: [] };
+        const referrer =
+          users.find((entry) => entry.id === row.referrer_user_id) ?? null;
+        return {
+          rows: [
+            {
+              referrer_user_id: row.referrer_user_id,
+              code: row.code,
+              status: row.status,
+              linked_at: row.created_at,
+              qualified_at: row.qualified_at,
+              referrer_username: referrer?.username ?? null,
+              referrer_display_name: referrer?.display_name ?? null,
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("upper(referral_code) = upper($1)")) {
+        const code = String(values[0] ?? "").toUpperCase();
+        const row =
+          users.find((entry) => entry.referral_code?.toUpperCase() === code) ?? null;
+        return { rows: row ? [{ id: row.id }] : [] };
+      }
+
+      if (
+        sql.includes("insert into referrals") &&
+        sql.includes("on conflict (referred_user_id) do nothing")
+      ) {
+        const referrerUserId = String(values[0] ?? "");
+        const referredUserId = String(values[1] ?? "");
+        const code = String(values[2] ?? "");
+        const status = String(values[3] ?? "pending") as
+          | "pending"
+          | "qualified"
+          | "blocked";
+        const qualifiedAt =
+          values[4] instanceof Date
+            ? (values[4] as Date)
+            : values[4] == null
+              ? null
+              : new Date(String(values[4]));
+        if (referrals.some((entry) => entry.referred_user_id === referredUserId)) {
+          return { rows: [] };
+        }
+        referrals.push({
+          referrer_user_id: referrerUserId,
+          referred_user_id: referredUserId,
+          code,
+          status,
+          qualified_at: qualifiedAt,
+          created_at: new Date("2026-02-01T00:00:00.000Z"),
+        });
+        return { rows: [{ inserted: true }] };
+      }
+
+      throw new Error(`Unhandled SQL in referral attach test db: ${sql}`);
     },
   } as import("./db.js").DbQuery;
 }
@@ -370,6 +469,114 @@ const tests: TestCase[] = [
       });
       assert.equal(result.code, "VIP");
       assert.equal(result.transferredFromUserId, "user-b");
+    },
+  },
+  {
+    name: "get referral attachment status returns empty when not attached",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [{ id: "user-a", referral_code: null }],
+      });
+      const status = await getReferralAttachmentStatus(db, { userId: "user-a" });
+      assert.equal(status.hasReferrer, false);
+      assert.equal(status.code, null);
+      assert.equal(status.status, null);
+      assert.equal(status.referrer, null);
+    },
+  },
+  {
+    name: "attach referral for existing user succeeds once",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [
+          { id: "user-a", referral_code: null },
+          {
+            id: "user-b",
+            referral_code: "CREATOR",
+            username: "creator",
+            display_name: "Creator",
+          },
+        ],
+      });
+      const result = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "creator",
+      });
+      assert.equal(result.status, "attached");
+      assert.equal(result.referral.hasReferrer, true);
+      assert.equal(result.referral.code, "CREATOR");
+      assert.equal(result.referral.status, "pending");
+      assert.equal(result.referral.referrer?.userId, "user-b");
+    },
+  },
+  {
+    name: "attach referral for existing user reports already attached",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [
+          { id: "user-a", referral_code: null },
+          { id: "user-b", referral_code: "FIRST" },
+          { id: "user-c", referral_code: "SECOND" },
+        ],
+        referrals: [
+          {
+            referrer_user_id: "user-b",
+            referred_user_id: "user-a",
+            code: "FIRST",
+            status: "pending",
+          },
+        ],
+      });
+      const result = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "SECOND",
+      });
+      assert.equal(result.status, "already_attached");
+      assert.equal(result.referral.code, "FIRST");
+    },
+  },
+  {
+    name: "attach referral keeps already_attached precedence over malformed code",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [
+          { id: "user-a", referral_code: null },
+          { id: "user-b", referral_code: "FIRST" },
+        ],
+        referrals: [
+          {
+            referrer_user_id: "user-b",
+            referred_user_id: "user-a",
+            code: "FIRST",
+            status: "pending",
+          },
+        ],
+      });
+      const result = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "!!!",
+      });
+      assert.equal(result.status, "already_attached");
+      assert.equal(result.referral.code, "FIRST");
+    },
+  },
+  {
+    name: "attach referral rejects self and missing code with stable statuses",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [{ id: "user-a", referral_code: "SELF" }],
+      });
+      const self = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "self",
+      });
+      assert.equal(self.status, "self_referral");
+
+      const missing = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "missing",
+      });
+      assert.equal(missing.status, "not_found");
     },
   },
 ];

@@ -10,6 +10,10 @@ export const rewardsReferralCodeUpdateBodySchema = z.object({
   code: z.string().trim().min(1).max(32),
 });
 
+export const rewardsReferralAttachBodySchema = z.object({
+  code: z.string().trim().min(1).max(32),
+});
+
 const rewardsChainIdSchema = z
   .string()
   .trim()
