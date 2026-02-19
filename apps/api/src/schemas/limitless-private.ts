@@ -24,6 +24,16 @@ const zOptionalBool = z
   .union([z.boolean(), z.string(), z.undefined()])
   .transform((v) => v === true || v === "true")
   .catch(false);
+const LIMITLESS_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/i;
+const zLimitlessSlug = z
+  .string()
+  .trim()
+  .min(1, "slug is required")
+  .max(128, "slug is too long")
+  .regex(
+    LIMITLESS_SLUG_RE,
+    "slug must use letters, numbers, and dashes only",
+  );
 
 const limitlessOrderSchema = z
   .object({
@@ -57,7 +67,7 @@ export const limitlessAuthLoginBodySchema = z.object({
 export const limitlessOrderBodySchema = z.object({
   order: limitlessOrderSchema,
   orderType: zOrderType.default("GTC"),
-  marketSlug: zRequiredString("marketSlug is required"),
+  marketSlug: zLimitlessSlug,
   ownerId: z.coerce.number().int().optional(),
 });
 
@@ -66,11 +76,11 @@ export const limitlessOrderIdParamsSchema = z.object({
 });
 
 export const limitlessOpenOrdersQuerySchema = z.object({
-  slug: zRequiredString("slug is required"),
+  slug: zLimitlessSlug,
 });
 
 export const limitlessMarketExchangeQuerySchema = z.object({
-  slug: zRequiredString("slug is required"),
+  slug: zLimitlessSlug,
   side: z
     .preprocess(
       (v) => (typeof v === "string" ? v.toUpperCase() : v),
@@ -88,7 +98,7 @@ export const limitlessHistoryQuerySchema = z.object({
 });
 
 export const limitlessSlugParamsSchema = z.object({
-  slug: zRequiredString("slug is required"),
+  slug: zLimitlessSlug,
 });
 
 export const limitlessCancelBatchBodySchema = z.object({
@@ -101,7 +111,7 @@ export const limitlessAmmOrderBodySchema = z.object({
   size: z.number().positive("size is required"),
   price: z.number().positive().optional(),
   amountUsd: z.number().positive().optional(),
-  marketSlug: z.string().optional(),
+  marketSlug: zLimitlessSlug.optional(),
   txHash: z
     .string()
     .min(1, "txHash is required")

@@ -86,7 +86,6 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to add market to watchlist",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -217,7 +216,6 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch watchlist",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -266,7 +264,6 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to fetch watchlist ids",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -338,7 +335,6 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to remove market from watchlist",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

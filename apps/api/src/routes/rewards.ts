@@ -12,15 +12,18 @@ import {
 } from "../lib/usdc.js";
 import {
   rewardsClaimBodySchema,
+  rewardsReferralAttachBodySchema,
   rewardsLeaderboardQuerySchema,
   rewardsReferralCodeUpdateBodySchema,
   rewardsReferralsQuerySchema,
 } from "../schemas/rewards.js";
 import {
+  attachReferralCodeForExistingUser,
   createRewardClaim,
   getOrCreateReferralCode,
   getRewardsLeaderboard,
   getRewardsPolicy,
+  getReferralAttachmentStatus,
   getRewardsClaimableByChainMicro,
   getRewardsReferrals,
   getRewardsSummary,
@@ -119,6 +122,47 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
         reply.code(statusCode);
         return reply.send({ error: message });
       }
+    },
+  );
+
+  z.get(
+    "/rewards/referral/status",
+    { preHandler: createAuthMiddleware() },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const referral = await getReferralAttachmentStatus(pool, { userId: user.id });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, referral });
+    },
+  );
+
+  z.post(
+    "/rewards/referral/attach",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: rewardsReferralAttachBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const result = await tx(pool, async (client: PoolClient) => {
+        await acquireRewardsUserAdvisoryXactLock(client, user.id);
+        return attachReferralCodeForExistingUser(client, {
+          userId: user.id,
+          referralCode: request.body.code,
+        });
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, ...result });
     },
   );
 

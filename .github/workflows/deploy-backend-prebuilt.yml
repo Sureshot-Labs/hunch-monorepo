@@ -45,14 +45,22 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add host to known_hosts
+      - name: Configure pinned known_hosts
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           if [ -z "${SSH_HOST}" ]; then
             echo "SSH_HOST is required (set as a GitHub secret)." >&2
             exit 1
           fi
+          if [ -z "${SSH_KNOWN_HOSTS}" ]; then
+            echo "SSH_KNOWN_HOSTS secret is required and must contain the pinned host key line(s)." >&2
+            exit 1
+          fi
           mkdir -p ~/.ssh
-          ssh-keyscan -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy backend (prebuilt)
         env:

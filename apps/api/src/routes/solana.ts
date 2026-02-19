@@ -265,7 +265,6 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Solana blockhash failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -342,7 +341,6 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Solana submit failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

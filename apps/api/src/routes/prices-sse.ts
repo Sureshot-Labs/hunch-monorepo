@@ -2,6 +2,12 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { env } from "../env.js";
 import { getRedisStatus } from "../redis.js";
+import {
+  acquireDistributedSlot,
+  checkRateLimit,
+  releaseDistributedSlot,
+} from "../lib/rate-limit.js";
+import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens, markStreamHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
 import {
@@ -30,13 +36,68 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
     "/prices/stream",
     { schema: { querystring: pricesStreamQuerySchema } },
     async (request, reply) => {
+      const clientIp = resolveSecurityClientIp(request);
+      const maxDurationSec = Math.max(30, env.pricesSseMaxDurationSec);
+      const slotTtlMs = (maxDurationSec + 120) * 1000;
+      const activeSlotKey = `sse:prices:active:${clientIp}`;
+
+      const connectsPerMinuteLimit = env.pricesSseConnectsPerMinute;
+      const canConnect = await checkRateLimit(
+        `sse:prices:connect:${clientIp}`,
+        connectsPerMinuteLimit,
+        60_000,
+        { onError: "fail_closed" },
+      );
+      if (!canConnect) {
+        reply.code(429);
+        return reply.send({
+          error: "Too many stream connection attempts. Please retry later.",
+        });
+      }
+
+      const maxConnectionsPerIp = env.pricesSseMaxConnectionsPerIp;
+      const hasSlot = await acquireDistributedSlot(
+        activeSlotKey,
+        maxConnectionsPerIp,
+        slotTtlMs,
+        { onError: "fail_closed" },
+      );
+      if (!hasSlot) {
+        reply.code(429);
+        return reply.send({
+          error: `Too many active price streams for this IP (max ${maxConnectionsPerIp}).`,
+        });
+      }
+
       const { redis: r, status } = await getRedisStatus();
       if (!r) {
+        await releaseDistributedSlot(activeSlotKey, slotTtlMs);
         reply.code(503);
         return reply.send({
           error: status === "loading" ? "Redis loading, retry" : "Redis unavailable",
         });
       }
+
+      let cleanedUp = false;
+      let hb: NodeJS.Timeout | null = null;
+      let sticky: NodeJS.Timeout | null = null;
+      let sessionTimeout: NodeJS.Timeout | null = null;
+      let unsubscribeTicks: (() => void) | null = null;
+      let unsubscribeMarketState: (() => void) | null = null;
+
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        if (hb) clearInterval(hb);
+        if (sticky) clearInterval(sticky);
+        if (sessionTimeout) clearTimeout(sessionTimeout);
+        unsubscribeTicks?.();
+        unsubscribeMarketState?.();
+        void releaseDistributedSlot(activeSlotKey, slotTtlMs);
+      };
+
+      request.raw.on("close", cleanup);
+      request.raw.on("error", cleanup);
 
       const ids = request.query.token_id;
       void markHotTokens({ tokenIds: ids });
@@ -99,8 +160,6 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         }),
       );
 
-      let unsubscribeTicks: (() => void) | null = null;
-      let unsubscribeMarketState: (() => void) | null = null;
       try {
         unsubscribeTicks = await subscribeToPriceTicks(ids, (payload) => {
           send("tick", payload);
@@ -113,6 +172,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         } catch {
           // ignore; connection may already be closed
         }
+        cleanup();
         return;
       }
 
@@ -125,7 +185,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // heartbeat so proxies don’t kill idle streams
-      const hb = setInterval(() => {
+      hb = setInterval(() => {
         try {
           reply.raw.write(":keepalive\n\n");
         } catch {
@@ -135,17 +195,23 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
 
       // Keep currently subscribed tokens sticky while the stream is open.
       const stickyMarkIntervalMs = Math.max(5, env.hotStreamMarkIntervalSec) * 1000;
-      const sticky = setInterval(() => {
+      sticky = setInterval(() => {
         void markStreamHotTokens({ tokenIds: ids });
       }, stickyMarkIntervalMs);
 
-      // cleanup
-      request.raw.on("close", () => {
-        clearInterval(hb);
-        clearInterval(sticky);
-        unsubscribeTicks?.();
-        unsubscribeMarketState?.();
-      });
+      const maxDurationMs = maxDurationSec * 1000;
+      sessionTimeout = setTimeout(() => {
+        send("error", { error: "Stream session expired" });
+        try {
+          reply.raw.end();
+        } catch {
+          // best-effort close
+        }
+      }, maxDurationMs);
+      if (typeof sessionTimeout.unref === "function") {
+        sessionTimeout.unref();
+      }
+
     },
   );
 };

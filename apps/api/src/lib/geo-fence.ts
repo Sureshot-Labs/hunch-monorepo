@@ -63,6 +63,7 @@ export function resolveClientIp(
 ): string | null {
   const forwarded = shouldTrustForwardedHeaders(request, config)
     ? [
+        readHeader(request, "x-hunch-client-ip"),
         readHeader(request, "cf-connecting-ip"),
         readHeader(request, "x-forwarded-for"),
         readHeader(request, "x-real-ip"),

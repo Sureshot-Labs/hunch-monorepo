@@ -7,6 +7,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -402,7 +403,6 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -419,7 +419,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
       const { marketId } = request.params;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `market:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
 
@@ -666,7 +666,6 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -952,7 +951,7 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         format,
       } = request.query;
 
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `candlesticks:market:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 60, 60000);
       if (!canProceed) {
@@ -1639,7 +1638,6 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

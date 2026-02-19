@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { getRedis } from "../redis.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
+import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import type { PriceHistoryData } from "../server-types.js";
 import {
@@ -65,7 +66,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const fidelity = q.fidelity;
 
       // Check if client is requesting too frequently
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `price-history:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 50, 60000); // 50 requests per minute per client
 
@@ -169,7 +170,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -187,7 +187,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const { tokenId } = request.params;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `orderbook:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
 
@@ -244,7 +244,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -262,7 +261,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `orderbook-batch:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 50, 60000); // 50 requests per minute per client
 
@@ -294,7 +293,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -313,7 +311,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const side = request.query.side;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `price:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 200, 60000); // 200 requests per minute per client
 
@@ -372,7 +370,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -391,7 +388,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const requests = body.requests;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `price-batch:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
 
@@ -418,7 +415,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -436,7 +432,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const { tokenId } = request.params;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `midpoint:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 200, 60000); // 200 requests per minute per client
 
@@ -491,7 +487,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -509,7 +504,7 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       // Check client rate limiting
-      const clientIp = request.ip || "unknown";
+      const clientIp = resolveSecurityClientIp(request);
       const rateLimitKey = `spreads:${clientIp}`;
       const canProceed = await checkRateLimit(rateLimitKey, 100, 60000); // 100 requests per minute per client
 
@@ -539,7 +534,6 @@ export const polymarketProxyRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Internal server error",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

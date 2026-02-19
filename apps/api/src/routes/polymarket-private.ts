@@ -722,7 +722,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Polymarket market info",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -882,7 +881,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Polymarket order hash failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1010,10 +1008,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             includeMagicProxy,
           });
           results[wallet] = result;
-        } catch (error) {
+        } catch {
           results[wallet] = {
             error: "Funder derive failed",
-            message: error instanceof Error ? error.message : "Unknown error",
           };
         }
       }
@@ -1299,7 +1296,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Polymarket quote failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1499,7 +1495,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Polymarket account snapshot",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },

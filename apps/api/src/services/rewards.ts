@@ -5,6 +5,7 @@ import {
   fetchActiveRewardsPolicy,
   fetchClaimedTotalsByChain,
   fetchFeeTotalsByChain,
+  fetchInboundReferralForUser,
   fetchQualifiedReferralCount,
   fetchReferralFeeTotalsByChain,
   fetchRewardsLeaderboardMe,
@@ -130,6 +131,26 @@ export type RewardsLeaderboard = {
   me: RewardsLeaderboardEntry | null;
 };
 
+export type ReferralAttachmentStatus =
+  | "attached"
+  | "already_attached"
+  | "invalid_code"
+  | "not_found"
+  | "self_referral";
+
+export type ReferralAttachmentState = {
+  hasReferrer: boolean;
+  code: string | null;
+  status: "pending" | "qualified" | "blocked" | null;
+  linkedAt: Date | null;
+  qualifiedAt: Date | null;
+  referrer: {
+    userId: string;
+    username: string | null;
+    displayName: string | null;
+  } | null;
+};
+
 function normalizeTier(raw: unknown): RewardsTier | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
@@ -239,6 +260,41 @@ function normalizeReferralCode(value: string): string | null {
   return sanitized.slice(0, 32);
 }
 
+function emptyReferralAttachmentState(): ReferralAttachmentState {
+  return {
+    hasReferrer: false,
+    code: null,
+    status: null,
+    linkedAt: null,
+    qualifiedAt: null,
+    referrer: null,
+  };
+}
+
+async function buildReferralAttachmentState(
+  pool: DbQuery,
+  userId: string,
+): Promise<ReferralAttachmentState> {
+  const row = await fetchInboundReferralForUser(pool, userId);
+  if (!row) return emptyReferralAttachmentState();
+  const status =
+    row.status === "pending" || row.status === "qualified" || row.status === "blocked"
+      ? row.status
+      : null;
+  return {
+    hasReferrer: true,
+    code: row.code,
+    status,
+    linkedAt: row.linked_at,
+    qualifiedAt: row.qualified_at,
+    referrer: {
+      userId: row.referrer_user_id,
+      username: row.referrer_username,
+      displayName: row.referrer_display_name,
+    },
+  };
+}
+
 function createReferralCodeError(
   statusCode: number,
   message: string,
@@ -330,6 +386,62 @@ export async function attachReferralCode(
     code: normalized,
     status: "pending",
   });
+}
+
+export async function getReferralAttachmentStatus(
+  pool: DbQuery,
+  inputs: { userId: string },
+): Promise<ReferralAttachmentState> {
+  return buildReferralAttachmentState(pool, inputs.userId);
+}
+
+export async function attachReferralCodeForExistingUser(
+  pool: DbQuery,
+  inputs: { userId: string; referralCode: string },
+): Promise<{
+  status: ReferralAttachmentStatus;
+  referral: ReferralAttachmentState;
+}> {
+  const existing = await buildReferralAttachmentState(pool, inputs.userId);
+  if (existing.hasReferrer) {
+    return { status: "already_attached", referral: existing };
+  }
+
+  const normalized = normalizeReferralCode(inputs.referralCode);
+  if (!normalized) {
+    return {
+      status: "invalid_code",
+      referral: existing,
+    };
+  }
+
+  const referrer = await findUserByReferralCode(pool, normalized);
+  if (!referrer) {
+    return {
+      status: "not_found",
+      referral: existing,
+    };
+  }
+
+  if (referrer.id === inputs.userId) {
+    return {
+      status: "self_referral",
+      referral: existing,
+    };
+  }
+
+  const inserted = await insertReferral(pool, {
+    referrerUserId: referrer.id,
+    referredUserId: inputs.userId,
+    code: normalized,
+    status: "pending",
+  });
+
+  const current = await buildReferralAttachmentState(pool, inputs.userId);
+  return {
+    status: inserted ? "attached" : "already_attached",
+    referral: current,
+  };
 }
 
 export async function setReferralCodeForUser(

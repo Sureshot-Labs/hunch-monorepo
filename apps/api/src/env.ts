@@ -92,7 +92,15 @@ const enableSwagger =
   enableSwaggerSetting ?? nodeEnv.toLowerCase() !== "production";
 const trustProxySetting = parseOptionalBool(process.env.TRUST_PROXY);
 const trustProxy = trustProxySetting ?? false;
+const trustProxyHops = trustProxy
+  ? optionalPositiveInt("TRUST_PROXY_HOPS", 1)
+  : 0;
 const proxySecret = process.env.HUNCH_PROXY_SECRET?.trim() || "";
+if (nodeEnv.toLowerCase() === "production" && trustProxy && !proxySecret) {
+  throw new Error(
+    "HUNCH_PROXY_SECRET is required when TRUST_PROXY=true in production",
+  );
+}
 
 const dflowEnvRaw = process.env.DFLOW_ENV?.trim().toLowerCase();
 const dflowEnv: "dev" | "prod" =
@@ -313,6 +321,7 @@ export const env = {
   nodeEnv,
   enableSwagger,
   trustProxy,
+  trustProxyHops,
   proxySecret,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
@@ -535,7 +544,20 @@ export const env = {
   ),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
+  metricsAuthToken: process.env.METRICS_AUTH_TOKEN?.trim() || "",
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
+  pricesSseMaxConnectionsPerIp: optionalPositiveInt(
+    "API_PRICES_SSE_MAX_CONNECTIONS_PER_IP",
+    5,
+  ),
+  pricesSseConnectsPerMinute: optionalPositiveInt(
+    "API_PRICES_SSE_CONNECTS_PER_MINUTE",
+    30,
+  ),
+  pricesSseMaxDurationSec: optionalPositiveInt(
+    "API_PRICES_SSE_MAX_DURATION_SEC",
+    30 * 60,
+  ),
   walletBalancesBatchMaxWallets: optionalPositiveInt(
     "WALLET_BALANCES_BATCH_MAX_WALLETS",
     20,

@@ -405,7 +405,6 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Kalshi account snapshot",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -729,7 +728,6 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "DFlow submit failed",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
@@ -1068,7 +1066,6 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to store DFlow execution",
-          message: error instanceof Error ? error.message : "Unknown error",
         });
       }
     },
