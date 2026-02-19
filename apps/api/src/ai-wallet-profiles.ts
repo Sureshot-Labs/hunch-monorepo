@@ -39,6 +39,11 @@ async function main() {
     windowDays,
     force,
     dryRun,
+    selectionMode: config.selectionMode,
+    selectionRecentLimit: config.selectionRecentLimit,
+    selectionPnlLimit: config.selectionPnlLimit,
+    selectionSignalsLimit: config.selectionSignalsLimit,
+    selectionSignalsWindowHours: config.selectionSignalsWindowHours,
     model: config.model,
   });
 

@@ -176,7 +176,7 @@ const solanaRpcUrls = parseList(
 );
 const aiWhaleProfileAutoRun =
   parseOptionalBool(process.env.AI_WHALE_PROFILE_AUTORUN) ?? false;
-const aiWhaleProfileLimit = optionalPositiveInt("AI_WHALE_PROFILE_LIMIT", 15);
+const aiWhaleProfileLimit = optionalPositiveInt("AI_WHALE_PROFILE_LIMIT", 45);
 const aiWhaleProfileMarketLimit = optionalPositiveInt(
   "AI_WHALE_PROFILE_MARKET_LIMIT",
   5,
@@ -184,6 +184,27 @@ const aiWhaleProfileMarketLimit = optionalPositiveInt(
 const aiWhaleProfileWindowDays = optionalPositiveInt(
   "AI_WHALE_PROFILE_WINDOW_DAYS",
   30,
+);
+const aiWhaleProfileSelectionMode = parseEnum(
+  process.env.AI_WHALE_PROFILE_SELECTION_MODE,
+  ["recent", "pnl", "hybrid"] as const,
+  "hybrid",
+);
+const aiWhaleProfileSelectionRecentLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_RECENT_LIMIT",
+  15,
+);
+const aiWhaleProfileSelectionPnlLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_PNL_LIMIT",
+  15,
+);
+const aiWhaleProfileSelectionSignalsLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_SIGNALS_LIMIT",
+  15,
+);
+const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
+  "AI_WHALE_PROFILE_SELECTION_SIGNALS_WINDOW_HOURS",
+  24,
 );
 const aiWhaleProfileModel =
   process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
@@ -331,6 +352,11 @@ export const env = {
   aiWhaleProfileLimit,
   aiWhaleProfileMarketLimit,
   aiWhaleProfileWindowDays,
+  aiWhaleProfileSelectionMode,
+  aiWhaleProfileSelectionRecentLimit,
+  aiWhaleProfileSelectionPnlLimit,
+  aiWhaleProfileSelectionSignalsLimit,
+  aiWhaleProfileSelectionSignalsWindowHours,
   aiWhaleProfileModel,
   aiClusterAnalysisEnabled:
     parseOptionalBool(process.env.AI_CLUSTER_ANALYSIS_ENABLED) ?? false,

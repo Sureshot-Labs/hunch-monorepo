@@ -85,12 +85,16 @@ export type AiWhaleProfilesPolicy = {
   limit: number;
   marketLimit: number;
   windowDays: number;
+  selectionMode: "recent" | "pnl" | "hybrid";
+  selectionRecentLimit: number;
+  selectionPnlLimit: number;
+  selectionSignalsLimit: number;
+  selectionSignalsWindowHours: number;
   model: string;
   styleGuide: string;
   maxTokens: number;
   maxTokensFallback: number;
   promptVersion: string;
-  strictNoInsiderLanguage: boolean;
 };
 
 export type AiClustersPolicy = {
@@ -142,6 +146,15 @@ const positiveInt = z.coerce.number().int().min(1);
 const nonNegativeInt = z.coerce.number().int().min(0);
 const nonNegativeNumber = z.coerce.number().min(0);
 const ratio = z.coerce.number().min(0).max(1);
+const strictBoolean = z.preprocess((value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return value;
+}, z.boolean());
 
 const walletIntelSignalsSchema = z
   .object({
@@ -213,29 +226,33 @@ const walletIntelRefreshSchema = z
 
 const aiWhaleProfilesSchema = z
   .object({
-    autoRun: z.coerce.boolean(),
+    autoRun: strictBoolean,
     limit: positiveInt,
     marketLimit: positiveInt,
     windowDays: positiveInt,
+    selectionMode: z.enum(["recent", "pnl", "hybrid"]),
+    selectionRecentLimit: nonNegativeInt,
+    selectionPnlLimit: nonNegativeInt,
+    selectionSignalsLimit: nonNegativeInt,
+    selectionSignalsWindowHours: positiveInt,
     model: z.string().trim().min(1).max(200),
     styleGuide: z.string().trim().min(1).max(5_000),
     maxTokens: positiveInt.max(32_000),
     maxTokensFallback: positiveInt.max(32_000),
     promptVersion: z.string().trim().min(1).max(64),
-    strictNoInsiderLanguage: z.coerce.boolean(),
   })
   .strict()
   .partial();
 
 const aiClustersSchema = z
   .object({
-    analysisEnabled: z.coerce.boolean(),
+    analysisEnabled: strictBoolean,
     modelFast: z.string().trim().min(1).max(200),
     modelFinal: z.string().trim().min(1).max(200),
     modelFallback: z.string().trim().min(1).max(200),
     maxStageB: nonNegativeInt,
     reanalyzeHours: nonNegativeInt,
-    useWebContext: z.coerce.boolean(),
+    useWebContext: strictBoolean,
     webMaxResults: nonNegativeInt.max(25),
     minConfidence: ratio,
     maxOutlierRatio: ratio,
@@ -243,7 +260,7 @@ const aiClustersSchema = z
     analysisMinQuality: ratio,
     analysisMinVenueCount: positiveInt.max(20),
     analysisConcurrency: positiveInt.max(20),
-    debugLogs: z.coerce.boolean(),
+    debugLogs: strictBoolean,
     maxClustersPerRun: positiveInt.max(2_000),
   })
   .strict()
@@ -271,6 +288,18 @@ const warnedInvalidOverrides = new Set<string>();
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+export function resolveSignalWindowHours(
+  queryWindowHours: number | undefined,
+  policy: Pick<WalletIntelSignalsPolicy, "windowHoursDefault" | "windowHoursMax">,
+): number {
+  const windowMax = Math.max(1, Math.trunc(policy.windowHoursMax));
+  const windowDefault = clamp(Math.trunc(policy.windowHoursDefault), 1, windowMax);
+  if (queryWindowHours == null) return windowDefault;
+  const requested = Math.trunc(queryWindowHours);
+  if (!Number.isFinite(requested)) return windowDefault;
+  return clamp(requested, 1, windowMax);
 }
 
 function getDefaults(): IntelPolicyMap {
@@ -328,12 +357,16 @@ function getDefaults(): IntelPolicyMap {
       limit: env.aiWhaleProfileLimit,
       marketLimit: env.aiWhaleProfileMarketLimit,
       windowDays: env.aiWhaleProfileWindowDays,
+      selectionMode: env.aiWhaleProfileSelectionMode,
+      selectionRecentLimit: env.aiWhaleProfileSelectionRecentLimit,
+      selectionPnlLimit: env.aiWhaleProfileSelectionPnlLimit,
+      selectionSignalsLimit: env.aiWhaleProfileSelectionSignalsLimit,
+      selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
       styleGuide: env.aiWhaleProfileStyleGuide,
       maxTokens: env.aiWhaleProfileMaxTokens,
       maxTokensFallback: env.aiWhaleProfileMaxTokensFallback,
       promptVersion: "v1",
-      strictNoInsiderLanguage: true,
     },
     ai_clusters: {
       analysisEnabled: env.aiClusterAnalysisEnabled,
@@ -447,6 +480,15 @@ function normalizeAiWhaleProfilesPolicy(
     limit: Math.max(1, Math.trunc(policy.limit)),
     marketLimit: Math.max(1, Math.trunc(policy.marketLimit)),
     windowDays: Math.max(1, Math.trunc(policy.windowDays)),
+    selectionMode: policy.selectionMode,
+    selectionRecentLimit: Math.max(0, Math.trunc(policy.selectionRecentLimit)),
+    selectionPnlLimit: Math.max(0, Math.trunc(policy.selectionPnlLimit)),
+    selectionSignalsLimit: Math.max(0, Math.trunc(policy.selectionSignalsLimit)),
+    selectionSignalsWindowHours: clamp(
+      Math.trunc(policy.selectionSignalsWindowHours),
+      1,
+      24 * 14,
+    ),
     model: policy.model.trim(),
     styleGuide:
       styleGuide.length > 0
@@ -455,7 +497,6 @@ function normalizeAiWhaleProfilesPolicy(
     maxTokens: Math.max(1, Math.trunc(policy.maxTokens)),
     maxTokensFallback: Math.max(1, Math.trunc(policy.maxTokensFallback)),
     promptVersion: policy.promptVersion.trim() || "v1",
-    strictNoInsiderLanguage: Boolean(policy.strictNoInsiderLanguage),
   };
 }
 
@@ -537,6 +578,10 @@ function sanitizeOverridePayload(
       delete record.stageATimeoutMs;
       delete record.stageBTimeoutMs;
       delete record.forceFinalOnly;
+      return record;
+    }
+    case "ai_whale_profiles": {
+      delete record.strictNoInsiderLanguage;
       return record;
     }
     case "arbitrage_defaults": {

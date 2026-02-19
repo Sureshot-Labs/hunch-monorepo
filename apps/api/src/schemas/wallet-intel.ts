@@ -37,7 +37,7 @@ export const walletActivityQuerySchema = z.object({
 
 export const walletActivitySummaryQuerySchema = z.object({
   scope: z.enum(["following", "whales", "all"]).default("whales"),
-  windowHours: z.coerce.number().int().min(1).max(24 * 14).default(24),
+  windowHours: z.coerce.number().int().min(1).optional(),
   topChanges: z.coerce.number().int().min(1).max(10).default(5),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
@@ -63,7 +63,7 @@ export const walletActivitySummaryQuerySchema = z.object({
 
 export const walletActivitySignalsQuerySchema = z.object({
   scope: z.enum(["following", "active", "all"]).default("following"),
-  windowHours: z.coerce.number().int().min(1).max(24 * 14).optional(),
+  windowHours: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
   minStakeUsd: z.coerce.number().min(0).optional(),

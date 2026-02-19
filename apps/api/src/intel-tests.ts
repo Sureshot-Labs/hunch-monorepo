@@ -6,7 +6,10 @@ import {
   fetchActiveRuntimePolicy,
   listActiveRuntimePolicies,
 } from "./repos/runtime-policies.js";
-import { resolveIntelPolicy } from "./services/runtime-policies.js";
+import {
+  resolveIntelPolicy,
+  resolveSignalWindowHours,
+} from "./services/runtime-policies.js";
 
 type TestCase = {
   name: string;
@@ -79,6 +82,78 @@ const tests: TestCase[] = [
       );
     },
   },
+  {
+    name: "signal window hours resolve uses policy default and max clamp",
+    run: () => {
+      const policy = {
+        windowHoursDefault: 36,
+        windowHoursMax: 48,
+      };
+
+      assert.equal(resolveSignalWindowHours(undefined, policy), 36);
+      assert.equal(resolveSignalWindowHours(12, policy), 12);
+      assert.equal(resolveSignalWindowHours(200, policy), 48);
+      assert.equal(
+        resolveSignalWindowHours(24, { windowHoursDefault: 72, windowHoursMax: 24 }),
+        24,
+      );
+    },
+  },
+  {
+    name: "runtime policy boolean parsing honors explicit true/false strings",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000002",
+              policy_key: "ai_clusters",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                analysisEnabled: "false",
+                useWebContext: "true",
+                debugLogs: false,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "ai_clusters");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.analysisEnabled, false);
+      assert.equal(resolved.effective.useWebContext, true);
+      assert.equal(resolved.effective.debugLogs, false);
+    },
+  },
+  {
+    name: "runtime policy boolean parsing rejects non-boolean strings",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000003",
+              policy_key: "ai_whale_profiles",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                autoRun: "nope",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "ai_whale_profiles");
+      assert.equal(resolved.invalidOverride, true);
+      assert.equal(resolved.source, "env");
+    },
+  },
 ];
 
 let passed = 0;
@@ -93,4 +168,3 @@ for (const test of tests) {
 }
 
 console.log(`[intel-tests] passed ${passed}/${tests.length}`);
-

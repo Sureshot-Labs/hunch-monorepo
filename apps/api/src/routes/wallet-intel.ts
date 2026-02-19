@@ -16,6 +16,7 @@ import {
   type WalletActivityTopChange,
 } from "../services/wallet-activity-summary.js";
 import {
+  resolveSignalWindowHours,
   resolveWalletIntelRefreshPolicy,
   resolveWalletIntelSignalsPolicy,
 } from "../services/runtime-policies.js";
@@ -965,7 +966,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             case "winrate":
               return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "pnl_30d":
-              return "metrics.metrics_pnl desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+              return "metrics.metrics_pnl desc nulls last, whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
             case "last_activity":
             default:
               return "activity.last_activity_at desc nulls last, whale_score desc nulls last, w.last_seen_at desc";
@@ -1496,13 +1497,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           resolveWalletIntelSignalsPolicy(client),
         ]);
         const signalConfig = signalsPolicy.effective;
+        const windowHours = resolveSignalWindowHours(
+          query.windowHours,
+          signalConfig,
+        );
         const candidates = await loadCandidateWallets(
           client,
           user.id,
           query.scope,
           categoryFilter,
           {
-            windowHours: query.windowHours,
+            windowHours,
             minActivityUsd: refreshPolicy.effective.minActivityUsd,
             minActivityShares: refreshPolicy.effective.minActivityShares,
           },
@@ -1513,7 +1518,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const summaryMap = await fetchWalletActivitySummaries(client, walletIds, {
-          windowHours: query.windowHours,
+          windowHours,
           topChanges: query.topChanges,
           baselineDays: 30,
           enteredLateHours: 24,
@@ -1644,14 +1649,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           resolveWalletIntelRefreshPolicy(client),
         ]);
         const signalConfig = signalsPolicy.effective;
-        const windowMax = Math.max(1, signalConfig.windowHoursMax);
-        const windowDefault = Math.min(
-          Math.max(1, signalConfig.windowHoursDefault),
-          windowMax,
-        );
-        const windowHours = Math.min(
-          Math.max(1, query.windowHours ?? windowDefault),
-          windowMax,
+        const windowHours = resolveSignalWindowHours(
+          query.windowHours,
+          signalConfig,
         );
         const minScore = query.minScore ?? signalConfig.minScore;
         const maxOdds = query.maxOdds ?? signalConfig.maxOdds;

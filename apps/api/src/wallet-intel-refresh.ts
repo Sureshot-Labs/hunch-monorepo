@@ -1058,7 +1058,7 @@ async function refreshMetrics(
     const whereSince = entry.since
       ? `and wa.occurred_at >= $3::timestamptz - interval '${entry.since}' and wa.occurred_at <= $3::timestamptz`
       : "and wa.occurred_at <= $3::timestamptz";
-    await client.query(
+    const metricsResult = await client.query<{ negative_legs: number | string }>(
       `
         with base_events as (
           select
@@ -1102,6 +1102,11 @@ async function refreshMetrics(
           where outcome_side in ('YES', 'NO')
           group by wallet_id, market_id, outcome_side
         ),
+        negative_legs as (
+          select count(*)::int as negative_legs
+          from legs
+          where net_shares < -1e-9
+        ),
         leg_marks as (
           select
             l.wallet_id,
@@ -1142,38 +1147,50 @@ async function refreshMetrics(
           from leg_marks
           where mark_value is not null
           group by wallet_id
+        ),
+        upserted as (
+          insert into wallet_metrics_snapshots (
+            wallet_id,
+            venue,
+            period,
+            as_of,
+            trades_count,
+            volume_usd,
+            pnl_usd,
+            last_trade_at
+          )
+          select
+            agg.wallet_id,
+            null,
+            $2::text,
+            $3::timestamptz,
+            agg.trades_count,
+            agg.volume_usd,
+            pnl.pnl_usd,
+            agg.last_trade_at
+          from agg
+          left join pnl on pnl.wallet_id = agg.wallet_id
+          on conflict (wallet_id, venue, period, as_of)
+          do update set
+            trades_count = excluded.trades_count,
+            volume_usd = excluded.volume_usd,
+            pnl_usd = excluded.pnl_usd,
+            last_trade_at = excluded.last_trade_at,
+            updated_at = now()
+          returning wallet_id
         )
-        insert into wallet_metrics_snapshots (
-          wallet_id,
-          venue,
-          period,
-          as_of,
-          trades_count,
-          volume_usd,
-          pnl_usd,
-          last_trade_at
-        )
-        select
-          agg.wallet_id,
-          null,
-          $2::text,
-          $3::timestamptz,
-          agg.trades_count,
-          agg.volume_usd,
-          pnl.pnl_usd,
-          agg.last_trade_at
-        from agg
-        left join pnl on pnl.wallet_id = agg.wallet_id
-        on conflict (wallet_id, venue, period, as_of)
-        do update set
-          trades_count = excluded.trades_count,
-          volume_usd = excluded.volume_usd,
-          pnl_usd = excluded.pnl_usd,
-          last_trade_at = excluded.last_trade_at,
-          updated_at = now()
+        select negative_legs.negative_legs
+        from negative_legs
       `,
       [inputs.walletIds, entry.period, inputs.asOf],
     );
+    const negativeLegs = Number(metricsResult.rows[0]?.negative_legs ?? 0);
+    if (negativeLegs > 0) {
+      console.warn("[wallets:intel:refresh] pnl skipped negative net-share legs", {
+        period: entry.period,
+        negativeLegs,
+      });
+    }
   }
 }
 
