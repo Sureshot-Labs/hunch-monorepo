@@ -267,6 +267,7 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp
+      - /etc/nginx/conf.d
       - /var/cache/nginx
       - /var/run
     volumes:
