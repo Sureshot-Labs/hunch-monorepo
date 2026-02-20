@@ -548,7 +548,7 @@ export const env = {
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
   pricesSseMaxConnectionsPerIp: optionalPositiveInt(
     "API_PRICES_SSE_MAX_CONNECTIONS_PER_IP",
-    5,
+    50,
   ),
   pricesSseConnectsPerMinute: optionalPositiveInt(
     "API_PRICES_SSE_CONNECTS_PER_MINUTE",
