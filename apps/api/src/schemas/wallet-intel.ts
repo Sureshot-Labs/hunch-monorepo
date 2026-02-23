@@ -3,6 +3,36 @@ import { z } from "zod";
 import { zVenue } from "./common.js";
 
 const zChain = z.enum(["polygon", "base", "solana"]);
+const filterModeSchema = z.enum(["any", "all"]).default("any");
+const signalSeveritySchema = z.enum(["low", "medium", "high", "critical"]);
+
+const csvStringArraySchema = z.preprocess(
+  value => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string") {
+      return value
+        .split(",")
+        .map(item => item.trim())
+        .filter(Boolean);
+    }
+    return undefined;
+  },
+  z.array(z.string().min(1)).optional()
+);
+
+const categoriesCsvSchema = z.preprocess(
+  value => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string") {
+      return value
+        .split(",")
+        .map(item => item.trim())
+        .filter(Boolean);
+    }
+    return undefined;
+  },
+  z.array(z.string().min(1)).optional()
+);
 
 export const walletFollowBodySchema = z.object({
   address: z.string().min(4),
@@ -44,21 +74,13 @@ export const walletActivitySummaryQuerySchema = z.object({
   sort: z
     .enum(["last_activity", "net_change_usd", "unusual_score"])
     .default("last_activity"),
-  categories: z
-    .preprocess(
-      value => {
-        if (Array.isArray(value)) return value;
-        if (typeof value === "string") {
-          return value
-            .split(",")
-            .map(item => item.trim())
-            .filter(Boolean);
-        }
-        return undefined;
-      },
-      z.array(z.string().min(1)).optional()
-    )
-    .optional(),
+  categories: categoriesCsvSchema.optional(),
+  tags: csvStringArraySchema.optional(),
+  tagMode: filterModeSchema,
+  primary: csvStringArraySchema.optional(),
+  labels: csvStringArraySchema.optional(),
+  labelMode: filterModeSchema,
+  includeAttribution: z.coerce.boolean().default(true),
 });
 
 export const walletActivitySignalsQuerySchema = z.object({
@@ -74,7 +96,13 @@ export const walletActivitySignalsQuerySchema = z.object({
   minScore: z.coerce.number().min(0).max(1).optional(),
   signalType: z.enum(["longshot_large", "longshot_large_late"]).optional(),
   lateBucket: z.enum(["late", "very_late", "unknown"]).optional(),
-  categories: z
+  categories: categoriesCsvSchema.optional(),
+  tags: csvStringArraySchema.optional(),
+  tagMode: filterModeSchema,
+  primary: csvStringArraySchema.optional(),
+  labels: csvStringArraySchema.optional(),
+  labelMode: filterModeSchema,
+  severity: z
     .preprocess(
       value => {
         if (Array.isArray(value)) return value;
@@ -86,9 +114,12 @@ export const walletActivitySignalsQuerySchema = z.object({
         }
         return undefined;
       },
-      z.array(z.string().min(1)).optional()
+      z.array(signalSeveritySchema).optional()
     )
     .optional(),
+  displayReasons: csvStringArraySchema.optional(),
+  signalReasonMode: filterModeSchema,
+  includeAttribution: z.coerce.boolean().default(false),
 });
 
 export const walletPositionsQuerySchema = z.object({
@@ -133,4 +164,10 @@ export const walletWhalesQuerySchema = z.object({
       "pnl_30d",
     ])
     .default("last_activity"),
+  tags: csvStringArraySchema.optional(),
+  tagMode: filterModeSchema,
+  primary: csvStringArraySchema.optional(),
+  labels: csvStringArraySchema.optional(),
+  labelMode: filterModeSchema,
+  includeAttribution: z.coerce.boolean().default(true),
 });

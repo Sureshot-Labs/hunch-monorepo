@@ -13,12 +13,18 @@ type WalletActivitySummaryDbRow = {
   counts_increase: number | null;
   counts_reduce: number | null;
   counts_flip: number | null;
-  unusual_score: string | null;
+  max_abs_delta_usd_window: string | null;
+  baseline_p90_usd: string | null;
+  baseline_sample_count: number | null;
   top_changes: unknown;
 };
 
 export type WalletActivitySignalType = "longshot_large" | "longshot_large_late";
 export type WalletActivityLateBucket = "late" | "very_late" | "unknown";
+export type WalletActivityUnusualTier =
+  | "unusual"
+  | "very_unusual"
+  | "extreme";
 
 export type WalletActivityTopChange = {
   marketId: string;
@@ -62,8 +68,47 @@ export type WalletActivitySummary = {
   countsReduce: number;
   countsFlip: number;
   unusualScore: number | null;
+  unusualTier: WalletActivityUnusualTier | null;
   topChanges: WalletActivityTopChange[];
 };
+
+const UNUSUAL_TIER_UNUSUAL_MIN = 2;
+const UNUSUAL_TIER_VERY_UNUSUAL_MIN = 5;
+const UNUSUAL_TIER_EXTREME_MIN = 10;
+export const DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES = 20;
+
+export function computeRobustUnusualScore(input: {
+  maxAbsDeltaUsd: number | null | undefined;
+  baselineP90Usd: number | null | undefined;
+  baselineSampleCount: number | null | undefined;
+  minBaselineSamples?: number;
+}): number | null {
+  const minBaselineSamples = Math.max(
+    1,
+    Math.trunc(
+      input.minBaselineSamples ?? DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+    ),
+  );
+  const sampleCount = Math.max(0, Math.trunc(input.baselineSampleCount ?? 0));
+  if (sampleCount < minBaselineSamples) return null;
+  const denominator = input.baselineP90Usd ?? 0;
+  if (!Number.isFinite(denominator) || denominator <= 0) return null;
+  const numerator = Math.max(0, input.maxAbsDeltaUsd ?? 0);
+  if (!Number.isFinite(numerator)) return null;
+  const score = numerator / denominator;
+  return Number.isFinite(score) ? score : null;
+}
+
+export function resolveUnusualTier(
+  score: number | null | undefined,
+): WalletActivityUnusualTier | null {
+  if (score == null || !Number.isFinite(score) || score < UNUSUAL_TIER_UNUSUAL_MIN) {
+    return null;
+  }
+  if (score >= UNUSUAL_TIER_EXTREME_MIN) return "extreme";
+  if (score >= UNUSUAL_TIER_VERY_UNUSUAL_MIN) return "very_unusual";
+  return "unusual";
+}
 
 type WalletActivitySignalConfig = {
   maxOdds: number;
@@ -235,7 +280,8 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
  *
  * This is intentionally KISS:
  * - Activity is inferred from snapshot deltas / wallet_activity_events.
- * - "Unusual" is relative to the wallet's own recent baseline.
+ * - "Unusual" is relative to the wallet's own recent p90 baseline and only
+ *   evaluated when minimum baseline sample count is met.
  */
 export async function fetchWalletActivitySummaries(
   client: PoolClient,
@@ -244,6 +290,7 @@ export async function fetchWalletActivitySummaries(
     windowHours: number;
     topChanges: number;
     baselineDays?: number;
+    minBaselineSampleCount?: number;
     enteredLateHours?: number;
     signalConfig?: Partial<WalletActivitySignalConfig>;
   },
@@ -253,6 +300,12 @@ export async function fetchWalletActivitySummaries(
   const windowHours = Math.max(1, Math.trunc(options.windowHours));
   const topChanges = Math.max(1, Math.trunc(options.topChanges));
   const baselineDays = Math.max(7, Math.trunc(options.baselineDays ?? 30));
+  const minBaselineSampleCount = Math.max(
+    1,
+    Math.trunc(
+      options.minBaselineSampleCount ?? DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+    ),
+  );
   const signalConfig = resolveSignalConfig(options.signalConfig);
 
   const result = await client.query<WalletActivitySummaryDbRow>(
@@ -294,11 +347,23 @@ export async function fetchWalletActivitySummaries(
       baseline as (
         select
           wb.wallet_id,
-          wb.p50_usd,
           wb.p90_usd
         from wallet_activity_baseline wb
         where wb.wallet_id = any($1::uuid[])
           and wb.window_days = $3::int
+      ),
+      baseline_samples as (
+        select
+          ws.wallet_id,
+          count(*)::int as sample_count_30d
+        from wallet_set ws
+        left join wallet_activity_events wae
+          on wae.wallet_id = ws.wallet_id
+         and wae.activity_type in ('delta', 'trade')
+         and wae.size_usd is not null
+         and wae.occurred_at >= now() - ($3::text || ' days')::interval
+         and wae.occurred_at <= now()
+        group by ws.wallet_id
       ),
       events_window as (
         select
@@ -345,19 +410,21 @@ export async function fetchWalletActivitySummaries(
       labeled as (
         select
           e.*,
-          b.p50_usd,
           b.p90_usd,
+          coalesce(bs.sample_count_30d, 0) as baseline_sample_count,
           p.categories as profile_categories,
           coalesce(e.close_time, e.expiration_time) as close_at
         from enriched e
         left join baseline b on b.wallet_id = e.wallet_id
+        left join baseline_samples bs on bs.wallet_id = e.wallet_id
         left join profiles p on p.wallet_id = e.wallet_id
       ),
       change_rows as (
         select
           l.*,
           case
-            when l.p90_usd is not null
+            when coalesce(l.baseline_sample_count, 0) >= $19::int
+             and l.p90_usd is not null
              and l.p90_usd > 0
              and coalesce(l.max_abs_delta_usd, 0) >= l.p90_usd
               then true
@@ -627,13 +694,9 @@ export async function fetchWalletActivitySummaries(
           sum(cr.counts_increased)::int as counts_increase,
           sum(cr.counts_reduced)::int as counts_reduce,
           0::int as counts_flip,
-          max(
-            case
-              when cr.p50_usd is not null and cr.p50_usd > 0
-                then coalesce(cr.max_abs_delta_usd, 0) / cr.p50_usd
-              else null
-            end
-          ) as unusual_score
+          max(coalesce(cr.max_abs_delta_usd, 0)) as max_abs_delta_usd_window,
+          max(cr.p90_usd) as baseline_p90_usd,
+          max(coalesce(cr.baseline_sample_count, 0))::int as baseline_sample_count
         from change_rows cr
         group by cr.wallet_id
       )
@@ -648,7 +711,9 @@ export async function fetchWalletActivitySummaries(
         s.counts_increase,
         s.counts_reduce,
         s.counts_flip,
-        s.unusual_score,
+        s.max_abs_delta_usd_window,
+        s.baseline_p90_usd,
+        s.baseline_sample_count,
         tc.top_changes
       from summary s
       left join top_changes tc on tc.wallet_id = s.wallet_id
@@ -672,11 +737,18 @@ export async function fetchWalletActivitySummaries(
       signalConfig.weightNovelty,
       signalConfig.weightSum,
       signalConfig.minScore,
+      minBaselineSampleCount,
     ],
   );
 
   const map = new Map<string, WalletActivitySummary>();
   for (const row of result.rows) {
+    const unusualScore = computeRobustUnusualScore({
+      maxAbsDeltaUsd: parseNumber(row.max_abs_delta_usd_window),
+      baselineP90Usd: parseNumber(row.baseline_p90_usd),
+      baselineSampleCount: row.baseline_sample_count,
+      minBaselineSamples: minBaselineSampleCount,
+    });
     map.set(row.wallet_id, {
       walletId: row.wallet_id,
       windowHours,
@@ -689,7 +761,8 @@ export async function fetchWalletActivitySummaries(
       countsIncrease: row.counts_increase ?? 0,
       countsReduce: row.counts_reduce ?? 0,
       countsFlip: row.counts_flip ?? 0,
-      unusualScore: parseNumber(row.unusual_score),
+      unusualScore,
+      unusualTier: resolveUnusualTier(unusualScore),
       topChanges: parseTopChanges(row.top_changes),
     });
   }

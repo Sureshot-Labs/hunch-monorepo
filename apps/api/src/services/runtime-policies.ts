@@ -11,6 +11,7 @@ import {
 export const INTEL_POLICY_KEYS = [
   "wallet_intel_signals",
   "wallet_intel_refresh",
+  "wallet_intel_attribution",
   "ai_whale_profiles",
   "ai_clusters",
   "arbitrage_defaults",
@@ -123,9 +124,98 @@ export type ArbitrageDefaultsPolicy = {
   minQualityScore: number;
 };
 
+type WalletIntelAttributionVenueKey = "polymarket" | "kalshi" | "limitless";
+
+export type WalletIntelAttributionDisplayPolicy = {
+  listPrimaryCount: number;
+  listSecondaryCount: number;
+  detailsSecondaryMax: number;
+  detailsSupportingMax: number;
+};
+
+export type WalletIntelAttributionVenueThresholdPolicy = {
+  whaleExposureUsd: number;
+  whaleVolume30dUsd: number;
+  highConvictionStakeUsd: number;
+  marketMoverStakeUsd: number;
+  marketMoverStakeToMarketVolRatio: number;
+  highFrequencyTrades30d: number;
+  botMinActiveDays30d: number;
+  botMaxMedianStakeUsd: number;
+  volumeTraderVolume30dUsd: number;
+  specialistCategoryShareMin: number;
+  insiderCriticalSignals30dMin: number;
+  insiderAvgSignalScoreMin: number;
+  insiderMinResolvedBets: number;
+  insiderWinRateMin: number;
+};
+
+export type WalletIntelAttributionRuleWeightsPolicy = {
+  whale: number;
+  specialist: number;
+  bot: number;
+  insider: number;
+  primaryTieBreakOrder: Array<"whale" | "specialist" | "bot" | "insider">;
+};
+
+export type WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy = {
+  medium: number;
+  high: number;
+  critical: number;
+};
+
+export type WalletIntelAttributionSignalsDisplayPolicy = {
+  maxDisplayReasons: number;
+  hideRedundantReasonsWhenGateImplies: boolean;
+  severityThresholds: {
+    default: WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy;
+    polymarket: WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy;
+    kalshi: WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy;
+    limitless: WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy;
+  };
+};
+
+export type WalletIntelAttributionSensitiveLabelsPolicy = {
+  insiderEnabled: boolean;
+  botEnabled: boolean;
+};
+
+export type WalletIntelAttributionQueryControlsPolicy = {
+  whalesBatchSize: number;
+  whalesMaxScanCandidates: number;
+};
+
+export type WalletIntelAttributionVenueCapabilitiesPolicy = {
+  polymarket: { specialistEnabled: boolean };
+  kalshi: { specialistEnabled: boolean };
+  limitless: { specialistEnabled: boolean };
+};
+
+export type WalletIntelAttributionMultiVenueMergePolicy = {
+  strategy: "max_candidate_score";
+  venueTieBreak: "volume30d_desc_then_fixed_order";
+  fixedVenueOrder: WalletIntelAttributionVenueKey[];
+};
+
+export type WalletIntelAttributionPolicy = {
+  enabled: boolean;
+  display: WalletIntelAttributionDisplayPolicy;
+  venueThresholds: Record<
+    WalletIntelAttributionVenueKey,
+    WalletIntelAttributionVenueThresholdPolicy
+  >;
+  ruleWeights: WalletIntelAttributionRuleWeightsPolicy;
+  signalsDisplay: WalletIntelAttributionSignalsDisplayPolicy;
+  sensitiveLabels: WalletIntelAttributionSensitiveLabelsPolicy;
+  queryControls: WalletIntelAttributionQueryControlsPolicy;
+  venueCapabilities: WalletIntelAttributionVenueCapabilitiesPolicy;
+  multiVenueMerge: WalletIntelAttributionMultiVenueMergePolicy;
+};
+
 type IntelPolicyMap = {
   wallet_intel_signals: WalletIntelSignalsPolicy;
   wallet_intel_refresh: WalletIntelRefreshPolicy;
+  wallet_intel_attribution: WalletIntelAttributionPolicy;
   ai_whale_profiles: AiWhaleProfilesPolicy;
   ai_clusters: AiClustersPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
@@ -276,9 +366,150 @@ const arbitrageDefaultsSchema = z
   .strict()
   .partial();
 
+const attributionPrimaryKeySchema = z.enum([
+  "whale",
+  "specialist",
+  "bot",
+  "insider",
+]);
+const attributionVenueKeySchema = z.enum(["polymarket", "kalshi", "limitless"]);
+
+const attributionDisplaySchema = z
+  .object({
+    listPrimaryCount: positiveInt.max(5),
+    listSecondaryCount: positiveInt.max(10),
+    detailsSecondaryMax: positiveInt.max(30),
+    detailsSupportingMax: positiveInt.max(30),
+  })
+  .strict()
+  .partial();
+
+const attributionVenueThresholdSchema = z
+  .object({
+    whaleExposureUsd: nonNegativeNumber,
+    whaleVolume30dUsd: nonNegativeNumber,
+    highConvictionStakeUsd: nonNegativeNumber,
+    marketMoverStakeUsd: nonNegativeNumber,
+    marketMoverStakeToMarketVolRatio: ratio,
+    highFrequencyTrades30d: nonNegativeInt,
+    botMinActiveDays30d: nonNegativeInt.max(31),
+    botMaxMedianStakeUsd: nonNegativeNumber,
+    volumeTraderVolume30dUsd: nonNegativeNumber,
+    specialistCategoryShareMin: ratio,
+    insiderCriticalSignals30dMin: nonNegativeInt.max(200),
+    insiderAvgSignalScoreMin: ratio,
+    insiderMinResolvedBets: nonNegativeInt.max(10_000),
+    insiderWinRateMin: ratio,
+  })
+  .strict()
+  .partial();
+
+const attributionRuleWeightsSchema = z
+  .object({
+    whale: nonNegativeNumber,
+    specialist: nonNegativeNumber,
+    bot: nonNegativeNumber,
+    insider: nonNegativeNumber,
+    primaryTieBreakOrder: z.array(attributionPrimaryKeySchema).min(1).max(4),
+  })
+  .strict()
+  .partial();
+
+const attributionSeverityThresholdSchema = z
+  .object({
+    medium: ratio,
+    high: ratio,
+    critical: ratio,
+  })
+  .strict()
+  .partial();
+
+const attributionSignalsDisplaySchema = z
+  .object({
+    maxDisplayReasons: positiveInt.max(10),
+    hideRedundantReasonsWhenGateImplies: strictBoolean,
+    severityThresholds: z
+      .object({
+        default: attributionSeverityThresholdSchema.optional(),
+        polymarket: attributionSeverityThresholdSchema.optional(),
+        kalshi: attributionSeverityThresholdSchema.optional(),
+        limitless: attributionSeverityThresholdSchema.optional(),
+      })
+      .strict()
+      .partial(),
+  })
+  .strict()
+  .partial();
+
+const attributionSensitiveLabelsSchema = z
+  .object({
+    insiderEnabled: strictBoolean,
+    botEnabled: strictBoolean,
+  })
+  .strict()
+  .partial();
+
+const attributionQueryControlsSchema = z
+  .object({
+    whalesBatchSize: positiveInt.max(1_000),
+    whalesMaxScanCandidates: positiveInt.max(20_000),
+  })
+  .strict()
+  .partial();
+
+const attributionVenueCapabilitiesSchema = z
+  .object({
+    polymarket: z
+      .object({ specialistEnabled: strictBoolean })
+      .strict()
+      .partial(),
+    kalshi: z
+      .object({ specialistEnabled: strictBoolean })
+      .strict()
+      .partial(),
+    limitless: z
+      .object({ specialistEnabled: strictBoolean })
+      .strict()
+      .partial(),
+  })
+  .strict()
+  .partial();
+
+const attributionMultiVenueMergeSchema = z
+  .object({
+    strategy: z.enum(["max_candidate_score"]),
+    venueTieBreak: z.enum(["volume30d_desc_then_fixed_order"]),
+    fixedVenueOrder: z.array(attributionVenueKeySchema).min(1).max(3),
+  })
+  .strict()
+  .partial();
+
+const walletIntelAttributionSchema = z
+  .object({
+    enabled: strictBoolean,
+    display: attributionDisplaySchema,
+    venueThresholds: z
+      .object({
+        polymarket: attributionVenueThresholdSchema.optional(),
+        kalshi: attributionVenueThresholdSchema.optional(),
+        limitless: attributionVenueThresholdSchema.optional(),
+      })
+      .strict()
+      .partial(),
+    ruleWeights: attributionRuleWeightsSchema,
+    signalsDisplay: attributionSignalsDisplaySchema,
+    sensitiveLabels: attributionSensitiveLabelsSchema,
+    queryControls: attributionQueryControlsSchema,
+    venueCapabilities: attributionVenueCapabilitiesSchema,
+    multiVenueMerge: attributionMultiVenueMergeSchema,
+  })
+  .strict()
+  .partial();
+
 const policySchemas = {
   wallet_intel_signals: walletIntelSignalsSchema,
   wallet_intel_refresh: walletIntelRefreshSchema,
+  wallet_intel_attribution: walletIntelAttributionSchema,
   ai_whale_profiles: aiWhaleProfilesSchema,
   ai_clusters: aiClustersSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
@@ -288,6 +519,119 @@ const warnedInvalidOverrides = new Set<string>();
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMerge<T>(base: T, override: unknown): T {
+  if (!isPlainObject(base) || !isPlainObject(override)) return base;
+  const next: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const current = next[key];
+    if (Array.isArray(value)) {
+      next[key] = value;
+      continue;
+    }
+    if (isPlainObject(current) && isPlainObject(value)) {
+      next[key] = deepMerge(current, value);
+      continue;
+    }
+    next[key] = value;
+  }
+  return next as T;
+}
+
+const attributionVenueDefault: WalletIntelAttributionVenueThresholdPolicy = {
+  whaleExposureUsd: 50_000,
+  whaleVolume30dUsd: 150_000,
+  highConvictionStakeUsd: 5_000,
+  marketMoverStakeUsd: 10_000,
+  marketMoverStakeToMarketVolRatio: 0.05,
+  highFrequencyTrades30d: 120,
+  botMinActiveDays30d: 12,
+  botMaxMedianStakeUsd: 750,
+  volumeTraderVolume30dUsd: 250_000,
+  specialistCategoryShareMin: 0.6,
+  insiderCriticalSignals30dMin: 3,
+  insiderAvgSignalScoreMin: 0.75,
+  insiderMinResolvedBets: 12,
+  insiderWinRateMin: 0.62,
+};
+
+function parseAttributionDefaultsEnvOverride(): Partial<WalletIntelAttributionPolicy> {
+  const raw = env.walletIntelAttributionDefaultsJson?.trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isPlainObject(parsed)) {
+      console.warn(
+        "[runtime-policies] Invalid HUNCH_WALLET_INTEL_ATTRIBUTION_DEFAULTS_JSON: expected object",
+      );
+      return {};
+    }
+    return parsed as Partial<WalletIntelAttributionPolicy>;
+  } catch (error) {
+    console.warn(
+      "[runtime-policies] Failed to parse HUNCH_WALLET_INTEL_ATTRIBUTION_DEFAULTS_JSON",
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    return {};
+  }
+}
+
+function getWalletIntelAttributionDefaults(): WalletIntelAttributionPolicy {
+  const defaults: WalletIntelAttributionPolicy = {
+    enabled: false,
+    display: {
+      listPrimaryCount: 1,
+      listSecondaryCount: 2,
+      detailsSecondaryMax: 8,
+      detailsSupportingMax: 12,
+    },
+    venueThresholds: {
+      polymarket: { ...attributionVenueDefault },
+      kalshi: { ...attributionVenueDefault },
+      limitless: { ...attributionVenueDefault },
+    },
+    ruleWeights: {
+      whale: 1,
+      specialist: 1,
+      bot: 1,
+      insider: 1,
+      primaryTieBreakOrder: ["whale", "specialist", "bot", "insider"],
+    },
+    signalsDisplay: {
+      maxDisplayReasons: 2,
+      hideRedundantReasonsWhenGateImplies: true,
+      severityThresholds: {
+        default: { medium: 0.5, high: 0.75, critical: 0.9 },
+        polymarket: { medium: 0.5, high: 0.75, critical: 0.9 },
+        kalshi: { medium: 0.5, high: 0.75, critical: 0.9 },
+        limitless: { medium: 0.5, high: 0.75, critical: 0.9 },
+      },
+    },
+    sensitiveLabels: {
+      botEnabled: true,
+      insiderEnabled: false,
+    },
+    queryControls: {
+      whalesBatchSize: 100,
+      whalesMaxScanCandidates: 3_000,
+    },
+    venueCapabilities: {
+      polymarket: { specialistEnabled: true },
+      kalshi: { specialistEnabled: true },
+      limitless: { specialistEnabled: true },
+    },
+    multiVenueMerge: {
+      strategy: "max_candidate_score",
+      venueTieBreak: "volume30d_desc_then_fixed_order",
+      fixedVenueOrder: ["polymarket", "kalshi", "limitless"],
+    },
+  };
+  return deepMerge(defaults, parseAttributionDefaultsEnvOverride());
 }
 
 export function resolveSignalWindowHours(
@@ -352,6 +696,7 @@ function getDefaults(): IntelPolicyMap {
       whaleUsd: env.walletIntelWhaleUsd,
       whaleUsdSolana: env.walletIntelWhaleUsdSolana,
     },
+    wallet_intel_attribution: getWalletIntelAttributionDefaults(),
     ai_whale_profiles: {
       autoRun: env.aiWhaleProfileAutoRun,
       limit: env.aiWhaleProfileLimit,
@@ -470,6 +815,154 @@ function normalizeRefreshPolicy(
   };
 }
 
+function normalizeAttributionSeverityThresholds(
+  value: WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy,
+): WalletIntelAttributionSignalsDisplaySeverityThresholdPolicy {
+  const medium = clamp(value.medium, 0, 1);
+  const high = clamp(value.high, medium, 1);
+  const critical = clamp(value.critical, high, 1);
+  return { medium, high, critical };
+}
+
+function normalizeAttributionVenueThresholds(
+  value: WalletIntelAttributionVenueThresholdPolicy,
+): WalletIntelAttributionVenueThresholdPolicy {
+  return {
+    whaleExposureUsd: Math.max(0, value.whaleExposureUsd),
+    whaleVolume30dUsd: Math.max(0, value.whaleVolume30dUsd),
+    highConvictionStakeUsd: Math.max(0, value.highConvictionStakeUsd),
+    marketMoverStakeUsd: Math.max(0, value.marketMoverStakeUsd),
+    marketMoverStakeToMarketVolRatio: clamp(
+      value.marketMoverStakeToMarketVolRatio,
+      0,
+      1,
+    ),
+    highFrequencyTrades30d: Math.max(0, Math.trunc(value.highFrequencyTrades30d)),
+    botMinActiveDays30d: clamp(Math.trunc(value.botMinActiveDays30d), 0, 31),
+    botMaxMedianStakeUsd: Math.max(0, value.botMaxMedianStakeUsd),
+    volumeTraderVolume30dUsd: Math.max(0, value.volumeTraderVolume30dUsd),
+    specialistCategoryShareMin: clamp(value.specialistCategoryShareMin, 0, 1),
+    insiderCriticalSignals30dMin: Math.max(
+      0,
+      Math.trunc(value.insiderCriticalSignals30dMin),
+    ),
+    insiderAvgSignalScoreMin: clamp(value.insiderAvgSignalScoreMin, 0, 1),
+    insiderMinResolvedBets: Math.max(0, Math.trunc(value.insiderMinResolvedBets)),
+    insiderWinRateMin: clamp(value.insiderWinRateMin, 0, 1),
+  };
+}
+
+function normalizeAttributionPolicy(
+  policy: WalletIntelAttributionPolicy,
+): WalletIntelAttributionPolicy {
+  const tieBreakOrder = Array.from(
+    new Set(
+      policy.ruleWeights.primaryTieBreakOrder.filter((key) =>
+        ["whale", "specialist", "bot", "insider"].includes(key),
+      ),
+    ),
+  ) as WalletIntelAttributionRuleWeightsPolicy["primaryTieBreakOrder"];
+  for (const key of ["whale", "specialist", "bot", "insider"] as const) {
+    if (!tieBreakOrder.includes(key)) tieBreakOrder.push(key);
+  }
+  const fixedVenueOrder = Array.from(
+    new Set(
+      policy.multiVenueMerge.fixedVenueOrder.filter((venue) =>
+        ["polymarket", "kalshi", "limitless"].includes(venue),
+      ),
+    ),
+  ) as WalletIntelAttributionMultiVenueMergePolicy["fixedVenueOrder"];
+  for (const venue of ["polymarket", "kalshi", "limitless"] as const) {
+    if (!fixedVenueOrder.includes(venue)) fixedVenueOrder.push(venue);
+  }
+
+  return {
+    enabled: Boolean(policy.enabled),
+    display: {
+      listPrimaryCount: clamp(Math.trunc(policy.display.listPrimaryCount), 1, 5),
+      listSecondaryCount: clamp(Math.trunc(policy.display.listSecondaryCount), 0, 10),
+      detailsSecondaryMax: clamp(
+        Math.trunc(policy.display.detailsSecondaryMax),
+        0,
+        30,
+      ),
+      detailsSupportingMax: clamp(
+        Math.trunc(policy.display.detailsSupportingMax),
+        0,
+        30,
+      ),
+    },
+    venueThresholds: {
+      polymarket: normalizeAttributionVenueThresholds(
+        policy.venueThresholds.polymarket,
+      ),
+      kalshi: normalizeAttributionVenueThresholds(policy.venueThresholds.kalshi),
+      limitless: normalizeAttributionVenueThresholds(
+        policy.venueThresholds.limitless,
+      ),
+    },
+    ruleWeights: {
+      whale: Math.max(0, policy.ruleWeights.whale),
+      specialist: Math.max(0, policy.ruleWeights.specialist),
+      bot: Math.max(0, policy.ruleWeights.bot),
+      insider: Math.max(0, policy.ruleWeights.insider),
+      primaryTieBreakOrder: tieBreakOrder,
+    },
+    signalsDisplay: {
+      maxDisplayReasons: clamp(
+        Math.trunc(policy.signalsDisplay.maxDisplayReasons),
+        1,
+        10,
+      ),
+      hideRedundantReasonsWhenGateImplies: Boolean(
+        policy.signalsDisplay.hideRedundantReasonsWhenGateImplies,
+      ),
+      severityThresholds: {
+        default: normalizeAttributionSeverityThresholds(
+          policy.signalsDisplay.severityThresholds.default,
+        ),
+        polymarket: normalizeAttributionSeverityThresholds(
+          policy.signalsDisplay.severityThresholds.polymarket,
+        ),
+        kalshi: normalizeAttributionSeverityThresholds(
+          policy.signalsDisplay.severityThresholds.kalshi,
+        ),
+        limitless: normalizeAttributionSeverityThresholds(
+          policy.signalsDisplay.severityThresholds.limitless,
+        ),
+      },
+    },
+    sensitiveLabels: {
+      insiderEnabled: Boolean(policy.sensitiveLabels.insiderEnabled),
+      botEnabled: Boolean(policy.sensitiveLabels.botEnabled),
+    },
+    queryControls: {
+      whalesBatchSize: clamp(Math.trunc(policy.queryControls.whalesBatchSize), 10, 1_000),
+      whalesMaxScanCandidates: clamp(
+        Math.trunc(policy.queryControls.whalesMaxScanCandidates),
+        100,
+        20_000,
+      ),
+    },
+    venueCapabilities: {
+      polymarket: {
+        specialistEnabled: Boolean(policy.venueCapabilities.polymarket.specialistEnabled),
+      },
+      kalshi: {
+        specialistEnabled: Boolean(policy.venueCapabilities.kalshi.specialistEnabled),
+      },
+      limitless: {
+        specialistEnabled: Boolean(policy.venueCapabilities.limitless.specialistEnabled),
+      },
+    },
+    multiVenueMerge: {
+      strategy: "max_candidate_score",
+      venueTieBreak: "volume30d_desc_then_fixed_order",
+      fixedVenueOrder,
+    },
+  };
+}
+
 function normalizeAiWhaleProfilesPolicy(
   policy: AiWhaleProfilesPolicy,
 ): AiWhaleProfilesPolicy {
@@ -542,6 +1035,10 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeSignalsPolicy(merged as WalletIntelSignalsPolicy) as IntelPolicyMap[K];
     case "wallet_intel_refresh":
       return normalizeRefreshPolicy(merged as WalletIntelRefreshPolicy) as IntelPolicyMap[K];
+    case "wallet_intel_attribution":
+      return normalizeAttributionPolicy(
+        merged as WalletIntelAttributionPolicy,
+      ) as IntelPolicyMap[K];
     case "ai_whale_profiles":
       return normalizeAiWhaleProfilesPolicy(merged as AiWhaleProfilesPolicy) as IntelPolicyMap[K];
     case "ai_clusters":
@@ -572,6 +1069,11 @@ function sanitizeOverridePayload(
       delete record.rpcSoftFailMode;
       delete record.maxHolderErrorsBeforeAbort;
       delete record.selectionVenueWeights;
+      return record;
+    }
+    case "wallet_intel_attribution": {
+      // Backward compatibility: older overrides may still include llmOverlay.
+      delete record.llmOverlay;
       return record;
     }
     case "ai_clusters": {
@@ -656,10 +1158,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
     };
   }
 
-  const effective = normalizeMerged(key, {
-    ...defaults,
-    ...parsed.value,
-  } as IntelPolicyMap[K]);
+  const merged = deepMerge(defaults, parsed.value ?? {}) as IntelPolicyMap[K];
+  const effective = normalizeMerged(key, merged);
 
   return {
     key,
@@ -695,6 +1195,10 @@ export async function resolveAllIntelPolicies(
       "wallet_intel_refresh",
       byKey.get("wallet_intel_refresh") ?? null,
     ),
+    wallet_intel_attribution: resolveFromRow(
+      "wallet_intel_attribution",
+      byKey.get("wallet_intel_attribution") ?? null,
+    ),
     ai_whale_profiles: resolveFromRow(
       "ai_whale_profiles",
       byKey.get("ai_whale_profiles") ?? null,
@@ -716,6 +1220,10 @@ export async function resolveWalletIntelSignalsPolicy(pool: DbQuery) {
 
 export async function resolveWalletIntelRefreshPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "wallet_intel_refresh");
+}
+
+export async function resolveWalletIntelAttributionPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "wallet_intel_attribution");
 }
 
 export async function resolveAiWhaleProfilesPolicy(pool: DbQuery) {

@@ -15,9 +15,20 @@ import {
   mergeWalletIdsForScope,
 } from "./services/wallet-intel-filters.js";
 import {
+  buildSignalPresentation,
+  minPositiveThreshold,
+  walletMatchesFilters,
+} from "./services/wallet-attribution.js";
+import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
+import { shouldReturnFilterTooBroad } from "./routes/wallet-intel.js";
+import {
+  DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+  computeRobustUnusualScore,
+  resolveUnusualTier,
+} from "./services/wallet-activity-summary.js";
 
 type TestCase = {
   name: string;
@@ -163,6 +174,273 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "wallet attribution policy override merges partial nested blocks",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000021",
+              policy_key: "wallet_intel_attribution",
+              effective_at: new Date("2026-01-02T00:00:00.000Z"),
+              payload: {
+                enabled: true,
+                queryControls: {
+                  whalesBatchSize: 50,
+                  whalesMaxScanCandidates: 1500,
+                },
+                venueThresholds: {
+                  polymarket: {
+                    whaleExposureUsd: 75000,
+                  },
+                },
+              },
+              created_by: null,
+              created_at: new Date("2026-01-02T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "wallet_intel_attribution");
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.enabled, true);
+      assert.equal(resolved.effective.queryControls.whalesBatchSize, 50);
+      assert.equal(
+        resolved.effective.queryControls.whalesMaxScanCandidates,
+        1500,
+      );
+      assert.equal(
+        resolved.effective.venueThresholds.polymarket.whaleExposureUsd,
+        75000,
+      );
+      assert.equal(
+        resolved.effective.venueThresholds.kalshi.whaleExposureUsd > 0,
+        true,
+      );
+    },
+  },
+  {
+    name: "wallet attribution signal presentation hides redundant gate reasons",
+    run: () => {
+      const presentation = buildSignalPresentation({
+        signalLabels: [
+          "longshot_odds",
+          "high_notional",
+          "reactivated_after_idle",
+          "high_risk_longshot",
+        ],
+        labels: [],
+        signalScore: 0.91,
+        venue: "polymarket",
+        policy: {
+          enabled: true,
+          display: {
+            listPrimaryCount: 1,
+            listSecondaryCount: 2,
+            detailsSecondaryMax: 8,
+            detailsSupportingMax: 12,
+          },
+          venueThresholds: {
+            polymarket: {
+              whaleExposureUsd: 50000,
+              whaleVolume30dUsd: 150000,
+              highConvictionStakeUsd: 5000,
+              marketMoverStakeUsd: 10000,
+              marketMoverStakeToMarketVolRatio: 0.05,
+              highFrequencyTrades30d: 120,
+              botMinActiveDays30d: 12,
+              botMaxMedianStakeUsd: 750,
+              volumeTraderVolume30dUsd: 250000,
+              specialistCategoryShareMin: 0.6,
+              insiderCriticalSignals30dMin: 3,
+              insiderAvgSignalScoreMin: 0.75,
+              insiderMinResolvedBets: 12,
+              insiderWinRateMin: 0.62,
+            },
+            kalshi: {
+              whaleExposureUsd: 50000,
+              whaleVolume30dUsd: 150000,
+              highConvictionStakeUsd: 5000,
+              marketMoverStakeUsd: 10000,
+              marketMoverStakeToMarketVolRatio: 0.05,
+              highFrequencyTrades30d: 120,
+              botMinActiveDays30d: 12,
+              botMaxMedianStakeUsd: 750,
+              volumeTraderVolume30dUsd: 250000,
+              specialistCategoryShareMin: 0.6,
+              insiderCriticalSignals30dMin: 3,
+              insiderAvgSignalScoreMin: 0.75,
+              insiderMinResolvedBets: 12,
+              insiderWinRateMin: 0.62,
+            },
+            limitless: {
+              whaleExposureUsd: 50000,
+              whaleVolume30dUsd: 150000,
+              highConvictionStakeUsd: 5000,
+              marketMoverStakeUsd: 10000,
+              marketMoverStakeToMarketVolRatio: 0.05,
+              highFrequencyTrades30d: 120,
+              botMinActiveDays30d: 12,
+              botMaxMedianStakeUsd: 750,
+              volumeTraderVolume30dUsd: 250000,
+              specialistCategoryShareMin: 0.6,
+              insiderCriticalSignals30dMin: 3,
+              insiderAvgSignalScoreMin: 0.75,
+              insiderMinResolvedBets: 12,
+              insiderWinRateMin: 0.62,
+            },
+          },
+          ruleWeights: {
+            whale: 1,
+            specialist: 1,
+            bot: 1,
+            insider: 1,
+            primaryTieBreakOrder: ["whale", "specialist", "bot", "insider"],
+          },
+          signalsDisplay: {
+            maxDisplayReasons: 2,
+            hideRedundantReasonsWhenGateImplies: true,
+            severityThresholds: {
+              default: { medium: 0.5, high: 0.75, critical: 0.9 },
+              polymarket: { medium: 0.5, high: 0.75, critical: 0.9 },
+              kalshi: { medium: 0.5, high: 0.75, critical: 0.9 },
+              limitless: { medium: 0.5, high: 0.75, critical: 0.9 },
+            },
+          },
+          sensitiveLabels: { insiderEnabled: false, botEnabled: true },
+          queryControls: { whalesBatchSize: 100, whalesMaxScanCandidates: 3000 },
+          venueCapabilities: {
+            polymarket: { specialistEnabled: true },
+            kalshi: { specialistEnabled: true },
+            limitless: { specialistEnabled: true },
+          },
+          multiVenueMerge: {
+            strategy: "max_candidate_score",
+            venueTieBreak: "volume30d_desc_then_fixed_order",
+            fixedVenueOrder: ["polymarket", "kalshi", "limitless"],
+          },
+        },
+      });
+      assert.equal(presentation.severity, "critical");
+      assert.deepEqual(presentation.displayReasons, [
+        "high_risk_longshot",
+        "reactivated_after_idle",
+      ]);
+    },
+  },
+  {
+    name: "wallet attribution filter matcher supports any/all modes",
+    run: () => {
+      const matchedAll = walletMatchesFilters(
+        [{ slug: "whale" }, { slug: "fresh" }],
+        {
+          primary: "whale",
+          primaryCandidates: [{ key: "whale", score: 1 }],
+          secondary: ["high_conviction", "high_frequency"],
+          supporting: ["late_entry"],
+          display: {
+            listPrimary: ["whale"],
+            listSecondary: ["high_conviction", "high_frequency"],
+            detailsSecondary: ["high_conviction", "high_frequency"],
+            detailsSupporting: ["late_entry"],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        {
+          tags: ["whale", "fresh"],
+          tagMode: "all",
+          primary: ["whale"],
+          labels: ["high_conviction", "high_frequency"],
+          labelMode: "all",
+        },
+      );
+      assert.equal(matchedAll, true);
+
+      const matchedAny = walletMatchesFilters(
+        [{ slug: "dormant" }],
+        {
+          primary: "specialist",
+          primaryCandidates: [{ key: "specialist", score: 0.8 }],
+          secondary: ["crypto_specialist"],
+          supporting: ["unusual_behavior"],
+          display: {
+            listPrimary: ["specialist"],
+            listSecondary: ["crypto_specialist"],
+            detailsSecondary: ["crypto_specialist"],
+            detailsSupporting: ["unusual_behavior"],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        {
+          tags: ["dormant", "fresh"],
+          tagMode: "any",
+          primary: ["whale", "specialist"],
+          labels: ["crypto_specialist", "high_win_rate"],
+          labelMode: "any",
+        },
+      );
+      assert.equal(matchedAny, true);
+    },
+  },
+  {
+    name: "minPositiveThreshold ignores zero/negative values",
+    run: () => {
+      assert.equal(minPositiveThreshold([]), null);
+      assert.equal(minPositiveThreshold([0, -1, -100]), null);
+      assert.equal(minPositiveThreshold([0, 50_000, 10_000]), 10_000);
+      assert.equal(minPositiveThreshold([1, 2, 3]), 1);
+    },
+  },
+  {
+    name: "filter_too_broad only when scan cap hit and page cannot be satisfied",
+    run: () => {
+      assert.equal(
+        shouldReturnFilterTooBroad({
+          filteredCount: 30,
+          requestedOffset: 0,
+          requestedLimit: 25,
+          hitScanCap: true,
+          hasMoreCandidates: true,
+        }),
+        false,
+      );
+      assert.equal(
+        shouldReturnFilterTooBroad({
+          filteredCount: 30,
+          requestedOffset: 25,
+          requestedLimit: 25,
+          hitScanCap: true,
+          hasMoreCandidates: true,
+        }),
+        true,
+      );
+      assert.equal(
+        shouldReturnFilterTooBroad({
+          filteredCount: 30,
+          requestedOffset: 25,
+          requestedLimit: 25,
+          hitScanCap: false,
+          hasMoreCandidates: true,
+        }),
+        false,
+      );
+      assert.equal(
+        shouldReturnFilterTooBroad({
+          filteredCount: 30,
+          requestedOffset: 25,
+          requestedLimit: 25,
+          hitScanCap: true,
+          hasMoreCandidates: false,
+        }),
+        false,
+      );
+    },
+  },
+  {
     name: "scope=all wallet candidates use following+active union with dedupe",
     run: () => {
       const merged = mergeWalletIdsForScope(
@@ -301,6 +579,43 @@ const tests: TestCase[] = [
         markPrice: 0.9,
       });
       assert.equal(nearZeroNetShares, null);
+    },
+  },
+  {
+    name: "robust unusual score requires baseline sample gate and p90 denominator",
+    run: () => {
+      const blockedBySamples = computeRobustUnusualScore({
+        maxAbsDeltaUsd: 5000,
+        baselineP90Usd: 250,
+        baselineSampleCount: DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES - 1,
+      });
+      assert.equal(blockedBySamples, null);
+
+      const missingBaseline = computeRobustUnusualScore({
+        maxAbsDeltaUsd: 5000,
+        baselineP90Usd: null,
+        baselineSampleCount: DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES + 10,
+      });
+      assert.equal(missingBaseline, null);
+
+      const score = computeRobustUnusualScore({
+        maxAbsDeltaUsd: 5000,
+        baselineP90Usd: 250,
+        baselineSampleCount: DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+      });
+      assert.equal(score, 20);
+    },
+  },
+  {
+    name: "unusual tiers map to stable label boundaries",
+    run: () => {
+      assert.equal(resolveUnusualTier(null), null);
+      assert.equal(resolveUnusualTier(1.99), null);
+      assert.equal(resolveUnusualTier(2), "unusual");
+      assert.equal(resolveUnusualTier(4.99), "unusual");
+      assert.equal(resolveUnusualTier(5), "very_unusual");
+      assert.equal(resolveUnusualTier(9.99), "very_unusual");
+      assert.equal(resolveUnusualTier(10), "extreme");
     },
   },
 ];

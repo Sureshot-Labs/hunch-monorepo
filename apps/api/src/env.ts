@@ -531,6 +531,8 @@ export const env = {
     "WALLET_INTEL_SIGNAL_WINDOW_HOURS_MAX",
     24 * 14,
   ),
+  walletIntelAttributionDefaultsJson:
+    process.env.HUNCH_WALLET_INTEL_ATTRIBUTION_DEFAULTS_JSON?.trim() || "",
   walletIntelSignalNotificationsEnabled:
     parseOptionalBool(process.env.WALLET_INTEL_SIGNAL_NOTIFICATIONS_ENABLED) ??
     false,
