@@ -15,6 +15,7 @@ import {
 } from "../auth.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
+import { normalizeWalletNameInput } from "../lib/wallet-name.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { PrivyService } from "../privy-service.js";
@@ -28,6 +29,7 @@ import {
   polymarketRelayerStatusResponseSchema,
   polymarketRelayerSignBodySchema,
   removeWalletBodySchema,
+  updateWalletNameBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 import { attachReferralCode } from "../services/rewards.js";
@@ -297,9 +299,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             id: w.id,
             walletAddress: w.walletAddress,
             walletType: w.walletType,
+            name: w.name,
             isPrimary: w.isPrimary,
             isVerified: w.isVerified,
             createdAt: w.createdAt,
+            updatedAt: w.updatedAt,
           })),
           polymarketCredentials: polymarketCreds
             ? {
@@ -814,6 +818,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             id: w.id,
             walletAddress: w.walletAddress,
             walletType: w.walletType,
+            name: w.name,
             isPrimary: w.isPrimary,
             isVerified: w.isVerified,
             createdAt: w.createdAt,
@@ -1049,6 +1054,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             id: newWallet.id,
             walletAddress: newWallet.walletAddress,
             walletType: newWallet.walletType,
+            name: newWallet.name,
             isPrimary: newWallet.isPrimary,
             isVerified: newWallet.isVerified,
             createdAt: newWallet.createdAt,
@@ -1068,6 +1074,84 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to add wallet",
+        });
+      }
+    },
+  );
+
+  /**
+   * PATCH /auth/wallets
+   * Update linked wallet display name
+   */
+  z.patch(
+    "/auth/wallets",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: updateWalletNameBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const body = request.body;
+      const walletAddress = body.walletAddress.trim();
+      let walletName: string | null;
+      try {
+        walletName = normalizeWalletNameInput(body.name);
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error: error instanceof Error ? error.message : "Invalid wallet name",
+        });
+      }
+
+      try {
+        const clientIp = resolveSecurityClientIp(request);
+        const canProceed = await checkRateLimit(
+          `auth:update-wallet-name:${clientIp}`,
+          40,
+          60_000,
+          { onError: "fail_closed" },
+        );
+        if (!canProceed) {
+          reply.code(429);
+          return reply.send({ error: "Rate limit exceeded" });
+        }
+
+        const wallet = await AuthService.updateWalletName(
+          user.id,
+          walletAddress,
+          walletName,
+        );
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          wallet: {
+            id: wallet.id,
+            walletAddress: wallet.walletAddress,
+            walletType: wallet.walletType,
+            name: wallet.name,
+            isPrimary: wallet.isPrimary,
+            isVerified: wallet.isVerified,
+            createdAt: wallet.createdAt,
+            updatedAt: wallet.updatedAt,
+          },
+        });
+      } catch (error) {
+        if (error instanceof WalletNotFoundError) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Failed to update wallet name",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to update wallet name",
         });
       }
     },
@@ -1119,6 +1203,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             id: wallet.id,
             walletAddress: wallet.walletAddress,
             walletType: wallet.walletType,
+            name: wallet.name,
             isPrimary: wallet.isPrimary,
             isVerified: wallet.isVerified,
             createdAt: wallet.createdAt,

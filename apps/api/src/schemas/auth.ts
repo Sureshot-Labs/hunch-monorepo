@@ -34,6 +34,11 @@ export const removeWalletBodySchema = z.object({
   walletAddress: zRequiredString("walletAddress is required"),
 });
 
+export const updateWalletNameBodySchema = z.object({
+  walletAddress: zRequiredString("walletAddress is required"),
+  name: z.string().nullable(),
+});
+
 export const polymarketConnectBodySchema = z.object({
   signature: zRequiredString("signature is required"),
   timestamp: zRequiredString("timestamp is required"),

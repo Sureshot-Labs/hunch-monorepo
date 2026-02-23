@@ -76,6 +76,7 @@ export interface UserWallet {
   userId: string;
   walletAddress: string;
   walletType: string;
+  name: string | null;
   isPrimary: boolean;
   isVerified: boolean;
   createdAt: Date;
@@ -105,11 +106,26 @@ type UserWalletRow = {
   user_id: string;
   wallet_address: string;
   wallet_type: string;
+  name: string | null;
   is_primary: boolean;
   is_verified: boolean;
   created_at: Date;
   updated_at: Date;
 };
+
+function mapUserWalletRow(row: UserWalletRow): UserWallet {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    walletAddress: row.wallet_address,
+    walletType: row.wallet_type,
+    name: row.name,
+    isPrimary: row.is_primary,
+    isVerified: row.is_verified,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 type AuthSessionRow = {
   id: string;
@@ -937,21 +953,11 @@ export class AuthService {
    */
   static async getUserWallets(userId: string): Promise<UserWallet[]> {
     const result = await pool.query<UserWalletRow>(
-      "SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at FROM user_wallets WHERE user_id = $1 ORDER BY is_primary DESC, created_at ASC",
+      "SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at FROM user_wallets WHERE user_id = $1 ORDER BY is_primary DESC, created_at ASC",
       [userId],
     );
 
-    // Map snake_case to camelCase
-    return result.rows.map((row) => ({
-      id: row.id,
-      userId: row.user_id,
-      walletAddress: row.wallet_address,
-      walletType: row.wallet_type,
-      isPrimary: row.is_primary,
-      isVerified: row.is_verified,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return result.rows.map(mapUserWalletRow);
   }
 
   static async getUserWalletByAddress(
@@ -962,7 +968,7 @@ export class AuthService {
     const isEth = /^0x[a-fA-F0-9]{40}$/.test(normalized);
 
     const result = await pool.query<UserWalletRow>(
-      `SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at
+      `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
        FROM user_wallets
        WHERE user_id = $1 AND ${
          isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"
@@ -974,16 +980,7 @@ export class AuthService {
     const row = result.rows[0];
     if (!row) return null;
 
-    return {
-      id: row.id,
-      userId: row.user_id,
-      walletAddress: row.wallet_address,
-      walletType: row.wallet_type,
-      isPrimary: row.is_primary,
-      isVerified: row.is_verified,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return mapUserWalletRow(row);
   }
 
   static async addWallet(
@@ -1014,7 +1011,7 @@ export class AuthService {
       const result = await client.query<UserWalletRow>(
         `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature)
          VALUES ($1, $2, $3, false, $4, $5)
-         RETURNING id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at`,
+         RETURNING id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at`,
         [
           userId,
           input.walletAddress,
@@ -1027,22 +1024,37 @@ export class AuthService {
       await client.query("COMMIT");
 
       const row = result.rows[0];
-      return {
-        id: row.id,
-        userId: row.user_id,
-        walletAddress: row.wallet_address,
-        walletType: row.wallet_type,
-        isPrimary: row.is_primary,
-        isVerified: row.is_verified,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      };
+      return mapUserWalletRow(row);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
     } finally {
       client.release();
     }
+  }
+
+  static async updateWalletName(
+    userId: string,
+    walletAddress: string,
+    name: string | null,
+  ): Promise<UserWallet> {
+    const normalized = walletAddress.trim();
+    const isEth = ETH_ADDRESS_RE.test(normalized);
+    const result = await pool.query<UserWalletRow>(
+      `UPDATE user_wallets
+       SET name = $3,
+           updated_at = now()
+       WHERE user_id = $1
+         AND ${isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"}
+       RETURNING id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at`,
+      [userId, normalized, name],
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      throw new WalletNotFoundError();
+    }
+    return mapUserWalletRow(row);
   }
 
   static async removeWallet(
@@ -1064,7 +1076,7 @@ export class AuthService {
         : "wallet_address = $2";
 
       const targetResult = await client.query<UserWalletRow>(
-        `SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at
+        `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
          FROM user_wallets
          WHERE user_id = $1 AND ${match}
          LIMIT 1`,
@@ -1076,7 +1088,7 @@ export class AuthService {
       }
 
       const walletsResult = await client.query<UserWalletRow>(
-        `SELECT id, user_id, wallet_address, wallet_type, is_primary, is_verified, created_at, updated_at
+        `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
          FROM user_wallets
          WHERE user_id = $1
          ORDER BY is_primary DESC, created_at ASC`,
@@ -1125,26 +1137,11 @@ export class AuthService {
 
       await client.query("COMMIT");
 
-      const removed: UserWallet = {
-        id: target.id,
-        userId: target.user_id,
-        walletAddress: target.wallet_address,
-        walletType: target.wallet_type,
-        isPrimary: target.is_primary,
-        isVerified: target.is_verified,
-        createdAt: target.created_at,
-        updatedAt: target.updated_at,
-      };
+      const removed: UserWallet = mapUserWalletRow(target);
 
       const remainingWallets: UserWallet[] = remainingRows.map((row) => ({
-        id: row.id,
-        userId: row.user_id,
-        walletAddress: row.wallet_address,
-        walletType: row.wallet_type,
+        ...mapUserWalletRow(row),
         isPrimary: row.id === nextPrimary.id,
-        isVerified: row.is_verified,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
       }));
 
       return {
