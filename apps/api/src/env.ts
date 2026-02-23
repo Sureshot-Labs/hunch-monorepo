@@ -326,6 +326,7 @@ export const env = {
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 10),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
   holdersTtlSecPolymarket: Number(
     process.env.API_HOLDERS_TTL_SEC_POLYMARKET ?? "60",
