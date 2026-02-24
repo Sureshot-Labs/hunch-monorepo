@@ -35,6 +35,8 @@ import {
   normalizeAttributionPrimaryFilters,
   walletMatchesFilters,
   type WalletAttribution,
+  type WalletAttributionLabelKey,
+  type WalletAttributionPrimaryKey,
   type WalletSignalSeverity,
 } from "../services/wallet-attribution.js";
 import {
@@ -266,6 +268,37 @@ function normalizeStringArray(values: string[] | undefined): string[] {
         .filter(Boolean),
     ),
   );
+}
+
+const SUMMARY_DEPENDENT_PRIMARY_FILTERS = new Set<WalletAttributionPrimaryKey>([
+  "insider",
+]);
+const SUMMARY_DEPENDENT_LABEL_FILTERS = new Set<WalletAttributionLabelKey>([
+  "close_to_settlement",
+  "dormant_wake_up",
+  "late_entry",
+  "unusual_behavior",
+]);
+
+function filtersRequireSummaryHydration(
+  primaryFilters: WalletAttributionPrimaryKey[],
+  labelFilters: WalletAttributionLabelKey[],
+): boolean {
+  return (
+    primaryFilters.some((value) => SUMMARY_DEPENDENT_PRIMARY_FILTERS.has(value)) ||
+    labelFilters.some((value) => SUMMARY_DEPENDENT_LABEL_FILTERS.has(value))
+  );
+}
+
+async function resolveWhaleTagId(client: PoolClient): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `select id from wallet_tags where slug = 'whale' limit 1`,
+  );
+  const whaleTagId = result.rows[0]?.id ?? null;
+  if (!whaleTagId) {
+    throw new Error("Missing wallet_tags.slug='whale' record");
+  }
+  return whaleTagId;
 }
 
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {
@@ -547,6 +580,7 @@ async function loadCandidateWallets(
     );
   }
 
+  const whaleTagId = await resolveWhaleTagId(client);
   const rows = await client.query<CandidateWalletRow>(
     `
       select
@@ -564,7 +598,7 @@ async function loadCandidateWallets(
         wp.updated_at as profile_updated_at
       from wallets w
       join wallet_tag_map tm on tm.wallet_id = w.id
-      join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+       and tm.tag_id = $3::uuid
       left join wallet_user_labels wl
         on wl.wallet_id = w.id
        and wl.user_id = $1
@@ -574,7 +608,7 @@ async function loadCandidateWallets(
       where ($2::text[] is null or wp.profile->'categories' ?| $2::text[])
       order by w.last_seen_at desc
     `,
-    [userId, categoryFilter],
+    [userId, categoryFilter, whaleTagId],
   );
   return rows.rows;
 }
@@ -1354,6 +1388,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const labelsFilter = normalizeStringArray(query.labels);
       const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
       const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
+      const requiresSummaryForAttributionFilters = filtersRequireSummaryHydration(
+        primaryFilterTyped,
+        labelsFilterTyped,
+      );
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey("wallets-whales", user.id, query);
@@ -1409,6 +1447,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             10,
             Math.trunc(queryControls.whalesBatchSize),
           );
+          const whaleTagId = await resolveWhaleTagId(client);
 
           const whaleRows = await client.query<
             WalletRow &
@@ -1466,7 +1505,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 inferred.total as inferred_total
               from wallets w
               join wallet_tag_map tm on tm.wallet_id = w.id
-              join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+               and tm.tag_id = $5::uuid
               left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
               left join wallet_user_labels wl
                 on wl.wallet_id = w.id
@@ -1537,6 +1576,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               maxScanCandidates + 1,
               query.windowDays,
               categoryFilter.length > 0 ? categoryFilter : null,
+              whaleTagId,
             ],
           );
 
@@ -1611,22 +1651,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           let postFilterRows = tagsOnlyRows;
 
           if (needsAttributionForFilters && tagsOnlyRows.length > 0) {
-            summaryMapForFilters = new Map<string, WalletActivitySummary>();
-            for (const chunk of chunkArray(tagsOnlyRows, hydrationBatchSize)) {
-              const chunkIds = chunk.map((row) => row.walletId);
-              if (chunkIds.length === 0) continue;
-              const chunkSummary = await fetchWalletActivitySummaries(
-                client,
-                chunkIds,
-                {
-                  windowHours,
-                  topChanges: query.topChanges,
-                  baselineDays: 30,
-                  enteredLateHours: 24,
-                },
-              );
-              for (const [walletId, summary] of chunkSummary.entries()) {
-                summaryMapForFilters.set(walletId, summary);
+            if (requiresSummaryForAttributionFilters) {
+              summaryMapForFilters = new Map<string, WalletActivitySummary>();
+              for (const chunk of chunkArray(tagsOnlyRows, hydrationBatchSize)) {
+                const chunkIds = chunk.map((row) => row.walletId);
+                if (chunkIds.length === 0) continue;
+                const chunkSummary = await fetchWalletActivitySummaries(
+                  client,
+                  chunkIds,
+                  {
+                    windowHours,
+                    topChanges: query.topChanges,
+                    baselineDays: 30,
+                    enteredLateHours: 24,
+                  },
+                );
+                for (const [walletId, summary] of chunkSummary.entries()) {
+                  summaryMapForFilters.set(walletId, summary);
+                }
               }
             }
 
@@ -1690,9 +1732,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
           const summaryMapForPage =
             summaryMapForFilters ?? new Map<string, WalletActivitySummary>();
-          const needsSummaryForPage =
-            query.includeSummary ||
-            (includeAttributionInResponse && !needsAttributionForFilters);
+          const needsSummaryForPage = query.includeSummary || includeAttributionInResponse;
           if (needsSummaryForPage) {
             const missingIds = pagedIds.filter((id) => !summaryMapForPage.has(id));
             if (missingIds.length > 0) {

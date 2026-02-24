@@ -502,16 +502,39 @@ async function loadVenueStats(
                   and wah.activity_type in ('delta', 'trade')
                   and wah.hour_bucket >= now() - interval '30 days'
                 group by wah.wallet_id, wah.venue, wah.market_id
+              ),
+              market_meta as (
+                select
+                  um.id as market_id,
+                  lower(um.category) as market_category,
+                  um.event_id
+                from unified_markets um
+                join (
+                  select distinct market_id
+                  from wallet_market
+                ) mk on mk.market_id = um.id
+              ),
+              event_lookup as (
+                select
+                  ue.id as event_id,
+                  lower(ue.category) as event_category
+                from unified_events ue
+                join (
+                  select distinct mm.event_id
+                  from market_meta mm
+                  where mm.market_category is null
+                    and mm.event_id is not null
+                ) ev on ev.event_id = ue.id
               )
               select
                 wm.wallet_id,
                 wm.venue,
-                lower(coalesce(um.category, ue.category)) as raw_category,
+                coalesce(mm.market_category, el.event_category) as raw_category,
                 sum(wm.volume_usd) as volume_usd
               from wallet_market wm
-              left join unified_markets um on um.id = wm.market_id
-              left join unified_events ue on ue.id = um.event_id
-              group by wm.wallet_id, wm.venue, lower(coalesce(um.category, ue.category))
+              left join market_meta mm on mm.market_id = wm.market_id
+              left join event_lookup el on el.event_id = mm.event_id
+              group by wm.wallet_id, wm.venue, coalesce(mm.market_category, el.event_category)
             `,
             [walletIds],
           )
