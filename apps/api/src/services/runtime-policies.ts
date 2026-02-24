@@ -7,6 +7,7 @@ import {
   listActiveRuntimePolicies,
   type RuntimePolicyRow,
 } from "../repos/runtime-policies.js";
+import { normalizeMarketMapVenues } from "./market-map.js";
 
 export const INTEL_POLICY_KEYS = [
   "wallet_intel_signals",
@@ -14,6 +15,7 @@ export const INTEL_POLICY_KEYS = [
   "wallet_intel_attribution",
   "ai_whale_profiles",
   "ai_clusters",
+  "market_map",
   "arbitrage_defaults",
 ] as const;
 
@@ -124,6 +126,32 @@ export type ArbitrageDefaultsPolicy = {
   minQualityScore: number;
 };
 
+export type MarketMapPolicy = {
+  enabled: boolean;
+  depth: number;
+  k1: number;
+  k2: number;
+  maxEventsPerVenue: number;
+  ttlSec: number;
+  minEventVolume24h: number;
+  minEventLiquidity: number;
+  mergeLimitDefault: number;
+  mergePerVenueMinDefault: number;
+  sizeByDefault: "count" | "volume24h" | "liquidity" | "openInterest";
+  labelAiEnabled: boolean;
+  labelLevels: number[];
+  labelModel: string;
+  labelMaxTokens: number;
+  debugLogs: boolean;
+  venuesEnabled: string[];
+  projectionMethod: "umap";
+  projectionPcaDims: number;
+  projectionUmapNeighbors: number;
+  projectionUmapMinDist: number;
+  projectionSeed: number;
+  projectionBudgetMs: number;
+};
+
 type WalletIntelAttributionVenueKey = "polymarket" | "kalshi" | "limitless";
 
 export type WalletIntelAttributionDisplayPolicy = {
@@ -218,6 +246,7 @@ type IntelPolicyMap = {
   wallet_intel_attribution: WalletIntelAttributionPolicy;
   ai_whale_profiles: AiWhaleProfilesPolicy;
   ai_clusters: AiClustersPolicy;
+  market_map: MarketMapPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
 };
 
@@ -352,6 +381,42 @@ const aiClustersSchema = z
     analysisConcurrency: positiveInt.max(20),
     debugLogs: strictBoolean,
     maxClustersPerRun: positiveInt.max(2_000),
+  })
+  .strict()
+  .partial();
+
+const marketMapSizeBySchema = z.enum([
+  "count",
+  "volume24h",
+  "liquidity",
+  "openInterest",
+]);
+
+const marketMapSchema = z
+  .object({
+    enabled: strictBoolean,
+    depth: positiveInt.max(4),
+    k1: positiveInt.max(100),
+    k2: positiveInt.max(100),
+    maxEventsPerVenue: positiveInt.max(100_000),
+    ttlSec: positiveInt.max(60 * 60 * 24 * 30),
+    minEventVolume24h: nonNegativeNumber,
+    minEventLiquidity: nonNegativeNumber,
+    mergeLimitDefault: positiveInt.max(200),
+    mergePerVenueMinDefault: nonNegativeInt.max(50),
+    sizeByDefault: marketMapSizeBySchema,
+    labelAiEnabled: strictBoolean,
+    labelLevels: z.array(z.coerce.number().int().min(1).max(3)).max(3),
+    labelModel: z.string().trim().min(1).max(200),
+    labelMaxTokens: positiveInt.max(2_000),
+    debugLogs: strictBoolean,
+    venuesEnabled: z.array(z.string().trim().min(1).max(64)).min(1).max(20),
+    projectionMethod: z.enum(["umap"]),
+    projectionPcaDims: positiveInt.max(1024),
+    projectionUmapNeighbors: positiveInt.max(500),
+    projectionUmapMinDist: nonNegativeNumber.max(1),
+    projectionSeed: nonNegativeInt.max(2_147_483_647),
+    projectionBudgetMs: positiveInt.max(60 * 60 * 1_000),
   })
   .strict()
   .partial();
@@ -512,6 +577,7 @@ const policySchemas = {
   wallet_intel_attribution: walletIntelAttributionSchema,
   ai_whale_profiles: aiWhaleProfilesSchema,
   ai_clusters: aiClustersSchema,
+  market_map: marketMapSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
 } as const;
 
@@ -730,6 +796,31 @@ function getDefaults(): IntelPolicyMap {
       analysisConcurrency: env.aiClusterAnalysisConcurrency,
       debugLogs: env.aiClusterDebugLogs,
       maxClustersPerRun: 400,
+    },
+    market_map: {
+      enabled: env.aiMarketMapEnabled,
+      depth: env.aiMarketMapDepth,
+      k1: env.aiMarketMapK1,
+      k2: env.aiMarketMapK2,
+      maxEventsPerVenue: env.aiMarketMapMaxEventsPerVenue,
+      ttlSec: env.aiMarketMapTtlSec,
+      minEventVolume24h: env.aiMarketMapMinEventVolume24h,
+      minEventLiquidity: env.aiMarketMapMinEventLiquidity,
+      mergeLimitDefault: env.aiMarketMapMergeLimitDefault,
+      mergePerVenueMinDefault: env.aiMarketMapMergePerVenueMinDefault,
+      sizeByDefault: env.aiMarketMapSizeByDefault,
+      labelAiEnabled: env.aiMarketMapLabelAiEnabled,
+      labelLevels: env.aiMarketMapLabelLevels,
+      labelModel: env.aiMarketMapLabelModel,
+      labelMaxTokens: env.aiMarketMapLabelMaxTokens,
+      debugLogs: env.aiMarketMapDebugLogs,
+      venuesEnabled: env.aiMarketMapVenuesEnabled,
+      projectionMethod: env.aiMarketMapProjectionMethod,
+      projectionPcaDims: env.aiMarketMapProjectionPcaDims,
+      projectionUmapNeighbors: env.aiMarketMapProjectionUmapNeighbors,
+      projectionUmapMinDist: env.aiMarketMapProjectionUmapMinDist,
+      projectionSeed: env.aiMarketMapProjectionSeed,
+      projectionBudgetMs: env.aiMarketMapProjectionBudgetMs,
     },
     arbitrage_defaults: {
       limit: 24,
@@ -1015,6 +1106,67 @@ function normalizeAiClustersPolicy(policy: AiClustersPolicy): AiClustersPolicy {
   };
 }
 
+function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
+  const normalizedLabelLevels = Array.from(
+    new Set(
+      (policy.labelLevels ?? [])
+        .map((value) => Math.trunc(value))
+        .filter((value) => value === 1 || value === 2 || value === 3),
+    ),
+  ).sort((a, b) => a - b);
+
+  const normalizedVenues = normalizeMarketMapVenues(policy.venuesEnabled ?? []);
+  const venuesEnabled =
+    normalizedVenues.length > 0
+      ? normalizedVenues
+      : (["polymarket", "kalshi", "limitless"] as const);
+
+  return {
+    enabled: Boolean(policy.enabled),
+    depth: clamp(Math.trunc(policy.depth), 2, 4),
+    k1: clamp(Math.trunc(policy.k1), 2, 24),
+    k2: clamp(Math.trunc(policy.k2), 2, 24),
+    maxEventsPerVenue: clamp(Math.trunc(policy.maxEventsPerVenue), 100, 20_000),
+    ttlSec: clamp(Math.trunc(policy.ttlSec), 1_800, 604_800),
+    minEventVolume24h: Math.max(0, policy.minEventVolume24h),
+    minEventLiquidity: Math.max(0, policy.minEventLiquidity),
+    mergeLimitDefault: clamp(Math.trunc(policy.mergeLimitDefault), 1, 200),
+    mergePerVenueMinDefault: clamp(
+      Math.trunc(policy.mergePerVenueMinDefault),
+      0,
+      50,
+    ),
+    sizeByDefault:
+      policy.sizeByDefault === "count" ||
+      policy.sizeByDefault === "liquidity" ||
+      policy.sizeByDefault === "openInterest" ||
+      policy.sizeByDefault === "volume24h"
+        ? policy.sizeByDefault
+        : "volume24h",
+    labelAiEnabled: Boolean(policy.labelAiEnabled),
+    labelLevels:
+      normalizedLabelLevels.length > 0 ? normalizedLabelLevels : [1, 2, 3],
+    labelModel: policy.labelModel.trim(),
+    labelMaxTokens: clamp(Math.trunc(policy.labelMaxTokens), 1, 2_000),
+    debugLogs: Boolean(policy.debugLogs),
+    venuesEnabled: [...venuesEnabled],
+    projectionMethod: "umap",
+    projectionPcaDims: clamp(Math.trunc(policy.projectionPcaDims), 8, 128),
+    projectionUmapNeighbors: clamp(
+      Math.trunc(policy.projectionUmapNeighbors),
+      5,
+      100,
+    ),
+    projectionUmapMinDist: clamp(policy.projectionUmapMinDist, 0.01, 0.99),
+    projectionSeed: clamp(Math.trunc(policy.projectionSeed), 0, 2_147_483_647),
+    projectionBudgetMs: clamp(
+      Math.trunc(policy.projectionBudgetMs),
+      1_000,
+      600_000,
+    ),
+  };
+}
+
 function normalizeArbitrageDefaultsPolicy(
   policy: ArbitrageDefaultsPolicy,
 ): ArbitrageDefaultsPolicy {
@@ -1043,6 +1195,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeAiWhaleProfilesPolicy(merged as AiWhaleProfilesPolicy) as IntelPolicyMap[K];
     case "ai_clusters":
       return normalizeAiClustersPolicy(merged as AiClustersPolicy) as IntelPolicyMap[K];
+    case "market_map":
+      return normalizeMarketMapPolicy(merged as MarketMapPolicy) as IntelPolicyMap[K];
     case "arbitrage_defaults":
       return normalizeArbitrageDefaultsPolicy(merged as ArbitrageDefaultsPolicy) as IntelPolicyMap[K];
     default:
@@ -1080,6 +1234,11 @@ function sanitizeOverridePayload(
       delete record.stageATimeoutMs;
       delete record.stageBTimeoutMs;
       delete record.forceFinalOnly;
+      return record;
+    }
+    case "market_map": {
+      delete record.projectionAlgo;
+      delete record.layoutMode;
       return record;
     }
     case "ai_whale_profiles": {
@@ -1207,6 +1366,10 @@ export async function resolveAllIntelPolicies(
       "ai_clusters",
       byKey.get("ai_clusters") ?? null,
     ),
+    market_map: resolveFromRow(
+      "market_map",
+      byKey.get("market_map") ?? null,
+    ),
     arbitrage_defaults: resolveFromRow(
       "arbitrage_defaults",
       byKey.get("arbitrage_defaults") ?? null,
@@ -1232,6 +1395,10 @@ export async function resolveAiWhaleProfilesPolicy(pool: DbQuery) {
 
 export async function resolveAiClustersPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "ai_clusters");
+}
+
+export async function resolveMarketMapPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "market_map");
 }
 
 export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {

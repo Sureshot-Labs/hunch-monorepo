@@ -75,6 +75,15 @@ function parseList(raw: string | undefined, fallback?: string): string[] {
   return [];
 }
 
+function parseIntegerList(raw: string | undefined): number[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((entry) => Number(entry.trim()))
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.trunc(value));
+}
+
 function parseEnum<T extends string>(
   value: string | undefined,
   allowed: readonly T[],
@@ -216,6 +225,105 @@ const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
 );
 const aiWhaleProfileModel =
   process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
+const aiMarketMapEnabled =
+  parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
+const aiMarketMapDepth = optionalPositiveInt("AI_MARKET_MAP_DEPTH", 3);
+const aiMarketMapK1 = optionalPositiveInt("AI_MARKET_MAP_K1", 8);
+const aiMarketMapK2 = optionalPositiveInt("AI_MARKET_MAP_K2", 6);
+const aiMarketMapMaxEventsPerVenue = optionalPositiveInt(
+  "AI_MARKET_MAP_MAX_EVENTS_PER_VENUE",
+  500,
+);
+const aiMarketMapTtlSec = optionalPositiveInt("AI_MARKET_MAP_TTL_SEC", 43_200);
+const aiMarketMapMinEventVolume24h = optionalNonNegativeNumber(
+  "AI_MARKET_MAP_MIN_EVENT_VOLUME24H",
+  0,
+);
+const aiMarketMapMinEventLiquidity = optionalNonNegativeNumber(
+  "AI_MARKET_MAP_MIN_EVENT_LIQUIDITY",
+  0,
+);
+const aiMarketMapMergeLimitDefault = optionalPositiveInt(
+  "AI_MARKET_MAP_MERGE_LIMIT_DEFAULT",
+  60,
+);
+const aiMarketMapMergePerVenueMinDefault = optionalNonNegativeInt(
+  "AI_MARKET_MAP_MERGE_PER_VENUE_MIN_DEFAULT",
+  5,
+);
+const aiMarketMapSizeByDefaultRaw = process.env.AI_MARKET_MAP_SIZE_BY_DEFAULT
+  ?.trim()
+  .toLowerCase();
+const aiMarketMapSizeByDefault:
+  | "count"
+  | "volume24h"
+  | "liquidity"
+  | "openInterest" =
+  aiMarketMapSizeByDefaultRaw === "count"
+    ? "count"
+    : aiMarketMapSizeByDefaultRaw === "volume24h"
+      ? "volume24h"
+      : aiMarketMapSizeByDefaultRaw === "liquidity"
+        ? "liquidity"
+        : aiMarketMapSizeByDefaultRaw === "openinterest" ||
+            aiMarketMapSizeByDefaultRaw === "open_interest"
+          ? "openInterest"
+          : "volume24h";
+const aiMarketMapLabelAiEnabled =
+  parseOptionalBool(process.env.AI_MARKET_MAP_LABEL_AI_ENABLED) ?? true;
+const aiMarketMapLabelLevelsRaw = parseIntegerList(
+  process.env.AI_MARKET_MAP_LABEL_LEVELS,
+);
+const aiMarketMapLabelLevels =
+  aiMarketMapLabelLevelsRaw.length > 0 ? aiMarketMapLabelLevelsRaw : [1, 2, 3];
+const aiMarketMapLabelModel =
+  process.env.AI_MARKET_MAP_LABEL_MODEL?.trim() || "openai/gpt-5-nano";
+const aiMarketMapLabelMaxTokens = optionalPositiveInt(
+  "AI_MARKET_MAP_LABEL_MAX_TOKENS",
+  800,
+);
+const aiMarketMapDebugLogs =
+  parseOptionalBool(process.env.AI_MARKET_MAP_DEBUG_LOGS) ?? false;
+const aiMarketMapVenuesRaw = parseList(
+  process.env.AI_MARKET_MAP_VENUES_ENABLED,
+).map((value) => value.toLowerCase());
+const aiMarketMapVenuesEnabled = (() => {
+  const normalized = Array.from(
+    new Set(
+      aiMarketMapVenuesRaw.filter((venue) =>
+        /^[a-z0-9][a-z0-9_-]{0,63}$/.test(venue),
+      ),
+    ),
+  );
+  return normalized.length > 0
+    ? normalized
+    : ["polymarket", "kalshi", "limitless"];
+})();
+const aiMarketMapProjectionMethod = parseEnum(
+  process.env.AI_MARKET_MAP_PROJECTION_METHOD,
+  ["umap"] as const,
+  "umap",
+);
+const aiMarketMapProjectionPcaDims = optionalPositiveInt(
+  "AI_MARKET_MAP_PROJECTION_PCA_DIMS",
+  32,
+);
+const aiMarketMapProjectionUmapNeighbors = optionalPositiveInt(
+  "AI_MARKET_MAP_PROJECTION_UMAP_NEIGHBORS",
+  30,
+);
+const aiMarketMapProjectionUmapMinDist = optionalRatio01(
+  "AI_MARKET_MAP_PROJECTION_UMAP_MIN_DIST",
+  0.15,
+);
+const aiMarketMapProjectionSeed = optionalNonNegativeInt(
+  "AI_MARKET_MAP_PROJECTION_SEED",
+  42,
+);
+const aiMarketMapProjectionBudgetMs = optionalPositiveInt(
+  "AI_MARKET_MAP_PROJECTION_BUDGET_MS",
+  30_000,
+);
 const walletIntelWhaleUsd = optionalNonNegativeNumber(
   "WALLET_INTEL_WHALE_USD",
   10_000,
@@ -413,6 +521,29 @@ export const env = {
   ),
   aiClusterDebugLogs:
     parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
+  aiMarketMapEnabled,
+  aiMarketMapDepth,
+  aiMarketMapK1,
+  aiMarketMapK2,
+  aiMarketMapMaxEventsPerVenue,
+  aiMarketMapTtlSec,
+  aiMarketMapMinEventVolume24h,
+  aiMarketMapMinEventLiquidity,
+  aiMarketMapMergeLimitDefault,
+  aiMarketMapMergePerVenueMinDefault,
+  aiMarketMapSizeByDefault,
+  aiMarketMapLabelAiEnabled,
+  aiMarketMapLabelLevels,
+  aiMarketMapLabelModel,
+  aiMarketMapLabelMaxTokens,
+  aiMarketMapDebugLogs,
+  aiMarketMapVenuesEnabled,
+  aiMarketMapProjectionMethod,
+  aiMarketMapProjectionPcaDims,
+  aiMarketMapProjectionUmapNeighbors,
+  aiMarketMapProjectionUmapMinDist,
+  aiMarketMapProjectionSeed,
+  aiMarketMapProjectionBudgetMs,
   aiWhaleProfileStyleGuide:
     process.env.AI_WHALE_PROFILE_STYLE_GUIDE?.trim() ||
     "Neutral tone, short sentences, no hype, no speculation.",

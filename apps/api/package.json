@@ -21,6 +21,7 @@
     "rewards:migration:preflight": "tsx src/rewards-migration-preflight.ts",
     "ai:embed:backfill": "tsx src/ai-embed-backfill.ts",
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
+    "ai:embed:market-map": "tsx src/ai-embed-market-map.ts",
     "ai:topics:dry-run": "tsx src/ai-topics-dry-run.ts",
     "ai:search:smoke": "tsx src/ai-search-smoke.ts",
     "ai:synthesis:smoke": "tsx src/ai-synthesis-smoke.ts",
@@ -59,7 +60,9 @@
     "fastify-type-provider-zod": "6.1.0",
     "geoip-lite": "^1.4.10",
     "jsonwebtoken": "^9.0.3",
+    "ml-pca": "^4.1.1",
     "pg": "^8.16.3",
+    "umap-js": "^1.4.0",
     "zod": "4.2.0"
   },
   "devDependencies": {

@@ -238,6 +238,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "wallet_intel_attribution",
   "ai_whale_profiles",
   "ai_clusters",
+  "market_map",
   "arbitrage_defaults",
 ]);
 
