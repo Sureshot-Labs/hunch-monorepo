@@ -77,6 +77,12 @@ export type WalletAttributionInput = {
   topChanges?: WalletActivityTopChange[] | null;
 };
 
+export type WalletAttributionBuildOptions = {
+  mode?: "full" | "filters";
+  filterPrimary?: WalletAttributionPrimaryKey[] | null;
+  filterLabels?: WalletAttributionLabelKey[] | null;
+};
+
 type VenueKey = "polymarket" | "kalshi" | "limitless";
 
 type WalletVenueStats = {
@@ -239,6 +245,18 @@ const LABEL_ORDER: WalletAttributionLabelKey[] = [
   "volume_trader",
 ];
 
+const PRIMARY_KEY_SET = new Set<WalletAttributionPrimaryKey>(
+  PRIMARY_KEY_ORDER_FALLBACK,
+);
+const LABEL_KEY_SET = new Set<WalletAttributionLabelKey>(LABEL_ORDER);
+const SPECIALIST_LABEL_SET = new Set<WalletAttributionLabelKey>([
+  "sports_specialist",
+  "politics_specialist",
+  "crypto_specialist",
+  "macro_specialist",
+  "weather_specialist",
+]);
+
 const VENUE_ORDER_FALLBACK: VenueKey[] = ["polymarket", "kalshi", "limitless"];
 
 const REASON_PRIORITY: Record<string, number> = {
@@ -302,6 +320,36 @@ function mapCategoryToFamily(raw: string | null | undefined): SpecialistFamily |
     if (aliases.has(normalized)) return family;
   }
   return null;
+}
+
+export function normalizeAttributionPrimaryFilters(
+  values: string[] | null | undefined,
+): WalletAttributionPrimaryKey[] {
+  if (!values || values.length === 0) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.trim().toLowerCase())
+        .filter((value): value is WalletAttributionPrimaryKey =>
+          PRIMARY_KEY_SET.has(value as WalletAttributionPrimaryKey),
+        ),
+    ),
+  );
+}
+
+export function normalizeAttributionLabelFilters(
+  values: string[] | null | undefined,
+): WalletAttributionLabelKey[] {
+  if (!values || values.length === 0) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.trim().toLowerCase())
+        .filter((value): value is WalletAttributionLabelKey =>
+          LABEL_KEY_SET.has(value as WalletAttributionLabelKey),
+        ),
+    ),
+  );
 }
 
 function normalizedReasonCodes(change: WalletActivityTopChange): string[] {
@@ -404,11 +452,17 @@ function normalizeVenueOrder(policy: WalletIntelAttributionPolicy): VenueKey[] {
 async function loadVenueStats(
   client: PoolClient,
   walletIds: string[],
+  options?: {
+    includeCategoryStats?: boolean;
+    includeRatioStats?: boolean;
+  },
 ): Promise<Map<string, Map<VenueKey, WalletVenueStats>>> {
   const byWallet = new Map<string, Map<VenueKey, WalletVenueStats>>();
   if (walletIds.length === 0) return byWallet;
+  const includeCategoryStats = options?.includeCategoryStats ?? true;
+  const includeRatioStats = options?.includeRatioStats ?? true;
 
-  const [statsResult, categoryResult, ratioResult] = await Promise.all([
+  const [statsResult, categoryRows, ratioRows] = await Promise.all([
     client.query<VenueStatsRow>(
       `
         select
@@ -433,72 +487,89 @@ async function loadVenueStats(
       `,
       [walletIds],
     ),
-    client.query<CategoryVolumeRow>(
-      `
-        select
-          wah.wallet_id,
-          wah.venue,
-          lower(coalesce(um.category, ue.category)) as raw_category,
-          sum(coalesce(wah.volume_usd, abs(wah.signed_delta_usd), 0)) as volume_usd
-        from wallet_activity_hourly wah
-        left join unified_markets um on um.id = wah.market_id
-        left join unified_events ue on ue.id = um.event_id
-        where wah.wallet_id = any($1::uuid[])
-          and wah.activity_type in ('delta', 'trade')
-          and wah.hour_bucket >= now() - interval '30 days'
-        group by wah.wallet_id, wah.venue, lower(coalesce(um.category, ue.category))
-      `,
-      [walletIds],
-    ),
-    client.query<RatioRow>(
-      `
-        with wallet_market as (
-          select
-            wah.wallet_id,
-            wah.venue,
-            wah.market_id,
-            sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as wallet_notional_24h
-          from wallet_activity_hourly wah
-          where wah.wallet_id = any($1::uuid[])
-            and wah.activity_type in ('delta', 'trade')
-            and wah.hour_bucket >= now() - interval '24 hours'
-          group by wah.wallet_id, wah.venue, wah.market_id
-        ),
-        market_scope as (
-          select distinct venue, market_id
-          from wallet_market
-        ),
-        market_total as (
-          select
-            wah.venue,
-            wah.market_id,
-            sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as market_notional_24h
-          from wallet_activity_hourly wah
-          join market_scope ms
-            on ms.venue = wah.venue
-           and ms.market_id = wah.market_id
-          where wah.activity_type in ('delta', 'trade')
-            and wah.hour_bucket >= now() - interval '24 hours'
-          group by wah.venue, wah.market_id
-        )
-        select
-          wm.wallet_id,
-          wm.venue,
-          max(
-            case
-              when mt.market_notional_24h > 0
-                then wm.wallet_notional_24h / mt.market_notional_24h
-              else null
-            end
-          ) as max_stake_to_market_vol_ratio
-        from wallet_market wm
-        left join market_total mt
-          on mt.venue = wm.venue
-         and mt.market_id = wm.market_id
-        group by wm.wallet_id, wm.venue
-      `,
-      [walletIds],
-    ),
+    includeCategoryStats
+      ? client
+          .query<CategoryVolumeRow>(
+            `
+              with wallet_market as (
+                select
+                  wah.wallet_id,
+                  wah.venue,
+                  wah.market_id,
+                  sum(coalesce(wah.volume_usd, abs(wah.signed_delta_usd), 0)) as volume_usd
+                from wallet_activity_hourly wah
+                where wah.wallet_id = any($1::uuid[])
+                  and wah.activity_type in ('delta', 'trade')
+                  and wah.hour_bucket >= now() - interval '30 days'
+                group by wah.wallet_id, wah.venue, wah.market_id
+              )
+              select
+                wm.wallet_id,
+                wm.venue,
+                lower(coalesce(um.category, ue.category)) as raw_category,
+                sum(wm.volume_usd) as volume_usd
+              from wallet_market wm
+              left join unified_markets um on um.id = wm.market_id
+              left join unified_events ue on ue.id = um.event_id
+              group by wm.wallet_id, wm.venue, lower(coalesce(um.category, ue.category))
+            `,
+            [walletIds],
+          )
+          .then((result) => result.rows)
+      : Promise.resolve([] as CategoryVolumeRow[]),
+    includeRatioStats
+      ? client
+          .query<RatioRow>(
+            `
+              with wallet_market as (
+                select
+                  wah.wallet_id,
+                  wah.venue,
+                  wah.market_id,
+                  sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as wallet_notional_24h
+                from wallet_activity_hourly wah
+                where wah.wallet_id = any($1::uuid[])
+                  and wah.activity_type in ('delta', 'trade')
+                  and wah.hour_bucket >= now() - interval '24 hours'
+                group by wah.wallet_id, wah.venue, wah.market_id
+              ),
+              market_scope as (
+                select distinct venue, market_id
+                from wallet_market
+              ),
+              market_total as (
+                select
+                  wah.venue,
+                  wah.market_id,
+                  sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as market_notional_24h
+                from wallet_activity_hourly wah
+                join market_scope ms
+                  on ms.venue = wah.venue
+                 and ms.market_id = wah.market_id
+                where wah.activity_type in ('delta', 'trade')
+                  and wah.hour_bucket >= now() - interval '24 hours'
+                group by wah.venue, wah.market_id
+              )
+              select
+                wm.wallet_id,
+                wm.venue,
+                max(
+                  case
+                    when mt.market_notional_24h > 0
+                      then wm.wallet_notional_24h / mt.market_notional_24h
+                    else null
+                  end
+                ) as max_stake_to_market_vol_ratio
+              from wallet_market wm
+              left join market_total mt
+                on mt.venue = wm.venue
+               and mt.market_id = wm.market_id
+              group by wm.wallet_id, wm.venue
+            `,
+            [walletIds],
+          )
+          .then((result) => result.rows)
+      : Promise.resolve([] as RatioRow[]),
   ]);
 
   for (const row of statsResult.rows) {
@@ -522,7 +593,7 @@ async function loadVenueStats(
     string,
     { totals: number; familyTotals: Map<SpecialistFamily, number> }
   >();
-  for (const row of categoryResult.rows) {
+  for (const row of categoryRows) {
     const venue = parseVenue(row.venue);
     if (!venue) continue;
     const key = `${row.wallet_id}:${venue}`;
@@ -560,7 +631,7 @@ async function loadVenueStats(
     stats.topCategoryShare = bestFamily ? bestShare : null;
   }
 
-  for (const row of ratioResult.rows) {
+  for (const row of ratioRows) {
     const venue = parseVenue(row.venue);
     if (!venue) continue;
     const walletMap = byWallet.get(row.wallet_id);
@@ -990,13 +1061,28 @@ export async function buildWalletAttributionMap(
   client: PoolClient,
   wallets: WalletAttributionInput[],
   policy: WalletIntelAttributionPolicy,
+  options?: WalletAttributionBuildOptions,
 ): Promise<Map<string, WalletAttribution>> {
   const byWallet = new Map<string, WalletAttribution>();
   if (wallets.length === 0) return byWallet;
 
+  const mode = options?.mode ?? "full";
+  const requestedPrimary = new Set(options?.filterPrimary ?? []);
+  const requestedLabels = new Set(options?.filterLabels ?? []);
+  const includeCategoryStats =
+    mode === "full" ||
+    requestedPrimary.has("specialist") ||
+    Array.from(requestedLabels).some((label) =>
+      SPECIALIST_LABEL_SET.has(label),
+    );
+  const includeRatioStats =
+    mode === "full" || requestedLabels.has("market_mover");
   const walletIds = wallets.map((wallet) => wallet.walletId);
   const [venueStatsByWallet, computedStatsByWallet] = await Promise.all([
-    loadVenueStats(client, walletIds),
+    loadVenueStats(client, walletIds, {
+      includeCategoryStats,
+      includeRatioStats,
+    }),
     loadComputedStats(client, wallets),
   ]);
 

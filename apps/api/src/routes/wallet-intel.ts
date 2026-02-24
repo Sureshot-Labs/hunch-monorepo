@@ -31,6 +31,8 @@ import {
 import {
   buildSignalPresentation,
   buildWalletAttributionMap,
+  normalizeAttributionLabelFilters,
+  normalizeAttributionPrimaryFilters,
   walletMatchesFilters,
   type WalletAttribution,
   type WalletSignalSeverity,
@@ -1350,6 +1352,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const tagsFilter = normalizeStringArray(query.tags);
       const primaryFilter = normalizeStringArray(query.primary);
       const labelsFilter = normalizeStringArray(query.labels);
+      const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
+      const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey("wallets-whales", user.id, query);
@@ -1641,6 +1645,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     summaryMapForFilters?.get(row.walletId)?.topChanges ?? [],
                 })),
                 attributionPolicy.effective,
+                {
+                  mode: "filters",
+                  filterPrimary: primaryFilterTyped,
+                  filterLabels: labelsFilterTyped,
+                },
               );
               for (const [walletId, attribution] of chunkAttribution.entries()) {
                 attributionMapForFilters.set(walletId, attribution);
@@ -1711,7 +1720,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           );
 
           let pageAttributionMap = attributionMapForFilters;
-          if (includeAttributionInResponse && !needsAttributionForFilters) {
+          if (includeAttributionInResponse) {
             pageAttributionMap = await buildWalletAttributionMap(
               client,
               pagedRows.map((row) => ({
@@ -1724,6 +1733,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 topChanges: summaryMapForPage.get(row.walletId)?.topChanges ?? [],
               })),
               attributionPolicy.effective,
+              { mode: "full" },
             );
           }
 
@@ -1919,6 +1929,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const tagsFilter = normalizeStringArray(query.tags);
       const primaryFilter = normalizeStringArray(query.primary);
       const labelsFilter = normalizeStringArray(query.labels);
+      const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
+      const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey(
@@ -2044,6 +2056,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 topChanges: row.topChanges,
               })),
               attributionPolicy.effective,
+              {
+                mode: "filters",
+                filterPrimary: primaryFilterTyped,
+                filterLabels: labelsFilterTyped,
+              },
             );
             filtered = merged.filter((row) =>
               walletMatchesFilters(row.tags, attributionMap.get(row.walletId), {
@@ -2085,7 +2102,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           const start = query.offset;
           const end = start + query.limit;
           const pagedRows = sorted.slice(start, end);
-          if (includeAttributionInResponse && !needsAttributionForFilters) {
+          if (includeAttributionInResponse) {
             attributionMap = await buildWalletAttributionMap(
               client,
               pagedRows.map((row) => ({
@@ -2098,6 +2115,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 topChanges: row.topChanges,
               })),
               attributionPolicy.effective,
+              { mode: "full" },
             );
           }
 
@@ -2165,6 +2183,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const tagsFilter = normalizeStringArray(query.tags);
       const primaryFilter = normalizeStringArray(query.primary);
       const labelsFilter = normalizeStringArray(query.labels);
+      const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
+      const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
       const severityFilter = normalizeStringArray(
         (query.severity as string[] | undefined) ?? [],
       );
@@ -2435,6 +2455,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               client,
               attributionInputs,
               attributionPolicy.effective,
+              {
+                mode: "filters",
+                filterPrimary: primaryFilterTyped,
+                filterLabels: labelsFilterTyped,
+              },
             );
             filteredItems = items.filter((item) => {
               if (
@@ -2481,7 +2506,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             return b.occurredAt.getTime() - a.occurredAt.getTime();
           });
           const pagedRows = sorted.slice(query.offset, query.offset + query.limit);
-          if (includeAttributionInResponse && !needsAttributionForFilters) {
+          if (includeAttributionInResponse) {
             const byWallet = new Map<string, (typeof attributionInputs)[number]>();
             for (const item of pagedRows) {
               const input = attributionInputsByWallet.get(item.walletId);
@@ -2491,6 +2516,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               client,
               Array.from(byWallet.values()),
               attributionPolicy.effective,
+              { mode: "full" },
             );
           }
           const itemsForResponse = pagedRows.map((item) =>
