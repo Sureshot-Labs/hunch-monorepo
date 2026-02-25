@@ -1,8 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
 import { ethers } from "ethers";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { PublicKey } from "@solana/web3.js";
 
-import { createAuthMiddleware } from "../auth.js";
+import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
@@ -63,6 +64,7 @@ type DebridgeOrderInputs = {
 };
 
 type BridgeSwapType = "cross_chain" | "same_chain";
+const SOLANA_CHAIN_ID = "7565164";
 
 type DebridgeSameChainInputs = {
   chainId: string;
@@ -432,6 +434,102 @@ function resolveBridgeAddresses(
   return { senderAddress: sender, recipientAddress: recipient };
 }
 
+function normalizeWalletLookupKey(address: string): string {
+  const trimmed = address.trim();
+  if (!trimmed) return "";
+  return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
+}
+
+function isValidAddressForChain(chainId: string, address: string): boolean {
+  const trimmed = address.trim();
+  if (!trimmed) return false;
+  if (chainId === SOLANA_CHAIN_ID) {
+    try {
+      new PublicKey(trimmed);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return ethers.isAddress(trimmed);
+}
+
+function validateBridgeAddressInputs(inputs: {
+  srcChainId: string;
+  dstChainId: string;
+  senderAddress: string;
+  recipientAddress: string;
+  srcChainOrderAuthorityAddress?: string;
+  srcChainRefundAddress?: string;
+  dstChainOrderAuthorityAddress?: string;
+}): string | null {
+  if (!isValidAddressForChain(inputs.srcChainId, inputs.senderAddress)) {
+    return `senderAddress is invalid for source chain ${inputs.srcChainId}`;
+  }
+  if (!isValidAddressForChain(inputs.dstChainId, inputs.recipientAddress)) {
+    return `recipientAddress is invalid for destination chain ${inputs.dstChainId}`;
+  }
+  if (
+    inputs.srcChainOrderAuthorityAddress &&
+    !isValidAddressForChain(
+      inputs.srcChainId,
+      inputs.srcChainOrderAuthorityAddress,
+    )
+  ) {
+    return `srcChainOrderAuthorityAddress is invalid for source chain ${inputs.srcChainId}`;
+  }
+  if (
+    inputs.srcChainRefundAddress &&
+    !isValidAddressForChain(inputs.srcChainId, inputs.srcChainRefundAddress)
+  ) {
+    return `srcChainRefundAddress is invalid for source chain ${inputs.srcChainId}`;
+  }
+  if (
+    inputs.dstChainOrderAuthorityAddress &&
+    !isValidAddressForChain(
+      inputs.dstChainId,
+      inputs.dstChainOrderAuthorityAddress,
+    )
+  ) {
+    return `dstChainOrderAuthorityAddress is invalid for destination chain ${inputs.dstChainId}`;
+  }
+  return null;
+}
+
+async function isAuthorizedBridgeSender(
+  userId: string,
+  senderAddress: string,
+): Promise<boolean> {
+  const senderKey = normalizeWalletLookupKey(senderAddress);
+  if (!senderKey) return false;
+
+  const linkedWallet = await AuthService.getUserWalletByAddress(
+    userId,
+    senderAddress,
+  );
+  if (linkedWallet) return true;
+  if (!ethers.isAddress(senderAddress)) return false;
+
+  const linkedWallets = await AuthService.getUserWallets(userId);
+  for (const wallet of linkedWallets) {
+    const isEvmWallet =
+      wallet.walletType === "ethereum" || ethers.isAddress(wallet.walletAddress);
+    if (!isEvmWallet) continue;
+    const creds = await AuthService.getVenueCredentialsInfo(
+      userId,
+      "polymarket",
+      wallet.walletAddress,
+    );
+    const funderKey = creds?.funderAddress
+      ? normalizeWalletLookupKey(creds.funderAddress)
+      : "";
+    if (funderKey && funderKey === senderKey) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveSwapType(
   srcChainId: string,
   dstChainId: string,
@@ -600,6 +698,19 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           error: "senderAddress and recipientAddress are required",
         });
       }
+      const addressValidationError = validateBridgeAddressInputs({
+        srcChainId: query.srcChainId,
+        dstChainId: query.dstChainId,
+        senderAddress: addresses.senderAddress,
+        recipientAddress: addresses.recipientAddress,
+        srcChainOrderAuthorityAddress: query.srcChainOrderAuthorityAddress,
+        srcChainRefundAddress: query.srcChainRefundAddress,
+        dstChainOrderAuthorityAddress: query.dstChainOrderAuthorityAddress,
+      });
+      if (addressValidationError) {
+        reply.code(400);
+        return reply.send({ error: addressValidationError });
+      }
 
       const debridgeConfig = await getDebridgeConfig();
       const affiliateDefaults = resolveAffiliateDefaults({
@@ -663,11 +774,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             });
 
       if (!upstream.ok) {
+        const reason = extractDebridgeErrorMessage(upstream.payload);
         reply.code(502);
         return reply.send({
-          error: "deBridge quote failed",
+          error: reason || "deBridge quote failed",
           status: upstream.status,
-          message: extractDebridgeErrorMessage(upstream.payload),
+          message: reason || "deBridge quote failed",
           payload: upstream.payload,
         });
       }
@@ -722,6 +834,29 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "senderAddress and recipientAddress are required",
+        });
+      }
+      const addressValidationError = validateBridgeAddressInputs({
+        srcChainId: body.srcChainId,
+        dstChainId: body.dstChainId,
+        senderAddress: addresses.senderAddress,
+        recipientAddress: addresses.recipientAddress,
+        srcChainOrderAuthorityAddress: body.srcChainOrderAuthorityAddress,
+        srcChainRefundAddress: body.srcChainRefundAddress,
+        dstChainOrderAuthorityAddress: body.dstChainOrderAuthorityAddress,
+      });
+      if (addressValidationError) {
+        reply.code(400);
+        return reply.send({ error: addressValidationError });
+      }
+      const senderAuthorized = await isAuthorizedBridgeSender(
+        user.id,
+        addresses.senderAddress,
+      );
+      if (!senderAuthorized) {
+        reply.code(403);
+        return reply.send({
+          error: "senderAddress is not linked to the authenticated user",
         });
       }
 
@@ -787,11 +922,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             });
 
       if (!upstream.ok) {
+        const reason = extractDebridgeErrorMessage(upstream.payload);
         reply.code(502);
         return reply.send({
-          error: "deBridge order failed",
+          error: reason || "deBridge order failed",
           status: upstream.status,
-          message: extractDebridgeErrorMessage(upstream.payload),
+          message: reason || "deBridge order failed",
           payload: upstream.payload,
         });
       }

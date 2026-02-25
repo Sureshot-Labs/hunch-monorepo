@@ -569,6 +569,18 @@ export const env = {
     "WALLET_BALANCES_BATCH_CONCURRENCY",
     4,
   ),
+  walletBalancesTokenConcurrency: optionalPositiveInt(
+    "WALLET_BALANCES_TOKEN_CONCURRENCY",
+    2,
+  ),
+  walletBalancesRpcMaxAttempts: optionalPositiveInt(
+    "WALLET_BALANCES_RPC_MAX_ATTEMPTS",
+    3,
+  ),
+  walletBalancesRpcRetryBaseMs: optionalPositiveInt(
+    "WALLET_BALANCES_RPC_RETRY_BASE_MS",
+    200,
+  ),
   polymarketAccountCacheTtlMs: optionalNonNegativeInt(
     "POLYMARKET_ACCOUNT_CACHE_TTL_MS",
     5_000,

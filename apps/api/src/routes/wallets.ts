@@ -40,6 +40,12 @@ type TokenMeta = {
 };
 
 type WalletVenueStatus = Record<string, unknown>;
+type BalanceWalletResolution = {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  linkedWalletAddress: string;
+  source: "linked" | "derived_funder";
+};
 
 const SOLANA_CHAIN_ID = "7565164";
 const POLYGON_CHAIN_ID = "137";
@@ -48,6 +54,7 @@ const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
+const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
 
 type VenueStatusCacheEntry = {
   value: WalletVenueStatus;
@@ -56,6 +63,14 @@ type VenueStatusCacheEntry = {
 
 const venueStatusCache = new Map<string, VenueStatusCacheEntry>();
 const venueStatusInflight = new Map<string, Promise<WalletVenueStatus>>();
+const balanceWalletLookupCache = new Map<
+  string,
+  { lookup: Map<string, BalanceWalletResolution>; expiresAt: number }
+>();
+const walletBalancesInflight = new Map<
+  string,
+  Promise<{ balances: WalletBalanceItem[]; warnings: string[] }>
+>();
 
 function getVenueStatusCacheKey(inputs: {
   userId: string;
@@ -232,6 +247,107 @@ function normalizeWalletLookupKey(address: string) {
   return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
 }
 
+function readBalanceWalletLookupCache(
+  userId: string,
+): Map<string, BalanceWalletResolution> | null {
+  const entry = balanceWalletLookupCache.get(userId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    balanceWalletLookupCache.delete(userId);
+    return null;
+  }
+  return entry.lookup;
+}
+
+function writeBalanceWalletLookupCache(
+  userId: string,
+  lookup: Map<string, BalanceWalletResolution>,
+) {
+  balanceWalletLookupCache.set(userId, {
+    lookup,
+    expiresAt: Date.now() + BALANCE_WALLET_LOOKUP_TTL_MS,
+  });
+}
+
+async function loadBalanceWalletLookup(
+  userId: string,
+): Promise<Map<string, BalanceWalletResolution>> {
+  const cached = readBalanceWalletLookupCache(userId);
+  if (cached) return cached;
+
+  const linkedWallets = await AuthService.getUserWallets(userId);
+  const lookup = new Map<string, BalanceWalletResolution>();
+
+  for (const wallet of linkedWallets) {
+    const key = normalizeWalletLookupKey(wallet.walletAddress);
+    if (!key) continue;
+    const walletType =
+      wallet.walletType ??
+      (isEvmWalletAddress(wallet.walletAddress) ? "ethereum" : "solana");
+    lookup.set(key, {
+      walletAddress: wallet.walletAddress,
+      walletType,
+      linkedWalletAddress: wallet.walletAddress,
+      source: "linked",
+    });
+  }
+
+  const evmWallets = linkedWallets.filter(
+    (wallet) =>
+      wallet.walletType === "ethereum" ||
+      isEvmWalletAddress(wallet.walletAddress),
+  );
+
+  if (evmWallets.length > 0) {
+    const configuredConcurrency = Number(env.walletBalancesBatchConcurrency);
+    const concurrency = Math.max(
+      1,
+      Math.min(
+        Number.isFinite(configuredConcurrency) ? configuredConcurrency : 4,
+        8,
+      ),
+    );
+    const derived = await mapWithConcurrency(
+      evmWallets,
+      concurrency,
+      async (wallet) => {
+        try {
+          const creds = await AuthService.getVenueCredentialsInfo(
+            userId,
+            "polymarket",
+            wallet.walletAddress,
+          );
+          return {
+            signerWalletAddress: wallet.walletAddress,
+            funderAddress: creds?.funderAddress ?? null,
+          };
+        } catch {
+          return {
+            signerWalletAddress: wallet.walletAddress,
+            funderAddress: null,
+          };
+        }
+      },
+    );
+
+    for (const candidate of derived) {
+      const funderAddress = candidate.funderAddress?.trim();
+      if (!funderAddress || !isEvmWalletAddress(funderAddress)) continue;
+      const key = normalizeWalletLookupKey(funderAddress);
+      if (!key || lookup.has(key)) continue;
+      lookup.set(key, {
+        walletAddress: funderAddress,
+        walletType: "ethereum",
+        linkedWalletAddress: candidate.signerWalletAddress,
+        source: "derived_funder",
+      });
+    }
+  }
+
+  writeBalanceWalletLookupCache(userId, lookup);
+  return lookup;
+}
+
 function isEvmNativeAddress(address: string) {
   const lower = address.toLowerCase();
   return lower === EVM_NATIVE_ADDRESS || lower === EVM_NATIVE_ALT;
@@ -251,6 +367,20 @@ function getEvmRpcConfig(chainId: string) {
     };
   }
   return null;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isRpcRateLimitError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("429") ||
+    message.includes("too many requests") ||
+    message.includes("rate limit")
+  );
 }
 
 async function mapWithConcurrency<T, R>(
@@ -329,7 +459,11 @@ async function resolveWalletBalancesForWallet(inputs: {
     tokenMetaMapByChain.set(chainId, await loadTokenMetaMap(chainId, addresses));
   }
 
-  const fetchTasks = Array.from(entries.values()).map(async (entry) => {
+  const resolveEntryBalance = async (entry: {
+    chainId: string;
+    address: string;
+    isNative: boolean;
+  }) => {
     if (entry.chainId === SOLANA_CHAIN_ID) {
       if (!isSolanaWallet) {
         warnings.push(`Solana balances require a Solana wallet (${entry.address})`);
@@ -452,10 +586,83 @@ async function resolveWalletBalancesForWallet(inputs: {
           : ethers.formatUnits(balanceRaw, decimals),
       isNative: false,
     });
-  });
+  };
 
-  await Promise.all(fetchTasks);
+  const tokenConcurrency = Math.max(
+    1,
+    Math.min(env.walletBalancesTokenConcurrency, entries.size || 1),
+  );
+
+  await mapWithConcurrency(
+    Array.from(entries.values()),
+    tokenConcurrency,
+    async (entry) => {
+      for (let attempt = 1; attempt <= env.walletBalancesRpcMaxAttempts; attempt += 1) {
+        try {
+          await resolveEntryBalance(entry);
+          return;
+        } catch (error) {
+          const canRetry =
+            isRpcRateLimitError(error) &&
+            attempt < env.walletBalancesRpcMaxAttempts;
+          if (canRetry) {
+            const delayMs = Math.min(
+              env.walletBalancesRpcRetryBaseMs * 2 ** (attempt - 1),
+              2_000,
+            );
+            await sleep(delayMs);
+            continue;
+          }
+
+          const reason =
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "unknown error";
+          warnings.push(
+            `Failed to fetch balance for ${entry.chainId}:${entry.address} (${reason})`,
+          );
+          return;
+        }
+      }
+    },
+  );
   return { balances, warnings };
+}
+
+function buildWalletBalancesInflightKey(inputs: {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  tokens: string[];
+  chains: string[];
+}) {
+  const tokens = [...inputs.tokens].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const chains = [...inputs.chains].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  return JSON.stringify({
+    walletAddress: inputs.walletAddress.toLowerCase(),
+    walletType: inputs.walletType ?? null,
+    tokens,
+    chains,
+  });
+}
+
+async function resolveWalletBalancesForWalletWithInflight(inputs: {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  tokens: string[];
+  chains: string[];
+}): Promise<{ balances: WalletBalanceItem[]; warnings: string[] }> {
+  const key = buildWalletBalancesInflightKey(inputs);
+  const pending = walletBalancesInflight.get(key);
+  if (pending) return pending;
+  const request = resolveWalletBalancesForWallet(inputs).finally(() => {
+    walletBalancesInflight.delete(key);
+  });
+  walletBalancesInflight.set(key, request);
+  return request;
 }
 
 export const walletsRoutes: FastifyPluginAsync = async (app) => {
@@ -482,11 +689,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const requestedWallet = query.walletAddress?.trim();
       const walletAddress = requestedWallet || sessionWallet;
-
-      const wallet =
-        requestedWallet != null
-          ? await AuthService.getUserWalletByAddress(user.id, walletAddress)
-          : await AuthService.getUserWalletByAddress(user.id, sessionWallet);
+      const walletLookup = await loadBalanceWalletLookup(user.id);
+      const wallet = walletLookup.get(normalizeWalletLookupKey(walletAddress));
 
       if (!wallet) {
         reply.code(403);
@@ -504,7 +708,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const { balances, warnings } = await resolveWalletBalancesForWallet({
+        const { balances, warnings } =
+          await resolveWalletBalancesForWalletWithInflight({
           walletAddress: wallet.walletAddress,
           walletType: wallet.walletType,
           tokens,
@@ -574,21 +779,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "tokens or chains must be provided" });
       }
 
-      const linkedWallets = await AuthService.getUserWallets(user.id);
-      const linkedByAddress = new Map(
-        linkedWallets.map((wallet) => [
-          normalizeWalletLookupKey(wallet.walletAddress),
-          wallet,
-        ]),
+      const walletLookup = await loadBalanceWalletLookup(user.id);
+      const resolvedWallets = walletsRequested.map((walletAddress) =>
+        walletLookup.get(normalizeWalletLookupKey(walletAddress)) ?? null,
       );
-
-      const resolvedWallets = walletsRequested.map((walletAddress) => {
-        const wallet = linkedByAddress.get(normalizeWalletLookupKey(walletAddress));
-        if (!wallet) {
-          return null;
-        }
-        return wallet;
-      });
 
       if (resolvedWallets.some((wallet) => wallet == null)) {
         reply.code(403);
@@ -598,7 +792,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const walletsToQuery = resolvedWallets.filter(
-        (wallet): wallet is (typeof linkedWallets)[number] => wallet != null,
+        (wallet): wallet is BalanceWalletResolution => wallet != null,
       );
 
       const results = await mapWithConcurrency(
@@ -606,7 +800,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         env.walletBalancesBatchConcurrency,
         async (wallet) => {
           try {
-            const resolved = await resolveWalletBalancesForWallet({
+            const resolved =
+              await resolveWalletBalancesForWalletWithInflight({
               walletAddress: wallet.walletAddress,
               walletType: wallet.walletType,
               tokens,
