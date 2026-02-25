@@ -95,6 +95,8 @@ const balanceWalletLookupCache = new Map<
   string,
   { lookup: Map<string, BalanceWalletResolution>; expiresAt: number }
 >();
+const BALANCE_WALLET_LOOKUP_SWEEP_INTERVAL_MS = 60_000;
+let lastBalanceWalletLookupSweepAt = 0;
 const walletBalancesInflight = new Map<
   string,
   Promise<{ balances: WalletBalanceItem[]; warnings: string[] }>
@@ -335,9 +337,25 @@ function normalizeWalletLookupKey(address: string) {
   return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
 }
 
+function maybeSweepBalanceWalletLookupCache(now = Date.now()) {
+  if (
+    now - lastBalanceWalletLookupSweepAt <
+    BALANCE_WALLET_LOOKUP_SWEEP_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastBalanceWalletLookupSweepAt = now;
+  for (const [userId, entry] of balanceWalletLookupCache.entries()) {
+    if (entry.expiresAt <= now) {
+      balanceWalletLookupCache.delete(userId);
+    }
+  }
+}
+
 function readBalanceWalletLookupCache(
   userId: string,
 ): Map<string, BalanceWalletResolution> | null {
+  maybeSweepBalanceWalletLookupCache();
   const entry = balanceWalletLookupCache.get(userId);
   if (!entry) return null;
   if (entry.expiresAt <= Date.now()) {
@@ -351,6 +369,7 @@ function writeBalanceWalletLookupCache(
   userId: string,
   lookup: Map<string, BalanceWalletResolution>,
 ) {
+  maybeSweepBalanceWalletLookupCache();
   balanceWalletLookupCache.set(userId, {
     lookup,
     expiresAt: Date.now() + BALANCE_WALLET_LOOKUP_TTL_MS,
