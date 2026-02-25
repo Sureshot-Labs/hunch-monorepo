@@ -47,6 +47,7 @@ export type MarketMapNode = {
   sumOpenInterest: number;
   score: number;
   sampleEventIds: string[];
+  eventsPreview?: MarketMapEventSummary[];
   updatedAt: string;
 };
 

@@ -7,6 +7,10 @@ export const marketMapQuerySchema = z.object({
   sizeBy: z.enum(["count", "volume24h", "liquidity", "openInterest"]).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
   perVenueMin: z.coerce.number().int().min(0).max(50).optional(),
+  includeChildrenPreview: z.coerce.boolean().optional(),
+  childrenPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
+  includeLeafEventsPreview: z.coerce.boolean().optional(),
+  leafEventsPreviewLimit: z.coerce.number().int().min(1).max(24).optional(),
 });
 
 export const marketMapNodeParamsSchema = z.object({

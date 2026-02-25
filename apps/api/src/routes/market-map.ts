@@ -27,6 +27,23 @@ import {
 } from "../services/market-map.js";
 import { resolveMarketMapPolicy } from "../services/runtime-policies.js";
 
+function metricForEvent(
+  event: MarketMapEventSummary,
+  sizeBy: "count" | "volume24h" | "liquidity" | "openInterest",
+): number {
+  switch (sizeBy) {
+    case "count":
+      return 1;
+    case "liquidity":
+      return event.liquidity;
+    case "openInterest":
+      return event.openInterest;
+    case "volume24h":
+    default:
+      return event.volume24h;
+  }
+}
+
 export const marketMapRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -92,6 +109,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const sizeBy = parseMarketMapSizeBy(query.sizeBy, effective.sizeByDefault);
       const limit = query.limit ?? effective.mergeLimitDefault;
       const perVenueMin = query.perVenueMin ?? effective.mergePerVenueMinDefault;
+      const includeChildrenPreview = query.includeChildrenPreview ?? false;
+      const childrenPreviewLimit = query.childrenPreviewLimit ?? 8;
+      const includeLeafEventsPreview = query.includeLeafEventsPreview ?? false;
+      const leafEventsPreviewLimit = query.leafEventsPreviewLimit ?? 10;
 
       const { redis, status } = await getRedisStatus();
       if (!redis) {
@@ -152,6 +173,73 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         sizeBy,
       ).slice(0, limit);
 
+      const itemsWithPreview =
+        includeChildrenPreview && level < 3
+          ? (() => {
+              const parentIds = new Set(items.map((node) => node.id));
+              const byParent = new Map<string, MarketMapNode[]>();
+              for (const node of allNodes) {
+                if (node.level !== level + 1) continue;
+                if (!node.parentId) continue;
+                if (!parentIds.has(node.parentId)) continue;
+                const existing = byParent.get(node.parentId) ?? [];
+                existing.push(node);
+                byParent.set(node.parentId, existing);
+              }
+
+              return items.map((node) => {
+                const children = sortNodesByMetric(
+                  (byParent.get(node.id) ?? [])
+                    .map((childNode) =>
+                      applyVenueFilterToNode(childNode, selectedVenueSet),
+                    )
+                    .filter((childNode) => childNode.eventCount > 0),
+                  sizeBy,
+                ).slice(0, childrenPreviewLimit);
+                return {
+                  ...node,
+                  childrenPreview: children,
+                };
+              });
+            })()
+          : items;
+
+      const itemsWithLeafEventsPreview =
+        includeLeafEventsPreview && level === 3 && itemsWithPreview.length > 0
+          ? await (async () => {
+              const pipeline = redis.multi();
+              for (const node of itemsWithPreview) {
+                pipeline.get(marketMapRunNodeEventsKey(runId, node.id));
+              }
+              const rawEvents = (await pipeline.exec()) as unknown as Array<
+                string | null
+              >;
+
+              return itemsWithPreview.map((node, index) => {
+                const events = (
+                  safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? []
+                )
+                  .filter((event) =>
+                    selectedVenueSet.size === 0
+                      ? true
+                      : selectedVenueSet.has(event.venue),
+                  )
+                  .sort(
+                    (a, b) =>
+                      metricForEvent(b, sizeBy) - metricForEvent(a, sizeBy) ||
+                      b.score - a.score ||
+                      a.eventId.localeCompare(b.eventId),
+                  )
+                  .slice(0, leafEventsPreviewLimit);
+
+                return {
+                  ...node,
+                  eventsPreview: events,
+                };
+              });
+            })()
+          : itemsWithPreview;
+
       const countsByVenue: Record<MarketMapVenue, number> = Object.fromEntries(
         venues.map((venue) => [venue, 0]),
       );
@@ -175,7 +263,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         limit,
         perVenueMin,
         countsByVenue,
-        items,
+        items: itemsWithLeafEventsPreview,
         defaults: {
           sizeBy: effective.sizeByDefault,
           limit: effective.mergeLimitDefault,
