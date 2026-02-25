@@ -40,14 +40,49 @@ type TokenMeta = {
 };
 
 type WalletVenueStatus = Record<string, unknown>;
+type BalanceWalletResolution = {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  linkedWalletAddress: string;
+  source: "linked" | "derived_funder";
+};
 
 const SOLANA_CHAIN_ID = "7565164";
+const ETHEREUM_CHAIN_ID = "1";
+const OPTIMISM_CHAIN_ID = "10";
+const BSC_CHAIN_ID = "56";
 const POLYGON_CHAIN_ID = "137";
+const ARBITRUM_CHAIN_ID = "42161";
+const AVALANCHE_CHAIN_ID = "43114";
+const LINEA_CHAIN_ID = "59144";
 const BASE_CHAIN_ID = "8453";
 const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
+const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
+
+const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
+  "100000001": "245022934", // Neon
+  "100000002": "100", // Gnosis
+  "100000008": "32769", // Zilliqa
+  "100000009": "747", // Flow
+  "100000013": "1514", // Story
+  "100000014": "146", // Sonic
+  "100000017": "2741", // Abstract
+  "100000019": "25", // Cronos
+  "100000020": "80094", // Berachain
+  "100000021": "60808", // Bob
+  "100000022": "999", // HyperEVM
+  "100000023": "5000", // Mantle
+  "100000025": "50104", // Sophon
+  "100000026": "728126428", // Tron
+  "100000027": "1329", // Sei
+  "100000028": "9745", // Plasma
+  "100000029": "1776", // Injective
+  "100000030": "143", // Monad
+  "100000031": "4326", // MegaETH
+};
 
 type VenueStatusCacheEntry = {
   value: WalletVenueStatus;
@@ -56,6 +91,16 @@ type VenueStatusCacheEntry = {
 
 const venueStatusCache = new Map<string, VenueStatusCacheEntry>();
 const venueStatusInflight = new Map<string, Promise<WalletVenueStatus>>();
+const balanceWalletLookupCache = new Map<
+  string,
+  { lookup: Map<string, BalanceWalletResolution>; expiresAt: number }
+>();
+const BALANCE_WALLET_LOOKUP_SWEEP_INTERVAL_MS = 60_000;
+let lastBalanceWalletLookupSweepAt = 0;
+const walletBalancesInflight = new Map<
+  string,
+  Promise<{ balances: WalletBalanceItem[]; warnings: string[] }>
+>();
 
 function getVenueStatusCacheKey(inputs: {
   userId: string;
@@ -97,6 +142,36 @@ function writeVenueStatusCache(key: string, value: WalletVenueStatus) {
 }
 
 const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
+  [ETHEREUM_CHAIN_ID]: {
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+      address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      symbol: "USDC",
+      decimals: 6,
+      name: "USD Coin",
+    },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [OPTIMISM_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [BSC_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "BNB",
+      decimals: 18,
+      name: "BNB",
+    },
+  },
   [POLYGON_CHAIN_ID]: {
     [env.polymarketUsdcAddress.toLowerCase()]: {
       address: env.polymarketUsdcAddress,
@@ -124,6 +199,36 @@ const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
       decimals: 6,
       name: "USD Coin",
     },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [ARBITRUM_CHAIN_ID]: {
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": {
+      address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      symbol: "USDC",
+      decimals: 6,
+      name: "USD Coin",
+    },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [AVALANCHE_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "AVAX",
+      decimals: 18,
+      name: "Avalanche",
+    },
+  },
+  [LINEA_CHAIN_ID]: {
     [EVM_NATIVE_ADDRESS]: {
       address: EVM_NATIVE_ADDRESS,
       symbol: "ETH",
@@ -232,25 +337,204 @@ function normalizeWalletLookupKey(address: string) {
   return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
 }
 
+function maybeSweepBalanceWalletLookupCache(now = Date.now()) {
+  if (
+    now - lastBalanceWalletLookupSweepAt <
+    BALANCE_WALLET_LOOKUP_SWEEP_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastBalanceWalletLookupSweepAt = now;
+  for (const [userId, entry] of balanceWalletLookupCache.entries()) {
+    if (entry.expiresAt <= now) {
+      balanceWalletLookupCache.delete(userId);
+    }
+  }
+}
+
+function readBalanceWalletLookupCache(
+  userId: string,
+): Map<string, BalanceWalletResolution> | null {
+  maybeSweepBalanceWalletLookupCache();
+  const entry = balanceWalletLookupCache.get(userId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    balanceWalletLookupCache.delete(userId);
+    return null;
+  }
+  return entry.lookup;
+}
+
+function writeBalanceWalletLookupCache(
+  userId: string,
+  lookup: Map<string, BalanceWalletResolution>,
+) {
+  maybeSweepBalanceWalletLookupCache();
+  balanceWalletLookupCache.set(userId, {
+    lookup,
+    expiresAt: Date.now() + BALANCE_WALLET_LOOKUP_TTL_MS,
+  });
+}
+
+async function loadBalanceWalletLookup(
+  userId: string,
+): Promise<Map<string, BalanceWalletResolution>> {
+  const cached = readBalanceWalletLookupCache(userId);
+  if (cached) return cached;
+
+  const linkedWallets = await AuthService.getUserWallets(userId);
+  const lookup = new Map<string, BalanceWalletResolution>();
+
+  for (const wallet of linkedWallets) {
+    const key = normalizeWalletLookupKey(wallet.walletAddress);
+    if (!key) continue;
+    const walletType =
+      wallet.walletType ??
+      (isEvmWalletAddress(wallet.walletAddress) ? "ethereum" : "solana");
+    lookup.set(key, {
+      walletAddress: wallet.walletAddress,
+      walletType,
+      linkedWalletAddress: wallet.walletAddress,
+      source: "linked",
+    });
+  }
+
+  const evmWallets = linkedWallets.filter(
+    (wallet) =>
+      wallet.walletType === "ethereum" ||
+      isEvmWalletAddress(wallet.walletAddress),
+  );
+
+  if (evmWallets.length > 0) {
+    const configuredConcurrency = Number(env.walletBalancesBatchConcurrency);
+    const concurrency = Math.max(
+      1,
+      Math.min(
+        Number.isFinite(configuredConcurrency) ? configuredConcurrency : 4,
+        8,
+      ),
+    );
+    const derived = await mapWithConcurrency(
+      evmWallets,
+      concurrency,
+      async (wallet) => {
+        try {
+          const creds = await AuthService.getVenueCredentialsInfo(
+            userId,
+            "polymarket",
+            wallet.walletAddress,
+          );
+          return {
+            signerWalletAddress: wallet.walletAddress,
+            funderAddress: creds?.funderAddress ?? null,
+          };
+        } catch {
+          return {
+            signerWalletAddress: wallet.walletAddress,
+            funderAddress: null,
+          };
+        }
+      },
+    );
+
+    for (const candidate of derived) {
+      const funderAddress = candidate.funderAddress?.trim();
+      if (!funderAddress || !isEvmWalletAddress(funderAddress)) continue;
+      const key = normalizeWalletLookupKey(funderAddress);
+      if (!key || lookup.has(key)) continue;
+      lookup.set(key, {
+        walletAddress: funderAddress,
+        walletType: "ethereum",
+        linkedWalletAddress: candidate.signerWalletAddress,
+        source: "derived_funder",
+      });
+    }
+  }
+
+  writeBalanceWalletLookupCache(userId, lookup);
+  return lookup;
+}
+
 function isEvmNativeAddress(address: string) {
   const lower = address.toLowerCase();
   return lower === EVM_NATIVE_ADDRESS || lower === EVM_NATIVE_ALT;
 }
 
 function getEvmRpcConfig(chainId: string) {
-  if (chainId === POLYGON_CHAIN_ID) {
+  const resolvedChainId = DEBRIDGE_CHAIN_ID_ALIASES[chainId] ?? chainId;
+
+  const overrideRpcUrl =
+    env.evmRpcUrlsByChain[chainId] ?? env.evmRpcUrlsByChain[resolvedChainId];
+  if (overrideRpcUrl) {
+    return {
+      rpcUrl: overrideRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+
+  if (resolvedChainId === ETHEREUM_CHAIN_ID) {
+    return {
+      rpcUrl: env.ethereumRpcUrl,
+      timeoutMs: env.ethereumRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === OPTIMISM_CHAIN_ID) {
+    return {
+      rpcUrl: env.optimismRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === BSC_CHAIN_ID) {
+    return {
+      rpcUrl: env.bscRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === POLYGON_CHAIN_ID) {
     return {
       rpcUrl: env.polygonRpcUrl,
       timeoutMs: env.polygonRpcTimeoutMs,
     };
   }
-  if (chainId === BASE_CHAIN_ID) {
+  if (resolvedChainId === ARBITRUM_CHAIN_ID) {
+    return {
+      rpcUrl: env.arbitrumRpcUrl,
+      timeoutMs: env.arbitrumRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === AVALANCHE_CHAIN_ID) {
+    return {
+      rpcUrl: env.avalancheRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === LINEA_CHAIN_ID) {
+    return {
+      rpcUrl: env.lineaRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === BASE_CHAIN_ID) {
     return {
       rpcUrl: env.baseRpcUrl,
       timeoutMs: env.baseRpcTimeoutMs,
     };
   }
   return null;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isRpcRateLimitError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("429") ||
+    message.includes("too many requests") ||
+    message.includes("rate limit")
+  );
 }
 
 async function mapWithConcurrency<T, R>(
@@ -329,7 +613,11 @@ async function resolveWalletBalancesForWallet(inputs: {
     tokenMetaMapByChain.set(chainId, await loadTokenMetaMap(chainId, addresses));
   }
 
-  const fetchTasks = Array.from(entries.values()).map(async (entry) => {
+  const resolveEntryBalance = async (entry: {
+    chainId: string;
+    address: string;
+    isNative: boolean;
+  }) => {
     if (entry.chainId === SOLANA_CHAIN_ID) {
       if (!isSolanaWallet) {
         warnings.push(`Solana balances require a Solana wallet (${entry.address})`);
@@ -452,10 +740,83 @@ async function resolveWalletBalancesForWallet(inputs: {
           : ethers.formatUnits(balanceRaw, decimals),
       isNative: false,
     });
-  });
+  };
 
-  await Promise.all(fetchTasks);
+  const tokenConcurrency = Math.max(
+    1,
+    Math.min(env.walletBalancesTokenConcurrency, entries.size || 1),
+  );
+
+  await mapWithConcurrency(
+    Array.from(entries.values()),
+    tokenConcurrency,
+    async (entry) => {
+      for (let attempt = 1; attempt <= env.walletBalancesRpcMaxAttempts; attempt += 1) {
+        try {
+          await resolveEntryBalance(entry);
+          return;
+        } catch (error) {
+          const canRetry =
+            isRpcRateLimitError(error) &&
+            attempt < env.walletBalancesRpcMaxAttempts;
+          if (canRetry) {
+            const delayMs = Math.min(
+              env.walletBalancesRpcRetryBaseMs * 2 ** (attempt - 1),
+              2_000,
+            );
+            await sleep(delayMs);
+            continue;
+          }
+
+          const reason =
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "unknown error";
+          warnings.push(
+            `Failed to fetch balance for ${entry.chainId}:${entry.address} (${reason})`,
+          );
+          return;
+        }
+      }
+    },
+  );
   return { balances, warnings };
+}
+
+function buildWalletBalancesInflightKey(inputs: {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  tokens: string[];
+  chains: string[];
+}) {
+  const tokens = [...inputs.tokens].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const chains = [...inputs.chains].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  return JSON.stringify({
+    walletAddress: inputs.walletAddress.toLowerCase(),
+    walletType: inputs.walletType ?? null,
+    tokens,
+    chains,
+  });
+}
+
+async function resolveWalletBalancesForWalletWithInflight(inputs: {
+  walletAddress: string;
+  walletType: string | null | undefined;
+  tokens: string[];
+  chains: string[];
+}): Promise<{ balances: WalletBalanceItem[]; warnings: string[] }> {
+  const key = buildWalletBalancesInflightKey(inputs);
+  const pending = walletBalancesInflight.get(key);
+  if (pending) return pending;
+  const request = resolveWalletBalancesForWallet(inputs).finally(() => {
+    walletBalancesInflight.delete(key);
+  });
+  walletBalancesInflight.set(key, request);
+  return request;
 }
 
 export const walletsRoutes: FastifyPluginAsync = async (app) => {
@@ -482,11 +843,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const requestedWallet = query.walletAddress?.trim();
       const walletAddress = requestedWallet || sessionWallet;
-
-      const wallet =
-        requestedWallet != null
-          ? await AuthService.getUserWalletByAddress(user.id, walletAddress)
-          : await AuthService.getUserWalletByAddress(user.id, sessionWallet);
+      const walletLookup = await loadBalanceWalletLookup(user.id);
+      const wallet = walletLookup.get(normalizeWalletLookupKey(walletAddress));
 
       if (!wallet) {
         reply.code(403);
@@ -504,7 +862,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const { balances, warnings } = await resolveWalletBalancesForWallet({
+        const { balances, warnings } =
+          await resolveWalletBalancesForWalletWithInflight({
           walletAddress: wallet.walletAddress,
           walletType: wallet.walletType,
           tokens,
@@ -574,21 +933,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "tokens or chains must be provided" });
       }
 
-      const linkedWallets = await AuthService.getUserWallets(user.id);
-      const linkedByAddress = new Map(
-        linkedWallets.map((wallet) => [
-          normalizeWalletLookupKey(wallet.walletAddress),
-          wallet,
-        ]),
+      const walletLookup = await loadBalanceWalletLookup(user.id);
+      const resolvedWallets = walletsRequested.map((walletAddress) =>
+        walletLookup.get(normalizeWalletLookupKey(walletAddress)) ?? null,
       );
-
-      const resolvedWallets = walletsRequested.map((walletAddress) => {
-        const wallet = linkedByAddress.get(normalizeWalletLookupKey(walletAddress));
-        if (!wallet) {
-          return null;
-        }
-        return wallet;
-      });
 
       if (resolvedWallets.some((wallet) => wallet == null)) {
         reply.code(403);
@@ -598,7 +946,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const walletsToQuery = resolvedWallets.filter(
-        (wallet): wallet is (typeof linkedWallets)[number] => wallet != null,
+        (wallet): wallet is BalanceWalletResolution => wallet != null,
       );
 
       const results = await mapWithConcurrency(
@@ -606,7 +954,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         env.walletBalancesBatchConcurrency,
         async (wallet) => {
           try {
-            const resolved = await resolveWalletBalancesForWallet({
+            const resolved =
+              await resolveWalletBalancesForWalletWithInflight({
               walletAddress: wallet.walletAddress,
               walletType: wallet.walletType,
               tokens,

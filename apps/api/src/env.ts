@@ -84,6 +84,22 @@ function parseIntegerList(raw: string | undefined): number[] {
     .map((value) => Math.trunc(value));
 }
 
+function parseKeyValueMap(raw: string | undefined): Record<string, string> {
+  const output: Record<string, string> = {};
+  if (!raw) return output;
+  for (const entry of raw.split(/[\n,]/)) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (!key || !value) continue;
+    output[key] = value;
+  }
+  return output;
+}
+
 function parseEnum<T extends string>(
   value: string | undefined,
   allowed: readonly T[],
@@ -700,6 +716,18 @@ export const env = {
     "WALLET_BALANCES_BATCH_CONCURRENCY",
     4,
   ),
+  walletBalancesTokenConcurrency: optionalPositiveInt(
+    "WALLET_BALANCES_TOKEN_CONCURRENCY",
+    2,
+  ),
+  walletBalancesRpcMaxAttempts: optionalPositiveInt(
+    "WALLET_BALANCES_RPC_MAX_ATTEMPTS",
+    3,
+  ),
+  walletBalancesRpcRetryBaseMs: optionalPositiveInt(
+    "WALLET_BALANCES_RPC_RETRY_BASE_MS",
+    200,
+  ),
   polymarketAccountCacheTtlMs: optionalNonNegativeInt(
     "POLYMARKET_ACCOUNT_CACHE_TTL_MS",
     5_000,
@@ -719,15 +747,32 @@ export const env = {
   solanaRpcUrls,
   solanaRpcUrl: solanaRpcUrls[0],
   solanaRpcTimeoutMs: optionalPositiveInt("SOLANA_RPC_TIMEOUT_MS", 10_000),
+  evmRpcTimeoutMs: optionalPositiveInt("EVM_RPC_TIMEOUT_MS", 10_000),
+  evmRpcUrlsByChain: parseKeyValueMap(process.env.EVM_RPC_URLS_BY_CHAIN),
   solanaUsdcMint:
     process.env.DFLOW_USDC_MINT?.trim() ||
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  ethereumRpcUrl:
+    process.env.ETHEREUM_RPC_URL?.trim() ||
+    "https://ethereum-rpc.publicnode.com",
+  ethereumRpcTimeoutMs: optionalPositiveInt("ETHEREUM_RPC_TIMEOUT_MS", 10_000),
+  optimismRpcUrl:
+    process.env.OPTIMISM_RPC_URL?.trim() || "https://mainnet.optimism.io",
+  bscRpcUrl:
+    process.env.BSC_RPC_URL?.trim() || "https://bsc-dataseed.binance.org",
   polygonRpcUrl:
     process.env.POLYGON_RPC_URL?.trim() || "https://polygon-rpc.com",
   polygonRpcTimeoutMs: optionalPositiveInt("POLYGON_RPC_TIMEOUT_MS", 10_000),
   polygonMulticallAddress:
     process.env.POLYGON_MULTICALL_ADDRESS?.trim() ||
     "0xca11bde05977b3631167028862be2a173976ca11",
+  arbitrumRpcUrl:
+    process.env.ARBITRUM_RPC_URL?.trim() || "https://arb1.arbitrum.io/rpc",
+  arbitrumRpcTimeoutMs: optionalPositiveInt("ARBITRUM_RPC_TIMEOUT_MS", 10_000),
+  avalancheRpcUrl:
+    process.env.AVALANCHE_RPC_URL?.trim() ||
+    "https://api.avax.network/ext/bc/C/rpc",
+  lineaRpcUrl: process.env.LINEA_RPC_URL?.trim() || "https://rpc.linea.build",
   baseRpcUrl:
     process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
   baseRpcTimeoutMs: optionalPositiveInt("BASE_RPC_TIMEOUT_MS", 10_000),

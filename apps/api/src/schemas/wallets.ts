@@ -6,15 +6,32 @@ const zOptionalBool = z
   .transform((v) => v === true || v === "true")
   .catch(false);
 
+const WALLET_BALANCES_TOKENS_MAX = 60;
+const WALLET_BALANCES_BATCH_TOKENS_MAX = 120;
+
+const zWalletBalanceTokens = zCsvString("tokens is required").refine(
+  (tokens) => tokens.length <= WALLET_BALANCES_TOKENS_MAX,
+  {
+    message: `tokens exceeds max size (${WALLET_BALANCES_TOKENS_MAX})`,
+  },
+);
+
+const zWalletBalanceBatchTokens = zCsvString("tokens is required").refine(
+  (tokens) => tokens.length <= WALLET_BALANCES_BATCH_TOKENS_MAX,
+  {
+    message: `tokens exceeds max size (${WALLET_BALANCES_BATCH_TOKENS_MAX})`,
+  },
+);
+
 export const walletBalancesQuerySchema = z.object({
   walletAddress: z.string().optional(),
-  tokens: zCsvString("tokens is required").optional(),
+  tokens: zWalletBalanceTokens.optional(),
   chains: zCsvString("chains is required").optional(),
 });
 
 export const walletBalancesBatchQuerySchema = z.object({
   wallets: zCsvString("wallets is required"),
-  tokens: zCsvString("tokens is required").optional(),
+  tokens: zWalletBalanceBatchTokens.optional(),
   chains: zCsvString("chains is required").optional(),
 });
 
