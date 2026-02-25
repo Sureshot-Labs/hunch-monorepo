@@ -34,11 +34,15 @@ type EventCandidateRow = {
   event_id: string;
   venue: MarketMapVenue;
   title: string | null;
+  event_image: string | null;
+  event_icon: string | null;
   volume24h: unknown;
   liquidity: unknown;
   open_interest: unknown;
   score: unknown;
   representative_market_id: string | null;
+  representative_market_image: string | null;
+  representative_market_icon: string | null;
 };
 
 type EventPoint = {
@@ -46,6 +50,8 @@ type EventPoint = {
   venue: MarketMapVenue;
   title: string;
   representativeMarketId: string | null;
+  image: string | null;
+  icon: string | null;
   volume24h: number;
   liquidity: number;
   openInterest: number;
@@ -181,6 +187,13 @@ function toNumber(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeOptionalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed;
+}
+
 function normalizeVector(values: readonly number[]): number[] {
   let norm = 0;
   for (const value of values) norm += value * value;
@@ -286,6 +299,8 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     title: point.title,
     venue: point.venue,
     representativeMarketId: point.representativeMarketId,
+    image: point.image,
+    icon: point.icon,
     volume24h: point.volume24h,
     liquidity: point.liquidity,
     openInterest: point.openInterest,
@@ -512,6 +527,10 @@ function buildTreeGlobal(params: {
         sumOpenInterest: formatCoord(sumOpenInterest),
         score: formatCoord(score),
         sampleEventIds: bucket.slice(0, 6).map((row) => row.eventId),
+        heroEventId: representative.eventId,
+        heroMarketId: representative.representativeMarketId,
+        heroImage: representative.image,
+        heroIcon: representative.icon,
         updatedAt: nowIso,
       };
       nodes.push(node);
@@ -1139,6 +1158,8 @@ async function fetchVenueCandidates(
           e.id as event_id,
           e.venue::text as venue,
           e.title,
+          e.image as event_image,
+          e.icon as event_icon,
           (
             case
               when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
@@ -1212,6 +1233,8 @@ async function fetchVenueCandidates(
         select distinct on (m.event_id)
           m.event_id,
           m.id as representative_market_id,
+          m.image as representative_market_image,
+          m.icon as representative_market_icon,
           (
             (case
               when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
@@ -1237,6 +1260,8 @@ async function fetchVenueCandidates(
         em.event_id,
         em.venue,
         em.title,
+        em.event_image,
+        em.event_icon,
         em.volume24h,
         em.liquidity,
         em.open_interest,
@@ -1245,7 +1270,9 @@ async function fetchVenueCandidates(
           coalesce(em.liquidity, 0) +
           coalesce(em.open_interest, 0)
         )::double precision as score,
-        rep_market.representative_market_id
+        rep_market.representative_market_id,
+        rep_market.representative_market_image,
+        rep_market.representative_market_icon
       from candidate_events em
       join rep_market on rep_market.event_id = em.event_id
       order by score desc
@@ -1452,6 +1479,12 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           venue: row.venue,
           title: row.title?.trim() || row.event_id,
           representativeMarketId: row.representative_market_id ?? null,
+          image:
+            normalizeOptionalUrl(row.representative_market_image) ??
+            normalizeOptionalUrl(row.event_image),
+          icon:
+            normalizeOptionalUrl(row.representative_market_icon) ??
+            normalizeOptionalUrl(row.event_icon),
           volume24h: toNumber(row.volume24h),
           liquidity: toNumber(row.liquidity),
           openInterest: toNumber(row.open_interest),

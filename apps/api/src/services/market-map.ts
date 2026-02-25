@@ -47,6 +47,10 @@ export type MarketMapNode = {
   sumOpenInterest: number;
   score: number;
   sampleEventIds: string[];
+  heroEventId?: string | null;
+  heroMarketId?: string | null;
+  heroImage?: string | null;
+  heroIcon?: string | null;
   eventsPreview?: MarketMapEventSummary[];
   updatedAt: string;
 };
@@ -56,6 +60,8 @@ export type MarketMapEventSummary = {
   title: string;
   venue: MarketMapVenue;
   representativeMarketId: string | null;
+  image?: string | null;
+  icon?: string | null;
   volume24h: number;
   liquidity: number;
   openInterest: number;
