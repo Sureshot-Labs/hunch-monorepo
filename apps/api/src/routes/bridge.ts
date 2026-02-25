@@ -64,6 +64,7 @@ type DebridgeOrderInputs = {
 };
 
 type BridgeSwapType = "cross_chain" | "same_chain";
+type BridgeOrderStatus = "created" | "submitted" | "fulfilled" | "failed";
 const SOLANA_CHAIN_ID = "7565164";
 
 type DebridgeSameChainInputs = {
@@ -84,13 +85,59 @@ type AffiliateDefaults = {
   affiliateFeeRecipient?: string;
 };
 
-function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
-  if (!value) return null;
+function canonicalizeBridgeOrderStatus(
+  value: string | null | undefined,
+  fallback: BridgeOrderStatus = "submitted",
+): BridgeOrderStatus {
+  if (!value) return fallback;
   const normalized = value.trim().toLowerCase();
-  if (["fulfilled", "completed", "success"].includes(normalized)) return "completed";
-  if (["failed", "cancelled", "canceled", "reverted"].includes(normalized)) {
+  if (!normalized) return fallback;
+
+  if (normalized === "created") return "created";
+  if (
+    normalized === "submitted" ||
+    normalized === "pending" ||
+    normalized === "processing" ||
+    normalized === "in_progress" ||
+    normalized === "in progress" ||
+    normalized === "queued"
+  ) {
+    return "submitted";
+  }
+  if (
+    normalized === "fulfilled" ||
+    normalized === "completed" ||
+    normalized === "success" ||
+    normalized === "confirmed"
+  ) {
+    return "fulfilled";
+  }
+  if (
+    normalized === "failed" ||
+    normalized === "cancelled" ||
+    normalized === "canceled" ||
+    normalized === "reverted" ||
+    normalized === "error" ||
+    normalized === "expired"
+  ) {
     return "failed";
   }
+
+  return fallback;
+}
+
+function isTerminalBridgeOrderStatus(
+  value: string | null | undefined,
+): boolean {
+  const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
+  return normalized === "fulfilled" || normalized === "failed";
+}
+
+function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
+  if (!value) return null;
+  const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
+  if (normalized === "fulfilled") return "completed";
+  if (normalized === "failed") return "failed";
   return null;
 }
 
@@ -1111,6 +1158,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               txHash,
             }));
           if (fallback?.status) {
+            const canonicalStatus = canonicalizeBridgeOrderStatus(
+              fallback.status,
+            );
             await pool.query(
               `
                 update bridge_orders
@@ -1118,9 +1168,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 where provider = 'debridge'
                   and tx_hash_src = $2
               `,
-              [fallback.status, txHash],
+              [canonicalStatus, txHash],
             );
-            await notifyBridgeStatusByTx(txHash, fallback.status);
+            await notifyBridgeStatusByTx(txHash, canonicalStatus);
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,
@@ -1132,7 +1182,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               orders: [
                 {
                   orderId: txHash,
-                  payload: { status: fallback.status, source: "rpc" },
+                  payload: { status: canonicalStatus, source: "rpc" },
                 },
               ],
             });
@@ -1161,21 +1211,13 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         }
 
         if (isRecord(orderRes.payload)) {
-          const status =
+          const statusRaw =
             typeof orderRes.payload.status === "string"
               ? orderRes.payload.status
               : typeof orderRes.payload.state === "string"
                 ? orderRes.payload.state
                 : null;
-          const isTerminalStatus = (value: string) => {
-            const normalized = value.trim().toLowerCase();
-            return normalized === "fulfilled" ||
-              normalized === "failed" ||
-              normalized === "completed" ||
-              normalized === "cancelled" ||
-              normalized === "canceled";
-          };
-          if (status && !isTerminalStatus(status)) {
+          if (statusRaw && !isTerminalBridgeOrderStatus(statusRaw)) {
             const fallback =
               (await fetchEvmReceiptStatus({
                 chainId: resolvedChainId,
@@ -1186,6 +1228,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 txHash,
               }));
             if (fallback?.status) {
+              const canonicalStatus = canonicalizeBridgeOrderStatus(
+                fallback.status,
+              );
               await pool.query(
                 `
                   update bridge_orders
@@ -1193,9 +1238,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   where provider = 'debridge'
                     and tx_hash_src = $2
                 `,
-                [fallback.status, txHash],
+                [canonicalStatus, txHash],
               );
-              await notifyBridgeStatusByTx(txHash, fallback.status);
+              await notifyBridgeStatusByTx(txHash, canonicalStatus);
               reply.header("Content-Type", "application/json; charset=utf-8");
               return reply.send({
                 ok: true,
@@ -1207,13 +1252,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 orders: [
                   {
                     orderId: txHash,
-                    payload: { status: fallback.status, source: "rpc" },
+                    payload: { status: canonicalStatus, source: "rpc" },
                   },
                 ],
               });
             }
           }
-          if (status) {
+          if (statusRaw) {
+            const status = canonicalizeBridgeOrderStatus(statusRaw);
             await pool.query(
               `
                 update bridge_orders
@@ -1294,13 +1340,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         orders.push({ orderId: id, payload: orderRes.payload });
 
         if (isRecord(orderRes.payload)) {
-          const status =
+          const statusRaw =
             typeof orderRes.payload.status === "string"
               ? orderRes.payload.status
               : typeof orderRes.payload.state === "string"
                 ? orderRes.payload.state
                 : null;
-          if (status) {
+          if (statusRaw) {
+            const status = canonicalizeBridgeOrderStatus(statusRaw);
             await pool.query(
               `
                 update bridge_orders
@@ -1353,7 +1400,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const txColumn = body.txChain === "dst" ? "tx_hash_dst" : "tx_hash_src";
-      const status = body.status?.trim() || "submitted";
+      const status = canonicalizeBridgeOrderStatus(
+        body.status?.trim() || "submitted",
+      );
 
       const txHashValue = body.txHash;
       const updateQuery = bridgeOrderId
@@ -1464,19 +1513,35 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           [user.id, syncProvider, maxSync],
         );
 
-        const extractStatus = (payload: unknown) => {
+        const extractStatus = (payload: unknown): BridgeOrderStatus | null => {
           if (!isRecord(payload)) return null;
-          if (typeof payload.status === "string") return payload.status;
-          if (typeof payload.state === "string") return payload.state;
-          return null;
+          const rawStatus =
+            typeof payload.status === "string"
+              ? payload.status
+              : typeof payload.state === "string"
+                ? payload.state
+                : null;
+          if (!rawStatus) return null;
+          return canonicalizeBridgeOrderStatus(rawStatus);
         };
-        const isTerminalStatus = (value: string) => {
-          const normalized = value.trim().toLowerCase();
-          return normalized === "fulfilled" ||
-            normalized === "failed" ||
-            normalized === "completed" ||
-            normalized === "cancelled" ||
-            normalized === "canceled";
+        const isTerminalStatus = (value: BridgeOrderStatus) => {
+          return value === "fulfilled" || value === "failed";
+        };
+        const updateOrderStatus = async (status: BridgeOrderStatus, id: string) => {
+          await pool.query(
+            `
+              update bridge_orders
+              set status = $1, updated_at = now()
+              where id = $2
+            `,
+            [status, id],
+          );
+        };
+        const toCanonicalReceiptStatus = (
+          status: string | null | undefined,
+        ): BridgeOrderStatus | null => {
+          if (!status) return null;
+          return canonicalizeBridgeOrderStatus(status);
         };
 
         for (const row of pendingRows) {
@@ -1493,14 +1558,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               if (orderRes.ok) {
                 const status = extractStatus(orderRes.payload);
                 if (status && isTerminalStatus(status)) {
-                  await pool.query(
-                    `
-                      update bridge_orders
-                      set status = $1, updated_at = now()
-                      where id = $2
-                    `,
-                    [status, row.id],
-                  );
+                  await updateOrderStatus(status, row.id);
                   continue;
                 }
                 const fallback =
@@ -1513,14 +1571,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     txHash: row.tx_hash_src,
                   }));
                 if (fallback?.status) {
-                  await pool.query(
-                    `
-                      update bridge_orders
-                      set status = $1, updated_at = now()
-                      where id = $2
-                    `,
-                    [fallback.status, row.id],
+                  const canonicalStatus = toCanonicalReceiptStatus(
+                    fallback.status,
                   );
+                  if (canonicalStatus) {
+                    await updateOrderStatus(canonicalStatus, row.id);
+                  }
                 }
                 continue;
               }
@@ -1532,17 +1588,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 })) ??
                 (await fetchSolanaReceiptStatus({
                   chainId: row.src_chain_id,
-                  txHash: row.tx_hash_src,
+                txHash: row.tx_hash_src,
                 }));
               if (fallback?.status) {
-                await pool.query(
-                  `
-                    update bridge_orders
-                    set status = $1, updated_at = now()
-                    where id = $2
-                  `,
-                  [fallback.status, row.id],
+                const canonicalStatus = toCanonicalReceiptStatus(
+                  fallback.status,
                 );
+                if (canonicalStatus) {
+                  await updateOrderStatus(canonicalStatus, row.id);
+                }
               }
               continue;
             }
@@ -1587,14 +1641,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
 
             const status = extractStatus(orderRes.payload);
             if (status) {
-              await pool.query(
-                `
-                  update bridge_orders
-                  set status = $1, updated_at = now()
-                  where id = $2
-                `,
-                [status, row.id],
-              );
+              await updateOrderStatus(status, row.id);
             }
           } catch (error) {
             request.log.warn({ error, orderId: row.id }, "Bridge sync failed");

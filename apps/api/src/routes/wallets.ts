@@ -48,13 +48,41 @@ type BalanceWalletResolution = {
 };
 
 const SOLANA_CHAIN_ID = "7565164";
+const ETHEREUM_CHAIN_ID = "1";
+const OPTIMISM_CHAIN_ID = "10";
+const BSC_CHAIN_ID = "56";
 const POLYGON_CHAIN_ID = "137";
+const ARBITRUM_CHAIN_ID = "42161";
+const AVALANCHE_CHAIN_ID = "43114";
+const LINEA_CHAIN_ID = "59144";
 const BASE_CHAIN_ID = "8453";
 const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
 const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
+
+const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
+  "100000001": "245022934", // Neon
+  "100000002": "100", // Gnosis
+  "100000008": "32769", // Zilliqa
+  "100000009": "747", // Flow
+  "100000013": "1514", // Story
+  "100000014": "146", // Sonic
+  "100000017": "2741", // Abstract
+  "100000019": "25", // Cronos
+  "100000020": "80094", // Berachain
+  "100000021": "60808", // Bob
+  "100000022": "999", // HyperEVM
+  "100000023": "5000", // Mantle
+  "100000025": "50104", // Sophon
+  "100000026": "728126428", // Tron
+  "100000027": "1329", // Sei
+  "100000028": "9745", // Plasma
+  "100000029": "1776", // Injective
+  "100000030": "143", // Monad
+  "100000031": "4326", // MegaETH
+};
 
 type VenueStatusCacheEntry = {
   value: WalletVenueStatus;
@@ -112,6 +140,36 @@ function writeVenueStatusCache(key: string, value: WalletVenueStatus) {
 }
 
 const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
+  [ETHEREUM_CHAIN_ID]: {
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+      address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      symbol: "USDC",
+      decimals: 6,
+      name: "USD Coin",
+    },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [OPTIMISM_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [BSC_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "BNB",
+      decimals: 18,
+      name: "BNB",
+    },
+  },
   [POLYGON_CHAIN_ID]: {
     [env.polymarketUsdcAddress.toLowerCase()]: {
       address: env.polymarketUsdcAddress,
@@ -139,6 +197,36 @@ const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
       decimals: 6,
       name: "USD Coin",
     },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [ARBITRUM_CHAIN_ID]: {
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": {
+      address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      symbol: "USDC",
+      decimals: 6,
+      name: "USD Coin",
+    },
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
+  [AVALANCHE_CHAIN_ID]: {
+    [EVM_NATIVE_ADDRESS]: {
+      address: EVM_NATIVE_ADDRESS,
+      symbol: "AVAX",
+      decimals: 18,
+      name: "Avalanche",
+    },
+  },
+  [LINEA_CHAIN_ID]: {
     [EVM_NATIVE_ADDRESS]: {
       address: EVM_NATIVE_ADDRESS,
       symbol: "ETH",
@@ -354,13 +442,60 @@ function isEvmNativeAddress(address: string) {
 }
 
 function getEvmRpcConfig(chainId: string) {
-  if (chainId === POLYGON_CHAIN_ID) {
+  const resolvedChainId = DEBRIDGE_CHAIN_ID_ALIASES[chainId] ?? chainId;
+
+  const overrideRpcUrl =
+    env.evmRpcUrlsByChain[chainId] ?? env.evmRpcUrlsByChain[resolvedChainId];
+  if (overrideRpcUrl) {
+    return {
+      rpcUrl: overrideRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+
+  if (resolvedChainId === ETHEREUM_CHAIN_ID) {
+    return {
+      rpcUrl: env.ethereumRpcUrl,
+      timeoutMs: env.ethereumRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === OPTIMISM_CHAIN_ID) {
+    return {
+      rpcUrl: env.optimismRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === BSC_CHAIN_ID) {
+    return {
+      rpcUrl: env.bscRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === POLYGON_CHAIN_ID) {
     return {
       rpcUrl: env.polygonRpcUrl,
       timeoutMs: env.polygonRpcTimeoutMs,
     };
   }
-  if (chainId === BASE_CHAIN_ID) {
+  if (resolvedChainId === ARBITRUM_CHAIN_ID) {
+    return {
+      rpcUrl: env.arbitrumRpcUrl,
+      timeoutMs: env.arbitrumRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === AVALANCHE_CHAIN_ID) {
+    return {
+      rpcUrl: env.avalancheRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === LINEA_CHAIN_ID) {
+    return {
+      rpcUrl: env.lineaRpcUrl,
+      timeoutMs: env.evmRpcTimeoutMs,
+    };
+  }
+  if (resolvedChainId === BASE_CHAIN_ID) {
     return {
       rpcUrl: env.baseRpcUrl,
       timeoutMs: env.baseRpcTimeoutMs,
