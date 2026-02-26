@@ -246,6 +246,7 @@ const aiMarketMapEnabled =
 const aiMarketMapDepth = optionalPositiveInt("AI_MARKET_MAP_DEPTH", 3);
 const aiMarketMapK1 = optionalPositiveInt("AI_MARKET_MAP_K1", 8);
 const aiMarketMapK2 = optionalPositiveInt("AI_MARKET_MAP_K2", 6);
+const aiMarketMapK3 = optionalPositiveInt("AI_MARKET_MAP_K3", aiMarketMapK2);
 const aiMarketMapMaxEventsPerVenue = optionalPositiveInt(
   "AI_MARKET_MAP_MAX_EVENTS_PER_VENUE",
   500,
@@ -297,6 +298,22 @@ const aiMarketMapLabelModel =
 const aiMarketMapLabelMaxTokens = optionalPositiveInt(
   "AI_MARKET_MAP_LABEL_MAX_TOKENS",
   800,
+);
+const aiMarketMapLabelChildSamplesMax = optionalPositiveInt(
+  "AI_MARKET_MAP_LABEL_CHILD_SAMPLES_MAX",
+  16,
+);
+const aiMarketMapLabelSiblingSamplesMax = optionalNonNegativeInt(
+  "AI_MARKET_MAP_LABEL_SIBLING_SAMPLES_MAX",
+  6,
+);
+const aiMarketMapLabelSampleMaxChars = optionalPositiveInt(
+  "AI_MARKET_MAP_LABEL_SAMPLE_MAX_CHARS",
+  80,
+);
+const aiMarketMapMaxAiLabelsPerRun = optionalPositiveInt(
+  "AI_MARKET_MAP_MAX_AI_LABELS_PER_RUN",
+  400,
 );
 const aiMarketMapDebugLogs =
   parseOptionalBool(process.env.AI_MARKET_MAP_DEBUG_LOGS) ?? false;
@@ -541,6 +558,7 @@ export const env = {
   aiMarketMapDepth,
   aiMarketMapK1,
   aiMarketMapK2,
+  aiMarketMapK3,
   aiMarketMapMaxEventsPerVenue,
   aiMarketMapTtlSec,
   aiMarketMapMinEventVolume24h,
@@ -552,6 +570,10 @@ export const env = {
   aiMarketMapLabelLevels,
   aiMarketMapLabelModel,
   aiMarketMapLabelMaxTokens,
+  aiMarketMapLabelChildSamplesMax,
+  aiMarketMapLabelSiblingSamplesMax,
+  aiMarketMapLabelSampleMaxChars,
+  aiMarketMapMaxAiLabelsPerRun,
   aiMarketMapDebugLogs,
   aiMarketMapVenuesEnabled,
   aiMarketMapProjectionMethod,

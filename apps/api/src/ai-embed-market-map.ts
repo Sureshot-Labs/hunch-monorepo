@@ -26,7 +26,7 @@ import {
 } from "./services/runtime-policies.js";
 
 const MARKET_MAP_VERSION = "v1";
-const DEFAULT_MAX_AI_LABELS_PER_RUN = 300;
+const DEFAULT_MAX_AI_LABELS_PER_RUN = 400;
 const DEFAULT_AI_LABEL_TIMEOUT_MS = 8_000;
 const DEFAULT_AI_LABEL_CONCURRENCY = 4;
 
@@ -67,6 +67,7 @@ type BuildConfig = {
   depth: number;
   k1: number;
   k2: number;
+  k3: number;
   maxEventsPerVenue: number;
   ttlSec: number;
   minEventVolume24h: number;
@@ -75,6 +76,9 @@ type BuildConfig = {
   labelLevels: number[];
   labelModel: string;
   labelMaxTokens: number;
+  labelChildSamplesMax: number;
+  labelSiblingSamplesMax: number;
+  labelSampleMaxChars: number;
   maxAiLabelsPerRun: number;
   projectionPcaDims: number;
   projectionUmapNeighbors: number;
@@ -112,6 +116,13 @@ type AiLabelResult = {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  promptChars?: number;
+};
+
+type LabelPromptPayload = {
+  system: string;
+  user: string;
+  promptChars: number;
 };
 
 function parseFlag(args: string[], flag: string): string | undefined {
@@ -431,10 +442,11 @@ function buildTreeGlobal(params: {
   depth: number;
   k1: number;
   k2: number;
+  k3: number;
   nowIso: string;
   byNodeEvents: Map<string, MarketMapEventSummary[]>;
 }): MarketMapNode[] {
-  const { points, depth, k1, k2, nowIso, byNodeEvents } = params;
+  const { points, depth, k1, k2, k3, nowIso, byNodeEvents } = params;
   const nodes: MarketMapNode[] = [];
 
   function makeNodes(
@@ -443,7 +455,7 @@ function buildTreeGlobal(params: {
     parentId: string | null,
   ): string[] {
     if (clusterPoints.length === 0) return [];
-    const splitK = level === 1 ? k1 : k2;
+    const splitK = level === 1 ? k1 : level === 2 ? k2 : k3;
     const clusters = partitionCluster(clusterPoints, splitK);
     const createdIds: string[] = [];
 
@@ -696,81 +708,158 @@ function isGenericLabel(label: string): boolean {
   return generic.has(normalized);
 }
 
+function normalizeLabelSampleText(value: string, maxChars: number): string {
+  const flattened = value.replace(/\s+/g, " ").trim();
+  if (!flattened) return "";
+  if (flattened.length <= maxChars) return flattened;
+  return `${flattened.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+}
+
 function buildLabelSystemPrompt(): string {
   return [
-    "You are an ontology labeler for prediction-market event clusters.",
-    "Task: output one short, concrete, representative cluster label.",
-    "Return only strict JSON that matches exactly this schema:",
-    '{"label":"string"}',
+    "You label prediction-market event clusters.",
+    "Return exactly one short label line.",
+    "Do not return JSON, markdown, explanations, or extra text.",
     "Rules:",
     "- 2 to 6 words, max 60 characters.",
     "- Analyze the full in-cluster input and produce a label that represents the whole cluster, not just one sample.",
-    "- If input is event titles, name the shared theme of those events.",
-    "- If input is child-cluster labels, produce a parent label that is broad enough to cover all child clusters, but still specific.",
-    "- Use nearby sibling examples to avoid collisions; choose wording that distinguishes this cluster from neighbors.",
+    "- Use nearby sibling examples to avoid collisions.",
     "- Avoid generic labels (Politics, Sports, Crypto, Markets, Predictions).",
     "- Avoid numeric-only labels, odds, prices, punctuation fluff, and emojis.",
     "- Do not copy a sibling label unless the topic is truly identical.",
-    "- No extra keys, no markdown, no commentary.",
+    "- Keep wording concrete and specific.",
   ].join("\n");
 }
 
 function buildLabelUserPrompt(params: {
+  level: number;
   representative: string;
   sampleKind: "child_clusters" | "event_titles";
   samples: string[];
   siblingSamples: string[];
 }): string {
-  const clusterSamples = params.samples
-    .slice(0, 8)
+  const inScopeSamples = params.samples
     .map((title, idx) => `${idx + 1}. ${title}`)
     .join("\n");
   const nearbySamples = params.siblingSamples
-    .slice(0, 8)
     .map((title, idx) => `${idx + 1}. ${title}`)
     .join("\n");
-  const sampleHeader =
-    params.sampleKind === "child_clusters"
-      ? "In-cluster child cluster labels:"
-      : "In-cluster event titles:";
   const taskHint =
     params.sampleKind === "child_clusters"
-      ? "Build a parent-level label that best represents all child clusters."
+      ? "Build a parent-level label that covers all in-scope child clusters."
       : "Build a representative label for the shared topic across these events.";
   return [
     "Cluster labeling request.",
+    "",
+    `level: ${params.level}`,
+    `sample_kind: ${params.sampleKind}`,
     "",
     taskHint,
     "",
     `Representative title: ${params.representative}`,
     "",
-    sampleHeader,
-    clusterSamples || "- none",
+    "In-scope samples:",
+    inScopeSamples || "- none",
     "",
-    "Nearby sibling cluster examples (for disambiguation):",
+    "Nearby sibling samples (for disambiguation):",
     nearbySamples || "- none",
     "",
-    'Output strictly as JSON: {"label":"..."}',
+    "Output: one label line only.",
   ].join("\n");
+}
+
+function buildLabelPromptPayload(params: {
+  level: number;
+  representative: string;
+  sampleKind: "child_clusters" | "event_titles";
+  samples: string[];
+  siblingSamples: string[];
+}): LabelPromptPayload {
+  const system = buildLabelSystemPrompt();
+  const user = buildLabelUserPrompt(params);
+  return {
+    system,
+    user,
+    promptChars: system.length + user.length,
+  };
+}
+
+function sanitizeLabelCandidate(raw: string): string {
+  let text = raw.trim();
+  if (!text) return "";
+  text = text.replace(/^`+|`+$/g, "").trim();
+  text = text.replace(/^"+|"+$/g, "").trim();
+  text = text.replace(/^'+|'+$/g, "").trim();
+  return text.slice(0, 60).trim();
+}
+
+function parseLabelFromRawOutput(raw: string): {
+  label: string | null;
+  parseIssue: "json_parse_failed" | "invalid_schema" | null;
+  detail?: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { label: null, parseIssue: "invalid_schema" };
+  }
+
+  const parsed = parsePossibleJson<AiLabelResponse>(trimmed);
+  if (parsed && typeof parsed.label === "string") {
+    return { label: sanitizeLabelCandidate(parsed.label), parseIssue: null };
+  }
+
+  const partial = extractPartialLabel(trimmed);
+  if (partial) {
+    return { label: sanitizeLabelCandidate(partial), parseIssue: null };
+  }
+
+  const deFenced = trimmed
+    .replace(/^```(?:json|text)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const lines = deFenced
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  for (const line of lines) {
+    const withoutBullet = line.replace(/^[-*]\s+/, "").trim();
+    const labelPrefixMatch = withoutBullet.match(/^label\s*:\s*(.+)$/i);
+    if (
+      !labelPrefixMatch &&
+      (withoutBullet.startsWith("{") ||
+        withoutBullet.startsWith("[") ||
+        withoutBullet.startsWith('"label"'))
+    ) {
+      continue;
+    }
+    const candidate = labelPrefixMatch
+      ? labelPrefixMatch[1]
+      : withoutBullet;
+    const sanitized = sanitizeLabelCandidate(candidate);
+    if (sanitized) {
+      return { label: sanitized, parseIssue: null };
+    }
+  }
+
+  const parseIssue =
+    trimmed.startsWith("{") || trimmed.startsWith("[")
+      ? "json_parse_failed"
+      : "invalid_schema";
+  return {
+    label: null,
+    parseIssue,
+    detail: trimmed.slice(0, 180),
+  };
 }
 
 async function callOpenRouterLabel(params: {
   model: string;
   labelMaxTokens: number;
   timeoutMs: number;
-  representative: string;
-  sampleKind: "child_clusters" | "event_titles";
-  samples: string[];
-  siblingSamples: string[];
+  prompt: LabelPromptPayload;
 }): Promise<AiLabelResult> {
   if (!env.openRouterKey) return { label: null, reason: "http_error" };
-  const system = buildLabelSystemPrompt();
-  const user = buildLabelUserPrompt({
-    representative: params.representative,
-    sampleKind: params.sampleKind,
-    samples: params.samples,
-    siblingSamples: params.siblingSamples,
-  });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), params.timeoutMs);
   let response: Response;
@@ -785,19 +874,18 @@ async function callOpenRouterLabel(params: {
       body: JSON.stringify({
         model: params.model,
         messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
+          { role: "system", content: params.prompt.system },
+          { role: "user", content: params.prompt.user },
         ],
         temperature: 0,
         max_tokens: params.labelMaxTokens,
         reasoning: { effort: "low" },
-        response_format: { type: "json_object" },
       }),
       signal: controller.signal,
     });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      return { label: null, reason: "timeout" };
+      return { label: null, reason: "timeout", promptChars: params.prompt.promptChars };
     }
     throw error;
   } finally {
@@ -810,6 +898,7 @@ async function callOpenRouterLabel(params: {
       reason: "http_error",
       statusCode: response.status,
       detail: text.slice(0, 180),
+      promptChars: params.prompt.promptChars,
     };
   }
   const payload = (await response.json()) as {
@@ -846,36 +935,22 @@ async function callOpenRouterLabel(params: {
             : [],
         payloadSample: JSON.stringify(payload).slice(0, 240),
       }).slice(0, 240),
+      promptChars: params.prompt.promptChars,
     };
   }
 
-  const parsed = parsePossibleJson<AiLabelResponse>(trimmed);
-  if (!parsed) {
-    const partial = extractPartialLabel(trimmed);
-    if (partial) {
-      const label = partial.trim().slice(0, 60);
-      if (label && !isGenericLabel(label)) {
-        return { label, reason: "ok", finishReason, ...usage };
-      }
-    }
+  const parsedOutput = parseLabelFromRawOutput(trimmed);
+  if (!parsedOutput.label) {
     return {
       label: null,
-      reason: "json_parse_failed",
+      reason: parsedOutput.parseIssue ?? "invalid_schema",
       finishReason,
       ...usage,
-      detail: trimmed.slice(0, 180),
+      detail: parsedOutput.detail ?? trimmed.slice(0, 180),
+      promptChars: params.prompt.promptChars,
     };
   }
-  if (typeof parsed.label !== "string") {
-    return {
-      label: null,
-      reason: "invalid_schema",
-      finishReason,
-      ...usage,
-      detail: trimmed.slice(0, 180),
-    };
-  }
-  const label = parsed.label.trim().slice(0, 60);
+  const label = parsedOutput.label;
   if (!label || isGenericLabel(label)) {
     return {
       label: null,
@@ -883,9 +958,16 @@ async function callOpenRouterLabel(params: {
       finishReason,
       ...usage,
       detail: label.slice(0, 120),
+      promptChars: params.prompt.promptChars,
     };
   }
-  return { label, reason: "ok", finishReason, ...usage };
+  return {
+    label,
+    reason: "ok",
+    finishReason,
+    ...usage,
+    promptChars: params.prompt.promptChars,
+  };
 }
 
 async function applyAiLabels(params: {
@@ -963,6 +1045,7 @@ async function applyAiLabels(params: {
     1,
     Math.max(1, plannedAttempts),
   );
+  const plannedLevels = levelsDesc.filter((level) => (quotasByLevel.get(level) ?? 0) > 0);
   console.log("[market-map] ai labels start", {
     candidateNodes: candidates.length,
     maxAttempts,
@@ -972,6 +1055,9 @@ async function applyAiLabels(params: {
     configuredMaxAiLabels: config.maxAiLabelsPerRun,
     concurrency,
     timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
+    labelChildSamplesMax: config.labelChildSamplesMax,
+    labelSiblingSamplesMax: config.labelSiblingSamplesMax,
+    labelSampleMaxChars: config.labelSampleMaxChars,
     levels: levelsDesc,
     candidateCountsByLevel: Object.fromEntries(
       levelsDesc.map((level) => [level, bucketsByLevel.get(level)?.length ?? 0]),
@@ -985,8 +1071,55 @@ async function applyAiLabels(params: {
   let labeled = 0;
   let completed = 0;
   let attemptCursor = 0;
+  let levelBatchIndex = 0;
+  const issueReasonCounts = new Map<string, number>();
+  const finishReasonCounts = new Map<string, number>();
+  const errorSamples: Array<{
+    attempt: number;
+    nodeId: string;
+    level: number;
+    reason: string;
+    finishReason: string | null;
+    durationMs: number;
+    error: string | null;
+  }> = [];
+  const incrementCount = (map: Map<string, number>, key: string) => {
+    map.set(key, (map.get(key) ?? 0) + 1);
+  };
+  const percentile = (values: number[], p: number): number => {
+    if (values.length === 0) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const idx = Math.min(
+      sorted.length - 1,
+      Math.max(0, Math.ceil((p / 100) * sorted.length) - 1),
+    );
+    return Number(sorted[idx].toFixed(2));
+  };
+  const average = (values: number[]): number => {
+    if (values.length === 0) return 0;
+    const sum = values.reduce((acc, value) => acc + value, 0);
+    return Number((sum / values.length).toFixed(2));
+  };
+  const samplingSummaryByLevel: Record<
+    number,
+    {
+      attempts: number;
+      avgChildSamples: number;
+      p95ChildSamples: number;
+      avgSiblingSamples: number;
+      p95SiblingSamples: number;
+      avgPromptChars: number;
+      p95PromptChars: number;
+      avgPromptTokens: number;
+      p95PromptTokens: number;
+      avgCompletionTokens: number;
+      p95CompletionTokens: number;
+      avgReasoningTokens: number;
+      p95ReasoningTokens: number;
+    }
+  > = {};
 
-  for (const level of levelsDesc) {
+  for (const level of plannedLevels) {
     const quota = quotasByLevel.get(level) ?? 0;
     if (quota <= 0) continue;
     const levelCandidates = (bucketsByLevel.get(level) ?? [])
@@ -996,61 +1129,127 @@ async function applyAiLabels(params: {
         attempt: attemptCursor + idx + 1,
       }));
     attemptCursor += levelCandidates.length;
-    console.log("[market-map] ai labels level start", {
+    levelBatchIndex += 1;
+    console.log("[market-map] ai labels batch start", {
+      batch: `${levelBatchIndex}/${plannedLevels.length}`,
       level,
       attempts: levelCandidates.length,
       remainingBudget: plannedAttempts - attemptCursor,
+      completedSoFar: completed,
+      labeledSoFar: labeled,
+      labelChildSamplesMax: config.labelChildSamplesMax,
+      labelSiblingSamplesMax: config.labelSiblingSamplesMax,
+      labelSampleMaxChars: config.labelSampleMaxChars,
     });
+    let levelCompleted = 0;
+    let levelLabeled = 0;
+    let levelIssues = 0;
+    const levelChildSampleCounts: number[] = [];
+    const levelSiblingSampleCounts: number[] = [];
+    const levelPromptChars: number[] = [];
+    const levelPromptTokens: number[] = [];
+    const levelCompletionTokens: number[] = [];
+    const levelReasoningTokens: number[] = [];
 
     await forEachConcurrent(levelCandidates, concurrency, async (job) => {
       const { node, attempt } = job;
       const callStartedAt = Date.now();
-      console.log("[market-map] ai label call start", {
-        attempt,
-        maxAttempts,
-        nodeId: node.id,
-        venue: node.dominantVenue ?? node.venue,
-        level: node.level,
-      });
 
       const siblingNodes = nodes.filter(
         (entry) => entry.level === node.level && entry.parentId === node.parentId,
       );
-      const siblingSamples = Array.from(
-        new Set(
-          siblingNodes
-            .filter((entry) => entry.id !== node.id)
-            .map((entry) => entry.label?.trim() || entry.labelRepresentative)
-            .filter((value) => value.length > 0),
-        ),
-      ).slice(0, 6);
-      const childSamples = Array.from(
-        new Set(
-          node.childIds
-            .map((childId) => nodeById.get(childId)?.label?.trim() ?? "")
-            .filter((value) => value.length > 0),
-        ),
-      );
+      const siblingCandidates = siblingNodes
+        .filter((entry) => entry.id !== node.id)
+        .map((entry) => {
+          const raw = entry.label?.trim() || entry.labelRepresentative;
+          const normalized = normalizeLabelSampleText(
+            raw,
+            config.labelSampleMaxChars,
+          );
+          const dx = entry.x - node.x;
+          const dy = entry.y - node.y;
+          return { normalized, dist2: dx * dx + dy * dy };
+        })
+        .filter((entry) => entry.normalized.length > 0)
+        .sort(
+          (a, b) =>
+            a.dist2 - b.dist2 ||
+            a.normalized.localeCompare(b.normalized),
+        );
+      const siblingSamples: string[] = [];
+      const siblingSeen = new Set<string>();
+      for (const sibling of siblingCandidates) {
+        const key = sibling.normalized.toLowerCase();
+        if (siblingSeen.has(key)) continue;
+        siblingSeen.add(key);
+        siblingSamples.push(sibling.normalized);
+        if (siblingSamples.length >= config.labelSiblingSamplesMax) break;
+      }
+      const childSamplesRaw = node.childIds
+        .map((childId) => {
+          const child = nodeById.get(childId);
+          if (!child) return "";
+          return child.label?.trim() || child.labelRepresentative;
+        })
+        .map((value) => normalizeLabelSampleText(value, config.labelSampleMaxChars))
+        .filter((value) => value.length > 0);
+      const childSamples: string[] = [];
+      const childSeen = new Set<string>();
+      for (const value of childSamplesRaw) {
+        const key = value.toLowerCase();
+        if (childSeen.has(key)) continue;
+        childSeen.add(key);
+        childSamples.push(value);
+        if (childSamples.length >= config.labelChildSamplesMax) break;
+      }
       const sampleKind: "child_clusters" | "event_titles" =
         childSamples.length > 0 ? "child_clusters" : "event_titles";
       const samples =
         sampleKind === "child_clusters"
-          ? childSamples.slice(0, 8)
-          : Array.from(
-              new Set(
-                (byNodeEvents.get(node.id) ?? [])
-                  .slice(0, 8)
-                  .map((event) => event.title.trim())
-                  .filter((value) => value.length > 0),
-              ),
-            );
+          ? childSamples
+          : (() => {
+              const out: string[] = [];
+              const seen = new Set<string>();
+              for (const event of byNodeEvents.get(node.id) ?? []) {
+                const normalized = normalizeLabelSampleText(
+                  event.title,
+                  config.labelSampleMaxChars,
+                );
+                if (!normalized) continue;
+                const key = normalized.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push(normalized);
+                if (out.length >= config.labelChildSamplesMax) break;
+              }
+              return out;
+            })();
+      const normalizedRepresentative = normalizeLabelSampleText(
+        node.labelRepresentative,
+        config.labelSampleMaxChars,
+      );
       const normalizedSamples =
-        samples.length > 0 ? samples : [node.labelRepresentative];
+        samples.length > 0
+          ? samples
+          : [normalizedRepresentative || node.labelRepresentative];
+      const prompt = buildLabelPromptPayload({
+        level: node.level,
+        representative: normalizedRepresentative || node.labelRepresentative,
+        sampleKind,
+        samples: normalizedSamples,
+        siblingSamples,
+      });
+      const childSampleCount = normalizedSamples.length;
+      const siblingSampleCount = siblingSamples.length;
+      levelChildSampleCounts.push(childSampleCount);
+      levelSiblingSampleCounts.push(siblingSampleCount);
+      levelPromptChars.push(prompt.promptChars);
 
       let status: "labeled" | "no_label" | "error" = "no_label";
       let noLabelReason: AiLabelResult["reason"] | null = null;
       let errorMessage: string | null = null;
       let finishReason: string | null | undefined;
+      let promptChars: number | undefined = prompt.promptChars;
       let promptTokens: number | undefined;
       let completionTokens: number | undefined;
       let totalTokens: number | undefined;
@@ -1061,10 +1260,7 @@ async function applyAiLabels(params: {
           model: config.labelModel,
           labelMaxTokens: config.labelMaxTokens,
           timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
-          representative: node.labelRepresentative,
-          sampleKind,
-          samples: normalizedSamples,
-          siblingSamples,
+          prompt,
         });
         if (
           !result.label &&
@@ -1083,10 +1279,7 @@ async function applyAiLabels(params: {
               model: config.labelModel,
               labelMaxTokens: retryLabelMaxTokens,
               timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
-              representative: node.labelRepresentative,
-              sampleKind,
-              samples: normalizedSamples,
-              siblingSamples,
+              prompt,
             });
           }
         }
@@ -1095,9 +1288,12 @@ async function applyAiLabels(params: {
           node.label = result.label;
           node.labelSource = "ai";
           labeled += 1;
+          levelLabeled += 1;
           status = "labeled";
         } else {
           noLabelReason = result.reason;
+          incrementCount(issueReasonCounts, result.reason);
+          levelIssues += 1;
           if (result.detail) {
             errorMessage = result.detail;
           } else if (result.statusCode) {
@@ -1105,42 +1301,167 @@ async function applyAiLabels(params: {
           }
         }
         finishReason = result.finishReason;
+        promptChars = result.promptChars ?? prompt.promptChars;
         promptTokens = result.promptTokens;
         completionTokens = result.completionTokens;
         totalTokens = result.totalTokens;
         reasoningTokens = result.reasoningTokens;
       } catch (error) {
         status = "error";
+        incrementCount(issueReasonCounts, "unexpected_error");
+        levelIssues += 1;
         errorMessage = error instanceof Error ? error.message : String(error);
       }
       completed += 1;
-      console.log("[market-map] ai label call done", {
-        attempt,
-        maxAttempts,
-        nodeId: node.id,
-        status,
-        reason: noLabelReason,
-        finishReason,
-        sampleKind,
-        durationMs: Date.now() - callStartedAt,
-        promptTokens,
-        completionTokens,
-        reasoningTokens,
-        totalTokens,
-        labelMaxTokensUsed,
-        labeledSoFar: labeled,
-        completed,
-        remaining: plannedAttempts - completed,
-        error: errorMessage,
-      });
+      levelCompleted += 1;
+      if (typeof promptTokens === "number" && Number.isFinite(promptTokens)) {
+        levelPromptTokens.push(promptTokens);
+      }
+      if (
+        typeof completionTokens === "number" &&
+        Number.isFinite(completionTokens)
+      ) {
+        levelCompletionTokens.push(completionTokens);
+      }
+      if (
+        typeof reasoningTokens === "number" &&
+        Number.isFinite(reasoningTokens)
+      ) {
+        levelReasoningTokens.push(reasoningTokens);
+      }
+      if (finishReason) {
+        incrementCount(finishReasonCounts, finishReason);
+      }
+      const isIssue =
+        status === "error" ||
+        noLabelReason === "timeout" ||
+        noLabelReason === "http_error" ||
+        noLabelReason === "empty_content" ||
+        noLabelReason === "json_parse_failed" ||
+        noLabelReason === "invalid_schema";
+      if (isIssue) {
+        const reason = status === "error" ? "unexpected_error" : (noLabelReason ?? "unknown");
+        const durationMs = Date.now() - callStartedAt;
+        console.error("[market-map] ai label issue", {
+          attempt,
+          maxAttempts,
+          nodeId: node.id,
+          level: node.level,
+          status,
+          reason,
+          finishReason,
+          sampleKind,
+          childSampleCount,
+          siblingSampleCount,
+          durationMs,
+          promptChars,
+          promptTokens,
+          completionTokens,
+          reasoningTokens,
+          totalTokens,
+          labelMaxTokensUsed,
+          remaining: plannedAttempts - completed,
+          error: errorMessage,
+        });
+        if (errorSamples.length < 20) {
+          errorSamples.push({
+            attempt,
+            nodeId: node.id,
+            level: node.level,
+            reason,
+          finishReason: finishReason ?? null,
+          durationMs,
+          error: errorMessage,
+          });
+        }
+      } else if (config.debugLogs) {
+        console.log("[market-map] ai label call done", {
+          attempt,
+          maxAttempts,
+          nodeId: node.id,
+          status,
+          reason: noLabelReason,
+          finishReason,
+          sampleKind,
+          childSampleCount,
+          siblingSampleCount,
+          durationMs: Date.now() - callStartedAt,
+          promptChars,
+          promptTokens,
+          completionTokens,
+          reasoningTokens,
+          totalTokens,
+          labelMaxTokensUsed,
+          labeledSoFar: labeled,
+          completed,
+          remaining: plannedAttempts - completed,
+        });
+      }
     });
+    console.log("[market-map] ai labels batch done", {
+      batch: `${levelBatchIndex}/${plannedLevels.length}`,
+      level,
+      attempted: levelCandidates.length,
+      completed: levelCompleted,
+      labeled: levelLabeled,
+      issues: levelIssues,
+      remaining: plannedAttempts - completed,
+      sampling: {
+        avgChildSamples: average(levelChildSampleCounts),
+        p95ChildSamples: percentile(levelChildSampleCounts, 95),
+        avgSiblingSamples: average(levelSiblingSampleCounts),
+        p95SiblingSamples: percentile(levelSiblingSampleCounts, 95),
+        avgPromptChars: average(levelPromptChars),
+        p95PromptChars: percentile(levelPromptChars, 95),
+        avgPromptTokens: average(levelPromptTokens),
+        p95PromptTokens: percentile(levelPromptTokens, 95),
+        avgCompletionTokens: average(levelCompletionTokens),
+        p95CompletionTokens: percentile(levelCompletionTokens, 95),
+        avgReasoningTokens: average(levelReasoningTokens),
+        p95ReasoningTokens: percentile(levelReasoningTokens, 95),
+      },
+    });
+    samplingSummaryByLevel[level] = {
+      attempts: levelCandidates.length,
+      avgChildSamples: average(levelChildSampleCounts),
+      p95ChildSamples: percentile(levelChildSampleCounts, 95),
+      avgSiblingSamples: average(levelSiblingSampleCounts),
+      p95SiblingSamples: percentile(levelSiblingSampleCounts, 95),
+      avgPromptChars: average(levelPromptChars),
+      p95PromptChars: percentile(levelPromptChars, 95),
+      avgPromptTokens: average(levelPromptTokens),
+      p95PromptTokens: percentile(levelPromptTokens, 95),
+      avgCompletionTokens: average(levelCompletionTokens),
+      p95CompletionTokens: percentile(levelCompletionTokens, 95),
+      avgReasoningTokens: average(levelReasoningTokens),
+      p95ReasoningTokens: percentile(levelReasoningTokens, 95),
+    };
   }
 
+  const issueReasonSummary = Object.fromEntries(
+    Array.from(issueReasonCounts.entries()).sort((a, b) => b[1] - a[1]),
+  );
+  const finishReasonSummary = Object.fromEntries(
+    Array.from(finishReasonCounts.entries()).sort((a, b) => b[1] - a[1]),
+  );
+  const issuesTotal = Object.values(issueReasonSummary).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
   console.log("[market-map] ai labels done", {
     attempted: plannedAttempts,
     labeled,
+    unlabeled: plannedAttempts - labeled,
+    issuesTotal,
+    issueReasonSummary,
+    finishReasonSummary,
+    samplingSummaryByLevel,
+    errorSamples: errorSamples.length,
     durationMs: Date.now() - startedAt,
   });
+  if (errorSamples.length > 0) {
+    console.log("[market-map] ai labels issue samples", errorSamples);
+  }
 }
 
 async function fetchVenueCandidates(
@@ -1315,6 +1636,7 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
     ),
     k1: clamp(Math.trunc(parseNumber(parseFlag(args, "--k1")) ?? policy.k1), 2, 24),
     k2: clamp(Math.trunc(parseNumber(parseFlag(args, "--k2")) ?? policy.k2), 2, 24),
+    k3: clamp(Math.trunc(parseNumber(parseFlag(args, "--k3")) ?? policy.k3), 2, 24),
     maxEventsPerVenue: clamp(
       Math.trunc(
         parseNumber(parseFlag(args, "--max-events-per-venue")) ??
@@ -1349,9 +1671,34 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
       64,
       8_000,
     ),
+    labelChildSamplesMax: clamp(
+      Math.trunc(
+        parseNumber(parseFlag(args, "--label-child-samples-max")) ??
+          policy.labelChildSamplesMax,
+      ),
+      1,
+      20,
+    ),
+    labelSiblingSamplesMax: clamp(
+      Math.trunc(
+        parseNumber(parseFlag(args, "--label-sibling-samples-max")) ??
+          policy.labelSiblingSamplesMax,
+      ),
+      0,
+      20,
+    ),
+    labelSampleMaxChars: clamp(
+      Math.trunc(
+        parseNumber(parseFlag(args, "--label-sample-max-chars")) ??
+          policy.labelSampleMaxChars,
+      ),
+      24,
+      200,
+    ),
     maxAiLabelsPerRun: clamp(
       Math.trunc(
         parseNumber(parseFlag(args, "--max-ai-labels")) ??
+          policy.maxAiLabelsPerRun ??
           DEFAULT_MAX_AI_LABELS_PER_RUN,
       ),
       1,
@@ -1374,13 +1721,17 @@ Options:
   --venues <csv>                 Venues to include (default policy venuesEnabled)
   --depth <n>                    Tree depth (2..4)
   --k1 <n>                       Top-level split factor
-  --k2 <n>                       Child-level split factor
+  --k2 <n>                       2nd-level split factor
+  --k3 <n>                       3rd+ level split factor
   --max-events-per-venue <n>     Candidate cap per venue
   --min-event-volume-24h <n>     Min 24h event volume
   --min-event-liquidity <n>      Min event liquidity
   --ttl-sec <n>                  Snapshot TTL in Redis
   --label-max-tokens <n>         Max completion tokens for AI labels
-  --max-ai-labels <n>            Max AI label calls per run (default 300)
+  --label-child-samples-max <n>  Max in-scope samples per label prompt
+  --label-sibling-samples-max <n> Max sibling disambiguation samples per prompt
+  --label-sample-max-chars <n>   Max chars per sample string in prompt
+  --max-ai-labels <n>            Max AI label calls per run (default 400)
   --with-ai-labels               Enable AI label rewrite for this run
   --without-ai-labels            Disable AI labels for this run
   --enabled=<bool>               Override policy enabled (true/false)
@@ -1554,6 +1905,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     depth: config.depth,
     k1: config.k1,
     k2: config.k2,
+    k3: config.k3,
     perVenueEventCounts: Object.fromEntries(
       config.venues.map((venue) => [venue, byVenuePoints[venue]?.length ?? 0]),
     ),
@@ -1563,6 +1915,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     depth: config.depth,
     k1: config.k1,
     k2: config.k2,
+    k3: config.k3,
     nowIso,
     byNodeEvents,
   });

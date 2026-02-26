@@ -131,6 +131,8 @@ export type MarketMapPolicy = {
   depth: number;
   k1: number;
   k2: number;
+  k3: number;
+  maxAiLabelsPerRun: number;
   maxEventsPerVenue: number;
   ttlSec: number;
   minEventVolume24h: number;
@@ -142,6 +144,9 @@ export type MarketMapPolicy = {
   labelLevels: number[];
   labelModel: string;
   labelMaxTokens: number;
+  labelChildSamplesMax: number;
+  labelSiblingSamplesMax: number;
+  labelSampleMaxChars: number;
   debugLogs: boolean;
   venuesEnabled: string[];
   projectionMethod: "umap";
@@ -398,6 +403,8 @@ const marketMapSchema = z
     depth: positiveInt.max(4),
     k1: positiveInt.max(100),
     k2: positiveInt.max(100),
+    k3: positiveInt.max(100),
+    maxAiLabelsPerRun: positiveInt.max(2_000),
     maxEventsPerVenue: positiveInt.max(100_000),
     ttlSec: positiveInt.max(60 * 60 * 24 * 30),
     minEventVolume24h: nonNegativeNumber,
@@ -409,6 +416,9 @@ const marketMapSchema = z
     labelLevels: z.array(z.coerce.number().int().min(1).max(3)).max(3),
     labelModel: z.string().trim().min(1).max(200),
     labelMaxTokens: positiveInt.max(2_000),
+    labelChildSamplesMax: positiveInt.max(20),
+    labelSiblingSamplesMax: nonNegativeInt.max(20),
+    labelSampleMaxChars: positiveInt.max(200),
     debugLogs: strictBoolean,
     venuesEnabled: z.array(z.string().trim().min(1).max(64)).min(1).max(20),
     projectionMethod: z.enum(["umap"]),
@@ -802,6 +812,8 @@ function getDefaults(): IntelPolicyMap {
       depth: env.aiMarketMapDepth,
       k1: env.aiMarketMapK1,
       k2: env.aiMarketMapK2,
+      k3: env.aiMarketMapK3,
+      maxAiLabelsPerRun: env.aiMarketMapMaxAiLabelsPerRun,
       maxEventsPerVenue: env.aiMarketMapMaxEventsPerVenue,
       ttlSec: env.aiMarketMapTtlSec,
       minEventVolume24h: env.aiMarketMapMinEventVolume24h,
@@ -813,6 +825,9 @@ function getDefaults(): IntelPolicyMap {
       labelLevels: env.aiMarketMapLabelLevels,
       labelModel: env.aiMarketMapLabelModel,
       labelMaxTokens: env.aiMarketMapLabelMaxTokens,
+      labelChildSamplesMax: env.aiMarketMapLabelChildSamplesMax,
+      labelSiblingSamplesMax: env.aiMarketMapLabelSiblingSamplesMax,
+      labelSampleMaxChars: env.aiMarketMapLabelSampleMaxChars,
       debugLogs: env.aiMarketMapDebugLogs,
       venuesEnabled: env.aiMarketMapVenuesEnabled,
       projectionMethod: env.aiMarketMapProjectionMethod,
@@ -1120,12 +1135,19 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
     normalizedVenues.length > 0
       ? normalizedVenues
       : (["polymarket", "kalshi", "limitless"] as const);
+  const normalizedK3 = clamp(Math.trunc(policy.k3 ?? policy.k2), 2, 24);
 
   return {
     enabled: Boolean(policy.enabled),
     depth: clamp(Math.trunc(policy.depth), 2, 4),
     k1: clamp(Math.trunc(policy.k1), 2, 24),
     k2: clamp(Math.trunc(policy.k2), 2, 24),
+    k3: normalizedK3,
+    maxAiLabelsPerRun: clamp(
+      Math.trunc(policy.maxAiLabelsPerRun ?? 400),
+      1,
+      2_000,
+    ),
     maxEventsPerVenue: clamp(Math.trunc(policy.maxEventsPerVenue), 100, 20_000),
     ttlSec: clamp(Math.trunc(policy.ttlSec), 1_800, 604_800),
     minEventVolume24h: Math.max(0, policy.minEventVolume24h),
@@ -1148,6 +1170,21 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
       normalizedLabelLevels.length > 0 ? normalizedLabelLevels : [1, 2, 3],
     labelModel: policy.labelModel.trim(),
     labelMaxTokens: clamp(Math.trunc(policy.labelMaxTokens), 1, 2_000),
+    labelChildSamplesMax: clamp(
+      Math.trunc(policy.labelChildSamplesMax ?? 16),
+      1,
+      20,
+    ),
+    labelSiblingSamplesMax: clamp(
+      Math.trunc(policy.labelSiblingSamplesMax ?? 6),
+      0,
+      20,
+    ),
+    labelSampleMaxChars: clamp(
+      Math.trunc(policy.labelSampleMaxChars ?? 80),
+      24,
+      200,
+    ),
     debugLogs: Boolean(policy.debugLogs),
     venuesEnabled: [...venuesEnabled],
     projectionMethod: "umap",

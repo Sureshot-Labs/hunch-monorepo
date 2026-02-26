@@ -44,6 +44,294 @@ function metricForEvent(
   }
 }
 
+type MarketMapLiveMarketRow = {
+  market_id: string;
+  event_id: string;
+  market_title: string | null;
+  market_image: string | null;
+  market_icon: string | null;
+  market_status: string | null;
+  market_best_bid: unknown;
+  market_best_ask: unknown;
+  last_price: unknown;
+  token_yes: string | null;
+  token_no: string | null;
+  yes_top_bid: unknown;
+  yes_top_ask: unknown;
+  no_top_bid: unknown;
+  no_top_ask: unknown;
+  accepting_orders: boolean | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
+};
+
+type MarketMapLiveMarketData = {
+  marketId: string;
+  marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
+  marketStatus: string | null;
+  marketBestBid: number | null;
+  marketBestAsk: number | null;
+  lastPrice: number | null;
+  tokenYes: string | null;
+  tokenNo: string | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  acceptingOrders: boolean | null;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: number | null;
+  oddsSource: "representative" | "fallback";
+};
+
+function toNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function toBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1 ? true : value === 0 ? false : null;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
+  }
+  return null;
+}
+
+function normalizeLiveRow(
+  row: MarketMapLiveMarketRow,
+  oddsSource: "representative" | "fallback",
+): MarketMapLiveMarketData {
+  return {
+    marketId: row.market_id,
+    marketTitle: row.market_title ?? null,
+    marketImage: row.market_image ?? null,
+    marketIcon: row.market_icon ?? null,
+    marketStatus: row.market_status ?? null,
+    marketBestBid: toNumber(row.market_best_bid),
+    marketBestAsk: toNumber(row.market_best_ask),
+    lastPrice: toNumber(row.last_price),
+    tokenYes: row.token_yes ?? null,
+    tokenNo: row.token_no ?? null,
+    yesBid: toNumber(row.yes_top_bid),
+    yesAsk: toNumber(row.yes_top_ask),
+    noBid: toNumber(row.no_top_bid),
+    noAsk: toNumber(row.no_top_ask),
+    acceptingOrders: toBoolean(row.accepting_orders),
+    resolvedOutcome: row.resolved_outcome ?? null,
+    resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
+    oddsSource,
+  };
+}
+
+async function loadLiveMarketDataForEvents(
+  events: MarketMapEventSummary[],
+): Promise<Map<string, MarketMapLiveMarketData>> {
+  const byEventId = new Map<string, MarketMapLiveMarketData>();
+  if (events.length === 0) {
+    return byEventId;
+  }
+
+  const eventIds: string[] = [];
+  const eventVenues: string[] = [];
+  const preferredMarketIds: Array<string | null> = [];
+  const preferredByEventId = new Map<string, string | null>();
+  for (const event of events) {
+    eventIds.push(event.eventId);
+    eventVenues.push(event.venue);
+    preferredMarketIds.push(event.representativeMarketId ?? null);
+    preferredByEventId.set(event.eventId, event.representativeMarketId ?? null);
+  }
+
+  const { rows } = await pool.query<
+    MarketMapLiveMarketRow & { preferred_market_id: string | null }
+  >(
+    `
+    with event_input as (
+      select *
+      from unnest($1::text[], $2::text[], $3::text[]) as ei(event_id, event_venue, preferred_market_id)
+    ),
+    ranked as (
+      select
+        m.id as market_id,
+        m.event_id,
+        m.title as market_title,
+        m.image as market_image,
+        m.icon as market_icon,
+        m.status::text as market_status,
+        m.best_bid as market_best_bid,
+        m.best_ask as market_best_ask,
+        m.last_price,
+        mt.token_yes,
+        mt.token_no,
+        yes_top.best_bid as yes_top_bid,
+        yes_top.best_ask as yes_top_ask,
+        no_top.best_bid as no_top_bid,
+        no_top.best_ask as no_top_ask,
+        coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) as accepting_orders,
+        m.resolved_outcome,
+        m.resolved_outcome_pct,
+        ei.preferred_market_id,
+        row_number() over (
+          partition by m.event_id
+          order by
+            (case when m.id = ei.preferred_market_id then 0 else 1 end),
+            (
+              case
+                when m.status::text = 'ACTIVE'
+                  and (m.expiration_time is null or m.expiration_time > now())
+                  and (m.close_time is null or m.close_time > now())
+                then 0
+                else 1
+              end
+            ),
+            (case when mt.token_yes is not null and mt.token_no is not null then 0 else 1 end),
+            (
+              case
+                when yes_top.best_bid is not null
+                  or yes_top.best_ask is not null
+                  or no_top.best_bid is not null
+                  or no_top.best_ask is not null
+                  or m.last_price is not null
+                then 0
+                else 1
+              end
+            ),
+            (
+              coalesce(
+                case
+                  when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
+                  when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+                  else null
+                end,
+                0
+              )
+            ) desc,
+            (
+              coalesce(
+                nullif(m.liquidity, 0),
+                nullif(m.open_interest, 0),
+                0
+              )
+            ) desc,
+            coalesce(m.open_interest, 0) desc,
+            coalesce(m.volume_total, 0) desc,
+            m.venue_market_id,
+            m.id
+        ) as market_rank
+      from event_input ei
+      join unified_markets m
+        on m.event_id = ei.event_id
+       and m.venue = ei.event_venue
+      cross join lateral (
+        select
+          case
+            when m.venue = 'polymarket' and m.clob_token_ids is not null
+              then (m.clob_token_ids::jsonb ->> 0)
+            else m.token_yes
+          end as token_yes,
+          case
+            when m.venue = 'polymarket' and m.clob_token_ids is not null
+              then (m.clob_token_ids::jsonb ->> 1)
+            else m.token_no
+          end as token_no
+      ) mt
+      left join lateral (
+        select best_bid, best_ask
+        from unified_book_top
+        where token_id = mt.token_yes
+          and ts > now() - interval '7 days'
+        order by ts desc
+        limit 1
+      ) yes_top on true
+      left join lateral (
+        select best_bid, best_ask
+        from unified_book_top
+        where token_id = mt.token_no
+          and ts > now() - interval '7 days'
+        order by ts desc
+        limit 1
+      ) no_top on true
+      left join polymarket_markets pm
+        on m.venue = 'polymarket' and pm.id = m.venue_market_id
+    )
+    select
+      market_id,
+      event_id,
+      market_title,
+      market_image,
+      market_icon,
+      market_status,
+      market_best_bid,
+      market_best_ask,
+      last_price,
+      token_yes,
+      token_no,
+      yes_top_bid,
+      yes_top_ask,
+      no_top_bid,
+      no_top_ask,
+      accepting_orders,
+      resolved_outcome,
+      resolved_outcome_pct,
+      preferred_market_id
+    from ranked
+    where market_rank = 1
+    `,
+    [eventIds, eventVenues, preferredMarketIds],
+  );
+
+  for (const row of rows) {
+    const preferredMarketId = preferredByEventId.get(row.event_id) ?? null;
+    const oddsSource =
+      preferredMarketId != null && row.market_id === preferredMarketId
+        ? "representative"
+        : "fallback";
+    byEventId.set(row.event_id, normalizeLiveRow(row, oddsSource));
+  }
+  return byEventId;
+}
+
+function applyLiveMarketDataToEvents(
+  events: MarketMapEventSummary[],
+  byEventId: ReadonlyMap<string, MarketMapLiveMarketData>,
+): MarketMapEventSummary[] {
+  return events.map((event) => {
+    const live = byEventId.get(event.eventId);
+    if (!live) return event;
+    return {
+      ...event,
+      representativeMarketId: live.marketId,
+      representativeMarketTitle: live.marketTitle,
+      image: event.image ?? live.marketImage,
+      icon: event.icon ?? live.marketIcon,
+      oddsSource: live.oddsSource,
+      tokenYes: live.tokenYes,
+      tokenNo: live.tokenNo,
+      yesBid: live.yesBid,
+      yesAsk: live.yesAsk,
+      noBid: live.noBid,
+      noAsk: live.noAsk,
+      marketBestBid: live.marketBestBid,
+      marketBestAsk: live.marketBestAsk,
+      lastPrice: live.lastPrice,
+      marketStatus: live.marketStatus,
+      acceptingOrders: live.acceptingOrders,
+      resolvedOutcome: live.resolvedOutcome,
+      resolvedOutcomePct: live.resolvedOutcomePct,
+    };
+  });
+}
+
 export const marketMapRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -159,6 +447,27 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         allNodes = legacyRaw.flatMap((value) => safeJsonParse<MarketMapNode[]>(value) ?? []);
       }
       const selectedVenueSet = new Set<MarketMapVenue>(venues);
+      const parentNode = parentId
+        ? allNodes.find((node) => node.id === parentId) ?? null
+        : null;
+      if (level > 1) {
+        if (!parentNode) {
+          return reply.code(404).send({
+            error: "Market map parent node not found in active snapshot",
+            runId,
+            level,
+            parentId,
+          });
+        }
+        if (parentNode.level !== level - 1) {
+          return reply.code(400).send({
+            error: `Market map parent level mismatch: expected level ${level - 1}, got ${parentNode.level}`,
+            runId,
+            level,
+            parentId,
+          });
+        }
+      }
 
       const levelNodes = allNodes.filter((node) => {
         if (node.level !== level) return false;
@@ -215,10 +524,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 string | null
               >;
 
-              return itemsWithPreview.map((node, index) => {
-                const events = (
-                  safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? []
-                )
+              const eventsByNode = itemsWithPreview.map((_, index) =>
+                (safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? [])
                   .filter((event) =>
                     selectedVenueSet.size === 0
                       ? true
@@ -230,13 +537,38 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       b.score - a.score ||
                       a.eventId.localeCompare(b.eventId),
                   )
-                  .slice(0, leafEventsPreviewLimit);
+                  .slice(0, leafEventsPreviewLimit),
+              );
 
-                return {
-                  ...node,
-                  eventsPreview: events,
-                };
-              });
+              const previewEvents = eventsByNode.flat();
+              let liveByEventId: Map<string, MarketMapLiveMarketData> | null = null;
+              if (previewEvents.length > 0) {
+                try {
+                  liveByEventId = await loadLiveMarketDataForEvents(previewEvents);
+                } catch (error) {
+                  request.log.warn(
+                    {
+                      err: error,
+                      level,
+                      parentId,
+                      nodeCount: itemsWithPreview.length,
+                      previewEventCount: previewEvents.length,
+                    },
+                    "market-map leaf preview live market enrichment failed",
+                  );
+                }
+              }
+
+              return itemsWithPreview.map((node, index) => ({
+                ...node,
+                eventsPreview:
+                  liveByEventId == null
+                    ? eventsByNode[index]
+                    : applyLiveMarketDataToEvents(
+                        eventsByNode[index],
+                        liveByEventId,
+                      ),
+              }));
             })()
           : itemsWithPreview;
 
@@ -352,6 +684,18 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const offset = request.query.offset ?? 0;
       const limit = request.query.limit ?? 100;
       const items = events.slice(offset, offset + limit);
+      let itemsWithLiveMarket = items;
+      if (items.length > 0) {
+        try {
+          const liveByEventId = await loadLiveMarketDataForEvents(items);
+          itemsWithLiveMarket = applyLiveMarketDataToEvents(items, liveByEventId);
+        } catch (error) {
+          request.log.warn(
+            { err: error, nodeId, itemCount: items.length },
+            "market-map node events live market enrichment failed",
+          );
+        }
+      }
 
       return {
         runId,
@@ -360,7 +704,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         offset,
         limit,
         venues: selectedVenues,
-        items,
+        items: itemsWithLiveMarket,
       };
     },
   );
