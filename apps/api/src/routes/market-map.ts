@@ -181,10 +181,10 @@ async function loadLiveMarketDataForEvents(
         m.resolved_outcome,
         m.resolved_outcome_pct,
         ei.preferred_market_id,
+        odds.yes_probability,
         row_number() over (
           partition by m.event_id
           order by
-            (case when m.id = ei.preferred_market_id then 0 else 1 end),
             (
               case
                 when m.status::text = 'ACTIVE'
@@ -194,6 +194,9 @@ async function loadLiveMarketDataForEvents(
                 else 1
               end
             ),
+            (case when odds.yes_probability is null then 1 else 0 end),
+            odds.yes_probability desc nulls last,
+            (case when m.id = ei.preferred_market_id then 0 else 1 end),
             (case when mt.token_yes is not null and mt.token_no is not null then 0 else 1 end),
             (
               case
@@ -263,6 +266,32 @@ async function loadLiveMarketDataForEvents(
       ) no_top on true
       left join polymarket_markets pm
         on m.venue = 'polymarket' and pm.id = m.venue_market_id
+      cross join lateral (
+        select
+          case
+            when yes_top.best_bid is not null and yes_top.best_ask is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, ((yes_top.best_bid + yes_top.best_ask) / 2)::double precision)
+              )
+            when yes_top.best_bid is not null
+              then greatest(0::double precision, least(1::double precision, yes_top.best_bid::double precision))
+            when yes_top.best_ask is not null
+              then greatest(0::double precision, least(1::double precision, yes_top.best_ask::double precision))
+            when no_top.best_bid is not null and no_top.best_ask is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, (1 - ((no_top.best_bid + no_top.best_ask) / 2)::double precision))
+              )
+            when no_top.best_bid is not null
+              then greatest(0::double precision, least(1::double precision, (1 - no_top.best_bid::double precision)))
+            when no_top.best_ask is not null
+              then greatest(0::double precision, least(1::double precision, (1 - no_top.best_ask::double precision)))
+            when m.last_price is not null
+              then greatest(0::double precision, least(1::double precision, m.last_price::double precision))
+            else null::double precision
+          end as yes_probability
+      ) odds
     )
     select
       market_id,
