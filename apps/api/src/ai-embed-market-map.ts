@@ -41,6 +41,7 @@ type EventCandidateRow = {
   open_interest: unknown;
   score: unknown;
   representative_market_id: string | null;
+  representative_market_title: string | null;
   representative_market_image: string | null;
   representative_market_icon: string | null;
 };
@@ -50,6 +51,7 @@ type EventPoint = {
   venue: MarketMapVenue;
   title: string;
   representativeMarketId: string | null;
+  representativeMarketTitle: string | null;
   image: string | null;
   icon: string | null;
   volume24h: number;
@@ -310,6 +312,7 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     title: point.title,
     venue: point.venue,
     representativeMarketId: point.representativeMarketId,
+    representativeMarketTitle: point.representativeMarketTitle,
     image: point.image,
     icon: point.icon,
     volume24h: point.volume24h,
@@ -1554,6 +1557,7 @@ async function fetchVenueCandidates(
         select distinct on (m.event_id)
           m.event_id,
           m.id as representative_market_id,
+          m.title as representative_market_title,
           m.image as representative_market_image,
           m.icon as representative_market_icon,
           (
@@ -1592,6 +1596,7 @@ async function fetchVenueCandidates(
           coalesce(em.open_interest, 0)
         )::double precision as score,
         rep_market.representative_market_id,
+        rep_market.representative_market_title,
         rep_market.representative_market_image,
         rep_market.representative_market_icon
       from candidate_events em
@@ -1830,6 +1835,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           venue: row.venue,
           title: row.title?.trim() || row.event_id,
           representativeMarketId: row.representative_market_id ?? null,
+          representativeMarketTitle: row.representative_market_title?.trim() || null,
           image:
             normalizeOptionalUrl(row.representative_market_image) ??
             normalizeOptionalUrl(row.event_image),

@@ -113,7 +113,7 @@ function normalizeLiveRow(
 ): MarketMapLiveMarketData {
   return {
     marketId: row.market_id,
-    marketTitle: row.market_title ?? null,
+    marketTitle: row.market_title?.trim() || null,
     marketImage: row.market_image ?? null,
     marketIcon: row.market_icon ?? null,
     marketStatus: row.market_status ?? null,
@@ -340,7 +340,7 @@ function applyLiveMarketDataToEvents(
     return {
       ...event,
       representativeMarketId: live.marketId,
-      representativeMarketTitle: live.marketTitle,
+      representativeMarketTitle: live.marketTitle ?? event.representativeMarketTitle ?? null,
       image: event.image ?? live.marketImage,
       icon: event.icon ?? live.marketIcon,
       oddsSource: live.oddsSource,

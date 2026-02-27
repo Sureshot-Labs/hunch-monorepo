@@ -24,6 +24,8 @@
     "ai:embed:market-map": "tsx src/ai-embed-market-map.ts",
     "ai:topics:dry-run": "tsx src/ai-topics-dry-run.ts",
     "ai:search:smoke": "tsx src/ai-search-smoke.ts",
+    "ai:map-search:smoke": "tsx src/ai-map-search-smoke.ts",
+    "ai:map-signals:smoke": "tsx src/ai-map-signals-smoke.ts",
     "ai:synthesis:smoke": "tsx src/ai-synthesis-smoke.ts",
     "ai:e2e:smoke": "tsx src/ai-e2e-smoke.ts",
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
