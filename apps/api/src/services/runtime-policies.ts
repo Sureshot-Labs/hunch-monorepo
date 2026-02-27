@@ -128,6 +128,17 @@ export type ArbitrageDefaultsPolicy = {
 
 export type MarketMapPolicy = {
   enabled: boolean;
+  triggerMode: "interval" | "cron";
+  pollIntervalSec: number;
+  scheduleCron: string | null;
+  runWindowMinutes: number;
+  maxRunsPerWindow: number;
+  maxRunsPerDay: number;
+  budgetWindowMinutes: number;
+  budgetWindowUsd: number;
+  dayBudgetUsd: number;
+  estimatedRunCostUsd: number;
+  lockTtlSec: number;
   depth: number;
   k1: number;
   k2: number;
@@ -400,6 +411,17 @@ const marketMapSizeBySchema = z.enum([
 const marketMapSchema = z
   .object({
     enabled: strictBoolean,
+    triggerMode: z.enum(["interval", "cron"]),
+    pollIntervalSec: positiveInt.max(60 * 60 * 24),
+    scheduleCron: z.string().trim().min(1).max(200).nullable(),
+    runWindowMinutes: positiveInt.max(60 * 24 * 30),
+    maxRunsPerWindow: positiveInt.max(1_000),
+    maxRunsPerDay: positiveInt.max(1_000),
+    budgetWindowMinutes: positiveInt.max(60 * 24 * 30),
+    budgetWindowUsd: nonNegativeNumber.max(1_000_000),
+    dayBudgetUsd: nonNegativeNumber.max(1_000_000),
+    estimatedRunCostUsd: nonNegativeNumber.max(100_000),
+    lockTtlSec: positiveInt.max(60 * 60 * 24),
     depth: positiveInt.max(4),
     k1: positiveInt.max(100),
     k2: positiveInt.max(100),
@@ -809,6 +831,17 @@ function getDefaults(): IntelPolicyMap {
     },
     market_map: {
       enabled: env.aiMarketMapEnabled,
+      triggerMode: env.aiMarketMapTriggerMode,
+      pollIntervalSec: env.aiMarketMapPollIntervalSec,
+      scheduleCron: env.aiMarketMapScheduleCron,
+      runWindowMinutes: env.aiMarketMapRunWindowMinutes,
+      maxRunsPerWindow: env.aiMarketMapMaxRunsPerWindow,
+      maxRunsPerDay: env.aiMarketMapMaxRunsPerDay,
+      budgetWindowMinutes: env.aiMarketMapBudgetWindowMinutes,
+      budgetWindowUsd: env.aiMarketMapBudgetWindowUsd,
+      dayBudgetUsd: env.aiMarketMapDayBudgetUsd,
+      estimatedRunCostUsd: env.aiMarketMapEstimatedRunCostUsd,
+      lockTtlSec: env.aiMarketMapLockTtlSec,
       depth: env.aiMarketMapDepth,
       k1: env.aiMarketMapK1,
       k2: env.aiMarketMapK2,
@@ -1139,6 +1172,39 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
 
   return {
     enabled: Boolean(policy.enabled),
+    triggerMode:
+      policy.triggerMode === "cron" || policy.triggerMode === "interval"
+        ? policy.triggerMode
+        : "interval",
+    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    scheduleCron:
+      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+        ? policy.scheduleCron.trim()
+        : null,
+    runWindowMinutes: clamp(
+      Math.trunc(policy.runWindowMinutes ?? 60),
+      1,
+      60 * 24 * 30,
+    ),
+    maxRunsPerWindow: clamp(
+      Math.trunc(policy.maxRunsPerWindow ?? 1),
+      1,
+      1_000,
+    ),
+    maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay ?? 24), 1, 1_000),
+    budgetWindowMinutes: clamp(
+      Math.trunc(policy.budgetWindowMinutes ?? 1_440),
+      1,
+      60 * 24 * 30,
+    ),
+    budgetWindowUsd: clamp(policy.budgetWindowUsd ?? 10, 0, 1_000_000),
+    dayBudgetUsd: clamp(policy.dayBudgetUsd ?? 25, 0, 1_000_000),
+    estimatedRunCostUsd: clamp(
+      policy.estimatedRunCostUsd ?? env.aiMarketMapEstimatedRunCostUsd,
+      0,
+      100_000,
+    ),
+    lockTtlSec: clamp(Math.trunc(policy.lockTtlSec ?? 7_200), 60, 60 * 60 * 24),
     depth: clamp(Math.trunc(policy.depth), 2, 4),
     k1: clamp(Math.trunc(policy.k1), 2, 24),
     k2: clamp(Math.trunc(policy.k2), 2, 24),

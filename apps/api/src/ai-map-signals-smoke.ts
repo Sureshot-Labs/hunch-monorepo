@@ -4,6 +4,11 @@ import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
+  getOpenRouterEmbeddingPricingPerM,
+  getOpenRouterModelPricingPerM,
+} from "./lib/ai-pricing.js";
+import { extractProviderCostUsd, resolveAiCost, type CostSource } from "./lib/ai-cost.js";
+import {
   buildMapSignalsSystemPromptV2,
   buildMapSignalsUserPromptV2,
   parseMapSignalsAgentOutputV2,
@@ -68,6 +73,9 @@ type MapSearchSmokeFile = {
     callsExecuted: number;
     evidenceTotal: number;
     estimatedTotalCostUsd: number;
+    chargedTotalCostUsd?: number;
+    providerReportedCostUsd?: number;
+    providerReportedCostCalls?: number;
   };
   calls: MapSearchCall[];
   evidence: MapSearchEvidence[];
@@ -78,11 +86,33 @@ type OpenRouterUsage = {
   completionTokens: number;
   totalTokens: number;
   reasoningTokens: number;
+  providerCostUsd: number | null;
+  providerCostField: string | null;
+  providerCostUsdTicks: number | null;
+};
+
+type CostBreakdown = {
+  inputCostUsd: number;
+  outputCostUsd: number;
+  tokenCostUsd: number;
+  estimatedCostUsd: number;
+  chargedCostUsd: number;
+  providerCostUsd: number | null;
+  providerCostField: string | null;
+  providerCostUsdTicks: number | null;
+  costSource: CostSource;
 };
 
 type OpenRouterCallResult = {
   content: string;
   usage: OpenRouterUsage;
+  cost: CostBreakdown;
+};
+
+type EmbeddingCallResult = {
+  vectors: Array<number[] | null>;
+  usage: OpenRouterUsage;
+  cost: CostBreakdown;
 };
 
 type EvidenceEmbeddingInput = {
@@ -116,6 +146,8 @@ type Args = {
   timeoutSec: number;
   priceInputPerM: number;
   priceOutputPerM: number;
+  embedPriceInputPerM: number;
+  embedPriceOutputPerM: number;
   dryRun: boolean;
   verbose: boolean;
 };
@@ -185,6 +217,12 @@ type SignalCandidate = {
   modelOutput: MapSignalsAgentOutputV2 | null;
   usage: OpenRouterUsage;
   tokenCostUsd: number;
+  estimatedCostUsd: number;
+  chargedCostUsd: number;
+  providerCostUsd: number | null;
+  providerCostField: string | null;
+  providerCostUsdTicks: number | null;
+  costSource: CostSource;
   error: string | null;
   modelStatus: MapSignalsAgentOutputV2["status"] | "NONE";
   downgradedFromPublish: boolean;
@@ -282,6 +320,14 @@ function preview(value: string, maxChars: number): string {
 }
 
 function resolveArgs(argv: string[]): Args {
+  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.2";
+  const embedModel =
+    parseFlag(argv, "--embed-model") ??
+    process.env.OPENROUTER_EMBED_MODEL ??
+    process.env.AI_EMBED_MODEL ??
+    "intfloat/e5-large-v2";
+  const modelPricing = getOpenRouterModelPricingPerM(model);
+  const embedPricing = getOpenRouterEmbeddingPricingPerM(embedModel);
   return {
     inputPath:
       parseFlag(argv, "--in") ??
@@ -289,12 +335,8 @@ function resolveArgs(argv: string[]): Args {
       "/tmp/ai-map-search-smoke.json",
     outPath: parseFlag(argv, "--out") ?? null,
     reportPath: parseFlag(argv, "--report-out") ?? null,
-    model: parseFlag(argv, "--model") ?? "openai/gpt-5.2",
-    embedModel:
-      parseFlag(argv, "--embed-model") ??
-      process.env.OPENROUTER_EMBED_MODEL ??
-      process.env.AI_EMBED_MODEL ??
-      "intfloat/e5-large-v2",
+    model,
+    embedModel,
     maxNodes: parsePositiveInt(parseFlag(argv, "--max-nodes"), 20),
     maxEvidencePerNode: parsePositiveInt(parseFlag(argv, "--max-evidence-per-node"), 12),
     maxMarketsPerNode: parsePositiveInt(parseFlag(argv, "--max-markets-per-node"), 12),
@@ -313,8 +355,22 @@ function resolveArgs(argv: string[]): Args {
     concurrency: parsePositiveInt(parseFlag(argv, "--concurrency"), 3),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 900),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 90),
-    priceInputPerM: parsePositiveNumber(parseFlag(argv, "--price-input-per-m"), 0.2),
-    priceOutputPerM: parsePositiveNumber(parseFlag(argv, "--price-output-per-m"), 1),
+    priceInputPerM: parsePositiveNumber(
+      parseFlag(argv, "--price-input-per-m"),
+      modelPricing?.inputPerM ?? 0.2,
+    ),
+    priceOutputPerM: parsePositiveNumber(
+      parseFlag(argv, "--price-output-per-m"),
+      modelPricing?.outputPerM ?? 1,
+    ),
+    embedPriceInputPerM: parseNonNegativeNumber(
+      parseFlag(argv, "--embed-price-input-per-m"),
+      embedPricing?.inputPerM ?? 0,
+    ),
+    embedPriceOutputPerM: parseNonNegativeNumber(
+      parseFlag(argv, "--embed-price-output-per-m"),
+      embedPricing?.outputPerM ?? 0,
+    ),
     dryRun: hasFlag(argv, "--dry-run"),
     verbose: hasFlag(argv, "--verbose"),
   };
@@ -349,8 +405,10 @@ Quality gates:
   --min-affinity-for-publish <n> Minimum evidence→market affinity for publish (default: 0.15)
 
 Cost model:
-  --price-input-per-m <usd>      Input tokens USD / 1M (default: 0.2)
-  --price-output-per-m <usd>     Output tokens USD / 1M (default: 1)
+  --price-input-per-m <usd>      Input tokens USD / 1M (default: model table, fallback 0.2)
+  --price-output-per-m <usd>     Output tokens USD / 1M (default: model table, fallback 1)
+  --embed-price-input-per-m <usd> Embedding input tokens USD / 1M (default: model table, fallback 0)
+  --embed-price-output-per-m <usd> Embedding output tokens USD / 1M (default: model table, fallback 0)
 
 Flags:
   --dry-run                      Build deterministic context-only outputs (no model call)
@@ -833,6 +891,16 @@ async function callOpenRouter(
       safeNumber(payload.usage?.total_tokens) ?? promptTokens + completionTokens;
     const reasoningTokens =
       safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+    const providerCost = extractProviderCostUsd(payload);
+    const resolvedCost = resolveAiCost({
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      priceInputPerM: args.priceInputPerM,
+      priceOutputPerM: args.priceOutputPerM,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
+    });
 
     return {
       content,
@@ -841,6 +909,20 @@ async function callOpenRouter(
         completionTokens,
         totalTokens,
         reasoningTokens,
+        providerCostUsd: providerCost.providerCostUsd,
+        providerCostField: providerCost.providerCostField,
+        providerCostUsdTicks: providerCost.providerCostUsdTicks,
+      },
+      cost: {
+        inputCostUsd: resolvedCost.inputCostUsd,
+        outputCostUsd: resolvedCost.outputCostUsd,
+        tokenCostUsd: resolvedCost.tokenCostUsd,
+        estimatedCostUsd: resolvedCost.estimatedCostUsd,
+        chargedCostUsd: resolvedCost.chargedCostUsd,
+        providerCostUsd: resolvedCost.providerCostUsd,
+        providerCostField: resolvedCost.providerCostField,
+        providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
+        costSource: resolvedCost.costSource,
       },
     };
   } finally {
@@ -851,8 +933,32 @@ async function callOpenRouter(
 async function callOpenRouterEmbeddings(
   args: Args,
   texts: readonly string[],
-): Promise<Array<number[] | null>> {
-  if (texts.length === 0) return [];
+): Promise<EmbeddingCallResult> {
+  if (texts.length === 0) {
+    return {
+      vectors: [],
+      usage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        reasoningTokens: 0,
+        providerCostUsd: null,
+        providerCostField: null,
+        providerCostUsdTicks: null,
+      },
+      cost: {
+        inputCostUsd: 0,
+        outputCostUsd: 0,
+        tokenCostUsd: 0,
+        estimatedCostUsd: 0,
+        chargedCostUsd: 0,
+        providerCostUsd: null,
+        providerCostField: null,
+        providerCostUsdTicks: null,
+        costSource: "estimated",
+      },
+    };
+  }
   if (!env.openRouterKey) throw new Error("OPENROUTER_API_KEY missing");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
@@ -877,6 +983,12 @@ async function callOpenRouterEmbeddings(
     }
     const json = (await response.json()) as {
       data?: Array<{ embedding?: number[]; index?: number }>;
+      usage?: {
+        prompt_tokens?: unknown;
+        completion_tokens?: unknown;
+        total_tokens?: unknown;
+        completion_tokens_details?: { reasoning_tokens?: unknown } | null;
+      };
     };
     if (!Array.isArray(json.data)) throw new Error("OpenRouter embeddings missing data");
     const out: Array<number[] | null> = new Array(texts.length).fill(null);
@@ -886,7 +998,45 @@ async function callOpenRouterEmbeddings(
       if (!Array.isArray(item.embedding)) continue;
       out[idx] = normalizeVector(item.embedding);
     }
-    return out;
+    const promptTokens = safeNumber(json.usage?.prompt_tokens) ?? 0;
+    const completionTokens = safeNumber(json.usage?.completion_tokens) ?? 0;
+    const totalTokens =
+      safeNumber(json.usage?.total_tokens) ?? promptTokens + completionTokens;
+    const reasoningTokens =
+      safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+    const providerCost = extractProviderCostUsd(json);
+    const resolvedCost = resolveAiCost({
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      priceInputPerM: args.embedPriceInputPerM,
+      priceOutputPerM: args.embedPriceOutputPerM,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
+    });
+    return {
+      vectors: out,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        reasoningTokens,
+        providerCostUsd: providerCost.providerCostUsd,
+        providerCostField: providerCost.providerCostField,
+        providerCostUsdTicks: providerCost.providerCostUsdTicks,
+      },
+      cost: {
+        inputCostUsd: resolvedCost.inputCostUsd,
+        outputCostUsd: resolvedCost.outputCostUsd,
+        tokenCostUsd: resolvedCost.tokenCostUsd,
+        estimatedCostUsd: resolvedCost.estimatedCostUsd,
+        chargedCostUsd: resolvedCost.chargedCostUsd,
+        providerCostUsd: resolvedCost.providerCostUsd,
+        providerCostField: resolvedCost.providerCostField,
+        providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
+        costSource: resolvedCost.costSource,
+      },
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -1075,8 +1225,17 @@ function summarizeDeterministic(
       completionTokens: 0,
       totalTokens: 0,
       reasoningTokens: 0,
+      providerCostUsd: null,
+      providerCostField: null,
+      providerCostUsdTicks: null,
     },
     tokenCostUsd: 0,
+    estimatedCostUsd: 0,
+    chargedCostUsd: 0,
+    providerCostUsd: null,
+    providerCostField: null,
+    providerCostUsdTicks: null,
+    costSource: "estimated",
     error: null,
     modelStatus: "NONE",
     downgradedFromPublish: false,
@@ -1163,8 +1322,17 @@ async function evaluateNodeWithModel(params: {
         completionTokens: 0,
         totalTokens: 0,
         reasoningTokens: 0,
+        providerCostUsd: null,
+        providerCostField: null,
+        providerCostUsdTicks: null,
       },
       tokenCostUsd: 0,
+      estimatedCostUsd: 0,
+      chargedCostUsd: 0,
+      providerCostUsd: null,
+      providerCostField: null,
+      providerCostUsdTicks: null,
+      costSource: "estimated",
       error: null,
       modelStatus: "NONE",
       downgradedFromPublish: false,
@@ -1195,12 +1363,46 @@ async function evaluateNodeWithModel(params: {
   });
 
   let parsed: MapSignalsAgentOutputV2;
-  let usage: OpenRouterUsage;
+  const usage: OpenRouterUsage = {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    reasoningTokens: 0,
+    providerCostUsd: null,
+    providerCostField: null,
+    providerCostUsdTicks: null,
+  };
+  let estimatedCostUsd = 0;
+  let chargedCostUsd = 0;
+  let providerCostUsdTotal = 0;
+  let providerCostField: string | null = null;
+  let providerCostUsdTicksTotal: number | null = null;
+  let providerReportedCostCalls = 0;
   let schemaRepairAttempted = false;
   let schemaRepairSuccess = false;
   try {
+    const addCallCost = (result: OpenRouterCallResult): void => {
+      usage.promptTokens += result.usage.promptTokens;
+      usage.completionTokens += result.usage.completionTokens;
+      usage.totalTokens += result.usage.totalTokens;
+      usage.reasoningTokens += result.usage.reasoningTokens;
+      estimatedCostUsd += result.cost.estimatedCostUsd;
+      chargedCostUsd += result.cost.chargedCostUsd;
+      if (result.cost.providerCostUsd != null) {
+        providerCostUsdTotal += result.cost.providerCostUsd;
+        providerReportedCostCalls += 1;
+      }
+      if (result.cost.providerCostField && !providerCostField) {
+        providerCostField = result.cost.providerCostField;
+      }
+      if (result.cost.providerCostUsdTicks != null) {
+        providerCostUsdTicksTotal =
+          (providerCostUsdTicksTotal ?? 0) + result.cost.providerCostUsdTicks;
+      }
+    };
+
     const raw = await callOpenRouter(args, systemPrompt, userPrompt);
-    usage = raw.usage;
+    addCallCost(raw);
     const firstParsed = parsePossibleJson(raw.content);
     try {
       parsed = parseMapSignalsAgentOutputV2(firstParsed);
@@ -1215,12 +1417,7 @@ async function evaluateNodeWithModel(params: {
           systemPrompt,
           buildRepairPrompt(raw.content, toParseErrorMessage(parseError)),
         );
-        usage = {
-          promptTokens: usage.promptTokens + repairRaw.usage.promptTokens,
-          completionTokens: usage.completionTokens + repairRaw.usage.completionTokens,
-          totalTokens: usage.totalTokens + repairRaw.usage.totalTokens,
-          reasoningTokens: usage.reasoningTokens + repairRaw.usage.reasoningTokens,
-        };
+        addCallCost(repairRaw);
         const repairedParsed = parsePossibleJson(repairRaw.content);
         try {
           parsed = parseMapSignalsAgentOutputV2(repairedParsed);
@@ -1236,6 +1433,12 @@ async function evaluateNodeWithModel(params: {
         }
       }
     }
+    usage.providerCostUsd =
+      providerReportedCostCalls > 0
+        ? Number(providerCostUsdTotal.toFixed(6))
+        : null;
+    usage.providerCostField = providerCostField;
+    usage.providerCostUsdTicks = providerCostUsdTicksTotal;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -1272,8 +1475,17 @@ async function evaluateNodeWithModel(params: {
         completionTokens: 0,
         totalTokens: 0,
         reasoningTokens: 0,
+        providerCostUsd: null,
+        providerCostField: null,
+        providerCostUsdTicks: null,
       },
       tokenCostUsd: 0,
+      estimatedCostUsd: 0,
+      chargedCostUsd: 0,
+      providerCostUsd: null,
+      providerCostField: null,
+      providerCostUsdTicks: null,
+      costSource: "estimated",
       error: message,
       modelStatus: "NONE",
       downgradedFromPublish: false,
@@ -1307,9 +1519,9 @@ async function evaluateNodeWithModel(params: {
     pushUniqueReason(modelReasonCodes, "NO_VALID_EVIDENCE_IDS");
   }
 
-  const tokenCostUsd =
-    (usage.promptTokens * args.priceInputPerM) / 1_000_000 +
-    (usage.completionTokens * args.priceOutputPerM) / 1_000_000;
+  const tokenCostUsd = estimatedCostUsd;
+  const costSource: CostSource =
+    providerReportedCostCalls > 0 ? "provider_reported" : "estimated";
 
   let decision = mapStatusToDecision(parsed.status);
   const originalModelDecision = decision;
@@ -1397,6 +1609,13 @@ async function evaluateNodeWithModel(params: {
     modelOutput: parsed,
     usage,
     tokenCostUsd: Number(tokenCostUsd.toFixed(6)),
+    estimatedCostUsd: Number(estimatedCostUsd.toFixed(6)),
+    chargedCostUsd: Number(chargedCostUsd.toFixed(6)),
+    providerCostUsd:
+      usage.providerCostUsd == null ? null : Number(usage.providerCostUsd.toFixed(6)),
+    providerCostField: usage.providerCostField,
+    providerCostUsdTicks: usage.providerCostUsdTicks,
+    costSource,
     error: null,
     modelStatus: parsed.status,
     downgradedFromPublish,
@@ -1410,6 +1629,16 @@ function buildMarkdown(
   args: Args,
   signals: SignalCandidate[],
   durationMs: number,
+  embeddingTotals: {
+    calls: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number;
+    chargedCostUsd: number;
+    providerReportedCostUsd: number;
+    providerReportedCostCalls: number;
+  },
 ): string {
   const modelPublishCount = signals.filter(
     item => item.modelStatus === "PUBLISH",
@@ -1432,7 +1661,10 @@ function buildMarkdown(
   lines.push(`- map_generated_at: ${input.run.mapGeneratedAt}`);
   lines.push(`- source_calls: ${input.totals.callsExecuted}`);
   lines.push(`- source_evidence: ${input.totals.evidenceTotal}`);
-  lines.push(`- source_spent_usd_est: $${input.totals.estimatedTotalCostUsd.toFixed(6)}`);
+  lines.push(`- source_spent_usd_estimated: $${input.totals.estimatedTotalCostUsd.toFixed(6)}`);
+  lines.push(
+    `- source_spent_usd_charged: $${(input.totals.chargedTotalCostUsd ?? input.totals.estimatedTotalCostUsd).toFixed(6)}`,
+  );
   lines.push(`- model: ${args.model}`);
   lines.push(`- generated_signals: ${signals.length}`);
   lines.push(`- publish_candidates: ${signals.filter(item => item.decision === "publish_candidate").length}`);
@@ -1440,8 +1672,40 @@ function buildMarkdown(
   lines.push(`- skipped: ${signals.filter(item => item.decision === "skip").length}`);
   lines.push(`- model_publish_count: ${modelPublishCount}`);
   lines.push(`- downgraded_publish_count: ${downgradedPublishCount}`);
+  const modelEstimatedCostUsd = signals.reduce(
+    (sum, item) => sum + item.estimatedCostUsd,
+    0,
+  );
+  const modelChargedCostUsd = signals.reduce(
+    (sum, item) => sum + item.chargedCostUsd,
+    0,
+  );
+  const modelProviderReportedCostCalls = signals.filter(
+    item => item.providerCostUsd != null,
+  ).length;
+  const modelProviderReportedCostUsd = signals.reduce(
+    (sum, item) => sum + (item.providerCostUsd ?? 0),
+    0,
+  );
+  lines.push(`- model_cost_usd_estimated: $${modelEstimatedCostUsd.toFixed(6)}`);
+  lines.push(`- model_cost_usd_charged: $${modelChargedCostUsd.toFixed(6)}`);
+  lines.push(`- model_provider_reported_calls: ${modelProviderReportedCostCalls}`);
+  lines.push(`- model_provider_reported_cost_usd: $${modelProviderReportedCostUsd.toFixed(6)}`);
+  lines.push(`- embed_calls: ${embeddingTotals.calls}`);
+  lines.push(`- embed_tokens_prompt: ${embeddingTotals.promptTokens}`);
+  lines.push(`- embed_tokens_completion: ${embeddingTotals.completionTokens}`);
+  lines.push(`- embed_tokens_total: ${embeddingTotals.totalTokens}`);
+  lines.push(`- embed_cost_usd_estimated: $${embeddingTotals.estimatedCostUsd.toFixed(6)}`);
+  lines.push(`- embed_cost_usd_charged: $${embeddingTotals.chargedCostUsd.toFixed(6)}`);
+  lines.push(`- embed_provider_reported_calls: ${embeddingTotals.providerReportedCostCalls}`);
   lines.push(
-    `- token_cost_usd: $${signals.reduce((sum, item) => sum + item.tokenCostUsd, 0).toFixed(6)}`,
+    `- embed_provider_reported_cost_usd: $${embeddingTotals.providerReportedCostUsd.toFixed(6)}`,
+  );
+  lines.push(
+    `- total_cost_usd_estimated: $${(modelEstimatedCostUsd + embeddingTotals.estimatedCostUsd).toFixed(6)}`,
+  );
+  lines.push(
+    `- total_cost_usd_charged: $${(modelChargedCostUsd + embeddingTotals.chargedCostUsd).toFixed(6)}`,
   );
   lines.push(`- duration_ms: ${durationMs}`);
   if (downgradeReasonCounts.size > 0) {
@@ -1488,7 +1752,9 @@ function buildMarkdown(
     lines.push(
       `- best_market_affinity: ${signal.metrics.bestMarketAffinity == null ? "-" : signal.metrics.bestMarketAffinity.toFixed(6)}`,
     );
-    lines.push(`- token_cost_usd: $${signal.tokenCostUsd.toFixed(6)}`);
+    lines.push(`- token_cost_usd_estimated: $${signal.tokenCostUsd.toFixed(6)}`);
+    lines.push(`- cost_usd_charged: $${signal.chargedCostUsd.toFixed(6)}`);
+    lines.push(`- cost_source: ${signal.costSource}`);
     lines.push("- evidence:");
     for (const ref of signal.evidenceRefs.slice(0, 4)) {
       lines.push(
@@ -1532,6 +1798,10 @@ async function main(): Promise<void> {
       concurrency: args.concurrency,
       maxOutputTokens: args.maxOutputTokens,
       timeoutSec: args.timeoutSec,
+      priceInputPerM: args.priceInputPerM,
+      priceOutputPerM: args.priceOutputPerM,
+      embedPriceInputPerM: args.embedPriceInputPerM,
+      embedPriceOutputPerM: args.embedPriceOutputPerM,
       dryRun: args.dryRun,
     });
 
@@ -1570,6 +1840,28 @@ async function main(): Promise<void> {
     const eventEmbeddingCache = new Map<string, number[] | null>();
     const textEmbeddingCache = new Map<string, number[] | null>();
     const marketTitleCache = new Map<string, string | null>();
+    const embeddingCostTotals = {
+      calls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+      chargedCostUsd: 0,
+      providerReportedCostUsd: 0,
+      providerReportedCostCalls: 0,
+    };
+    function accountEmbeddingCost(result: EmbeddingCallResult): void {
+      embeddingCostTotals.calls += 1;
+      embeddingCostTotals.promptTokens += result.usage.promptTokens;
+      embeddingCostTotals.completionTokens += result.usage.completionTokens;
+      embeddingCostTotals.totalTokens += result.usage.totalTokens;
+      embeddingCostTotals.estimatedCostUsd += result.cost.estimatedCostUsd;
+      embeddingCostTotals.chargedCostUsd += result.cost.chargedCostUsd;
+      if (result.cost.providerCostUsd != null) {
+        embeddingCostTotals.providerReportedCostUsd += result.cost.providerCostUsd;
+        embeddingCostTotals.providerReportedCostCalls += 1;
+      }
+    }
     async function getNodeEvents(nodeId: string): Promise<MarketMapEventSummary[]> {
       if (nodeEventsCache.has(nodeId)) return nodeEventsCache.get(nodeId) ?? [];
       const raw = await redis.get(marketMapRunNodeEventsKey(runId, nodeId));
@@ -1610,8 +1902,9 @@ async function main(): Promise<void> {
           vec = textEmbeddingCache.get(textHash) ?? null;
         } else {
           try {
-            const [embedded] = await callOpenRouterEmbeddings(args, [fallbackText]);
-            vec = embedded ?? null;
+            const result = await callOpenRouterEmbeddings(args, [fallbackText]);
+            accountEmbeddingCost(result);
+            vec = result.vectors[0] ?? null;
           } catch {
             vec = null;
           }
@@ -1637,13 +1930,14 @@ async function main(): Promise<void> {
       }
       if (missing.length > 0) {
         try {
-          const vectors = await callOpenRouterEmbeddings(
+          const result = await callOpenRouterEmbeddings(
             args,
             missing.map(item => item.text),
           );
+          accountEmbeddingCost(result);
           for (let i = 0; i < missing.length; i += 1) {
             const id = missing[i].evidenceId;
-            const vec = vectors[i] ?? null;
+            const vec = result.vectors[i] ?? null;
             evidenceEmbeddingCache.set(id, vec);
             out.set(id, vec);
           }
@@ -1770,7 +2064,7 @@ async function main(): Promise<void> {
 
       completed += 1;
       inFlight = Math.max(0, inFlight - 1);
-      runningCostUsd += signal.tokenCostUsd;
+      runningCostUsd += signal.chargedCostUsd;
       if (signal.decision === "publish_candidate") runningPublish += 1;
       else if (signal.decision === "context_only") runningContext += 1;
       else runningSkip += 1;
@@ -1781,7 +2075,7 @@ async function main(): Promise<void> {
           ? "valid"
           : "invalid";
       console.log(
-        `[ai-map-signals-smoke] call_done #${callIndex} parse=${parseStatus} model_status=${signal.modelStatus} decision=${signal.decision} downgraded=${signal.downgradedFromPublish} conf=${signal.confidence.toFixed(3)} evidence=${signal.metrics.evidenceCount} markets=${signal.metrics.candidateMarkets} affinity=${signal.metrics.selectedMarketAffinity == null ? "-" : signal.metrics.selectedMarketAffinity.toFixed(3)} target=${signal.targetMarketId ?? "-"} cost=${formatUsd(signal.tokenCostUsd)} total_cost=${formatUsd(runningCostUsd)} completed=${completed}/${buckets.length} pub=${runningPublish} ctx=${runningContext} skip=${runningSkip} err=${signal.error ? preview(signal.error, 80) : "-"}`,
+        `[ai-map-signals-smoke] call_done #${callIndex} parse=${parseStatus} model_status=${signal.modelStatus} decision=${signal.decision} downgraded=${signal.downgradedFromPublish} conf=${signal.confidence.toFixed(3)} evidence=${signal.metrics.evidenceCount} markets=${signal.metrics.candidateMarkets} affinity=${signal.metrics.selectedMarketAffinity == null ? "-" : signal.metrics.selectedMarketAffinity.toFixed(3)} target=${signal.targetMarketId ?? "-"} cost=${formatUsd(signal.chargedCostUsd)} est=${formatUsd(signal.estimatedCostUsd)} src=${signal.costSource} total_cost=${formatUsd(runningCostUsd)} completed=${completed}/${buckets.length} pub=${runningPublish} ctx=${runningContext} skip=${runningSkip} err=${signal.error ? preview(signal.error, 80) : "-"}`,
       );
       return signal;
     });
@@ -1800,9 +2094,30 @@ async function main(): Promise<void> {
     const limitedSignals = signals.slice(0, args.maxSignals);
     const durationMs = Date.now() - startedAt;
     const totalTokenCostUsd = limitedSignals.reduce((sum, item) => sum + item.tokenCostUsd, 0);
+    const modelEstimatedCostUsd = limitedSignals.reduce(
+      (sum, item) => sum + item.estimatedCostUsd,
+      0,
+    );
+    const modelChargedCostUsd = limitedSignals.reduce(
+      (sum, item) => sum + item.chargedCostUsd,
+      0,
+    );
+    const modelProviderReportedCostUsd = limitedSignals.reduce(
+      (sum, item) => sum + (item.providerCostUsd ?? 0),
+      0,
+    );
+    const modelProviderReportedCostCalls = limitedSignals.filter(
+      item => item.providerCostUsd != null,
+    ).length;
     const promptTokens = limitedSignals.reduce((sum, item) => sum + item.usage.promptTokens, 0);
     const completionTokens = limitedSignals.reduce((sum, item) => sum + item.usage.completionTokens, 0);
     const totalTokens = limitedSignals.reduce((sum, item) => sum + item.usage.totalTokens, 0);
+    const totalEstimatedCostUsd = modelEstimatedCostUsd + embeddingCostTotals.estimatedCostUsd;
+    const totalChargedCostUsd = modelChargedCostUsd + embeddingCostTotals.chargedCostUsd;
+    const totalProviderReportedCostUsd =
+      modelProviderReportedCostUsd + embeddingCostTotals.providerReportedCostUsd;
+    const totalProviderReportedCostCalls =
+      modelProviderReportedCostCalls + embeddingCostTotals.providerReportedCostCalls;
     const modelPublishCount = limitedSignals.filter(
       item => item.modelStatus === "PUBLISH",
     ).length;
@@ -1830,6 +2145,10 @@ async function main(): Promise<void> {
         callsExecuted: input.totals.callsExecuted,
         evidenceTotal: input.totals.evidenceTotal,
         estimatedSearchCostUsd: input.totals.estimatedTotalCostUsd,
+        chargedSearchCostUsd:
+          input.totals.chargedTotalCostUsd ?? input.totals.estimatedTotalCostUsd,
+        providerReportedSearchCostUsd: input.totals.providerReportedCostUsd ?? 0,
+        providerReportedSearchCostCalls: input.totals.providerReportedCostCalls ?? 0,
         inputPath: args.inputPath,
       },
       config: {
@@ -1857,6 +2176,30 @@ async function main(): Promise<void> {
         completionTokens,
         totalTokens,
         tokenCostUsd: Number(totalTokenCostUsd.toFixed(6)),
+        modelEstimatedCostUsd: Number(modelEstimatedCostUsd.toFixed(6)),
+        modelChargedCostUsd: Number(modelChargedCostUsd.toFixed(6)),
+        modelProviderReportedCostUsd: Number(
+          modelProviderReportedCostUsd.toFixed(6),
+        ),
+        modelProviderReportedCostCalls,
+        embeddingPromptTokens: embeddingCostTotals.promptTokens,
+        embeddingCompletionTokens: embeddingCostTotals.completionTokens,
+        embeddingTotalTokens: embeddingCostTotals.totalTokens,
+        embeddingEstimatedCostUsd: Number(
+          embeddingCostTotals.estimatedCostUsd.toFixed(6),
+        ),
+        embeddingChargedCostUsd: Number(
+          embeddingCostTotals.chargedCostUsd.toFixed(6),
+        ),
+        embeddingProviderReportedCostUsd: Number(
+          embeddingCostTotals.providerReportedCostUsd.toFixed(6),
+        ),
+        embeddingProviderReportedCostCalls:
+          embeddingCostTotals.providerReportedCostCalls,
+        estimatedCostUsd: Number(totalEstimatedCostUsd.toFixed(6)),
+        chargedCostUsd: Number(totalChargedCostUsd.toFixed(6)),
+        providerReportedCostUsd: Number(totalProviderReportedCostUsd.toFixed(6)),
+        providerReportedCostCalls: totalProviderReportedCostCalls,
         modelPublishCount,
         downgradedPublishCount,
         downgradeReasonCounts,
@@ -1871,13 +2214,19 @@ async function main(): Promise<void> {
     }
 
     if (args.reportPath) {
-      const markdown = buildMarkdown(input, args, limitedSignals, durationMs);
+      const markdown = buildMarkdown(
+        input,
+        args,
+        limitedSignals,
+        durationMs,
+        embeddingCostTotals,
+      );
       await writeFile(args.reportPath, `${markdown}\n`, "utf8");
       console.log(`[ai-map-signals-smoke] wrote ${args.reportPath}`);
     }
 
     console.log(
-      `[ai-map-signals-smoke] done signals=${limitedSignals.length} publish=${payload.totals.publishCandidates} context_only=${payload.totals.contextOnly} skipped=${payload.totals.skipped} model_publish=${payload.totals.modelPublishCount} downgraded=${payload.totals.downgradedPublishCount} token_cost_usd=$${payload.totals.tokenCostUsd.toFixed(6)} duration_ms=${durationMs}`,
+      `[ai-map-signals-smoke] done signals=${limitedSignals.length} publish=${payload.totals.publishCandidates} context_only=${payload.totals.contextOnly} skipped=${payload.totals.skipped} model_publish=${payload.totals.modelPublishCount} downgraded=${payload.totals.downgradedPublishCount} charged_cost_usd=$${payload.totals.chargedCostUsd.toFixed(6)} est_cost_usd=$${payload.totals.estimatedCostUsd.toFixed(6)} duration_ms=${durationMs}`,
     );
   } finally {
     await redis.quit();

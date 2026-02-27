@@ -84,6 +84,28 @@ Implemented behavior:
   - market target tie-break: affinity -> liquidity -> open interest -> volume -> score,
   - stronger social near-duplicate suppression before generation.
 
+## 3.4 Cost Accounting (Normalized)
+
+Implemented normalization across map/search/signals:
+
+- provider-reported cost preferred when present (`usage.cost`, `usage.cost_in_usd_ticks`),
+- estimated fallback retained for compatibility,
+- charged cost = provider-reported OR estimated fallback,
+- outputs now carry both `estimated` and `charged` totals plus source breakdown.
+
+New shared helpers:
+
+- `apps/api/src/lib/ai-cost.ts`
+- `apps/api/src/lib/ai-pricing.ts`
+
+Verified OpenRouter pricing defaults (captured 2026-02-27):
+
+| Model | Input $ / 1M | Output $ / 1M | Notes |
+|---|---:|---:|---|
+| `openai/gpt-5.2` | `1.75` | `14.00` | from OpenRouter model metadata + live probe |
+| `openai/gpt-5-nano` | `0.05` | `0.40` | from OpenRouter model metadata + live probe |
+| `openai/text-embedding-3-small` | `0.02` | `0.00` | from live embeddings probe (`usage.cost`) |
+
 ---
 
 ## 4) Latest QA Baseline (2026-02-27, post prompt + ranking updates)
@@ -216,6 +238,39 @@ Output:
 - `ai:map_summary:v1:run:<runId>:nodes`
 - `ai:map_pipeline:v1:run:<runId>:status`
 
+Phase-1 concrete keys (search persistence + reuse):
+
+- `ai:map_search:v1:run:<runId>:artifact`
+  - compact JSON artifact (same logical content as `/tmp/ai-map-search-smoke.json`).
+- `ai:map_search:v1:run:<runId>:state`
+  - resumable scheduler state: `queue`, `queuedSet`, `visitedSet`, `budgetState`, `consecutiveLowYieldHighTools`, `consecutiveTransportFailures`, counters.
+- `ai:map_search:v1:run:<runId>:status`
+  - hash fields: `state`, `startedAt`, `completedAt`, `callsExecuted`, `evidenceTotal`, `spentUsd`, `inputTokens`, `outputTokens`, `toolAttempts`, `error`.
+- `ai:map_search:v1:run:<runId>:evidence_ids`
+  - set of evidence ids in the run.
+- `ai:map_search:v1:run:<runId>:node:<nodeId>:evidence_ids`
+  - set of evidence ids assigned to a node.
+- `ai:map_search:v1:run:<runId>:node:<nodeId>:headlines`
+  - capped list used for dedupe/nudge context.
+- `ai:map_search:v1:latest`
+  - pointer to latest completed search `runId`.
+- `ai:map_search:v1:map_run:<runId>:latest_search`
+  - pointer to latest search attempt for a map run.
+- `ai:embed:news:v1:<evidenceId>`
+  - hash: `embedding` (binary), `headline`, `summary`, `sourceDomain`, `publishedAt`, `createdAt`.
+- `ai:map_search:v1:recent_evidence`
+  - sorted-set index for fresh evidence ids (`score = publishedAt epoch ms`) used by warm-start reroute.
+- `ai:map_search:v1:run:<runId>:lock`
+  - distributed lock key for single-writer execution.
+- `ai:map_signals:v1:last_input_digest`
+  - digest of latest consumed search artifact/map run for no-change skip checks.
+- `ai:map_signals:v1:run:<runId>:input_digest`
+  - run-scoped input digest used by signals job.
+- `ai:map_signals:v1:publish:<signalKey>`
+  - idempotency key for publish path (`SETNX`/upsert guard).
+- `ai:map_signals:v1:publish:cooldown:<signalKey>`
+  - optional cooldown key to suppress near-identical republish noise.
+
 Status fields:
 
 - `map_ready`
@@ -247,6 +302,50 @@ On map rollover:
 new runId -> fresh search traversal
 optional: best-effort reroute from recent run evidence cache when available
 ```
+
+Signals execution rule:
+
+1. signals job reads latest completed search artifact for active map run.
+2. compute `input_digest` from (`mapRunId`, `searchRunId`, normalized evidence/assignment snapshot version).
+3. if `input_digest == last_input_digest`, skip run with status `skipped_no_input_change`.
+4. if changed, run signals and update `last_input_digest`.
+
+Search reuse modes:
+
+1. `cold_start`
+   - no prior run state loaded.
+2. `resume_same_run`
+   - load `run:<runId>:state`; if missing, load `run:<runId>:artifact`; if both missing, fall back to cold start.
+3. `warm_start_prior_run`
+   - load fresh recent evidence from prior run ids, reroute by embedding similarity to current run nodes, then start search with seeded priorities.
+
+Persistence modes:
+
+1. `artifact_only` (Phase 1a)
+   - write/read `artifact` + `state` + `status` keys only.
+2. `normalized_keys` (Phase 1b)
+   - additionally maintain normalized `evidence/assignments/calls/audit` keys.
+
+Source of truth rule:
+
+- `artifact_only`: `run:<runId>:artifact` is canonical.
+- `normalized_keys`: normalized keys are canonical; artifact is derived/debug-only.
+
+Warm-start reroute algorithm (KISS):
+
+1. read recent evidence ids from `ai:map_search:v1:recent_evidence` bounded by freshness windows.
+2. load `ai:embed:news:v1:<evidenceId>` embedding.
+3. score against current node centroids (same hybrid policy already used for assignment).
+4. if score passes threshold, attach as prior context and add branch priority seed.
+5. never auto-accept old evidence as new run output; old evidence only nudges traversal/prompt context.
+
+Run execution contract (single writer + resume safety):
+
+1. acquire lock via `SET ai:map_search:v1:run:<runId>:lock <owner> NX EX <ttlSec>`.
+2. heartbeat lock every `lockHeartbeatSec`; if heartbeat fails, worker aborts.
+3. write checkpoint (`state` + `status`) after each completed call batch.
+4. on restart with `resume_same_run`, load in canonical order: `state -> artifact -> cold_start`.
+5. if active map run changes during execution, stop with `map_run_changed` and do not publish partial artifacts as completed.
 
 ---
 
@@ -326,6 +425,86 @@ Keep:
 - max tool attempts,
 - USD budget with expected-next-call guards.
 
+Budget scopes (required):
+
+1. per-run budget
+- hard cap for a single execution (`budgetUsd`).
+2. rolling window budget
+- cap spend in a rolling time window (`budgetWindowMinutes`, `budgetWindowUsd`).
+3. optional daily cap
+- safety ceiling for 24h (`dayBudgetUsd`).
+4. optional slot budgets
+- UTC slot caps (example: `00:00-06:00`, `06:00-12:00`, each with own USD cap).
+
+Run-rate scopes (required for heartbeat mode):
+
+1. min interval gate
+- do not run if `now - lastStartedAt < pollIntervalSec`.
+2. rolling run-count cap
+- cap run starts per rolling window (`runWindowMinutes`, `maxRunsPerWindow`).
+3. optional daily run cap
+- cap run starts per UTC day (`maxRunsPerDay`, optional).
+
+Trigger model (required):
+
+1. `triggerMode = interval` (default)
+- run loop wakes every `pollIntervalSec`, then budget/lock gates decide run/skip.
+2. `triggerMode = cron` (optional compatibility)
+- cron tick invokes same gate logic.
+3. recommendation:
+- search uses slower interval, signals uses faster interval.
+
+Budget ledger keys (required for scheduler):
+
+- `ai:map_budget:v1:search:spend_log`
+  - sorted set of run spend records (score: run end epoch ms, member: JSON/ref containing runId + usd).
+- `ai:map_budget:v1:signals:spend_log`
+  - same shape for signals stage.
+- `ai:map_budget:v1:search:day:<YYYY-MM-DD>`
+  - optional daily accumulator for O(1) day checks.
+- `ai:map_budget:v1:signals:day:<YYYY-MM-DD>`
+  - optional daily accumulator for O(1) day checks.
+
+Run-rate ledger keys (required for scheduler):
+
+- `ai:map_runs:v1:search:start_log`
+  - sorted set; score=`startedAt epoch ms`, member=`runId` (or `runId:attempt`).
+- `ai:map_runs:v1:signals:start_log`
+  - same for signals.
+- `ai:map_runs:v1:summary:start_log`
+  - same for summaries.
+- `ai:map_runs:v1:search:day:<YYYY-MM-DD>`
+  - optional daily run-start accumulator.
+- `ai:map_runs:v1:signals:day:<YYYY-MM-DD>`
+  - optional daily run-start accumulator.
+- `ai:map_runs:v1:summary:day:<YYYY-MM-DD>`
+  - optional daily run-start accumulator.
+
+Scheduler decision flow (KISS):
+
+1. read runtime policy.
+2. check lock status.
+3. check run-rate gates:
+   - min-interval gate (`pollIntervalSec`),
+   - rolling run-count cap (`runWindowMinutes` + `maxRunsPerWindow`),
+   - optional day run cap (`maxRunsPerDay`).
+4. if run-rate blocked: write status (`skipped_min_interval` | `skipped_run_rate_window` | `skipped_run_rate_day`) and exit.
+5. read budget ledger and compute:
+   - rolling window spend (`now - budgetWindowMinutes`),
+   - current UTC day spend,
+   - active UTC slot spend (if slot budgets configured).
+6. if over budget: write status `skipped_budget_window` and exit cleanly.
+7. if allowed: run with normal per-run guards.
+8. on run start: append run-start record to run-rate logs.
+9. on completion: append spend record to spend log and update day accumulator.
+
+CLI behavior:
+
+- scheduler mode must enforce policy budgets.
+- manual CLI may bypass budget-window checks via explicit flag:
+  - `--ignore-policy-budget` (or `--force`).
+- per-run hard safety caps still apply unless explicitly overridden.
+
 Operational additions:
 
 1. per-level quotas to avoid starving L3,
@@ -340,6 +519,109 @@ Current operating profile used in QA:
 - routing thresholds: `L1=0.20, L2=0.24, L3=0.28`,
 - route min margins: `L1=0.015, L2=0.02, L3=0.025`.
 
+Runtime policy knobs required (search stage):
+
+- minimal operator knobs:
+  - `enabled` (bool)
+  - `triggerMode` (`interval | cron`)
+  - `pollIntervalSec` (int)
+  - `scheduleCron` (string, optional when `triggerMode=cron`)
+  - `profile` (`safe | balanced | aggressive`)
+  - `runWindowMinutes` (int)
+  - `maxRunsPerWindow` (int)
+  - `maxRunsPerDay` (int, optional)
+  - `budgetWindowMinutes` (int)
+  - `budgetWindowUsd` (number)
+  - `dayBudgetUsd` (number, optional)
+  - `slotBudgetsUtc` (array, optional; `{ startHHMM, endHHMM, budgetUsd }`)
+  - `reuseMode` (`cold_start | resume_same_run | warm_start_prior_run`)
+- advanced knobs (`advanced.search`):
+  - `dryRun` (bool)
+  - `persistenceMode` (`artifact_only | normalized_keys`)
+  - `model` (string)
+  - `embedModel` (string)
+  - `toolMode` (`both | web | x`)
+  - `strictSchema` (bool)
+  - `requireDistinctDomains` (bool)
+  - `maxCalls` (int)
+  - `maxTurns` (int)
+  - `concurrency` (int)
+  - `budgetUsd` (number)
+  - `timeoutSec` (int)
+  - `maxRetries` (int)
+  - `retryBaseMs` (int)
+  - `maxTotalInputTokens` (int)
+  - `maxTotalOutputTokens` (int)
+  - `maxTotalToolAttempts` (int)
+  - `maxToolAttemptsPerCall` (int)
+  - `maxEvidencePerCall` (int)
+  - `maxEvidenceTotal` (int)
+  - `windowHoursL1`, `windowHoursL2`, `windowHoursL3` (int)
+  - `recentHoursHint` (int)
+  - `enforceFreshness` (bool)
+  - `routeThresholdL1`, `routeThresholdL2`, `routeThresholdL3` (number)
+  - `routeMinSimilarity` (number)
+  - `routeMinMarginL1`, `routeMinMarginL2`, `routeMinMarginL3` (number)
+  - `branchPerCall` (int)
+  - `topRootCount` (int)
+  - `eventSampleLimit`, `childSampleLimit`, `siblingSampleLimit` (int)
+  - `sourceAllowDomains` (string[])
+  - `sourceDenyDomains` (string[])
+  - `maxXEvidencePerCall` (int)
+  - `maxUnconfirmedEvidencePerCall` (int)
+  - `lowYieldToolAttemptThreshold` (int)
+  - `lowYieldConsecutiveThreshold` (int)
+  - `ewmaAlpha` (number)
+  - `bootstrapExpectedInputTokens` (int)
+  - `bootstrapExpectedOutputTokens` (int)
+  - `bootstrapExpectedCallCostUsd` (number)
+  - `lockTtlSec` (int)
+  - `lockHeartbeatSec` (int)
+  - `artifactTtlSec` (int)
+  - `newsEmbeddingTtlSec` (int)
+  - `recentEvidenceTtlSec` (int)
+  - `warmStartEvidenceCap` (int)
+  - `warmStartMinSimilarity` (number)
+
+Runtime policy knobs required (signals stage):
+
+- minimal operator knobs:
+  - `enabled` (bool)
+  - `triggerMode` (`interval | cron`)
+  - `pollIntervalSec` (int)
+  - `scheduleCron` (string, optional when `triggerMode=cron`)
+  - `profile` (`safe | balanced | aggressive`)
+  - `runWindowMinutes` (int)
+  - `maxRunsPerWindow` (int)
+  - `maxRunsPerDay` (int, optional)
+  - `budgetWindowMinutes` (int)
+  - `budgetWindowUsd` (number)
+  - `dayBudgetUsd` (number, optional)
+  - `slotBudgetsUtc` (array, optional; `{ startHHMM, endHHMM, budgetUsd }`)
+- advanced knobs (`advanced.signals`):
+  - `dryRun` (bool)
+  - `model` (string)
+  - `embedModel` (string)
+  - `maxNodes`, `maxSignals` (int)
+  - `maxEvidencePerNode`, `maxMarketsPerNode` (int)
+  - `minEvidence`, `minConfirmed`, `minDistinctDomains` (int)
+  - `minEvidenceIdsForPublish` (int)
+  - `minAffinityForPublish` (number)
+  - `concurrency` (int)
+  - `maxOutputTokens` (int)
+  - `timeoutSec` (int)
+  - `budgetUsd` (number)
+
+KISS policy shape (required):
+
+1. expose only minimal top-level controls to operators.
+2. keep all other controls under `advanced.search` / `advanced.signals`.
+3. profile presets map to defaults:
+- `safe`: lower concurrency/tool caps, stricter publish thresholds.
+- `balanced`: current baseline.
+- `aggressive`: higher concurrency/coverage for exploration.
+4. for scheduling, prefer `triggerMode=interval`; use cron only when needed by ops.
+
 ---
 
 ## 11) Phased Plan (Re-aligned)
@@ -350,15 +632,60 @@ Current operating profile used in QA:
 - search smoke with strong guardrails and prompt updates.
 - signals smoke with gating and target naming.
 
-## Phase 1 (Next, productization)
+## Phase 1A (Next, minimal productization)
 
 - Redis persistence contract for search outputs (not only tmp files),
 - run status markers + TTL policy,
 - scheduler wiring for periodic search/signals.
+- runtime policy schema + admin read/write API (minimal knobs + advanced block).
+- startup load order for jobs: `runtime policy -> map active runId -> reuse mode -> execute`.
+- budget-window enforcement in scheduler (rolling + optional slot/day caps).
+- CLI override flags for manual runs (`--ignore-policy-budget` / `--force`).
+- production runners from smoke core.
+- signals no-change skip (`input_digest`) logic.
+- publish idempotency keys (`signalKey`) + cooldown suppression.
 
 Acceptance:
 
-- active run has machine-readable Redis artifacts for evidence + assignments + audit.
+- active run has machine-readable Redis artifacts + resumable `state`.
+- search job can `resume_same_run` without restarting from root.
+- scheduler skips runs cleanly when budget window is exhausted, with explicit status reason.
+- scheduler skips runs cleanly on run-rate gates with explicit status reason.
+- signals skips cleanly when input digest unchanged (`skipped_no_input_change`).
+- manual CLI can run outside scheduler windows when explicitly forced.
+- publish path is idempotent for same `signalKey`.
+
+Measurable acceptance (Phase 1A):
+
+1. Resume correctness:
+   - duplicate ratio denominator = `count(distinct evidence.id)` in final run artifact.
+   - requirement: `duplicates / distinct_evidence <= 1%`.
+2. Budget-window enforcement:
+   - in over-budget slots, `0` runs start and status contains `skipped_budget_window`.
+3. Run-rate enforcement:
+   - if `maxRunsPerWindow` exceeded, next poll produces `skipped_run_rate_window`.
+4. Stability:
+   - across 5 runs, parse-valid call ratio `>= 95%`.
+5. Signals no-change efficiency:
+   - with unchanged input digest across 10 polls, `10/10` runs skip with `skipped_no_input_change`.
+6. Publish idempotency:
+   - repeated publish attempts for same `signalKey` create at most one active record (upsert-only behavior).
+
+## Phase 1B (reuse optimization)
+
+- warm-start (`warm_start_prior_run`) nudging from recent evidence embeddings.
+- normalized key mode (`normalized_keys`) as optional canonical mode.
+
+Measurable acceptance (Phase 1B):
+
+1. Warm-start efficiency:
+   - across 5 paired runs on same map conditions, median `toolAttempts` improves by `>= 15%` vs cold-start.
+2. Warm-start quality guard:
+   - accepted evidence count drop `<= 10%` vs cold-start median.
+3. Routing guard:
+   - `assigned_child / evidence_total` degradation `<= 5pp` vs cold-start median.
+4. Cost guard:
+   - median `spent_usd / accepted_evidence` degradation `<= 10%`.
 
 ## Phase 2
 
@@ -405,7 +732,7 @@ From recent iterations:
 # map build
 pnpm -C hunch-monorepo -F api run ai:embed:market-map -- --force
 
-# search smoke
+# search smoke (QA/debug)
 pnpm -C hunch-monorepo -F api run ai:map-search:smoke -- \
   --concurrency 4 \
   --max-calls 16 \
@@ -413,18 +740,51 @@ pnpm -C hunch-monorepo -F api run ai:map-search:smoke -- \
   --out /tmp/ai-map-search-smoke.json \
   --report-out /tmp/ai-map-search-smoke.md
 
-# signals smoke
+# signals smoke (QA/debug)
 pnpm -C hunch-monorepo -F api run ai:map-signals:smoke -- \
   --in /tmp/ai-map-search-smoke.json \
   --out /tmp/ai-map-signals-smoke.json \
   --report-out /tmp/ai-map-signals-smoke.md
+
+# production runners (policy-driven; to be added in Phase 1)
+# pnpm -C hunch-monorepo -F api run ai:map-search:run
+# pnpm -C hunch-monorepo -F api run ai:map-signals:run
+
+# API policy/unit tests (runtime policy + scheduler guard normalization)
+pnpm -C hunch-monorepo -F api run test intel
 ```
 
 ---
 
-## 14) Open Gaps and Questions (for next discussion)
+## 14) Test Coverage (Updated)
+
+Implemented now:
+
+1. `apps/api/src/intel-tests.ts` includes market-map runtime policy coverage for:
+   - deprecated override-key sanitization (`projectionAlgo`, `layoutMode`),
+   - scheduler/projection normalization clamps (`pollIntervalSec`, `lockTtlSec`, `k1/k2/k3`, projection bounds),
+   - fallback behavior (`labelLevels=[] -> [1,2,3]`, invalid venues -> default venues set).
+2. Existing `apps/api/src/test-runner.ts` auto-discovers these tests (`*-tests.ts`), so no harness changes are required.
+
+Next test-runner additions (Phase 1A):
+
+1. Search artifact contract test (`ai-map-search-smoke`) with fixture output:
+   - required fields present,
+   - routing invariants hold (`leaf_self` assignment consistency),
+   - budget/guard stop reason is machine-readable.
+2. Signals artifact contract test (`ai-map-signals-smoke`) with fixture output:
+   - publish/context decisions valid against gate reasons,
+   - target name/id consistency checks.
+
+---
+
+## 15) Open Gaps and Questions (for next discussion)
 
 1. Redis persistence schema for search stage is still a plan item (currently artifact-first via `/tmp` in smoke).
+1. Phase-1A persistence is not implemented yet:
+   - Redis artifact/state/status writes,
+   - lock/heartbeat,
+   - resume load path.
 2. Rollover policy decision:
    - strict fresh re-search every run, or
    - partial reroute from recent run cache before new search.
@@ -440,3 +800,7 @@ pnpm -C hunch-monorepo -F api run ai:map-signals:smoke -- \
    - whether L1/L2 windows should remain wide (`96h/72h`) or tighten by branch class.
 8. Publish precision policy:
    - when to move from exploratory gates (`1/1/1`, affinity `0.15`) to stricter production defaults.
+9. Runtime policy ownership:
+   - single shared policy document vs separate `search` and `signals` policy docs.
+10. Redis footprint limits:
+   - exact TTL/size caps for artifacts, embeddings, and per-node headline caches.

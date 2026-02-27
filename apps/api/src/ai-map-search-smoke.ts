@@ -22,6 +22,7 @@ import {
   type MarketMapMeta,
   type MarketMapNode,
 } from "./services/market-map.js";
+import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
@@ -43,6 +44,8 @@ type UsageMetrics = {
   cachedInputTokens: number;
   numServerSideToolsUsed: number;
   toolUsageDetails: ToolUsageDetails;
+  providerCostUsd: number | null;
+  providerCostField: string | null;
   providerCostUsdTicks: number | null;
 };
 
@@ -51,6 +54,11 @@ type CostEstimate = {
   outputCostUsd: number;
   tokenCostUsd: number;
   toolCostUsd: number;
+  estimatedCostUsd: number;
+  providerCostUsd: number | null;
+  providerCostField: string | null;
+  chargedCostUsd: number;
+  costSource: "provider_reported" | "estimated";
   totalCostUsd: number;
 };
 
@@ -206,7 +214,10 @@ type BudgetState = {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalToolAttempts: number;
-  totalCostUsd: number;
+  totalEstimatedCostUsd: number;
+  totalChargedCostUsd: number;
+  totalProviderReportedCostUsd: number;
+  providerReportedCostCalls: number;
   expectedNextInputTokens: number;
   expectedNextCallCostUsd: number;
   expectedNextOutputTokens: number;
@@ -296,6 +307,8 @@ const ZERO_USAGE: UsageMetrics = {
   cachedInputTokens: 0,
   numServerSideToolsUsed: 0,
   toolUsageDetails: ZERO_TOOL_USAGE,
+  providerCostUsd: null,
+  providerCostField: null,
   providerCostUsdTicks: null,
 };
 
@@ -304,6 +317,11 @@ const ZERO_COST: CostEstimate = {
   outputCostUsd: 0,
   tokenCostUsd: 0,
   toolCostUsd: 0,
+  estimatedCostUsd: 0,
+  providerCostUsd: null,
+  providerCostField: null,
+  chargedCostUsd: 0,
+  costSource: "estimated",
   totalCostUsd: 0,
 };
 
@@ -791,12 +809,7 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
     mcp_calls: Number(detailsObj?.mcp_calls ?? 0),
     document_search_calls: Number(detailsObj?.document_search_calls ?? 0),
   };
-  const providerCostUsdTicksRaw = obj.cost_in_usd_ticks;
-  const providerCostUsdTicks =
-    typeof providerCostUsdTicksRaw === "number" &&
-    Number.isFinite(providerCostUsdTicksRaw)
-      ? providerCostUsdTicksRaw
-      : null;
+  const providerCost = extractProviderCostUsd(payload);
   return {
     inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
     outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
@@ -807,23 +820,37 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
     cachedInputTokens: Number(inputDetails?.cached_tokens ?? 0),
     numServerSideToolsUsed: Number(obj.num_server_side_tools_used ?? 0),
     toolUsageDetails,
-    providerCostUsdTicks,
+    providerCostUsd: providerCost.providerCostUsd,
+    providerCostField: providerCost.providerCostField,
+    providerCostUsdTicks: providerCost.providerCostUsdTicks,
   };
 }
 
 function computeEstimatedCost(args: Args, usage: UsageMetrics): CostEstimate {
-  const inputCostUsd = (usage.inputTokens / 1_000_000) * args.priceInputPerM;
-  const outputCostUsd = (usage.outputTokens / 1_000_000) * args.priceOutputPerM;
-  const tokenCostUsd = inputCostUsd + outputCostUsd;
-  const toolCostUsd =
-    (usage.toolUsageDetails.web_search_calls / 1_000) * args.priceWebPer1k +
-    (usage.toolUsageDetails.x_search_calls / 1_000) * args.priceXPer1k;
+  const resolved = resolveAiCost({
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    priceInputPerM: args.priceInputPerM,
+    priceOutputPerM: args.priceOutputPerM,
+    webSearchCalls: usage.toolUsageDetails.web_search_calls,
+    xSearchCalls: usage.toolUsageDetails.x_search_calls,
+    priceWebPer1k: args.priceWebPer1k,
+    priceXPer1k: args.priceXPer1k,
+    providerCostUsd: usage.providerCostUsd,
+    providerCostField: usage.providerCostField,
+    providerCostUsdTicks: usage.providerCostUsdTicks,
+  });
   return {
-    inputCostUsd,
-    outputCostUsd,
-    tokenCostUsd,
-    toolCostUsd,
-    totalCostUsd: tokenCostUsd + toolCostUsd,
+    inputCostUsd: resolved.inputCostUsd,
+    outputCostUsd: resolved.outputCostUsd,
+    tokenCostUsd: resolved.tokenCostUsd,
+    toolCostUsd: resolved.toolCostUsd,
+    estimatedCostUsd: resolved.estimatedCostUsd,
+    providerCostUsd: resolved.providerCostUsd,
+    providerCostField: resolved.providerCostField,
+    chargedCostUsd: resolved.chargedCostUsd,
+    costSource: resolved.costSource,
+    totalCostUsd: resolved.estimatedCostUsd,
   };
 }
 
@@ -1649,7 +1676,12 @@ function updateBudgetState(
   state.totalInputTokens += call.usage.inputTokens;
   state.totalOutputTokens += call.usage.outputTokens;
   state.totalToolAttempts += call.toolAttemptCount;
-  state.totalCostUsd += call.costEstimate.totalCostUsd;
+  state.totalEstimatedCostUsd += call.costEstimate.estimatedCostUsd;
+  state.totalChargedCostUsd += call.costEstimate.chargedCostUsd;
+  if (call.costEstimate.providerCostUsd != null) {
+    state.totalProviderReportedCostUsd += call.costEstimate.providerCostUsd;
+    state.providerReportedCostCalls += 1;
+  }
   const nextExpectedInput =
     state.callsExecuted === 1
       ? call.usage.inputTokens
@@ -1659,8 +1691,8 @@ function updateBudgetState(
     : state.expectedNextInputTokens;
   const nextExpected =
     state.callsExecuted === 1
-      ? call.costEstimate.totalCostUsd
-      : alpha * call.costEstimate.totalCostUsd +
+      ? call.costEstimate.chargedCostUsd
+      : alpha * call.costEstimate.chargedCostUsd +
         (1 - alpha) * state.expectedNextCallCostUsd;
   state.expectedNextCallCostUsd = Number.isFinite(nextExpected)
     ? Math.max(0, nextExpected)
@@ -1682,7 +1714,7 @@ function evaluateBudgetStop(
   if (state.totalInputTokens >= args.maxTotalInputTokens) return "max_total_input_tokens";
   if (state.totalOutputTokens >= args.maxTotalOutputTokens) return "max_total_output_tokens";
   if (state.totalToolAttempts >= args.maxTotalToolAttempts) return "max_total_tool_attempts";
-  if (state.totalCostUsd >= args.budgetUsd) return "budget_usd_exhausted";
+  if (state.totalChargedCostUsd >= args.budgetUsd) return "budget_usd_exhausted";
   if (state.callsExecuted > 0) {
     const remainingInput = args.maxTotalInputTokens - state.totalInputTokens;
     if (remainingInput < state.expectedNextInputTokens) {
@@ -1692,7 +1724,7 @@ function evaluateBudgetStop(
     if (remainingOutput < state.expectedNextOutputTokens) {
       return "output_guard_expected_next_call";
     }
-    const remaining = args.budgetUsd - state.totalCostUsd;
+    const remaining = args.budgetUsd - state.totalChargedCostUsd;
     if (remaining < state.expectedNextCallCostUsd) {
       return "budget_guard_expected_next_call";
     }
@@ -1821,7 +1853,10 @@ async function main(): Promise<void> {
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalToolAttempts: 0,
-    totalCostUsd: 0,
+    totalEstimatedCostUsd: 0,
+    totalChargedCostUsd: 0,
+    totalProviderReportedCostUsd: 0,
+    providerReportedCostCalls: 0,
     expectedNextInputTokens: args.bootstrapExpectedInputTokens,
     expectedNextCallCostUsd: args.bootstrapExpectedCallCostUsd,
     expectedNextOutputTokens: args.bootstrapExpectedOutputTokens,
@@ -1871,7 +1906,12 @@ async function main(): Promise<void> {
         inputTokens: budgetState.totalInputTokens,
         outputTokens: budgetState.totalOutputTokens,
         toolAttempts: budgetState.totalToolAttempts,
-        estimatedTotalCostUsd: Number(budgetState.totalCostUsd.toFixed(6)),
+        estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+        chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        providerReportedCostUsd: Number(
+          budgetState.totalProviderReportedCostUsd.toFixed(6),
+        ),
+        providerReportedCostCalls: budgetState.providerReportedCostCalls,
         expectedNextInputTokens: Math.round(budgetState.expectedNextInputTokens),
         expectedNextCallCostUsd: Number(
           budgetState.expectedNextCallCostUsd.toFixed(6),
@@ -1984,7 +2024,7 @@ async function main(): Promise<void> {
     const budgetStopBefore = evaluateBudgetStop(args, budgetState);
     if (budgetStopBefore) {
       console.log(
-        `[ai-map-search-smoke] stop=${budgetStopBefore} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalCostUsd)} expected_next=${formatUsd(budgetState.expectedNextCallCostUsd)} expected_next_input=${Math.round(budgetState.expectedNextInputTokens)} expected_next_output=${Math.round(budgetState.expectedNextOutputTokens)}`,
+        `[ai-map-search-smoke] stop=${budgetStopBefore} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalChargedCostUsd)} est=${formatUsd(budgetState.totalEstimatedCostUsd)} expected_next=${formatUsd(budgetState.expectedNextCallCostUsd)} expected_next_input=${Math.round(budgetState.expectedNextInputTokens)} expected_next_output=${Math.round(budgetState.expectedNextOutputTokens)}`,
       );
       break;
     }
@@ -2019,7 +2059,7 @@ async function main(): Promise<void> {
         batchReservedInputTokens +
         reserveInputTokens;
       const projectedCost =
-        budgetState.totalCostUsd + batchReservedCostUsd + reserveCostUsd;
+        budgetState.totalChargedCostUsd + batchReservedCostUsd + reserveCostUsd;
       const projectedOutput =
         budgetState.totalOutputTokens +
         batchReservedOutputTokens +
@@ -2202,7 +2242,7 @@ async function main(): Promise<void> {
     if (launches.length === 0) {
       if (launchGuardStop) {
         console.log(
-          `[ai-map-search-smoke] stop=${launchGuardStop} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalCostUsd)} total_evidence=${evidenceById.size}`,
+          `[ai-map-search-smoke] stop=${launchGuardStop} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalChargedCostUsd)} est=${formatUsd(budgetState.totalEstimatedCostUsd)} total_evidence=${evidenceById.size}`,
         );
         break;
       }
@@ -2636,7 +2676,7 @@ async function main(): Promise<void> {
 
       if (!args.verbose) {
         console.log(
-          `[ai-map-search-smoke] call_done #${record.callIndex} status=${record.statusCode} parse=${record.parseStatus} new_ev=${record.newEvidenceCount} drop_fresh=${record.droppedByFreshnessCount} drop_src=${record.droppedBySourceCapCount} drop_dom=${record.droppedByDomainPolicyCount} tools=${record.toolAttemptCount} cost=${formatUsd(record.costEstimate.totalCostUsd)} stop=${record.budgetStop ?? "-"} err=${record.error ? preview(record.error, 120) : "-"}`,
+          `[ai-map-search-smoke] call_done #${record.callIndex} status=${record.statusCode} parse=${record.parseStatus} new_ev=${record.newEvidenceCount} drop_fresh=${record.droppedByFreshnessCount} drop_src=${record.droppedBySourceCapCount} drop_dom=${record.droppedByDomainPolicyCount} tools=${record.toolAttemptCount} cost=${formatUsd(record.costEstimate.chargedCostUsd)} src=${record.costEstimate.costSource} stop=${record.budgetStop ?? "-"} err=${record.error ? preview(record.error, 120) : "-"}`,
         );
       }
 
@@ -2662,7 +2702,11 @@ async function main(): Promise<void> {
           assignedAvgSimilarity: record.assignedAvgSimilarity,
           fallbackSuppressed: record.fallbackSuppressed,
           toolAttempts: record.toolAttemptCount,
-          costUsd: Number(record.costEstimate.totalCostUsd.toFixed(6)),
+          chargedCostUsd: Number(record.costEstimate.chargedCostUsd.toFixed(6)),
+          estimatedCostUsd: Number(
+            record.costEstimate.estimatedCostUsd.toFixed(6),
+          ),
+          costSource: record.costEstimate.costSource,
           budgetStop: record.budgetStop,
         });
       }
@@ -2674,7 +2718,7 @@ async function main(): Promise<void> {
 
     if (batchStopReason) {
       console.log(
-        `[ai-map-search-smoke] stop=${batchStopReason} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalCostUsd)} total_evidence=${evidenceById.size}`,
+        `[ai-map-search-smoke] stop=${batchStopReason} calls=${budgetState.callsExecuted} spent=${formatUsd(budgetState.totalChargedCostUsd)} est=${formatUsd(budgetState.totalEstimatedCostUsd)} total_evidence=${evidenceById.size}`,
       );
       break;
     }
@@ -2717,7 +2761,8 @@ async function main(): Promise<void> {
   markdownLines.push(`- map_generated_at: ${snapshot.meta.generatedAt}`);
   markdownLines.push(`- calls_executed: ${budgetState.callsExecuted}`);
   markdownLines.push(`- evidence_total: ${evidenceById.size}`);
-  markdownLines.push(`- spent_usd_est: ${formatUsd(budgetState.totalCostUsd)}`);
+  markdownLines.push(`- spent_usd_charged: ${formatUsd(budgetState.totalChargedCostUsd)}`);
+  markdownLines.push(`- spent_usd_est: ${formatUsd(budgetState.totalEstimatedCostUsd)}`);
   markdownLines.push(
     `- token_totals: input=${budgetState.totalInputTokens}, output=${budgetState.totalOutputTokens}`,
   );
@@ -2762,7 +2807,7 @@ async function main(): Promise<void> {
   markdownLines.push("");
   for (const call of callRecords) {
     markdownLines.push(
-      `- #${call.callIndex} node=${call.nodeLabel} level=${call.level} status=${call.statusCode} parse=${call.parseStatus} evidence=${call.newEvidenceCount}/${call.returnedEvidenceCount} tools=${call.toolAttemptCount} cost=${formatUsd(call.costEstimate.totalCostUsd)} stop=${call.budgetStop ?? "-"}`,
+      `- #${call.callIndex} node=${call.nodeLabel} level=${call.level} status=${call.statusCode} parse=${call.parseStatus} evidence=${call.newEvidenceCount}/${call.returnedEvidenceCount} tools=${call.toolAttemptCount} cost=${formatUsd(call.costEstimate.chargedCostUsd)} src=${call.costEstimate.costSource} stop=${call.budgetStop ?? "-"}`,
     );
   }
   const markdownReport = markdownLines.join("\n");
@@ -2799,7 +2844,12 @@ async function main(): Promise<void> {
       inputTokens: budgetState.totalInputTokens,
       outputTokens: budgetState.totalOutputTokens,
       toolAttempts: budgetState.totalToolAttempts,
-      estimatedTotalCostUsd: Number(budgetState.totalCostUsd.toFixed(6)),
+      estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      providerReportedCostUsd: Number(
+        budgetState.totalProviderReportedCostUsd.toFixed(6),
+      ),
+      providerReportedCostCalls: budgetState.providerReportedCostCalls,
       expectedNextInputTokens: Math.round(budgetState.expectedNextInputTokens),
       expectedNextCallCostUsd: Number(
         budgetState.expectedNextCallCostUsd.toFixed(6),
@@ -2884,7 +2934,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[ai-map-search-smoke] done calls=${budgetState.callsExecuted} evidence=${evidenceById.size} spent=${formatUsd(budgetState.totalCostUsd)} duration_ms=${Date.now() - startedAt}`,
+    `[ai-map-search-smoke] done calls=${budgetState.callsExecuted} evidence=${evidenceById.size} spent=${formatUsd(budgetState.totalChargedCostUsd)} est=${formatUsd(budgetState.totalEstimatedCostUsd)} duration_ms=${Date.now() - startedAt}`,
   );
   if (!args.out) {
     console.log(
@@ -2893,7 +2943,8 @@ async function main(): Promise<void> {
           runId,
           callsExecuted: budgetState.callsExecuted,
           evidenceTotal: evidenceById.size,
-          estimatedTotalCostUsd: Number(budgetState.totalCostUsd.toFixed(6)),
+          estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+          chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
           topLeaves,
         },
         null,

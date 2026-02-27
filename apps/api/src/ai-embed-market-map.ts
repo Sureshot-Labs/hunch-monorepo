@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { PCA } from "ml-pca";
 import { RESP_TYPES } from "redis";
 import { UMAP } from "umap-js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import {
+  getOpenRouterModelPricingPerM,
+} from "./lib/ai-pricing.js";
+import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import {
   buildMarketMapNodeId,
   type MarketMapEventSummary,
@@ -29,6 +34,8 @@ const MARKET_MAP_VERSION = "v1";
 const DEFAULT_MAX_AI_LABELS_PER_RUN = 400;
 const DEFAULT_AI_LABEL_TIMEOUT_MS = 8_000;
 const DEFAULT_AI_LABEL_CONCURRENCY = 4;
+const DEFAULT_LABEL_PRICE_INPUT_PER_M = 0.05;
+const DEFAULT_LABEL_PRICE_OUTPUT_PER_M = 0.4;
 
 type EventCandidateRow = {
   event_id: string;
@@ -95,6 +102,7 @@ type BuildResult = {
   nodes: MarketMapNode[];
   byNodeEvents: Map<string, MarketMapEventSummary[]>;
   meta: Omit<MarketMapMeta, "runId">;
+  labelCostSummary: LabelCostSummary;
 };
 
 type AiLabelResponse = {
@@ -119,6 +127,37 @@ type AiLabelResult = {
   totalTokens?: number;
   reasoningTokens?: number;
   promptChars?: number;
+  providerCostUsd?: number | null;
+  providerCostField?: string | null;
+  providerCostUsdTicks?: number | null;
+};
+
+type LabelCostSummary = {
+  attempted: number;
+  labeled: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  reasoningTokens: number;
+  estimatedCostUsd: number;
+  chargedCostUsd: number;
+  providerReportedCostUsd: number;
+  providerReportedCostCalls: number;
+  providerReportedCostShare: number;
+};
+
+type MarketMapBuildRunResult = {
+  status: "completed" | "dry_run" | "skipped_disabled";
+  source: "env" | "db";
+  effectiveAt: string | null;
+  redisRunId: string | null;
+  eventCountTotal: number;
+  nodeCountTotal: number;
+  projectionMethod: "umap" | "pca2";
+  projectionFallback: boolean;
+  projectionDurationMs: number;
+  buildDurationMs: number;
+  labelCostSummary: LabelCostSummary;
 };
 
 type LabelPromptPayload = {
@@ -174,6 +213,22 @@ function parseNumber(value: string | undefined): number | undefined {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function emptyLabelCostSummary(): LabelCostSummary {
+  return {
+    attempted: 0,
+    labeled: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    reasoningTokens: 0,
+    estimatedCostUsd: 0,
+    chargedCostUsd: 0,
+    providerReportedCostUsd: 0,
+    providerReportedCostCalls: 0,
+    providerReportedCostShare: 0,
+  };
 }
 
 async function forEachConcurrent<T>(
@@ -912,6 +967,7 @@ async function callOpenRouterLabel(params: {
     usage?: unknown;
   };
   const usage = extractUsage(payload);
+  const providerCost = extractProviderCostUsd(payload);
   const finishReason = payload.choices?.[0]?.finish_reason ?? null;
   const messageContent = payload.choices?.[0]?.message?.content;
   const raw = parseOpenRouterMessageContent(messageContent);
@@ -927,6 +983,9 @@ async function callOpenRouterLabel(params: {
       reason: "empty_content",
       finishReason,
       ...usage,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
       detail: JSON.stringify({
         contentType,
         finishReason,
@@ -949,6 +1008,9 @@ async function callOpenRouterLabel(params: {
       reason: parsedOutput.parseIssue ?? "invalid_schema",
       finishReason,
       ...usage,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
       detail: parsedOutput.detail ?? trimmed.slice(0, 180),
       promptChars: params.prompt.promptChars,
     };
@@ -960,6 +1022,9 @@ async function callOpenRouterLabel(params: {
       reason: "generic_label",
       finishReason,
       ...usage,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
       detail: label.slice(0, 120),
       promptChars: params.prompt.promptChars,
     };
@@ -969,6 +1034,9 @@ async function callOpenRouterLabel(params: {
     reason: "ok",
     finishReason,
     ...usage,
+    providerCostUsd: providerCost.providerCostUsd,
+    providerCostField: providerCost.providerCostField,
+    providerCostUsdTicks: providerCost.providerCostUsdTicks,
     promptChars: params.prompt.promptChars,
   };
 }
@@ -977,15 +1045,15 @@ async function applyAiLabels(params: {
   nodes: MarketMapNode[];
   byNodeEvents: Map<string, MarketMapEventSummary[]>;
   config: BuildConfig;
-}): Promise<void> {
+}): Promise<LabelCostSummary> {
   const { nodes, byNodeEvents, config } = params;
   if (!config.labelAiEnabled) {
     console.log("[market-map] ai labels skipped (disabled)");
-    return;
+    return emptyLabelCostSummary();
   }
   if (!env.openRouterKey) {
     console.log("[market-map] ai labels skipped (OPENROUTER_API_KEY missing)");
-    return;
+    return emptyLabelCostSummary();
   }
   const allowedLevels = new Set(config.labelLevels);
   const deepestExistingLevel = nodes.reduce(
@@ -1000,7 +1068,7 @@ async function applyAiLabels(params: {
   const candidates = nodes.filter((node) => allowedLevels.has(node.level));
   if (candidates.length === 0) {
     console.log("[market-map] ai labels skipped (no candidate nodes)");
-    return;
+    return emptyLabelCostSummary();
   }
   const levelsDesc = Array.from(
     new Set(candidates.map((node) => node.level)),
@@ -1041,8 +1109,12 @@ async function applyAiLabels(params: {
   );
   if (plannedAttempts <= 0) {
     console.log("[market-map] ai labels skipped (zero planned attempts)");
-    return;
+    return emptyLabelCostSummary();
   }
+  const pricing = getOpenRouterModelPricingPerM(config.labelModel);
+  const labelPriceInputPerM = pricing?.inputPerM ?? DEFAULT_LABEL_PRICE_INPUT_PER_M;
+  const labelPriceOutputPerM =
+    pricing?.outputPerM ?? DEFAULT_LABEL_PRICE_OUTPUT_PER_M;
   const concurrency = clamp(
     DEFAULT_AI_LABEL_CONCURRENCY,
     1,
@@ -1075,6 +1147,14 @@ async function applyAiLabels(params: {
   let completed = 0;
   let attemptCursor = 0;
   let levelBatchIndex = 0;
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  let totalLabelTokens = 0;
+  let totalReasoningTokens = 0;
+  let totalEstimatedCostUsd = 0;
+  let totalChargedCostUsd = 0;
+  let totalProviderReportedCostUsd = 0;
+  let providerReportedCostCalls = 0;
   const issueReasonCounts = new Map<string, number>();
   const finishReasonCounts = new Map<string, number>();
   const errorSamples: Array<{
@@ -1257,6 +1337,9 @@ async function applyAiLabels(params: {
       let completionTokens: number | undefined;
       let totalTokens: number | undefined;
       let reasoningTokens: number | undefined;
+      let providerCostUsd: number | null = null;
+      let providerCostField: string | null = null;
+      let providerCostUsdTicks: number | null = null;
       let labelMaxTokensUsed = config.labelMaxTokens;
       try {
         let result = await callOpenRouterLabel({
@@ -1309,6 +1392,9 @@ async function applyAiLabels(params: {
         completionTokens = result.completionTokens;
         totalTokens = result.totalTokens;
         reasoningTokens = result.reasoningTokens;
+        providerCostUsd = result.providerCostUsd ?? null;
+        providerCostField = result.providerCostField ?? null;
+        providerCostUsdTicks = result.providerCostUsdTicks ?? null;
       } catch (error) {
         status = "error";
         incrementCount(issueReasonCounts, "unexpected_error");
@@ -1331,6 +1417,46 @@ async function applyAiLabels(params: {
         Number.isFinite(reasoningTokens)
       ) {
         levelReasoningTokens.push(reasoningTokens);
+      }
+      const resolvedCost = resolveAiCost({
+        inputTokens:
+          typeof promptTokens === "number" && Number.isFinite(promptTokens)
+            ? promptTokens
+            : 0,
+        outputTokens:
+          typeof completionTokens === "number" &&
+            Number.isFinite(completionTokens)
+            ? completionTokens
+            : 0,
+        priceInputPerM: labelPriceInputPerM,
+        priceOutputPerM: labelPriceOutputPerM,
+        providerCostUsd,
+        providerCostField,
+        providerCostUsdTicks,
+      });
+      totalEstimatedCostUsd += resolvedCost.estimatedCostUsd;
+      totalChargedCostUsd += resolvedCost.chargedCostUsd;
+      if (resolvedCost.providerCostUsd != null) {
+        totalProviderReportedCostUsd += resolvedCost.providerCostUsd;
+        providerReportedCostCalls += 1;
+      }
+      if (typeof promptTokens === "number" && Number.isFinite(promptTokens)) {
+        totalPromptTokens += promptTokens;
+      }
+      if (
+        typeof completionTokens === "number" &&
+        Number.isFinite(completionTokens)
+      ) {
+        totalCompletionTokens += completionTokens;
+      }
+      if (typeof totalTokens === "number" && Number.isFinite(totalTokens)) {
+        totalLabelTokens += totalTokens;
+      }
+      if (
+        typeof reasoningTokens === "number" &&
+        Number.isFinite(reasoningTokens)
+      ) {
+        totalReasoningTokens += reasoningTokens;
       }
       if (finishReason) {
         incrementCount(finishReasonCounts, finishReason);
@@ -1362,6 +1488,9 @@ async function applyAiLabels(params: {
           completionTokens,
           reasoningTokens,
           totalTokens,
+          estimatedCostUsd: Number(resolvedCost.estimatedCostUsd.toFixed(6)),
+          chargedCostUsd: Number(resolvedCost.chargedCostUsd.toFixed(6)),
+          costSource: resolvedCost.costSource,
           labelMaxTokensUsed,
           remaining: plannedAttempts - completed,
           error: errorMessage,
@@ -1372,9 +1501,9 @@ async function applyAiLabels(params: {
             nodeId: node.id,
             level: node.level,
             reason,
-          finishReason: finishReason ?? null,
-          durationMs,
-          error: errorMessage,
+            finishReason: finishReason ?? null,
+            durationMs,
+            error: errorMessage,
           });
         }
       } else if (config.debugLogs) {
@@ -1394,6 +1523,9 @@ async function applyAiLabels(params: {
           completionTokens,
           reasoningTokens,
           totalTokens,
+          estimatedCostUsd: Number(resolvedCost.estimatedCostUsd.toFixed(6)),
+          chargedCostUsd: Number(resolvedCost.chargedCostUsd.toFixed(6)),
+          costSource: resolvedCost.costSource,
           labelMaxTokensUsed,
           labeledSoFar: labeled,
           completed,
@@ -1451,6 +1583,21 @@ async function applyAiLabels(params: {
     (sum, value) => sum + value,
     0,
   );
+  const providerReportedCostShare =
+    plannedAttempts > 0 ? providerReportedCostCalls / plannedAttempts : 0;
+  const labelCostSummary: LabelCostSummary = {
+    attempted: plannedAttempts,
+    labeled,
+    promptTokens: totalPromptTokens,
+    completionTokens: totalCompletionTokens,
+    totalTokens: totalLabelTokens,
+    reasoningTokens: totalReasoningTokens,
+    estimatedCostUsd: Number(totalEstimatedCostUsd.toFixed(6)),
+    chargedCostUsd: Number(totalChargedCostUsd.toFixed(6)),
+    providerReportedCostUsd: Number(totalProviderReportedCostUsd.toFixed(6)),
+    providerReportedCostCalls,
+    providerReportedCostShare: Number(providerReportedCostShare.toFixed(4)),
+  };
   console.log("[market-map] ai labels done", {
     attempted: plannedAttempts,
     labeled,
@@ -1460,11 +1607,13 @@ async function applyAiLabels(params: {
     finishReasonSummary,
     samplingSummaryByLevel,
     errorSamples: errorSamples.length,
+    cost: labelCostSummary,
     durationMs: Date.now() - startedAt,
   });
   if (errorSamples.length > 0) {
     console.log("[market-map] ai labels issue samples", errorSamples);
   }
+  return labelCostSummary;
 }
 
 async function fetchVenueCandidates(
@@ -1943,7 +2092,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     ),
   });
 
-  await applyAiLabels({ nodes, byNodeEvents, config });
+  const labelCostSummary = await applyAiLabels({ nodes, byNodeEvents, config });
 
   const projectionDurationMs = Date.now() - projectionStarted;
   const buildDurationMs = Date.now() - startedAt;
@@ -1951,6 +2100,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
   return {
     nodes,
     byNodeEvents,
+    labelCostSummary,
     meta: {
       generatedAt: nowIso,
       version: MARKET_MAP_VERSION,
@@ -1969,7 +2119,7 @@ async function storeSnapshot(
   redisUrl: string,
   config: BuildConfig,
   result: BuildResult,
-): Promise<void> {
+): Promise<string> {
   const runId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const redis = createRedisClient({ url: redisUrl });
   await ensureRedis(redis, { waitForReady: true, logLabel: "market-map-store" });
@@ -2018,16 +2168,30 @@ async function storeSnapshot(
       projectionDurationMs: result.meta.projectionDurationMs,
       buildDurationMs: result.meta.buildDurationMs,
     });
+    return runId;
   } finally {
     await redis.quit();
   }
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+export async function runMarketMapBuild(
+  args: string[] = process.argv.slice(2),
+): Promise<MarketMapBuildRunResult> {
   if (hasFlag(args, "--help")) {
     printHelp();
-    return;
+    return {
+      status: "skipped_disabled",
+      source: "env",
+      effectiveAt: null,
+      redisRunId: null,
+      eventCountTotal: 0,
+      nodeCountTotal: 0,
+      projectionMethod: "umap",
+      projectionFallback: false,
+      projectionDurationMs: 0,
+      buildDurationMs: 0,
+      labelCostSummary: emptyLabelCostSummary(),
+    };
   }
 
   const policy = await resolveMarketMapPolicy(pool);
@@ -2036,7 +2200,19 @@ async function main() {
     console.log(
       "[market-map] skipped (policy disabled). use --force to run anyway",
     );
-    return;
+    return {
+      status: "skipped_disabled",
+      source: policy.source,
+      effectiveAt: policy.effectiveAt?.toISOString() ?? null,
+      redisRunId: null,
+      eventCountTotal: 0,
+      nodeCountTotal: 0,
+      projectionMethod: "umap",
+      projectionFallback: false,
+      projectionDurationMs: 0,
+      buildDurationMs: 0,
+      labelCostSummary: emptyLabelCostSummary(),
+    };
   }
   if (!env.redisUrl) {
     throw new Error("[market-map] REDIS_URL is required");
@@ -2062,22 +2238,60 @@ async function main() {
     projectionFallback: result.meta.projectionFallback,
     projectionDurationMs: result.meta.projectionDurationMs,
     buildDurationMs: result.meta.buildDurationMs,
+    labelCostSummary: result.labelCostSummary,
   });
 
   if (config.dryRun) {
     console.log("[market-map] dry-run complete (no Redis writes)");
-    return;
+    return {
+      status: "dry_run",
+      source: policy.source,
+      effectiveAt: policy.effectiveAt?.toISOString() ?? null,
+      redisRunId: null,
+      eventCountTotal: result.meta.eventCountTotal,
+      nodeCountTotal: result.nodes.length,
+      projectionMethod: result.meta.projectionMethod,
+      projectionFallback: result.meta.projectionFallback,
+      projectionDurationMs: result.meta.projectionDurationMs,
+      buildDurationMs: result.meta.buildDurationMs,
+      labelCostSummary: result.labelCostSummary,
+    };
   }
-  await storeSnapshot(env.redisUrl, config, result);
+  const redisRunId = await storeSnapshot(env.redisUrl, config, result);
+  return {
+    status: "completed",
+    source: policy.source,
+    effectiveAt: policy.effectiveAt?.toISOString() ?? null,
+    redisRunId,
+    eventCountTotal: result.meta.eventCountTotal,
+    nodeCountTotal: result.nodes.length,
+    projectionMethod: result.meta.projectionMethod,
+    projectionFallback: result.meta.projectionFallback,
+    projectionDurationMs: result.meta.projectionDurationMs,
+    buildDurationMs: result.meta.buildDurationMs,
+    labelCostSummary: result.labelCostSummary,
+  };
 }
 
-main()
-  .then(async () => {
-    await pool.end();
-    process.exit(0);
-  })
-  .catch(async (error) => {
-    console.error("[market-map] failed", error);
-    await pool.end();
-    process.exit(1);
-  });
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  runMarketMapBuild()
+    .then(async () => {
+      await pool.end();
+      process.exit(0);
+    })
+    .catch(async (error) => {
+      console.error("[market-map] failed", error);
+      await pool.end();
+      process.exit(1);
+    });
+}

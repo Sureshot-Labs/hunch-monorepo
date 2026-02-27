@@ -243,6 +243,49 @@ const aiWhaleProfileModel =
   process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
+const aiMarketMapTriggerMode = parseEnum(
+  process.env.AI_MARKET_MAP_TRIGGER_MODE,
+  ["interval", "cron"] as const,
+  "interval",
+);
+const aiMarketMapPollIntervalSec = optionalPositiveInt(
+  "AI_MARKET_MAP_POLL_INTERVAL_SEC",
+  3_600,
+);
+const aiMarketMapScheduleCron =
+  process.env.AI_MARKET_MAP_SCHEDULE_CRON?.trim() || null;
+const aiMarketMapRunWindowMinutes = optionalPositiveInt(
+  "AI_MARKET_MAP_RUN_WINDOW_MINUTES",
+  60,
+);
+const aiMarketMapMaxRunsPerWindow = optionalPositiveInt(
+  "AI_MARKET_MAP_MAX_RUNS_PER_WINDOW",
+  1,
+);
+const aiMarketMapMaxRunsPerDay = optionalPositiveInt(
+  "AI_MARKET_MAP_MAX_RUNS_PER_DAY",
+  24,
+);
+const aiMarketMapBudgetWindowMinutes = optionalPositiveInt(
+  "AI_MARKET_MAP_BUDGET_WINDOW_MINUTES",
+  1_440,
+);
+const aiMarketMapBudgetWindowUsd = optionalNonNegativeNumber(
+  "AI_MARKET_MAP_BUDGET_WINDOW_USD",
+  10,
+);
+const aiMarketMapDayBudgetUsd = optionalNonNegativeNumber(
+  "AI_MARKET_MAP_DAY_BUDGET_USD",
+  25,
+);
+const aiMarketMapEstimatedRunCostUsd = optionalNonNegativeNumber(
+  "AI_MARKET_MAP_ESTIMATED_RUN_COST_USD",
+  0.06,
+);
+const aiMarketMapLockTtlSec = optionalPositiveInt(
+  "AI_MARKET_MAP_LOCK_TTL_SEC",
+  7_200,
+);
 const aiMarketMapDepth = optionalPositiveInt("AI_MARKET_MAP_DEPTH", 3);
 const aiMarketMapK1 = optionalPositiveInt("AI_MARKET_MAP_K1", 8);
 const aiMarketMapK2 = optionalPositiveInt("AI_MARKET_MAP_K2", 6);
@@ -555,6 +598,17 @@ export const env = {
   aiClusterDebugLogs:
     parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
   aiMarketMapEnabled,
+  aiMarketMapTriggerMode,
+  aiMarketMapPollIntervalSec,
+  aiMarketMapScheduleCron,
+  aiMarketMapRunWindowMinutes,
+  aiMarketMapMaxRunsPerWindow,
+  aiMarketMapMaxRunsPerDay,
+  aiMarketMapBudgetWindowMinutes,
+  aiMarketMapBudgetWindowUsd,
+  aiMarketMapDayBudgetUsd,
+  aiMarketMapEstimatedRunCostUsd,
+  aiMarketMapLockTtlSec,
   aiMarketMapDepth,
   aiMarketMapK1,
   aiMarketMapK2,

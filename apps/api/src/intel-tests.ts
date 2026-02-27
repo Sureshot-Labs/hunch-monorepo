@@ -24,6 +24,11 @@ import {
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
 import { shouldReturnFilterTooBroad } from "./routes/wallet-intel.js";
+import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
+import {
+  getOpenRouterEmbeddingPricingPerM,
+  getOpenRouterModelPricingPerM,
+} from "./lib/ai-pricing.js";
 import {
   DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
   computeRobustUnusualScore,
@@ -36,6 +41,62 @@ type TestCase = {
 };
 
 const tests: TestCase[] = [
+  {
+    name: "ai cost extractor supports OpenRouter usage.cost",
+    run: () => {
+      const payload = {
+        usage: {
+          prompt_tokens: 15,
+          completion_tokens: 9,
+          cost: 0.00015225,
+        },
+      };
+      const provider = extractProviderCostUsd(payload);
+      assert.equal(provider.providerCostUsd, 0.00015225);
+      assert.equal(provider.providerCostField, "cost");
+      assert.equal(provider.providerCostUsdTicks, null);
+
+      const resolved = resolveAiCost({
+        inputTokens: 15,
+        outputTokens: 9,
+        priceInputPerM: 1.75,
+        priceOutputPerM: 14,
+        providerCostUsd: provider.providerCostUsd,
+        providerCostField: provider.providerCostField,
+      });
+      assert.equal(resolved.costSource, "provider_reported");
+      assert.equal(Number(resolved.chargedCostUsd.toFixed(8)), 0.00015225);
+    },
+  },
+  {
+    name: "ai cost extractor supports usage.cost_in_usd_ticks",
+    run: () => {
+      const payload = {
+        usage: {
+          prompt_tokens: 16,
+          completion_tokens: 64,
+          cost_in_usd_ticks: 264000,
+        },
+      };
+      const provider = extractProviderCostUsd(payload);
+      assert.equal(provider.providerCostUsdTicks, 264000);
+      assert.equal(Number((provider.providerCostUsd ?? 0).toFixed(10)), 0.0000264);
+    },
+  },
+  {
+    name: "openrouter pricing table exposes verified defaults",
+    run: () => {
+      const gpt52 = getOpenRouterModelPricingPerM("openai/gpt-5.2");
+      const gpt5nano = getOpenRouterModelPricingPerM("openai/gpt-5-nano");
+      const embed = getOpenRouterEmbeddingPricingPerM("openai/text-embedding-3-small");
+      assert.equal(gpt52?.inputPerM, 1.75);
+      assert.equal(gpt52?.outputPerM, 14);
+      assert.equal(gpt5nano?.inputPerM, 0.05);
+      assert.equal(gpt5nano?.outputPerM, 0.4);
+      assert.equal(embed?.inputPerM, 0.02);
+      assert.equal(embed?.outputPerM, 0);
+    },
+  },
   {
     name: "runtime policy reads fall back when migration table is missing",
     run: async () => {
@@ -171,6 +232,103 @@ const tests: TestCase[] = [
       const resolved = await resolveIntelPolicy(db, "ai_whale_profiles");
       assert.equal(resolved.invalidOverride, true);
       assert.equal(resolved.source, "env");
+    },
+  },
+  {
+    name: "market map policy sanitizer ignores deprecated projection override keys",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000004",
+              policy_key: "market_map",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                enabled: true,
+                projectionAlgo: "pca2",
+                layoutMode: "grid",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "market_map");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.enabled, true);
+      assert.equal(
+        "projectionAlgo" in ((resolved.override ?? {}) as Record<string, unknown>),
+        false,
+      );
+      assert.equal(
+        "layoutMode" in ((resolved.override ?? {}) as Record<string, unknown>),
+        false,
+      );
+    },
+  },
+  {
+    name: "market map policy normalizes scheduler and projection bounds",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000005",
+              policy_key: "market_map",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                enabled: true,
+                triggerMode: "interval",
+                pollIntervalSec: 1,
+                runWindowMinutes: 1,
+                maxRunsPerWindow: 1,
+                maxRunsPerDay: 1,
+                budgetWindowMinutes: 1,
+                budgetWindowUsd: 0,
+                dayBudgetUsd: 0,
+                estimatedRunCostUsd: 0,
+                lockTtlSec: 1,
+                depth: 1,
+                k1: 1,
+                k2: 1,
+                k3: 1,
+                labelLevels: [],
+                venuesEnabled: ["!invalid"],
+                projectionPcaDims: 1,
+                projectionUmapNeighbors: 1,
+                projectionUmapMinDist: 0,
+                projectionBudgetMs: 1,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "market_map");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.pollIntervalSec, 60);
+      assert.equal(resolved.effective.lockTtlSec, 60);
+      assert.equal(resolved.effective.depth, 2);
+      assert.equal(resolved.effective.k1, 2);
+      assert.equal(resolved.effective.k2, 2);
+      assert.equal(resolved.effective.k3, 2);
+      assert.deepEqual(resolved.effective.labelLevels, [1, 2, 3]);
+      assert.deepEqual(resolved.effective.venuesEnabled, [
+        "polymarket",
+        "kalshi",
+        "limitless",
+      ]);
+      assert.equal(resolved.effective.projectionPcaDims, 8);
+      assert.equal(resolved.effective.projectionUmapNeighbors, 5);
+      assert.equal(resolved.effective.projectionUmapMinDist, 0.01);
+      assert.equal(resolved.effective.projectionBudgetMs, 1000);
     },
   },
   {
