@@ -240,6 +240,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "ai_clusters",
   "market_map",
   "map_search",
+  "map_signals",
   "arbitrage_defaults",
 ]);
 

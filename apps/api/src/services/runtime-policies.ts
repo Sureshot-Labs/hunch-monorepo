@@ -17,6 +17,7 @@ export const INTEL_POLICY_KEYS = [
   "ai_clusters",
   "market_map",
   "map_search",
+  "map_signals",
   "arbitrage_defaults",
 ] as const;
 
@@ -248,6 +249,43 @@ export type MapSearchPolicy = {
   verboseOutput: boolean;
 };
 
+export type MapSignalsPolicy = {
+  enabled: boolean;
+  triggerMode: "interval" | "cron";
+  pollIntervalSec: number;
+  scheduleCron: string | null;
+  runWindowMinutes: number;
+  maxRunsPerWindow: number;
+  maxRunsPerDay: number;
+  budgetWindowMinutes: number;
+  budgetWindowUsd: number;
+  dayBudgetUsd: number;
+  estimatedRunCostUsd: number;
+  lockTtlSec: number;
+  lockHeartbeatSec: number;
+  artifactTtlSec: number;
+  statusTtlSec: number;
+  inputDigestEnabled: boolean;
+  model: string;
+  embedModel: string;
+  maxNodes: number;
+  maxSignals: number;
+  maxEvidencePerNode: number;
+  maxMarketsPerNode: number;
+  minEvidence: number;
+  minConfirmed: number;
+  minDistinctDomains: number;
+  minEvidenceIdsForPublish: number;
+  minAffinityForPublish: number;
+  concurrency: number;
+  maxOutputTokens: number;
+  timeoutSec: number;
+  dryRun: boolean;
+  verbose: boolean;
+  persistNotes: boolean;
+  maxPublishPerRun: number;
+};
+
 type WalletIntelAttributionVenueKey = "polymarket" | "kalshi" | "limitless";
 
 export type WalletIntelAttributionDisplayPolicy = {
@@ -344,6 +382,7 @@ type IntelPolicyMap = {
   ai_clusters: AiClustersPolicy;
   market_map: MarketMapPolicy;
   map_search: MapSearchPolicy;
+  map_signals: MapSignalsPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
 };
 
@@ -624,6 +663,46 @@ const mapSearchSchema = z
   .strict()
   .partial();
 
+const mapSignalsSchema = z
+  .object({
+    enabled: strictBoolean,
+    triggerMode: z.enum(["interval", "cron"]),
+    pollIntervalSec: positiveInt.max(60 * 60 * 24),
+    scheduleCron: z.string().trim().min(1).max(200).nullable(),
+    runWindowMinutes: positiveInt.max(60 * 24 * 30),
+    maxRunsPerWindow: positiveInt.max(1_000),
+    maxRunsPerDay: positiveInt.max(1_000),
+    budgetWindowMinutes: positiveInt.max(60 * 24 * 30),
+    budgetWindowUsd: nonNegativeNumber.max(1_000_000),
+    dayBudgetUsd: nonNegativeNumber.max(1_000_000),
+    estimatedRunCostUsd: nonNegativeNumber.max(100_000),
+    lockTtlSec: positiveInt.max(60 * 60 * 24),
+    lockHeartbeatSec: positiveInt.max(60 * 60 * 24),
+    artifactTtlSec: positiveInt.max(60 * 60 * 24 * 30),
+    statusTtlSec: positiveInt.max(60 * 60 * 24 * 30),
+    inputDigestEnabled: strictBoolean,
+    model: z.string().trim().min(1).max(200),
+    embedModel: z.string().trim().min(1).max(200),
+    maxNodes: positiveInt.max(500),
+    maxSignals: positiveInt.max(500),
+    maxEvidencePerNode: positiveInt.max(200),
+    maxMarketsPerNode: positiveInt.max(200),
+    minEvidence: positiveInt.max(50),
+    minConfirmed: nonNegativeInt.max(50),
+    minDistinctDomains: positiveInt.max(50),
+    minEvidenceIdsForPublish: positiveInt.max(50),
+    minAffinityForPublish: ratio,
+    concurrency: positiveInt.max(16),
+    maxOutputTokens: positiveInt.max(8_000),
+    timeoutSec: positiveInt.max(60 * 10),
+    dryRun: strictBoolean,
+    verbose: strictBoolean,
+    persistNotes: strictBoolean,
+    maxPublishPerRun: positiveInt.max(5_000),
+  })
+  .strict()
+  .partial();
+
 const arbitrageDefaultsSchema = z
   .object({
     limit: positiveInt.max(200),
@@ -782,6 +861,7 @@ const policySchemas = {
   ai_clusters: aiClustersSchema,
   market_map: marketMapSchema,
   map_search: mapSearchSchema,
+  map_signals: mapSignalsSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
 } as const;
 
@@ -1128,6 +1208,45 @@ function getDefaults(): IntelPolicyMap {
       verbose: false,
       leanOutput: false,
       verboseOutput: false,
+    },
+    map_signals: {
+      enabled: env.aiMapSignalsEnabled,
+      triggerMode: "interval",
+      pollIntervalSec: 60 * 60,
+      scheduleCron: null,
+      runWindowMinutes: 60,
+      maxRunsPerWindow: 1,
+      maxRunsPerDay: 24,
+      budgetWindowMinutes: 60 * 24,
+      budgetWindowUsd: 10,
+      dayBudgetUsd: 25,
+      estimatedRunCostUsd: 0.25,
+      lockTtlSec: 60 * 30,
+      lockHeartbeatSec: 30,
+      artifactTtlSec: 60 * 60 * 24 * 3,
+      statusTtlSec: 60 * 60 * 24 * 7,
+      inputDigestEnabled: true,
+      model: "openai/gpt-5.2",
+      embedModel:
+        process.env.OPENROUTER_EMBED_MODEL ||
+        process.env.AI_EMBED_MODEL ||
+        "intfloat/e5-large-v2",
+      maxNodes: 20,
+      maxSignals: 20,
+      maxEvidencePerNode: 12,
+      maxMarketsPerNode: 12,
+      minEvidence: 1,
+      minConfirmed: 1,
+      minDistinctDomains: 1,
+      minEvidenceIdsForPublish: 1,
+      minAffinityForPublish: 0.15,
+      concurrency: 4,
+      maxOutputTokens: 900,
+      timeoutSec: 90,
+      dryRun: false,
+      verbose: false,
+      persistNotes: false,
+      maxPublishPerRun: 200,
     },
     arbitrage_defaults: {
       limit: 24,
@@ -1652,6 +1771,56 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
   };
 }
 
+function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
+  return {
+    ...policy,
+    enabled: Boolean(policy.enabled),
+    triggerMode:
+      policy.triggerMode === "cron" || policy.triggerMode === "interval"
+        ? policy.triggerMode
+        : "interval",
+    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    scheduleCron:
+      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+        ? policy.scheduleCron.trim()
+        : null,
+    runWindowMinutes: clamp(Math.trunc(policy.runWindowMinutes), 1, 60 * 24 * 30),
+    maxRunsPerWindow: clamp(Math.trunc(policy.maxRunsPerWindow), 1, 1_000),
+    maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
+    budgetWindowMinutes: clamp(Math.trunc(policy.budgetWindowMinutes), 1, 60 * 24 * 30),
+    budgetWindowUsd: clamp(policy.budgetWindowUsd, 0, 1_000_000),
+    dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
+    estimatedRunCostUsd: clamp(policy.estimatedRunCostUsd, 0, 100_000),
+    lockTtlSec: clamp(Math.trunc(policy.lockTtlSec), 30, 60 * 60 * 24),
+    lockHeartbeatSec: clamp(Math.trunc(policy.lockHeartbeatSec), 10, 60 * 60 * 24),
+    artifactTtlSec: clamp(Math.trunc(policy.artifactTtlSec), 60, 60 * 60 * 24 * 30),
+    statusTtlSec: clamp(Math.trunc(policy.statusTtlSec), 60, 60 * 60 * 24 * 30),
+    inputDigestEnabled: Boolean(policy.inputDigestEnabled),
+    model: policy.model.trim(),
+    embedModel: policy.embedModel.trim(),
+    maxNodes: clamp(Math.trunc(policy.maxNodes), 1, 500),
+    maxSignals: clamp(Math.trunc(policy.maxSignals), 1, 500),
+    maxEvidencePerNode: clamp(Math.trunc(policy.maxEvidencePerNode), 1, 200),
+    maxMarketsPerNode: clamp(Math.trunc(policy.maxMarketsPerNode), 1, 200),
+    minEvidence: clamp(Math.trunc(policy.minEvidence), 1, 50),
+    minConfirmed: clamp(Math.trunc(policy.minConfirmed), 0, 50),
+    minDistinctDomains: clamp(Math.trunc(policy.minDistinctDomains), 1, 50),
+    minEvidenceIdsForPublish: clamp(
+      Math.trunc(policy.minEvidenceIdsForPublish),
+      1,
+      50,
+    ),
+    minAffinityForPublish: clamp(policy.minAffinityForPublish, 0, 1),
+    concurrency: clamp(Math.trunc(policy.concurrency), 1, 16),
+    maxOutputTokens: clamp(Math.trunc(policy.maxOutputTokens), 100, 8_000),
+    timeoutSec: clamp(Math.trunc(policy.timeoutSec), 15, 60 * 10),
+    dryRun: Boolean(policy.dryRun),
+    verbose: Boolean(policy.verbose),
+    persistNotes: Boolean(policy.persistNotes),
+    maxPublishPerRun: clamp(Math.trunc(policy.maxPublishPerRun), 1, 5_000),
+  };
+}
+
 function normalizeArbitrageDefaultsPolicy(
   policy: ArbitrageDefaultsPolicy,
 ): ArbitrageDefaultsPolicy {
@@ -1684,6 +1853,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeMarketMapPolicy(merged as MarketMapPolicy) as IntelPolicyMap[K];
     case "map_search":
       return normalizeMapSearchPolicy(merged as MapSearchPolicy) as IntelPolicyMap[K];
+    case "map_signals":
+      return normalizeMapSignalsPolicy(merged as MapSignalsPolicy) as IntelPolicyMap[K];
     case "arbitrage_defaults":
       return normalizeArbitrageDefaultsPolicy(merged as ArbitrageDefaultsPolicy) as IntelPolicyMap[K];
     default:
@@ -1729,6 +1900,9 @@ function sanitizeOverridePayload(
       return record;
     }
     case "map_search": {
+      return record;
+    }
+    case "map_signals": {
       return record;
     }
     case "ai_whale_profiles": {
@@ -1864,6 +2038,10 @@ export async function resolveAllIntelPolicies(
       "map_search",
       byKey.get("map_search") ?? null,
     ),
+    map_signals: resolveFromRow(
+      "map_signals",
+      byKey.get("map_signals") ?? null,
+    ),
     arbitrage_defaults: resolveFromRow(
       "arbitrage_defaults",
       byKey.get("arbitrage_defaults") ?? null,
@@ -1897,6 +2075,10 @@ export async function resolveMarketMapPolicy(pool: DbQuery) {
 
 export async function resolveMapSearchPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "map_search");
+}
+
+export async function resolveMapSignalsPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "map_signals");
 }
 
 export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {

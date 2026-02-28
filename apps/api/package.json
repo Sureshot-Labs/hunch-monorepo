@@ -47,7 +47,9 @@
     "check": "pnpm run lint && pnpm run typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",
-    "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
+    "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown",
+    "ai:map-signals:run": "tsx src/ai-map-signals-run.ts",
+    "ai:map-signals:runner": "tsx src/ai-map-signals-runner.ts"
   },
   "dependencies": {
     "@fastify/swagger": "^9.6.1",

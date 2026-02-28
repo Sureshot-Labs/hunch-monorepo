@@ -380,6 +380,52 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "map signals policy normalizes scheduler bounds and publish gates",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000036",
+              policy_key: "map_signals",
+              effective_at: new Date("2026-01-02T00:00:00.000Z"),
+              payload: {
+                pollIntervalSec: 1,
+                lockTtlSec: 15,
+                lockHeartbeatSec: 1,
+                minEvidence: 1,
+                minConfirmed: 0,
+                minDistinctDomains: 1,
+                minEvidenceIdsForPublish: 1,
+                minAffinityForPublish: 1,
+                concurrency: 16,
+                maxOutputTokens: 5,
+                persistNotes: "true",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-02T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "map_signals");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.pollIntervalSec, 60);
+      assert.equal(resolved.effective.lockTtlSec, 30);
+      assert.equal(resolved.effective.lockHeartbeatSec, 10);
+      assert.equal(resolved.effective.minEvidence, 1);
+      assert.equal(resolved.effective.minConfirmed, 0);
+      assert.equal(resolved.effective.minDistinctDomains, 1);
+      assert.equal(resolved.effective.minEvidenceIdsForPublish, 1);
+      assert.equal(resolved.effective.minAffinityForPublish, 1);
+      assert.equal(resolved.effective.concurrency, 16);
+      assert.equal(resolved.effective.maxOutputTokens, 100);
+      assert.equal(resolved.effective.persistNotes, true);
+    },
+  },
+  {
     name: "wallet attribution policy override merges partial nested blocks",
     run: async () => {
       const db = {
