@@ -1,4 +1,4 @@
-# AI Map News + Signals Pipeline Plan (Redis-First, Map-Run Scoped)
+# AI Map News + Signals Pipeline Plan (Signals persist into `ai_notes`)
 
 ## 1) Objective
 
@@ -6,8 +6,8 @@ Build a production-safe, map-first AI pipeline with four independent jobs, keyed
 
 1. `map-build` (implemented): build hierarchical market-map snapshot.
 2. `news-search` (implemented as run core + smoke wrapper; policy/scheduler/persistence productization next): collect and assign fresh evidence.
-3. `signal-generate` (implemented as smoke CLI; run-core extraction + policy-runner productization next): generate market/event signals.
-4. `cluster-summary-generate` (planned): generate cluster digests.
+3. `signal-generate` (implemented as smoke CLI; run-core extraction + policy-runner productization next): generate durable signals.
+4. `cluster-summary-generate` (planned): generate cluster-level summaries.
 
 Design goals:
 
@@ -33,8 +33,8 @@ Current implementation matrix:
 | Stage | Run core | Smoke wrapper | Policy-driven runner | Scheduler wiring | Redis persistence contract |
 |---|---|---|---|---|---|
 | `map-build` | implemented | n/a | implemented (`ai:map-build:run`) | implemented via cron/runner usage | implemented for map snapshot + runner status |
-| `news-search` | implemented (`ai:map-search:run`) | implemented (`ai:map-search:smoke`) | not implemented yet | not implemented yet | not implemented yet (artifact/state/status keys pending) |
-| `signal-generate` | partial (inside smoke script) | implemented (`ai:map-signals:smoke`) | not implemented yet (`ai:map-signals:run` pending) | not implemented yet | not implemented yet (digest/idempotency keys pending) |
+| `news-search` | implemented (`ai:map-search:run`) | implemented (`ai:map-search:smoke`) | implemented (`ai:map-search:runner`) | not implemented yet | implemented (artifact/state/status + reuse) |
+| `signal-generate` | partial (inside smoke script) | implemented (`ai:map-signals:smoke`) | not implemented yet (`ai:map-signals:run` pending) | not implemented yet | partial (digest/idempotency plan pending) |
 | `cluster-summary-generate` | not implemented | not implemented | not implemented | not implemented | not implemented |
 
 ---
@@ -45,7 +45,7 @@ Current implementation matrix:
 
 - Evidence retrieval + assignment to map hierarchy.
 - Signal generation from assigned evidence + candidate markets.
-- Cluster summaries from assigned evidence.
+- Cluster summary generation from assigned evidence.
 - Rollover behavior across new map runs.
 - Serving contracts for map UI consumption.
 
@@ -100,6 +100,7 @@ Implemented behavior:
 - model synthesis using `openai/gpt-5.2`,
 - strict post-model gates (`LOW_CONFIRMED`, affinity, target validity, etc.),
 - output includes target event/market names and evidence refs,
+- output is structurally compatible with durable `ai_notes` writes (`note_type=signal`),
 - latest improvements:
   - market target tie-break: affinity -> liquidity -> open interest -> volume -> score,
   - stronger social near-duplicate suppression before generation.
@@ -226,7 +227,8 @@ Input:
 Output:
 
 - run-scoped signal objects for serving,
-- publish-ready candidates for market/event publishing path.
+- durable `ai_notes` writes in Postgres for primary targets (market/event/node),
+- publish-ready records for downstream consumers.
 
 ## 5.4 Job D: `cluster-summary-generate` (consumer)
 
@@ -236,7 +238,8 @@ Input:
 
 Output:
 
-- run-scoped cluster summaries (with refs and confidence).
+- run-scoped cluster summaries (with refs and confidence),
+- durable notes with `note_type=cluster_summary`.
 
 ---
 
@@ -246,7 +249,7 @@ Output:
 
 - Current search execution reads map snapshot from Redis and writes artifact/checkpoint files when `--out` is provided (typically `/tmp` in QA usage).
 - Phase 1 target is to persist search artifacts in Redis with run-scoped keys.
-- Only publish stage should write durable external-facing signal records.
+- Only notes publish stages should write durable external-facing note records.
 
 ## 6.2 Suggested key families
 
@@ -286,9 +289,9 @@ Phase-1 concrete keys (search persistence + reuse):
   - digest of latest consumed search artifact/map run for no-change skip checks.
 - `ai:map_signals:v1:run:<runId>:input_digest`
   - run-scoped input digest used by signals job.
-- `ai:map_signals:v1:publish:<signalKey>`
+- `ai:map_signals:v1:publish:<noteKey>`
   - idempotency key for publish path (`SETNX`/upsert guard).
-- `ai:map_signals:v1:publish:cooldown:<signalKey>`
+- `ai:map_signals:v1:publish:cooldown:<noteKey>`
   - optional cooldown key to suppress near-identical republish noise.
 
 Status fields:
@@ -299,10 +302,80 @@ Status fields:
 - `summary_complete`
 - `publish_complete`
 
-## 6.3 Durability note
+## 6.3 Postgres durability for notes (required for Stage C)
 
-- Optional future phase: add Postgres canonical evidence tables.
-- Not required for initial productized flow.
+Signals and summaries should be stored in a unified `ai_notes` model.
+
+Suggested v1 schema:
+
+- `ai_notes`
+  - `id` (uuid pk)
+  - `note_key` (text unique, idempotency key)
+  - `note_type` (`signal`, `cluster_summary`, future extensible)
+  - `status` (`active`, `superseded`, `retracted`)
+  - `map_run_id` (text)
+  - `search_run_id` (text nullable)
+  - `source_node_id` (text nullable)
+  - `headline`, `summary`, `rationale`
+  - `signal_type` (`catalyst|risk|update`, nullable for non-signal note types)
+  - `direction` (`up|down|mixed`, nullable for non-signal note types)
+  - `confidence` (numeric)
+  - `reason_codes` (jsonb)
+  - `metrics` (jsonb)
+  - `model_meta` (jsonb)
+  - `supersedes_note_id` (uuid nullable fk to `ai_notes.id`)
+  - `created_at`, `updated_at`
+
+- `ai_note_targets`
+  - `note_id` (uuid fk)
+  - `target_kind` (text, polymorphic kind; app-level allowlist)
+  - `target_id` (text, namespaced id)
+  - `is_primary` (bool)
+  - `rank` (int, default `0`)
+  - `affinity_score` (numeric nullable)
+  - `target_meta` (jsonb nullable, kind-specific metadata)
+  - unique (`note_id`, `target_kind`, `target_id`)
+
+Recommended initial `target_kind` allowlist:
+
+- `market`
+- `event`
+- `node`
+- `wallet`
+- `token`
+- `user` (optional)
+
+Recommended `target_id` convention:
+
+- namespaced stable ids, e.g.:
+  - `market:polymarket:1408408`
+  - `event:kalshi:KX...`
+  - `node:mm:v1:global:2:...`
+  - `wallet:solana:<pubkey>`
+  - `wallet:evm:0x...`
+  - `token:solana:<mint>`
+
+Validation rule:
+
+- keep `target_kind` as `text` in DB for forward compatibility;
+- enforce accepted kinds in app schema/policy layer (not DB enum) to avoid migration churn.
+
+Indexing rule:
+
+- add index on (`target_kind`, `target_id`, `created_at desc`) for fast target timelines.
+
+- `ai_note_evidence`
+  - `note_id` (uuid fk)
+  - `evidence_id` (text)
+  - `relevance` (numeric nullable)
+  - unique (`note_id`, `evidence_id`)
+
+KISS dedupe/versioning rule:
+
+1. For each primary target, fetch last active note of same `note_type`.
+2. Pass prior note snapshot into prompt context.
+3. If no material change, emit `context_only` and skip DB write.
+4. If material change, insert new note and mark prior as `superseded`.
 
 ---
 
@@ -311,8 +384,8 @@ Status fields:
 ```text
 map-build -> active runId snapshot (Redis)
         -> news-search (Redis-only evidence + assignments + audit)
-        -> signal-generate (Redis read; publish candidates)
-        -> cluster-summary-generate (Redis read; node summaries)
+        -> signal-generate (Redis read; writes ai_notes + target/evidence links)
+        -> cluster-summary-generate (Redis read; writes ai_notes of summary type)
         -> serving APIs (news/signals/summaries by active runId)
 ```
 
@@ -401,7 +474,7 @@ Default denylist currently includes:
 
 ---
 
-## 9) Generation Contracts
+## 9) Note Generation Contracts
 
 ## 9.1 `signal-generate`
 
@@ -414,13 +487,21 @@ Output:
 - `publish_candidate` | `context_only` | `skip`,
 - `signal_type`, `direction`, `confidence`,
 - `target_event_id`, `target_market_id`, names, evidence refs, reason codes.
+- durable note writes into `ai_notes` + `ai_note_targets` + `ai_note_evidence`.
+
+Duplicate-avoidance requirement:
+
+1. Load previous active signal note for primary target.
+2. Include previous note context in prompt (headline, summary, direction, confidence, key evidence IDs).
+3. If model indicates no material change, keep as `context_only` and do not write a new note.
+4. If material change, write new note and supersede previous.
 
 Current gate profile:
 
 - smoke profile is intentionally permissive for exploration (`minEvidence/minConfirmed/minDistinctDomains` can be `1`).
 - publish profile should be stricter in production presets.
 
-## 9.2 `cluster-summary-generate`
+## 9.2 `cluster-summary-generate` (`note_type=cluster_summary`)
 
 Input:
 
@@ -429,6 +510,7 @@ Input:
 Output:
 
 - concise node summary + confidence + refs + freshness markers.
+- durable note writes into `ai_notes` with node primary target.
 
 Serving should explicitly label:
 
@@ -490,7 +572,7 @@ Run-rate ledger keys (required for scheduler):
 - `ai:map_runs:v1:search:start_log`
   - sorted set; score=`startedAt epoch ms`, member=`runId` (or `runId:attempt`).
 - `ai:map_runs:v1:signals:start_log`
-  - same for signals.
+  - same for signals runs.
 - `ai:map_runs:v1:summary:start_log`
   - same for summaries.
 - `ai:map_runs:v1:search:day:<YYYY-MM-DD>`
@@ -650,11 +732,11 @@ KISS policy shape (required):
 
 - map build + map UI serving.
 - search run core with strong guardrails + smoke wrapper.
-- signals smoke CLI with gating and target naming.
+- signals smoke CLI with gating and target naming (persisted later as `ai_notes`).
 
-## Phase 1A.1 (Next) Search persistence + execution safety
+## Phase 1A.1 (Done) Search persistence + execution safety
 
-- Redis persistence contract for search outputs (not only tmp files),
+- Redis persistence contract for search outputs (artifact + state + status),
 - run status markers + TTL policy,
 - lock/heartbeat for single-writer search runs,
 - resumable search state load path (`state -> artifact -> cold_start`),
@@ -678,24 +760,25 @@ Measurable acceptance (Phase 1A.1):
 - extract reusable signals run core from smoke-only script,
 - add `ai:map-signals:run` policy-driven runner (smoke remains QA/debug),
 - signals no-change skip (`input_digest`) logic,
-- publish idempotency keys (`signalKey`) + cooldown suppression.
+- note idempotency keys (`note_key`) + cooldown suppression,
+- Postgres write path to `ai_notes` + target/evidence link tables.
 
 Acceptance (1A.2):
 
 - signals run can execute without `--in` file dependency in policy-driven mode,
-- signals skips cleanly when input digest unchanged (`skipped_no_input_change`),
-- publish path is idempotent for same `signalKey`.
+- signals run skips cleanly when input digest unchanged (`skipped_no_input_change`),
+- publish path is idempotent for same `note_key`.
 
 Measurable acceptance (Phase 1A.2):
 
 1. Signals no-change efficiency:
    - with unchanged input digest across 10 polls, `10/10` runs skip with `skipped_no_input_change`.
 2. Publish idempotency:
-   - repeated publish attempts for same `signalKey` create at most one active record (upsert-only behavior).
+   - repeated publish attempts for same `note_key` create at most one active record (upsert-only behavior).
 
 ## Phase 1A.3 (Next) Runtime policy + scheduler wiring
 
-- runtime policy schema + admin read/write API for `search` and `signals` (minimal knobs + `advanced.*` block),
+- runtime policy schema + admin read/write API for `search` and `map_signals` (minimal knobs + `advanced.*` block),
 - scheduler wiring for periodic search/signals,
 - budget-window enforcement in scheduler (rolling + optional slot/day caps),
 - run-rate gates in scheduler (`pollIntervalSec`, window/day caps),
@@ -745,11 +828,11 @@ Measurable acceptance (Phase 1B):
 
 ## Phase 3
 
-- publish pipeline integration for signal candidates (idempotent publish keys).
+- publish pipeline integration for durable `ai_notes` candidates (idempotent note keys).
 
 ## Phase 4 (Optional)
 
-- Postgres durability for canonical evidence/assignments if long-retention or analytics needs justify it.
+- Postgres durability for canonical search evidence/assignments if long-retention or analytics needs justify it.
 
 ---
 
@@ -808,8 +891,8 @@ pnpm -C hunch-monorepo -F api run ai:map-signals:smoke -- \
 # policy-driven runners
 # implemented:
 # pnpm -C hunch-monorepo -F api run ai:map-build:run
+# pnpm -C hunch-monorepo -F api run ai:map-search:runner
 # pending implementation:
-# ai:map-search:run wrapper with runtime policy + scheduler gates
 # ai:map-signals:run (not added to package scripts yet)
 
 # API policy/unit tests (runtime policy + scheduler guard normalization)
@@ -842,11 +925,8 @@ Next test-runner additions (Phase 1A):
 
 ## 15) Open Gaps and Questions (for next discussion)
 
-1. Redis persistence schema for search stage is still a plan item (currently artifact-first via optional file output, commonly `/tmp` in QA runs).
-2. Phase-1A persistence is not implemented yet:
-   - Redis artifact/state/status writes,
-   - lock/heartbeat,
-   - resume load path.
+1. Search persistence exists for artifact/state/status/reuse; remaining gap is contract hardening for long-term retention and serving APIs.
+2. Search runner scheduler wiring is still pending (runner exists, periodic scheduler not wired yet).
 3. Rollover policy decision:
    - strict fresh re-search every run, or
    - partial reroute from recent run cache before new search.
@@ -855,13 +935,13 @@ Next test-runner additions (Phase 1A):
 5. Summary stage policy:
    - include `low_margin` evidence by default or only as secondary context.
 6. Serving API contract:
-   - exact response shape and TTL semantics for `news`, `signals`, `summary`.
+   - exact response shape and TTL semantics for `news`, `notes`, `summary`.
 7. Search efficiency policy:
    - how aggressively to cut low-yield, tool-heavy branches without losing useful recall.
 8. Freshness vs cost policy:
    - whether L1/L2 windows should remain wide (`96h/72h`) or tighten by branch class.
 9. Publish precision policy:
-   - when to move from exploratory gates (`1/1/1`, affinity `0.15`) to stricter production defaults.
+   - when to move from exploratory gates (`1/1/1`, affinity `0.15`) to stricter production defaults for durable `ai_notes` writes.
 10. Runtime policy ownership:
    - single shared policy document vs separate `search` and `signals` policy docs.
 11. Redis footprint limits:
