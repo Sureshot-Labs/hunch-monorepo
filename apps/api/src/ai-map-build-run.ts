@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { runMarketMapBuild } from "./ai-embed-market-map.js";
+import { runMarketMapBuild } from "./lib/map-news/map-build-core.js";
 import { resolveMarketMapPolicy } from "./services/runtime-policies.js";
 
 const LOCK_KEY = "ai:map_build:v1:lock";
@@ -193,6 +193,33 @@ async function setStatus(
   await redis.expire(STATUS_KEY, STATUS_TTL_SEC);
 }
 
+function installSignalHandlers(
+  onSignal: (signal: "SIGINT" | "SIGTERM") => Promise<void>,
+): () => void {
+  const signals: Array<"SIGINT" | "SIGTERM"> = ["SIGINT", "SIGTERM"];
+  const wrappedHandlers = new Map<
+    "SIGINT" | "SIGTERM",
+    (signal: NodeJS.Signals) => void
+  >();
+
+  for (const signal of signals) {
+    const handler = () => {
+      void onSignal(signal);
+    };
+    wrappedHandlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+
+  return () => {
+    for (const signal of signals) {
+      const handler = wrappedHandlers.get(signal);
+      if (handler) {
+        process.removeListener(signal, handler);
+      }
+    }
+  };
+}
+
 async function main() {
   const args = parseRunnerArgs(process.argv.slice(2));
   const policy = await resolveMarketMapPolicy(pool);
@@ -212,6 +239,43 @@ async function main() {
   const lockValue = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const runId = lockValue;
   const nowMs = Date.now();
+  let released = false;
+  let shuttingDownBySignal = false;
+
+  const releaseLockAndRedis = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    try {
+      const currentLockValue = await redis.get(LOCK_KEY);
+      if (currentLockValue === lockValue) {
+        await redis.del(LOCK_KEY);
+      }
+    } finally {
+      await redis.quit();
+    }
+  };
+
+  const detachSignalHandlers = installSignalHandlers(async (signal) => {
+    if (shuttingDownBySignal) return;
+    shuttingDownBySignal = true;
+    console.warn(`[map-build-run] received ${signal}, releasing lock and exiting`);
+    try {
+      await setStatus(redis, {
+        state: "aborted",
+        reason: `aborted_${signal.toLowerCase()}`,
+        runId,
+        at: new Date().toISOString(),
+      });
+    } catch {
+      // best effort status update
+    }
+    try {
+      await releaseLockAndRedis();
+    } finally {
+      await pool.end();
+      process.exit(130);
+    }
+  });
 
   try {
     const acquired = await redis.set(LOCK_KEY, lockValue, {
@@ -499,13 +563,11 @@ async function main() {
       throw error;
     }
   } finally {
+    detachSignalHandlers();
     try {
-      const currentLockValue = await redis.get(LOCK_KEY);
-      if (currentLockValue === lockValue) {
-        await redis.del(LOCK_KEY);
-      }
-    } finally {
-      await redis.quit();
+      await releaseLockAndRedis();
+    } catch {
+      // best effort cleanup
     }
   }
 }

@@ -5,8 +5,8 @@
 Build a production-safe, map-first AI pipeline with four independent jobs, keyed by `runId`:
 
 1. `map-build` (implemented): build hierarchical market-map snapshot.
-2. `news-search` (implemented as smoke, productizing next): collect and assign fresh evidence.
-3. `signal-generate` (implemented as smoke, productizing next): generate market/event signals.
+2. `news-search` (implemented as run core + smoke wrapper; policy/scheduler/persistence productization next): collect and assign fresh evidence.
+3. `signal-generate` (implemented as smoke CLI; run-core extraction + policy-runner productization next): generate market/event signals.
 4. `cluster-summary-generate` (planned): generate cluster digests.
 
 Design goals:
@@ -16,6 +16,26 @@ Design goals:
 - good branch coverage with low waste,
 - clear serving contract for map UI,
 - Redis-first search stage (no Postgres writes in search stage).
+
+---
+
+## 1.1 Terminology + Implementation Status
+
+Terminology used in this plan:
+
+- **run core**: reusable execution logic for a stage (no scheduler/policy ownership by itself).
+- **smoke wrapper**: QA/debug CLI wrapper around run core (typically file in/out).
+- **runner (policy-driven)**: production entrypoint that enforces runtime policy, lock/rate/budget gates, and writes run status.
+- **scheduler**: interval/cron loop that invokes runners repeatedly.
+
+Current implementation matrix:
+
+| Stage | Run core | Smoke wrapper | Policy-driven runner | Scheduler wiring | Redis persistence contract |
+|---|---|---|---|---|---|
+| `map-build` | implemented | n/a | implemented (`ai:map-build:run`) | implemented via cron/runner usage | implemented for map snapshot + runner status |
+| `news-search` | implemented (`ai:map-search:run`) | implemented (`ai:map-search:smoke`) | not implemented yet | not implemented yet | not implemented yet (artifact/state/status keys pending) |
+| `signal-generate` | partial (inside smoke script) | implemented (`ai:map-signals:smoke`) | not implemented yet (`ai:map-signals:run` pending) | not implemented yet | not implemented yet (digest/idempotency keys pending) |
+| `cluster-summary-generate` | not implemented | not implemented | not implemented | not implemented | not implemented |
 
 ---
 
@@ -53,7 +73,7 @@ Design goals:
   - `GET /market-map/node/:id/events`
 - Frontend cluster/treemap drilldown implemented in `Hunch_App/src/app/market-map`.
 
-## 3.2 Search smoke (`ai:map-search:smoke`)
+## 3.2 Search execution (`ai:map-search:run` core, `ai:map-search:smoke` wrapper)
 
 Implemented behavior:
 
@@ -71,7 +91,7 @@ Implemented behavior:
   - `event | representative_market` samples,
   - prompt length trimming to reduce token waste.
 
-## 3.3 Signals smoke (`ai:map-signals:smoke`)
+## 3.3 Signals generation (QA smoke CLI: `ai:map-signals:smoke`)
 
 Implemented behavior:
 
@@ -224,7 +244,7 @@ Output:
 
 ## 6.1 Current contract direction
 
-- Current smoke implementation reads map snapshot from Redis and writes artifacts to JSON files (`/tmp`).
+- Current search execution reads map snapshot from Redis and writes artifact/checkpoint files when `--out` is provided (typically `/tmp` in QA usage).
 - Phase 1 target is to persist search artifacts in Redis with run-scoped keys.
 - Only publish stage should write durable external-facing signal records.
 
@@ -629,47 +649,79 @@ KISS policy shape (required):
 ## Phase 0 (Done)
 
 - map build + map UI serving.
-- search smoke with strong guardrails and prompt updates.
-- signals smoke with gating and target naming.
+- search run core with strong guardrails + smoke wrapper.
+- signals smoke CLI with gating and target naming.
 
-## Phase 1A (Next, minimal productization)
+## Phase 1A.1 (Next) Search persistence + execution safety
 
 - Redis persistence contract for search outputs (not only tmp files),
 - run status markers + TTL policy,
-- scheduler wiring for periodic search/signals.
-- runtime policy schema + admin read/write API (minimal knobs + advanced block).
-- startup load order for jobs: `runtime policy -> map active runId -> reuse mode -> execute`.
-- budget-window enforcement in scheduler (rolling + optional slot/day caps).
-- CLI override flags for manual runs (`--ignore-policy-budget` / `--force`).
-- production runners from smoke core.
-- signals no-change skip (`input_digest`) logic.
-- publish idempotency keys (`signalKey`) + cooldown suppression.
+- lock/heartbeat for single-writer search runs,
+- resumable search state load path (`state -> artifact -> cold_start`),
+- startup load order for search run: `runtime policy -> map active runId -> reuse mode -> execute`.
 
-Acceptance:
+Acceptance (1A.1):
 
 - active run has machine-readable Redis artifacts + resumable `state`.
 - search job can `resume_same_run` without restarting from root.
-- scheduler skips runs cleanly when budget window is exhausted, with explicit status reason.
-- scheduler skips runs cleanly on run-rate gates with explicit status reason.
-- signals skips cleanly when input digest unchanged (`skipped_no_input_change`).
-- manual CLI can run outside scheduler windows when explicitly forced.
-- publish path is idempotent for same `signalKey`.
 
-Measurable acceptance (Phase 1A):
+Measurable acceptance (Phase 1A.1):
 
 1. Resume correctness:
    - duplicate ratio denominator = `count(distinct evidence.id)` in final run artifact.
    - requirement: `duplicates / distinct_evidence <= 1%`.
-2. Budget-window enforcement:
-   - in over-budget slots, `0` runs start and status contains `skipped_budget_window`.
-3. Run-rate enforcement:
-   - if `maxRunsPerWindow` exceeded, next poll produces `skipped_run_rate_window`.
-4. Stability:
+2. Stability:
    - across 5 runs, parse-valid call ratio `>= 95%`.
-5. Signals no-change efficiency:
+
+## Phase 1A.2 (Next) Signals run-core extraction + policy runner productization
+
+- extract reusable signals run core from smoke-only script,
+- add `ai:map-signals:run` policy-driven runner (smoke remains QA/debug),
+- signals no-change skip (`input_digest`) logic,
+- publish idempotency keys (`signalKey`) + cooldown suppression.
+
+Acceptance (1A.2):
+
+- signals run can execute without `--in` file dependency in policy-driven mode,
+- signals skips cleanly when input digest unchanged (`skipped_no_input_change`),
+- publish path is idempotent for same `signalKey`.
+
+Measurable acceptance (Phase 1A.2):
+
+1. Signals no-change efficiency:
    - with unchanged input digest across 10 polls, `10/10` runs skip with `skipped_no_input_change`.
-6. Publish idempotency:
+2. Publish idempotency:
    - repeated publish attempts for same `signalKey` create at most one active record (upsert-only behavior).
+
+## Phase 1A.3 (Next) Runtime policy + scheduler wiring
+
+- runtime policy schema + admin read/write API for `search` and `signals` (minimal knobs + `advanced.*` block),
+- scheduler wiring for periodic search/signals,
+- budget-window enforcement in scheduler (rolling + optional slot/day caps),
+- run-rate gates in scheduler (`pollIntervalSec`, window/day caps),
+- CLI override flags for manual runs (`--ignore-policy-budget` / `--force`).
+
+Acceptance (1A.3):
+
+- scheduler skips runs cleanly when budget window is exhausted, with explicit status reason,
+- scheduler skips runs cleanly on run-rate gates with explicit status reason,
+- manual CLI can run outside scheduler windows when explicitly forced.
+
+Measurable acceptance (Phase 1A.3):
+
+1. Budget-window enforcement:
+   - in over-budget slots, `0` runs start and status contains `skipped_budget_window`.
+2. Run-rate enforcement:
+   - if `maxRunsPerWindow` exceeded, next poll produces `skipped_run_rate_window`.
+
+Stage DoD (binary):
+
+1. Search DoD:
+   - search run writes `artifact`, `state`, and `status` for active `runId` in Redis.
+2. Signals DoD:
+   - signals run emits `skipped_no_input_change` when input digest is unchanged.
+3. Policy DoD:
+   - search/signals scheduler path reads runtime policy and enforces run-rate + budget gates.
 
 ## Phase 1B (reuse optimization)
 
@@ -732,7 +784,14 @@ From recent iterations:
 # map build
 pnpm -C hunch-monorepo -F api run ai:embed:market-map -- --force
 
-# search smoke (QA/debug)
+# search run core CLI (manual/QA execution; not policy-driven yet)
+pnpm -C hunch-monorepo -F api run ai:map-search:run -- \
+  --concurrency 4 \
+  --max-calls 16 \
+  --budget-usd 1 \
+  --dry-run
+
+# search smoke wrapper (QA/debug; wraps ai:map-search:run)
 pnpm -C hunch-monorepo -F api run ai:map-search:smoke -- \
   --concurrency 4 \
   --max-calls 16 \
@@ -740,15 +799,18 @@ pnpm -C hunch-monorepo -F api run ai:map-search:smoke -- \
   --out /tmp/ai-map-search-smoke.json \
   --report-out /tmp/ai-map-search-smoke.md
 
-# signals smoke (QA/debug)
+# signals smoke CLI (QA/debug; file-input workflow)
 pnpm -C hunch-monorepo -F api run ai:map-signals:smoke -- \
   --in /tmp/ai-map-search-smoke.json \
   --out /tmp/ai-map-signals-smoke.json \
   --report-out /tmp/ai-map-signals-smoke.md
 
-# production runners (policy-driven; to be added in Phase 1)
-# pnpm -C hunch-monorepo -F api run ai:map-search:run
-# pnpm -C hunch-monorepo -F api run ai:map-signals:run
+# policy-driven runners
+# implemented:
+# pnpm -C hunch-monorepo -F api run ai:map-build:run
+# pending implementation:
+# ai:map-search:run wrapper with runtime policy + scheduler gates
+# ai:map-signals:run (not added to package scripts yet)
 
 # API policy/unit tests (runtime policy + scheduler guard normalization)
 pnpm -C hunch-monorepo -F api run test intel
@@ -780,27 +842,27 @@ Next test-runner additions (Phase 1A):
 
 ## 15) Open Gaps and Questions (for next discussion)
 
-1. Redis persistence schema for search stage is still a plan item (currently artifact-first via `/tmp` in smoke).
-1. Phase-1A persistence is not implemented yet:
+1. Redis persistence schema for search stage is still a plan item (currently artifact-first via optional file output, commonly `/tmp` in QA runs).
+2. Phase-1A persistence is not implemented yet:
    - Redis artifact/state/status writes,
    - lock/heartbeat,
    - resume load path.
-2. Rollover policy decision:
+3. Rollover policy decision:
    - strict fresh re-search every run, or
    - partial reroute from recent run cache before new search.
-3. Publish profile thresholds:
+4. Publish profile thresholds:
    - keep permissive (`1/1/1`) for coverage, or raise for precision in production preset.
-4. Summary stage policy:
+5. Summary stage policy:
    - include `low_margin` evidence by default or only as secondary context.
-5. Serving API contract:
+6. Serving API contract:
    - exact response shape and TTL semantics for `news`, `signals`, `summary`.
-6. Search efficiency policy:
+7. Search efficiency policy:
    - how aggressively to cut low-yield, tool-heavy branches without losing useful recall.
-7. Freshness vs cost policy:
+8. Freshness vs cost policy:
    - whether L1/L2 windows should remain wide (`96h/72h`) or tighten by branch class.
-8. Publish precision policy:
+9. Publish precision policy:
    - when to move from exploratory gates (`1/1/1`, affinity `0.15`) to stricter production defaults.
-9. Runtime policy ownership:
+10. Runtime policy ownership:
    - single shared policy document vs separate `search` and `signals` policy docs.
-10. Redis footprint limits:
+11. Redis footprint limits:
    - exact TTL/size caps for artifacts, embeddings, and per-node headline caches.
