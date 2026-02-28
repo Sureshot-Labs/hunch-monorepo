@@ -313,10 +313,12 @@ Suggested v1 schema:
   - `note_key` (text unique, idempotency key)
   - `note_type` (`signal`, `cluster_summary`, future extensible)
   - `status` (`active`, `superseded`, `retracted`)
-  - `map_run_id` (text)
-  - `search_run_id` (text nullable)
-  - `source_node_id` (text nullable)
-  - `headline`, `summary`, `rationale`
+  - `title`, `description`, `rationale`
+  - `source_kind` (text; producer context type, e.g. `node`, `event`, `wallet`)
+  - `source_id` (text; producer context id)
+  - `producer_type` (text; e.g. `map_signals`)
+  - `producer_run_id` (text)
+  - `lineage` (jsonb; e.g. `map_run_id`, `search_run_id`, `source_node_id`, and future chain metadata)
   - `signal_type` (`catalyst|risk|update`, nullable for non-signal note types)
   - `direction` (`up|down|mixed`, nullable for non-signal note types)
   - `confidence` (numeric)
@@ -363,6 +365,8 @@ Validation rule:
 Indexing rule:
 
 - add index on (`target_kind`, `target_id`, `created_at desc`) for fast target timelines.
+- add index on (`source_kind`, `source_id`, `created_at desc`) for source timelines.
+- keep expression indexes for frequent lineage lookups (e.g. `lineage->>'map_run_id'`, `lineage->>'search_run_id'`) only when query pressure appears.
 
 - `ai_note_evidence`
   - `note_id` (uuid fk)
@@ -492,7 +496,7 @@ Output:
 Duplicate-avoidance requirement:
 
 1. Load previous active signal note for primary target.
-2. Include previous note context in prompt (headline, summary, direction, confidence, key evidence IDs).
+2. Include previous note context in prompt (`title`, `description`, `direction`, `confidence`, key evidence IDs).
 3. If model indicates no material change, keep as `context_only` and do not write a new note.
 4. If material change, write new note and supersede previous.
 
