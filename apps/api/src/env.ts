@@ -241,6 +241,10 @@ const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
 );
 const aiWhaleProfileModel =
   process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
+const aiMapSearchEnabled =
+  parseOptionalBool(process.env.AI_MAP_SEARCH_ENABLED) ?? false;
+const aiMapSignalsEnabled =
+  parseOptionalBool(process.env.AI_MAP_SIGNALS_ENABLED) ?? false;
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -597,6 +601,8 @@ export const env = {
   ),
   aiClusterDebugLogs:
     parseOptionalBool(process.env.AI_CLUSTER_DEBUG_LOGS) ?? false,
+  aiMapSearchEnabled,
+  aiMapSignalsEnabled,
   aiMarketMapEnabled,
   aiMarketMapTriggerMode,
   aiMarketMapPollIntervalSec,

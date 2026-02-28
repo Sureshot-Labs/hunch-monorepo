@@ -27,6 +27,43 @@ import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
+const MAP_SEARCH_KEY_PREFIX = "ai:map_search:v1";
+const MAP_SEARCH_LATEST_KEY = `${MAP_SEARCH_KEY_PREFIX}:latest`;
+const MAP_SEARCH_RECENT_EVIDENCE_KEY = `${MAP_SEARCH_KEY_PREFIX}:recent_evidence`;
+const MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC = 60 * 60 * 24 * 7;
+
+function mapSearchArtifactKey(runId: string): string {
+  return `${MAP_SEARCH_KEY_PREFIX}:run:${runId}:artifact`;
+}
+
+function mapSearchStateKey(runId: string): string {
+  return `${MAP_SEARCH_KEY_PREFIX}:run:${runId}:state`;
+}
+
+function mapSearchRunStatusKey(runId: string): string {
+  return `${MAP_SEARCH_KEY_PREFIX}:run:${runId}:status`;
+}
+
+function mapSearchLatestForMapRunKey(runId: string): string {
+  return `${MAP_SEARCH_KEY_PREFIX}:map_run:${runId}:latest_search`;
+}
+
+function mapSearchEvidenceDocKey(evidenceId: string): string {
+  return `${MAP_SEARCH_KEY_PREFIX}:evidence:${evidenceId}`;
+}
+
+function mapSearchNewsEmbeddingKey(evidenceId: string): string {
+  return `ai:embed:news:v1:${evidenceId}`;
+}
+
+type ReuseMode =
+  | "auto"
+  | "cold_start"
+  | "same_run_diversify"
+  | "same_run_seed"
+  | "resume_same_run"
+  | "warm_start_prior_run";
+type PersistenceMode = "artifact_only" | "normalized_keys";
 
 type MapSearchRunContext = {
   commandName: string;
@@ -242,10 +279,75 @@ type BudgetState = {
   expectedNextOutputTokens: number;
 };
 
+type PersistedEvidence = {
+  id: string;
+  headline: string;
+  summary: string;
+  sourceUrl: string;
+  sourceDomain: string;
+  publishedAt: string | null;
+  authorHandle: string | null;
+  confirmation: "confirmed" | "developing" | "unconfirmed";
+  sourceTier: "official" | "wire" | "major_media" | "specialist" | "social";
+  relevance: number;
+  confidence: number;
+  callIndex: number;
+  nodeId: string;
+  assignedNodeId: string | null;
+  assignedSimilarity: number | null;
+  routeMethod: "hybrid" | "lexical_only" | "none";
+  routeBestChildId: string | null;
+  routeBestScore: number | null;
+  routeSecondScore: number | null;
+  routeMargin: number | null;
+  routeThresholdUsed: number | null;
+  routeReason:
+    | "assigned_child"
+    | "below_threshold"
+    | "below_min_similarity"
+    | "low_margin"
+    | "no_candidate"
+    | "leaf_self"
+    | null;
+};
+
+type ResumeStatePayload = {
+  version: "map_search_resume_v1";
+  runId: string;
+  at: string;
+  state: "running" | "completed" | "failed" | "aborted" | "dry_run";
+  reason: string;
+  resume: {
+    queue: NodeQueueItem[];
+    visited: string[];
+    budgetState: BudgetState;
+    droppedByFreshnessTotal: number;
+    droppedBySourceCapTotal: number;
+    droppedByDomainPolicyTotal: number;
+    leafAssignmentFixesTotal: number;
+    fallbackSuppressedTotal: number;
+    consecutiveTransportFailures: number;
+    consecutiveLowYieldHighTools: number;
+    evidence: PersistedEvidence[];
+    callRecords: NodeCallRecord[];
+  };
+};
+
 type Args = {
   runId: string | null;
   out: string | null;
   reportOut: string | null;
+  reuseMode: ReuseMode;
+  persistenceMode: PersistenceMode;
+  artifactTtlSec: number;
+  stateTtlSec: number;
+  statusTtlSec: number;
+  warmStartEvidenceLimit: number;
+  warmStartMinSimilarity: number;
+  warmStartQueueBoost: number;
+  sameRunNoveltyAlpha: number;
+  sameRunNoveltyFloor: number;
+  sameRunNoveltyBoost: number;
   model: string;
   embedModel: string;
   includeWebTool: boolean;
@@ -396,6 +498,25 @@ function parseModeTool(raw: string | undefined): "both" | "web" | "x" | "none" {
   return "both";
 }
 
+function parseReuseMode(raw: string | undefined): ReuseMode {
+  if (!raw) return "auto";
+  const value = raw.trim().toLowerCase();
+  if (value === "auto") return "auto";
+  if (value === "cold_start") return "cold_start";
+  if (value === "same_run_diversify") return "same_run_diversify";
+  if (value === "same_run_seed") return "same_run_seed";
+  if (value === "resume_same_run") return "resume_same_run";
+  if (value === "warm_start_prior_run") return "warm_start_prior_run";
+  return "auto";
+}
+
+function parsePersistenceMode(raw: string | undefined): PersistenceMode {
+  if (!raw) return "normalized_keys";
+  const value = raw.trim().toLowerCase();
+  if (value === "artifact_only") return "artifact_only";
+  return "normalized_keys";
+}
+
 function parseDomainCsv(raw: string | undefined): string[] {
   if (!raw) return [];
   const normalized = raw.trim().toLowerCase();
@@ -447,6 +568,35 @@ function resolveArgs(argv: string[]): Args {
     runId: parseFlag(argv, "--run-id") ?? null,
     out: parseFlag(argv, "--out") ?? null,
     reportOut: parseFlag(argv, "--report-out") ?? null,
+    reuseMode: parseReuseMode(parseFlag(argv, "--reuse-mode")),
+    persistenceMode: parsePersistenceMode(parseFlag(argv, "--persistence-mode")),
+    artifactTtlSec: parsePositiveInt(parseFlag(argv, "--artifact-ttl-sec"), 60 * 60 * 24 * 3),
+    stateTtlSec: parsePositiveInt(parseFlag(argv, "--state-ttl-sec"), 60 * 60 * 24 * 3),
+    statusTtlSec: parsePositiveInt(parseFlag(argv, "--status-ttl-sec"), 60 * 60 * 24 * 7),
+    warmStartEvidenceLimit: parsePositiveInt(
+      parseFlag(argv, "--warm-start-evidence-limit"),
+      120,
+    ),
+    warmStartMinSimilarity: parseRatio(
+      parseFlag(argv, "--warm-start-min-similarity"),
+      0.18,
+    ),
+    warmStartQueueBoost: parseNonNegativeFloat(
+      parseFlag(argv, "--warm-start-queue-boost"),
+      0.8,
+    ),
+    sameRunNoveltyAlpha: parseNonNegativeFloat(
+      parseFlag(argv, "--same-run-novelty-alpha"),
+      1.2,
+    ),
+    sameRunNoveltyFloor: parseRatio(
+      parseFlag(argv, "--same-run-novelty-floor"),
+      0.35,
+    ),
+    sameRunNoveltyBoost: parseNonNegativeFloat(
+      parseFlag(argv, "--same-run-novelty-boost"),
+      0.25,
+    ),
     model:
       parseFlag(argv, "--model") ??
       process.env.XAI_SEARCH_MODEL?.trim() ??
@@ -603,6 +753,11 @@ Core:
   --tool-mode <both|web|x|none>       Tool surface (default: both)
   --out <path>                        JSON report output path
   --report-out <path>                 Markdown report output path
+  --reuse-mode <mode>                 auto | cold_start | same_run_diversify | same_run_seed | resume_same_run | warm_start_prior_run (default: auto)
+  --persistence-mode <mode>           artifact_only | normalized_keys (default: normalized_keys)
+  --artifact-ttl-sec <n>              Redis TTL for artifact writes (default: 259200)
+  --state-ttl-sec <n>                 Redis TTL for resumable state (default: 259200)
+  --status-ttl-sec <n>                Redis TTL for status hashes (default: 604800)
   --dry-run                           Plan + traversal only, no model/tool calls
   --verbose                           Verbose logs
 
@@ -648,6 +803,12 @@ Traversal and routing:
   --route-min-margin-l1 <0..1>        Min top1-top2 score margin at level 1 (default: 0.015)
   --route-min-margin-l2 <0..1>        Min top1-top2 score margin at level 2 (default: 0.02)
   --route-min-margin-l3 <0..1>        Min top1-top2 score margin at level >=3 (default: 0.025)
+  --warm-start-evidence-limit <n>     Max prior evidence items loaded for warm-start (default: 120)
+  --warm-start-min-similarity <0..1>  Minimum warm-start assignment similarity (default: 0.18)
+  --warm-start-queue-boost <n>        Priority boost for warm-start queue seeds (default: 0.8)
+  --same-run-novelty-alpha <n>        Novelty penalty strength for same_run_diversify (default: 1.2)
+  --same-run-novelty-floor <0..1>     Minimum novelty multiplier floor (default: 0.35)
+  --same-run-novelty-boost <n>        Bonus priority for unseen nodes (default: 0.25)
   --source-deny-domains <csv>         Drop evidence from denied domains (default includes market operators + low-signal social/exchange domains)
   --source-allow-domains <csv>        Optional allowlist. If set, only listed domains are accepted
   --max-x-evidence-per-call <n>       Max accepted x.com evidence items per call (default: 2)
@@ -1236,6 +1397,92 @@ function toEvidencePreviewFromMapEvidence(evidence: MapEvidence): EvidencePrevie
   };
 }
 
+function toPersistedEvidence(evidence: MapEvidence): PersistedEvidence {
+  return {
+    id: evidence.id,
+    headline: evidence.headline,
+    summary: evidence.summary,
+    sourceUrl: evidence.sourceUrl,
+    sourceDomain: evidence.sourceDomain,
+    publishedAt: evidence.publishedAt,
+    authorHandle: evidence.authorHandle,
+    confirmation: evidence.confirmation,
+    sourceTier: evidence.sourceTier,
+    relevance: evidence.relevance,
+    confidence: evidence.confidence,
+    callIndex: evidence.callIndex,
+    nodeId: evidence.nodeId,
+    assignedNodeId: evidence.assignedNodeId,
+    assignedSimilarity: evidence.assignedSimilarity,
+    routeMethod: evidence.routeMethod,
+    routeBestChildId: evidence.routeBestChildId,
+    routeBestScore: evidence.routeBestScore,
+    routeSecondScore: evidence.routeSecondScore,
+    routeMargin: evidence.routeMargin,
+    routeThresholdUsed: evidence.routeThresholdUsed,
+    routeReason: evidence.routeReason,
+  };
+}
+
+function fromPersistedEvidence(
+  evidence: PersistedEvidence,
+  nodeById: Map<string, MarketMapNode>,
+): MapEvidence | null {
+  if (!nodeById.has(evidence.nodeId)) return null;
+  const assignedNodeId =
+    evidence.assignedNodeId && nodeById.has(evidence.assignedNodeId)
+      ? evidence.assignedNodeId
+      : nodeById.has(evidence.nodeId)
+        ? evidence.nodeId
+        : null;
+  return {
+    id: evidence.id,
+    headline: evidence.headline,
+    summary: evidence.summary,
+    sourceUrl: evidence.sourceUrl,
+    sourceDomain: evidence.sourceDomain,
+    publishedAt: evidence.publishedAt,
+    authorHandle: evidence.authorHandle,
+    confirmation: evidence.confirmation,
+    sourceTier: evidence.sourceTier,
+    relevance: evidence.relevance,
+    confidence: evidence.confidence,
+    callIndex: evidence.callIndex,
+    nodeId: evidence.nodeId,
+    embedding: null,
+    assignedNodeId,
+    assignedSimilarity: evidence.assignedSimilarity,
+    routeMethod: evidence.routeMethod,
+    routeBestChildId: evidence.routeBestChildId,
+    routeBestScore: evidence.routeBestScore,
+    routeSecondScore: evidence.routeSecondScore,
+    routeMargin: evidence.routeMargin,
+    routeThresholdUsed: evidence.routeThresholdUsed,
+    routeReason: evidence.routeReason,
+  };
+}
+
+function parseResumeStatePayload(raw: string | null): ResumeStatePayload | null {
+  const parsed = safeJsonParse<ResumeStatePayload>(raw);
+  if (!parsed || parsed.version !== "map_search_resume_v1") return null;
+  if (!parsed.resume || !Array.isArray(parsed.resume.queue)) return null;
+  if (!Array.isArray(parsed.resume.visited)) return null;
+  if (!Array.isArray(parsed.resume.evidence)) return null;
+  if (!Array.isArray(parsed.resume.callRecords)) return null;
+  return parsed;
+}
+
+function parsePriorEvidenceFromArtifact(
+  raw: string | null,
+  limit: number,
+): PersistedEvidence[] {
+  if (!raw) return [];
+  const parsed = safeJsonParse<{ evidence?: PersistedEvidence[] }>(raw);
+  const evidence = parsed?.evidence;
+  if (!Array.isArray(evidence)) return [];
+  return evidence.slice(0, Math.max(0, limit));
+}
+
 function serializeCallRecord(
   call: NodeCallRecord,
   args: Args,
@@ -1755,6 +2002,19 @@ function formatUsd(value: number): string {
   return `$${value.toFixed(6)}`;
 }
 
+async function setSearchStatus(
+  redis: ReturnType<typeof createRedisClient>,
+  key: string,
+  ttlSec: number,
+  payload: Record<string, string | number | null>,
+): Promise<void> {
+  const cleaned = Object.fromEntries(
+    Object.entries(payload).map(([k, v]) => [k, v ?? ""]),
+  );
+  await redis.hSet(key, cleaned);
+  await redis.expire(key, ttlSec);
+}
+
 export async function runMapSearch(
   argv: string[] = process.argv.slice(2),
   context: Partial<MapSearchRunContext> = {},
@@ -1822,14 +2082,323 @@ export async function runMapSearch(
   let fallbackSuppressedTotal = 0;
   const sourceAllowSet = new Set(args.sourceAllowDomains);
   const sourceDenySet = new Set(args.sourceDenyDomains);
+  const nowIso = () => new Date().toISOString();
+  let resumeLoaded = false;
+  let resumeStateReason: string | null = null;
+  let sameRunSeedCandidates = 0;
+  let sameRunSeedAssigned = 0;
+  let warmStartCandidates = 0;
+  let warmStartAssigned = 0;
 
-  for (const node of rootNodes) {
-    const basePriority = Math.log10(1 + Math.max(1, node.sumVolume24h));
-    addQueueItem(queue, queued, {
-      nodeId: node.id,
-      priority: basePriority,
-      reason: "root_seed",
-    });
+  const budgetState: BudgetState = {
+    callsExecuted: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalToolAttempts: 0,
+    totalEstimatedCostUsd: 0,
+    totalChargedCostUsd: 0,
+    totalProviderReportedCostUsd: 0,
+    providerReportedCostCalls: 0,
+    expectedNextInputTokens: args.bootstrapExpectedInputTokens,
+    expectedNextCallCostUsd: args.bootstrapExpectedCallCostUsd,
+    expectedNextOutputTokens: args.bootstrapExpectedOutputTokens,
+  };
+
+  const sameRunCoverageByNode = new Map<string, number>();
+  let sameRunDiversifyActive = false;
+
+  const applySameRunNoveltyPriority = (nodeId: string, priority: number): number => {
+    if (!sameRunDiversifyActive) return priority;
+    const coverage = sameRunCoverageByNode.get(nodeId) ?? 0;
+    const noveltyMultiplier = Math.max(
+      args.sameRunNoveltyFloor,
+      1 / (1 + args.sameRunNoveltyAlpha * Math.log1p(coverage)),
+    );
+    const unseenBoost = coverage === 0 ? args.sameRunNoveltyBoost : 0;
+    return Number((priority * noveltyMultiplier + unseenBoost).toFixed(6));
+  };
+
+  const markCoverageForNodeAndAncestors = (nodeId: string): void => {
+    let cursor: MarketMapNode | null = nodeById.get(nodeId) ?? null;
+    while (cursor) {
+      const current = sameRunCoverageByNode.get(cursor.id) ?? 0;
+      sameRunCoverageByNode.set(cursor.id, current + 1);
+      cursor = cursor.parentId ? (nodeById.get(cursor.parentId) ?? null) : null;
+    }
+  };
+
+  const loadSameRunCoverage = (priorEvidence: PersistedEvidence[]): number => {
+    sameRunCoverageByNode.clear();
+    for (const prior of priorEvidence) {
+      const assigned = prior.assignedNodeId && nodeById.has(prior.assignedNodeId)
+        ? prior.assignedNodeId
+        : nodeById.has(prior.nodeId)
+          ? prior.nodeId
+          : null;
+      if (!assigned) continue;
+      markCoverageForNodeAndAncestors(assigned);
+    }
+    return sameRunCoverageByNode.size;
+  };
+
+  const seedRoots = () => {
+    for (const node of rootNodes) {
+      const basePriority = Math.log10(1 + Math.max(1, node.sumVolume24h));
+      addQueueItem(queue, queued, {
+        nodeId: node.id,
+        priority: applySameRunNoveltyPriority(node.id, basePriority),
+        reason: "root_seed",
+      });
+    }
+  };
+
+  const shouldTryResume =
+    args.reuseMode === "auto" || args.reuseMode === "resume_same_run";
+  const shouldTrySameRunDiversify =
+    args.reuseMode === "auto" || args.reuseMode === "same_run_diversify";
+  const shouldTrySameRunSeed = args.reuseMode === "same_run_seed";
+  const shouldTryWarmStart =
+    args.reuseMode === "auto" || args.reuseMode === "warm_start_prior_run";
+
+  if (shouldTryResume && args.persistenceMode === "normalized_keys") {
+    const resumeRaw = await redis.get(mapSearchStateKey(runId));
+    const resumed = parseResumeStatePayload(resumeRaw);
+    if (
+      resumed &&
+      resumed.runId === runId &&
+      resumed.resume &&
+      resumed.state !== "completed" &&
+      resumed.state !== "dry_run"
+    ) {
+      queue.length = 0;
+      queued.clear();
+      visited.clear();
+      evidenceById.clear();
+      callRecords.length = 0;
+
+      for (const visitedNodeId of resumed.resume.visited) {
+        if (nodeById.has(visitedNodeId)) visited.add(visitedNodeId);
+      }
+      for (const queuedItem of resumed.resume.queue) {
+        if (!nodeById.has(queuedItem.nodeId)) continue;
+        if (visited.has(queuedItem.nodeId)) continue;
+        addQueueItem(queue, queued, queuedItem);
+      }
+      for (const evidenceRaw of resumed.resume.evidence) {
+        const restored = fromPersistedEvidence(evidenceRaw, nodeById);
+        if (!restored) continue;
+        evidenceById.set(restored.id, restored);
+        const assignedNodeId = restored.assignedNodeId ?? restored.nodeId;
+        const set = leafEvidenceIds.get(assignedNodeId) ?? new Set<string>();
+        set.add(restored.id);
+        leafEvidenceIds.set(assignedNodeId, set);
+        const headlines = nodeEvidenceHeadlines.get(restored.nodeId) ?? [];
+        headlines.push(restored.headline);
+        nodeEvidenceHeadlines.set(restored.nodeId, headlines.slice(-20));
+      }
+      for (const record of resumed.resume.callRecords) {
+        callRecords.push(record);
+      }
+
+      budgetState.callsExecuted = resumed.resume.budgetState.callsExecuted ?? 0;
+      budgetState.totalInputTokens = resumed.resume.budgetState.totalInputTokens ?? 0;
+      budgetState.totalOutputTokens = resumed.resume.budgetState.totalOutputTokens ?? 0;
+      budgetState.totalToolAttempts = resumed.resume.budgetState.totalToolAttempts ?? 0;
+      budgetState.totalEstimatedCostUsd =
+        resumed.resume.budgetState.totalEstimatedCostUsd ?? 0;
+      budgetState.totalChargedCostUsd =
+        resumed.resume.budgetState.totalChargedCostUsd ?? 0;
+      budgetState.totalProviderReportedCostUsd =
+        resumed.resume.budgetState.totalProviderReportedCostUsd ?? 0;
+      budgetState.providerReportedCostCalls =
+        resumed.resume.budgetState.providerReportedCostCalls ?? 0;
+      budgetState.expectedNextInputTokens =
+        resumed.resume.budgetState.expectedNextInputTokens ??
+        budgetState.expectedNextInputTokens;
+      budgetState.expectedNextCallCostUsd =
+        resumed.resume.budgetState.expectedNextCallCostUsd ??
+        budgetState.expectedNextCallCostUsd;
+      budgetState.expectedNextOutputTokens =
+        resumed.resume.budgetState.expectedNextOutputTokens ??
+        budgetState.expectedNextOutputTokens;
+
+      droppedByFreshnessTotal = resumed.resume.droppedByFreshnessTotal ?? 0;
+      droppedBySourceCapTotal = resumed.resume.droppedBySourceCapTotal ?? 0;
+      droppedByDomainPolicyTotal = resumed.resume.droppedByDomainPolicyTotal ?? 0;
+      leafAssignmentFixesTotal = resumed.resume.leafAssignmentFixesTotal ?? 0;
+      fallbackSuppressedTotal = resumed.resume.fallbackSuppressedTotal ?? 0;
+      consecutiveTransportFailures = resumed.resume.consecutiveTransportFailures ?? 0;
+      consecutiveLowYieldHighTools =
+        resumed.resume.consecutiveLowYieldHighTools ?? 0;
+
+      resumeLoaded = true;
+      resumeStateReason = resumed.reason ?? "resume_state";
+      console.log(`${logPrefix()} resume_loaded`, {
+        runId,
+        at: resumed.at,
+        reason: resumeStateReason,
+        queueSize: queue.length,
+        visited: visited.size,
+        evidence: evidenceById.size,
+        callsExecuted: budgetState.callsExecuted,
+      });
+    }
+  }
+
+  const seedQueueFromEvidence = async (
+    sourceId: string,
+    priorEvidence: PersistedEvidence[],
+    reasonPrefix: "same_run_seed" | "same_run_diversify" | "warm_start",
+  ): Promise<number> => {
+    let assigned = 0;
+    const rootById = new Map(rootNodes.map(node => [node.id, node]));
+    for (const prior of priorEvidence) {
+      const sourceText = `${prior.headline} ${prior.summary}`.trim();
+      const cachedEmbeddingRaw = await redis.get(mapSearchNewsEmbeddingKey(prior.id));
+      const cachedEmbedding = (() => {
+        if (!cachedEmbeddingRaw) return null;
+        const parsed = safeJsonParse<number[]>(cachedEmbeddingRaw);
+        if (!Array.isArray(parsed) || parsed.length === 0) return null;
+        return normalizeVector(parsed);
+      })();
+      let bestRootId: string | null = null;
+      let bestRootScore = 0;
+      for (const root of rootNodes) {
+        const lexicalScore = lexicalSimilarity(sourceText, nodeDisplayLabel(root));
+        let score = lexicalScore;
+        if (cachedEmbedding) {
+          const representativeEmbedding = await getNodeRepresentativeEmbedding(root.id);
+          const semanticScore = representativeEmbedding
+            ? Math.max(0, dot(cachedEmbedding, representativeEmbedding))
+            : 0;
+          score = 0.75 * semanticScore + 0.25 * lexicalScore;
+        }
+        if (score > bestRootScore) {
+          bestRootScore = score;
+          bestRootId = root.id;
+        }
+      }
+      if (!bestRootId || bestRootScore < args.warmStartMinSimilarity) continue;
+      const root = rootById.get(bestRootId);
+      if (!root) continue;
+
+      const headlines = nodeEvidenceHeadlines.get(root.id) ?? [];
+      headlines.push(prior.headline);
+      nodeEvidenceHeadlines.set(root.id, headlines.slice(-20));
+      addQueueItem(queue, queued, {
+        nodeId: root.id,
+        priority: applySameRunNoveltyPriority(
+          root.id,
+          Math.log10(1 + Math.max(1, root.sumVolume24h)) +
+            args.warmStartQueueBoost +
+            bestRootScore,
+        ),
+        reason: `${reasonPrefix}:${sourceId}`,
+      });
+
+      const children = childrenByParent.get(root.id) ?? [];
+      let bestChild: MarketMapNode | null = null;
+      let bestChildScore = 0;
+      for (const child of children) {
+        const lexicalScore = lexicalSimilarity(sourceText, nodeDisplayLabel(child));
+        let score = lexicalScore;
+        if (cachedEmbedding) {
+          const representativeEmbedding = await getNodeRepresentativeEmbedding(child.id);
+          const semanticScore = representativeEmbedding
+            ? Math.max(0, dot(cachedEmbedding, representativeEmbedding))
+            : 0;
+          score = 0.75 * semanticScore + 0.25 * lexicalScore;
+        }
+        if (score > bestChildScore) {
+          bestChildScore = score;
+          bestChild = child;
+        }
+      }
+      if (bestChild && bestChildScore >= args.warmStartMinSimilarity) {
+        addQueueItem(queue, queued, {
+          nodeId: bestChild.id,
+          priority: applySameRunNoveltyPriority(
+            bestChild.id,
+            Math.log10(1 + Math.max(1, bestChild.sumVolume24h)) +
+              args.warmStartQueueBoost * 0.9 +
+              bestChildScore,
+          ),
+          reason: `${reasonPrefix}_child:${sourceId}`,
+        });
+        const childHeadlines = nodeEvidenceHeadlines.get(bestChild.id) ?? [];
+        childHeadlines.push(prior.headline);
+        nodeEvidenceHeadlines.set(bestChild.id, childHeadlines.slice(-20));
+      }
+      assigned += 1;
+    }
+    return assigned;
+  };
+
+  if (!resumeLoaded && (shouldTrySameRunDiversify || shouldTrySameRunSeed)) {
+    const sameRunArtifactRaw = await redis.get(mapSearchArtifactKey(runId));
+    const sameRunEvidence = parsePriorEvidenceFromArtifact(
+      sameRunArtifactRaw,
+      args.warmStartEvidenceLimit,
+    );
+    sameRunSeedCandidates = sameRunEvidence.length;
+    if (sameRunSeedCandidates > 0) {
+      if (shouldTrySameRunDiversify) {
+        const coverageNodes = loadSameRunCoverage(sameRunEvidence);
+        sameRunDiversifyActive = coverageNodes > 0;
+      }
+      sameRunSeedAssigned = await seedQueueFromEvidence(
+        runId,
+        sameRunEvidence,
+        shouldTrySameRunDiversify ? "same_run_diversify" : "same_run_seed",
+      );
+      if (sameRunSeedAssigned > 0) {
+        console.log(
+          `${logPrefix()} ${shouldTrySameRunDiversify ? "same_run_diversify" : "same_run_seed"}`,
+          {
+            runId,
+            candidates: sameRunSeedCandidates,
+            assigned: sameRunSeedAssigned,
+            sameRunDiversifyActive,
+            sameRunCoverageNodes: sameRunCoverageByNode.size,
+            noveltyAlpha: args.sameRunNoveltyAlpha,
+            noveltyFloor: args.sameRunNoveltyFloor,
+            noveltyBoost: args.sameRunNoveltyBoost,
+          },
+        );
+      }
+    }
+  }
+
+  if (!resumeLoaded && sameRunSeedAssigned === 0 && shouldTryWarmStart) {
+    const previousRunIdRaw = (await redis.get(MAP_SEARCH_LATEST_KEY))?.trim() ?? "";
+    const previousRunId =
+      previousRunIdRaw.length > 0 && previousRunIdRaw !== runId
+        ? previousRunIdRaw
+        : null;
+    if (previousRunId) {
+      const priorArtifactRaw = await redis.get(mapSearchArtifactKey(previousRunId));
+      const priorEvidence = parsePriorEvidenceFromArtifact(
+        priorArtifactRaw,
+        args.warmStartEvidenceLimit,
+      );
+      warmStartCandidates = priorEvidence.length;
+      if (warmStartCandidates > 0) {
+        warmStartAssigned = await seedQueueFromEvidence(
+          previousRunId,
+          priorEvidence,
+          "warm_start",
+        );
+        console.log(`${logPrefix()} warm_start`, {
+          previousRunId,
+          candidates: warmStartCandidates,
+          assigned: warmStartAssigned,
+        });
+      }
+    }
+  }
+
+  if (!resumeLoaded) {
+    seedRoots();
   }
 
   console.log(`${logPrefix()} start`, {
@@ -1867,25 +2436,46 @@ export async function runMapSearch(
     sourceDenyDomains: args.sourceDenyDomains,
     maxUnconfirmedEvidencePerCall: args.maxUnconfirmedEvidencePerCall,
     rootSeedCount: rootNodes.length,
+    reuseMode: args.reuseMode,
+    persistenceMode: args.persistenceMode,
+    resumeLoaded,
+    resumeStateReason,
+    sameRunSeedCandidates,
+    sameRunSeedAssigned,
+    sameRunDiversifyActive,
+    sameRunCoverageNodes: sameRunCoverageByNode.size,
+    sameRunNoveltyAlpha: args.sameRunNoveltyAlpha,
+    sameRunNoveltyFloor: args.sameRunNoveltyFloor,
+    sameRunNoveltyBoost: args.sameRunNoveltyBoost,
+    warmStartCandidates,
+    warmStartAssigned,
     dryRun: args.dryRun,
   });
 
-  const budgetState: BudgetState = {
-    callsExecuted: 0,
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    totalToolAttempts: 0,
-    totalEstimatedCostUsd: 0,
-    totalChargedCostUsd: 0,
-    totalProviderReportedCostUsd: 0,
-    providerReportedCostCalls: 0,
-    expectedNextInputTokens: args.bootstrapExpectedInputTokens,
-    expectedNextCallCostUsd: args.bootstrapExpectedCallCostUsd,
-    expectedNextOutputTokens: args.bootstrapExpectedOutputTokens,
-  };
+  if (args.persistenceMode === "normalized_keys") {
+    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "running",
+      reason: "started",
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+    });
+    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "running",
+      reason: "started",
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+    });
+  }
 
   async function writeCheckpoint(reason: string): Promise<void> {
-    if (!args.out) return;
     const evidence = Array.from(evidenceById.values())
       .sort(
         (a, b) =>
@@ -1944,6 +2534,11 @@ export async function runMapSearch(
         droppedByDomainPolicyTotal,
         leafAssignmentFixesTotal,
         fallbackSuppressedTotal,
+        resumeLoaded,
+        sameRunSeedCandidates,
+        sameRunSeedAssigned,
+        warmStartCandidates,
+        warmStartAssigned,
       },
       callsCompact: callRecords.map(call => ({
         callIndex: call.callIndex,
@@ -1967,7 +2562,67 @@ export async function runMapSearch(
       calls: callRecords.map(call => serializeCallRecord(call, args)),
       evidence,
     };
-    await writeFile(args.out, JSON.stringify(checkpoint, null, 2), "utf8");
+    if (args.out) {
+      await writeFile(args.out, JSON.stringify(checkpoint, null, 2), "utf8");
+    }
+
+    const shouldPersistArtifact =
+      args.persistenceMode === "artifact_only" ||
+      args.persistenceMode === "normalized_keys";
+    if (!shouldPersistArtifact) return;
+
+    await redis.set(mapSearchArtifactKey(runId), JSON.stringify(checkpoint), {
+      EX: args.artifactTtlSec,
+    });
+
+    if (args.persistenceMode !== "normalized_keys") return;
+
+    const resumePayload: ResumeStatePayload = {
+      version: "map_search_resume_v1",
+      runId,
+      at: nowIso(),
+      state: args.dryRun ? "dry_run" : "running",
+      reason,
+      resume: {
+        queue: queue.slice(0, 1_500),
+        visited: Array.from(visited),
+        budgetState: { ...budgetState },
+        droppedByFreshnessTotal,
+        droppedBySourceCapTotal,
+        droppedByDomainPolicyTotal,
+        leafAssignmentFixesTotal,
+        fallbackSuppressedTotal,
+        consecutiveTransportFailures,
+        consecutiveLowYieldHighTools,
+        evidence: Array.from(evidenceById.values()).map(toPersistedEvidence),
+        callRecords: callRecords.slice(),
+      },
+    };
+
+    await redis.set(mapSearchStateKey(runId), JSON.stringify(resumePayload), {
+      EX: args.stateTtlSec,
+    });
+
+    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "running",
+      reason,
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+    });
+    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "running",
+      reason,
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+    });
   }
 
   async function getNodeEvents(nodeId: string): Promise<MarketMapEventSummary[]> {
@@ -2041,6 +2696,8 @@ export async function runMapSearch(
     nodeWindowHours: number;
     rawCall: XaiCallRaw;
   };
+
+  await writeCheckpoint("started");
 
   while (queue.length > 0) {
     const budgetStopBefore = evaluateBudgetStop(args, budgetState);
@@ -2537,7 +3194,7 @@ export async function runMapSearch(
             base * 0.2 + route.score + route.evidenceCount * 0.35;
           addQueueItem(queue, queued, {
             nodeId: child.id,
-            priority: routePriority,
+            priority: applySameRunNoveltyPriority(child.id, routePriority),
             reason: `route:${node.id}`,
           });
         }
@@ -2622,7 +3279,10 @@ export async function runMapSearch(
           if (visited.has(fallback.id)) continue;
           addQueueItem(queue, queued, {
             nodeId: fallback.id,
-            priority: Math.log10(1 + Math.max(1, fallback.sumVolume24h)) * 0.1,
+            priority: applySameRunNoveltyPriority(
+              fallback.id,
+              Math.log10(1 + Math.max(1, fallback.sumVolume24h)) * 0.1,
+            ),
             reason: `fallback:${node.id}`,
           });
         }
@@ -2883,6 +3543,11 @@ export async function runMapSearch(
       leafAssignmentFixesTotal,
       fallbackSuppressedTotal,
       consecutiveTransportFailures,
+      resumeLoaded,
+      sameRunSeedCandidates,
+      sameRunSeedAssigned,
+      warmStartCandidates,
+      warmStartAssigned,
       topLeaves: topLeaves.length,
     },
     callsCompact: callRecords.map(call => ({
@@ -2945,6 +3610,115 @@ export async function runMapSearch(
     calls: callRecords.map(call => serializeCallRecord(call, args)),
     markdownReport: args.leanOutput ? undefined : markdownReport,
   };
+
+  if (
+    args.persistenceMode === "artifact_only" ||
+    args.persistenceMode === "normalized_keys"
+  ) {
+    await redis.set(mapSearchArtifactKey(runId), JSON.stringify(report), {
+      EX: args.artifactTtlSec,
+    });
+    await redis.set(MAP_SEARCH_LATEST_KEY, runId, { EX: args.artifactTtlSec });
+    await redis.set(
+      mapSearchLatestForMapRunKey(runId),
+      JSON.stringify({
+        runId,
+        completedAt: nowIso(),
+      }),
+      { EX: args.artifactTtlSec },
+    );
+  }
+
+  if (args.persistenceMode === "normalized_keys") {
+    const finalResumePayload: ResumeStatePayload = {
+      version: "map_search_resume_v1",
+      runId,
+      at: nowIso(),
+      state: args.dryRun ? "dry_run" : "completed",
+      reason: "completed",
+      resume: {
+        queue: queue.slice(0, 1_500),
+        visited: Array.from(visited),
+        budgetState: { ...budgetState },
+        droppedByFreshnessTotal,
+        droppedBySourceCapTotal,
+        droppedByDomainPolicyTotal,
+        leafAssignmentFixesTotal,
+        fallbackSuppressedTotal,
+        consecutiveTransportFailures,
+        consecutiveLowYieldHighTools,
+        evidence: Array.from(evidenceById.values()).map(toPersistedEvidence),
+        callRecords: callRecords.slice(),
+      },
+    };
+    await redis.set(mapSearchStateKey(runId), JSON.stringify(finalResumePayload), {
+      EX: args.stateTtlSec,
+    });
+    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "completed",
+      reason: "completed",
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      reuseMode: args.reuseMode,
+      resumeLoaded: resumeLoaded ? 1 : 0,
+      sameRunSeedAssigned,
+      warmStartAssigned,
+    });
+    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
+      state: args.dryRun ? "dry_run" : "completed",
+      reason: "completed",
+      runId,
+      at: nowIso(),
+      callsExecuted: budgetState.callsExecuted,
+      evidenceTotal: evidenceById.size,
+      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      reuseMode: args.reuseMode,
+      resumeLoaded: resumeLoaded ? 1 : 0,
+      sameRunSeedAssigned,
+      warmStartAssigned,
+    });
+  }
+
+  if (!args.dryRun) {
+    const nowMs = Date.now();
+    const evidenceItems = Array.from(evidenceById.values());
+    if (evidenceItems.length > 0) {
+      for (const evidence of evidenceItems) {
+        await redis.set(mapSearchEvidenceDocKey(evidence.id), JSON.stringify({
+          ...toPersistedEvidence(evidence),
+          runId,
+          capturedAt: nowIso(),
+        }), {
+          EX: Math.max(args.artifactTtlSec, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC),
+        });
+        const publishedTs = parseDateIso(evidence.publishedAt)?.getTime() ?? nowMs;
+        await redis.zAdd(MAP_SEARCH_RECENT_EVIDENCE_KEY, {
+          score: publishedTs,
+          value: evidence.id,
+        });
+        if (evidence.embedding && evidence.embedding.length > 0) {
+          await redis.set(
+            mapSearchNewsEmbeddingKey(evidence.id),
+            JSON.stringify(evidence.embedding),
+            {
+              EX: Math.max(args.artifactTtlSec, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC),
+            },
+          );
+        }
+      }
+      await redis.expire(MAP_SEARCH_RECENT_EVIDENCE_KEY, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC);
+      await redis.zRemRangeByScore(
+        MAP_SEARCH_RECENT_EVIDENCE_KEY,
+        0,
+        nowMs - MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC * 1000,
+      );
+    }
+  }
 
   if (args.out) {
     await writeFile(args.out, JSON.stringify(report, null, 2), "utf8");

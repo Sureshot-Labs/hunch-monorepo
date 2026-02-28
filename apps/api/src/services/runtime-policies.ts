@@ -16,6 +16,7 @@ export const INTEL_POLICY_KEYS = [
   "ai_whale_profiles",
   "ai_clusters",
   "market_map",
+  "map_search",
   "arbitrage_defaults",
 ] as const;
 
@@ -168,6 +169,85 @@ export type MarketMapPolicy = {
   projectionBudgetMs: number;
 };
 
+export type MapSearchPolicy = {
+  enabled: boolean;
+  triggerMode: "interval" | "cron";
+  pollIntervalSec: number;
+  scheduleCron: string | null;
+  runWindowMinutes: number;
+  maxRunsPerWindow: number;
+  maxRunsPerDay: number;
+  budgetWindowMinutes: number;
+  budgetWindowUsd: number;
+  dayBudgetUsd: number;
+  estimatedRunCostUsd: number;
+  lockTtlSec: number;
+  lockHeartbeatSec: number;
+  artifactTtlSec: number;
+  stateTtlSec: number;
+  statusTtlSec: number;
+  reuseMode:
+    | "auto"
+    | "cold_start"
+    | "same_run_diversify"
+    | "same_run_seed"
+    | "resume_same_run"
+    | "warm_start_prior_run";
+  persistenceMode: "artifact_only" | "normalized_keys";
+  model: string;
+  embedModel: string;
+  toolMode: "both" | "web" | "x" | "none";
+  strictSchema: boolean;
+  requireDistinctDomains: boolean;
+  concurrency: number;
+  maxCalls: number;
+  budgetUsd: number;
+  timeoutSec: number;
+  maxRetries: number;
+  retryBaseMs: number;
+  maxTotalInputTokens: number;
+  maxTotalOutputTokens: number;
+  maxTotalToolAttempts: number;
+  maxToolAttemptsPerCall: number;
+  maxEvidencePerCall: number;
+  maxEvidenceTotal: number;
+  windowHoursL1: number;
+  windowHoursL2: number;
+  windowHoursL3: number;
+  recentHoursHint: number;
+  topRootCount: number;
+  branchPerCall: number;
+  eventSampleLimit: number;
+  childSampleLimit: number;
+  siblingSampleLimit: number;
+  routeThresholdL1: number;
+  routeThresholdL2: number;
+  routeThresholdL3: number;
+  routeMinSimilarity: number;
+  routeMinMarginL1: number;
+  routeMinMarginL2: number;
+  routeMinMarginL3: number;
+  sourceAllowDomains: string[];
+  sourceDenyDomains: string[];
+  maxXEvidencePerCall: number;
+  maxUnconfirmedEvidencePerCall: number;
+  lowYieldToolAttemptThreshold: number;
+  lowYieldConsecutiveThreshold: number;
+  enforceFreshness: boolean;
+  reportTopLeaves: number;
+  reportTopEvidence: number;
+  warmStartEvidenceLimit: number;
+  warmStartMinSimilarity: number;
+  warmStartQueueBoost: number;
+  sameRunNoveltyAlpha: number;
+  sameRunNoveltyFloor: number;
+  sameRunNoveltyBoost: number;
+  dryRun: boolean;
+  verbose: boolean;
+  leanOutput: boolean;
+  verboseOutput: boolean;
+};
+
 type WalletIntelAttributionVenueKey = "polymarket" | "kalshi" | "limitless";
 
 export type WalletIntelAttributionDisplayPolicy = {
@@ -263,6 +343,7 @@ type IntelPolicyMap = {
   ai_whale_profiles: AiWhaleProfilesPolicy;
   ai_clusters: AiClustersPolicy;
   market_map: MarketMapPolicy;
+  map_search: MapSearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
 };
 
@@ -453,6 +534,96 @@ const marketMapSchema = z
   .strict()
   .partial();
 
+const mapSearchToolModeSchema = z.enum(["both", "web", "x", "none"]);
+const mapSearchReuseModeSchema = z.enum([
+  "auto",
+  "cold_start",
+  "same_run_diversify",
+  "same_run_seed",
+  "resume_same_run",
+  "warm_start_prior_run",
+]);
+const mapSearchPersistenceModeSchema = z.enum([
+  "artifact_only",
+  "normalized_keys",
+]);
+
+const mapSearchSchema = z
+  .object({
+    enabled: strictBoolean,
+    triggerMode: z.enum(["interval", "cron"]),
+    pollIntervalSec: positiveInt.max(60 * 60 * 24),
+    scheduleCron: z.string().trim().min(1).max(200).nullable(),
+    runWindowMinutes: positiveInt.max(60 * 24 * 30),
+    maxRunsPerWindow: positiveInt.max(1_000),
+    maxRunsPerDay: positiveInt.max(1_000),
+    budgetWindowMinutes: positiveInt.max(60 * 24 * 30),
+    budgetWindowUsd: nonNegativeNumber.max(1_000_000),
+    dayBudgetUsd: nonNegativeNumber.max(1_000_000),
+    estimatedRunCostUsd: nonNegativeNumber.max(100_000),
+    lockTtlSec: positiveInt.max(60 * 60 * 24),
+    lockHeartbeatSec: positiveInt.max(60 * 60 * 24),
+    artifactTtlSec: positiveInt.max(60 * 60 * 24 * 30),
+    stateTtlSec: positiveInt.max(60 * 60 * 24 * 30),
+    statusTtlSec: positiveInt.max(60 * 60 * 24 * 30),
+    reuseMode: mapSearchReuseModeSchema,
+    persistenceMode: mapSearchPersistenceModeSchema,
+    model: z.string().trim().min(1).max(200),
+    embedModel: z.string().trim().min(1).max(200),
+    toolMode: mapSearchToolModeSchema,
+    strictSchema: strictBoolean,
+    requireDistinctDomains: strictBoolean,
+    concurrency: positiveInt.max(8),
+    maxCalls: positiveInt.max(1_000),
+    budgetUsd: nonNegativeNumber.max(1_000_000),
+    timeoutSec: positiveInt.max(60 * 10),
+    maxRetries: nonNegativeInt.max(10),
+    retryBaseMs: positiveInt.max(60_000),
+    maxTotalInputTokens: positiveInt.max(10_000_000),
+    maxTotalOutputTokens: positiveInt.max(10_000_000),
+    maxTotalToolAttempts: positiveInt.max(100_000),
+    maxToolAttemptsPerCall: positiveInt.max(1_000),
+    maxEvidencePerCall: positiveInt.max(100),
+    maxEvidenceTotal: positiveInt.max(10_000),
+    windowHoursL1: positiveInt.max(24 * 30),
+    windowHoursL2: positiveInt.max(24 * 30),
+    windowHoursL3: positiveInt.max(24 * 30),
+    recentHoursHint: positiveInt.max(24 * 30),
+    topRootCount: positiveInt.max(200),
+    branchPerCall: positiveInt.max(50),
+    eventSampleLimit: positiveInt.max(200),
+    childSampleLimit: positiveInt.max(200),
+    siblingSampleLimit: positiveInt.max(200),
+    routeThresholdL1: ratio,
+    routeThresholdL2: ratio,
+    routeThresholdL3: ratio,
+    routeMinSimilarity: ratio,
+    routeMinMarginL1: ratio,
+    routeMinMarginL2: ratio,
+    routeMinMarginL3: ratio,
+    sourceAllowDomains: z.array(z.string().trim().min(1).max(128)).max(256),
+    sourceDenyDomains: z.array(z.string().trim().min(1).max(128)).max(256),
+    maxXEvidencePerCall: nonNegativeInt.max(100),
+    maxUnconfirmedEvidencePerCall: nonNegativeInt.max(100),
+    lowYieldToolAttemptThreshold: positiveInt.max(1_000),
+    lowYieldConsecutiveThreshold: positiveInt.max(1_000),
+    enforceFreshness: strictBoolean,
+    reportTopLeaves: positiveInt.max(200),
+    reportTopEvidence: positiveInt.max(200),
+    warmStartEvidenceLimit: positiveInt.max(5_000),
+    warmStartMinSimilarity: ratio,
+    warmStartQueueBoost: nonNegativeNumber.max(10),
+    sameRunNoveltyAlpha: nonNegativeNumber.max(20),
+    sameRunNoveltyFloor: ratio,
+    sameRunNoveltyBoost: nonNegativeNumber.max(10),
+    dryRun: strictBoolean,
+    verbose: strictBoolean,
+    leanOutput: strictBoolean,
+    verboseOutput: strictBoolean,
+  })
+  .strict()
+  .partial();
+
 const arbitrageDefaultsSchema = z
   .object({
     limit: positiveInt.max(200),
@@ -610,6 +781,7 @@ const policySchemas = {
   ai_whale_profiles: aiWhaleProfilesSchema,
   ai_clusters: aiClustersSchema,
   market_map: marketMapSchema,
+  map_search: mapSearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
 } as const;
 
@@ -869,6 +1041,93 @@ function getDefaults(): IntelPolicyMap {
       projectionUmapMinDist: env.aiMarketMapProjectionUmapMinDist,
       projectionSeed: env.aiMarketMapProjectionSeed,
       projectionBudgetMs: env.aiMarketMapProjectionBudgetMs,
+    },
+    map_search: {
+      enabled: env.aiMapSearchEnabled,
+      triggerMode: "interval",
+      pollIntervalSec: 60 * 60,
+      scheduleCron: null,
+      runWindowMinutes: 60,
+      maxRunsPerWindow: 1,
+      maxRunsPerDay: 24,
+      budgetWindowMinutes: 60 * 24,
+      budgetWindowUsd: 10,
+      dayBudgetUsd: 25,
+      estimatedRunCostUsd: 1,
+      lockTtlSec: 60 * 30,
+      lockHeartbeatSec: 30,
+      artifactTtlSec: 60 * 60 * 24 * 3,
+      stateTtlSec: 60 * 60 * 24 * 3,
+      statusTtlSec: 60 * 60 * 24 * 7,
+      reuseMode: "auto",
+      persistenceMode: "normalized_keys",
+      model: process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
+      embedModel:
+        process.env.OPENROUTER_EMBED_MODEL ||
+        process.env.AI_EMBED_MODEL ||
+        "intfloat/e5-large-v2",
+      toolMode: "both",
+      strictSchema: true,
+      requireDistinctDomains: true,
+      concurrency: 4,
+      maxCalls: 16,
+      budgetUsd: 1,
+      timeoutSec: 80,
+      maxRetries: 1,
+      retryBaseMs: 1200,
+      maxTotalInputTokens: 500_000,
+      maxTotalOutputTokens: 150_000,
+      maxTotalToolAttempts: 600,
+      maxToolAttemptsPerCall: 20,
+      maxEvidencePerCall: 8,
+      maxEvidenceTotal: 240,
+      windowHoursL1: 96,
+      windowHoursL2: 72,
+      windowHoursL3: 24,
+      recentHoursHint: 6,
+      topRootCount: 6,
+      branchPerCall: 3,
+      eventSampleLimit: 10,
+      childSampleLimit: 8,
+      siblingSampleLimit: 6,
+      routeThresholdL1: 0.2,
+      routeThresholdL2: 0.24,
+      routeThresholdL3: 0.28,
+      routeMinSimilarity: 0,
+      routeMinMarginL1: 0.015,
+      routeMinMarginL2: 0.02,
+      routeMinMarginL3: 0.025,
+      sourceAllowDomains: [],
+      sourceDenyDomains: [
+        "polymarket.com",
+        "kalshi.com",
+        "limitless.exchange",
+        "hunch.trade",
+        "app.hunch.trade",
+        "instagram.com",
+        "facebook.com",
+        "tiktok.com",
+        "mexc.com",
+        "mexc.co",
+        "kucoin.com",
+      ],
+      maxXEvidencePerCall: 2,
+      maxUnconfirmedEvidencePerCall: 2,
+      lowYieldToolAttemptThreshold: 10,
+      lowYieldConsecutiveThreshold: 3,
+      enforceFreshness: true,
+      reportTopLeaves: 10,
+      reportTopEvidence: 20,
+      warmStartEvidenceLimit: 120,
+      warmStartMinSimilarity: 0.18,
+      warmStartQueueBoost: 0.8,
+      sameRunNoveltyAlpha: 1.2,
+      sameRunNoveltyFloor: 0.35,
+      sameRunNoveltyBoost: 0.25,
+      dryRun: false,
+      verbose: false,
+      leanOutput: false,
+      verboseOutput: false,
     },
     arbitrage_defaults: {
       limit: 24,
@@ -1270,6 +1529,129 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
   };
 }
 
+function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
+  const normalizeDomains = (domains: string[]): string[] =>
+    Array.from(
+      new Set(
+        (domains ?? [])
+          .map((value) =>
+            value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, ""),
+          )
+          .filter((value) => value.length > 0),
+      ),
+    ).slice(0, 256);
+
+  return {
+    ...policy,
+    enabled: Boolean(policy.enabled),
+    triggerMode:
+      policy.triggerMode === "cron" || policy.triggerMode === "interval"
+        ? policy.triggerMode
+        : "interval",
+    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    scheduleCron:
+      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+        ? policy.scheduleCron.trim()
+        : null,
+    runWindowMinutes: clamp(Math.trunc(policy.runWindowMinutes), 1, 60 * 24 * 30),
+    maxRunsPerWindow: clamp(Math.trunc(policy.maxRunsPerWindow), 1, 1_000),
+    maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
+    budgetWindowMinutes: clamp(Math.trunc(policy.budgetWindowMinutes), 1, 60 * 24 * 30),
+    budgetWindowUsd: clamp(policy.budgetWindowUsd, 0, 1_000_000),
+    dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
+    estimatedRunCostUsd: clamp(policy.estimatedRunCostUsd, 0, 100_000),
+    lockTtlSec: clamp(Math.trunc(policy.lockTtlSec), 30, 60 * 60 * 24),
+    lockHeartbeatSec: clamp(Math.trunc(policy.lockHeartbeatSec), 10, 60 * 60 * 24),
+    artifactTtlSec: clamp(Math.trunc(policy.artifactTtlSec), 60, 60 * 60 * 24 * 30),
+    stateTtlSec: clamp(Math.trunc(policy.stateTtlSec), 60, 60 * 60 * 24 * 30),
+    statusTtlSec: clamp(Math.trunc(policy.statusTtlSec), 60, 60 * 60 * 24 * 30),
+    reuseMode:
+      policy.reuseMode === "auto" ||
+      policy.reuseMode === "cold_start" ||
+      policy.reuseMode === "same_run_diversify" ||
+      policy.reuseMode === "same_run_seed" ||
+      policy.reuseMode === "resume_same_run" ||
+      policy.reuseMode === "warm_start_prior_run"
+        ? policy.reuseMode
+        : "auto",
+    persistenceMode:
+      policy.persistenceMode === "artifact_only" ||
+      policy.persistenceMode === "normalized_keys"
+        ? policy.persistenceMode
+        : "normalized_keys",
+    model: policy.model.trim(),
+    embedModel: policy.embedModel.trim(),
+    toolMode:
+      policy.toolMode === "none" ||
+      policy.toolMode === "web" ||
+      policy.toolMode === "x" ||
+      policy.toolMode === "both"
+        ? policy.toolMode
+        : "both",
+    strictSchema: Boolean(policy.strictSchema),
+    requireDistinctDomains: Boolean(policy.requireDistinctDomains),
+    concurrency: clamp(Math.trunc(policy.concurrency), 1, 8),
+    maxCalls: clamp(Math.trunc(policy.maxCalls), 1, 1_000),
+    budgetUsd: clamp(policy.budgetUsd, 0, 1_000_000),
+    timeoutSec: clamp(Math.trunc(policy.timeoutSec), 5, 60 * 10),
+    maxRetries: clamp(Math.trunc(policy.maxRetries), 0, 10),
+    retryBaseMs: clamp(Math.trunc(policy.retryBaseMs), 100, 60_000),
+    maxTotalInputTokens: clamp(Math.trunc(policy.maxTotalInputTokens), 1_000, 10_000_000),
+    maxTotalOutputTokens: clamp(Math.trunc(policy.maxTotalOutputTokens), 1_000, 10_000_000),
+    maxTotalToolAttempts: clamp(Math.trunc(policy.maxTotalToolAttempts), 1, 100_000),
+    maxToolAttemptsPerCall: clamp(Math.trunc(policy.maxToolAttemptsPerCall), 1, 1_000),
+    maxEvidencePerCall: clamp(Math.trunc(policy.maxEvidencePerCall), 1, 100),
+    maxEvidenceTotal: clamp(Math.trunc(policy.maxEvidenceTotal), 1, 10_000),
+    windowHoursL1: clamp(Math.trunc(policy.windowHoursL1), 1, 24 * 30),
+    windowHoursL2: clamp(Math.trunc(policy.windowHoursL2), 1, 24 * 30),
+    windowHoursL3: clamp(Math.trunc(policy.windowHoursL3), 1, 24 * 30),
+    recentHoursHint: clamp(Math.trunc(policy.recentHoursHint), 1, 24 * 30),
+    topRootCount: clamp(Math.trunc(policy.topRootCount), 1, 200),
+    branchPerCall: clamp(Math.trunc(policy.branchPerCall), 1, 50),
+    eventSampleLimit: clamp(Math.trunc(policy.eventSampleLimit), 1, 200),
+    childSampleLimit: clamp(Math.trunc(policy.childSampleLimit), 1, 200),
+    siblingSampleLimit: clamp(Math.trunc(policy.siblingSampleLimit), 0, 200),
+    routeThresholdL1: clamp(policy.routeThresholdL1, 0, 1),
+    routeThresholdL2: clamp(policy.routeThresholdL2, 0, 1),
+    routeThresholdL3: clamp(policy.routeThresholdL3, 0, 1),
+    routeMinSimilarity: clamp(policy.routeMinSimilarity, 0, 1),
+    routeMinMarginL1: clamp(policy.routeMinMarginL1, 0, 1),
+    routeMinMarginL2: clamp(policy.routeMinMarginL2, 0, 1),
+    routeMinMarginL3: clamp(policy.routeMinMarginL3, 0, 1),
+    sourceAllowDomains: normalizeDomains(policy.sourceAllowDomains ?? []),
+    sourceDenyDomains: normalizeDomains(policy.sourceDenyDomains ?? []),
+    maxXEvidencePerCall: clamp(Math.trunc(policy.maxXEvidencePerCall), 0, 100),
+    maxUnconfirmedEvidencePerCall: clamp(
+      Math.trunc(policy.maxUnconfirmedEvidencePerCall),
+      0,
+      100,
+    ),
+    lowYieldToolAttemptThreshold: clamp(
+      Math.trunc(policy.lowYieldToolAttemptThreshold),
+      1,
+      1_000,
+    ),
+    lowYieldConsecutiveThreshold: clamp(
+      Math.trunc(policy.lowYieldConsecutiveThreshold),
+      1,
+      1_000,
+    ),
+    enforceFreshness: Boolean(policy.enforceFreshness),
+    reportTopLeaves: clamp(Math.trunc(policy.reportTopLeaves), 1, 200),
+    reportTopEvidence: clamp(Math.trunc(policy.reportTopEvidence), 1, 200),
+    warmStartEvidenceLimit: clamp(Math.trunc(policy.warmStartEvidenceLimit), 1, 5_000),
+    warmStartMinSimilarity: clamp(policy.warmStartMinSimilarity, 0, 1),
+    warmStartQueueBoost: clamp(policy.warmStartQueueBoost, 0, 10),
+    sameRunNoveltyAlpha: clamp(policy.sameRunNoveltyAlpha, 0, 20),
+    sameRunNoveltyFloor: clamp(policy.sameRunNoveltyFloor, 0, 1),
+    sameRunNoveltyBoost: clamp(policy.sameRunNoveltyBoost, 0, 10),
+    dryRun: Boolean(policy.dryRun),
+    verbose: Boolean(policy.verbose),
+    leanOutput: Boolean(policy.leanOutput),
+    verboseOutput: Boolean(policy.verboseOutput),
+  };
+}
+
 function normalizeArbitrageDefaultsPolicy(
   policy: ArbitrageDefaultsPolicy,
 ): ArbitrageDefaultsPolicy {
@@ -1300,6 +1682,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeAiClustersPolicy(merged as AiClustersPolicy) as IntelPolicyMap[K];
     case "market_map":
       return normalizeMarketMapPolicy(merged as MarketMapPolicy) as IntelPolicyMap[K];
+    case "map_search":
+      return normalizeMapSearchPolicy(merged as MapSearchPolicy) as IntelPolicyMap[K];
     case "arbitrage_defaults":
       return normalizeArbitrageDefaultsPolicy(merged as ArbitrageDefaultsPolicy) as IntelPolicyMap[K];
     default:
@@ -1342,6 +1726,9 @@ function sanitizeOverridePayload(
     case "market_map": {
       delete record.projectionAlgo;
       delete record.layoutMode;
+      return record;
+    }
+    case "map_search": {
       return record;
     }
     case "ai_whale_profiles": {
@@ -1473,6 +1860,10 @@ export async function resolveAllIntelPolicies(
       "market_map",
       byKey.get("market_map") ?? null,
     ),
+    map_search: resolveFromRow(
+      "map_search",
+      byKey.get("map_search") ?? null,
+    ),
     arbitrage_defaults: resolveFromRow(
       "arbitrage_defaults",
       byKey.get("arbitrage_defaults") ?? null,
@@ -1502,6 +1893,10 @@ export async function resolveAiClustersPolicy(pool: DbQuery) {
 
 export async function resolveMarketMapPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "market_map");
+}
+
+export async function resolveMapSearchPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "map_search");
 }
 
 export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {

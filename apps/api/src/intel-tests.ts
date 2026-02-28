@@ -332,6 +332,54 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "map search policy normalizes scheduler bounds and domains",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000006",
+              policy_key: "map_search",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                pollIntervalSec: 1,
+                lockTtlSec: 30,
+                lockHeartbeatSec: 1,
+                maxCalls: 1,
+                enforceFreshness: "false",
+                sourceAllowDomains: [
+                  "HTTPS://WWW.Example.com",
+                  "example.com",
+                  "  api.X.com ",
+                ],
+                sourceDenyDomains: [
+                  "https://www.Polymarket.com",
+                  "polymarket.com",
+                ],
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "map_search");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.pollIntervalSec, 60);
+      assert.equal(resolved.effective.lockTtlSec, 30);
+      assert.equal(resolved.effective.lockHeartbeatSec, 10);
+      assert.equal(resolved.effective.maxCalls, 1);
+      assert.equal(resolved.effective.enforceFreshness, false);
+      assert.deepEqual(resolved.effective.sourceAllowDomains, [
+        "example.com",
+        "api.x.com",
+      ]);
+      assert.deepEqual(resolved.effective.sourceDenyDomains, ["polymarket.com"]);
+    },
+  },
+  {
     name: "wallet attribution policy override merges partial nested blocks",
     run: async () => {
       const db = {

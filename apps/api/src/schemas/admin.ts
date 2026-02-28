@@ -239,6 +239,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "ai_whale_profiles",
   "ai_clusters",
   "market_map",
+  "map_search",
   "arbitrage_defaults",
 ]);
 

@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { runMapSearch } from "./ai-map-search-run.js";
+import { runMapSearch } from "./lib/map-news/map-search-core.js";
 
 const isDirectRun = (() => {
   const entry = process.argv[1];
