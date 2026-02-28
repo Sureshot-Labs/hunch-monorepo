@@ -1,1 +1,1 @@
-export { runMarketMapBuild } from "../../ai-embed-market-map.js";
+export { runMarketMapBuild } from "../../ai-map-build-run.js";

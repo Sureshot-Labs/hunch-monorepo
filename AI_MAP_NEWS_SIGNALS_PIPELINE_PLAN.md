@@ -32,7 +32,7 @@ Current implementation matrix:
 
 | Stage | Run core | Smoke wrapper | Policy-driven runner | Scheduler wiring | Redis persistence contract |
 |---|---|---|---|---|---|
-| `map-build` | implemented | n/a | implemented (`ai:map-build:run`) | implemented via cron/runner usage | implemented for map snapshot + runner status |
+| `map-build` | implemented (`ai:map-build:run`) | implemented (`ai:map-build:smoke`) | implemented (`ai:map-build:runner`) | implemented via cron/runner usage | implemented for map snapshot + runner status |
 | `news-search` | implemented (`ai:map-search:run`) | implemented (`ai:map-search:smoke`) | implemented (`ai:map-search:runner`) | not implemented yet | implemented (artifact/state/status + reuse) |
 | `signal-generate` | partial (inside smoke script) | implemented (`ai:map-signals:smoke`) | not implemented yet (`ai:map-signals:run` pending) | not implemented yet | partial (digest/idempotency plan pending) |
 | `cluster-summary-generate` | not implemented | not implemented | not implemented | not implemented | not implemented |
@@ -61,7 +61,7 @@ Current implementation matrix:
 
 ## 3.1 Map build + serving
 
-- Build script: `pnpm -C hunch-monorepo -F api run ai:embed:market-map`.
+- Build script: `pnpm -C hunch-monorepo -F api run ai:map-build:run`.
 - Active run metadata and nodes stored in Redis:
   - `ai:market_map:v1:active`
   - `ai:market_map:v1:run:<runId>:meta`
@@ -869,7 +869,7 @@ From recent iterations:
 
 ```bash
 # map build
-pnpm -C hunch-monorepo -F api run ai:embed:market-map -- --force
+pnpm -C hunch-monorepo -F api run ai:map-build:run -- --force
 
 # search run core CLI (manual/QA execution; not policy-driven yet)
 pnpm -C hunch-monorepo -F api run ai:map-search:run -- \
@@ -894,7 +894,7 @@ pnpm -C hunch-monorepo -F api run ai:map-signals:smoke -- \
 
 # policy-driven runners
 # implemented:
-# pnpm -C hunch-monorepo -F api run ai:map-build:run
+# pnpm -C hunch-monorepo -F api run ai:map-build:runner
 # pnpm -C hunch-monorepo -F api run ai:map-search:runner
 # pending implementation:
 # ai:map-signals:run (not added to package scripts yet)

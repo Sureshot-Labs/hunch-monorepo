@@ -99,6 +99,7 @@ type SignalsReportSignal = {
   evidenceRefs: Array<{
     evidenceId: string;
     headline: string;
+    sourceUrl: string;
     sourceDomain: string;
     publishedAt: string | null;
     confirmation: "confirmed" | "developing" | "unconfirmed";
@@ -307,6 +308,34 @@ function ensureArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function buildModelEvidenceRefs(
+  refs: SignalsReportSignal["evidenceRefs"],
+): Array<{
+  evidence_id: string;
+  headline: string | null;
+  source_url: string | null;
+  source_domain: string | null;
+  published_at: string | null;
+  confirmation: "confirmed" | "developing" | "unconfirmed" | null;
+}> {
+  return ensureArray<SignalsReportSignal["evidenceRefs"][number]>(refs)
+    .slice(0, 6)
+    .map((ref) => ({
+      evidence_id: normalizeText(ref.evidenceId, 160),
+      headline: normalizeText(ref.headline, 240) || null,
+      source_url: normalizeText(ref.sourceUrl, 1024) || null,
+      source_domain: normalizeText(ref.sourceDomain, 120) || null,
+      published_at: normalizeText(ref.publishedAt ?? "", 64) || null,
+      confirmation:
+        ref.confirmation === "confirmed" ||
+        ref.confirmation === "developing" ||
+        ref.confirmation === "unconfirmed"
+          ? ref.confirmation
+          : null,
+    }))
+    .filter((ref) => ref.evidence_id.length > 0);
+}
+
 function buildInputDigest(
   mapRunId: string,
   searchRunId: string | null,
@@ -434,6 +463,7 @@ async function persistSignalNotes(params: {
               charged_cost_usd: signal.chargedCostUsd,
               estimated_cost_usd: signal.estimatedCostUsd,
               provider_cost_usd: signal.providerCostUsd,
+              evidence_refs: buildModelEvidenceRefs(signal.evidenceRefs),
             }),
           ],
         );

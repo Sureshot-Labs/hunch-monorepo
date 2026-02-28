@@ -228,6 +228,7 @@ type SignalCandidate = {
   evidenceRefs: Array<{
     evidenceId: string;
     headline: string;
+    sourceUrl: string;
     sourceDomain: string;
     publishedAt: string | null;
     confirmation: Confirmation;
@@ -1233,6 +1234,7 @@ function summarizeDeterministic(
     evidenceRefs: evidence.slice(0, 6).map(item => ({
       evidenceId: item.id,
       headline: item.headline,
+      sourceUrl: item.sourceUrl,
       sourceDomain: item.sourceDomain,
       publishedAt: item.publishedAt,
       confirmation: item.confirmation,
@@ -1291,6 +1293,7 @@ async function evaluateNodeWithModel(params: {
   const baseRefs = evidence.slice(0, 6).map(item => ({
     evidenceId: item.id,
     headline: item.headline,
+    sourceUrl: item.sourceUrl,
     sourceDomain: item.sourceDomain,
     publishedAt: item.publishedAt,
     confirmation: item.confirmation,
