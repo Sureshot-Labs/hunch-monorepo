@@ -26,6 +26,44 @@ export type MarketMapNodeVenueMetrics = {
   sumOpenInterest: number;
 };
 
+export type MarketMapNodePreview = {
+  id: string;
+  venue: MarketMapVenue;
+  dominantVenue: MarketMapVenue | null;
+  venueCount: number;
+  venueBreakdown: Record<MarketMapVenue, MarketMapNodeVenueMetrics>;
+  level: number;
+  parentId: string | null;
+  childIds: string[];
+  label: string;
+  labelRepresentative: string;
+  labelAi: string | null;
+  labelSource: "representative" | "ai";
+  x: number;
+  y: number;
+  eventCount: number;
+  sumVolume24h: number;
+  sumLiquidity: number;
+  sumOpenInterest: number;
+  score: number;
+  sampleEventIds: string[];
+  heroEventId?: string | null;
+  heroMarketId?: string | null;
+  heroImage?: string | null;
+  heroIcon?: string | null;
+  signalCountDirect?: number;
+  signalCountSubtree?: number;
+  topSignal?: {
+    title: string;
+    description: string | null;
+    signalType: "catalyst" | "risk" | "update" | null;
+    direction: "up" | "down" | "mixed" | null;
+    confidence: number | null;
+    createdAt: string;
+  } | null;
+  updatedAt: string;
+};
+
 export type MarketMapNode = {
   id: string;
   venue: MarketMapVenue;
@@ -51,7 +89,18 @@ export type MarketMapNode = {
   heroMarketId?: string | null;
   heroImage?: string | null;
   heroIcon?: string | null;
+  signalCountDirect?: number;
+  signalCountSubtree?: number;
+  topSignal?: {
+    title: string;
+    description: string | null;
+    signalType: "catalyst" | "risk" | "update" | null;
+    direction: "up" | "down" | "mixed" | null;
+    confidence: number | null;
+    createdAt: string;
+  } | null;
   eventsPreview?: MarketMapEventSummary[];
+  childrenPreview?: MarketMapNodePreview[];
   updatedAt: string;
 };
 
@@ -77,6 +126,15 @@ export type MarketMapEventSummary = {
   resolvedOutcomePct?: number | null;
   image?: string | null;
   icon?: string | null;
+  signalCount?: number;
+  topSignal?: {
+    title: string;
+    description: string | null;
+    signalType: "catalyst" | "risk" | "update" | null;
+    direction: "up" | "down" | "mixed" | null;
+    confidence: number | null;
+    createdAt: string;
+  } | null;
   volume24h: number;
   liquidity: number;
   openInterest: number;
