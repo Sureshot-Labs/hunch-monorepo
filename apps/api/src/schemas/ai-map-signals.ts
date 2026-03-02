@@ -57,8 +57,6 @@ export type MapSignalsPromptInput = {
     eventTitle: string;
     marketTitle: string | null;
     venue: string;
-    yesProb: number | null;
-    noProb: number | null;
     volume24h: number;
     liquidity: number;
     openInterest: number;
@@ -100,8 +98,6 @@ function formatMarketList(
           `  venue: ${item.venue}`,
           `  event_title: ${item.eventTitle}`,
           `  market_title: ${item.marketTitle ?? "-"}`,
-          `  yes_prob: ${item.yesProb == null ? "-" : item.yesProb.toFixed(4)}`,
-          `  no_prob: ${item.noProb == null ? "-" : item.noProb.toFixed(4)}`,
           `  volume_24h: ${item.volume24h.toFixed(2)}`,
           `  liquidity: ${item.liquidity.toFixed(2)}`,
           `  open_interest: ${item.openInterest.toFixed(2)}`,

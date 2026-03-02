@@ -1104,6 +1104,11 @@ async function main() {
     );
     addArgIfMissing(
       searchArgs,
+      "--top-markets-per-event",
+      String(config.topMarketsPerEvent),
+    );
+    addArgIfMissing(
+      searchArgs,
       "--max-markets-per-node",
       String(config.maxMarketsPerNode),
     );

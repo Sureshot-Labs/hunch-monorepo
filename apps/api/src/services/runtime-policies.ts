@@ -271,6 +271,7 @@ export type MapSignalsPolicy = {
   maxNodes: number;
   maxSignals: number;
   maxEvidencePerNode: number;
+  topMarketsPerEvent: number;
   maxMarketsPerNode: number;
   minEvidence: number;
   minConfirmed: number;
@@ -686,6 +687,7 @@ const mapSignalsSchema = z
     maxNodes: positiveInt.max(500),
     maxSignals: positiveInt.max(500),
     maxEvidencePerNode: positiveInt.max(200),
+    topMarketsPerEvent: positiveInt.max(20),
     maxMarketsPerNode: positiveInt.max(200),
     minEvidence: positiveInt.max(50),
     minConfirmed: nonNegativeInt.max(50),
@@ -1234,6 +1236,7 @@ function getDefaults(): IntelPolicyMap {
       maxNodes: 20,
       maxSignals: 20,
       maxEvidencePerNode: 12,
+      topMarketsPerEvent: 3,
       maxMarketsPerNode: 12,
       minEvidence: 1,
       minConfirmed: 1,
@@ -1801,6 +1804,7 @@ function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
     maxNodes: clamp(Math.trunc(policy.maxNodes), 1, 500),
     maxSignals: clamp(Math.trunc(policy.maxSignals), 1, 500),
     maxEvidencePerNode: clamp(Math.trunc(policy.maxEvidencePerNode), 1, 200),
+    topMarketsPerEvent: clamp(Math.trunc(policy.topMarketsPerEvent), 1, 20),
     maxMarketsPerNode: clamp(Math.trunc(policy.maxMarketsPerNode), 1, 200),
     minEvidence: clamp(Math.trunc(policy.minEvidence), 1, 50),
     minConfirmed: clamp(Math.trunc(policy.minConfirmed), 0, 50),

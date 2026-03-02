@@ -153,6 +153,7 @@ type Args = {
   embedModel: string;
   maxNodes: number;
   maxEvidencePerNode: number;
+  topMarketsPerEvent: number;
   maxMarketsPerNode: number;
   minEvidence: number;
   minConfirmed: number;
@@ -184,14 +185,22 @@ type MarketCandidate = {
   eventTitle: string;
   marketTitle: string | null;
   venue: string;
-  yesProb: number | null;
-  noProb: number | null;
   volume24h: number;
   liquidity: number;
   openInterest: number;
   score: number;
   affinityScore: number;
   affinityRank: number;
+};
+
+type EventTopMarket = {
+  marketId: string;
+  marketTitle: string | null;
+  venue: string | null;
+  volume24h: number;
+  liquidity: number;
+  openInterest: number;
+  rank: number;
 };
 
 type SignalDecision = "publish_candidate" | "context_only" | "skip";
@@ -359,6 +368,7 @@ function resolveArgs(argv: string[]): Args {
     embedModel,
     maxNodes: parsePositiveInt(parseFlag(argv, "--max-nodes"), 20),
     maxEvidencePerNode: parsePositiveInt(parseFlag(argv, "--max-evidence-per-node"), 12),
+    topMarketsPerEvent: parsePositiveInt(parseFlag(argv, "--top-markets-per-event"), 3),
     maxMarketsPerNode: parsePositiveInt(parseFlag(argv, "--max-markets-per-node"), 12),
     minEvidence: parsePositiveInt(parseFlag(argv, "--min-evidence"), 1),
     minConfirmed: parsePositiveInt(parseFlag(argv, "--min-confirmed"), 1),
@@ -415,6 +425,7 @@ Selection:
   --max-nodes <n>                Max node buckets considered (default: 20)
   --max-signals <n>              Max returned signals (default: 20)
   --max-evidence-per-node <n>    Evidence rows per node in prompt (default: 12)
+  --top-markets-per-event <n>    Candidate markets per event (default: 3)
   --max-markets-per-node <n>     Candidate markets per node (default: 12)
 
 Quality gates:
@@ -459,52 +470,19 @@ function numericOrZero(value: number | null | undefined): number {
   return Number.isFinite(value) ? Number(value) : 0;
 }
 
+function unknownNumberOrZero(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
 function safeNumber(value: unknown): number | null {
   if (typeof value !== "number") return null;
   if (!Number.isFinite(value)) return null;
   return value;
-}
-
-function computeMid(a: number | null | undefined, b: number | null | undefined): number | null {
-  if (Number.isFinite(a) && Number.isFinite(b)) {
-    return clamp01((Number(a) + Number(b)) / 2);
-  }
-  if (Number.isFinite(a)) return clamp01(Number(a));
-  if (Number.isFinite(b)) return clamp01(Number(b));
-  return null;
-}
-
-function inferYesNoProbabilities(event: MarketMapEventSummary): {
-  yesProb: number | null;
-  noProb: number | null;
-} {
-  if (event.resolvedOutcomePct != null && Number.isFinite(event.resolvedOutcomePct)) {
-    const yes = clamp01(event.resolvedOutcomePct / 100);
-    return { yesProb: yes, noProb: clamp01(1 - yes) };
-  }
-
-  const yesMid = computeMid(event.yesBid ?? null, event.yesAsk ?? null);
-  const noMid = computeMid(event.noBid ?? null, event.noAsk ?? null);
-
-  if (yesMid != null && noMid != null) {
-    const total = yesMid + noMid;
-    if (total > 0.000001) {
-      const yes = clamp01(yesMid / total);
-      return { yesProb: yes, noProb: clamp01(1 - yes) };
-    }
-  }
-  if (yesMid != null) return { yesProb: yesMid, noProb: clamp01(1 - yesMid) };
-  if (noMid != null) return { yesProb: clamp01(1 - noMid), noProb: noMid };
-
-  const marketMid = computeMid(event.marketBestBid ?? null, event.marketBestAsk ?? null);
-  if (marketMid != null) return { yesProb: marketMid, noProb: clamp01(1 - marketMid) };
-
-  if (event.lastPrice != null && Number.isFinite(event.lastPrice)) {
-    const yes = clamp01(event.lastPrice);
-    return { yesProb: yes, noProb: clamp01(1 - yes) };
-  }
-
-  return { yesProb: null, noProb: null };
 }
 
 function buildSignalId(runId: string, nodeId: string): string {
@@ -1064,6 +1042,7 @@ async function callOpenRouterEmbeddings(
 
 async function toMarketCandidates(
   events: MarketMapEventSummary[],
+  topMarketsByEventId: Map<string, EventTopMarket[]>,
   maxItems: number,
   evidence: MapSearchEvidence[],
   options: {
@@ -1077,19 +1056,57 @@ async function toMarketCandidates(
   },
 ): Promise<MarketCandidate[]> {
   const out: MarketCandidate[] = [];
+  const candidates: MarketCandidate[] = [];
   const seen = new Set<string>();
-  const emitted = new Set<string>();
   const marketRows: MarketEmbeddingInput[] = [];
 
   for (const event of events) {
-    if (!event.representativeMarketId) continue;
-    const marketId = event.representativeMarketId;
-    if (seen.has(marketId)) continue;
-    seen.add(marketId);
+    const topMarkets = topMarketsByEventId.get(event.eventId) ?? [];
+    if (topMarkets.length === 0 && event.representativeMarketId) {
+      const marketId = event.representativeMarketId;
+      if (seen.has(marketId)) continue;
+      seen.add(marketId);
+      candidates.push({
+        marketId,
+        eventId: event.eventId,
+        eventTitle: event.title,
+        marketTitle: event.representativeMarketTitle ?? null,
+        venue: event.venue,
+        volume24h: numericOrZero(event.volume24h),
+        liquidity: numericOrZero(event.liquidity),
+        openInterest: numericOrZero(event.openInterest),
+        score: numericOrZero(event.score),
+        affinityScore: 0,
+        affinityRank: 0,
+      });
+      continue;
+    }
+
+    for (const market of topMarkets) {
+      const marketId = market.marketId;
+      if (seen.has(marketId)) continue;
+      seen.add(marketId);
+      candidates.push({
+        marketId,
+        eventId: event.eventId,
+        eventTitle: event.title,
+        marketTitle: market.marketTitle ?? null,
+        venue: market.venue ?? event.venue,
+        volume24h: market.volume24h,
+        liquidity: market.liquidity,
+        openInterest: market.openInterest,
+        score: numericOrZero(event.score),
+        affinityScore: 0,
+        affinityRank: 0,
+      });
+    }
+  }
+
+  for (const candidate of candidates) {
     marketRows.push({
-      marketId,
-      eventId: event.eventId,
-      text: `${event.title} ${event.representativeMarketTitle ?? ""}`,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+      text: `${candidate.eventTitle} ${candidate.marketTitle ?? ""}`,
     });
   }
 
@@ -1107,16 +1124,12 @@ async function toMarketCandidates(
       : Promise.resolve(new Map<string, number[] | null>()),
   ]);
 
-  for (const event of events) {
-    if (!event.representativeMarketId) continue;
-    const marketId = event.representativeMarketId;
-    if (emitted.has(marketId)) continue;
-    emitted.add(marketId);
-
-    const probs = inferYesNoProbabilities(event);
-    const marketText = `${event.title} ${event.representativeMarketTitle ?? ""}`;
+  for (const candidate of candidates) {
+    const marketText = `${candidate.eventTitle} ${candidate.marketTitle ?? ""}`;
     const marketEmbedding =
-      options.includeSemanticAffinity ? (marketEmbeddings.get(marketId) ?? null) : null;
+      options.includeSemanticAffinity
+        ? (marketEmbeddings.get(candidate.marketId) ?? null)
+        : null;
     const affinityScore = options.includeSemanticAffinity
       ? evidenceMarketAffinityHybrid(
           evidence,
@@ -1126,17 +1139,7 @@ async function toMarketCandidates(
         )
       : evidenceMarketAffinity(evidence, marketText);
     out.push({
-      marketId,
-      eventId: event.eventId,
-      eventTitle: event.title,
-      marketTitle: event.representativeMarketTitle ?? null,
-      venue: event.venue,
-      yesProb: probs.yesProb,
-      noProb: probs.noProb,
-      volume24h: numericOrZero(event.volume24h),
-      liquidity: numericOrZero(event.liquidity),
-      openInterest: numericOrZero(event.openInterest),
-      score: numericOrZero(event.score),
+      ...candidate,
       affinityScore,
       affinityRank: 0,
     });
@@ -1817,6 +1820,7 @@ export async function runMapSignals(
       maxNodes: args.maxNodes,
       maxSignals: args.maxSignals,
       maxEvidencePerNode: args.maxEvidencePerNode,
+      topMarketsPerEvent: args.topMarketsPerEvent,
       maxMarketsPerNode: args.maxMarketsPerNode,
       minEvidence: args.minEvidence,
       minConfirmed: args.minConfirmed,
@@ -1863,6 +1867,7 @@ export async function runMapSignals(
     });
 
     const nodeEventsCache = new Map<string, MarketMapEventSummary[]>();
+    const eventTopMarketsCache = new Map<string, EventTopMarket[]>();
     const evidenceEmbeddingCache = new Map<string, number[] | null>();
     const marketEmbeddingCache = new Map<string, number[] | null>();
     const eventEmbeddingCache = new Map<string, number[] | null>();
@@ -1899,6 +1904,95 @@ export async function runMapSignals(
         .sort((a, b) => numericOrZero(b.score) - numericOrZero(a.score));
       nodeEventsCache.set(nodeId, sorted);
       return sorted;
+    }
+
+    async function getTopMarketsForEvents(
+      eventIds: string[],
+    ): Promise<Map<string, EventTopMarket[]>> {
+      const out = new Map<string, EventTopMarket[]>();
+      const uniqueEventIds = Array.from(
+        new Set(eventIds.filter(eventId => eventId && eventId.trim().length > 0)),
+      );
+      const missing: string[] = [];
+      for (const eventId of uniqueEventIds) {
+        if (!eventTopMarketsCache.has(eventId)) missing.push(eventId);
+      }
+
+      if (missing.length > 0) {
+        type EventTopMarketRow = {
+          event_id: string;
+          market_id: string;
+          market_title: string | null;
+          market_venue: string | null;
+          volume_24h: unknown;
+          liquidity: unknown;
+          open_interest: unknown;
+          market_rank: unknown;
+        };
+        const { rows } = await pool.query<EventTopMarketRow>(
+          `
+            with ranked_markets as (
+              select
+                m.event_id,
+                m.id as market_id,
+                m.title as market_title,
+                m.venue as market_venue,
+                m.volume_24h,
+                m.liquidity,
+                m.open_interest,
+                row_number() over (
+                  partition by m.event_id
+                  order by m.volume_24h desc nulls last, m.liquidity desc nulls last, m.venue_market_id, m.id
+                ) as market_rank
+              from unified_markets m
+              where m.event_id = any($1::text[])
+            )
+            select
+              event_id,
+              market_id,
+              market_title,
+              market_venue,
+              volume_24h,
+              liquidity,
+              open_interest,
+              market_rank
+            from ranked_markets
+            where market_rank <= $2
+            order by event_id, market_rank
+          `,
+          [missing, args.topMarketsPerEvent],
+        );
+        const grouped = new Map<string, EventTopMarket[]>();
+        for (const row of rows) {
+          const venueRaw = (row.market_venue ?? "").toLowerCase();
+          const venue =
+            venueRaw === "polymarket" ||
+            venueRaw === "kalshi" ||
+            venueRaw === "limitless"
+              ? venueRaw
+              : null;
+          const parsed: EventTopMarket = {
+            marketId: row.market_id,
+            marketTitle: row.market_title?.trim() || null,
+            venue,
+            volume24h: unknownNumberOrZero(row.volume_24h),
+            liquidity: unknownNumberOrZero(row.liquidity),
+            openInterest: unknownNumberOrZero(row.open_interest),
+            rank: Math.max(1, Math.trunc(unknownNumberOrZero(row.market_rank))),
+          };
+          const list = grouped.get(row.event_id);
+          if (list) list.push(parsed);
+          else grouped.set(row.event_id, [parsed]);
+        }
+        for (const eventId of missing) {
+          eventTopMarketsCache.set(eventId, grouped.get(eventId) ?? []);
+        }
+      }
+
+      for (const eventId of uniqueEventIds) {
+        out.set(eventId, eventTopMarketsCache.get(eventId) ?? []);
+      }
+      return out;
     }
 
     async function getEventEmbedding(eventId: string): Promise<number[] | null> {
@@ -2060,8 +2154,12 @@ export async function runMapSignals(
       );
 
       const events = await getNodeEvents(bucket.nodeId);
+      const topMarketsByEventId = await getTopMarketsForEvents(
+        events.map(event => event.eventId),
+      );
       const candidateMarkets = await toMarketCandidates(
         events,
+        topMarketsByEventId,
         args.maxMarketsPerNode,
         bucket.evidence.slice(0, args.maxEvidencePerNode),
         {
@@ -2184,6 +2282,7 @@ export async function runMapSignals(
         maxNodes: args.maxNodes,
         maxSignals: args.maxSignals,
         maxEvidencePerNode: args.maxEvidencePerNode,
+        topMarketsPerEvent: args.topMarketsPerEvent,
         maxMarketsPerNode: args.maxMarketsPerNode,
         minEvidence: args.minEvidence,
         minConfirmed: args.minConfirmed,
