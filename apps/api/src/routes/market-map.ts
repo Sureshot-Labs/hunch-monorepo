@@ -547,15 +547,15 @@ async function loadLiveMarketDataForEvents(
         m.image as market_image,
         m.icon as market_icon,
         m.status::text as market_status,
-        m.best_bid as market_best_bid,
-        m.best_ask as market_best_ask,
-        m.last_price,
+        coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
+        coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
+        coalesce(m.last_price, km.last_price_dollars) as last_price,
         mt.token_yes,
         mt.token_no,
-        yes_top.best_bid as yes_top_bid,
-        yes_top.best_ask as yes_top_ask,
-        no_top.best_bid as no_top_bid,
-        no_top.best_ask as no_top_ask,
+        coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
+        coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
+        coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
+        coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
         coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) as accepting_orders,
         m.resolved_outcome,
         m.resolved_outcome_pct,
@@ -566,6 +566,73 @@ async function loadLiveMarketDataForEvents(
           order by
             (
               case
+                when coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
+                  and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
+                  and (m.expiration_time is null or m.expiration_time > now())
+                  and (m.close_time is null or m.close_time > now())
+                  and (
+                    m.resolved_outcome is null
+                    or upper(m.resolved_outcome::text) not in ('YES', 'NO')
+                  )
+                  and (
+                    m.resolved_outcome_pct is null
+                    or (m.resolved_outcome_pct > 0 and m.resolved_outcome_pct < 10000)
+                  )
+                then 0
+                else 1
+              end
+            ),
+            (
+              case
+                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+                  or coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+                  or coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+                  or coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+                  or m.best_bid is not null
+                  or m.best_ask is not null
+                  or coalesce(m.last_price, km.last_price_dollars) is not null
+                  or m.resolved_outcome is not null
+                  or m.resolved_outcome_pct is not null
+                then 0
+                else 1
+              end
+            ),
+            (
+              case
+                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+                  and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+                  and coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+                  and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+                then 0
+                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+                  and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+                then 1
+                when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+                  and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+                then 1
+                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+                  or coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+                  or coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+                  or coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+                then 2
+                when m.best_bid is not null
+                  and m.best_ask is not null
+                then 3
+                when m.best_bid is not null
+                  or m.best_ask is not null
+                then 4
+                when m.resolved_outcome is not null
+                  or m.resolved_outcome_pct is not null
+                then 5
+                when coalesce(m.last_price, km.last_price_dollars) is not null
+                then 6
+                else 7
+              end
+            ),
+            (case when odds.yes_probability is null then 1 else 0 end),
+            odds.yes_probability desc,
+            (
+              case
                 when m.status::text = 'ACTIVE'
                   and (m.expiration_time is null or m.expiration_time > now())
                   and (m.close_time is null or m.close_time > now())
@@ -573,21 +640,8 @@ async function loadLiveMarketDataForEvents(
                 else 1
               end
             ),
-            (case when odds.yes_probability is null then 1 else 0 end),
-            odds.yes_probability desc nulls last,
-            (case when m.id = ei.preferred_market_id then 0 else 1 end),
             (case when mt.token_yes is not null and mt.token_no is not null then 0 else 1 end),
-            (
-              case
-                when yes_top.best_bid is not null
-                  or yes_top.best_ask is not null
-                  or no_top.best_bid is not null
-                  or no_top.best_ask is not null
-                  or m.last_price is not null
-                then 0
-                else 1
-              end
-            ),
+            (case when m.id = ei.preferred_market_id then 0 else 1 end),
             (
               coalesce(
                 case
@@ -645,29 +699,72 @@ async function loadLiveMarketDataForEvents(
       ) no_top on true
       left join polymarket_markets pm
         on m.venue = 'polymarket' and pm.id = m.venue_market_id
+      left join kalshi_markets km
+        on m.venue = 'kalshi' and km.id = m.venue_market_id
       cross join lateral (
         select
           case
-            when yes_top.best_bid is not null and yes_top.best_ask is not null
+            when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+              and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
               then greatest(
                 0::double precision,
-                least(1::double precision, ((yes_top.best_bid + yes_top.best_ask) / 2)::double precision)
+                least(
+                  1::double precision,
+                  ((coalesce(yes_top.best_bid, km.yes_bid_dollars) + coalesce(yes_top.best_ask, km.yes_ask_dollars)) / 2)::double precision
+                )
               )
-            when yes_top.best_bid is not null
-              then greatest(0::double precision, least(1::double precision, yes_top.best_bid::double precision))
-            when yes_top.best_ask is not null
-              then greatest(0::double precision, least(1::double precision, yes_top.best_ask::double precision))
-            when no_top.best_bid is not null and no_top.best_ask is not null
+            when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
               then greatest(
                 0::double precision,
-                least(1::double precision, (1 - ((no_top.best_bid + no_top.best_ask) / 2)::double precision))
+                least(1::double precision, coalesce(yes_top.best_bid, km.yes_bid_dollars)::double precision)
               )
-            when no_top.best_bid is not null
-              then greatest(0::double precision, least(1::double precision, (1 - no_top.best_bid::double precision)))
-            when no_top.best_ask is not null
-              then greatest(0::double precision, least(1::double precision, (1 - no_top.best_ask::double precision)))
-            when m.last_price is not null
-              then greatest(0::double precision, least(1::double precision, m.last_price::double precision))
+            when coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, coalesce(yes_top.best_ask, km.yes_ask_dollars)::double precision)
+              )
+            when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+              and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+              then greatest(
+                0::double precision,
+                least(
+                  1::double precision,
+                  (1 - ((coalesce(no_top.best_bid, km.no_bid_dollars) + coalesce(no_top.best_ask, km.no_ask_dollars)) / 2)::double precision)
+                )
+              )
+            when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, (1 - coalesce(no_top.best_bid, km.no_bid_dollars)::double precision))
+              )
+            when coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, (1 - coalesce(no_top.best_ask, km.no_ask_dollars)::double precision))
+              )
+            when m.best_bid is not null and m.best_ask is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, ((m.best_bid + m.best_ask) / 2)::double precision)
+              )
+            when m.best_bid is not null
+              then greatest(0::double precision, least(1::double precision, m.best_bid::double precision))
+            when m.best_ask is not null
+              then greatest(0::double precision, least(1::double precision, m.best_ask::double precision))
+            when m.resolved_outcome_pct is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, (m.resolved_outcome_pct::double precision / 10000))
+              )
+            when upper(coalesce(m.resolved_outcome::text, '')) = 'YES'
+              then 1::double precision
+            when upper(coalesce(m.resolved_outcome::text, '')) = 'NO'
+              then 0::double precision
+            when coalesce(m.last_price, km.last_price_dollars) is not null
+              then greatest(
+                0::double precision,
+                least(1::double precision, coalesce(m.last_price, km.last_price_dollars)::double precision)
+              )
             else null::double precision
           end as yes_probability
       ) odds
@@ -807,8 +904,12 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const perVenueMin = query.perVenueMin ?? effective.mergePerVenueMinDefault;
       const includeChildrenPreview = query.includeChildrenPreview ?? false;
       const childrenPreviewLimit = query.childrenPreviewLimit ?? 8;
-      const includeLeafEventsPreview = query.includeLeafEventsPreview ?? false;
-      const leafEventsPreviewLimit = query.leafEventsPreviewLimit ?? 10;
+      const includeEventsPreview =
+        query.includeEventsPreview ??
+        query.includeLeafEventsPreview ??
+        false;
+      const eventsPreviewLimit =
+        query.eventsPreviewLimit ?? query.leafEventsPreviewLimit ?? 10;
 
       const { redis, status } = await getRedisStatus();
       if (!redis) {
@@ -1000,10 +1101,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         })),
       }));
 
-      const itemsWithLeafEventsPreview =
-        includeLeafEventsPreview &&
-        level === 3 &&
-        itemsWithPreviewSignals.length > 0
+      const itemsWithEventsPreview =
+        includeEventsPreview && itemsWithPreviewSignals.length > 0
           ? await (async () => {
               const pipeline = redis.multi();
               for (const node of itemsWithPreviewSignals) {
@@ -1026,7 +1125,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       b.score - a.score ||
                       a.eventId.localeCompare(b.eventId),
                   )
-                  .slice(0, leafEventsPreviewLimit),
+                  .slice(0, eventsPreviewLimit),
               );
               const previewEventIds = Array.from(
                 new Set(
@@ -1060,7 +1159,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       nodeCount: itemsWithPreview.length,
                       previewEventCount: previewEvents.length,
                     },
-                    "market-map leaf preview live market enrichment failed",
+                    "market-map events preview live market enrichment failed",
                   );
                 }
               }
@@ -1101,7 +1200,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         limit,
         perVenueMin,
         countsByVenue,
-        items: itemsWithLeafEventsPreview,
+        items: itemsWithEventsPreview,
         defaults: {
           sizeBy: effective.sizeByDefault,
           limit: effective.mergeLimitDefault,

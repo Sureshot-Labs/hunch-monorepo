@@ -9,6 +9,9 @@ export const marketMapQuerySchema = z.object({
   perVenueMin: z.coerce.number().int().min(0).max(50).optional(),
   includeChildrenPreview: z.coerce.boolean().optional(),
   childrenPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
+  includeEventsPreview: z.coerce.boolean().optional(),
+  eventsPreviewLimit: z.coerce.number().int().min(1).max(24).optional(),
+  // Backward-compat aliases.
   includeLeafEventsPreview: z.coerce.boolean().optional(),
   leafEventsPreviewLimit: z.coerce.number().int().min(1).max(24).optional(),
 });
