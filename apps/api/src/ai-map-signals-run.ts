@@ -24,6 +24,10 @@ import {
   type MarketMapMeta,
   type MarketMapNode,
 } from "./services/market-map.js";
+import {
+  eventVenueKey,
+  selectRankedRepresentativeMarketsForEvents,
+} from "./services/market-map-representative.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 
@@ -1042,7 +1046,7 @@ async function callOpenRouterEmbeddings(
 
 async function toMarketCandidates(
   events: MarketMapEventSummary[],
-  topMarketsByEventId: Map<string, EventTopMarket[]>,
+  topMarketsByEventVenue: Map<string, EventTopMarket[]>,
   maxItems: number,
   evidence: MapSearchEvidence[],
   options: {
@@ -1061,7 +1065,8 @@ async function toMarketCandidates(
   const marketRows: MarketEmbeddingInput[] = [];
 
   for (const event of events) {
-    const topMarkets = topMarketsByEventId.get(event.eventId) ?? [];
+    const topMarkets =
+      topMarketsByEventVenue.get(eventVenueKey(event.eventId, event.venue)) ?? [];
     if (topMarkets.length === 0 && event.representativeMarketId) {
       const marketId = event.representativeMarketId;
       if (seen.has(marketId)) continue;
@@ -1907,64 +1912,42 @@ export async function runMapSignals(
     }
 
     async function getTopMarketsForEvents(
-      eventIds: string[],
+      events: MarketMapEventSummary[],
     ): Promise<Map<string, EventTopMarket[]>> {
       const out = new Map<string, EventTopMarket[]>();
-      const uniqueEventIds = Array.from(
-        new Set(eventIds.filter(eventId => eventId && eventId.trim().length > 0)),
-      );
-      const missing: string[] = [];
-      for (const eventId of uniqueEventIds) {
-        if (!eventTopMarketsCache.has(eventId)) missing.push(eventId);
+      const uniqueEvents = new Map<string, MarketMapEventSummary>();
+      for (const event of events) {
+        if (!event.eventId.trim() || !event.venue.trim()) continue;
+        const key = eventVenueKey(event.eventId, event.venue);
+        if (!uniqueEvents.has(key)) uniqueEvents.set(key, event);
       }
 
-      if (missing.length > 0) {
-        type EventTopMarketRow = {
-          event_id: string;
-          market_id: string;
-          market_title: string | null;
-          market_venue: string | null;
-          volume_24h: unknown;
-          liquidity: unknown;
-          open_interest: unknown;
-          market_rank: unknown;
-        };
-        const { rows } = await pool.query<EventTopMarketRow>(
-          `
-            with ranked_markets as (
-              select
-                m.event_id,
-                m.id as market_id,
-                m.title as market_title,
-                m.venue as market_venue,
-                m.volume_24h,
-                m.liquidity,
-                m.open_interest,
-                row_number() over (
-                  partition by m.event_id
-                  order by m.volume_24h desc nulls last, m.liquidity desc nulls last, m.venue_market_id, m.id
-                ) as market_rank
-              from unified_markets m
-              where m.event_id = any($1::text[])
-            )
-            select
-              event_id,
-              market_id,
-              market_title,
-              market_venue,
-              volume_24h,
-              liquidity,
-              open_interest,
-              market_rank
-            from ranked_markets
-            where market_rank <= $2
-            order by event_id, market_rank
-          `,
-          [missing, args.topMarketsPerEvent],
+      const missingInputs: Array<{
+        eventId: string;
+        venue: string;
+        preferredMarketId: string | null;
+      }> = [];
+      for (const [key, event] of uniqueEvents) {
+        if (!eventTopMarketsCache.has(key)) {
+          missingInputs.push({
+            eventId: event.eventId,
+            venue: event.venue,
+            preferredMarketId: event.representativeMarketId ?? null,
+          });
+        }
+      }
+
+      if (missingInputs.length > 0) {
+        const ranked = await selectRankedRepresentativeMarketsForEvents(
+          pool,
+          missingInputs,
+          args.topMarketsPerEvent,
         );
+
         const grouped = new Map<string, EventTopMarket[]>();
-        for (const row of rows) {
-          const venueRaw = (row.market_venue ?? "").toLowerCase();
+        for (const row of ranked) {
+          const key = eventVenueKey(row.eventId, row.venue);
+          const venueRaw = (row.venue ?? "").toLowerCase();
           const venue =
             venueRaw === "polymarket" ||
             venueRaw === "kalshi" ||
@@ -1972,25 +1955,27 @@ export async function runMapSignals(
               ? venueRaw
               : null;
           const parsed: EventTopMarket = {
-            marketId: row.market_id,
-            marketTitle: row.market_title?.trim() || null,
+            marketId: row.marketId,
+            marketTitle: row.marketTitle,
             venue,
-            volume24h: unknownNumberOrZero(row.volume_24h),
-            liquidity: unknownNumberOrZero(row.liquidity),
-            openInterest: unknownNumberOrZero(row.open_interest),
-            rank: Math.max(1, Math.trunc(unknownNumberOrZero(row.market_rank))),
+            volume24h: row.volume24h,
+            liquidity: row.liquidity,
+            openInterest: row.openInterest,
+            rank: row.rank,
           };
-          const list = grouped.get(row.event_id);
+          const list = grouped.get(key);
           if (list) list.push(parsed);
-          else grouped.set(row.event_id, [parsed]);
+          else grouped.set(key, [parsed]);
         }
-        for (const eventId of missing) {
-          eventTopMarketsCache.set(eventId, grouped.get(eventId) ?? []);
+        for (const [key] of uniqueEvents) {
+          if (!eventTopMarketsCache.has(key)) {
+            eventTopMarketsCache.set(key, grouped.get(key) ?? []);
+          }
         }
       }
 
-      for (const eventId of uniqueEventIds) {
-        out.set(eventId, eventTopMarketsCache.get(eventId) ?? []);
+      for (const [key] of uniqueEvents) {
+        out.set(key, eventTopMarketsCache.get(key) ?? []);
       }
       return out;
     }
@@ -2154,12 +2139,10 @@ export async function runMapSignals(
       );
 
       const events = await getNodeEvents(bucket.nodeId);
-      const topMarketsByEventId = await getTopMarketsForEvents(
-        events.map(event => event.eventId),
-      );
+      const topMarketsByEventVenue = await getTopMarketsForEvents(events);
       const candidateMarkets = await toMarketCandidates(
         events,
-        topMarketsByEventId,
+        topMarketsByEventVenue,
         args.maxMarketsPerNode,
         bucket.evidence.slice(0, args.maxEvidencePerNode),
         {

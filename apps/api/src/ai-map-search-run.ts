@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { RESP_TYPES } from "redis";
 import { ZodError } from "zod";
+import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
   buildMapSearchSystemPromptV2,
@@ -23,6 +24,11 @@ import {
   type MarketMapMeta,
   type MarketMapNode,
 } from "./services/market-map.js";
+import {
+  eventVenueKey,
+  selectRankedRepresentativeMarketsForEvents,
+  type RankedRepresentativeMarket,
+} from "./services/market-map-representative.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
@@ -382,6 +388,7 @@ type Args = {
   childSampleLimit: number;
   siblingSampleLimit: number;
   eventSampleLimit: number;
+  topMarketsPerEvent: number;
   leafEventEmbeddingCap: number;
   routeMinSimilarity: number;
   routeThresholdL1: number;
@@ -668,6 +675,10 @@ function resolveArgs(argv: string[]): Args {
     childSampleLimit: parsePositiveInt(parseFlag(argv, "--child-sample-limit"), 8),
     siblingSampleLimit: parsePositiveInt(parseFlag(argv, "--sibling-sample-limit"), 6),
     eventSampleLimit: parsePositiveInt(parseFlag(argv, "--event-sample-limit"), 10),
+    topMarketsPerEvent: parsePositiveInt(
+      parseFlag(argv, "--top-markets-per-event"),
+      3,
+    ),
     leafEventEmbeddingCap: parsePositiveInt(
       parseFlag(argv, "--leaf-event-embedding-cap"),
       20,
@@ -794,6 +805,7 @@ Traversal and routing:
   --child-sample-limit <n>            Child label samples passed to prompt (default: 8)
   --sibling-sample-limit <n>          Sibling samples passed to prompt (default: 6)
   --event-sample-limit <n>            Event title samples passed to prompt (default: 10)
+  --top-markets-per-event <n>         Representative markets per sampled event in prompt (default: 3)
   --leaf-event-embedding-cap <n>      Max event embeddings used per node centroid (default: 20)
   --route-min-similarity <0..1>       Optional extra child-routing floor (default: 0; disabled)
   --route-threshold-l1 <0..1>         Hybrid routing threshold at level 1 (default: 0.20)
@@ -2066,6 +2078,11 @@ export async function runMapSearch(
   const queued = new Set<string>();
   const visited = new Set<string>();
   const nodeEventsCache = new Map<string, MarketMapEventSummary[]>();
+  const representativeMarketByEventVenue = new Map<
+    string,
+    RankedRepresentativeMarket | null
+  >();
+  const topMarketsByEventVenue = new Map<string, RankedRepresentativeMarket[]>();
   const eventEmbeddingCache = new Map<string, number[] | null>();
   const nodeCentroidCache = new Map<string, number[] | null>();
   const nodeRepresentativeEmbeddingCache = new Map<string, number[] | null>();
@@ -2632,8 +2649,147 @@ export async function runMapSearch(
     const sorted = events
       .slice()
       .sort((a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId));
-    nodeEventsCache.set(nodeId, sorted);
-    return sorted;
+
+    const missingInputs: Array<{
+      eventId: string;
+      venue: string;
+      preferredMarketId: string | null;
+    }> = [];
+    for (const event of sorted) {
+      const key = eventVenueKey(event.eventId, event.venue);
+      if (representativeMarketByEventVenue.has(key)) continue;
+      missingInputs.push({
+        eventId: event.eventId,
+        venue: event.venue,
+        preferredMarketId: event.representativeMarketId ?? null,
+      });
+    }
+
+    if (missingInputs.length > 0) {
+      try {
+        const ranked = await selectRankedRepresentativeMarketsForEvents(
+          pool,
+          missingInputs,
+          1,
+        );
+        const selectedByKey = new Map<string, RankedRepresentativeMarket>();
+        for (const row of ranked) {
+          const key = eventVenueKey(row.eventId, row.venue);
+          if (!selectedByKey.has(key)) selectedByKey.set(key, row);
+        }
+        for (const input of missingInputs) {
+          const key = eventVenueKey(input.eventId, input.venue);
+          representativeMarketByEventVenue.set(key, selectedByKey.get(key) ?? null);
+        }
+      } catch (error) {
+        console.warn(`${logPrefix()} representative market enrichment failed`, {
+          error: error instanceof Error ? error.message : String(error),
+          eventCount: missingInputs.length,
+        });
+        for (const input of missingInputs) {
+          const key = eventVenueKey(input.eventId, input.venue);
+          representativeMarketByEventVenue.set(key, null);
+        }
+      }
+    }
+
+    const enriched = sorted.map((event) => {
+      const key = eventVenueKey(event.eventId, event.venue);
+      const selected = representativeMarketByEventVenue.get(key);
+      if (!selected) return event;
+      const oddsSource: MarketMapEventSummary["oddsSource"] =
+        event.representativeMarketId &&
+        selected.marketId === event.representativeMarketId
+          ? "representative"
+          : "fallback";
+      return {
+        ...event,
+        representativeMarketId: selected.marketId,
+        representativeMarketTitle:
+          selected.marketTitle ?? event.representativeMarketTitle ?? null,
+        oddsSource,
+        tokenYes: selected.tokenYes,
+        tokenNo: selected.tokenNo,
+        yesBid: selected.yesBid,
+        yesAsk: selected.yesAsk,
+        noBid: selected.noBid,
+        noAsk: selected.noAsk,
+        marketBestBid: selected.marketBestBid,
+        marketBestAsk: selected.marketBestAsk,
+        lastPrice: selected.lastPrice,
+        marketStatus: selected.marketStatus,
+        acceptingOrders: selected.acceptingOrders,
+        resolvedOutcome: selected.resolvedOutcome,
+        resolvedOutcomePct: selected.resolvedOutcomePct,
+      };
+    });
+
+    nodeEventsCache.set(nodeId, enriched);
+    return enriched;
+  }
+
+  async function getTopMarketsForEvents(
+    events: MarketMapEventSummary[],
+  ): Promise<Map<string, RankedRepresentativeMarket[]>> {
+    const out = new Map<string, RankedRepresentativeMarket[]>();
+    const uniqueEvents = new Map<string, MarketMapEventSummary>();
+    for (const event of events) {
+      const eventId = event.eventId.trim();
+      const venue = event.venue.trim().toLowerCase();
+      if (!eventId || !venue) continue;
+      const key = eventVenueKey(eventId, venue);
+      if (!uniqueEvents.has(key)) uniqueEvents.set(key, event);
+    }
+
+    const missingInputs: Array<{
+      eventId: string;
+      venue: string;
+      preferredMarketId: string | null;
+    }> = [];
+    for (const [key, event] of uniqueEvents) {
+      if (!topMarketsByEventVenue.has(key)) {
+        missingInputs.push({
+          eventId: event.eventId,
+          venue: event.venue,
+          preferredMarketId: event.representativeMarketId ?? null,
+        });
+      }
+    }
+
+    if (missingInputs.length > 0) {
+      try {
+        const ranked = await selectRankedRepresentativeMarketsForEvents(
+          pool,
+          missingInputs,
+          args.topMarketsPerEvent,
+        );
+        const grouped = new Map<string, RankedRepresentativeMarket[]>();
+        for (const row of ranked) {
+          const key = eventVenueKey(row.eventId, row.venue);
+          const existing = grouped.get(key);
+          if (existing) existing.push(row);
+          else grouped.set(key, [row]);
+        }
+        for (const input of missingInputs) {
+          const key = eventVenueKey(input.eventId, input.venue);
+          topMarketsByEventVenue.set(key, grouped.get(key) ?? []);
+        }
+      } catch (error) {
+        console.warn(`${logPrefix()} top markets enrichment failed`, {
+          error: error instanceof Error ? error.message : String(error),
+          eventCount: missingInputs.length,
+        });
+        for (const input of missingInputs) {
+          const key = eventVenueKey(input.eventId, input.venue);
+          topMarketsByEventVenue.set(key, []);
+        }
+      }
+    }
+
+    for (const [key] of uniqueEvents) {
+      out.set(key, topMarketsByEventVenue.get(key) ?? []);
+    }
+    return out;
   }
 
   async function getEventEmbedding(eventId: string): Promise<number[] | null> {
@@ -2778,16 +2934,22 @@ export async function runMapSearch(
           .slice(0, args.childSampleLimit)
           .map(nodeDisplayLabel);
         const events = await getNodeEvents(node.id);
-        const sampleEventTitles = events
-          .slice(0, args.eventSampleLimit)
-          .map(event => event.title.trim());
-        const sampleEventMarketTitles = events
-          .slice(0, args.eventSampleLimit)
-          .map((event) => {
-            const eventTitle = event.title.trim();
+        const sampledEvents = events.slice(0, args.eventSampleLimit);
+        const sampleEventTitles = sampledEvents.map(event => event.title.trim());
+        const marketsByEvent = await getTopMarketsForEvents(sampledEvents);
+        const sampleEventMarketTitles = sampledEvents.map((event) => {
+          const eventTitle = event.title.trim();
+          const key = eventVenueKey(event.eventId, event.venue);
+          const markets = marketsByEvent.get(key) ?? [];
+          if (markets.length === 0) {
             const marketTitle = event.representativeMarketTitle?.trim() || null;
             return marketTitle ? `${eventTitle} | ${marketTitle}` : eventTitle;
-          });
+          }
+          const labels = markets
+            .slice(0, args.topMarketsPerEvent)
+            .map((market) => market.marketTitle?.trim() || market.marketId);
+          return `${eventTitle} | ${labels.join(" ; ")}`;
+        });
         const priorHeadlines = nodeEvidenceHeadlines.get(node.id) ?? [];
         const nodeWindowHours = getWindowHoursForLevel(node.level, args);
         const softToolCapThisCall = Math.min(

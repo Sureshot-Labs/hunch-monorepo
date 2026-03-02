@@ -25,6 +25,11 @@ import {
   safeJsonParse,
   sortNodesByMetric,
 } from "../services/market-map.js";
+import {
+  eventVenueKey,
+  selectRankedRepresentativeMarketsForEvents,
+  type RankedRepresentativeMarket,
+} from "../services/market-map-representative.js";
 import { resolveMarketMapPolicy } from "../services/runtime-policies.js";
 
 function metricForEvent(
@@ -43,27 +48,6 @@ function metricForEvent(
       return event.volume24h;
   }
 }
-
-type MarketMapLiveMarketRow = {
-  market_id: string;
-  event_id: string;
-  market_title: string | null;
-  market_image: string | null;
-  market_icon: string | null;
-  market_status: string | null;
-  market_best_bid: unknown;
-  market_best_ask: unknown;
-  last_price: unknown;
-  token_yes: string | null;
-  token_no: string | null;
-  yes_top_bid: unknown;
-  yes_top_ask: unknown;
-  no_top_bid: unknown;
-  no_top_ask: unknown;
-  accepting_orders: boolean | null;
-  resolved_outcome: string | null;
-  resolved_outcome_pct: unknown;
-};
 
 type MarketMapLiveMarketData = {
   marketId: string;
@@ -137,39 +121,28 @@ function toIsoString(value: Date | string): string {
   return new Date(parsed).toISOString();
 }
 
-function toBoolean(value: unknown): boolean | null {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value === 1 ? true : value === 0 ? false : null;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true" || normalized === "1") return true;
-    if (normalized === "false" || normalized === "0") return false;
-  }
-  return null;
-}
-
 function normalizeLiveRow(
-  row: MarketMapLiveMarketRow,
+  row: RankedRepresentativeMarket,
   oddsSource: "representative" | "fallback",
 ): MarketMapLiveMarketData {
   return {
-    marketId: row.market_id,
-    marketTitle: row.market_title?.trim() || null,
-    marketImage: row.market_image ?? null,
-    marketIcon: row.market_icon ?? null,
-    marketStatus: row.market_status ?? null,
-    marketBestBid: toNumber(row.market_best_bid),
-    marketBestAsk: toNumber(row.market_best_ask),
-    lastPrice: toNumber(row.last_price),
-    tokenYes: row.token_yes ?? null,
-    tokenNo: row.token_no ?? null,
-    yesBid: toNumber(row.yes_top_bid),
-    yesAsk: toNumber(row.yes_top_ask),
-    noBid: toNumber(row.no_top_bid),
-    noAsk: toNumber(row.no_top_ask),
-    acceptingOrders: toBoolean(row.accepting_orders),
-    resolvedOutcome: row.resolved_outcome ?? null,
-    resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
+    marketId: row.marketId,
+    marketTitle: row.marketTitle,
+    marketImage: row.marketImage,
+    marketIcon: row.marketIcon,
+    marketStatus: row.marketStatus,
+    marketBestBid: row.marketBestBid,
+    marketBestAsk: row.marketBestAsk,
+    lastPrice: row.lastPrice,
+    tokenYes: row.tokenYes,
+    tokenNo: row.tokenNo,
+    yesBid: row.yesBid,
+    yesAsk: row.yesAsk,
+    noBid: row.noBid,
+    noAsk: row.noAsk,
+    acceptingOrders: row.acceptingOrders,
+    resolvedOutcome: row.resolvedOutcome,
+    resolvedOutcomePct: row.resolvedOutcomePct,
     oddsSource,
   };
 }
@@ -515,303 +488,49 @@ function applySignalSummaryToEvents(
 async function loadLiveMarketDataForEvents(
   events: MarketMapEventSummary[],
 ): Promise<Map<string, MarketMapLiveMarketData>> {
-  const byEventId = new Map<string, MarketMapLiveMarketData>();
+  const byEventVenue = new Map<string, MarketMapLiveMarketData>();
   if (events.length === 0) {
-    return byEventId;
+    return byEventVenue;
   }
 
-  const eventIds: string[] = [];
-  const eventVenues: string[] = [];
-  const preferredMarketIds: Array<string | null> = [];
-  const preferredByEventId = new Map<string, string | null>();
-  for (const event of events) {
-    eventIds.push(event.eventId);
-    eventVenues.push(event.venue);
-    preferredMarketIds.push(event.representativeMarketId ?? null);
-    preferredByEventId.set(event.eventId, event.representativeMarketId ?? null);
-  }
+  const preferredByEventVenue = new Map<string, string | null>();
+  const inputs = events.map((event) => {
+    const key = eventVenueKey(event.eventId, event.venue);
+    const preferredMarketId = event.representativeMarketId ?? null;
+    preferredByEventVenue.set(key, preferredMarketId);
+    return {
+      eventId: event.eventId,
+      venue: event.venue,
+      preferredMarketId,
+    };
+  });
 
-  const { rows } = await pool.query<
-    MarketMapLiveMarketRow & { preferred_market_id: string | null }
-  >(
-    `
-    with event_input as (
-      select *
-      from unnest($1::text[], $2::text[], $3::text[]) as ei(event_id, event_venue, preferred_market_id)
-    ),
-    ranked as (
-      select
-        m.id as market_id,
-        m.event_id,
-        m.title as market_title,
-        m.image as market_image,
-        m.icon as market_icon,
-        m.status::text as market_status,
-        coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
-        coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
-        coalesce(m.last_price, km.last_price_dollars) as last_price,
-        mt.token_yes,
-        mt.token_no,
-        coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
-        coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
-        coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
-        coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
-        coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) as accepting_orders,
-        m.resolved_outcome,
-        m.resolved_outcome_pct,
-        ei.preferred_market_id,
-        odds.yes_probability,
-        row_number() over (
-          partition by m.event_id
-          order by
-            (
-              case
-                when coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
-                  and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
-                  and (m.expiration_time is null or m.expiration_time > now())
-                  and (m.close_time is null or m.close_time > now())
-                  and (
-                    m.resolved_outcome is null
-                    or upper(m.resolved_outcome::text) not in ('YES', 'NO')
-                  )
-                  and (
-                    m.resolved_outcome_pct is null
-                    or (m.resolved_outcome_pct > 0 and m.resolved_outcome_pct < 10000)
-                  )
-                then 0
-                else 1
-              end
-            ),
-            (
-              case
-                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-                  or coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-                  or coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-                  or coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-                  or m.best_bid is not null
-                  or m.best_ask is not null
-                  or coalesce(m.last_price, km.last_price_dollars) is not null
-                  or m.resolved_outcome is not null
-                  or m.resolved_outcome_pct is not null
-                then 0
-                else 1
-              end
-            ),
-            (
-              case
-                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-                  and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-                  and coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-                  and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-                then 0
-                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-                  and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-                then 1
-                when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-                  and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-                then 1
-                when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-                  or coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-                  or coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-                  or coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-                then 2
-                when m.best_bid is not null
-                  and m.best_ask is not null
-                then 3
-                when m.best_bid is not null
-                  or m.best_ask is not null
-                then 4
-                when m.resolved_outcome is not null
-                  or m.resolved_outcome_pct is not null
-                then 5
-                when coalesce(m.last_price, km.last_price_dollars) is not null
-                then 6
-                else 7
-              end
-            ),
-            (case when odds.yes_probability is null then 1 else 0 end),
-            odds.yes_probability desc,
-            (
-              case
-                when m.status::text = 'ACTIVE'
-                  and (m.expiration_time is null or m.expiration_time > now())
-                  and (m.close_time is null or m.close_time > now())
-                then 0
-                else 1
-              end
-            ),
-            (case when mt.token_yes is not null and mt.token_no is not null then 0 else 1 end),
-            (case when m.id = ei.preferred_market_id then 0 else 1 end),
-            (
-              coalesce(
-                case
-                  when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
-                  when m.volume_total is not null and m.volume_total > 0 then m.volume_total
-                  else null
-                end,
-                0
-              )
-            ) desc,
-            (
-              coalesce(
-                nullif(m.liquidity, 0),
-                nullif(m.open_interest, 0),
-                0
-              )
-            ) desc,
-            coalesce(m.open_interest, 0) desc,
-            coalesce(m.volume_total, 0) desc,
-            m.venue_market_id,
-            m.id
-        ) as market_rank
-      from event_input ei
-      join unified_markets m
-        on m.event_id = ei.event_id
-       and m.venue = ei.event_venue
-      cross join lateral (
-        select
-          case
-            when m.venue = 'polymarket' and m.clob_token_ids is not null
-              then (m.clob_token_ids::jsonb ->> 0)
-            else m.token_yes
-          end as token_yes,
-          case
-            when m.venue = 'polymarket' and m.clob_token_ids is not null
-              then (m.clob_token_ids::jsonb ->> 1)
-            else m.token_no
-          end as token_no
-      ) mt
-      left join lateral (
-        select best_bid, best_ask
-        from unified_book_top
-        where token_id = mt.token_yes
-          and ts > now() - interval '7 days'
-        order by ts desc
-        limit 1
-      ) yes_top on true
-      left join lateral (
-        select best_bid, best_ask
-        from unified_book_top
-        where token_id = mt.token_no
-          and ts > now() - interval '7 days'
-        order by ts desc
-        limit 1
-      ) no_top on true
-      left join polymarket_markets pm
-        on m.venue = 'polymarket' and pm.id = m.venue_market_id
-      left join kalshi_markets km
-        on m.venue = 'kalshi' and km.id = m.venue_market_id
-      cross join lateral (
-        select
-          case
-            when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-              and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(
-                  1::double precision,
-                  ((coalesce(yes_top.best_bid, km.yes_bid_dollars) + coalesce(yes_top.best_ask, km.yes_ask_dollars)) / 2)::double precision
-                )
-              )
-            when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, coalesce(yes_top.best_bid, km.yes_bid_dollars)::double precision)
-              )
-            when coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, coalesce(yes_top.best_ask, km.yes_ask_dollars)::double precision)
-              )
-            when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-              and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(
-                  1::double precision,
-                  (1 - ((coalesce(no_top.best_bid, km.no_bid_dollars) + coalesce(no_top.best_ask, km.no_ask_dollars)) / 2)::double precision)
-                )
-              )
-            when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, (1 - coalesce(no_top.best_bid, km.no_bid_dollars)::double precision))
-              )
-            when coalesce(no_top.best_ask, km.no_ask_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, (1 - coalesce(no_top.best_ask, km.no_ask_dollars)::double precision))
-              )
-            when m.best_bid is not null and m.best_ask is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, ((m.best_bid + m.best_ask) / 2)::double precision)
-              )
-            when m.best_bid is not null
-              then greatest(0::double precision, least(1::double precision, m.best_bid::double precision))
-            when m.best_ask is not null
-              then greatest(0::double precision, least(1::double precision, m.best_ask::double precision))
-            when m.resolved_outcome_pct is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, (m.resolved_outcome_pct::double precision / 10000))
-              )
-            when upper(coalesce(m.resolved_outcome::text, '')) = 'YES'
-              then 1::double precision
-            when upper(coalesce(m.resolved_outcome::text, '')) = 'NO'
-              then 0::double precision
-            when coalesce(m.last_price, km.last_price_dollars) is not null
-              then greatest(
-                0::double precision,
-                least(1::double precision, coalesce(m.last_price, km.last_price_dollars)::double precision)
-              )
-            else null::double precision
-          end as yes_probability
-      ) odds
-    )
-    select
-      market_id,
-      event_id,
-      market_title,
-      market_image,
-      market_icon,
-      market_status,
-      market_best_bid,
-      market_best_ask,
-      last_price,
-      token_yes,
-      token_no,
-      yes_top_bid,
-      yes_top_ask,
-      no_top_bid,
-      no_top_ask,
-      accepting_orders,
-      resolved_outcome,
-      resolved_outcome_pct,
-      preferred_market_id
-    from ranked
-    where market_rank = 1
-    `,
-    [eventIds, eventVenues, preferredMarketIds],
+  const ranked = await selectRankedRepresentativeMarketsForEvents(
+    pool,
+    inputs,
+    1,
   );
 
-  for (const row of rows) {
-    const preferredMarketId = preferredByEventId.get(row.event_id) ?? null;
+  for (const row of ranked) {
+    const key = eventVenueKey(row.eventId, row.venue);
+    if (byEventVenue.has(key)) continue;
+    const preferredMarketId = preferredByEventVenue.get(key) ?? null;
     const oddsSource =
-      preferredMarketId != null && row.market_id === preferredMarketId
+      preferredMarketId != null && row.marketId === preferredMarketId
         ? "representative"
         : "fallback";
-    byEventId.set(row.event_id, normalizeLiveRow(row, oddsSource));
+    byEventVenue.set(key, normalizeLiveRow(row, oddsSource));
   }
-  return byEventId;
+
+  return byEventVenue;
 }
 
 function applyLiveMarketDataToEvents(
   events: MarketMapEventSummary[],
-  byEventId: ReadonlyMap<string, MarketMapLiveMarketData>,
+  byEventVenue: ReadonlyMap<string, MarketMapLiveMarketData>,
 ): MarketMapEventSummary[] {
   return events.map((event) => {
-    const live = byEventId.get(event.eventId);
+    const live = byEventVenue.get(eventVenueKey(event.eventId, event.venue));
     if (!live) return event;
     return {
       ...event,

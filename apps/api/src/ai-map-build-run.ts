@@ -1626,7 +1626,18 @@ async function fetchVenueCandidates(
   const queryLimit = Math.max(config.maxEventsPerVenue, config.maxEventsPerVenue * 2);
   const { rows } = await pool.query<EventCandidateRow>(
     `
-      with candidate_events as (
+      with active_market_oi as (
+        select
+          m.event_id,
+          sum(coalesce(m.open_interest, 0))::double precision as sum_open_interest
+        from unified_markets m
+        where m.status = 'ACTIVE'
+          and m.venue = $1
+          and (m.expiration_time is null or m.expiration_time > $2)
+          and (m.close_time is null or m.close_time > $2)
+        group by m.event_id
+      ),
+      candidate_events as (
         select
           e.id as event_id,
           e.venue::text as venue,
@@ -1642,11 +1653,15 @@ async function fetchVenueCandidates(
           )::double precision as volume24h,
           coalesce(
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
-            nullif(e.open_interest, 0),
+            nullif(
+              coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+              0
+            ),
             0
           )::double precision as liquidity,
-          coalesce(nullif(e.open_interest, 0), 0)::double precision as open_interest
+          coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0)::double precision as open_interest
         from unified_events e
+        join active_market_oi amo on amo.event_id = e.id
         where e.status = 'ACTIVE'
           and e.venue = $1
           and (e.end_date is null or e.end_date > $2)
@@ -1661,19 +1676,13 @@ async function fetchVenueCandidates(
             or (
               coalesce(
                 nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
-                nullif(e.open_interest, 0),
+                nullif(
+                  coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+                  0
+                ),
                 0
               ) >= $4
             )
-          )
-          and exists (
-            select 1
-            from unified_markets m
-            where m.event_id = e.id
-              and m.status = 'ACTIVE'
-              and m.venue = $1
-              and (m.expiration_time is null or m.expiration_time > $2)
-              and (m.close_time is null or m.close_time > $2)
           )
         order by
           (
@@ -1689,7 +1698,10 @@ async function fetchVenueCandidates(
             coalesce(
               coalesce(
                 nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
-                nullif(e.open_interest, 0),
+                nullif(
+                  coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+                  0
+                ),
                 0
               ),
               0
