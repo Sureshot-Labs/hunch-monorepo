@@ -518,15 +518,6 @@ function numericOrZero(value: number | null | undefined): number {
   return Number.isFinite(value) ? Number(value) : 0;
 }
 
-function unknownNumberOrZero(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
-  }
-  return 0;
-}
-
 function safeNumber(value: unknown): number | null {
   if (typeof value !== "number") return null;
   if (!Number.isFinite(value)) return null;

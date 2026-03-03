@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import crypto from "node:crypto";
 import { pool } from "../db.js";
+import { env } from "../env.js";
 import { getRedisStatus } from "../redis.js";
 import {
   marketMapNodeEventsQuerySchema,
@@ -31,6 +33,16 @@ import {
   type RankedRepresentativeMarket,
 } from "../services/market-map-representative.js";
 import { resolveMarketMapPolicy } from "../services/runtime-policies.js";
+
+function buildWeakEtag(body: string): string {
+  return `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+}
+
+function buildPrivateCacheControl(ttlSec: number): string {
+  return ttlSec > 0
+    ? `private, max-age=${ttlSec}, stale-while-revalidate=${ttlSec * 2}`
+    : "no-store";
+}
 
 function metricForEvent(
   event: MarketMapEventSummary,
@@ -653,6 +665,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         false;
       const eventsPreviewLimit =
         query.eventsPreviewLimit ?? query.leafEventsPreviewLimit ?? 10;
+      const cacheEnabled = env.marketMapTtlSec > 0;
+      const cacheTtl = cacheEnabled ? env.marketMapTtlSec : 0;
+      const policyCacheVersion = [
+        policy.source,
+        policy.effectiveAt?.toISOString() ?? "none",
+        effective.sizeByDefault,
+        String(effective.mergeLimitDefault),
+        String(effective.mergePerVenueMinDefault),
+        effective.venuesEnabled.join(","),
+      ].join(":");
 
       const { redis, status } = await getRedisStatus();
       if (!redis) {
@@ -682,6 +704,38 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             perVenueMin: effective.mergePerVenueMinDefault,
           },
         };
+      }
+      const cacheKey = [
+        "market-map:v1",
+        runId,
+        policyCacheVersion,
+        String(level),
+        parentId ?? "",
+        sizeBy,
+        String(limit),
+        String(perVenueMin),
+        includeChildrenPreview ? "1" : "0",
+        String(childrenPreviewLimit),
+        includeEventsPreview ? "1" : "0",
+        String(eventsPreviewLimit),
+        venues.slice().sort().join(","),
+      ].join(":");
+      let skipCacheWrite = false;
+      if (cacheEnabled) {
+        const cachedBody = await redis.get(cacheKey);
+        if (cachedBody) {
+          const etag = buildWeakEtag(cachedBody);
+          if (request.headers["if-none-match"] === etag) {
+            reply.header("ETag", etag);
+            reply.code(304);
+            return reply.send();
+          }
+          reply.header("x-cache", "hit");
+          reply.header("ETag", etag);
+          reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cachedBody);
+        }
       }
 
       const pipeline = redis.multi();
@@ -894,6 +948,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 try {
                   liveByEventId = await loadLiveMarketDataForEvents(previewEvents);
                 } catch (error) {
+                  skipCacheWrite = true;
                   request.log.warn(
                     {
                       err: error,
@@ -930,7 +985,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      return {
+      const payload = {
         enabled: true,
         runId,
         generatedAt: meta?.generatedAt ?? null,
@@ -950,6 +1005,23 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           perVenueMin: effective.mergePerVenueMinDefault,
         },
       };
+      const body = JSON.stringify(payload);
+      const etag = buildWeakEtag(body);
+      if (request.headers["if-none-match"] === etag) {
+        reply.header("ETag", etag);
+        reply.code(304);
+        return reply.send();
+      }
+      if (cacheEnabled && !skipCacheWrite) {
+        await redis.setEx(cacheKey, cacheTtl, body);
+        reply.header("x-cache", "miss");
+      } else if (cacheEnabled && skipCacheWrite) {
+        reply.header("x-cache", "bypass");
+      }
+      reply.header("ETag", etag);
+      reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send(body);
     },
   );
 
@@ -1017,6 +1089,42 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           ? queryVenues.filter((venue) => allowedVenueSet.has(venue))
           : policy.effective.venuesEnabled;
       const selectedVenueSet = new Set<MarketMapVenue>(selectedVenues);
+      const offset = request.query.offset ?? 0;
+      const limit = request.query.limit ?? 100;
+      const cacheEnabled = env.marketMapTtlSec > 0;
+      const cacheTtl = cacheEnabled ? env.marketMapTtlSec : 0;
+      const policyCacheVersion = [
+        policy.source,
+        policy.effectiveAt?.toISOString() ?? "none",
+        policy.effective.venuesEnabled.join(","),
+      ].join(":");
+      const cacheKey = [
+        "market-map:node-events:v1",
+        runId,
+        policyCacheVersion,
+        nodeId,
+        selectedVenues.slice().sort().join(","),
+        String(offset),
+        String(limit),
+      ].join(":");
+      let skipCacheWrite = false;
+      if (cacheEnabled) {
+        const cachedBody = await redis.get(cacheKey);
+        if (cachedBody) {
+          const etag = buildWeakEtag(cachedBody);
+          if (request.headers["if-none-match"] === etag) {
+            reply.header("ETag", etag);
+            reply.code(304);
+            return reply.send();
+          }
+          reply.header("x-cache", "hit");
+          reply.header("ETag", etag);
+          reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cachedBody);
+        }
+      }
+
       const [nodeRaw, eventsRaw] = await Promise.all([
         redis.get(marketMapRunNodeKey(runId, nodeId)),
         redis.get(marketMapRunNodeEventsKey(runId, nodeId)),
@@ -1029,8 +1137,6 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         (event) =>
           selectedVenueSet.size === 0 ? true : selectedVenueSet.has(event.venue),
       );
-      const offset = request.query.offset ?? 0;
-      const limit = request.query.limit ?? 100;
       const items = events.slice(offset, offset + limit);
       const eventSignalSummaryByEventId =
         items.length > 0
@@ -1051,6 +1157,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             liveByEventId,
           );
         } catch (error) {
+          skipCacheWrite = true;
           request.log.warn(
             { err: error, nodeId, itemCount: items.length },
             "market-map node events live market enrichment failed",
@@ -1058,7 +1165,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      return {
+      const payload = {
         runId,
         node: applyVenueFilterToNode(node, selectedVenueSet),
         total: events.length,
@@ -1067,6 +1174,23 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         venues: selectedVenues,
         items: itemsWithLiveMarket,
       };
+      const body = JSON.stringify(payload);
+      const etag = buildWeakEtag(body);
+      if (request.headers["if-none-match"] === etag) {
+        reply.header("ETag", etag);
+        reply.code(304);
+        return reply.send();
+      }
+      if (cacheEnabled && !skipCacheWrite) {
+        await redis.setEx(cacheKey, cacheTtl, body);
+        reply.header("x-cache", "miss");
+      } else if (cacheEnabled && skipCacheWrite) {
+        reply.header("x-cache", "bypass");
+      }
+      reply.header("ETag", etag);
+      reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send(body);
     },
   );
 };

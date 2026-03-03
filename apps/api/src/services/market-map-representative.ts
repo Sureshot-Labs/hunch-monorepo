@@ -169,6 +169,9 @@ export async function selectRankedRepresentativeMarketsForEvents(
   }
 
   const limit = Math.max(1, Math.min(20, Math.trunc(perEventLimit)));
+  // Keep expensive top-of-book lookups bounded to a small candidate set.
+  const prefilterLimit = Math.max(limit, 10);
+  const nowParam = new Date().toISOString();
   const eventIds = normalized.map((input) => input.eventId);
   const venues = normalized.map((input) => input.venue);
   const preferredMarketIds = normalized.map((input) => input.preferredMarketId);
@@ -187,10 +190,59 @@ export async function selectRankedRepresentativeMarketsForEvents(
       from raw_input
       order by event_id, event_venue, (preferred_market_id is not null) desc
     ),
-    ranked as (
+    candidate_markets as (
       select
         ei.event_id,
         ei.event_venue,
+        ei.preferred_market_id,
+        m.id as market_id,
+        row_number() over (
+          partition by ei.event_id, ei.event_venue
+          order by
+            (case when m.id = ei.preferred_market_id then 0 else 1 end),
+            (
+              coalesce(
+                case
+                  when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
+                  when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+                  else null
+                end,
+                0
+              )
+            ) desc,
+            (
+              coalesce(
+                nullif(m.liquidity, 0),
+                nullif(m.open_interest, 0),
+                0
+              )
+            ) desc,
+            m.venue_market_id,
+            m.id
+        ) as candidate_rank
+      from event_input ei
+      join unified_markets m
+        on m.event_id = ei.event_id
+       and m.venue = ei.event_venue
+      where m.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
+        and (m.close_time is null or m.close_time > $5::timestamptz)
+    ),
+    market_base as (
+      select
+        cm.event_id as input_event_id,
+        cm.event_venue as input_event_venue,
+        cm.preferred_market_id as input_preferred_market_id,
+        m.*
+      from candidate_markets cm
+      join unified_markets m
+        on m.id = cm.market_id
+      where cm.candidate_rank <= $6
+    ),
+    ranked as (
+      select
+        m.input_event_id as event_id,
+        m.input_event_venue as event_venue,
         m.id as market_id,
         m.title as market_title,
         m.image as market_image,
@@ -215,16 +267,16 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.volume_24h as market_volume_24h,
         m.liquidity as market_liquidity,
         coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) as market_open_interest,
-        ei.preferred_market_id,
+        m.input_preferred_market_id as preferred_market_id,
         row_number() over (
-          partition by ei.event_id, ei.event_venue
+          partition by m.input_event_id, m.input_event_venue
           order by
             (
               case
                 when coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
                   and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
-                  and (m.expiration_time is null or m.expiration_time > now())
-                  and (m.close_time is null or m.close_time > now())
+                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
+                  and (m.close_time is null or m.close_time > $5::timestamptz)
                   and (
                     m.resolved_outcome is null
                     or upper(m.resolved_outcome::text) not in ('YES', 'NO')
@@ -289,14 +341,14 @@ export async function selectRankedRepresentativeMarketsForEvents(
             (
               case
                 when m.status::text = 'ACTIVE'
-                  and (m.expiration_time is null or m.expiration_time > now())
-                  and (m.close_time is null or m.close_time > now())
+                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
+                  and (m.close_time is null or m.close_time > $5::timestamptz)
                 then 0
                 else 1
               end
             ),
             (case when mt.token_yes is not null and mt.token_no is not null then 0 else 1 end),
-            (case when m.id = ei.preferred_market_id then 0 else 1 end),
+            (case when m.id = m.input_preferred_market_id then 0 else 1 end),
             (
               coalesce(
                 case
@@ -319,10 +371,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
             m.venue_market_id,
             m.id
         ) as market_rank
-      from event_input ei
-      join unified_markets m
-        on m.event_id = ei.event_id
-       and m.venue = ei.event_venue
+      from market_base m
       cross join lateral (
         select
           case
@@ -353,7 +402,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         from unified_book_top
         where mt.token_yes is not null
           and token_id = mt.token_yes
-          and ts > now() - interval '7 days'
+          and ts > ($5::timestamptz - interval '7 days')
         order by ts desc
         limit 1
       ) yes_top on true
@@ -362,7 +411,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         from unified_book_top
         where mt.token_no is not null
           and token_id = mt.token_no
-          and ts > now() - interval '7 days'
+          and ts > ($5::timestamptz - interval '7 days')
         order by ts desc
         limit 1
       ) no_top on true
@@ -468,7 +517,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
     where market_rank <= $4
     order by event_id, event_venue, market_rank
     `,
-    [eventIds, venues, preferredMarketIds, limit],
+    [eventIds, venues, preferredMarketIds, limit, nowParam, prefilterLimit],
   );
 
   return rows.map(normalizeRow);
