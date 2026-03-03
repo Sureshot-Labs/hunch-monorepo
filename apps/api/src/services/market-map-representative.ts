@@ -214,7 +214,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         odds.yes_probability,
         m.volume_24h as market_volume_24h,
         m.liquidity as market_liquidity,
-        m.open_interest as market_open_interest,
+        coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) as market_open_interest,
         ei.preferred_market_id,
         row_number() over (
           partition by ei.event_id, ei.event_venue
@@ -314,7 +314,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
                 0
               )
             ) desc,
-            coalesce(m.open_interest, 0) desc,
+            coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) desc,
             coalesce(m.volume_total, 0) desc,
             m.venue_market_id,
             m.id
@@ -473,4 +473,3 @@ export async function selectRankedRepresentativeMarketsForEvents(
 
   return rows.map(normalizeRow);
 }
-

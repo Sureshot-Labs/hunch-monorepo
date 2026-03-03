@@ -1654,12 +1654,22 @@ async function fetchVenueCandidates(
           coalesce(
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
             nullif(
-              coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+              coalesce(
+                nullif(e.open_interest, 0),
+                nullif(amo.sum_open_interest, 0),
+                nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+                0
+              ),
               0
             ),
             0
           )::double precision as liquidity,
-          coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0)::double precision as open_interest
+          coalesce(
+            nullif(e.open_interest, 0),
+            nullif(amo.sum_open_interest, 0),
+            nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+            0
+          )::double precision as open_interest
         from unified_events e
         join active_market_oi amo on amo.event_id = e.id
         where e.status = 'ACTIVE'
@@ -1677,7 +1687,12 @@ async function fetchVenueCandidates(
               coalesce(
                 nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
                 nullif(
-                  coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+                  coalesce(
+                    nullif(e.open_interest, 0),
+                    nullif(amo.sum_open_interest, 0),
+                    nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+                    0
+                  ),
                   0
                 ),
                 0
@@ -1699,7 +1714,12 @@ async function fetchVenueCandidates(
               coalesce(
                 nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
                 nullif(
-                  coalesce(nullif(e.open_interest, 0), nullif(amo.sum_open_interest, 0), 0),
+                  coalesce(
+                    nullif(e.open_interest, 0),
+                    nullif(amo.sum_open_interest, 0),
+                    nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+                    0
+                  ),
                   0
                 ),
                 0

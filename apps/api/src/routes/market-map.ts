@@ -36,13 +36,15 @@ function metricForEvent(
   event: MarketMapEventSummary,
   sizeBy: "count" | "volume24h" | "liquidity" | "openInterest",
 ): number {
+  const openInterestFallback =
+    event.openInterest > 0 ? event.openInterest : Math.max(0, event.liquidity);
   switch (sizeBy) {
     case "count":
       return 1;
     case "liquidity":
       return event.liquidity;
     case "openInterest":
-      return event.openInterest;
+      return openInterestFallback;
     case "volume24h":
     default:
       return event.volume24h;
@@ -67,6 +69,9 @@ type MarketMapLiveMarketData = {
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
+  volume24h: number;
+  liquidity: number;
+  openInterest: number;
   oddsSource: "representative" | "fallback";
 };
 
@@ -143,6 +148,9 @@ function normalizeLiveRow(
     acceptingOrders: row.acceptingOrders,
     resolvedOutcome: row.resolvedOutcome,
     resolvedOutcomePct: row.resolvedOutcomePct,
+    volume24h: row.volume24h,
+    liquidity: row.liquidity,
+    openInterest: row.openInterest,
     oddsSource,
   };
 }
@@ -532,6 +540,20 @@ function applyLiveMarketDataToEvents(
   return events.map((event) => {
     const live = byEventVenue.get(eventVenueKey(event.eventId, event.venue));
     if (!live) return event;
+    const liquidityFallback =
+      event.liquidity > 0
+        ? event.liquidity
+        : live.liquidity > 0
+          ? live.liquidity
+          : live.openInterest > 0
+            ? live.openInterest
+            : 0;
+    const openInterestFallback =
+      event.openInterest > 0
+        ? event.openInterest
+        : live.openInterest > 0
+          ? live.openInterest
+          : liquidityFallback;
     return {
       ...event,
       representativeMarketId: live.marketId,
@@ -539,6 +561,8 @@ function applyLiveMarketDataToEvents(
       image: event.image ?? live.marketImage,
       icon: event.icon ?? live.marketIcon,
       oddsSource: live.oddsSource,
+      liquidity: liquidityFallback,
+      openInterest: openInterestFallback,
       tokenYes: live.tokenYes,
       tokenNo: live.tokenNo,
       yesBid: live.yesBid,

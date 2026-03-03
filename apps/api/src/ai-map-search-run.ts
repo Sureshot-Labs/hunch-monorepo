@@ -2646,7 +2646,22 @@ export async function runMapSearch(
     if (nodeEventsCache.has(nodeId)) return nodeEventsCache.get(nodeId) ?? [];
     const raw = await redis.get(marketMapRunNodeEventsKey(runId, nodeId));
     const events = safeJsonParse<MarketMapEventSummary[]>(raw) ?? [];
-    const sorted = events
+    const normalized = events.map((event) => {
+      const liquidity =
+        event.liquidity > 0
+          ? event.liquidity
+          : event.openInterest > 0
+            ? event.openInterest
+            : 0;
+      const openInterest =
+        event.openInterest > 0 ? event.openInterest : liquidity;
+      return {
+        ...event,
+        liquidity,
+        openInterest,
+      };
+    });
+    const sorted = normalized
       .slice()
       .sort((a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId));
 
@@ -2707,6 +2722,24 @@ export async function runMapSearch(
         representativeMarketId: selected.marketId,
         representativeMarketTitle:
           selected.marketTitle ?? event.representativeMarketTitle ?? null,
+        liquidity:
+          event.liquidity > 0
+            ? event.liquidity
+            : selected.liquidity > 0
+              ? selected.liquidity
+              : selected.openInterest > 0
+                ? selected.openInterest
+                : 0,
+        openInterest:
+          event.openInterest > 0
+            ? event.openInterest
+            : selected.openInterest > 0
+              ? selected.openInterest
+              : event.liquidity > 0
+                ? event.liquidity
+                : selected.liquidity > 0
+                  ? selected.liquidity
+                  : 0,
         oddsSource,
         tokenYes: selected.tokenYes,
         tokenNo: selected.tokenNo,

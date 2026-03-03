@@ -1904,7 +1904,24 @@ export async function runMapSignals(
       if (nodeEventsCache.has(nodeId)) return nodeEventsCache.get(nodeId) ?? [];
       const raw = await redis.get(marketMapRunNodeEventsKey(runId, nodeId));
       const rows = safeJsonParse<MarketMapEventSummary[]>(raw) ?? [];
-      const sorted = rows
+      const normalized = rows.map((event) => {
+        const liquidity =
+          numericOrZero(event.liquidity) > 0
+            ? numericOrZero(event.liquidity)
+            : numericOrZero(event.openInterest) > 0
+              ? numericOrZero(event.openInterest)
+              : 0;
+        const openInterest =
+          numericOrZero(event.openInterest) > 0
+            ? numericOrZero(event.openInterest)
+            : liquidity;
+        return {
+          ...event,
+          liquidity,
+          openInterest,
+        };
+      });
+      const sorted = normalized
         .slice()
         .sort((a, b) => numericOrZero(b.score) - numericOrZero(a.score));
       nodeEventsCache.set(nodeId, sorted);
