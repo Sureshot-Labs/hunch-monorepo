@@ -3,6 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
+import { z } from "zod";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { runMapSignals } from "./ai-map-signals-run.js";
@@ -70,70 +71,93 @@ type RunEntry = {
   result: SignalsRunnerResult;
 };
 
-type SignalsReportSignal = {
-  signalId: string;
-  nodeId: string;
-  nodeLabel: string;
-  level: number;
-  decision: "publish_candidate" | "context_only" | "skip";
-  signalType: "catalyst" | "risk" | "update";
-  direction: "up" | "down" | "mixed";
-  confidence: number;
-  headline: string;
-  summary: string;
-  rationale: string;
-  targetMarketId: string | null;
-  targetEventId: string | null;
-  targetMarketTitle: string | null;
-  targetEventTitle: string | null;
-  targetVenue: string | null;
-  reasonCodes: string[];
-  metrics: {
-    evidenceCount: number;
-    confirmedCount: number;
-    distinctDomains: number;
-    candidateMarkets: number;
-    selectedMarketAffinity: number | null;
-    bestMarketAffinity: number | null;
-  };
-  evidenceRefs: Array<{
-    evidenceId: string;
-    headline: string;
-    sourceUrl: string;
-    sourceDomain: string;
-    publishedAt: string | null;
-    confirmation: "confirmed" | "developing" | "unconfirmed";
-    sourceTier: "official" | "wire" | "major_media" | "specialist" | "social";
-  }>;
-  modelStatus: "PUBLISH" | "CONTEXT" | "SKIP" | "NONE";
-  downgradedFromPublish: boolean;
-  chargedCostUsd: number;
-  estimatedCostUsd: number;
-  providerCostUsd: number | null;
-  costSource: "estimated" | "provider_reported";
-};
+const signalsReportSignalSchema = z
+  .object({
+    signalId: z.string().min(1),
+    nodeId: z.string().min(1),
+    nodeLabel: z.string().min(1),
+    level: z.coerce.number().int().nonnegative(),
+    decision: z.enum(["publish_candidate", "context_only", "skip"]),
+    signalType: z.enum(["catalyst", "risk", "update"]),
+    direction: z.enum(["up", "down", "mixed"]),
+    confidence: z.coerce.number().finite(),
+    headline: z.string().min(1),
+    summary: z.string().min(1),
+    rationale: z.string().min(1),
+    targetMarketId: z.string().min(1).nullable(),
+    targetEventId: z.string().min(1).nullable(),
+    targetMarketTitle: z.string().min(1).nullable(),
+    targetEventTitle: z.string().min(1).nullable(),
+    targetVenue: z.string().min(1).nullable(),
+    reasonCodes: z.array(z.string().min(1)).default([]),
+    metrics: z.object({
+      evidenceCount: z.coerce.number().finite(),
+      confirmedCount: z.coerce.number().finite(),
+      distinctDomains: z.coerce.number().finite(),
+      candidateMarkets: z.coerce.number().finite(),
+      selectedMarketAffinity: z.coerce.number().finite().nullable(),
+      bestMarketAffinity: z.coerce.number().finite().nullable(),
+    }),
+    evidenceRefs: z
+      .array(
+        z.object({
+          evidenceId: z.string().min(1),
+          headline: z.string().min(1),
+          sourceUrl: z.string().min(1),
+          sourceDomain: z.string().min(1),
+          publishedAt: z.string().min(1).nullable(),
+          confirmation: z.enum(["confirmed", "developing", "unconfirmed"]),
+          sourceTier: z.enum([
+            "official",
+            "wire",
+            "major_media",
+            "specialist",
+            "social",
+          ]),
+        }),
+      )
+      .default([]),
+    modelStatus: z.enum(["PUBLISH", "CONTEXT", "SKIP", "NONE"]),
+    downgradedFromPublish: z.coerce.boolean(),
+    chargedCostUsd: z.coerce.number().finite(),
+    estimatedCostUsd: z.coerce.number().finite(),
+    providerCostUsd: z.coerce.number().finite().nullable(),
+    costSource: z.enum(["estimated", "provider_reported", "mixed"]),
+  })
+  .passthrough();
 
-type SignalsReportLike = {
-  source?: {
-    runId?: string;
-    mapGeneratedAt?: string;
-    providerReportedSearchCostUsd?: number;
-    providerReportedSearchCostCalls?: number;
-    chargedSearchCostUsd?: number;
-  };
-  totals?: {
-    durationMs?: number;
-    generatedSignals?: number;
-    publishCandidates?: number;
-    contextOnly?: number;
-    skipped?: number;
-    estimatedCostUsd?: number;
-    chargedCostUsd?: number;
-    providerReportedCostUsd?: number;
-    providerReportedCostCalls?: number;
-  };
-  signals?: SignalsReportSignal[];
-};
+const signalsReportSchema = z
+  .object({
+    source: z
+      .object({
+        runId: z.string().min(1).optional(),
+        mapGeneratedAt: z.string().min(1).optional(),
+        providerReportedSearchCostUsd: z.coerce.number().finite().optional(),
+        providerReportedSearchCostCalls: z.coerce.number().finite().optional(),
+        chargedSearchCostUsd: z.coerce.number().finite().optional(),
+      })
+      .partial()
+      .optional(),
+    totals: z
+      .object({
+        durationMs: z.coerce.number().finite().optional(),
+        generatedSignals: z.coerce.number().finite().optional(),
+        publishCandidates: z.coerce.number().finite().optional(),
+        contextOnly: z.coerce.number().finite().optional(),
+        skipped: z.coerce.number().finite().optional(),
+        estimatedCostUsd: z.coerce.number().finite().optional(),
+        chargedCostUsd: z.coerce.number().finite().optional(),
+        providerReportedCostUsd: z.coerce.number().finite().optional(),
+        providerReportedCostCalls: z.coerce.number().finite().optional(),
+      })
+      .partial()
+      .optional(),
+    signals: z.array(signalsReportSignalSchema).optional(),
+  })
+  .passthrough();
+
+type SignalsReportSignal = z.infer<typeof signalsReportSignalSchema>;
+type SignalsReportLike = z.infer<typeof signalsReportSchema>;
 
 type PersistStats = {
   considered: number;
@@ -287,11 +311,14 @@ function previewError(error: unknown): string {
 }
 
 function extractSignalsReport(raw: string): SignalsReportLike {
-  const parsed = JSON.parse(raw) as SignalsReportLike;
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("signals report is not an object");
-  }
-  return parsed;
+  const parsed = JSON.parse(raw) as unknown;
+  const result = signalsReportSchema.safeParse(parsed);
+  if (result.success) return result.data;
+  const issues = result.error.issues
+    .slice(0, 5)
+    .map(issue => `${issue.path.join(".") || "root"}:${issue.message}`)
+    .join("; ");
+  throw new Error(`invalid_signals_report:${issues}`);
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -1132,6 +1159,8 @@ async function main() {
     addArgIfMissing(searchArgs, "--concurrency", String(config.concurrency));
     addArgIfMissing(searchArgs, "--max-output-tokens", String(config.maxOutputTokens));
     addArgIfMissing(searchArgs, "--timeout-sec", String(config.timeoutSec));
+    addArgIfMissing(searchArgs, "--max-retries", String(config.maxRetries));
+    addArgIfMissing(searchArgs, "--retry-base-ms", String(config.retryBaseMs));
 
     if ((args.dryRun || config.dryRun) && !hasOption(searchArgs, "--dry-run")) {
       searchArgs.push("--dry-run");

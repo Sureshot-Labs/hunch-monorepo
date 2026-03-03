@@ -282,6 +282,8 @@ export type MapSignalsPolicy = {
   concurrency: number;
   maxOutputTokens: number;
   timeoutSec: number;
+  maxRetries: number;
+  retryBaseMs: number;
   dryRun: boolean;
   verbose: boolean;
   persistNotes: boolean;
@@ -699,6 +701,8 @@ const mapSignalsSchema = z
     concurrency: positiveInt.max(16),
     maxOutputTokens: positiveInt.max(8_000),
     timeoutSec: positiveInt.max(60 * 10),
+    maxRetries: nonNegativeInt.max(10),
+    retryBaseMs: positiveInt.max(60_000),
     dryRun: strictBoolean,
     verbose: strictBoolean,
     persistNotes: strictBoolean,
@@ -1249,6 +1253,8 @@ function getDefaults(): IntelPolicyMap {
       concurrency: 4,
       maxOutputTokens: 900,
       timeoutSec: 90,
+      maxRetries: 1,
+      retryBaseMs: 1200,
       dryRun: false,
       verbose: false,
       persistNotes: false,
@@ -1826,6 +1832,8 @@ function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
     concurrency: clamp(Math.trunc(policy.concurrency), 1, 16),
     maxOutputTokens: clamp(Math.trunc(policy.maxOutputTokens), 100, 8_000),
     timeoutSec: clamp(Math.trunc(policy.timeoutSec), 15, 60 * 10),
+    maxRetries: clamp(Math.trunc(policy.maxRetries), 0, 10),
+    retryBaseMs: clamp(Math.trunc(policy.retryBaseMs), 100, 60_000),
     dryRun: Boolean(policy.dryRun),
     verbose: Boolean(policy.verbose),
     persistNotes: Boolean(policy.persistNotes),

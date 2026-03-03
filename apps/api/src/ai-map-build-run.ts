@@ -911,6 +911,41 @@ function parseLabelFromRawOutput(raw: string): {
   };
 }
 
+const AI_LABEL_TRANSIENT_MAX_RETRIES = 2;
+const AI_LABEL_RETRY_BASE_MS = 800;
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function computeRetryBackoffMs(baseMs: number, attempt: number): number {
+  const exp = Math.min(attempt, 6);
+  const jitterFactor = 0.75 + Math.random() * 0.5;
+  return Math.round(baseMs * 2 ** exp * jitterFactor);
+}
+
+function isTransientLabelResult(result: AiLabelResult): boolean {
+  if (result.reason === "timeout") return true;
+  if (result.reason !== "http_error") return false;
+  const status = result.statusCode ?? null;
+  if (status == null) return true;
+  if (status === 429) return true;
+  return status >= 500 && status < 600;
+}
+
+function isTransientLabelError(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("abort") ||
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("econnreset")
+  );
+}
+
 async function callOpenRouterLabel(params: {
   model: string;
   labelMaxTokens: number;
@@ -1037,6 +1072,35 @@ async function callOpenRouterLabel(params: {
     providerCostUsd: providerCost.providerCostUsd,
     providerCostField: providerCost.providerCostField,
     providerCostUsdTicks: providerCost.providerCostUsdTicks,
+    promptChars: params.prompt.promptChars,
+  };
+}
+
+async function callOpenRouterLabelWithRetry(params: {
+  model: string;
+  labelMaxTokens: number;
+  timeoutMs: number;
+  prompt: LabelPromptPayload;
+}): Promise<AiLabelResult> {
+  const totalAttempts = AI_LABEL_TRANSIENT_MAX_RETRIES + 1;
+  for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+    try {
+      const result = await callOpenRouterLabel(params);
+      const canRetry =
+        attempt + 1 < totalAttempts && isTransientLabelResult(result);
+      if (!canRetry) return result;
+    } catch (error) {
+      const canRetry =
+        attempt + 1 < totalAttempts && isTransientLabelError(error);
+      if (!canRetry) throw error;
+    }
+    const backoffMs = computeRetryBackoffMs(AI_LABEL_RETRY_BASE_MS, attempt);
+    await sleepMs(backoffMs);
+  }
+  return {
+    label: null,
+    reason: "http_error",
+    detail: "retry_exhausted",
     promptChars: params.prompt.promptChars,
   };
 }
@@ -1342,7 +1406,7 @@ async function applyAiLabels(params: {
       let providerCostUsdTicks: number | null = null;
       let labelMaxTokensUsed = config.labelMaxTokens;
       try {
-        let result = await callOpenRouterLabel({
+        let result = await callOpenRouterLabelWithRetry({
           model: config.labelModel,
           labelMaxTokens: config.labelMaxTokens,
           timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
@@ -1361,7 +1425,7 @@ async function applyAiLabels(params: {
           );
           if (retryLabelMaxTokens > config.labelMaxTokens) {
             labelMaxTokensUsed = retryLabelMaxTokens;
-            result = await callOpenRouterLabel({
+            result = await callOpenRouterLabelWithRetry({
               model: config.labelModel,
               labelMaxTokens: retryLabelMaxTokens,
               timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,

@@ -4,6 +4,91 @@ export const mapSignalDirectionSchema = z.enum(["up", "down", "mixed"]);
 export const mapSignalTypeSchema = z.enum(["catalyst", "risk", "update"]);
 export const mapSignalStatusSchema = z.enum(["PUBLISH", "CONTEXT", "SKIP"]);
 
+const mapSearchConfirmationSchema = z.enum([
+  "confirmed",
+  "developing",
+  "unconfirmed",
+]);
+const mapSearchSourceTierSchema = z.enum([
+  "official",
+  "wire",
+  "major_media",
+  "specialist",
+  "social",
+]);
+const mapSearchRouteReasonSchema = z.enum([
+  "assigned_child",
+  "below_threshold",
+  "below_min_similarity",
+  "low_margin",
+  "no_candidate",
+  "leaf_self",
+]);
+
+const mapSignalsInputRunSchema = z
+  .object({
+    runId: z.string().min(1),
+    mapGeneratedAt: z.string().min(1),
+  })
+  .passthrough();
+
+const mapSignalsInputTotalsSchema = z
+  .object({
+    callsExecuted: z.coerce.number().finite(),
+    evidenceTotal: z.coerce.number().finite(),
+    estimatedTotalCostUsd: z.coerce.number().finite(),
+    chargedTotalCostUsd: z.coerce.number().finite().optional(),
+    providerReportedCostUsd: z.coerce.number().finite().optional(),
+    providerReportedCostCalls: z.coerce.number().finite().optional(),
+  })
+  .passthrough();
+
+const mapSignalsInputCallSchema = z
+  .object({
+    callIndex: z.coerce.number().int().nonnegative(),
+    nodeId: z.string().min(1),
+    nodeLabel: z.string().min(1),
+    level: z.coerce.number().int().nonnegative(),
+  })
+  .passthrough();
+
+const mapSignalsInputEvidenceSchema = z
+  .object({
+    id: z.string().min(1),
+    headline: z.string().min(1).max(240),
+    summary: z.string().min(1).max(320),
+    sourceUrl: z.string().url(),
+    sourceDomain: z.string().min(1).max(120),
+    publishedAt: z.string().min(1).nullable(),
+    confirmation: mapSearchConfirmationSchema,
+    sourceTier: mapSearchSourceTierSchema,
+    relevance: z.number().min(0).max(1),
+    confidence: z.number().min(0).max(1),
+    nodeId: z.string().min(1),
+    callIndex: z.coerce.number().int().nonnegative(),
+    assignedNodeId: z.string().min(1).nullable(),
+    assignedSimilarity: z.number().nullable(),
+    routeReason: mapSearchRouteReasonSchema.nullable(),
+  })
+  .passthrough();
+
+export const mapSignalsInputArtifactSchema = z
+  .object({
+    run: mapSignalsInputRunSchema,
+    totals: mapSignalsInputTotalsSchema,
+    calls: z.array(mapSignalsInputCallSchema),
+    evidence: z.array(mapSignalsInputEvidenceSchema),
+  })
+  .passthrough();
+
+export type MapSignalsInputArtifact = z.infer<typeof mapSignalsInputArtifactSchema>;
+
+export function parseMapSignalsInputArtifactV1(
+  payload: unknown,
+): MapSignalsInputArtifact {
+  return mapSignalsInputArtifactSchema.parse(payload);
+}
+
 export const mapSignalsAgentOutputV2Schema = z
   .object({
     version: z.literal("map_signals_v2"),

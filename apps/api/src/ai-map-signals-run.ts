@@ -12,6 +12,7 @@ import { extractProviderCostUsd, resolveAiCost, type CostSource } from "./lib/ai
 import {
   buildMapSignalsSystemPromptV2,
   buildMapSignalsUserPromptV2,
+  parseMapSignalsInputArtifactV1,
   parseMapSignalsAgentOutputV2,
   type MapSignalsAgentOutputV2,
 } from "./schemas/ai-map-signals.js";
@@ -168,6 +169,8 @@ type Args = {
   concurrency: number;
   maxOutputTokens: number;
   timeoutSec: number;
+  maxRetries: number;
+  retryBaseMs: number;
   priceInputPerM: number;
   priceOutputPerM: number;
   embedPriceInputPerM: number;
@@ -283,6 +286,13 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return n;
 }
 
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
 function parsePositiveNumber(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const n = Number(raw);
@@ -346,6 +356,41 @@ function formatUsd(value: number): string {
   return `$${value.toFixed(6)}`;
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function computeBackoffMs(baseMs: number, attempt: number): number {
+  const exp = Math.min(attempt, 6);
+  const jitterFactor = 0.75 + Math.random() * 0.5;
+  return Math.round(baseMs * 2 ** exp * jitterFactor);
+}
+
+function extractHttpStatusFromErrorMessage(message: string): number | null {
+  const match = message.match(/\b(\d{3})\b/);
+  if (!match) return null;
+  const status = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(status)) return null;
+  return status;
+}
+
+function isTransientOpenRouterError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") return true;
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  const status = extractHttpStatusFromErrorMessage(message);
+  if (status === 429) return true;
+  if (status != null && status >= 500 && status < 600) return true;
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("abort") ||
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("econnreset")
+  );
+}
+
 function preview(value: string, maxChars: number): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxChars) return normalized;
@@ -389,6 +434,8 @@ function resolveArgs(argv: string[]): Args {
     concurrency: parsePositiveInt(parseFlag(argv, "--concurrency"), 3),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 900),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 90),
+    maxRetries: parseNonNegativeInt(parseFlag(argv, "--max-retries"), 1),
+    retryBaseMs: parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 1200),
     priceInputPerM: parsePositiveNumber(
       parseFlag(argv, "--price-input-per-m"),
       modelPricing?.inputPerM ?? 0.2,
@@ -423,6 +470,8 @@ Model:
   --embed-model <id>             OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
   --max-output-tokens <n>        Max output tokens per node call (default: 900)
   --timeout-sec <n>              Request timeout seconds (default: 90)
+  --max-retries <n>              Transient retry count per OpenRouter call (default: 1)
+  --retry-base-ms <n>            Retry backoff base ms (default: 1200)
   --concurrency <n>              Parallel node calls (default: 3)
 
 Selection:
@@ -454,13 +503,8 @@ Flags:
 
 async function readInput(path: string): Promise<MapSearchArtifactFile> {
   const raw = await readFile(path, "utf8");
-  const parsed = JSON.parse(raw) as MapSearchArtifactFile;
-  if (!parsed || typeof parsed !== "object") throw new Error("invalid_input_payload");
-  if (!parsed.run?.runId) throw new Error("missing_run_id");
-  if (!Array.isArray(parsed.calls) || !Array.isArray(parsed.evidence)) {
-    throw new Error("missing_calls_or_evidence");
-  }
-  return parsed;
+  const parsed = JSON.parse(raw) as unknown;
+  return parseMapSignalsInputArtifactV1(parsed);
 }
 
 function clamp01(value: number): number {
@@ -845,91 +889,104 @@ async function callOpenRouter(
   userPrompt: string,
 ): Promise<OpenRouterCallResult> {
   if (!env.openRouterKey) throw new Error("OPENROUTER_API_KEY missing");
+  const totalAttempts = args.maxRetries + 1;
+  for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.openRouterKey}`,
+          "Content-Type": "application/json",
+          "X-Title": "Hunch AI Map Signals",
+        },
+        body: JSON.stringify({
+          model: args.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0,
+          max_tokens: args.maxOutputTokens,
+          response_format: { type: "json_object" },
+          reasoning: { effort: "low" },
+        }),
+        signal: controller.signal,
+      });
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`OpenRouter ${response.status}: ${text}`);
+      }
 
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openRouterKey}`,
-        "Content-Type": "application/json",
-        "X-Title": "Hunch AI Map Signals",
-      },
-      body: JSON.stringify({
-        model: args.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0,
-        max_tokens: args.maxOutputTokens,
-        response_format: { type: "json_object" },
-        reasoning: { effort: "low" },
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`OpenRouter ${response.status}: ${text}`);
-    }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
-      usage?: {
-        prompt_tokens?: unknown;
-        completion_tokens?: unknown;
-        total_tokens?: unknown;
-        completion_tokens_details?: { reasoning_tokens?: unknown } | null;
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: unknown } }>;
+        usage?: {
+          prompt_tokens?: unknown;
+          completion_tokens?: unknown;
+          total_tokens?: unknown;
+          completion_tokens_details?: { reasoning_tokens?: unknown } | null;
+        };
       };
-    };
 
-    const content = parseMessageContent(payload.choices?.[0]?.message?.content);
-    const promptTokens = safeNumber(payload.usage?.prompt_tokens) ?? 0;
-    const completionTokens = safeNumber(payload.usage?.completion_tokens) ?? 0;
-    const totalTokens =
-      safeNumber(payload.usage?.total_tokens) ?? promptTokens + completionTokens;
-    const reasoningTokens =
-      safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
-    const providerCost = extractProviderCostUsd(payload);
-    const resolvedCost = resolveAiCost({
-      inputTokens: promptTokens,
-      outputTokens: completionTokens,
-      priceInputPerM: args.priceInputPerM,
-      priceOutputPerM: args.priceOutputPerM,
-      providerCostUsd: providerCost.providerCostUsd,
-      providerCostField: providerCost.providerCostField,
-      providerCostUsdTicks: providerCost.providerCostUsdTicks,
-    });
-
-    return {
-      content,
-      usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens,
-        reasoningTokens,
+      const content = parseMessageContent(payload.choices?.[0]?.message?.content);
+      const promptTokens = safeNumber(payload.usage?.prompt_tokens) ?? 0;
+      const completionTokens = safeNumber(payload.usage?.completion_tokens) ?? 0;
+      const totalTokens =
+        safeNumber(payload.usage?.total_tokens) ?? promptTokens + completionTokens;
+      const reasoningTokens =
+        safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+      const providerCost = extractProviderCostUsd(payload);
+      const resolvedCost = resolveAiCost({
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
+        priceInputPerM: args.priceInputPerM,
+        priceOutputPerM: args.priceOutputPerM,
         providerCostUsd: providerCost.providerCostUsd,
         providerCostField: providerCost.providerCostField,
         providerCostUsdTicks: providerCost.providerCostUsdTicks,
-      },
-      cost: {
-        inputCostUsd: resolvedCost.inputCostUsd,
-        outputCostUsd: resolvedCost.outputCostUsd,
-        tokenCostUsd: resolvedCost.tokenCostUsd,
-        estimatedCostUsd: resolvedCost.estimatedCostUsd,
-        chargedCostUsd: resolvedCost.chargedCostUsd,
-        providerCostUsd: resolvedCost.providerCostUsd,
-        providerCostField: resolvedCost.providerCostField,
-        providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
-        costSource: resolvedCost.costSource,
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
+      });
+
+      return {
+        content,
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          reasoningTokens,
+          providerCostUsd: providerCost.providerCostUsd,
+          providerCostField: providerCost.providerCostField,
+          providerCostUsdTicks: providerCost.providerCostUsdTicks,
+        },
+        cost: {
+          inputCostUsd: resolvedCost.inputCostUsd,
+          outputCostUsd: resolvedCost.outputCostUsd,
+          tokenCostUsd: resolvedCost.tokenCostUsd,
+          estimatedCostUsd: resolvedCost.estimatedCostUsd,
+          chargedCostUsd: resolvedCost.chargedCostUsd,
+          providerCostUsd: resolvedCost.providerCostUsd,
+          providerCostField: resolvedCost.providerCostField,
+          providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
+          costSource: resolvedCost.costSource,
+        },
+      };
+    } catch (error) {
+      const canRetry = attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
+      if (!canRetry) throw error;
+      const backoffMs = computeBackoffMs(args.retryBaseMs, attempt);
+      if (args.verbose) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.log(
+          `${logPrefix()} openrouter_chat_retry attempt=${attempt + 1}/${totalAttempts - 1} backoff_ms=${backoffMs} err=${preview(message, 140)}`,
+        );
+      }
+      await sleep(backoffMs);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw new Error("openrouter_chat_retry_exhausted");
 }
 
 async function callOpenRouterEmbeddings(
@@ -962,86 +1019,101 @@ async function callOpenRouterEmbeddings(
     };
   }
   if (!env.openRouterKey) throw new Error("OPENROUTER_API_KEY missing");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openRouterKey}`,
-        "Content-Type": "application/json",
-        "X-Title": "Hunch AI Map Signals",
-      },
-      body: JSON.stringify({
-        model: args.embedModel,
-        input: texts,
-        encoding_format: "float",
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`OpenRouter embeddings failed: ${response.status} ${body}`);
-    }
-    const json = (await response.json()) as {
-      data?: Array<{ embedding?: number[]; index?: number }>;
-      usage?: {
-        prompt_tokens?: unknown;
-        completion_tokens?: unknown;
-        total_tokens?: unknown;
-        completion_tokens_details?: { reasoning_tokens?: unknown } | null;
+  const totalAttempts = args.maxRetries + 1;
+  for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.openRouterKey}`,
+          "Content-Type": "application/json",
+          "X-Title": "Hunch AI Map Signals",
+        },
+        body: JSON.stringify({
+          model: args.embedModel,
+          input: texts,
+          encoding_format: "float",
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`OpenRouter embeddings failed: ${response.status} ${body}`);
+      }
+      const json = (await response.json()) as {
+        data?: Array<{ embedding?: number[]; index?: number }>;
+        usage?: {
+          prompt_tokens?: unknown;
+          completion_tokens?: unknown;
+          total_tokens?: unknown;
+          completion_tokens_details?: { reasoning_tokens?: unknown } | null;
+        };
       };
-    };
-    if (!Array.isArray(json.data)) throw new Error("OpenRouter embeddings missing data");
-    const out: Array<number[] | null> = new Array(texts.length).fill(null);
-    for (const item of json.data) {
-      const idx = typeof item.index === "number" ? item.index : -1;
-      if (idx < 0 || idx >= texts.length) continue;
-      if (!Array.isArray(item.embedding)) continue;
-      out[idx] = normalizeVector(item.embedding);
-    }
-    const promptTokens = safeNumber(json.usage?.prompt_tokens) ?? 0;
-    const completionTokens = safeNumber(json.usage?.completion_tokens) ?? 0;
-    const totalTokens =
-      safeNumber(json.usage?.total_tokens) ?? promptTokens + completionTokens;
-    const reasoningTokens =
-      safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
-    const providerCost = extractProviderCostUsd(json);
-    const resolvedCost = resolveAiCost({
-      inputTokens: promptTokens,
-      outputTokens: completionTokens,
-      priceInputPerM: args.embedPriceInputPerM,
-      priceOutputPerM: args.embedPriceOutputPerM,
-      providerCostUsd: providerCost.providerCostUsd,
-      providerCostField: providerCost.providerCostField,
-      providerCostUsdTicks: providerCost.providerCostUsdTicks,
-    });
-    return {
-      vectors: out,
-      usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens,
-        reasoningTokens,
+      if (!Array.isArray(json.data)) throw new Error("OpenRouter embeddings missing data");
+      const out: Array<number[] | null> = new Array(texts.length).fill(null);
+      for (const item of json.data) {
+        const idx = typeof item.index === "number" ? item.index : -1;
+        if (idx < 0 || idx >= texts.length) continue;
+        if (!Array.isArray(item.embedding)) continue;
+        out[idx] = normalizeVector(item.embedding);
+      }
+      const promptTokens = safeNumber(json.usage?.prompt_tokens) ?? 0;
+      const completionTokens = safeNumber(json.usage?.completion_tokens) ?? 0;
+      const totalTokens =
+        safeNumber(json.usage?.total_tokens) ?? promptTokens + completionTokens;
+      const reasoningTokens =
+        safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+      const providerCost = extractProviderCostUsd(json);
+      const resolvedCost = resolveAiCost({
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
+        priceInputPerM: args.embedPriceInputPerM,
+        priceOutputPerM: args.embedPriceOutputPerM,
         providerCostUsd: providerCost.providerCostUsd,
         providerCostField: providerCost.providerCostField,
         providerCostUsdTicks: providerCost.providerCostUsdTicks,
-      },
-      cost: {
-        inputCostUsd: resolvedCost.inputCostUsd,
-        outputCostUsd: resolvedCost.outputCostUsd,
-        tokenCostUsd: resolvedCost.tokenCostUsd,
-        estimatedCostUsd: resolvedCost.estimatedCostUsd,
-        chargedCostUsd: resolvedCost.chargedCostUsd,
-        providerCostUsd: resolvedCost.providerCostUsd,
-        providerCostField: resolvedCost.providerCostField,
-        providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
-        costSource: resolvedCost.costSource,
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
+      });
+      return {
+        vectors: out,
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          reasoningTokens,
+          providerCostUsd: providerCost.providerCostUsd,
+          providerCostField: providerCost.providerCostField,
+          providerCostUsdTicks: providerCost.providerCostUsdTicks,
+        },
+        cost: {
+          inputCostUsd: resolvedCost.inputCostUsd,
+          outputCostUsd: resolvedCost.outputCostUsd,
+          tokenCostUsd: resolvedCost.tokenCostUsd,
+          estimatedCostUsd: resolvedCost.estimatedCostUsd,
+          chargedCostUsd: resolvedCost.chargedCostUsd,
+          providerCostUsd: resolvedCost.providerCostUsd,
+          providerCostField: resolvedCost.providerCostField,
+          providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
+          costSource: resolvedCost.costSource,
+        },
+      };
+    } catch (error) {
+      const canRetry = attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
+      if (!canRetry) throw error;
+      const backoffMs = computeBackoffMs(args.retryBaseMs, attempt);
+      if (args.verbose) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.log(
+          `${logPrefix()} openrouter_embed_retry attempt=${attempt + 1}/${totalAttempts - 1} backoff_ms=${backoffMs} err=${preview(message, 140)}`,
+        );
+      }
+      await sleep(backoffMs);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw new Error("openrouter_embeddings_retry_exhausted");
 }
 
 async function toMarketCandidates(

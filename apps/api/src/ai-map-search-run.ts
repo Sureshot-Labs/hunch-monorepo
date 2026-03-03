@@ -1216,6 +1216,90 @@ function salvageAgentOutput(
   }
 }
 
+function buildLenientAgentOutput(parsed: unknown): MapSearchAgentOutputV2 | null {
+  const record = asRecord(parsed);
+  if (!record) return null;
+
+  const rawEvidence = Array.isArray(record.evidence) ? record.evidence.slice(0, 12) : [];
+  const keptEvidence: MapSearchEvidenceItemV2[] = [];
+  for (const item of rawEvidence) {
+    const direct = mapSearchEvidenceItemV2Schema.safeParse(item);
+    if (direct.success) {
+      keptEvidence.push(direct.data);
+      continue;
+    }
+    const candidateRecord = asRecord(item);
+    if (!candidateRecord) continue;
+    const fallbackCandidate = {
+      headline: clampStringValue(candidateRecord.headline, 240, ""),
+      summary: clampStringValue(candidateRecord.summary, 300, ""),
+      source_url: clampStringValue(candidateRecord.source_url, 1024, ""),
+      source_domain: clampStringValue(candidateRecord.source_domain, 120, ""),
+      published_at:
+        typeof candidateRecord.published_at === "string"
+          ? candidateRecord.published_at
+          : null,
+      author_handle:
+        typeof candidateRecord.author_handle === "string"
+          ? candidateRecord.author_handle
+          : null,
+      confirmation: candidateRecord.confirmation,
+      source_tier: candidateRecord.source_tier,
+      relevance:
+        typeof candidateRecord.relevance === "number" &&
+        Number.isFinite(candidateRecord.relevance)
+          ? candidateRecord.relevance
+          : 0.5,
+      confidence:
+        typeof candidateRecord.confidence === "number" &&
+        Number.isFinite(candidateRecord.confidence)
+          ? candidateRecord.confidence
+          : 0.5,
+    };
+    const fallbackParsed = mapSearchEvidenceItemV2Schema.safeParse(fallbackCandidate);
+    if (fallbackParsed.success) keptEvidence.push(fallbackParsed.data);
+  }
+
+  const rawStatus =
+    typeof record.status === "string" ? record.status.trim().toUpperCase() : "";
+  const normalizedStatus: MapSearchAgentOutputV2["status"] =
+    rawStatus === "OK" || rawStatus === "PARTIAL" || rawStatus === "NO_EVIDENCE"
+      ? (rawStatus as MapSearchAgentOutputV2["status"])
+      : keptEvidence.length > 0
+        ? "PARTIAL"
+        : "NO_EVIDENCE";
+  const summaryFallback =
+    keptEvidence[0]?.summary ??
+    keptEvidence[0]?.headline ??
+    (normalizedStatus === "NO_EVIDENCE"
+      ? "No eligible evidence found."
+      : "Partial evidence recovered.");
+  const summary = clampStringValue(record.summary, 260, summaryFallback);
+  const nextFocus = Array.isArray(record.next_focus)
+    ? record.next_focus
+        .map(item => clampStringValue(item, 120, ""))
+        .filter(item => item.length > 0)
+        .slice(0, 8)
+    : [];
+  const notes = clampStringValue(record.notes, 400, "");
+  const candidate: Record<string, unknown> = {
+    version: "map_search_v2",
+    status:
+      normalizedStatus === "OK" && keptEvidence.length === 0
+        ? "PARTIAL"
+        : normalizedStatus,
+    summary,
+    next_focus: nextFocus,
+    evidence: keptEvidence,
+  };
+  if (notes) candidate.notes = notes;
+  try {
+    return parseMapSearchAgentOutputV2(candidate);
+  } catch {
+    return null;
+  }
+}
+
 function parseAgentOutput(raw: string, strict: boolean): ParsedAgentOutput {
   const candidate = extractJsonCandidate(raw);
   if (!candidate) {
@@ -1253,6 +1337,16 @@ function parseAgentOutput(raw: string, strict: boolean): ParsedAgentOutput {
         data: salvaged.data,
       };
     }
+    if (!strict) {
+      const lenient = buildLenientAgentOutput(parsed);
+      if (lenient) {
+        return {
+          valid: true,
+          parseError: `lenient_recovery:root=${schemaError}`,
+          data: lenient,
+        };
+      }
+    }
     if (strict) {
       return {
         valid: false,
@@ -1262,7 +1356,7 @@ function parseAgentOutput(raw: string, strict: boolean): ParsedAgentOutput {
     }
     return {
       valid: false,
-      parseError: "schema_invalid",
+      parseError: schemaError,
       data: null,
     };
   }

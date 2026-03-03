@@ -203,7 +203,7 @@ export function buildMapSearchSystemPromptV2(
     "If some evidence is relevant but incomplete, set status=PARTIAL.",
     "Never fabricate URLs, summaries, timestamps, or handles.",
     "Output must validate this JSON Schema:",
-    JSON.stringify(MAP_SEARCH_AGENT_OUTPUT_V2_JSON_SCHEMA, null, 2),
+    JSON.stringify(MAP_SEARCH_AGENT_OUTPUT_V2_JSON_SCHEMA),
   ].join("\n");
 }
 

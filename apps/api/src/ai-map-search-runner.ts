@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
+import { z } from "zod";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { runMapSearch } from "./lib/map-news/map-search-core.js";
@@ -54,23 +55,33 @@ type RunEntry = {
   result: SearchRunnerResult;
 };
 
-type SearchReportLike = {
-  run?: {
-    runId?: string;
-  };
-  totals?: {
-    durationMs?: number;
-    callsExecuted?: number;
-    evidenceTotal?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    toolAttempts?: number;
-    estimatedTotalCostUsd?: number;
-    chargedTotalCostUsd?: number;
-    providerReportedCostUsd?: number;
-    providerReportedCostCalls?: number;
-  };
-};
+const searchReportSchema = z
+  .object({
+    run: z
+      .object({
+        runId: z.string().min(1).optional(),
+      })
+      .partial()
+      .optional(),
+    totals: z
+      .object({
+        durationMs: z.coerce.number().finite().optional(),
+        callsExecuted: z.coerce.number().finite().optional(),
+        evidenceTotal: z.coerce.number().finite().optional(),
+        inputTokens: z.coerce.number().finite().optional(),
+        outputTokens: z.coerce.number().finite().optional(),
+        toolAttempts: z.coerce.number().finite().optional(),
+        estimatedTotalCostUsd: z.coerce.number().finite().optional(),
+        chargedTotalCostUsd: z.coerce.number().finite().optional(),
+        providerReportedCostUsd: z.coerce.number().finite().optional(),
+        providerReportedCostCalls: z.coerce.number().finite().optional(),
+      })
+      .partial()
+      .optional(),
+  })
+  .passthrough();
+
+type SearchReportLike = z.infer<typeof searchReportSchema>;
 
 function hasFlag(args: string[], flag: string): boolean {
   return args.some((arg) => arg === flag);
@@ -244,11 +255,14 @@ function toNumber(value: unknown, fallback = 0): number {
 }
 
 function extractSearchReport(raw: string): SearchReportLike {
-  const parsed = JSON.parse(raw) as SearchReportLike;
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("search report is not an object");
-  }
-  return parsed;
+  const parsed = JSON.parse(raw) as unknown;
+  const result = searchReportSchema.safeParse(parsed);
+  if (result.success) return result.data;
+  const issues = result.error.issues
+    .slice(0, 5)
+    .map(issue => `${issue.path.join(".") || "root"}:${issue.message}`)
+    .join("; ");
+  throw new Error(`invalid_search_report:${issues}`);
 }
 
 function printHelp(): void {
