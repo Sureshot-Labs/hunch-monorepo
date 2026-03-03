@@ -241,10 +241,16 @@ async function main() {
   const nowMs = Date.now();
   let released = false;
   let shuttingDownBySignal = false;
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatInFlight = false;
 
   const releaseLockAndRedis = async (): Promise<void> => {
     if (released) return;
     released = true;
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
     try {
       const currentLockValue = await redis.get(LOCK_KEY);
       if (currentLockValue === lockValue) {
@@ -277,6 +283,37 @@ async function main() {
     }
   });
 
+  const renewLock = async (): Promise<void> => {
+    if (released || heartbeatInFlight) return;
+    heartbeatInFlight = true;
+    try {
+      const currentLockValue = await redis.get(LOCK_KEY);
+      if (currentLockValue !== lockValue) {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        return;
+      }
+      await redis.expire(LOCK_KEY, config.lockTtlSec);
+    } catch {
+      // best effort renewal
+    } finally {
+      heartbeatInFlight = false;
+    }
+  };
+
+  const startHeartbeat = () => {
+    const intervalSec = Math.max(
+      5,
+      Math.min(config.lockHeartbeatSec, Math.max(5, Math.floor(config.lockTtlSec / 2))),
+    );
+    heartbeatTimer = setInterval(() => {
+      void renewLock();
+    }, intervalSec * 1_000);
+    heartbeatTimer.unref();
+  };
+
   try {
     const acquired = await redis.set(LOCK_KEY, lockValue, {
       NX: true,
@@ -292,6 +329,8 @@ async function main() {
       });
       return;
     }
+
+    startHeartbeat();
 
     await redis.zRemRangeByScore(RUNS_KEY, 0, nowMs - RUN_HISTORY_TTL_MS);
 

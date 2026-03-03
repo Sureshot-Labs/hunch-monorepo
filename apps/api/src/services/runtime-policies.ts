@@ -141,6 +141,7 @@ export type MarketMapPolicy = {
   dayBudgetUsd: number;
   estimatedRunCostUsd: number;
   lockTtlSec: number;
+  lockHeartbeatSec: number;
   depth: number;
   k1: number;
   k2: number;
@@ -543,6 +544,7 @@ const marketMapSchema = z
     dayBudgetUsd: nonNegativeNumber.max(1_000_000),
     estimatedRunCostUsd: nonNegativeNumber.max(100_000),
     lockTtlSec: positiveInt.max(60 * 60 * 24),
+    lockHeartbeatSec: positiveInt.max(60 * 60 * 24),
     depth: positiveInt.max(4),
     k1: positiveInt.max(100),
     k2: positiveInt.max(100),
@@ -1096,6 +1098,7 @@ function getDefaults(): IntelPolicyMap {
       dayBudgetUsd: env.aiMarketMapDayBudgetUsd,
       estimatedRunCostUsd: env.aiMarketMapEstimatedRunCostUsd,
       lockTtlSec: env.aiMarketMapLockTtlSec,
+      lockHeartbeatSec: env.aiMarketMapLockHeartbeatSec,
       depth: env.aiMarketMapDepth,
       k1: env.aiMarketMapK1,
       k2: env.aiMarketMapK2,
@@ -1586,6 +1589,11 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
       100_000,
     ),
     lockTtlSec: clamp(Math.trunc(policy.lockTtlSec ?? 7_200), 60, 60 * 60 * 24),
+    lockHeartbeatSec: clamp(
+      Math.trunc(policy.lockHeartbeatSec ?? 30),
+      10,
+      60 * 60 * 24,
+    ),
     depth: clamp(Math.trunc(policy.depth), 2, 4),
     k1: clamp(Math.trunc(policy.k1), 2, 24),
     k2: clamp(Math.trunc(policy.k2), 2, 24),

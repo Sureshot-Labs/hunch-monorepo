@@ -290,6 +290,10 @@ const aiMarketMapLockTtlSec = optionalPositiveInt(
   "AI_MARKET_MAP_LOCK_TTL_SEC",
   7_200,
 );
+const aiMarketMapLockHeartbeatSec = optionalPositiveInt(
+  "AI_MARKET_MAP_LOCK_HEARTBEAT_SEC",
+  30,
+);
 const aiMarketMapDepth = optionalPositiveInt("AI_MARKET_MAP_DEPTH", 3);
 const aiMarketMapK1 = optionalPositiveInt("AI_MARKET_MAP_K1", 8);
 const aiMarketMapK2 = optionalPositiveInt("AI_MARKET_MAP_K2", 6);
@@ -615,6 +619,7 @@ export const env = {
   aiMarketMapDayBudgetUsd,
   aiMarketMapEstimatedRunCostUsd,
   aiMarketMapLockTtlSec,
+  aiMarketMapLockHeartbeatSec,
   aiMarketMapDepth,
   aiMarketMapK1,
   aiMarketMapK2,
