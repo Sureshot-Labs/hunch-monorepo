@@ -4,6 +4,7 @@ import { zEthAddress, zRequiredString, zVenue } from "./common.js";
 export const authPrivyBodySchema = z.object({
   accessToken: zRequiredString("accessToken is required"),
   referralCode: z.string().trim().min(1).max(32).optional(),
+  inviteConfirmed: z.boolean().optional(),
 });
 
 export const venueCredentialsBodySchema = z.object({

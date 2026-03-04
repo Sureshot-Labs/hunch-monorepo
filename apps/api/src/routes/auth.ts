@@ -222,15 +222,18 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           const referralCode =
             typeof body.referralCode === "string" ? body.referralCode : "";
           const hasReferralCode = referralCode.trim().length > 0;
+          const inviteConfirmed = body.inviteConfirmed === true;
 
           if (effectiveAccessState === "required" || effectiveAccessState === "prompt") {
             const current = await getReferralAttachmentStatus(client, {
               userId: user.id,
             });
-            const alreadyInvited = current.hasReferrer;
+            let hasReferrer = current.hasReferrer;
 
-            if (!alreadyInvited) {
-              if (!hasReferralCode) {
+            if (!hasReferrer) {
+              if (!inviteConfirmed) {
+                inviteReason = hasReferralCode ? null : "missing_code";
+              } else if (!hasReferralCode) {
                 inviteReason = "missing_code";
               } else {
                 const attached = await attachReferralCodeForExistingUser(client, {
@@ -238,14 +241,24 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
                   referralCode,
                 });
                 inviteReason = mapAttachStatusToInviteReason(attached.status);
+                if (inviteReason == null) {
+                  hasReferrer = true;
+                }
               }
+            }
+
+            if (effectiveAccessState === "required" && !hasReferrer && !inviteConfirmed) {
+              inviteReason = "missing_code";
             }
 
             if (effectiveAccessState === "required" && inviteReason) {
               await client.query("ROLLBACK");
             } else {
-              if (effectiveAccessState === "prompt" && inviteReason) {
+              if (effectiveAccessState === "prompt" && !hasReferrer) {
                 invitePrompt = true;
+                if (!inviteReason) {
+                  inviteReason = "missing_code";
+                }
               }
               await client.query("COMMIT");
             }
