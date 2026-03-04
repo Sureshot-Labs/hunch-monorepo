@@ -273,6 +273,36 @@ export async function selectRankedRepresentativeMarketsForEvents(
           order by
             (
               case
+                when mt.token_yes is not null
+                  and mt.token_no is not null
+                  and coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
+                  and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
+                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
+                  and (m.close_time is null or m.close_time > $5::timestamptz)
+                  and (
+                    m.resolved_outcome is null
+                    or upper(m.resolved_outcome::text) not in ('YES', 'NO')
+                  )
+                  and (
+                    m.resolved_outcome_pct is null
+                    or (m.resolved_outcome_pct > 0 and m.resolved_outcome_pct < 10000)
+                  )
+                  and (
+                    coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+                    or coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+                    or coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+                    or coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+                    or m.best_bid is not null
+                    or m.best_ask is not null
+                    or coalesce(m.last_price, km.last_price_dollars) is not null
+                    or odds.yes_probability is not null
+                  )
+                then 0
+                else 1
+              end
+            ),
+            (
+              case
                 when coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
                   and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
                   and (m.expiration_time is null or m.expiration_time > $5::timestamptz)

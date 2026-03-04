@@ -29,6 +29,9 @@ import {
   eventVenueKey,
   selectRankedRepresentativeMarketsForEvents,
 } from "./services/market-map-representative.js";
+import {
+  isMarketMapUsable,
+} from "./services/market-map-quality.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 
@@ -1130,26 +1133,6 @@ async function toMarketCandidates(
   for (const event of events) {
     const topMarkets =
       topMarketsByEventVenue.get(eventVenueKey(event.eventId, event.venue)) ?? [];
-    if (topMarkets.length === 0 && event.representativeMarketId) {
-      const marketId = event.representativeMarketId;
-      if (seen.has(marketId)) continue;
-      seen.add(marketId);
-      candidates.push({
-        marketId,
-        eventId: event.eventId,
-        eventTitle: event.title,
-        marketTitle: event.representativeMarketTitle ?? null,
-        venue: event.venue,
-        volume24h: numericOrZero(event.volume24h),
-        liquidity: numericOrZero(event.liquidity),
-        openInterest: numericOrZero(event.openInterest),
-        score: numericOrZero(event.score),
-        affinityScore: 0,
-        affinityRank: 0,
-      });
-      continue;
-    }
-
     for (const market of topMarkets) {
       const marketId = market.marketId;
       if (seen.has(marketId)) continue;
@@ -2026,6 +2009,26 @@ export async function runMapSignals(
 
         const grouped = new Map<string, EventTopMarket[]>();
         for (const row of ranked) {
+          if (
+            !isMarketMapUsable({
+              tokenYes: row.tokenYes,
+              tokenNo: row.tokenNo,
+              acceptingOrders: row.acceptingOrders,
+              marketStatus: row.marketStatus,
+              yesBid: row.yesBid,
+              yesAsk: row.yesAsk,
+              noBid: row.noBid,
+              noAsk: row.noAsk,
+              marketBestBid: row.marketBestBid,
+              marketBestAsk: row.marketBestAsk,
+              lastPrice: row.lastPrice,
+              resolvedOutcome: row.resolvedOutcome,
+              resolvedOutcomePct: row.resolvedOutcomePct,
+              yesProbability: row.yesProbability,
+            })
+          ) {
+            continue;
+          }
           const key = eventVenueKey(row.eventId, row.venue);
           const venueRaw = (row.venue ?? "").toLowerCase();
           const venue =

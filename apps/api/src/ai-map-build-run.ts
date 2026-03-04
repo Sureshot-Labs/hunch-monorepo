@@ -26,6 +26,15 @@ import {
   type MarketMapVenue,
 } from "./services/market-map.js";
 import {
+  eventVenueKey,
+  selectRankedRepresentativeMarketsForEvents,
+  type RankedRepresentativeMarket,
+} from "./services/market-map-representative.js";
+import {
+  getMarketMapDropReason,
+  type MarketMapDropReason,
+} from "./services/market-map-quality.js";
+import {
   resolveMarketMapPolicy,
   type MarketMapPolicy,
 } from "./services/runtime-policies.js";
@@ -53,6 +62,31 @@ type EventCandidateRow = {
   representative_market_icon: string | null;
 };
 
+type EnrichedEventCandidateRow = EventCandidateRow & {
+  odds_source: "representative" | "fallback" | null;
+  token_yes: string | null;
+  token_no: string | null;
+  yes_bid: number | null;
+  yes_ask: number | null;
+  no_bid: number | null;
+  no_ask: number | null;
+  market_best_bid: number | null;
+  market_best_ask: number | null;
+  last_price: number | null;
+  market_status: string | null;
+  accepting_orders: boolean | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: number | null;
+};
+
+type CandidateQualitySummary = {
+  before: number;
+  kept: number;
+  dropped: number;
+  droppedReasons: Record<MarketMapDropReason, number>;
+  enrichmentFailed: boolean;
+};
+
 type EventPoint = {
   eventId: string;
   venue: MarketMapVenue;
@@ -65,6 +99,20 @@ type EventPoint = {
   liquidity: number;
   openInterest: number;
   score: number;
+  oddsSource: "representative" | "fallback" | null;
+  tokenYes: string | null;
+  tokenNo: string | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  marketBestBid: number | null;
+  marketBestAsk: number | null;
+  lastPrice: number | null;
+  marketStatus: string | null;
+  acceptingOrders: boolean | null;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: number | null;
   vector: number[];
   x: number;
   y: number;
@@ -262,6 +310,14 @@ function normalizeOptionalUrl(value: unknown): string | null {
   return trimmed;
 }
 
+function emptyDropReasonCounts(): Record<MarketMapDropReason, number> {
+  return {
+    missing_token_pair: 0,
+    untradeable: 0,
+    missing_odds: 0,
+  };
+}
+
 function normalizeVector(values: readonly number[]): number[] {
   let norm = 0;
   for (const value of values) norm += value * value;
@@ -373,6 +429,20 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     volume24h: point.volume24h,
     liquidity: point.liquidity,
     openInterest: point.openInterest,
+    oddsSource: point.oddsSource,
+    tokenYes: point.tokenYes,
+    tokenNo: point.tokenNo,
+    yesBid: point.yesBid,
+    yesAsk: point.yesAsk,
+    noBid: point.noBid,
+    noAsk: point.noAsk,
+    marketBestBid: point.marketBestBid,
+    marketBestAsk: point.marketBestAsk,
+    lastPrice: point.lastPrice,
+    marketStatus: point.marketStatus,
+    acceptingOrders: point.acceptingOrders,
+    resolvedOutcome: point.resolvedOutcome,
+    resolvedOutcomePct: point.resolvedOutcomePct,
     score: point.score,
     x: point.x,
     y: point.y,
@@ -1862,6 +1932,127 @@ async function fetchVenueCandidates(
   return rows;
 }
 
+function applyRepresentativeToCandidate(
+  row: EventCandidateRow,
+  selected: RankedRepresentativeMarket | null,
+): EnrichedEventCandidateRow {
+  const oddsSource: "representative" | "fallback" | null =
+    selected == null
+      ? null
+      : row.representative_market_id != null &&
+          selected.marketId === row.representative_market_id
+        ? "representative"
+        : "fallback";
+  return {
+    ...row,
+    representative_market_id: selected?.marketId ?? row.representative_market_id,
+    representative_market_title:
+      selected?.marketTitle ?? row.representative_market_title,
+    representative_market_image:
+      normalizeOptionalUrl(selected?.marketImage) ?? row.representative_market_image,
+    representative_market_icon:
+      normalizeOptionalUrl(selected?.marketIcon) ?? row.representative_market_icon,
+    odds_source: oddsSource,
+    token_yes: selected?.tokenYes ?? null,
+    token_no: selected?.tokenNo ?? null,
+    yes_bid: selected?.yesBid ?? null,
+    yes_ask: selected?.yesAsk ?? null,
+    no_bid: selected?.noBid ?? null,
+    no_ask: selected?.noAsk ?? null,
+    market_best_bid: selected?.marketBestBid ?? null,
+    market_best_ask: selected?.marketBestAsk ?? null,
+    last_price: selected?.lastPrice ?? null,
+    market_status: selected?.marketStatus ?? null,
+    accepting_orders: selected?.acceptingOrders ?? null,
+    resolved_outcome: selected?.resolvedOutcome ?? null,
+    resolved_outcome_pct: selected?.resolvedOutcomePct ?? null,
+  };
+}
+
+async function filterCandidatesByRepresentativeQuality(params: {
+  venue: MarketMapVenue;
+  candidates: EventCandidateRow[];
+}): Promise<{ rows: EnrichedEventCandidateRow[]; summary: CandidateQualitySummary }> {
+  const { venue, candidates } = params;
+  const summary: CandidateQualitySummary = {
+    before: candidates.length,
+    kept: 0,
+    dropped: 0,
+    droppedReasons: emptyDropReasonCounts(),
+    enrichmentFailed: false,
+  };
+  if (candidates.length === 0) {
+    return { rows: [], summary };
+  }
+
+  const inputs = candidates.map((row) => ({
+    eventId: row.event_id,
+    venue: row.venue,
+    preferredMarketId: row.representative_market_id ?? null,
+  }));
+
+  let ranked: RankedRepresentativeMarket[] = [];
+  try {
+    ranked = await selectRankedRepresentativeMarketsForEvents(pool, inputs, 1);
+  } catch (error) {
+    summary.enrichmentFailed = true;
+    summary.kept = candidates.length;
+    console.warn("[market-map] representative quality enrichment failed", {
+      venue,
+      candidates: candidates.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      rows: candidates.map((row) => applyRepresentativeToCandidate(row, null)),
+      summary,
+    };
+  }
+
+  const selectedByEvent = new Map<string, RankedRepresentativeMarket>();
+  for (const row of ranked) {
+    const key = eventVenueKey(row.eventId, row.venue);
+    if (!selectedByEvent.has(key)) {
+      selectedByEvent.set(key, row);
+    }
+  }
+
+  const rows: EnrichedEventCandidateRow[] = [];
+  for (const row of candidates) {
+    const key = eventVenueKey(row.event_id, row.venue);
+    const selected = selectedByEvent.get(key) ?? null;
+    if (!selected) {
+      summary.dropped += 1;
+      summary.droppedReasons.missing_odds += 1;
+      continue;
+    }
+    const reason = getMarketMapDropReason({
+      tokenYes: selected.tokenYes,
+      tokenNo: selected.tokenNo,
+      acceptingOrders: selected.acceptingOrders,
+      marketStatus: selected.marketStatus,
+      yesBid: selected.yesBid,
+      yesAsk: selected.yesAsk,
+      noBid: selected.noBid,
+      noAsk: selected.noAsk,
+      marketBestBid: selected.marketBestBid,
+      marketBestAsk: selected.marketBestAsk,
+      lastPrice: selected.lastPrice,
+      resolvedOutcome: selected.resolvedOutcome,
+      resolvedOutcomePct: selected.resolvedOutcomePct,
+      yesProbability: selected.yesProbability,
+    });
+    if (reason) {
+      summary.dropped += 1;
+      summary.droppedReasons[reason] += 1;
+      continue;
+    }
+    rows.push(applyRepresentativeToCandidate(row, selected));
+  }
+
+  summary.kept = rows.length;
+  return { rows, summary };
+}
+
 function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
   const venuesArg = parseFlag(args, "--venues");
   const venues =
@@ -2000,6 +2191,10 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     MarketMapVenue,
     {
       candidates: number;
+      candidatesAfterQuality: number;
+      candidatesDroppedByQuality: number;
+      candidateQualityDropReasons: Record<MarketMapDropReason, number>;
+      candidateQualityEnrichmentFailed: boolean;
       embedded: number;
       selected: number;
       candidateQueryMs: number;
@@ -2020,6 +2215,13 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       const queryStartedAt = Date.now();
       const candidates = await fetchVenueCandidates(venue, config);
       const candidateQueryMs = Date.now() - queryStartedAt;
+      const {
+        rows: qualityCandidates,
+        summary: qualitySummary,
+      } = await filterCandidatesByRepresentativeQuality({
+        venue,
+        candidates,
+      });
       const sampleCandidateIds = candidates.slice(0, 8).map((row) => row.event_id);
       let sampleKeyHits = 0;
       let sampleEmbeddingFieldHits = 0;
@@ -2053,6 +2255,10 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       }
       diagnostics[venue] = {
         candidates: candidates.length,
+        candidatesAfterQuality: qualitySummary.kept,
+        candidatesDroppedByQuality: qualitySummary.dropped,
+        candidateQualityDropReasons: qualitySummary.droppedReasons,
+        candidateQualityEnrichmentFailed: qualitySummary.enrichmentFailed,
         embedded: 0,
         selected: 0,
         candidateQueryMs,
@@ -2061,16 +2267,16 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
         sampleEmbeddingFieldHits,
         sampleEmbeddingBufferHits,
       };
-      if (candidates.length === 0) continue;
+      if (qualityCandidates.length === 0) continue;
 
       const raw = await Promise.all(
-        candidates.map((row) =>
+        qualityCandidates.map((row) =>
           bufferClient.hGet(`ai:embed:event:${row.event_id}`, "embedding"),
         ),
       );
       const points: EventPoint[] = [];
-      for (let i = 0; i < candidates.length; i += 1) {
-        const row = candidates[i];
+      for (let i = 0; i < qualityCandidates.length; i += 1) {
+        const row = qualityCandidates[i];
         const embedding = raw[i];
         if (!embedding || !Buffer.isBuffer(embedding)) continue;
         const vector = parseEmbeddingBuffer(embedding);
@@ -2091,6 +2297,20 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           liquidity: toNumber(row.liquidity),
           openInterest: toNumber(row.open_interest),
           score: toNumber(row.score),
+          oddsSource: row.odds_source,
+          tokenYes: row.token_yes,
+          tokenNo: row.token_no,
+          yesBid: row.yes_bid,
+          yesAsk: row.yes_ask,
+          noBid: row.no_bid,
+          noAsk: row.no_ask,
+          marketBestBid: row.market_best_bid,
+          marketBestAsk: row.market_best_ask,
+          lastPrice: row.last_price,
+          marketStatus: row.market_status,
+          acceptingOrders: row.accepting_orders,
+          resolvedOutcome: row.resolved_outcome,
+          resolvedOutcomePct: row.resolved_outcome_pct,
           vector,
           x: 0,
           y: 0,

@@ -29,6 +29,9 @@ import {
   selectRankedRepresentativeMarketsForEvents,
   type RankedRepresentativeMarket,
 } from "./services/market-map-representative.js";
+import {
+  isMarketMapUsable,
+} from "./services/market-map-quality.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
@@ -2764,6 +2767,7 @@ export async function runMapSearch(
       venue: string;
       preferredMarketId: string | null;
     }> = [];
+    let enrichmentFailed = false;
     for (const event of sorted) {
       const key = eventVenueKey(event.eventId, event.venue);
       if (representativeMarketByEventVenue.has(key)) continue;
@@ -2791,6 +2795,7 @@ export async function runMapSearch(
           representativeMarketByEventVenue.set(key, selectedByKey.get(key) ?? null);
         }
       } catch (error) {
+        enrichmentFailed = true;
         console.warn(`${logPrefix()} representative market enrichment failed`, {
           error: error instanceof Error ? error.message : String(error),
           eventCount: missingInputs.length,
@@ -2851,8 +2856,36 @@ export async function runMapSearch(
       };
     });
 
-    nodeEventsCache.set(nodeId, enriched);
-    return enriched;
+    const filtered = enrichmentFailed
+      ? enriched
+      : enriched.filter((event) =>
+          isMarketMapUsable({
+            tokenYes: event.tokenYes ?? null,
+            tokenNo: event.tokenNo ?? null,
+            acceptingOrders: event.acceptingOrders ?? null,
+            marketStatus: event.marketStatus ?? null,
+            yesBid: event.yesBid ?? null,
+            yesAsk: event.yesAsk ?? null,
+            noBid: event.noBid ?? null,
+            noAsk: event.noAsk ?? null,
+            marketBestBid: event.marketBestBid ?? null,
+            marketBestAsk: event.marketBestAsk ?? null,
+            lastPrice: event.lastPrice ?? null,
+            resolvedOutcome: event.resolvedOutcome ?? null,
+            resolvedOutcomePct: event.resolvedOutcomePct ?? null,
+          }),
+        );
+    if (!enrichmentFailed && filtered.length !== enriched.length) {
+      console.log(`${logPrefix()} node_event_quality_prune`, {
+        nodeId,
+        before: enriched.length,
+        after: filtered.length,
+        dropped: enriched.length - filtered.length,
+      });
+    }
+
+    nodeEventsCache.set(nodeId, filtered);
+    return filtered;
   }
 
   async function getTopMarketsForEvents(
@@ -2892,6 +2925,26 @@ export async function runMapSearch(
         );
         const grouped = new Map<string, RankedRepresentativeMarket[]>();
         for (const row of ranked) {
+          if (
+            !isMarketMapUsable({
+              tokenYes: row.tokenYes,
+              tokenNo: row.tokenNo,
+              acceptingOrders: row.acceptingOrders,
+              marketStatus: row.marketStatus,
+              yesBid: row.yesBid,
+              yesAsk: row.yesAsk,
+              noBid: row.noBid,
+              noAsk: row.noAsk,
+              marketBestBid: row.marketBestBid,
+              marketBestAsk: row.marketBestAsk,
+              lastPrice: row.lastPrice,
+              resolvedOutcome: row.resolvedOutcome,
+              resolvedOutcomePct: row.resolvedOutcomePct,
+              yesProbability: row.yesProbability,
+            })
+          ) {
+            continue;
+          }
           const key = eventVenueKey(row.eventId, row.venue);
           const existing = grouped.get(key);
           if (existing) existing.push(row);
@@ -3069,8 +3122,7 @@ export async function runMapSearch(
           const key = eventVenueKey(event.eventId, event.venue);
           const markets = marketsByEvent.get(key) ?? [];
           if (markets.length === 0) {
-            const marketTitle = event.representativeMarketTitle?.trim() || null;
-            return marketTitle ? `${eventTitle} | ${marketTitle}` : eventTitle;
+            return eventTitle;
           }
           const labels = markets
             .slice(0, args.topMarketsPerEvent)

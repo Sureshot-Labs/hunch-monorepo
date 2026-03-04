@@ -32,6 +32,10 @@ import {
   selectRankedRepresentativeMarketsForEvents,
   type RankedRepresentativeMarket,
 } from "../services/market-map-representative.js";
+import {
+  getMarketMapDropReason,
+  type MarketMapDropReason,
+} from "../services/market-map-quality.js";
 import { resolveMarketMapPolicy } from "../services/runtime-policies.js";
 
 function buildWeakEtag(body: string): string {
@@ -121,6 +125,8 @@ type MarketMapEventSignalRow = {
   created_at: Date | string;
 };
 
+type MarketMapDropReasonCounts = Record<MarketMapDropReason, number>;
+
 function toNumber(value: unknown): number | null {
   if (value == null) return null;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -165,6 +171,55 @@ function normalizeLiveRow(
     openInterest: row.openInterest,
     oddsSource,
   };
+}
+
+function emptyDropReasonCounts(): MarketMapDropReasonCounts {
+  return {
+    missing_token_pair: 0,
+    untradeable: 0,
+    missing_odds: 0,
+  };
+}
+
+function incrementDropReason(
+  counts: MarketMapDropReasonCounts,
+  reason: MarketMapDropReason,
+): void {
+  counts[reason] += 1;
+}
+
+function filterUsableEvents(events: MarketMapEventSummary[]): {
+  items: MarketMapEventSummary[];
+  dropped: number;
+  droppedReasons: MarketMapDropReasonCounts;
+} {
+  const items: MarketMapEventSummary[] = [];
+  const droppedReasons = emptyDropReasonCounts();
+  let dropped = 0;
+  for (const event of events) {
+    const reason = getMarketMapDropReason({
+      tokenYes: event.tokenYes ?? null,
+      tokenNo: event.tokenNo ?? null,
+      acceptingOrders: event.acceptingOrders ?? null,
+      marketStatus: event.marketStatus ?? null,
+      yesBid: event.yesBid ?? null,
+      yesAsk: event.yesAsk ?? null,
+      noBid: event.noBid ?? null,
+      noAsk: event.noAsk ?? null,
+      marketBestBid: event.marketBestBid ?? null,
+      marketBestAsk: event.marketBestAsk ?? null,
+      lastPrice: event.lastPrice ?? null,
+      resolvedOutcome: event.resolvedOutcome ?? null,
+      resolvedOutcomePct: event.resolvedOutcomePct ?? null,
+    });
+    if (!reason) {
+      items.push(event);
+      continue;
+    }
+    dropped += 1;
+    incrementDropReason(droppedReasons, reason);
+  }
+  return { items, dropped, droppedReasons };
 }
 
 async function loadNodeSignalSummaryByNodeId(params: {
@@ -962,16 +1017,47 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 }
               }
 
-              return itemsWithPreviewSignals.map((node, index) => ({
-                ...node,
-                eventsPreview:
+              let droppedPreviewEvents = 0;
+              const droppedReasons = emptyDropReasonCounts();
+              const previewItems = itemsWithPreviewSignals.map((node, index) => {
+                const withLive =
                   liveByEventId == null
                     ? eventsByNodeWithSignals[index]
                     : applyLiveMarketDataToEvents(
                         eventsByNodeWithSignals[index],
                         liveByEventId,
-                      ),
-              }));
+                      );
+                if (liveByEventId == null) {
+                  return {
+                    ...node,
+                    eventsPreview: withLive,
+                  };
+                }
+                const filtered = filterUsableEvents(withLive);
+                droppedPreviewEvents += filtered.dropped;
+                for (const reason of Object.keys(
+                  filtered.droppedReasons,
+                ) as MarketMapDropReason[]) {
+                  droppedReasons[reason] += filtered.droppedReasons[reason];
+                }
+                return {
+                  ...node,
+                  eventsPreview: filtered.items,
+                };
+              });
+              if (liveByEventId != null && droppedPreviewEvents > 0) {
+                request.log.info(
+                  {
+                    level,
+                    parentId,
+                    droppedPreviewEvents,
+                    droppedReasons,
+                    previewNodeCount: previewItems.length,
+                  },
+                  "market-map events preview quality gate dropped events",
+                );
+              }
+              return previewItems;
             })()
           : itemsWithPreviewSignals;
 
@@ -1149,6 +1235,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         items,
         eventSignalSummaryByEventId,
       );
+      let qualityGateApplied = false;
       if (items.length > 0) {
         try {
           const liveByEventId = await loadLiveMarketDataForEvents(itemsWithLiveMarket);
@@ -1156,11 +1243,28 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             itemsWithLiveMarket,
             liveByEventId,
           );
+          qualityGateApplied = true;
         } catch (error) {
           skipCacheWrite = true;
           request.log.warn(
             { err: error, nodeId, itemCount: items.length },
             "market-map node events live market enrichment failed",
+          );
+        }
+      }
+      if (qualityGateApplied) {
+        const filtered = filterUsableEvents(itemsWithLiveMarket);
+        itemsWithLiveMarket = filtered.items;
+        if (filtered.dropped > 0) {
+          request.log.info(
+            {
+              nodeId,
+              offset,
+              limit,
+              droppedItems: filtered.dropped,
+              droppedReasons: filtered.droppedReasons,
+            },
+            "market-map node events quality gate dropped events",
           );
         }
       }
