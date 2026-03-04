@@ -235,6 +235,57 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "auth access policy resolves valid db override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000030",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+    },
+  },
+  {
+    name: "auth access policy rejects invalid state and falls back to env",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000031",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "not_a_state",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, true);
+      assert.equal(resolved.source, "env");
+    },
+  },
+  {
     name: "market map policy sanitizer ignores deprecated projection override keys",
     run: async () => {
       const db = {

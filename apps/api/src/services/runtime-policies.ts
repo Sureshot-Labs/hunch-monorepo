@@ -10,6 +10,7 @@ import {
 import { normalizeMarketMapVenues } from "./market-map.js";
 
 export const INTEL_POLICY_KEYS = [
+  "auth_access",
   "wallet_intel_signals",
   "wallet_intel_refresh",
   "wallet_intel_attribution",
@@ -24,6 +25,12 @@ export const INTEL_POLICY_KEYS = [
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 
 type PolicySource = "env" | "db";
+
+export type AuthAccessState = "off" | "prompt" | "required";
+
+export type AuthAccessPolicy = {
+  state: AuthAccessState;
+};
 
 export type WalletIntelSignalsPolicy = {
   maxOdds: number;
@@ -379,6 +386,7 @@ export type WalletIntelAttributionPolicy = {
 };
 
 type IntelPolicyMap = {
+  auth_access: AuthAccessPolicy;
   wallet_intel_signals: WalletIntelSignalsPolicy;
   wallet_intel_refresh: WalletIntelRefreshPolicy;
   wallet_intel_attribution: WalletIntelAttributionPolicy;
@@ -861,7 +869,16 @@ const walletIntelAttributionSchema = z
   .strict()
   .partial();
 
+const authAccessStateSchema = z.enum(["off", "prompt", "required"]);
+const authAccessSchema = z
+  .object({
+    state: authAccessStateSchema,
+  })
+  .strict()
+  .partial();
+
 const policySchemas = {
+  auth_access: authAccessSchema,
   wallet_intel_signals: walletIntelSignalsSchema,
   wallet_intel_refresh: walletIntelRefreshSchema,
   wallet_intel_attribution: walletIntelAttributionSchema,
@@ -1006,6 +1023,9 @@ export function resolveSignalWindowHours(
 
 function getDefaults(): IntelPolicyMap {
   return {
+    auth_access: {
+      state: env.authAccessState,
+    },
     wallet_intel_signals: {
       maxOdds: env.walletIntelSignalMaxOdds,
       minStakeUsd: env.walletIntelSignalMinStakeUsd,
@@ -1852,11 +1872,21 @@ function normalizeArbitrageDefaultsPolicy(
   };
 }
 
+function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
+  return {
+    state: authAccessStateSchema.safeParse(policy.state).success
+      ? policy.state
+      : "off",
+  };
+}
+
 function normalizeMerged<K extends IntelPolicyKey>(
   key: K,
   merged: IntelPolicyMap[K],
 ): IntelPolicyMap[K] {
   switch (key) {
+    case "auth_access":
+      return normalizeAuthAccessPolicy(merged as AuthAccessPolicy) as IntelPolicyMap[K];
     case "wallet_intel_signals":
       return normalizeSignalsPolicy(merged as WalletIntelSignalsPolicy) as IntelPolicyMap[K];
     case "wallet_intel_refresh":
@@ -2030,6 +2060,10 @@ export async function resolveAllIntelPolicies(
   const rows = await listActiveRuntimePolicies(pool);
   const byKey = new Map(rows.map((row) => [row.policy_key, row]));
   return {
+    auth_access: resolveFromRow(
+      "auth_access",
+      byKey.get("auth_access") ?? null,
+    ),
     wallet_intel_signals: resolveFromRow(
       "wallet_intel_signals",
       byKey.get("wallet_intel_signals") ?? null,
@@ -2103,4 +2137,8 @@ export async function resolveMapSignalsPolicy(pool: DbQuery) {
 
 export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "arbitrage_defaults");
+}
+
+export async function resolveAuthAccessPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "auth_access");
 }

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
 import type { SignOptions } from "jsonwebtoken";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import "./env.js";
 import { PrivyService, PrivyUser, PrivyClaims } from "./privy-service.js";
@@ -543,266 +544,277 @@ export class AuthService {
   /**
    * Create or update user from Privy authentication
    */
-  static async createOrUpdateUserFromPrivy(
+  static async createOrUpdateUserFromPrivyWithClient(
+    client: Pick<PoolClient, "query">,
     privyUser: PrivyUser,
     _privyClaims: PrivyClaims,
   ): Promise<User> {
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
+    // Extract user data from Privy
+    const email = privyUser.email?.address?.trim() ?? null;
+    const privyUserId = privyUser.id;
+    const privyWallets = PrivyService.extractWallets(privyUser);
+    const primaryWallet = privyWallets[0];
+    if (!primaryWallet) {
+      throw new Error("No wallet address found in Privy user data");
+    }
 
-      // Extract user data from Privy
-      const email = privyUser.email?.address?.trim() ?? null;
-      const privyUserId = privyUser.id;
-      const privyWallets = PrivyService.extractWallets(privyUser);
-      const primaryWallet = privyWallets[0];
-      if (!primaryWallet) {
-        throw new Error("No wallet address found in Privy user data");
-      }
+    const primaryWalletAddress = primaryWallet.address;
 
-      const primaryWalletAddress = primaryWallet.address;
+    let userId: string | null = null;
 
-      let userId: string | null = null;
+    const userByPrivyId = await client.query<{ id: string }>(
+      "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
+      [privyUserId],
+    );
+    userId = userByPrivyId.rows[0]?.id ?? null;
 
-      const userByPrivyId = await client.query<{ id: string }>(
-        "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
-        [privyUserId],
-      );
-      userId = userByPrivyId.rows[0]?.id ?? null;
+    // Backward-compatibility path:
+    // if Privy user id changes (e.g. app migration) recover the account by linked wallet ownership.
+    if (!userId) {
+      const matchedUserIds = new Set<string>();
+      for (const wallet of privyWallets) {
+        const match = ETH_ADDRESS_RE.test(wallet.address)
+          ? "lower(wallet_address) = lower($2)"
+          : "wallet_address = $2";
 
-      // Backward-compatibility path:
-      // if Privy user id changes (e.g. app migration) recover the account by linked wallet ownership.
-      if (!userId) {
-        const matchedUserIds = new Set<string>();
-        for (const wallet of privyWallets) {
-          const match = ETH_ADDRESS_RE.test(wallet.address)
-            ? "lower(wallet_address) = lower($2)"
-            : "wallet_address = $2";
-
-          const owner = await client.query<{ user_id: string }>(
-            `SELECT user_id
+        const owner = await client.query<{ user_id: string }>(
+          `SELECT user_id
              FROM user_wallets
              WHERE wallet_type = $1
                AND ${match}
              LIMIT 2`,
-            [wallet.walletType, wallet.address],
-          );
+          [wallet.walletType, wallet.address],
+        );
 
-          for (const row of owner.rows) matchedUserIds.add(row.user_id);
-          if (matchedUserIds.size > 1) break;
-        }
-
-        if (matchedUserIds.size > 1) {
-          throw new WalletAlreadyExistsError(
-            "Privy wallets resolve to multiple users; merge users before login",
-          );
-        }
-
-        if (matchedUserIds.size === 1) {
-          userId = matchedUserIds.values().next().value ?? null;
-        }
+        for (const row of owner.rows) matchedUserIds.add(row.user_id);
+        if (matchedUserIds.size > 1) break;
       }
 
-      // Secondary recovery path:
-      // if Privy DID changed and wallet matching is inconclusive, recover by email.
-      if (!userId && email) {
-        const userByEmail = await client.query<{ id: string }>(
+      if (matchedUserIds.size > 1) {
+        throw new WalletAlreadyExistsError(
+          "Privy wallets resolve to multiple users; merge users before login",
+        );
+      }
+
+      if (matchedUserIds.size === 1) {
+        userId = matchedUserIds.values().next().value ?? null;
+      }
+    }
+
+    // Secondary recovery path:
+    // if Privy DID changed and wallet matching is inconclusive, recover by email.
+    if (!userId && email) {
+      const userByEmail = await client.query<{ id: string }>(
+        `SELECT id
+           FROM users
+          WHERE lower(email) = lower($1)
+          LIMIT 2`,
+        [email],
+      );
+
+      if (userByEmail.rows.length > 1) {
+        throw new Error(
+          "Multiple users share this email; merge users before login",
+        );
+      }
+
+      userId = userByEmail.rows[0]?.id ?? null;
+    }
+
+    if (userId) {
+      if (email) {
+        const emailConflict = await client.query<{ id: string }>(
           `SELECT id
              FROM users
             WHERE lower(email) = lower($1)
-            LIMIT 2`,
-          [email],
+              AND id <> $2
+            LIMIT 1`,
+          [email, userId],
         );
 
-        if (userByEmail.rows.length > 1) {
-          throw new Error(
-            "Multiple users share this email; merge users before login",
-          );
+        if (emailConflict.rows.length > 0) {
+          throw new Error("Email already linked to another account");
         }
-
-        userId = userByEmail.rows[0]?.id ?? null;
       }
 
-      if (userId) {
-        if (email) {
-          const emailConflict = await client.query<{ id: string }>(
-            `SELECT id
-               FROM users
-              WHERE lower(email) = lower($1)
-                AND id <> $2
-              LIMIT 1`,
-            [email, userId],
-          );
-
-          if (emailConflict.rows.length > 0) {
-            throw new Error("Email already linked to another account");
-          }
-        }
-
-        for (const wallet of privyWallets) {
-          const match =
-            wallet.walletType === "ethereum"
-              ? "lower(wallet_address) = lower($2)"
-              : "wallet_address = $2";
-          const conflict = await client.query<{ user_id: string }>(
-            `SELECT user_id
+      for (const wallet of privyWallets) {
+        const match =
+          wallet.walletType === "ethereum"
+            ? "lower(wallet_address) = lower($2)"
+            : "wallet_address = $2";
+        const conflict = await client.query<{ user_id: string }>(
+          `SELECT user_id
              FROM user_wallets
              WHERE wallet_type = $1
                AND ${match}
                AND user_id <> $3
              LIMIT 1`,
-            [wallet.walletType, wallet.address, userId],
+          [wallet.walletType, wallet.address, userId],
+        );
+
+        if (conflict.rows.length > 0) {
+          throw new WalletAlreadyExistsError(
+            "Wallet address already linked to another account",
           );
-
-          if (conflict.rows.length > 0) {
-            throw new WalletAlreadyExistsError(
-              "Wallet address already linked to another account",
-            );
-          }
         }
+      }
 
-        // Update user data (and persist Privy DID for stable identity).
-        await client.query(
-          `UPDATE users SET
+      // Update user data (and persist Privy DID for stable identity).
+      await client.query(
+        `UPDATE users SET
            email = $1,
            privy_user_id = $2,
            last_login_at = now(),
            updated_at = now()
            WHERE id = $3`,
-          [email, privyUserId, userId],
-        );
+        [email, privyUserId, userId],
+      );
 
-        // Remove wallets that were unlinked in Privy (and dependent venue creds).
-        const existingWallets = await client.query<{
-          id: string;
-          wallet_address: string;
-        }>("SELECT id, wallet_address FROM user_wallets WHERE user_id = $1", [
-          userId,
-        ]);
+      // Remove wallets that were unlinked in Privy (and dependent venue creds).
+      const existingWallets = await client.query<{
+        id: string;
+        wallet_address: string;
+      }>("SELECT id, wallet_address FROM user_wallets WHERE user_id = $1", [
+        userId,
+      ]);
 
-        const linkedWalletSet = new Set(
-          privyWallets.map((w) => normalizeWalletAddress(w.address)),
-        );
-        const walletIdsToDelete: string[] = [];
-        for (const wallet of existingWallets.rows) {
-          const normalized = normalizeWalletAddress(wallet.wallet_address);
-          if (!linkedWalletSet.has(normalized))
-            walletIdsToDelete.push(wallet.id);
-        }
+      const linkedWalletSet = new Set(
+        privyWallets.map((w) => normalizeWalletAddress(w.address)),
+      );
+      const walletIdsToDelete: string[] = [];
+      for (const wallet of existingWallets.rows) {
+        const normalized = normalizeWalletAddress(wallet.wallet_address);
+        if (!linkedWalletSet.has(normalized))
+          walletIdsToDelete.push(wallet.id);
+      }
 
-        if (walletIdsToDelete.length > 0) {
-          await client.query(
-            `DELETE FROM user_venue_credentials
+      if (walletIdsToDelete.length > 0) {
+        await client.query(
+          `DELETE FROM user_venue_credentials
              WHERE user_id = $1
                AND wallet_address IN (
                  SELECT wallet_address FROM user_wallets WHERE id = ANY($2::uuid[])
                )`,
-            [userId, walletIdsToDelete],
-          );
-
-          await client.query(
-            "DELETE FROM user_wallets WHERE user_id = $1 AND id = ANY($2::uuid[])",
-            [userId, walletIdsToDelete],
-          );
-        }
-
-        // Add any new wallet addresses
-        for (const wallet of privyWallets) {
-          const match = ETH_ADDRESS_RE.test(wallet.address)
-            ? "lower(wallet_address) = lower($2)"
-            : "wallet_address = $2";
-
-          const existingWallet = await client.query<{
-            id: string;
-            wallet_type: string;
-            is_verified: boolean;
-          }>(
-            `SELECT id, wallet_type, is_verified FROM user_wallets WHERE user_id = $1 AND ${match} LIMIT 1`,
-            [userId, wallet.address],
-          );
-
-          if (existingWallet.rows.length === 0) {
-            await client.query(
-              `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
-               VALUES ($1, $2, $3, false, true)`,
-              [userId, wallet.address, wallet.walletType],
-            );
-            continue;
-          }
-
-          const existing = existingWallet.rows[0];
-          if (
-            existing.wallet_type !== wallet.walletType ||
-            !existing.is_verified
-          ) {
-            await client.query(
-              `UPDATE user_wallets
-               SET wallet_type = $3, is_verified = true, updated_at = now()
-               WHERE user_id = $1 AND ${match}`,
-              [userId, wallet.address, wallet.walletType],
-            );
-          }
-        }
-
-        await client.query(
-          "UPDATE user_wallets SET is_primary = false WHERE user_id = $1",
-          [userId],
+          [userId, walletIdsToDelete],
         );
 
-        const primaryMatch = ETH_ADDRESS_RE.test(primaryWalletAddress)
-          ? "lower(wallet_address) = lower($2)"
-          : "wallet_address = $2";
         await client.query(
-          `UPDATE user_wallets SET is_primary = true WHERE user_id = $1 AND ${primaryMatch}`,
-          [userId, primaryWalletAddress],
-        );
-      } else {
-        // Create new user
-        const userResult = await client.query<UserRow>(
-          `INSERT INTO users (email, privy_user_id, last_login_at)
-           VALUES ($1, $2, now())
-           RETURNING id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
-          [email, privyUserId],
-        );
-
-        userId = userResult.rows[0].id;
-
-        // Create wallet records
-        for (const wallet of privyWallets) {
-          await client.query(
-            `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
-             VALUES ($1, $2, $3, $4, true)`,
-            [
-              userId,
-              wallet.address,
-              wallet.walletType,
-              wallet.address === primaryWalletAddress,
-            ],
-          );
-        }
-
-        // Create trading preferences
-        await client.query(
-          `INSERT INTO user_trading_preferences (user_id) VALUES ($1)`,
-          [userId],
-        );
-
-        // Create trading stats
-        await client.query(
-          `INSERT INTO user_trading_stats (user_id) VALUES ($1)`,
-          [userId],
+          "DELETE FROM user_wallets WHERE user_id = $1 AND id = ANY($2::uuid[])",
+          [userId, walletIdsToDelete],
         );
       }
 
-      // Get the user data
-      const userResult = await client.query<UserRow>(
-        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      // Add any new wallet addresses
+      for (const wallet of privyWallets) {
+        const match = ETH_ADDRESS_RE.test(wallet.address)
+          ? "lower(wallet_address) = lower($2)"
+          : "wallet_address = $2";
+
+        const existingWallet = await client.query<{
+          id: string;
+          wallet_type: string;
+          is_verified: boolean;
+        }>(
+          `SELECT id, wallet_type, is_verified FROM user_wallets WHERE user_id = $1 AND ${match} LIMIT 1`,
+          [userId, wallet.address],
+        );
+
+        if (existingWallet.rows.length === 0) {
+          await client.query(
+            `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
+               VALUES ($1, $2, $3, false, true)`,
+            [userId, wallet.address, wallet.walletType],
+          );
+          continue;
+        }
+
+        const existing = existingWallet.rows[0];
+        if (
+          existing.wallet_type !== wallet.walletType ||
+          !existing.is_verified
+        ) {
+          await client.query(
+            `UPDATE user_wallets
+               SET wallet_type = $3, is_verified = true, updated_at = now()
+               WHERE user_id = $1 AND ${match}`,
+            [userId, wallet.address, wallet.walletType],
+          );
+        }
+      }
+
+      await client.query(
+        "UPDATE user_wallets SET is_primary = false WHERE user_id = $1",
         [userId],
       );
 
-      await client.query("COMMIT");
+      const primaryMatch = ETH_ADDRESS_RE.test(primaryWalletAddress)
+        ? "lower(wallet_address) = lower($2)"
+        : "wallet_address = $2";
+      await client.query(
+        `UPDATE user_wallets SET is_primary = true WHERE user_id = $1 AND ${primaryMatch}`,
+        [userId, primaryWalletAddress],
+      );
+    } else {
+      // Create new user
+      const userResult = await client.query<UserRow>(
+        `INSERT INTO users (email, privy_user_id, last_login_at)
+           VALUES ($1, $2, now())
+           RETURNING id, privy_user_id, email, username, display_name, avatar_url, is_active, is_verified, created_at, updated_at, last_login_at`,
+        [email, privyUserId],
+      );
 
-      return mapUserRow(userResult.rows[0]);
+      userId = userResult.rows[0].id;
+
+      // Create wallet records
+      for (const wallet of privyWallets) {
+        await client.query(
+          `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
+             VALUES ($1, $2, $3, $4, true)`,
+          [
+            userId,
+            wallet.address,
+            wallet.walletType,
+            wallet.address === primaryWalletAddress,
+          ],
+        );
+      }
+
+      // Create trading preferences
+      await client.query(
+        `INSERT INTO user_trading_preferences (user_id) VALUES ($1)`,
+        [userId],
+      );
+
+      // Create trading stats
+      await client.query(
+        `INSERT INTO user_trading_stats (user_id) VALUES ($1)`,
+        [userId],
+      );
+    }
+
+    // Get the user data
+    const userResult = await client.query<UserRow>(
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      [userId],
+    );
+
+    return mapUserRow(userResult.rows[0]);
+  }
+
+  static async createOrUpdateUserFromPrivy(
+    privyUser: PrivyUser,
+    privyClaims: PrivyClaims,
+  ): Promise<User> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const user = await AuthService.createOrUpdateUserFromPrivyWithClient(
+        client,
+        privyUser,
+        privyClaims,
+      );
+      await client.query("COMMIT");
+      return user;
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

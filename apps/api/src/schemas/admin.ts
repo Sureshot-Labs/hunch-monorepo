@@ -233,6 +233,7 @@ export const adminRewardsTreasuryQuerySchema = z.object({
 });
 
 export const adminIntelPolicyKeySchema = z.enum([
+  "auth_access",
   "wallet_intel_signals",
   "wallet_intel_refresh",
   "wallet_intel_attribution",

@@ -32,7 +32,13 @@ import {
   updateWalletNameBodySchema,
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
-import { attachReferralCode } from "../services/rewards.js";
+import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import {
+  attachReferralCode,
+  attachReferralCodeForExistingUser,
+  getReferralAttachmentStatus,
+  type ReferralAttachmentStatus,
+} from "../services/rewards.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -105,8 +111,48 @@ function verifySolanaSignature(params: {
   return crypto.verify(null, messageBytes, key, signatureBytes);
 }
 
+type AuthAccessState = "off" | "prompt" | "required";
+type InviteReason = "missing_code" | "invalid_code" | "not_found" | "self_referral";
+
+function mapAttachStatusToInviteReason(
+  status: ReferralAttachmentStatus,
+): InviteReason | null {
+  switch (status) {
+    case "invalid_code":
+      return "invalid_code";
+    case "not_found":
+      return "not_found";
+    case "self_referral":
+      return "self_referral";
+    default:
+      return null;
+  }
+}
+
+function resolvePolicyVersionToken(input: {
+  source: "env" | "db";
+  effectiveAt: Date | null;
+}): string {
+  if (input.source === "db" && input.effectiveAt) {
+    return input.effectiveAt.toISOString();
+  }
+  return "env-default-v1";
+}
+
 export const authRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  z.get("/auth/invite-status", async (_request, reply) => {
+    const resolved = await resolveAuthAccessPolicy(pool);
+    const state = resolved.effective.state as AuthAccessState;
+    const policyVersion = resolvePolicyVersionToken({
+      source: resolved.source,
+      effectiveAt: resolved.effectiveAt,
+    });
+    reply.header("Cache-Control", "no-store");
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    return reply.send({ state, policyVersion });
+  });
 
   /**
    * POST /auth/privy
@@ -147,10 +193,102 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
-        const user = await AuthService.createOrUpdateUserFromPrivy(
-          privyUser,
-          claims,
-        );
+        const accessPolicyResolved = await resolveAuthAccessPolicy(pool);
+        const policyVersion = resolvePolicyVersionToken({
+          source: accessPolicyResolved.source,
+          effectiveAt: accessPolicyResolved.effectiveAt,
+        });
+
+        let user: Awaited<ReturnType<typeof AuthService.createOrUpdateUserFromPrivy>>;
+        let invitePrompt = false;
+        let inviteReason: InviteReason | null = null;
+        let effectiveAccessState = accessPolicyResolved.effective
+          .state as AuthAccessState;
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          user = await AuthService.createOrUpdateUserFromPrivyWithClient(
+            client,
+            privyUser,
+            claims,
+          );
+
+          // Admin bypass is always-on and non-configurable.
+          if (user.isAdmin) {
+            effectiveAccessState = "off";
+          }
+
+          const referralCode =
+            typeof body.referralCode === "string" ? body.referralCode : "";
+          const hasReferralCode = referralCode.trim().length > 0;
+
+          if (effectiveAccessState === "required" || effectiveAccessState === "prompt") {
+            const current = await getReferralAttachmentStatus(client, {
+              userId: user.id,
+            });
+            const alreadyInvited = current.hasReferrer;
+
+            if (!alreadyInvited) {
+              if (!hasReferralCode) {
+                inviteReason = "missing_code";
+              } else {
+                const attached = await attachReferralCodeForExistingUser(client, {
+                  userId: user.id,
+                  referralCode,
+                });
+                inviteReason = mapAttachStatusToInviteReason(attached.status);
+              }
+            }
+
+            if (effectiveAccessState === "required" && inviteReason) {
+              await client.query("ROLLBACK");
+            } else {
+              if (effectiveAccessState === "prompt" && inviteReason) {
+                invitePrompt = true;
+              }
+              await client.query("COMMIT");
+            }
+          } else {
+            if (hasReferralCode) {
+              try {
+                await attachReferralCode(client, {
+                  userId: user.id,
+                  referralCode,
+                });
+              } catch (error) {
+                app.log.warn(
+                  { error, userId: user.id },
+                  "Failed to attach referral code",
+                );
+              }
+            }
+            await client.query("COMMIT");
+          }
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally {
+          client.release();
+        }
+
+        if (effectiveAccessState === "required" && inviteReason) {
+          await AuthService.recordAuthAttempt(
+            primaryWalletAddress,
+            "privy-auth",
+            false,
+            clientIp,
+            userAgent,
+            `invite_required:${inviteReason}`,
+          );
+          reply.code(403);
+          return reply.send({
+            error: "invite_required",
+            reason: inviteReason,
+            inviteOnly: true,
+            invitePolicyVersion: policyVersion,
+          });
+        }
 
         const sessionToken = AuthService.generateToken(user.id);
 
@@ -161,20 +299,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           clientIp,
           userAgent,
         );
-
-        if (typeof body.referralCode === "string" && body.referralCode.trim()) {
-          try {
-            await attachReferralCode(pool, {
-              userId: user.id,
-              referralCode: body.referralCode,
-            });
-          } catch (error) {
-            app.log.warn(
-              { error, userId: user.id },
-              "Failed to attach referral code",
-            );
-          }
-        }
 
         await AuthService.recordAuthAttempt(
           primaryWalletAddress,
@@ -206,6 +330,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           walletAddresses,
           primaryWalletAddress,
           privyUserId: privyUser.id,
+          invitePrompt: invitePrompt || undefined,
+          inviteReason: invitePrompt ? inviteReason : undefined,
+          invitePolicyVersion:
+            invitePrompt && effectiveAccessState === "prompt"
+              ? policyVersion
+              : undefined,
         });
       } catch (error) {
         app.log.error({ error }, "Privy authentication failed");

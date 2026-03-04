@@ -245,6 +245,11 @@ const aiMapSearchEnabled =
   parseOptionalBool(process.env.AI_MAP_SEARCH_ENABLED) ?? false;
 const aiMapSignalsEnabled =
   parseOptionalBool(process.env.AI_MAP_SIGNALS_ENABLED) ?? false;
+const authAccessState = parseEnum(
+  process.env.AUTH_ACCESS_STATE,
+  ["off", "prompt", "required"] as const,
+  "off",
+);
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -518,6 +523,7 @@ export const env = {
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  authAccessState,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 10),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
