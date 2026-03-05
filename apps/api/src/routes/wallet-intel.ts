@@ -929,14 +929,23 @@ async function loadWhaleTopMarkets(
           um.resolved_outcome
       ) ranked
       left join lateral (
-        with latest_positions as (
+        with latest_snapshot as (
+          select max(ws.snapshot_at) as snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = ranked.wallet_id
+            and ws.venue = ranked.venue
+        ),
+        latest_positions as (
           select distinct on (upper(coalesce(ws.outcome_side, '')))
             upper(coalesce(ws.outcome_side, '')) as outcome_side,
             ws.shares,
             ws.size_usd,
             ws.price
           from wallet_position_snapshots ws
+          join latest_snapshot ls
+            on ls.snapshot_at = ws.snapshot_at
           where ws.wallet_id = ranked.wallet_id
+            and ws.venue = ranked.venue
             and ws.market_id = ranked.market_id
             and ws.shares > 0
           order by
@@ -3066,7 +3075,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         params.push(query.since);
       }
 
-      params.push(query.limit, query.offset);
+      const minUsdParam = idx++;
+      params.push(env.walletIntelMinPositionUsd);
+      const minSharesParam = idx++;
+      params.push(env.walletIntelMinPositionShares);
+      const positionFilterSql = `
+        (
+          case
+            when ws.size_usd is not null then ws.size_usd >= $${minUsdParam}
+            when ws.shares is not null then ws.shares >= $${minSharesParam}
+            else true
+          end
+        )
+      `;
+
+      params.push(query.limit + 1, query.offset);
       const limitParam = idx++;
       const offsetParam = idx++;
 
@@ -3121,7 +3144,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join wallet_profiles wp on wp.wallet_id = w.id
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
-              order by ws.snapshot_at desc
+              where ${positionFilterSql}
+              order by
+                ws.snapshot_at desc,
+                ws.size_usd desc nulls last,
+                ws.shares desc nulls last,
+                coalesce(um.title, ws.market_id) asc
               limit $${limitParam}
               offset $${offsetParam}
             `
@@ -3160,7 +3188,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${where}
-              order by ws.snapshot_at desc
+                and ${positionFilterSql}
+              order by
+                ws.snapshot_at desc,
+                ws.size_usd desc nulls last,
+                ws.shares desc nulls last,
+                coalesce(um.title, ws.market_id) asc
               limit $${limitParam}
               offset $${offsetParam}
             `;
@@ -3192,7 +3225,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           metadata: unknown;
         }>(sql, params);
 
-        const items = rows.rows.map((row) => ({
+        const hasMore = rows.rows.length > query.limit;
+        const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
+
+        const items = pageRows.map((row) => ({
           walletId: row.wallet_id,
           address: row.address,
           chain: row.chain,
@@ -3221,25 +3257,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           metadata: row.metadata ?? null,
         }));
 
-        const minUsd = env.walletIntelMinPositionUsd;
-        const minShares = env.walletIntelMinPositionShares;
-
-        const filteredItems =
-          minUsd <= 0 && minShares <= 0
-            ? items
-            : items.filter((item) => {
-                if (item.sizeUsd != null) {
-                  return item.sizeUsd >= minUsd;
-                }
-                if (item.shares != null) {
-                  return item.shares >= minShares;
-                }
-                return true;
-              });
-
         return reply.send({
           ok: true,
-          items: filteredItems,
+          items,
+          hasMore,
         });
       } catch (error) {
         app.log.error(
