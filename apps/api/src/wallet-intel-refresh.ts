@@ -10,8 +10,16 @@ import { isRecord } from "./lib/type-guards.js";
 import { limitlessRequest } from "./services/limitless-client.js";
 import { fetchErc1155BalancesByOwner } from "./services/polygon-rpc.js";
 import { inspectSafeWallet } from "./services/polymarket-funder.js";
-import { fetchSolanaTokenBalancesByOwner } from "./services/solana-rpc.js";
+import {
+  fetchSolanaTokenBalancesByOwner,
+  type SolanaTokenBalance,
+} from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
+import { normalizeOutcomeSideForStorage } from "./services/wallet-intel-helpers.js";
+import {
+  createWalletIntelRetryTelemetry,
+  type WalletIntelRetryTelemetry,
+} from "./services/wallet-intel-retry.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
 import {
   getIntelPolicyDefaults,
@@ -24,6 +32,19 @@ import { NET_SHARES_EPSILON } from "./services/wallet-intel-pnl.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
+type WalletIntelRefreshTelemetry = {
+  holdersPolymarket: WalletIntelRetryTelemetry;
+  holdersAlchemyPolygon: WalletIntelRetryTelemetry;
+  holdersAlchemyBase: WalletIntelRetryTelemetry;
+  holdersSolana: WalletIntelRetryTelemetry;
+  followedPositionsPolymarket: WalletIntelRetryTelemetry;
+  followedPositionsLimitless: WalletIntelRetryTelemetry;
+  followedPositionsKalshi: WalletIntelRetryTelemetry;
+  followedSnapshotPolygon: WalletIntelRetryTelemetry;
+  followedSnapshotBase: WalletIntelRetryTelemetry;
+  followedSnapshotSolana: WalletIntelRetryTelemetry;
+  limitlessPriceBackfill: WalletIntelRetryTelemetry;
+};
 
 let walletIntelRefreshPolicy: WalletIntelRefreshPolicy = getIntelPolicyDefaults(
   "wallet_intel_refresh",
@@ -43,6 +64,8 @@ const SYSTEM_TAGS = [
   { slug: "dormant", label: "Dormant", tagType: "behavior" },
   { slug: "whale", label: "Whale", tagType: "performance" },
 ] as const;
+const REFRESH_ADVISORY_LOCK_KEY_1 = 4207;
+const REFRESH_ADVISORY_LOCK_KEY_2 = 1;
 
 type TokenIndexEntry = {
   marketId: string;
@@ -62,6 +85,112 @@ type LimitlessMarketDetail = {
   prices?: Array<unknown>;
   tradeType?: unknown;
 };
+
+function createRefreshTelemetry(): WalletIntelRefreshTelemetry {
+  return {
+    holdersPolymarket: createWalletIntelRetryTelemetry("holders_polymarket"),
+    holdersAlchemyPolygon: createWalletIntelRetryTelemetry(
+      "holders_alchemy_polygon",
+    ),
+    holdersAlchemyBase: createWalletIntelRetryTelemetry("holders_alchemy_base"),
+    holdersSolana: createWalletIntelRetryTelemetry("holders_solana"),
+    followedPositionsPolymarket: createWalletIntelRetryTelemetry(
+      "followed_positions_polymarket",
+    ),
+    followedPositionsLimitless: createWalletIntelRetryTelemetry(
+      "followed_positions_limitless",
+    ),
+    followedPositionsKalshi: createWalletIntelRetryTelemetry(
+      "followed_positions_kalshi",
+    ),
+    followedSnapshotPolygon: createWalletIntelRetryTelemetry(
+      "followed_snapshot_polygon",
+    ),
+    followedSnapshotBase: createWalletIntelRetryTelemetry("followed_snapshot_base"),
+    followedSnapshotSolana: createWalletIntelRetryTelemetry(
+      "followed_snapshot_solana",
+    ),
+    limitlessPriceBackfill: createWalletIntelRetryTelemetry(
+      "limitless_price_backfill",
+    ),
+  };
+}
+
+function telemetryBuckets(
+  telemetry: WalletIntelRefreshTelemetry,
+): WalletIntelRetryTelemetry[] {
+  return Object.values(telemetry);
+}
+
+function logRefreshTelemetry(telemetry: WalletIntelRefreshTelemetry) {
+  console.log(
+    "[wallets:intel:refresh] telemetry",
+    Object.fromEntries(
+      telemetryBuckets(telemetry).map((bucket) => [
+        bucket.source,
+        {
+          attempted: bucket.attempted,
+          succeeded: bucket.succeeded,
+          retried: bucket.retried,
+          failed: bucket.failed,
+          rateLimited: bucket.rateLimited,
+          aborted: bucket.aborted,
+          otherErrors: bucket.otherErrors,
+          estimatedCalls: bucket.estimatedCalls,
+          actualCalls: bucket.actualCalls,
+        },
+      ]),
+    ),
+  );
+}
+
+async function runWithTelemetry<T>(
+  bucket: WalletIntelRetryTelemetry,
+  fn: () => Promise<T>,
+): Promise<T> {
+  bucket.attempted += 1;
+  bucket.actualCalls += 1;
+  try {
+    const result = await fn();
+    bucket.succeeded += 1;
+    return result;
+  } catch (error) {
+    bucket.failed += 1;
+    if (isAbortError(error)) {
+      bucket.aborted += 1;
+    } else if (isRpcRateLimit(error)) {
+      bucket.rateLimited += 1;
+    } else {
+      bucket.otherErrors += 1;
+    }
+    throw error;
+  }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const size = Math.max(1, Math.trunc(concurrency));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const run = async () => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= items.length) return;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(size, items.length) }, () => run()),
+  );
+  return results;
+}
 
 function parseLimitlessNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -87,10 +216,12 @@ function normalizeLimitlessPrice(
 
 async function fetchLimitlessOrderbook(
   slug: string,
+  telemetry?: WalletIntelRetryTelemetry | null,
 ): Promise<LimitlessOrderbook | null> {
   const res = await limitlessRequest({
     method: "GET",
     requestPath: `/markets/${encodeURIComponent(slug)}/orderbook`,
+    telemetry: telemetry ?? null,
   });
   if (!res.ok) return null;
   const payload = res.payload;
@@ -105,10 +236,12 @@ async function fetchLimitlessOrderbook(
 
 async function fetchLimitlessMarketDetail(
   slug: string,
+  telemetry?: WalletIntelRetryTelemetry | null,
 ): Promise<LimitlessMarketDetail | null> {
   const res = await limitlessRequest({
     method: "GET",
     requestPath: `/markets/${encodeURIComponent(slug)}`,
+    telemetry: telemetry ?? null,
   });
   if (!res.ok) return null;
   const payload = res.payload;
@@ -123,6 +256,7 @@ async function fetchLimitlessMarketDetail(
 async function backfillLimitlessPrices(
   client: Queryable,
   markets: Array<{ id: string; venue: string }>,
+  telemetry?: WalletIntelRetryTelemetry | null,
 ): Promise<number> {
   const limitlessIds = markets
     .filter((market) => market.venue === "limitless")
@@ -164,7 +298,7 @@ async function backfillLimitlessPrices(
     let bestAsk: number | null = null;
     let lastPrice: number | null = null;
 
-    const orderbook = await fetchLimitlessOrderbook(row.slug);
+    const orderbook = await fetchLimitlessOrderbook(row.slug, telemetry ?? null);
     if (orderbook) {
       bestBid = parseLimitlessNumber(orderbook.bids?.[0]?.price ?? null);
       bestAsk = parseLimitlessNumber(orderbook.asks?.[0]?.price ?? null);
@@ -172,7 +306,7 @@ async function backfillLimitlessPrices(
     }
 
     if (bestBid == null && bestAsk == null && lastPrice == null) {
-      const detail = await fetchLimitlessMarketDetail(row.slug);
+      const detail = await fetchLimitlessMarketDetail(row.slug, telemetry ?? null);
       if (detail) {
         const tradeType =
           typeof detail.tradeType === "string" ? detail.tradeType : row.trade_type;
@@ -343,6 +477,25 @@ function parseMetadataSource(metadata: unknown): string | null {
 }
 
 type Queryable = Pick<PoolClient, "query">;
+
+async function acquireRefreshAdvisoryLock(client: Queryable): Promise<boolean> {
+  const result = await client.query<{ locked: boolean }>(
+    `
+      select pg_try_advisory_lock($1::int, $2::int) as locked
+    `,
+    [REFRESH_ADVISORY_LOCK_KEY_1, REFRESH_ADVISORY_LOCK_KEY_2],
+  );
+  return result.rows[0]?.locked ?? false;
+}
+
+async function releaseRefreshAdvisoryLock(client: Queryable): Promise<void> {
+  await client.query(
+    `
+      select pg_advisory_unlock($1::int, $2::int)
+    `,
+    [REFRESH_ADVISORY_LOCK_KEY_1, REFRESH_ADVISORY_LOCK_KEY_2],
+  );
+}
 
 async function ensureSystemTags(
   client: Queryable,
@@ -537,9 +690,8 @@ async function upsertWalletPositionSnapshot(
         snapshot_at
       )
       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      on conflict (wallet_id, venue, market_id, snapshot_at)
+      on conflict (wallet_id, venue, market_id, outcome_side, snapshot_at)
       do update set
-        outcome_side = excluded.outcome_side,
         shares = excluded.shares,
         size_usd = excluded.size_usd,
         price = excluded.price,
@@ -549,7 +701,7 @@ async function upsertWalletPositionSnapshot(
       inputs.walletId,
       inputs.venue,
       inputs.marketId,
-      inputs.outcomeSide,
+      normalizeOutcomeSideForStorage(inputs.outcomeSide),
       inputs.shares,
       inputs.sizeUsd,
       inputs.price,
@@ -593,9 +745,15 @@ async function upsertWalletActivityEvent(
         occurred_at
       )
       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      on conflict (wallet_id, venue, market_id, activity_type, occurred_at)
+      on conflict (
+        wallet_id,
+        venue,
+        market_id,
+        outcome_side,
+        activity_type,
+        occurred_at
+      )
       do update set
-        outcome_side = excluded.outcome_side,
         action = excluded.action,
         delta_shares = excluded.delta_shares,
         size_usd = excluded.size_usd,
@@ -607,7 +765,7 @@ async function upsertWalletActivityEvent(
       inputs.walletId,
       inputs.venue,
       inputs.marketId,
-      inputs.outcomeSide,
+      normalizeOutcomeSideForStorage(inputs.outcomeSide),
       inputs.action,
       inputs.deltaShares,
       inputs.sizeUsd,
@@ -694,6 +852,8 @@ async function snapshotFollowedWalletHoldingsSolana(
     tokenMints: string[];
     tokenIndex: Map<string, TokenIndexEntry>;
     occurredAt: Date;
+    balances?: SolanaTokenBalance[] | null;
+    telemetry?: WalletIntelRetryTelemetry | null;
   },
 ): Promise<number> {
   if (inputs.tokenMints.length === 0) return 0;
@@ -705,12 +865,18 @@ async function snapshotFollowedWalletHoldingsSolana(
   if (targetMints.size === 0) return 0;
   let balances: Awaited<ReturnType<typeof fetchSolanaTokenBalancesByOwner>>;
   try {
-    balances = await fetchSolanaTokenBalancesByOwner({
-      rpcUrls: env.solanaRpcUrls,
-      timeoutMs: env.solanaRpcTimeoutMs,
-      owner: inputs.address,
-      includeToken2022: true,
-    });
+    balances =
+      inputs.balances ??
+      (await runWithTelemetry(
+        inputs.telemetry ?? createWalletIntelRetryTelemetry("solana_snapshot"),
+        () =>
+          fetchSolanaTokenBalancesByOwner({
+            rpcUrls: env.solanaRpcUrls,
+            timeoutMs: env.solanaRpcTimeoutMs,
+            owner: inputs.address,
+            includeToken2022: true,
+          }),
+      ));
   } catch (error) {
     console.error(
       "[wallets:intel:refresh] solana balances fetch failed",
@@ -936,7 +1102,7 @@ async function applySnapshotDeltas(
     market_id: string;
     outcome_side: string | null;
   }) =>
-    `${row.wallet_id}|${row.venue}|${row.market_id}|${row.outcome_side ?? "—"}`;
+    `${row.wallet_id}|${row.venue}|${row.market_id}|${normalizeOutcomeSideForStorage(row.outcome_side)}`;
 
   for (const row of currentRows.rows) {
     currentMap.set(makeKey(row), row);
@@ -1404,7 +1570,10 @@ async function refreshWalletPositionExposure(
   if (inputs.walletIds.length === 0) return;
   await client.query(
     `
-      with latest as (
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      latest as (
         select
           ws.wallet_id,
           ws.venue,
@@ -1413,31 +1582,95 @@ async function refreshWalletPositionExposure(
         where ws.wallet_id = any($1::uuid[])
         group by ws.wallet_id, ws.venue
       ),
-      exposure as (
+      latest_rows as (
         select
           ws.wallet_id,
-          sum(coalesce(ws.size_usd, 0)) as exposure_usd
+          ws.market_id,
+          case
+            when upper(ws.outcome_side) in ('YES', 'NO') then upper(ws.outcome_side)
+            else '__OTHER__'
+          end as outcome_side,
+          greatest(
+            coalesce(
+              ws.size_usd,
+              abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0)),
+              0
+            ),
+            0
+          ) as leg_notional_usd
         from wallet_position_snapshots ws
         join latest l
           on l.wallet_id = ws.wallet_id
          and l.venue = ws.venue
          and l.snapshot_at = ws.snapshot_at
         where ws.wallet_id = any($1::uuid[])
-        group by ws.wallet_id
+      ),
+      market_rollup as (
+        select
+          wallet_id,
+          market_id,
+          sum(
+            case when outcome_side = 'YES' then leg_notional_usd else 0 end
+          ) as yes_notional_usd,
+          sum(
+            case when outcome_side = 'NO' then leg_notional_usd else 0 end
+          ) as no_notional_usd,
+          sum(
+            case when outcome_side = '__OTHER__' then leg_notional_usd else 0 end
+          ) as other_notional_usd
+        from latest_rows
+        group by wallet_id, market_id
+      ),
+      exposure as (
+        select
+          wallet_id,
+          sum(yes_notional_usd + no_notional_usd + other_notional_usd) as exposure_usd,
+          sum(2 * least(yes_notional_usd, no_notional_usd)) as hedged_notional_usd,
+          sum(abs(yes_notional_usd - no_notional_usd) + other_notional_usd) as net_imbalance_usd,
+          count(*) filter (
+            where yes_notional_usd > 0 and no_notional_usd > 0
+          )::int as two_sided_markets
+        from market_rollup
+        group by wallet_id
+      ),
+      final_rows as (
+        select
+          ws.wallet_id,
+          coalesce(e.exposure_usd, 0) as exposure_usd,
+          coalesce(e.hedged_notional_usd, 0) as hedged_notional_usd,
+          coalesce(e.net_imbalance_usd, 0) as net_imbalance_usd,
+          coalesce(e.two_sided_markets, 0) as two_sided_markets
+        from wallet_set ws
+        left join exposure e on e.wallet_id = ws.wallet_id
       )
       insert into wallet_position_exposure (
         wallet_id,
         exposure_usd,
+        hedged_notional_usd,
+        net_imbalance_usd,
+        hedge_ratio,
+        two_sided_markets,
         as_of
       )
       select
         wallet_id,
         exposure_usd,
+        hedged_notional_usd,
+        net_imbalance_usd,
+        case
+          when exposure_usd > 0 then hedged_notional_usd / exposure_usd
+          else 0
+        end as hedge_ratio,
+        two_sided_markets,
         $2::timestamptz
-      from exposure
+      from final_rows
       on conflict (wallet_id)
       do update set
         exposure_usd = excluded.exposure_usd,
+        hedged_notional_usd = excluded.hedged_notional_usd,
+        net_imbalance_usd = excluded.net_imbalance_usd,
+        hedge_ratio = excluded.hedge_ratio,
+        two_sided_markets = excluded.two_sided_markets,
         as_of = excluded.as_of,
         updated_at = now()
     `,
@@ -1986,13 +2219,16 @@ async function runSnapshot(snapshotAt: Date) {
   const marketLimit = walletIntelRefreshPolicy.marketLimit;
   const marketLimitPerVenue = walletIntelRefreshPolicy.marketLimitPerVenue;
   const marketLimitKalshi = walletIntelRefreshPolicy.marketLimitKalshi;
+  const telemetry = createRefreshTelemetry();
+  const marketFetchConcurrency = env.walletIntelMarketFetchConcurrency;
+  const followedFetchConcurrency = env.walletIntelFollowedFetchConcurrency;
   const marketLimitPerVenueMax = Math.max(
     marketLimitPerVenue,
     marketLimitKalshi,
   );
 
   console.log(
-    `[wallets:intel:refresh] start markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()}`,
+    `[wallets:intel:refresh] start markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency}`,
   );
 
   const client = await pool.connect();
@@ -2099,6 +2335,7 @@ async function runSnapshot(snapshotAt: Date) {
     const limitlessPriceBackfills = await backfillLimitlessPrices(
       client,
       marketRows,
+      telemetry.limitlessPriceBackfill,
     );
     if (limitlessPriceBackfills > 0) {
       console.log(
@@ -2126,19 +2363,40 @@ async function runSnapshot(snapshotAt: Date) {
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
 
-    for (const market of marketRows) {
+    const marketResults = await mapWithConcurrency(
+      marketRows,
+      marketFetchConcurrency,
+      async (market) => {
+        const chain = VENUE_CHAIN[market.venue] ?? null;
+        if (!chain) {
+          return { market, chain, data: null, error: null };
+        }
+        try {
+          const data = await fetchMarketHolderData({
+            marketId: market.id,
+            limit: holderLimit,
+            telemetry: {
+              holdersPolymarket: telemetry.holdersPolymarket,
+              holdersAlchemyPolygon: telemetry.holdersAlchemyPolygon,
+              holdersAlchemyBase: telemetry.holdersAlchemyBase,
+              holdersSolana: telemetry.holdersSolana,
+            },
+          });
+          return { market, chain, data, error: null };
+        } catch (error) {
+          return { market, chain, data: null, error };
+        }
+      },
+    );
+
+    for (const result of marketResults) {
+      const market = result.market;
       const venue = market.venue as Venue;
-      const chain = VENUE_CHAIN[market.venue] ?? null;
+      const chain = result.chain;
       if (!chain) continue;
 
-      let data;
-      try {
-        data = await fetchMarketHolderData({
-          marketId: market.id,
-          limit: holderLimit,
-          client,
-        });
-      } catch (error) {
+      if (result.error) {
+        const error = result.error;
         if (isRpcRateLimit(error)) {
           holderRateLimitErrors += 1;
           continue;
@@ -2155,6 +2413,9 @@ async function runSnapshot(snapshotAt: Date) {
         );
         continue;
       }
+
+      const data = result.data;
+      if (!data) continue;
 
       const maybeAddToken = (
         tokenId: string | null,
@@ -2323,7 +2584,14 @@ async function runSnapshot(snapshotAt: Date) {
       Math.ceil(tokenIdsByVenue.polymarket.length / 200);
     const estBaseHoldingsRpcCalls =
       followedByChain.base * Math.ceil(tokenIdsByVenue.limitless.length / 200);
-    const estSolanaHoldingsRpcCalls = followedByChain.solana * 2;
+    const estSolanaHoldingsRpcCalls =
+      tokenIdsByVenue.kalshi.length > 0 ? followedByChain.solana : 0;
+    telemetry.followedSnapshotPolygon.estimatedCalls += estPolygonHoldingsRpcCalls;
+    telemetry.followedSnapshotBase.estimatedCalls += estBaseHoldingsRpcCalls;
+    telemetry.followedSnapshotSolana.estimatedCalls += estSolanaHoldingsRpcCalls;
+    telemetry.followedPositionsPolymarket.estimatedCalls += followedByChain.polygon;
+    telemetry.followedPositionsLimitless.estimatedCalls += followedByChain.base;
+    telemetry.followedPositionsKalshi.estimatedCalls += followedByChain.solana;
     console.log("[wallets:intel:refresh] followed fanout", {
       followed: followedWallets.rows.length,
       followedByChain,
@@ -2337,21 +2605,65 @@ async function runSnapshot(snapshotAt: Date) {
         base: estBaseHoldingsRpcCalls,
         solana: estSolanaHoldingsRpcCalls,
       },
+      concurrency: {
+        marketFetch: marketFetchConcurrency,
+        followedFetch: followedFetchConcurrency,
+      },
     });
 
     let followedProcessed = 0;
     let followedRows = 0;
+    const prefetchedSolanaBalances = new Map<string, SolanaTokenBalance[] | null>();
+
+    const solanaFollowedWallets = followedWallets.rows.filter(
+      (row) => row.chain === "solana",
+    );
+    if (
+      solanaFollowedWallets.length > 0 &&
+      tokenIdsByVenue.kalshi.length > 0
+    ) {
+      await mapWithConcurrency(
+        solanaFollowedWallets,
+        followedFetchConcurrency,
+        async (followed) => {
+          try {
+            const balances = await runWithTelemetry(
+              telemetry.followedSnapshotSolana,
+              () =>
+                fetchSolanaTokenBalancesByOwner({
+                  rpcUrls: env.solanaRpcUrls,
+                  timeoutMs: env.solanaRpcTimeoutMs,
+                  owner: followed.address,
+                  includeToken2022: true,
+                }),
+            );
+            prefetchedSolanaBalances.set(followed.wallet_id, balances);
+          } catch (error) {
+            prefetchedSolanaBalances.set(followed.wallet_id, null);
+            console.error(
+              "[wallets:intel:refresh] prefetched solana balances failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
+        },
+      );
+    }
 
     for (const followed of followedWallets.rows) {
       followedProcessed += 1;
       if (followed.chain === "polygon") {
         try {
-          await syncPositionsForUserWallet(pool, {
-            userId: followed.user_id,
-            walletAddress: followed.address,
-            venue: "polymarket",
-            positionScope: "followed",
-          });
+          await runWithTelemetry(
+            telemetry.followedPositionsPolymarket,
+            () =>
+              syncPositionsForUserWallet(pool, {
+                userId: followed.user_id,
+                walletAddress: followed.address,
+                venue: "polymarket",
+                positionScope: "followed",
+              }),
+          );
         } catch (error) {
           console.error(
             "[wallets:intel:refresh] polymarket positions sync failed",
@@ -2359,17 +2671,21 @@ async function runSnapshot(snapshotAt: Date) {
           );
         }
 
-        const inserted = await snapshotFollowedWalletHoldingsEvm(client, {
-          walletId: followed.wallet_id,
-          address: normalizeAddress(followed.address, "polygon"),
-          venue: "polymarket",
-          rpcUrl: env.polygonRpcUrl,
-          rpcTimeoutMs: env.polygonRpcTimeoutMs,
-          contractAddress: env.polymarketConditionalTokensAddress,
-          tokenIds: tokenIdsByVenue.polymarket,
-          tokenIndex: tokenIndexByVenue.polymarket,
-          occurredAt: snapshotAt,
-        });
+        const inserted = await runWithTelemetry(
+          telemetry.followedSnapshotPolygon,
+          () =>
+            snapshotFollowedWalletHoldingsEvm(client, {
+              walletId: followed.wallet_id,
+              address: normalizeAddress(followed.address, "polygon"),
+              venue: "polymarket",
+              rpcUrl: env.polygonRpcUrl,
+              rpcTimeoutMs: env.polygonRpcTimeoutMs,
+              contractAddress: env.polymarketConditionalTokensAddress,
+              tokenIds: tokenIdsByVenue.polymarket,
+              tokenIndex: tokenIndexByVenue.polymarket,
+              occurredAt: snapshotAt,
+            }),
+        );
         if (inserted > 0) {
           followedRows += inserted;
           touchedWalletIds.add(followed.wallet_id);
@@ -2392,12 +2708,16 @@ async function runSnapshot(snapshotAt: Date) {
 
       if (followed.chain === "base") {
         try {
-          await syncPositionsForUserWallet(pool, {
-            userId: followed.user_id,
-            walletAddress: followed.address,
-            venue: "limitless",
-            positionScope: "followed",
-          });
+          await runWithTelemetry(
+            telemetry.followedPositionsLimitless,
+            () =>
+              syncPositionsForUserWallet(pool, {
+                userId: followed.user_id,
+                walletAddress: followed.address,
+                venue: "limitless",
+                positionScope: "followed",
+              }),
+          );
         } catch (error) {
           if (isLimitlessSessionMissing(error)) {
             console.info(
@@ -2412,17 +2732,21 @@ async function runSnapshot(snapshotAt: Date) {
           }
         }
 
-        const inserted = await snapshotFollowedWalletHoldingsEvm(client, {
-          walletId: followed.wallet_id,
-          address: normalizeAddress(followed.address, "base"),
-          venue: "limitless",
-          rpcUrl: env.baseRpcUrl,
-          rpcTimeoutMs: env.baseRpcTimeoutMs,
-          contractAddress: env.limitlessConditionalTokensAddress,
-          tokenIds: tokenIdsByVenue.limitless,
-          tokenIndex: tokenIndexByVenue.limitless,
-          occurredAt: snapshotAt,
-        });
+        const inserted = await runWithTelemetry(
+          telemetry.followedSnapshotBase,
+          () =>
+            snapshotFollowedWalletHoldingsEvm(client, {
+              walletId: followed.wallet_id,
+              address: normalizeAddress(followed.address, "base"),
+              venue: "limitless",
+              rpcUrl: env.baseRpcUrl,
+              rpcTimeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: env.limitlessConditionalTokensAddress,
+              tokenIds: tokenIdsByVenue.limitless,
+              tokenIndex: tokenIndexByVenue.limitless,
+              occurredAt: snapshotAt,
+            }),
+        );
         if (inserted > 0) {
           followedRows += inserted;
           touchedWalletIds.add(followed.wallet_id);
@@ -2445,12 +2769,18 @@ async function runSnapshot(snapshotAt: Date) {
 
       if (followed.chain === "solana") {
         try {
-          await syncPositionsForUserWallet(pool, {
-            userId: followed.user_id,
-            walletAddress: followed.address,
-            venue: "kalshi",
-            positionScope: "followed",
-          });
+          await runWithTelemetry(
+            telemetry.followedPositionsKalshi,
+            () =>
+              syncPositionsForUserWallet(pool, {
+                userId: followed.user_id,
+                walletAddress: followed.address,
+                venue: "kalshi",
+                positionScope: "followed",
+                prefetchedSolanaBalances:
+                  prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+              }),
+          );
         } catch (error) {
           console.error(
             "[wallets:intel:refresh] kalshi positions sync failed",
@@ -2464,6 +2794,8 @@ async function runSnapshot(snapshotAt: Date) {
           tokenMints: tokenIdsByVenue.kalshi,
           tokenIndex: tokenIndexByVenue.kalshi,
           occurredAt: snapshotAt,
+          balances: prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+          telemetry: telemetry.followedSnapshotSolana,
         });
         if (inserted > 0) {
           followedRows += inserted;
@@ -2548,6 +2880,7 @@ async function runSnapshot(snapshotAt: Date) {
     });
 
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
+    logRefreshTelemetry(telemetry);
 
     console.log(
       `[wallets:intel:refresh] done markets=${marketsProcessed} wallets=${walletIds.length} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} whaleOwnersLinked=${whaleOwnersLinked}`,
@@ -2558,76 +2891,92 @@ async function runSnapshot(snapshotAt: Date) {
 }
 
 async function main() {
-  const [refreshPolicy, whalePolicy] = await Promise.all([
-    resolveWalletIntelRefreshPolicy(pool),
-    resolveAiWhaleProfilesPolicy(pool),
-  ]);
-  walletIntelRefreshPolicy = refreshPolicy.effective;
-  aiWhaleProfilesPolicy = whalePolicy.effective;
+  const lockClient = await pool.connect();
+  try {
+    const locked = await acquireRefreshAdvisoryLock(lockClient);
+    if (!locked) {
+      throw new Error(
+        "Another wallet intel refresh is already running; advisory lock is held.",
+      );
+    }
 
-  const runAt = new Date();
-  const baseSnapshot = bucketDate(runAt, walletIntelRefreshPolicy.snapshotHours);
-  const backfillSteps = parseBackfillSnapshots();
-  const retention = parseRetentionConfig();
-  const snapshots: Date[] = [];
+    const [refreshPolicy, whalePolicy] = await Promise.all([
+      resolveWalletIntelRefreshPolicy(pool),
+      resolveAiWhaleProfilesPolicy(pool),
+    ]);
+    walletIntelRefreshPolicy = refreshPolicy.effective;
+    aiWhaleProfilesPolicy = whalePolicy.effective;
 
-  if (backfillSteps > 0) {
-    console.log(
-      `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${walletIntelRefreshPolicy.snapshotHours}`,
-    );
-  }
+    const runAt = new Date();
+    const baseSnapshot = bucketDate(runAt, walletIntelRefreshPolicy.snapshotHours);
+    const backfillSteps = parseBackfillSnapshots();
+    const retention = parseRetentionConfig();
+    const snapshots: Date[] = [];
 
-  if (retention.cleanupOnly) {
+    if (backfillSteps > 0) {
+      console.log(
+        `[wallets:intel:refresh] backfill snapshots=${backfillSteps} stepHours=${walletIntelRefreshPolicy.snapshotHours}`,
+      );
+    }
+
+    if (retention.cleanupOnly) {
+      if (retention.skipCleanup) {
+        console.log("[wallets:intel:refresh] cleanup-only skipped (--skip-cleanup)");
+        return;
+      }
+      if (!retentionEnabled(retention)) {
+        console.log("[wallets:intel:refresh] cleanup-only skipped (no retention)");
+        return;
+      }
+      console.log(
+        `[wallets:intel:refresh] cleanup-only retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
+      );
+      const result = await cleanupWalletIntel(retention, runAt);
+      console.log(
+        `[wallets:intel:refresh] cleanup-only done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
+      );
+      return;
+    }
+
+    for (let step = backfillSteps; step >= 0; step -= 1) {
+      snapshots.push(
+        addHours(baseSnapshot, -step * walletIntelRefreshPolicy.snapshotHours),
+      );
+    }
+
+    for (const snapshotAt of snapshots) {
+      await runSnapshot(snapshotAt);
+    }
+
+    if (aiWhaleProfilesPolicy.autoRun) {
+      const result = await runWhaleProfiles({
+        limit: aiWhaleProfilesPolicy.limit,
+        marketLimit: aiWhaleProfilesPolicy.marketLimit,
+        windowDays: aiWhaleProfilesPolicy.windowDays,
+        policy: aiWhaleProfilesPolicy,
+      });
+      console.log("[wallets:intel:refresh] whale profiles", result);
+    }
+
     if (retention.skipCleanup) {
-      console.log("[wallets:intel:refresh] cleanup-only skipped (--skip-cleanup)");
-      return;
+      console.log("[wallets:intel:refresh] cleanup skipped (--skip-cleanup)");
+    } else if (retentionEnabled(retention)) {
+      console.log(
+        `[wallets:intel:refresh] cleanup retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
+      );
+      const result = await cleanupWalletIntel(retention, runAt);
+      console.log(
+        `[wallets:intel:refresh] cleanup done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
+      );
+    } else {
+      console.log("[wallets:intel:refresh] cleanup skipped (no retention)");
     }
-    if (!retentionEnabled(retention)) {
-      console.log("[wallets:intel:refresh] cleanup-only skipped (no retention)");
-      return;
+  } finally {
+    try {
+      await releaseRefreshAdvisoryLock(lockClient);
+    } finally {
+      lockClient.release();
     }
-    console.log(
-      `[wallets:intel:refresh] cleanup-only retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
-    );
-    const result = await cleanupWalletIntel(retention, runAt);
-    console.log(
-      `[wallets:intel:refresh] cleanup-only done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
-    );
-    return;
-  }
-
-  for (let step = backfillSteps; step >= 0; step -= 1) {
-    snapshots.push(
-      addHours(baseSnapshot, -step * walletIntelRefreshPolicy.snapshotHours),
-    );
-  }
-
-  for (const snapshotAt of snapshots) {
-    await runSnapshot(snapshotAt);
-  }
-
-  if (aiWhaleProfilesPolicy.autoRun) {
-    const result = await runWhaleProfiles({
-      limit: aiWhaleProfilesPolicy.limit,
-      marketLimit: aiWhaleProfilesPolicy.marketLimit,
-      windowDays: aiWhaleProfilesPolicy.windowDays,
-      policy: aiWhaleProfilesPolicy,
-    });
-    console.log("[wallets:intel:refresh] whale profiles", result);
-  }
-
-  if (retention.skipCleanup) {
-    console.log("[wallets:intel:refresh] cleanup skipped (--skip-cleanup)");
-  } else if (retentionEnabled(retention)) {
-    console.log(
-      `[wallets:intel:refresh] cleanup retention snapshots=${retention.snapshotsDays ?? 0}d activity=${retention.activityDays ?? 0}d metrics=${retention.metricsDays ?? 0}d`,
-    );
-    const result = await cleanupWalletIntel(retention, runAt);
-    console.log(
-      `[wallets:intel:refresh] cleanup done snapshots=${result.snapshots} activity=${result.activity} metrics=${result.metrics}`,
-    );
-  } else {
-    console.log("[wallets:intel:refresh] cleanup skipped (no retention)");
   }
 }
 

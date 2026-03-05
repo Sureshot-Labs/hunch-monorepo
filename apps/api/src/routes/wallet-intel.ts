@@ -28,6 +28,11 @@ import {
   evaluateSignalMarketWindow,
   mergeWalletIdsForScope,
 } from "../services/wallet-intel-filters.js";
+import { normalizeOutcomeSideForApi } from "../services/wallet-intel-helpers.js";
+import {
+  buildWalletMmDiagnostics,
+  type WalletMmDiagnostics,
+} from "../services/wallet-intel-mm.js";
 import {
   buildSignalPresentation,
   buildWalletAttributionMap,
@@ -143,6 +148,11 @@ type WhaleWalletItem = {
   lastActivityAt: Date | null;
   activityKind: "mixed" | "trade" | "holder" | null;
   trackedExposureUsd: number | null;
+  trackedHedgedNotionalUsd: number | null;
+  trackedNetImbalanceUsd: number | null;
+  trackedHedgeRatio: number | null;
+  trackedTwoSidedMarkets: number | null;
+  mmDiagnostics: WalletMmDiagnostics | null;
   approxPnlUsd: number | null;
   approxPnlPeriod: "30d";
   inferredWinRate: number | null;
@@ -250,6 +260,7 @@ type WalletActivitySignalItem = {
   reasonCodes: string[];
   displayReasons: string[];
   severity: WalletSignalSeverity;
+  mmDiagnostics: WalletMmDiagnostics | null;
   occurredAt: Date;
   attribution?: WalletAttribution;
 };
@@ -268,6 +279,14 @@ function normalizeStringArray(values: string[] | undefined): string[] {
         .filter(Boolean),
     ),
   );
+}
+
+function nullableNumber(
+  value: string | number | null | undefined,
+): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 const SUMMARY_DEPENDENT_PRIMARY_FILTERS = new Set<WalletAttributionPrimaryKey>([
@@ -334,6 +353,10 @@ function mapWhaleRowToItem(
       metrics_pnl: string | null;
       metrics_trades: number | null;
       exposure_usd: string | null;
+      hedged_notional_usd: string | null;
+      net_imbalance_usd: string | null;
+      hedge_ratio: string | null;
+      two_sided_markets: number | null;
       whale_score: string | null;
       is_safe: boolean;
       owner_address: string | null;
@@ -343,7 +366,24 @@ function mapWhaleRowToItem(
       inferred_total: number | null;
       user_label: string | null;
     },
+  refreshPolicy: Awaited<ReturnType<typeof resolveWalletIntelRefreshPolicy>>["effective"],
 ): WhaleWalletItem {
+  const mmDiagnostics =
+    row.exposure_usd != null ||
+    row.hedged_notional_usd != null ||
+    row.net_imbalance_usd != null ||
+    row.hedge_ratio != null ||
+    row.two_sided_markets != null
+      ? buildWalletMmDiagnostics({
+          exposureUsd: nullableNumber(row.exposure_usd) ?? 0,
+          hedgedNotionalUsd: nullableNumber(row.hedged_notional_usd) ?? 0,
+          netImbalanceUsd: nullableNumber(row.net_imbalance_usd) ?? 0,
+          hedgeRatio: nullableNumber(row.hedge_ratio) ?? 0,
+          twoSidedMarkets: row.two_sided_markets ?? 0,
+          chain: row.chain,
+          refreshPolicy,
+        })
+      : null;
   return {
     walletId: row.id,
     address: row.address,
@@ -365,8 +405,14 @@ function mapWhaleRowToItem(
       if (hasHolder) return "holder";
       return null;
     })(),
-    trackedExposureUsd: row.exposure_usd != null ? Number(row.exposure_usd) : null,
-    approxPnlUsd: row.metrics_pnl != null ? Number(row.metrics_pnl) : null,
+    trackedExposureUsd: nullableNumber(row.exposure_usd),
+    trackedHedgedNotionalUsd: nullableNumber(row.hedged_notional_usd),
+    trackedNetImbalanceUsd: nullableNumber(row.net_imbalance_usd),
+    trackedHedgeRatio: nullableNumber(row.hedge_ratio),
+    trackedTwoSidedMarkets:
+      row.two_sided_markets != null ? Number(row.two_sided_markets) : null,
+    mmDiagnostics,
+    approxPnlUsd: nullableNumber(row.metrics_pnl),
     approxPnlPeriod: "30d",
     inferredWinRate:
       row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
@@ -678,6 +724,73 @@ async function loadWalletRowsByIds(
   return rows.rows;
 }
 
+async function loadWalletMmDiagnosticsMap(
+  client: PoolClient,
+  wallets: Array<{ walletId: string; chain: string }>,
+  refreshPolicy: Awaited<ReturnType<typeof resolveWalletIntelRefreshPolicy>>["effective"],
+): Promise<Map<string, WalletMmDiagnostics>> {
+  const byWallet = new Map<string, WalletMmDiagnostics>();
+  if (wallets.length === 0) return byWallet;
+  const walletIds = wallets.map((wallet) => wallet.walletId);
+  const chainByWallet = new Map(
+    wallets.map((wallet) => [wallet.walletId, wallet.chain] as const),
+  );
+  const rows = await client.query<{
+    wallet_id: string;
+    exposure_usd: string | null;
+    hedged_notional_usd: string | null;
+    net_imbalance_usd: string | null;
+    hedge_ratio: string | null;
+    two_sided_markets: number | null;
+  }>(
+    `
+      select
+        wallet_id,
+        exposure_usd,
+        hedged_notional_usd,
+        net_imbalance_usd,
+        hedge_ratio,
+        two_sided_markets
+      from wallet_position_exposure
+      where wallet_id = any($1::uuid[])
+    `,
+    [walletIds],
+  );
+
+  for (const row of rows.rows) {
+    byWallet.set(
+      row.wallet_id,
+      buildWalletMmDiagnostics({
+        exposureUsd: nullableNumber(row.exposure_usd) ?? 0,
+        hedgedNotionalUsd: nullableNumber(row.hedged_notional_usd) ?? 0,
+        netImbalanceUsd: nullableNumber(row.net_imbalance_usd) ?? 0,
+        hedgeRatio: nullableNumber(row.hedge_ratio) ?? 0,
+        twoSidedMarkets: row.two_sided_markets ?? 0,
+        chain: chainByWallet.get(row.wallet_id) ?? null,
+        refreshPolicy,
+      }),
+    );
+  }
+
+  for (const wallet of wallets) {
+    if (byWallet.has(wallet.walletId)) continue;
+    byWallet.set(
+      wallet.walletId,
+      buildWalletMmDiagnostics({
+        exposureUsd: 0,
+        hedgedNotionalUsd: 0,
+        netImbalanceUsd: 0,
+        hedgeRatio: 0,
+        twoSidedMarkets: 0,
+        chain: wallet.chain,
+        refreshPolicy,
+      }),
+    );
+  }
+
+  return byWallet;
+}
+
 async function loadSignalCandidateWallets(
   client: PoolClient,
   userId: string,
@@ -828,7 +941,7 @@ async function loadWhaleTopMarkets(
       closeTime: market.close_time ?? null,
       expirationTime: market.expiration_time ?? null,
       resolvedOutcome: market.resolved_outcome ?? null,
-      positionSide: market.position_side,
+      positionSide: normalizeOutcomeSideForApi(market.position_side),
       positionShares: market.position_shares
         ? Number(market.position_shares)
         : null,
@@ -1406,9 +1519,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const client = await pool.connect();
       try {
         const result = await withJitDisabled(client, async () => {
-          const [signalsPolicy, attributionPolicy] = await Promise.all([
+          const [signalsPolicy, attributionPolicy, refreshPolicy] =
+            await Promise.all([
             resolveWalletIntelSignalsPolicy(client),
             resolveWalletIntelAttributionPolicy(client),
+            resolveWalletIntelRefreshPolicy(client),
           ]);
           const attributionEnabled = attributionPolicy.effective.enabled;
           const needsAttributionForFilters =
@@ -1424,6 +1539,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 return "metrics.metrics_trades desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "exposure_usd":
                 return "exposure.exposure_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+              case "imbalance_usd":
+                return "exposure.net_imbalance_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "winrate":
                 return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "pnl_30d":
@@ -1462,6 +1579,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 metrics_pnl: string | null;
                 metrics_trades: number | null;
                 exposure_usd: string | null;
+                hedged_notional_usd: string | null;
+                net_imbalance_usd: string | null;
+                hedge_ratio: string | null;
+                two_sided_markets: number | null;
                 whale_score: string | null;
                 is_safe: boolean;
                 owner_address: string | null;
@@ -1490,6 +1611,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 metrics.metrics_pnl,
                 metrics.metrics_trades,
                 exposure.exposure_usd,
+                exposure.hedged_notional_usd,
+                exposure.net_imbalance_usd,
+                exposure.hedge_ratio,
+                exposure.two_sided_markets,
                 case
                   when w.chain = 'solana'
                     then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
@@ -1587,7 +1712,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             : whaleRows.rows;
 
           const filteredByActivity = scannedRows
-            .map((row) => mapWhaleRowToItem(row))
+            .map((row) => mapWhaleRowToItem(row, refreshPolicy.effective))
             .filter((row) => Boolean(row.lastActivityAt));
 
           const deduped = new Map<string, WhaleWalletItem>();
@@ -1601,18 +1726,44 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               deduped.set(dedupeKey, row);
               continue;
             }
-            const existingVolume =
-              existing.metrics && typeof existing.metrics.volume_usd === "string"
-                ? Number(existing.metrics.volume_usd)
-                : Number(existing.metrics?.volume_usd ?? 0);
-            const rowVolume =
-              row.metrics && typeof row.metrics.volume_usd === "string"
-                ? Number(row.metrics.volume_usd)
-                : Number(row.metrics?.volume_usd ?? 0);
-            const existingScore = Number.isFinite(existingVolume)
-              ? existingVolume
-              : 0;
-            const rowScore = Number.isFinite(rowVolume) ? rowVolume : 0;
+            const existingScore = (() => {
+              switch (query.sort) {
+                case "trades_30d":
+                  return Number(existing.metrics?.trades_count ?? 0);
+                case "exposure_usd":
+                  return existing.trackedExposureUsd ?? 0;
+                case "imbalance_usd":
+                  return existing.trackedNetImbalanceUsd ?? 0;
+                case "winrate":
+                  return existing.inferredWinRate ?? 0;
+                case "pnl_30d":
+                  return existing.approxPnlUsd ?? 0;
+                case "last_activity":
+                  return existing.lastActivityAt?.getTime() ?? 0;
+                case "volume_30d":
+                default:
+                  return nullableNumber(existing.metrics?.volume_usd) ?? 0;
+              }
+            })();
+            const rowScore = (() => {
+              switch (query.sort) {
+                case "trades_30d":
+                  return Number(row.metrics?.trades_count ?? 0);
+                case "exposure_usd":
+                  return row.trackedExposureUsd ?? 0;
+                case "imbalance_usd":
+                  return row.trackedNetImbalanceUsd ?? 0;
+                case "winrate":
+                  return row.inferredWinRate ?? 0;
+                case "pnl_30d":
+                  return row.approxPnlUsd ?? 0;
+                case "last_activity":
+                  return row.lastActivityAt?.getTime() ?? 0;
+                case "volume_30d":
+                default:
+                  return nullableNumber(row.metrics?.volume_usd) ?? 0;
+              }
+            })();
 
             if (existing.isSafe && !row.isSafe) {
               deduped.set(dedupeKey, row);
@@ -1636,7 +1787,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           }
 
           const dedupedRows = Array.from(deduped.values());
-          const tagsOnlyRows = dedupedRows.filter((row) =>
+          const mmFilteredRows = dedupedRows.filter((row) => {
+            if (query.mmMode === "exclude") {
+              return !row.mmDiagnostics?.mmSuspected;
+            }
+            if (query.mmMode === "only") {
+              return Boolean(row.mmDiagnostics?.mmSuspected);
+            }
+            return true;
+          });
+          const tagsOnlyRows = mmFilteredRows.filter((row) =>
             walletMatchesFilters(row.tags, undefined, {
               tags: tagsFilter,
               tagMode: query.tagMode,
@@ -2308,6 +2468,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               minScore,
             },
           });
+          const mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
+            client,
+            candidates.map((row) => ({
+              walletId: row.id,
+              chain: row.chain,
+            })),
+            refreshPolicy.effective,
+          );
 
           const items: WalletActivitySignalItem[] = [];
           const nowMs = Date.now();
@@ -2320,7 +2488,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           }> = [];
           for (const row of candidates) {
             const summary = summaryMap.get(row.id);
+            const mmDiagnostics = mmDiagnosticsByWallet.get(row.id) ?? null;
             if (!summary) continue;
+            if (query.excludeMmLike && mmDiagnostics?.mmSuspected) continue;
             for (const change of summary.topChanges) {
               if (!change.signalType) continue;
               if (query.signalType && change.signalType !== query.signalType) continue;
@@ -2407,6 +2577,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 reasonCodes: signalPresentation.reasonCodes,
                 displayReasons: signalPresentation.displayReasons,
                 severity: signalPresentation.severity,
+                mmDiagnostics,
                 occurredAt: change.occurredAt,
               });
             }
@@ -2733,7 +2904,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? row.expiration_time.toISOString()
             : null,
           resolvedOutcome: row.resolved_outcome,
-          outcomeSide: row.outcome_side,
+          outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
           action: row.action,
           deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
           sizeUsd: row.size_usd ? Number(row.size_usd) : null,
@@ -2964,7 +3135,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? row.expiration_time.toISOString()
             : null,
           resolvedOutcome: row.resolved_outcome,
-          outcomeSide: row.outcome_side,
+          outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
           shares: row.shares ? Number(row.shares) : null,
           sizeUsd: row.size_usd ? Number(row.size_usd) : null,
           price: row.price ? Number(row.price) : null,

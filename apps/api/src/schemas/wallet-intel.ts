@@ -102,6 +102,7 @@ export const walletActivitySignalsQuerySchema = z.object({
   primary: csvStringArraySchema.optional(),
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
+  excludeMmLike: z.coerce.boolean().default(false),
   severity: z
     .preprocess(
       value => {
@@ -160,10 +161,12 @@ export const walletWhalesQuerySchema = z.object({
       "volume_30d",
       "trades_30d",
       "exposure_usd",
+      "imbalance_usd",
       "winrate",
       "pnl_30d",
     ])
     .default("last_activity"),
+  mmMode: z.enum(["all", "exclude", "only"]).default("all"),
   tags: csvStringArraySchema.optional(),
   tagMode: filterModeSchema,
   primary: csvStringArraySchema.optional(),

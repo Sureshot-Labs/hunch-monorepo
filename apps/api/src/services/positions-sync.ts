@@ -8,7 +8,10 @@ import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
-import { fetchSolanaTokenBalancesByOwner } from "./solana-rpc.js";
+import {
+  fetchSolanaTokenBalancesByOwner,
+  type SolanaTokenBalance,
+} from "./solana-rpc.js";
 import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
 import { ethers } from "ethers";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
@@ -872,14 +875,21 @@ type PositionScope = "own" | "followed";
 
 async function syncKalshiPositionsFromSolana(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+    prefetchedBalances?: SolanaTokenBalance[] | null;
+  },
 ): Promise<PositionsSyncResult> {
-  const balances = await fetchSolanaTokenBalancesByOwner({
-    rpcUrls: env.solanaRpcUrls,
-    timeoutMs: env.solanaRpcTimeoutMs,
-    owner: inputs.walletAddress,
-    includeToken2022: true,
-  });
+  const balances =
+    inputs.prefetchedBalances ??
+    (await fetchSolanaTokenBalancesByOwner({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      owner: inputs.walletAddress,
+      includeToken2022: true,
+    }));
 
   const tokenBalances = balances.map((balance) => ({
     tokenId: `sol:${balance.mint}`,
@@ -1215,6 +1225,7 @@ export async function syncPositionsForUserWallet(
     walletAddress: string;
     venue?: Position["venue"];
     positionScope?: PositionScope;
+    prefetchedSolanaBalances?: SolanaTokenBalance[] | null;
   },
 ): Promise<PositionsSyncResult> {
   const requestedVenue = inputs.venue;
@@ -1261,5 +1272,6 @@ export async function syncPositionsForUserWallet(
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
     positionScope,
+    prefetchedBalances: inputs.prefetchedSolanaBalances ?? null,
   });
 }

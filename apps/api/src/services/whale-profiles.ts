@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import { normalizeOutcomeSideForApi } from "./wallet-intel-helpers.js";
 import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
   fetchWalletActivitySummaries,
@@ -576,7 +577,7 @@ function buildProfileInput(
         parseNumber(market.position_price),
         parseNumber(market.last_price),
       ),
-      position_side: market.position_side,
+      position_side: normalizeOutcomeSideForApi(market.position_side),
       position_shares: parseNumber(market.position_shares),
       position_value_usd: parseNumber(market.position_value_usd),
       position_price: parseNumber(market.position_price),

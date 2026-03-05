@@ -98,6 +98,10 @@ type WalletVenueStats = {
 
 type WalletComputedStats = {
   exposureUsd: number;
+  hedgedNotionalUsd: number;
+  netImbalanceUsd: number;
+  hedgeRatio: number;
+  twoSidedMarkets: number;
   inferredWinRate: number | null;
   inferredResolvedCount: number | null;
   pnl30dUsd: number | null;
@@ -140,6 +144,10 @@ type RatioRow = {
 type ExposureRow = {
   wallet_id: string;
   exposure_usd: string | null;
+  hedged_notional_usd: string | null;
+  net_imbalance_usd: string | null;
+  hedge_ratio: string | null;
+  two_sided_markets: number | null;
 };
 
 type InferredOutcomeRow = {
@@ -677,7 +685,13 @@ async function loadComputedStats(
   const [exposureResult, inferredResult] = await Promise.all([
     client.query<ExposureRow>(
       `
-        select wallet_id, exposure_usd
+        select
+          wallet_id,
+          exposure_usd,
+          hedged_notional_usd,
+          net_imbalance_usd,
+          hedge_ratio,
+          two_sided_markets
         from wallet_position_exposure
         where wallet_id = any($1::uuid[])
       `,
@@ -693,9 +707,24 @@ async function loadComputedStats(
     ),
   ]);
 
-  const exposureByWallet = new Map<string, number>();
+  const exposureByWallet = new Map<
+    string,
+    {
+      exposureUsd: number;
+      hedgedNotionalUsd: number;
+      netImbalanceUsd: number;
+      hedgeRatio: number;
+      twoSidedMarkets: number;
+    }
+  >();
   for (const row of exposureResult.rows) {
-    exposureByWallet.set(row.wallet_id, Math.max(0, toNumber(row.exposure_usd) ?? 0));
+    exposureByWallet.set(row.wallet_id, {
+      exposureUsd: Math.max(0, toNumber(row.exposure_usd) ?? 0),
+      hedgedNotionalUsd: Math.max(0, toNumber(row.hedged_notional_usd) ?? 0),
+      netImbalanceUsd: Math.max(0, toNumber(row.net_imbalance_usd) ?? 0),
+      hedgeRatio: clamp(toNumber(row.hedge_ratio) ?? 0, 0, 1),
+      twoSidedMarkets: Math.max(0, Number(row.two_sided_markets ?? 0)),
+    });
   }
 
   const inferredByWallet = new Map<string, { winRate: number | null; resolved: number | null }>();
@@ -710,11 +739,12 @@ async function loadComputedStats(
 
   for (const wallet of wallets) {
     const inferred = inferredByWallet.get(wallet.walletId);
+    const exposureRecord = exposureByWallet.get(wallet.walletId);
     const exposureFromInput = toNumber(wallet.trackedExposureUsd);
     const exposure =
       exposureFromInput != null
         ? Math.max(0, exposureFromInput)
-        : exposureByWallet.get(wallet.walletId) ?? 0;
+        : exposureRecord?.exposureUsd ?? 0;
     const resolvedFromInput = toNumber(wallet.inferredResolvedCount);
     const winRateFromInput = toNumber(wallet.inferredWinRate);
     const inferredResolvedCount =
@@ -732,6 +762,10 @@ async function loadComputedStats(
     );
     map.set(wallet.walletId, {
       exposureUsd: exposure,
+      hedgedNotionalUsd: exposureRecord?.hedgedNotionalUsd ?? 0,
+      netImbalanceUsd: exposureRecord?.netImbalanceUsd ?? 0,
+      hedgeRatio: exposureRecord?.hedgeRatio ?? 0,
+      twoSidedMarkets: exposureRecord?.twoSidedMarkets ?? 0,
       inferredWinRate,
       inferredResolvedCount,
       pnl30dUsd,
@@ -1116,6 +1150,10 @@ export async function buildWalletAttributionMap(
       computedStatsByWallet.get(wallet.walletId) ??
       ({
         exposureUsd: 0,
+        hedgedNotionalUsd: 0,
+        netImbalanceUsd: 0,
+        hedgeRatio: 0,
+        twoSidedMarkets: 0,
         inferredWinRate: null,
         inferredResolvedCount: null,
         pnl30dUsd: null,

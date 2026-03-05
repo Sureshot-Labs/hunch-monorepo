@@ -1,4 +1,4 @@
-import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
+import { isAbortError, isRpcRateLimit } from "@hunch/shared";
 import type { PoolClient } from "pg";
 
 import { pool } from "../db.js";
@@ -8,6 +8,10 @@ import {
   fetchSolanaTokenAccountOwners,
   fetchSolanaTokenLargestAccounts,
 } from "./solana-rpc.js";
+import {
+  fetchWithWalletIntelRetry,
+  type WalletIntelRetryTelemetry,
+} from "./wallet-intel-retry.js";
 
 export type MarketRow = {
   id: string;
@@ -54,8 +58,6 @@ type Queryable = Pick<PoolClient, "query">;
 
 const POLYMARKET_HOLDER_LIMIT = 20;
 const HOLDERS_TIMEOUT_MS = 10_000;
-const HOLDERS_RETRY_ATTEMPTS = 2;
-const HOLDERS_RETRY_DELAY_MS = 250;
 
 function parseOutcomes(outcomes: string | null): string[] {
   if (!outcomes) return [];
@@ -172,65 +174,51 @@ function parseNumber(value: unknown): number | null {
 async function fetchPolymarketHolders(inputs: {
   conditionId: string;
   limit: number;
+  telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<{ wallet: string; outcomeIndex: number; shares: number }[]> {
   const url = new URL("/holders", env.polymarketDataApiBase);
   url.searchParams.set("limit", String(inputs.limit));
   url.searchParams.set("minBalance", "1");
   url.searchParams.set("market", inputs.conditionId);
 
-  for (let attempt = 0; attempt < HOLDERS_RETRY_ATTEMPTS; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), HOLDERS_TIMEOUT_MS);
-    try {
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`Polymarket holders failed: ${response.status}`);
-      }
-      const payload = (await response.json()) as unknown;
-      const entries = Array.isArray(payload) ? payload : [];
-      const results: {
-        wallet: string;
-        outcomeIndex: number;
-        shares: number;
-      }[] = [];
+  const response = await fetchWithWalletIntelRetry({
+    url: url.toString(),
+    init: { method: "GET" },
+    timeoutMs: HOLDERS_TIMEOUT_MS,
+    allowRetry: true,
+    telemetry: inputs.telemetry,
+  });
+  if (!response.ok) {
+    throw new Error(`Polymarket holders failed: ${response.status}`);
+  }
+  const payload = (await response.json()) as unknown;
+  const entries = Array.isArray(payload) ? payload : [];
+  const results: {
+    wallet: string;
+    outcomeIndex: number;
+    shares: number;
+  }[] = [];
 
-      for (const token of entries) {
-        if (!isRecord(token)) continue;
-        const holders = Array.isArray(token.holders) ? token.holders : [];
-        for (const holder of holders) {
-          if (!isRecord(holder)) continue;
-          const wallet = pickHolderWallet(holder);
-          if (!wallet) continue;
-          const shares = parseNumber(holder.amount);
-          if (shares == null || shares <= 0) continue;
-          const outcomeIndex = parseNumber(holder.outcomeIndex);
-          if (outcomeIndex == null) continue;
-          results.push({
-            wallet,
-            outcomeIndex: Math.round(outcomeIndex),
-            shares,
-          });
-        }
-      }
-      return results;
-    } catch (error) {
-      if (isAbortError(error)) {
-        if (attempt < HOLDERS_RETRY_ATTEMPTS - 1) {
-          await sleep(HOLDERS_RETRY_DELAY_MS);
-          continue;
-        }
-        return [];
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+  for (const token of entries) {
+    if (!isRecord(token)) continue;
+    const holders = Array.isArray(token.holders) ? token.holders : [];
+    for (const holder of holders) {
+      if (!isRecord(holder)) continue;
+      const wallet = pickHolderWallet(holder);
+      if (!wallet) continue;
+      const shares = parseNumber(holder.amount);
+      if (shares == null || shares <= 0) continue;
+      const outcomeIndex = parseNumber(holder.outcomeIndex);
+      if (outcomeIndex == null) continue;
+      results.push({
+        wallet,
+        outcomeIndex: Math.round(outcomeIndex),
+        shares,
+      });
     }
   }
 
-  return [];
+  return results;
 }
 
 async function fetchAlchemyOwners(inputs: {
@@ -238,6 +226,7 @@ async function fetchAlchemyOwners(inputs: {
   contractAddress: string;
   tokenId: string;
   limit: number;
+  telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<{ wallet: string; shares: number }[]> {
   if (!inputs.baseUrl) return [];
   const url = new URL(
@@ -248,67 +237,50 @@ async function fetchAlchemyOwners(inputs: {
   url.searchParams.set("pageSize", String(inputs.limit));
   url.searchParams.set("withTokenBalances", "true");
 
-  for (let attempt = 0; attempt < HOLDERS_RETRY_ATTEMPTS; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), HOLDERS_TIMEOUT_MS);
-    try {
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`Alchemy owners failed: ${response.status}`);
-      }
-      const payload = (await response.json()) as unknown;
-      const ownersRaw = isRecord(payload) && Array.isArray(payload.owners)
-        ? payload.owners
-        : [];
-      const owners: { wallet: string; shares: number }[] = [];
+  const response = await fetchWithWalletIntelRetry({
+    url: url.toString(),
+    init: { method: "GET" },
+    timeoutMs: HOLDERS_TIMEOUT_MS,
+    allowRetry: true,
+    telemetry: inputs.telemetry,
+  });
+  if (!response.ok) {
+    throw new Error(`Alchemy owners failed: ${response.status}`);
+  }
+  const payload = (await response.json()) as unknown;
+  const ownersRaw =
+    isRecord(payload) && Array.isArray(payload.owners) ? payload.owners : [];
+  const owners: { wallet: string; shares: number }[] = [];
 
-      for (const owner of ownersRaw) {
-        if (typeof owner === "string") {
-          owners.push({ wallet: owner, shares: 1 });
-          continue;
-        }
-        if (!isRecord(owner)) continue;
-        const wallet = pickHolderWallet(owner);
-        if (!wallet) continue;
-
-        const directBalance = parseNumber(owner.balance);
-        if (directBalance != null) {
-          owners.push({ wallet, shares: directBalance });
-          continue;
-        }
-
-        const tokenBalances = Array.isArray(owner.tokenBalances)
-          ? owner.tokenBalances
-          : [];
-        const tokenBalance = tokenBalances.find((entry) => isRecord(entry));
-        const balance = tokenBalance ? parseNumber(tokenBalance.balance) : null;
-        if (balance != null) {
-          owners.push({ wallet, shares: balance });
-          continue;
-        }
-
-        owners.push({ wallet, shares: 1 });
-      }
-
-      return owners;
-    } catch (error) {
-      if (isAbortError(error)) {
-        if (attempt < HOLDERS_RETRY_ATTEMPTS - 1) {
-          await sleep(HOLDERS_RETRY_DELAY_MS);
-          continue;
-        }
-        return [];
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+  for (const owner of ownersRaw) {
+    if (typeof owner === "string") {
+      owners.push({ wallet: owner, shares: 1 });
+      continue;
     }
+    if (!isRecord(owner)) continue;
+    const wallet = pickHolderWallet(owner);
+    if (!wallet) continue;
+
+    const directBalance = parseNumber(owner.balance);
+    if (directBalance != null) {
+      owners.push({ wallet, shares: directBalance });
+      continue;
+    }
+
+    const tokenBalances = Array.isArray(owner.tokenBalances)
+      ? owner.tokenBalances
+      : [];
+    const tokenBalance = tokenBalances.find((entry) => isRecord(entry));
+    const balance = tokenBalance ? parseNumber(tokenBalance.balance) : null;
+    if (balance != null) {
+      owners.push({ wallet, shares: balance });
+      continue;
+    }
+
+    owners.push({ wallet, shares: 1 });
   }
 
-  return [];
+  return owners;
 }
 
 async function fetchSolanaHolders(inputs: {
@@ -348,6 +320,12 @@ export async function fetchMarketHolderData(inputs: {
   marketId: string;
   limit: number;
   client?: PoolClient;
+  telemetry?: {
+    holdersPolymarket?: WalletIntelRetryTelemetry | null;
+    holdersAlchemyPolygon?: WalletIntelRetryTelemetry | null;
+    holdersAlchemyBase?: WalletIntelRetryTelemetry | null;
+    holdersSolana?: WalletIntelRetryTelemetry | null;
+  };
 }): Promise<MarketHolderData> {
   const db: Queryable = inputs.client ?? pool;
   const { rows: markets } = await db.query<MarketRow>(
@@ -479,6 +457,7 @@ export async function fetchMarketHolderData(inputs: {
       const holders = await fetchPolymarketHolders({
         conditionId: market.condition_id,
         limit: Math.min(inputs.limit, POLYMARKET_HOLDER_LIMIT),
+        telemetry: inputs.telemetry?.holdersPolymarket ?? null,
       });
       for (const holder of holders) {
         let side: "YES" | "NO" | null = null;
@@ -519,6 +498,10 @@ export async function fetchMarketHolderData(inputs: {
                 contractAddress,
                 tokenId: yesId,
                 limit: inputs.limit,
+                telemetry:
+                  market.venue === "polymarket"
+                    ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
+                    : (inputs.telemetry?.holdersAlchemyBase ?? null),
               })
             : Promise.resolve([]),
           noId
@@ -527,6 +510,10 @@ export async function fetchMarketHolderData(inputs: {
                 contractAddress,
                 tokenId: noId,
                 limit: inputs.limit,
+                telemetry:
+                  market.venue === "polymarket"
+                    ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
+                    : (inputs.telemetry?.holdersAlchemyBase ?? null),
               })
             : Promise.resolve([]),
         ]);
@@ -554,23 +541,27 @@ export async function fetchMarketHolderData(inputs: {
     source = "solana";
     const safeFetch = async (mint: string | null) => {
       if (!mint) return [];
-      const retry = 2;
-      const backoffMs = 250;
-      const delayMs = 50;
-      let attempt = 0;
+      const telemetry = inputs.telemetry?.holdersSolana ?? null;
+      if (telemetry) {
+        telemetry.attempted += 1;
+        telemetry.estimatedCalls += 2;
+        telemetry.actualCalls += 1;
+      }
       while (true) {
         try {
           const owners = await fetchSolanaHolders({ mint, limit: inputs.limit });
-          if (delayMs > 0) await sleep(delayMs);
+          if (telemetry) telemetry.succeeded += 1;
           return owners;
         } catch (error) {
           if (isSolanaMintNotFound(error)) {
+            if (telemetry) telemetry.succeeded += 1;
             return [];
           }
-          if ((isRpcRateLimit(error) || isAbortError(error)) && attempt < retry) {
-            await sleep(backoffMs * Math.max(1, 2 ** attempt));
-            attempt += 1;
-            continue;
+          if (telemetry) {
+            telemetry.failed += 1;
+            if (isAbortError(error)) telemetry.aborted += 1;
+            else if (isRpcRateLimit(error)) telemetry.rateLimited += 1;
+            else telemetry.otherErrors += 1;
           }
           throw error;
         }

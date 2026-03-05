@@ -1,3 +1,6 @@
+import { isAbortError, isRpcRateLimit, sleep } from "@hunch/shared";
+
+import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 
 type JsonRpcError = {
@@ -90,71 +93,81 @@ async function solanaRpcRequest<T>(inputs: {
   params: unknown[];
 }): Promise<T> {
   let lastError: unknown = null;
+  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
 
-  for (const rpcUrl of inputs.rpcUrls) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
-    try {
-      const response = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: inputs.method,
-          params: inputs.params,
-        }),
-        signal: controller.signal,
-      });
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    for (const rpcUrl of inputs.rpcUrls) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+      try {
+        const response = await fetch(rpcUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: inputs.method,
+            params: inputs.params,
+          }),
+          signal: controller.signal,
+        });
 
-      if (!response.ok) {
-        const error = new Error(
-          `Solana RPC error: ${response.status} ${response.statusText}`,
-        );
+        if (!response.ok) {
+          const error = new Error(
+            `Solana RPC error: ${response.status} ${response.statusText}`,
+          );
+          lastError = error;
+          if (response.status === 429 && inputs.rpcUrls.length > 1) {
+            continue;
+          }
+          throw error;
+        }
+
+        const json = (await response.json()) as unknown;
+        if (!isRecord(json)) {
+          throw new Error("Solana RPC: invalid JSON response");
+        }
+
+        const rpc = json as JsonRpcResponse<T>;
+        if ("error" in rpc) {
+          const message =
+            typeof rpc.error.message === "string"
+              ? rpc.error.message
+              : "Unknown Solana RPC error";
+          const error = new Error(
+            `Solana RPC ${inputs.method} error: ${message}`,
+          );
+          lastError = error;
+          if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
+            continue;
+          }
+          throw error;
+        }
+
+        return rpc.result;
+      } catch (error) {
         lastError = error;
-        if (response.status === 429 && inputs.rpcUrls.length > 1) {
-          continue;
+        if (inputs.rpcUrls.length > 1) {
+          if (isRpcRateLimit(error) || isAbortError(error)) {
+            continue;
+          }
         }
         throw error;
+      } finally {
+        clearTimeout(timeout);
       }
-
-      const json = (await response.json()) as unknown;
-      if (!isRecord(json)) {
-        throw new Error("Solana RPC: invalid JSON response");
-      }
-
-      const rpc = json as JsonRpcResponse<T>;
-      if ("error" in rpc) {
-        const message =
-          typeof rpc.error.message === "string"
-            ? rpc.error.message
-            : "Unknown Solana RPC error";
-        const error = new Error(
-          `Solana RPC ${inputs.method} error: ${message}`,
-        );
-        lastError = error;
-        if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
-          continue;
-        }
-        throw error;
-      }
-
-      return rpc.result;
-    } catch (error) {
-      lastError = error;
-      if (inputs.rpcUrls.length > 1) {
-        const message = error instanceof Error ? error.message : "";
-        if (
-          /Solana RPC error: 429/i.test(message) ||
-          /too many requests/i.test(message)
-        ) {
-          continue;
-        }
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
     }
+
+    const retryable = isRpcRateLimit(lastError) || isAbortError(lastError);
+    if (retryable && attempt < maxAttempts - 1) {
+      const backoffMs = Math.min(
+        env.walletIntelRetryBaseBackoffMs * Math.max(1, 2 ** attempt),
+        env.walletIntelRetryMaxBackoffMs,
+      );
+      await sleep(backoffMs);
+      continue;
+    }
+    break;
   }
 
   throw lastError ?? new Error("Solana RPC request failed");

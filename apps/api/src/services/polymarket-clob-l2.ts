@@ -1,6 +1,10 @@
 import crypto from "crypto";
 import { BuilderSigner, type BuilderApiKeyCreds } from "@polymarket/builder-signing-sdk";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  fetchWithWalletIntelRetry,
+  type WalletIntelRetryTelemetry,
+} from "./wallet-intel-retry.js";
 
 export type PolymarketL2Credentials = {
   apiKey: string;
@@ -105,15 +109,18 @@ async function readJsonOrText(res: Response): Promise<unknown> {
 async function fetchClobTime(inputs: {
   baseUrl: string;
   timeoutMs: number;
+  telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<number | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
-
   try {
-    const res = await fetch(`${inputs.baseUrl}/time`, {
-      method: "GET",
-      headers: { accept: "application/json", "user-agent": "Hunch-API/1.0" },
-      signal: controller.signal,
+    const res = await fetchWithWalletIntelRetry({
+      url: `${inputs.baseUrl}/time`,
+      init: {
+        method: "GET",
+        headers: { accept: "application/json", "user-agent": "Hunch-API/1.0" },
+      },
+      timeoutMs: inputs.timeoutMs,
+      allowRetry: true,
+      telemetry: inputs.telemetry ?? null,
     });
     if (!res.ok) return null;
 
@@ -132,8 +139,6 @@ async function fetchClobTime(inputs: {
     return null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -146,6 +151,7 @@ export async function polymarketL2Request(inputs: {
   method: "GET" | "POST" | "DELETE";
   requestPath: string;
   body?: unknown;
+  telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<{ ok: true; payload: unknown } | { ok: false; status: number; payload: unknown }> {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl);
   const requestPath = inputs.requestPath.startsWith("/")
@@ -162,6 +168,7 @@ export async function polymarketL2Request(inputs: {
   const remoteTime = await fetchClobTime({
     baseUrl,
     timeoutMs: inputs.timeoutMs,
+    telemetry: inputs.telemetry ?? null,
   });
 
   const headers = new Headers({
@@ -193,25 +200,23 @@ export async function polymarketL2Request(inputs: {
   });
   console.log("!!! Polymarket L2 Request Headers:", Object.fromEntries(headers.entries()));
   console.log("!!! Polymarket inputs.builderCreds :", inputs.builderCreds);*/
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
-
-  try {
-    const res = await fetch(`${baseUrl}${requestPath}`, {
+  const res = await fetchWithWalletIntelRetry({
+    url: `${baseUrl}${requestPath}`,
+    init: {
       method: inputs.method,
       headers,
       body: bodyString,
-      signal: controller.signal,
-    });
+    },
+    timeoutMs: inputs.timeoutMs,
+    allowRetry: inputs.method === "GET",
+    telemetry: inputs.telemetry ?? null,
+  });
 
-    const payload = await readJsonOrText(res);
-    if (!res.ok) {
-      return { ok: false, status: res.status, payload };
-    }
-    return { ok: true, payload };
-  } finally {
-    clearTimeout(timeout);
+  const payload = await readJsonOrText(res);
+  if (!res.ok) {
+    return { ok: false, status: res.status, payload };
   }
+  return { ok: true, payload };
 }
 
 export function extractOrderArray(payload: unknown): unknown[] {

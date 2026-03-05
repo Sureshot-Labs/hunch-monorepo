@@ -1,5 +1,9 @@
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  fetchWithWalletIntelRetry,
+  type WalletIntelRetryTelemetry,
+} from "./wallet-intel-retry.js";
 
 type LimitlessResult =
   | { ok: true; payload: unknown; sessionCookie?: string }
@@ -54,6 +58,7 @@ export async function limitlessRequest(inputs: {
   captureSessionCookie?: boolean;
   timeoutMs?: number;
   baseUrl?: string;
+  telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<LimitlessResult> {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl ?? env.limitlessApiBase);
   const requestPath = inputs.requestPath.startsWith("/")
@@ -81,40 +86,35 @@ export async function limitlessRequest(inputs: {
     headers.set("content-type", "application/json; charset=utf-8");
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    inputs.timeoutMs ?? env.limitlessApiTimeoutMs,
-  );
-
-  try {
-    const res = await fetch(`${baseUrl}${requestPath}`, {
+  const res = await fetchWithWalletIntelRetry({
+    url: `${baseUrl}${requestPath}`,
+    init: {
       method: inputs.method,
       headers,
       body: bodyString,
-      signal: controller.signal,
-    });
+    },
+    timeoutMs: inputs.timeoutMs ?? env.limitlessApiTimeoutMs,
+    allowRetry: inputs.method === "GET",
+    telemetry: inputs.telemetry ?? null,
+  });
 
-    const payload = await readJsonOrText(res);
-    const sessionCookie = inputs.captureSessionCookie
-      ? extractSessionCookie(res.headers)
-      : null;
+  const payload = await readJsonOrText(res);
+  const sessionCookie = inputs.captureSessionCookie
+    ? extractSessionCookie(res.headers)
+    : null;
 
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: res.status,
-        payload,
-        ...(sessionCookie ? { sessionCookie } : {}),
-      };
-    }
-
+  if (!res.ok) {
     return {
-      ok: true,
+      ok: false,
+      status: res.status,
       payload,
       ...(sessionCookie ? { sessionCookie } : {}),
     };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  return {
+    ok: true,
+    payload,
+    ...(sessionCookie ? { sessionCookie } : {}),
+  };
 }

@@ -21,6 +21,21 @@ function optionalPositiveInt(name: string, fallback: number): number {
   return asInt > 0 ? asInt : fallback;
 }
 
+function optionalIntInRange(
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const asInt = Math.trunc(n);
+  if (asInt < min || asInt > max) return fallback;
+  return asInt;
+}
+
 function optionalNonNegativeInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -674,6 +689,18 @@ export const env = {
   walletIntelWhaleMarketLimit,
   walletIntelWatchlistMarketLimit,
   walletIntelFollowedWalletLimit,
+  walletIntelMarketFetchConcurrency: optionalIntInRange(
+    "WALLET_INTEL_MARKET_FETCH_CONCURRENCY",
+    2,
+    1,
+    4,
+  ),
+  walletIntelFollowedFetchConcurrency: optionalIntInRange(
+    "WALLET_INTEL_FOLLOWED_FETCH_CONCURRENCY",
+    1,
+    1,
+    2,
+  ),
   walletIntelTokenLimitPoly,
   walletIntelTokenLimitLimitless,
   walletIntelTokenLimitKalshi,
@@ -764,6 +791,24 @@ export const env = {
   walletIntelSignalMinScore: optionalNonNegativeNumber(
     "WALLET_INTEL_SIGNAL_MIN_SCORE",
     0.6,
+  ),
+  walletIntelRetryMaxAttempts: optionalIntInRange(
+    "WALLET_INTEL_RETRY_MAX_ATTEMPTS",
+    3,
+    1,
+    6,
+  ),
+  walletIntelRetryBaseBackoffMs: optionalIntInRange(
+    "WALLET_INTEL_RETRY_BASE_BACKOFF_MS",
+    250,
+    10,
+    60_000,
+  ),
+  walletIntelRetryMaxBackoffMs: optionalIntInRange(
+    "WALLET_INTEL_RETRY_MAX_BACKOFF_MS",
+    2_000,
+    10,
+    120_000,
   ),
   walletIntelSignalWindowHoursDefault: optionalPositiveInt(
     "WALLET_INTEL_SIGNAL_WINDOW_HOURS_DEFAULT",

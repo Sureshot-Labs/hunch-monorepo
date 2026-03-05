@@ -2,6 +2,8 @@
 
 import assert from "node:assert/strict";
 
+import { isRetryableHttpStatus, parseRetryAfterMs } from "@hunch/shared";
+
 import {
   fetchActiveRuntimePolicy,
   listActiveRuntimePolicies,
@@ -34,6 +36,16 @@ import {
   computeRobustUnusualScore,
   resolveUnusualTier,
 } from "./services/wallet-activity-summary.js";
+import {
+  normalizeOutcomeSideForApi,
+  normalizeOutcomeSideForStorage,
+} from "./services/wallet-intel-helpers.js";
+import {
+  MM_HEDGE_RATIO_MIN,
+  MM_TWO_SIDED_MARKETS_MIN,
+  buildWalletMmDiagnostics,
+  computeMmSuspected,
+} from "./services/wallet-intel-mm.js";
 
 type TestCase = {
   name: string;
@@ -919,6 +931,71 @@ const tests: TestCase[] = [
       assert.equal(resolveUnusualTier(5), "very_unusual");
       assert.equal(resolveUnusualTier(9.99), "very_unusual");
       assert.equal(resolveUnusualTier(10), "extreme");
+    },
+  },
+  {
+    name: "outcome side normalization preserves YES/NO and maps empty to null contract",
+    run: () => {
+      assert.equal(normalizeOutcomeSideForStorage("YES"), "YES");
+      assert.equal(normalizeOutcomeSideForStorage("no"), "NO");
+      assert.equal(normalizeOutcomeSideForStorage(""), "");
+      assert.equal(normalizeOutcomeSideForStorage(null), "");
+      assert.equal(normalizeOutcomeSideForApi(""), null);
+      assert.equal(normalizeOutcomeSideForApi("YES"), "YES");
+      assert.equal(normalizeOutcomeSideForApi("NO"), "NO");
+    },
+  },
+  {
+    name: "mm helper uses hedge ratio, two-sided markets, and whale threshold gate",
+    run: () => {
+      const refreshPolicy = {
+        whaleUsd: 100_000,
+        whaleUsdSolana: 50_000,
+      };
+      assert.equal(
+        computeMmSuspected({
+          hedgeRatio: MM_HEDGE_RATIO_MIN,
+          twoSidedMarkets: MM_TWO_SIDED_MARKETS_MIN,
+          exposureUsd: 100_000,
+          chain: "polygon",
+          refreshPolicy,
+        }),
+        true,
+      );
+      assert.equal(
+        computeMmSuspected({
+          hedgeRatio: MM_HEDGE_RATIO_MIN - 0.01,
+          twoSidedMarkets: MM_TWO_SIDED_MARKETS_MIN,
+          exposureUsd: 100_000,
+          chain: "polygon",
+          refreshPolicy,
+        }),
+        false,
+      );
+      const diagnostics = buildWalletMmDiagnostics({
+        exposureUsd: 120_000,
+        hedgedNotionalUsd: 90_000,
+        netImbalanceUsd: 30_000,
+        hedgeRatio: 0.75,
+        twoSidedMarkets: 4,
+        chain: "polygon",
+        refreshPolicy,
+      });
+      assert.equal(diagnostics.mmSuspected, true);
+      assert.equal(diagnostics.thresholds.exposureUsdMin, 100_000);
+    },
+  },
+  {
+    name: "retry helpers parse Retry-After and retryable statuses safely",
+    run: () => {
+      assert.equal(parseRetryAfterMs("2", 0), 2000);
+      assert.equal(
+        parseRetryAfterMs("Thu, 01 Jan 1970 00:00:03 GMT", 1000),
+        2000,
+      );
+      assert.equal(isRetryableHttpStatus(429), true);
+      assert.equal(isRetryableHttpStatus(503), true);
+      assert.equal(isRetryableHttpStatus(404), false);
     },
   },
 ];
