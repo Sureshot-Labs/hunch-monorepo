@@ -10,7 +10,7 @@ import {
   type WalletActivitySummary,
 } from "./wallet-activity-summary.js";
 
-const PROFILE_VERSION = "v3";
+const PROFILE_VERSION = "v5";
 const CATEGORY_VALUES = [
   "sports",
   "politics",
@@ -69,6 +69,14 @@ type WhaleProfileInput = {
     resolved_count: number | null;
   };
   exposure_usd: number | null;
+  exposure: {
+    gross_usd: number | null;
+    net_imbalance_usd: number | null;
+    hedged_notional_usd: number | null;
+    hedge_ratio: number | null;
+    two_sided_markets: number;
+    posture: "directional" | "partially_hedged" | "heavily_hedged" | "unknown";
+  };
   activity: {
     last_activity_at: string | null;
     kind: "trade" | "holder" | "mixed" | "unknown";
@@ -135,9 +143,16 @@ type WhaleProfileInput = {
     last_yes_price: number | null;
     held_odds: number | null;
     position_side: string | null;
+    is_two_sided: boolean;
     position_shares: number | null;
     position_value_usd: number | null;
     position_price: number | null;
+    yes_position_shares: number | null;
+    yes_position_value_usd: number | null;
+    yes_position_price: number | null;
+    no_position_shares: number | null;
+    no_position_value_usd: number | null;
+    no_position_price: number | null;
   }>;
 };
 
@@ -156,6 +171,10 @@ type WhaleRow = {
   metrics_win_rate: string | null;
   metrics_last_trade_at: Date | null;
   exposure_usd: string | null;
+  hedged_notional_usd: string | null;
+  net_imbalance_usd: string | null;
+  hedge_ratio: string | null;
+  two_sided_markets: number | null;
   whale_score: string | null;
   signal_abs_usd: string | null;
   last_activity_at: Date | null;
@@ -188,9 +207,17 @@ type WhaleMarketRow = {
   best_ask: string | null;
   last_price: string | null;
   position_side: string | null;
+  has_yes_position: boolean;
+  has_no_position: boolean;
   position_shares: string | null;
   position_value_usd: string | null;
   position_price: string | null;
+  yes_position_shares: string | null;
+  yes_position_value_usd: string | null;
+  yes_position_price: string | null;
+  no_position_shares: string | null;
+  no_position_value_usd: string | null;
+  no_position_price: string | null;
 };
 
 type WhaleProfileOptions = {
@@ -279,6 +306,26 @@ function truncateIsoToHour(value: string | null | undefined): string | null {
   if (!Number.isFinite(date.getTime())) return null;
   date.setMinutes(0, 0, 0);
   return date.toISOString();
+}
+
+function resolveExposurePosture(inputs: {
+  exposureUsd: number | null;
+  hedgedNotionalUsd: number | null;
+  hedgeRatio: number | null;
+  twoSidedMarkets: number | null;
+}): WhaleProfileInput["exposure"]["posture"] {
+  const exposureUsd = Math.max(0, inputs.exposureUsd ?? 0);
+  const hedgedNotionalUsd = Math.max(0, inputs.hedgedNotionalUsd ?? 0);
+  const hedgeRatio = Math.max(0, Math.min(1, inputs.hedgeRatio ?? 0));
+  const twoSidedMarkets = Math.max(0, Math.trunc(inputs.twoSidedMarkets ?? 0));
+  if (exposureUsd <= 0) return "unknown";
+  if (hedgeRatio >= 0.6 || (hedgedNotionalUsd > 0 && twoSidedMarkets >= 3)) {
+    return "heavily_hedged";
+  }
+  if (hedgeRatio >= 0.15 || hedgedNotionalUsd > 0 || twoSidedMarkets > 0) {
+    return "partially_hedged";
+  }
+  return "directional";
 }
 
 function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
@@ -473,6 +520,127 @@ function resolveHeldOdds(
   return null;
 }
 
+type ProfileTopMarket = WhaleProfileInput["top_markets"][number];
+
+function normalizeProfilePositionSide(
+  side: string | null | undefined,
+  hasYesPosition: boolean,
+  hasNoPosition: boolean,
+): ProfileTopMarket["position_side"] {
+  if (hasYesPosition && hasNoPosition) return "BOTH";
+  return normalizeOutcomeSideForApi(side);
+}
+
+export function mapWhaleMarketToProfileMarket(
+  market: WhaleMarketRow,
+  nowMs: number = Date.now(),
+): ProfileTopMarket {
+  const closeTime = market.close_time ? market.close_time.toISOString() : null;
+  const expirationTime = market.expiration_time
+    ? market.expiration_time.toISOString()
+    : null;
+  const resolved = Boolean(market.resolved_outcome);
+  const status = market.status?.toUpperCase();
+  const hasEndedStatus = status != null && status !== "ACTIVE";
+  const endTimestamp = closeTime ?? expirationTime;
+  const endTimeMs = endTimestamp ? new Date(endTimestamp).getTime() : null;
+  const endedByTime = endTimeMs != null && endTimeMs < nowMs;
+  const isActive = !(resolved || hasEndedStatus || endedByTime);
+  const hasYesPosition = Boolean(market.has_yes_position);
+  const hasNoPosition = Boolean(market.has_no_position);
+  const positionSide = normalizeProfilePositionSide(
+    market.position_side,
+    hasYesPosition,
+    hasNoPosition,
+  );
+  const yesPositionShares = parseNumber(market.yes_position_shares);
+  const yesPositionValueUsd = parseNumber(market.yes_position_value_usd);
+  const yesPositionPrice = parseNumber(market.yes_position_price);
+  const noPositionShares = parseNumber(market.no_position_shares);
+  const noPositionValueUsd = parseNumber(market.no_position_value_usd);
+  const noPositionPrice = parseNumber(market.no_position_price);
+  const lastYesPrice = parseNumber(market.last_price);
+
+  return {
+    market_id: market.market_id,
+    market_title: market.market_title,
+    event_title: market.event_title,
+    venue: market.venue,
+    category: market.category,
+    status: market.status,
+    close_time: closeTime,
+    expiration_time: expirationTime,
+    resolved_outcome: market.resolved_outcome,
+    is_active: isActive,
+    volume_usd: parseNumber(market.volume_usd),
+    activity_count: market.activity_count,
+    last_activity_at: market.last_activity_at
+      ? market.last_activity_at.toISOString()
+      : null,
+    avg_price: parseNumber(market.avg_price),
+    best_bid: parseNumber(market.best_bid),
+    best_ask: parseNumber(market.best_ask),
+    last_yes_price: lastYesPrice,
+    held_odds: resolveHeldOdds(
+      positionSide,
+      parseNumber(market.position_price),
+      lastYesPrice,
+    ),
+    position_side: positionSide,
+    is_two_sided: hasYesPosition && hasNoPosition,
+    position_shares: parseNumber(market.position_shares),
+    position_value_usd: parseNumber(market.position_value_usd),
+    position_price: parseNumber(market.position_price),
+    yes_position_shares: yesPositionShares,
+    yes_position_value_usd: yesPositionValueUsd,
+    yes_position_price: yesPositionPrice,
+    no_position_shares: noPositionShares,
+    no_position_value_usd: noPositionValueUsd,
+    no_position_price: noPositionPrice,
+  };
+}
+
+export function computeProfileSideBias(markets: ProfileTopMarket[]): {
+  yesValue: number;
+  noValue: number;
+  sideRatio: number | null;
+  sideBiasLabel: WhaleProfileInput["summary"]["side_bias_label"];
+} {
+  let yesValue = 0;
+  let noValue = 0;
+  for (const market of markets) {
+    yesValue +=
+      market.yes_position_value_usd ??
+      market.yes_position_shares ??
+      (market.position_side?.toUpperCase() === "YES"
+        ? (market.position_value_usd ??
+            market.position_shares ??
+            market.volume_usd ??
+            0)
+        : 0);
+    noValue +=
+      market.no_position_value_usd ??
+      market.no_position_shares ??
+      (market.position_side?.toUpperCase() === "NO"
+        ? (market.position_value_usd ??
+            market.position_shares ??
+            market.volume_usd ??
+            0)
+        : 0);
+  }
+  const totalSide = yesValue + noValue;
+  const sideRatio = totalSide > 0 ? yesValue / totalSide : null;
+  const sideBiasLabel: WhaleProfileInput["summary"]["side_bias_label"] =
+    sideRatio == null
+      ? "unknown"
+      : sideRatio >= 0.65
+        ? "mostly_yes"
+        : sideRatio <= 0.35
+          ? "mostly_no"
+          : "mixed";
+  return { yesValue, noValue, sideRatio, sideBiasLabel };
+}
+
 async function callOpenRouter(
   model: string,
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -539,50 +707,9 @@ function buildProfileInput(
   },
 ): WhaleProfileInput {
   const now = Date.now();
-  const markets = topMarkets.map((market) => {
-    const closeTime = market.close_time ? market.close_time.toISOString() : null;
-    const expirationTime = market.expiration_time
-      ? market.expiration_time.toISOString()
-      : null;
-    const resolved = Boolean(market.resolved_outcome);
-    const status = market.status?.toUpperCase();
-    const hasEndedStatus = status != null && status !== "ACTIVE";
-    const endTimestamp = closeTime ?? expirationTime;
-    const endTimeMs = endTimestamp ? new Date(endTimestamp).getTime() : null;
-    const endedByTime = endTimeMs != null && endTimeMs < now;
-    const isActive = !(resolved || hasEndedStatus || endedByTime);
-
-    return {
-      market_id: market.market_id,
-      market_title: market.market_title,
-      event_title: market.event_title,
-      venue: market.venue,
-      category: market.category,
-      status: market.status,
-      close_time: closeTime,
-      expiration_time: expirationTime,
-      resolved_outcome: market.resolved_outcome,
-      is_active: isActive,
-      volume_usd: parseNumber(market.volume_usd),
-      activity_count: market.activity_count,
-      last_activity_at: market.last_activity_at
-        ? market.last_activity_at.toISOString()
-        : null,
-      avg_price: parseNumber(market.avg_price),
-      best_bid: parseNumber(market.best_bid),
-      best_ask: parseNumber(market.best_ask),
-      last_yes_price: parseNumber(market.last_price),
-      held_odds: resolveHeldOdds(
-        market.position_side,
-        parseNumber(market.position_price),
-        parseNumber(market.last_price),
-      ),
-      position_side: normalizeOutcomeSideForApi(market.position_side),
-      position_shares: parseNumber(market.position_shares),
-      position_value_usd: parseNumber(market.position_value_usd),
-      position_price: parseNumber(market.position_price),
-    };
-  });
+  const markets = topMarkets.map((market) =>
+    mapWhaleMarketToProfileMarket(market, now),
+  );
 
   const totalVolume = markets.reduce(
     (sum, market) => sum + (market.volume_usd ?? 0),
@@ -592,30 +719,8 @@ function buildProfileInput(
   const concentration =
     topVolume != null && totalVolume > 0 ? topVolume / totalVolume : null;
 
-  let yesValue = 0;
-  let noValue = 0;
-  for (const market of markets) {
-    const value =
-      market.position_value_usd ??
-      market.position_shares ??
-      market.volume_usd ??
-      0;
-    if (market.position_side?.toUpperCase() === "YES") {
-      yesValue += value;
-    } else if (market.position_side?.toUpperCase() === "NO") {
-      noValue += value;
-    }
-  }
-  const totalSide = yesValue + noValue;
-  const sideRatio = totalSide > 0 ? yesValue / totalSide : null;
-  const sideBiasLabel: WhaleProfileInput["summary"]["side_bias_label"] =
-    sideRatio == null
-      ? "unknown"
-      : sideRatio >= 0.65
-        ? "mostly_yes"
-        : sideRatio <= 0.35
-          ? "mostly_no"
-          : "mixed";
+  const { yesValue, noValue, sideRatio, sideBiasLabel } =
+    computeProfileSideBias(markets);
 
   const concentrationLabel: WhaleProfileInput["summary"]["concentration_label"] =
     concentration == null
@@ -760,6 +865,19 @@ function buildProfileInput(
         wallet.inferred_total != null ? Number(wallet.inferred_total) : null,
     },
     exposure_usd: parseNumber(wallet.exposure_usd),
+    exposure: {
+      gross_usd: parseNumber(wallet.exposure_usd),
+      net_imbalance_usd: parseNumber(wallet.net_imbalance_usd),
+      hedged_notional_usd: parseNumber(wallet.hedged_notional_usd),
+      hedge_ratio: parseNumber(wallet.hedge_ratio),
+      two_sided_markets: wallet.two_sided_markets ?? 0,
+      posture: resolveExposurePosture({
+        exposureUsd: parseNumber(wallet.exposure_usd),
+        hedgedNotionalUsd: parseNumber(wallet.hedged_notional_usd),
+        hedgeRatio: parseNumber(wallet.hedge_ratio),
+        twoSidedMarkets: wallet.two_sided_markets,
+      }),
+    },
     activity: {
       last_activity_at: wallet.last_activity_at
         ? wallet.last_activity_at.toISOString()
@@ -873,6 +991,10 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             metrics.metrics_win_rate,
             metrics.metrics_last_trade_at,
             exposure.exposure_usd,
+            exposure.hedged_notional_usd,
+            exposure.net_imbalance_usd,
+            exposure.hedge_ratio,
+            exposure.two_sided_markets,
             activity.last_activity_at,
             activity.has_trade_activity,
             activity.has_holder_activity,
@@ -918,18 +1040,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
               and wah.activity_type in ('delta', 'trade')
               and wah.hour_bucket >= now() - ($6::text || ' hours')::interval
           ) signal on true
-          left join lateral (
-            select
-              sum(coalesce(ws.size_usd, 0)) as exposure_usd
-            from wallet_position_snapshots ws
-            join (
-              select venue, max(snapshot_at) as snapshot_at
-              from wallet_position_snapshots
-              where wallet_id = w.id
-              group by venue
-            ) latest on latest.venue = ws.venue and latest.snapshot_at = ws.snapshot_at
-            where ws.wallet_id = w.id
-          ) exposure on true
+          left join wallet_position_exposure exposure on exposure.wallet_id = w.id
           left join lateral (
             select
               w2.address as owner_address,
@@ -1129,9 +1240,17 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         select
           ranked.*,
           pos.outcome_side as position_side,
+          pos.has_yes_position,
+          pos.has_no_position,
           pos.shares as position_shares,
           pos.size_usd as position_value_usd,
-          pos.price as position_price
+          pos.price as position_price,
+          pos.yes_shares as yes_position_shares,
+          pos.yes_size_usd as yes_position_value_usd,
+          pos.yes_price as yes_position_price,
+          pos.no_shares as no_position_shares,
+          pos.no_size_usd as no_position_value_usd,
+          pos.no_price as no_position_price
         from (
           select
             wa.wallet_id,
@@ -1183,17 +1302,50 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             um.resolved_outcome
         ) ranked
         left join lateral (
+          with latest_positions as (
+            select distinct on (upper(coalesce(ws.outcome_side, '')))
+              upper(coalesce(ws.outcome_side, '')) as outcome_side,
+              ws.shares,
+              ws.size_usd,
+              ws.price
+            from wallet_position_snapshots ws
+            where ws.wallet_id = ranked.wallet_id
+              and ws.market_id = ranked.market_id
+              and ws.shares > 0
+            order by
+              upper(coalesce(ws.outcome_side, '')),
+              ws.snapshot_at desc,
+              ws.size_usd desc nulls last,
+              ws.shares desc
+          )
           select
-            ws.outcome_side,
-            ws.shares,
-            ws.size_usd,
-            ws.price
-          from wallet_position_snapshots ws
-          where ws.wallet_id = ranked.wallet_id
-            and ws.market_id = ranked.market_id
-            and ws.shares > 0
-          order by ws.snapshot_at desc, ws.size_usd desc nulls last, ws.shares desc
-          limit 1
+            case
+              when bool_or(lp.outcome_side = 'YES')
+               and bool_or(lp.outcome_side = 'NO')
+                then 'BOTH'
+              when bool_or(lp.outcome_side = 'YES')
+                then 'YES'
+              when bool_or(lp.outcome_side = 'NO')
+                then 'NO'
+              else null
+            end as outcome_side,
+            bool_or(lp.outcome_side = 'YES') as has_yes_position,
+            bool_or(lp.outcome_side = 'NO') as has_no_position,
+            sum(lp.shares) as shares,
+            sum(lp.size_usd) as size_usd,
+            case
+              when bool_or(lp.outcome_side = 'YES')
+               and bool_or(lp.outcome_side = 'NO')
+                then null
+              else max(lp.price)
+            end as price,
+            sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
+            sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
+            max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
+            sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
+            sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
+            max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
+          from latest_positions lp
         ) pos on true
         where ranked.rn <= $2
         order by ranked.wallet_id, ranked.rn
@@ -1217,17 +1369,21 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     const existingRows = await client.query<{
       wallet_id: string;
       features_hash: string;
+      version: string;
     }>(
       `
-        select wallet_id, features_hash
+        select wallet_id, features_hash, version
         from wallet_profiles
         where wallet_id = any($1::uuid[])
       `,
       [whaleIds],
     );
-    const existingMap = new Map<string, string>();
+    const existingMap = new Map<string, { featuresHash: string; version: string }>();
     for (const row of existingRows.rows) {
-      existingMap.set(row.wallet_id, row.features_hash);
+      existingMap.set(row.wallet_id, {
+        featuresHash: row.features_hash,
+        version: row.version,
+      });
     }
 
     let processed = 0;
@@ -1260,7 +1416,12 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         styleGuide: policy.styleGuide,
       });
       const featuresHash = hashProfileInput(input);
-      if (!options.force && existingMap.get(whale.id) === featuresHash) {
+      const existing = existingMap.get(whale.id);
+      if (
+        !options.force &&
+        existing?.featuresHash === featuresHash &&
+        existing.version === PROFILE_VERSION
+      ) {
         skipped += 1;
         if (verbose) {
           console.log("[whale-profile] wallet skipped (unchanged)", {
@@ -1299,6 +1460,15 @@ Rules:
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
+- Exposure fields:
+  - exposure.gross_usd is total tracked gross exposure.
+  - exposure.net_imbalance_usd is directional exposure after offsetting opposite-side positions.
+  - exposure.hedged_notional_usd is the offsetting notional paired across opposite sides.
+  - exposure.hedge_ratio is 0..1 and shows how much of gross exposure is hedged.
+  - exposure.two_sided_markets counts markets with both sides held.
+- Do not describe a wallet as strongly bullish or bearish from gross exposure alone.
+- If exposure.posture is partially_hedged or heavily_hedged, say that the wallet uses offsetting or two-sided positioning.
+- If net imbalance is much smaller than gross exposure, emphasize balanced or hedged positioning over conviction.
 - recent_window summarizes the last recent_window.window_hours hours.
   Use it to explain what changed recently (net change, many exits, spikes),
   but treat it as secondary to the broader 30d pattern.
@@ -1307,15 +1477,23 @@ Rules:
 - Price fields:
   - top_markets.last_yes_price is the YES price from the market.
   - top_markets.held_odds is the side-aware price (YES/NO) for the held position.
+    It is null when top_markets.position_side is BOTH.
   - top_changes.odds is also side-aware for the change row.
+- Position fields:
+  - top_markets.position_side can be YES, NO, or BOTH.
+  - BOTH means the wallet currently holds both YES and NO in that market.
+  - top_markets.position_value_usd is gross value across held sides.
+  - top_markets.yes_position_value_usd and no_position_value_usd split the market by side.
+  - Never rewrite a BOTH market as a single YES or single NO position.
 - Wallet type/roles:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
  - Prefer evidence from top_events when available; fall back to top_markets.
 - Use summary.side_bias_label and summary.concentration_label as hints.
+- If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, mention two-sided or hedged positioning unless one side is clearly negligible.
 - Style guide: ${policy.styleGuide}
-- Prompt version: ${policy.promptVersion}
+- Profile revision: ${PROFILE_VERSION}
 - Never suggest insider information.
 
 Whale data (JSON):\n${JSON.stringify(input)}`;

@@ -48,6 +48,10 @@ import {
   buildWalletMmDiagnostics,
   computeMmSuspected,
 } from "./services/wallet-intel-mm.js";
+import {
+  computeProfileSideBias,
+  mapWhaleMarketToProfileMarket,
+} from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import { walletActivitySignalsQuerySchema } from "./schemas/wallet-intel.js";
 
@@ -1156,6 +1160,97 @@ const tests: TestCase[] = [
         env.walletIntelRetryBaseBackoffMs = originalBaseBackoffMs;
         env.walletIntelRetryMaxBackoffMs = originalMaxBackoffMs;
       }
+    },
+  },
+  {
+    name: "whale profile market mapping preserves two-sided positions",
+    run: () => {
+      const market = mapWhaleMarketToProfileMarket(
+        {
+          wallet_id: "wallet-1",
+          market_id: "market-1",
+          market_title: "ETH above threshold?",
+          event_title: "ETH above threshold?",
+          venue: "limitless",
+          category: "crypto",
+          status: "ACTIVE",
+          close_time: new Date("2026-01-12T13:00:00.000Z"),
+          expiration_time: new Date("2026-01-12T13:00:00.000Z"),
+          resolved_outcome: null,
+          volume_usd: "1.484",
+          activity_count: 2,
+          last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
+          avg_price: "0.742",
+          best_bid: "0.742",
+          best_ask: "0.742",
+          last_price: "0.742",
+          position_side: "BOTH",
+          has_yes_position: true,
+          has_no_position: true,
+          position_shares: "2",
+          position_value_usd: "1",
+          position_price: null,
+          yes_position_shares: "1",
+          yes_position_value_usd: "0.742",
+          yes_position_price: "0.742",
+          no_position_shares: "1",
+          no_position_value_usd: "0.258",
+          no_position_price: "0.258",
+        } as never,
+        new Date("2026-03-05T21:00:00.000Z").getTime(),
+      );
+
+      assert.equal(market.position_side, "BOTH");
+      assert.equal(market.is_two_sided, true);
+      assert.equal(market.held_odds, null);
+      assert.equal(market.position_value_usd, 1);
+      assert.equal(market.yes_position_value_usd, 0.742);
+      assert.equal(market.no_position_value_usd, 0.258);
+    },
+  },
+  {
+    name: "whale profile side bias counts both sides from a two-sided market",
+    run: () => {
+      const market = mapWhaleMarketToProfileMarket(
+        {
+          wallet_id: "wallet-1",
+          market_id: "market-1",
+          market_title: "ETH above threshold?",
+          event_title: "ETH above threshold?",
+          venue: "limitless",
+          category: "crypto",
+          status: "ACTIVE",
+          close_time: new Date("2026-01-12T13:00:00.000Z"),
+          expiration_time: new Date("2026-01-12T13:00:00.000Z"),
+          resolved_outcome: null,
+          volume_usd: "1.484",
+          activity_count: 2,
+          last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
+          avg_price: "0.742",
+          best_bid: "0.742",
+          best_ask: "0.742",
+          last_price: "0.742",
+          position_side: "BOTH",
+          has_yes_position: true,
+          has_no_position: true,
+          position_shares: "2",
+          position_value_usd: "1",
+          position_price: null,
+          yes_position_shares: "1",
+          yes_position_value_usd: "0.742",
+          yes_position_price: "0.742",
+          no_position_shares: "1",
+          no_position_value_usd: "0.258",
+          no_position_price: "0.258",
+        } as never,
+        new Date("2026-03-05T21:00:00.000Z").getTime(),
+      );
+
+      const summary = computeProfileSideBias([market]);
+      assert.equal(summary.yesValue, 0.742);
+      assert.equal(summary.noValue, 0.258);
+      assert.ok(Math.abs((summary.sideRatio ?? 0) - 0.742) < 1e-9);
+      assert.equal(summary.sideBiasLabel, "mostly_yes");
     },
   },
 ];

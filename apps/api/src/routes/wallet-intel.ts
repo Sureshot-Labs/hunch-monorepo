@@ -104,9 +104,17 @@ type WhaleMarketRow = {
   best_ask: string | null;
   last_price: string | null;
   position_side: string | null;
+  has_yes_position: boolean;
+  has_no_position: boolean;
   position_shares: string | null;
   position_value_usd: string | null;
   position_price: string | null;
+  yes_position_shares: string | null;
+  yes_position_value_usd: string | null;
+  yes_position_price: string | null;
+  no_position_shares: string | null;
+  no_position_value_usd: string | null;
+  no_position_price: string | null;
   last_activity_at: Date | null;
 };
 
@@ -127,9 +135,16 @@ type WhaleMarketItem = {
   expirationTime: Date | null;
   resolvedOutcome: string | null;
   positionSide: string | null;
+  isTwoSided: boolean;
   positionShares: number | null;
   positionValueUsd: number | null;
   positionPrice: number | null;
+  yesPositionShares: number | null;
+  yesPositionValueUsd: number | null;
+  yesPositionPrice: number | null;
+  noPositionShares: number | null;
+  noPositionValueUsd: number | null;
+  noPositionPrice: number | null;
   lastActivityAt: Date | null;
 };
 
@@ -850,9 +865,17 @@ async function loadWhaleTopMarkets(
       select
         ranked.*,
         pos.outcome_side as position_side,
+        pos.has_yes_position,
+        pos.has_no_position,
         pos.shares as position_shares,
         pos.size_usd as position_value_usd,
-        pos.price as position_price
+        pos.price as position_price,
+        pos.yes_shares as yes_position_shares,
+        pos.yes_size_usd as yes_position_value_usd,
+        pos.yes_price as yes_position_price,
+        pos.no_shares as no_position_shares,
+        pos.no_size_usd as no_position_value_usd,
+        pos.no_price as no_position_price
       from (
         select
           wah.wallet_id,
@@ -906,17 +929,50 @@ async function loadWhaleTopMarkets(
           um.resolved_outcome
       ) ranked
       left join lateral (
+        with latest_positions as (
+          select distinct on (upper(coalesce(ws.outcome_side, '')))
+            upper(coalesce(ws.outcome_side, '')) as outcome_side,
+            ws.shares,
+            ws.size_usd,
+            ws.price
+          from wallet_position_snapshots ws
+          where ws.wallet_id = ranked.wallet_id
+            and ws.market_id = ranked.market_id
+            and ws.shares > 0
+          order by
+            upper(coalesce(ws.outcome_side, '')),
+            ws.snapshot_at desc,
+            ws.size_usd desc nulls last,
+            ws.shares desc
+        )
         select
-          ws.outcome_side,
-          ws.shares,
-          ws.size_usd,
-          ws.price
-        from wallet_position_snapshots ws
-        where ws.wallet_id = ranked.wallet_id
-          and ws.market_id = ranked.market_id
-          and ws.shares > 0
-        order by ws.snapshot_at desc, ws.size_usd desc nulls last, ws.shares desc
-        limit 1
+          case
+            when bool_or(lp.outcome_side = 'YES')
+             and bool_or(lp.outcome_side = 'NO')
+              then 'BOTH'
+            when bool_or(lp.outcome_side = 'YES')
+              then 'YES'
+            when bool_or(lp.outcome_side = 'NO')
+              then 'NO'
+            else null
+          end as outcome_side,
+          bool_or(lp.outcome_side = 'YES') as has_yes_position,
+          bool_or(lp.outcome_side = 'NO') as has_no_position,
+          sum(lp.shares) as shares,
+          sum(lp.size_usd) as size_usd,
+          case
+            when bool_or(lp.outcome_side = 'YES')
+             and bool_or(lp.outcome_side = 'NO')
+              then null
+            else max(lp.price)
+          end as price,
+          sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
+          sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
+          max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
+          sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
+          sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
+          max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
+        from latest_positions lp
       ) pos on true
       where ranked.rn <= $2
       order by ranked.wallet_id, ranked.rn
@@ -941,7 +997,11 @@ async function loadWhaleTopMarkets(
       closeTime: market.close_time ?? null,
       expirationTime: market.expiration_time ?? null,
       resolvedOutcome: market.resolved_outcome ?? null,
-      positionSide: normalizeOutcomeSideForApi(market.position_side),
+      positionSide:
+        market.has_yes_position && market.has_no_position
+          ? "BOTH"
+          : normalizeOutcomeSideForApi(market.position_side),
+      isTwoSided: Boolean(market.has_yes_position && market.has_no_position),
       positionShares: market.position_shares
         ? Number(market.position_shares)
         : null,
@@ -950,6 +1010,24 @@ async function loadWhaleTopMarkets(
         : null,
       positionPrice: market.position_price
         ? Number(market.position_price)
+        : null,
+      yesPositionShares: market.yes_position_shares
+        ? Number(market.yes_position_shares)
+        : null,
+      yesPositionValueUsd: market.yes_position_value_usd
+        ? Number(market.yes_position_value_usd)
+        : null,
+      yesPositionPrice: market.yes_position_price
+        ? Number(market.yes_position_price)
+        : null,
+      noPositionShares: market.no_position_shares
+        ? Number(market.no_position_shares)
+        : null,
+      noPositionValueUsd: market.no_position_value_usd
+        ? Number(market.no_position_value_usd)
+        : null,
+      noPositionPrice: market.no_position_price
+        ? Number(market.no_position_price)
         : null,
       lastActivityAt: market.last_activity_at,
     });
