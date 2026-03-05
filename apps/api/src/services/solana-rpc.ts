@@ -147,10 +147,12 @@ async function solanaRpcRequest<T>(inputs: {
         return rpc.result;
       } catch (error) {
         lastError = error;
-        if (inputs.rpcUrls.length > 1) {
-          if (isRpcRateLimit(error) || isAbortError(error)) {
+        const retryable = isRpcRateLimit(error) || isAbortError(error);
+        if (retryable) {
+          if (inputs.rpcUrls.length > 1) {
             continue;
           }
+          break;
         }
         throw error;
       } finally {

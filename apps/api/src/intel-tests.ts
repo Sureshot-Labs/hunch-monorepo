@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import { isRetryableHttpStatus, parseRetryAfterMs } from "@hunch/shared";
 
+import { env } from "./env.js";
 import {
   fetchActiveRuntimePolicy,
   listActiveRuntimePolicies,
@@ -36,6 +37,7 @@ import {
   computeRobustUnusualScore,
   resolveUnusualTier,
 } from "./services/wallet-activity-summary.js";
+import { fetchMarketHolderData } from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
   normalizeOutcomeSideForStorage,
@@ -46,6 +48,8 @@ import {
   buildWalletMmDiagnostics,
   computeMmSuspected,
 } from "./services/wallet-intel-mm.js";
+import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
+import { walletActivitySignalsQuerySchema } from "./schemas/wallet-intel.js";
 
 type TestCase = {
   name: string;
@@ -996,6 +1000,162 @@ const tests: TestCase[] = [
       assert.equal(isRetryableHttpStatus(429), true);
       assert.equal(isRetryableHttpStatus(503), true);
       assert.equal(isRetryableHttpStatus(404), false);
+    },
+  },
+  {
+    name: "wallet activity signals query parses false boolean strings safely",
+    run: () => {
+      const defaults = walletActivitySignalsQuerySchema.parse({});
+      assert.equal(defaults.excludeMmLike, false);
+      assert.equal(defaults.includeAttribution, false);
+
+      const parsedFalse = walletActivitySignalsQuerySchema.parse({
+        excludeMmLike: "false",
+        includeAttribution: "false",
+      });
+      assert.equal(parsedFalse.excludeMmLike, false);
+      assert.equal(parsedFalse.includeAttribution, false);
+
+      const parsedTrue = walletActivitySignalsQuerySchema.parse({
+        excludeMmLike: "true",
+        includeAttribution: "1",
+      });
+      assert.equal(parsedTrue.excludeMmLike, true);
+      assert.equal(parsedTrue.includeAttribution, true);
+    },
+  },
+  {
+    name: "market holder fetch degrades alchemy failures without losing token metadata",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress = "0xlimitless";
+
+      let fetchCalls = 0;
+      globalThis.fetch = async (input: string | URL | Request) => {
+        fetchCalls += 1;
+        const url = String(input);
+        if (!url.includes("getOwnersForNFT")) {
+          throw new Error(`unexpected fetch url: ${url}`);
+        }
+        throw new Error("transient alchemy failure");
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:yes-token",
+                  token_no: "limitless:no-token",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "limitless:yes-token", side: "YES" },
+                { token_id: "limitless:no-token", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return { rows: [] };
+          }
+          if (queryCount === 4) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "limitless:market-1",
+          limit: 10,
+          client: client as never,
+        });
+
+        assert.equal(fetchCalls, 2);
+        assert.deepEqual(result.tokenIdsBySide, {
+          YES: "limitless:yes-token",
+          NO: "limitless:no-token",
+        });
+        assert.equal(result.source, "unavailable");
+        assert.deepEqual(result.holders, []);
+        assert.ok(Math.abs((result.priceBySide.YES ?? 0) - 0.65) < 1e-9);
+        assert.ok(Math.abs((result.priceBySide.NO ?? 0) - 0.35) < 1e-9);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+      }
+    },
+  },
+  {
+    name: "single-rpc solana requests retry 429 responses across attempts",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
+      const originalBaseBackoffMs = env.walletIntelRetryBaseBackoffMs;
+      const originalMaxBackoffMs = env.walletIntelRetryMaxBackoffMs;
+
+      env.walletIntelRetryMaxAttempts = 2;
+      env.walletIntelRetryBaseBackoffMs = 0;
+      env.walletIntelRetryMaxBackoffMs = 0;
+
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          return new Response("rate limited", {
+            status: 429,
+            statusText: "Too Many Requests",
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { value: 123 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      try {
+        const balance = await fetchSolanaBalanceLamports({
+          rpcUrls: ["https://solana.example"],
+          owner: "wallet",
+          timeoutMs: 1_000,
+        });
+        assert.equal(balance, 123n);
+        assert.equal(fetchCalls, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
+        env.walletIntelRetryBaseBackoffMs = originalBaseBackoffMs;
+        env.walletIntelRetryMaxBackoffMs = originalMaxBackoffMs;
+      }
     },
   },
 ];

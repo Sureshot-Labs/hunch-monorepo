@@ -34,6 +34,21 @@ const categoriesCsvSchema = z.preprocess(
   z.array(z.string().min(1)).optional()
 );
 
+const queryBooleanSchema = z.preprocess(
+  value => {
+    if (value == null || value === "") return undefined;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["1", "true", "yes", "on"].includes(normalized)) return true;
+      if (["0", "false", "no", "off"].includes(normalized)) return false;
+    }
+    return value;
+  },
+  z.boolean()
+);
+
 export const walletFollowBodySchema = z.object({
   address: z.string().min(4),
   chain: zChain,
@@ -80,7 +95,7 @@ export const walletActivitySummaryQuerySchema = z.object({
   primary: csvStringArraySchema.optional(),
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
-  includeAttribution: z.coerce.boolean().default(true),
+  includeAttribution: queryBooleanSchema.default(true),
 });
 
 export const walletActivitySignalsQuerySchema = z.object({
@@ -102,7 +117,7 @@ export const walletActivitySignalsQuerySchema = z.object({
   primary: csvStringArraySchema.optional(),
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
-  excludeMmLike: z.coerce.boolean().default(false),
+  excludeMmLike: queryBooleanSchema.default(false),
   severity: z
     .preprocess(
       value => {
@@ -120,14 +135,14 @@ export const walletActivitySignalsQuerySchema = z.object({
     .optional(),
   displayReasons: csvStringArraySchema.optional(),
   signalReasonMode: filterModeSchema,
-  includeAttribution: z.coerce.boolean().default(false),
+  includeAttribution: queryBooleanSchema.default(false),
 });
 
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   venue: zVenue.optional(),
   since: z.string().datetime().optional(),
-  latest: z.coerce.boolean().default(true),
+  latest: queryBooleanSchema.default(true),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -137,7 +152,7 @@ export const walletWhalesQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   marketLimit: z.coerce.number().int().min(1).max(20).default(5),
   windowDays: z.coerce.number().int().min(1).max(365).default(30),
-  includeSummary: z.coerce.boolean().default(false),
+  includeSummary: queryBooleanSchema.default(false),
   windowHours: z.coerce.number().int().min(1).max(24 * 14).default(24),
   topChanges: z.coerce.number().int().min(1).max(10).default(3),
   categories: z
@@ -172,5 +187,5 @@ export const walletWhalesQuerySchema = z.object({
   primary: csvStringArraySchema.optional(),
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
-  includeAttribution: z.coerce.boolean().default(true),
+  includeAttribution: queryBooleanSchema.default(true),
 });

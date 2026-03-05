@@ -491,31 +491,38 @@ export async function fetchMarketHolderData(inputs: {
         source = "alchemy";
         const yesId = normalizeTokenId(yesToken);
         const noId = normalizeTokenId(noToken);
+        let alchemyFailed = false;
+        const fetchAlchemyOwnersSafe = async (
+          tokenId: string | null,
+          telemetry: WalletIntelRetryTelemetry | null,
+        ): Promise<{ wallet: string; shares: number }[]> => {
+          if (!tokenId) return [];
+          try {
+            return await fetchAlchemyOwners({
+              baseUrl,
+              contractAddress,
+              tokenId,
+              limit: inputs.limit,
+              telemetry,
+            });
+          } catch {
+            alchemyFailed = true;
+            return [];
+          }
+        };
         const [yesOwners, noOwners] = await Promise.all([
-          yesId
-            ? fetchAlchemyOwners({
-                baseUrl,
-                contractAddress,
-                tokenId: yesId,
-                limit: inputs.limit,
-                telemetry:
-                  market.venue === "polymarket"
-                    ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
-                    : (inputs.telemetry?.holdersAlchemyBase ?? null),
-              })
-            : Promise.resolve([]),
-          noId
-            ? fetchAlchemyOwners({
-                baseUrl,
-                contractAddress,
-                tokenId: noId,
-                limit: inputs.limit,
-                telemetry:
-                  market.venue === "polymarket"
-                    ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
-                    : (inputs.telemetry?.holdersAlchemyBase ?? null),
-              })
-            : Promise.resolve([]),
+          fetchAlchemyOwnersSafe(
+            yesId,
+            market.venue === "polymarket"
+              ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
+              : (inputs.telemetry?.holdersAlchemyBase ?? null),
+          ),
+          fetchAlchemyOwnersSafe(
+            noId,
+            market.venue === "polymarket"
+              ? (inputs.telemetry?.holdersAlchemyPolygon ?? null)
+              : (inputs.telemetry?.holdersAlchemyBase ?? null),
+          ),
         ]);
         for (const owner of yesOwners) {
           holderEntries.push({
@@ -531,6 +538,9 @@ export async function fetchMarketHolderData(inputs: {
             shares: owner.shares,
           });
         }
+        if (holderEntries.length === 0 && alchemyFailed) {
+          source = "unavailable";
+        }
       }
     }
   }
@@ -539,6 +549,7 @@ export async function fetchMarketHolderData(inputs: {
     const yesMint = normalizeSolanaMint(yesToken);
     const noMint = normalizeSolanaMint(noToken);
     source = "solana";
+    let solanaFailed = false;
     const safeFetch = async (mint: string | null) => {
       if (!mint) return [];
       const telemetry = inputs.telemetry?.holdersSolana ?? null;
@@ -547,24 +558,23 @@ export async function fetchMarketHolderData(inputs: {
         telemetry.estimatedCalls += 2;
         telemetry.actualCalls += 1;
       }
-      while (true) {
-        try {
-          const owners = await fetchSolanaHolders({ mint, limit: inputs.limit });
+      try {
+        const owners = await fetchSolanaHolders({ mint, limit: inputs.limit });
+        if (telemetry) telemetry.succeeded += 1;
+        return owners;
+      } catch (error) {
+        if (isSolanaMintNotFound(error)) {
           if (telemetry) telemetry.succeeded += 1;
-          return owners;
-        } catch (error) {
-          if (isSolanaMintNotFound(error)) {
-            if (telemetry) telemetry.succeeded += 1;
-            return [];
-          }
-          if (telemetry) {
-            telemetry.failed += 1;
-            if (isAbortError(error)) telemetry.aborted += 1;
-            else if (isRpcRateLimit(error)) telemetry.rateLimited += 1;
-            else telemetry.otherErrors += 1;
-          }
-          throw error;
+          return [];
         }
+        solanaFailed = true;
+        if (telemetry) {
+          telemetry.failed += 1;
+          if (isAbortError(error)) telemetry.aborted += 1;
+          else if (isRpcRateLimit(error)) telemetry.rateLimited += 1;
+          else telemetry.otherErrors += 1;
+        }
+        return [];
       }
     };
     const yesOwners = await safeFetch(yesMint);
@@ -582,6 +592,9 @@ export async function fetchMarketHolderData(inputs: {
         side: "NO",
         shares: owner.shares,
       });
+    }
+    if (holderEntries.length === 0 && solanaFailed) {
+      source = "unavailable";
     }
   }
 
