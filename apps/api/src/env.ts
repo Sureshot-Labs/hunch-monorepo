@@ -674,11 +674,11 @@ export const env = {
     "Neutral tone, short sentences, no hype, no speculation.",
   aiWhaleProfileMaxTokens: optionalPositiveInt(
     "AI_WHALE_PROFILE_MAX_TOKENS",
-    800,
+    1000,
   ),
   aiWhaleProfileMaxTokensFallback: optionalPositiveInt(
     "AI_WHALE_PROFILE_MAX_TOKENS_FALLBACK",
-    420,
+    560,
   ),
   walletIntelMarketLimit: optionalPositiveInt(
     "WALLET_INTEL_MARKET_LIMIT",

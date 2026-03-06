@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
 
+import { z } from "zod";
+
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { isRecord } from "../lib/type-guards.js";
 import { normalizeOutcomeSideForApi } from "./wallet-intel-helpers.js";
 import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
@@ -10,7 +11,7 @@ import {
   type WalletActivitySummary,
 } from "./wallet-activity-summary.js";
 
-const PROFILE_VERSION = "v5";
+const PROFILE_VERSION = "v7";
 const CATEGORY_VALUES = [
   "sports",
   "politics",
@@ -24,6 +25,25 @@ const CATEGORY_VALUES = [
 ] as const;
 
 type WhaleCategory = (typeof CATEGORY_VALUES)[number];
+const categorySchema = z.enum(CATEGORY_VALUES);
+const whaleProfileOutputSchema = z
+  .object({
+    label_short: z.string().trim().min(1).max(56),
+    label_long: z.string().trim().min(1).max(320),
+    archetype: z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .regex(/^[a-z0-9_ -]+$/i),
+    categories: z.array(z.string().trim().min(1).max(48)).max(6).optional(),
+    theme_focus: z.array(z.string().trim().min(1).max(48)).max(6).optional(),
+    risk_style: z.string().trim().min(1).max(96),
+    confidence: z.coerce.number().min(0).max(1),
+    evidence: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
+    notes: z.string().trim().min(1).max(420).optional(),
+  })
+  .passthrough();
 
 type WhaleProfile = {
   label_short?: string;
@@ -68,7 +88,6 @@ type WhaleProfileInput = {
     win_rate: number | null;
     resolved_count: number | null;
   };
-  exposure_usd: number | null;
   exposure: {
     gross_usd: number | null;
     net_imbalance_usd: number | null;
@@ -76,6 +95,18 @@ type WhaleProfileInput = {
     hedge_ratio: number | null;
     two_sided_markets: number;
     posture: "directional" | "partially_hedged" | "heavily_hedged" | "unknown";
+  };
+  current_portfolio: {
+    snapshot_at: string | null;
+    market_count_total: number;
+    event_count_total: number;
+    gross_usd_total: number;
+    yes_gross_usd: number;
+    no_gross_usd: number;
+    largest_position_share: number | null;
+    top_markets_gross_usd: number;
+    omitted_market_count: number;
+    omitted_gross_usd: number;
   };
   activity: {
     last_activity_at: string | null;
@@ -91,7 +122,7 @@ type WhaleProfileInput = {
   };
   top_events: Array<{
     event_title: string;
-    total_volume_usd: number | null;
+    gross_usd: number | null;
     market_count: number;
   }>;
   recent_window: {
@@ -126,6 +157,7 @@ type WhaleProfileInput = {
   top_markets: Array<{
     market_id: string;
     market_title: string | null;
+    event_id: string | null;
     event_title: string | null;
     venue: string;
     category: string | null;
@@ -134,10 +166,13 @@ type WhaleProfileInput = {
     expiration_time: string | null;
     resolved_outcome: string | null;
     is_active: boolean;
-    volume_usd: number | null;
-    activity_count: number;
-    last_activity_at: string | null;
-    avg_price: number | null;
+    snapshot_at: string | null;
+    recent_activity: {
+      last_activity_at: string | null;
+      volume_usd: number | null;
+      activity_count: number;
+      avg_price: number | null;
+    };
     best_bid: number | null;
     best_ask: number | null;
     last_yes_price: number | null;
@@ -191,6 +226,7 @@ type WhaleRow = {
 type WhaleMarketRow = {
   wallet_id: string;
   market_id: string;
+  event_id: string | null;
   market_title: string | null;
   event_title: string | null;
   venue: string;
@@ -199,10 +235,11 @@ type WhaleMarketRow = {
   close_time: Date | null;
   expiration_time: Date | null;
   resolved_outcome: string | null;
-  volume_usd: string | null;
-  activity_count: number;
-  last_activity_at: Date | null;
-  avg_price: string | null;
+  snapshot_at: Date | null;
+  recent_volume_usd: string | null;
+  recent_activity_count: number;
+  recent_last_activity_at: Date | null;
+  recent_avg_price: string | null;
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
@@ -328,6 +365,159 @@ function resolveExposurePosture(inputs: {
   return "directional";
 }
 
+function resolveMarketGrossUsd(
+  market: WhaleProfileInput["top_markets"][number],
+): number {
+  const splitGross =
+    (market.yes_position_value_usd ?? 0) + (market.no_position_value_usd ?? 0);
+  if (splitGross > 0) return splitGross;
+  return Math.max(0, market.position_value_usd ?? 0);
+}
+
+function resolveMarketStateCounts(
+  markets: WhaleProfileInput["top_markets"],
+): WhaleProfileInput["summary"]["market_state_counts"] {
+  return markets.reduce(
+    (acc, market) => {
+      if (market.resolved_outcome) {
+        acc.resolved += 1;
+        return acc;
+      }
+      const status = market.status?.toUpperCase();
+      if (status && status !== "ACTIVE") {
+        acc.ended += 1;
+        return acc;
+      }
+      const closeAt = market.close_time ?? market.expiration_time;
+      if (closeAt && new Date(closeAt).getTime() < Date.now()) {
+        acc.ended += 1;
+        return acc;
+      }
+      acc.active += 1;
+      return acc;
+    },
+    { active: 0, ended: 0, resolved: 0 },
+  );
+}
+
+export function summarizeProfileMarkets(
+  markets: WhaleProfileInput["top_markets"],
+  marketLimit: number,
+): {
+  topMarkets: WhaleProfileInput["top_markets"];
+  currentPortfolio: WhaleProfileInput["current_portfolio"];
+  topEvents: WhaleProfileInput["top_events"];
+  summary: WhaleProfileInput["summary"];
+} {
+  const sortedMarkets = [...markets].sort((a, b) => {
+    const valueDiff = resolveMarketGrossUsd(b) - resolveMarketGrossUsd(a);
+    if (Math.abs(valueDiff) > 1e-9) return valueDiff;
+    const shareDiff = (b.position_shares ?? 0) - (a.position_shares ?? 0);
+    if (Math.abs(shareDiff) > 1e-9) return shareDiff;
+    const aTitle = `${a.event_title ?? ""} ${a.market_title ?? ""}`;
+    const bTitle = `${b.event_title ?? ""} ${b.market_title ?? ""}`;
+    return aTitle.localeCompare(bTitle);
+  });
+  const topMarkets = sortedMarkets.slice(0, Math.max(1, marketLimit));
+  const grossUsdTotal = sortedMarkets.reduce(
+    (sum, market) => sum + resolveMarketGrossUsd(market),
+    0,
+  );
+  const yesGrossUsd = sortedMarkets.reduce(
+    (sum, market) => sum + (market.yes_position_value_usd ?? 0),
+    0,
+  );
+  const noGrossUsd = sortedMarkets.reduce(
+    (sum, market) => sum + (market.no_position_value_usd ?? 0),
+    0,
+  );
+  const largestGrossUsd = topMarkets[0] ? resolveMarketGrossUsd(topMarkets[0]) : 0;
+  const topMarketsGrossUsd = topMarkets.reduce(
+    (sum, market) => sum + resolveMarketGrossUsd(market),
+    0,
+  );
+  const omittedMarketCount = Math.max(0, sortedMarkets.length - topMarkets.length);
+  const omittedGrossUsd = Math.max(0, grossUsdTotal - topMarketsGrossUsd);
+
+  const eventKeys = new Set<string>();
+  const eventRollup = new Map<string, { title: string; grossUsd: number; count: number }>();
+  const categoryCounts = sortedMarkets.reduce<Record<string, number>>((acc, market) => {
+    const category = market.category?.trim();
+    if (category) acc[category] = (acc[category] ?? 0) + 1;
+    return acc;
+  }, {});
+  const snapshotAt = sortedMarkets.reduce<string | null>((latest, market) => {
+    if (!market.snapshot_at) return latest;
+    if (!latest) return market.snapshot_at;
+    return market.snapshot_at > latest ? market.snapshot_at : latest;
+  }, null);
+
+  for (const market of sortedMarkets) {
+    const rawTitle = market.event_title?.trim() || market.market_title?.trim();
+    const eventKey = market.event_id?.trim() || rawTitle;
+    if (eventKey) eventKeys.add(eventKey);
+    if (!rawTitle) continue;
+    const grossUsd = resolveMarketGrossUsd(market);
+    const entry = eventRollup.get(rawTitle) ?? {
+      title: rawTitle,
+      grossUsd: 0,
+      count: 0,
+    };
+    entry.grossUsd += grossUsd;
+    entry.count += 1;
+    eventRollup.set(rawTitle, entry);
+  }
+
+  const { yesValue, noValue, sideRatio, sideBiasLabel } =
+    computeProfileSideBias(sortedMarkets);
+  const concentration =
+    grossUsdTotal > 0 ? clampNumber(largestGrossUsd / grossUsdTotal, 0, 1) : null;
+  const concentrationLabel: WhaleProfileInput["summary"]["concentration_label"] =
+    concentration == null
+      ? "unknown"
+      : concentration >= 0.6
+        ? "high"
+        : concentration >= 0.3
+          ? "medium"
+          : "low";
+
+  return {
+    topMarkets,
+    currentPortfolio: {
+      snapshot_at: snapshotAt,
+      market_count_total: sortedMarkets.length,
+      event_count_total: eventKeys.size,
+      gross_usd_total: grossUsdTotal,
+      yes_gross_usd: yesGrossUsd,
+      no_gross_usd: noGrossUsd,
+      largest_position_share: concentration,
+      top_markets_gross_usd: topMarketsGrossUsd,
+      omitted_market_count: omittedMarketCount,
+      omitted_gross_usd: omittedGrossUsd,
+    },
+    topEvents: Array.from(eventRollup.values())
+      .sort((a, b) => b.grossUsd - a.grossUsd)
+      .slice(0, 3)
+      .map((entry) => ({
+        event_title: entry.title,
+        gross_usd: entry.grossUsd || null,
+        market_count: entry.count,
+      })),
+    summary: {
+      top_market_concentration: concentration,
+      concentration_label: concentrationLabel,
+      side_bias: {
+        yes: yesValue,
+        no: noValue,
+        ratio: sideRatio,
+      },
+      side_bias_label: sideBiasLabel,
+      category_counts: categoryCounts,
+      market_state_counts: resolveMarketStateCounts(sortedMarkets),
+    },
+  };
+}
+
 function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
   const recent = input.recent_window;
   const recentHash: WhaleProfileInput["recent_window"] = {
@@ -377,48 +567,7 @@ function hashProfileInput(input: WhaleProfileInput): string {
     .digest("hex");
 }
 
-function normalizeProfile(raw: unknown): WhaleProfile | null {
-  if (!isRecord(raw)) return null;
-  const labelShort =
-    typeof raw.label_short === "string" ? raw.label_short.trim() : null;
-  const labelLong =
-    typeof raw.label_long === "string" ? raw.label_long.trim() : null;
-  const archetype =
-    typeof raw.archetype === "string" ? raw.archetype.trim() : null;
-  const categories = normalizeCategoryList(raw.categories);
-  const riskStyle =
-    typeof raw.risk_style === "string" ? raw.risk_style.trim() : null;
-  const notes = typeof raw.notes === "string" ? raw.notes.trim() : null;
-  const confidenceRaw = raw.confidence;
-  const confidence =
-    typeof confidenceRaw === "number"
-      ? clampNumber(confidenceRaw, 0, 1)
-      : null;
-  const themeFocus = Array.isArray(raw.theme_focus)
-    ? raw.theme_focus
-        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-        .filter((entry) => entry.length > 0)
-    : [];
-  const evidence = Array.isArray(raw.evidence)
-    ? raw.evidence
-        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-        .filter((entry) => entry.length > 0)
-    : [];
-
-  return {
-    ...(labelShort ? { label_short: labelShort } : {}),
-    ...(labelLong ? { label_long: labelLong } : {}),
-    ...(archetype ? { archetype } : {}),
-    ...(categories.length ? { categories } : {}),
-    ...(themeFocus.length ? { theme_focus: themeFocus } : {}),
-    ...(riskStyle ? { risk_style: riskStyle } : {}),
-    ...(confidence != null ? { confidence } : {}),
-    ...(evidence.length ? { evidence } : {}),
-    ...(notes ? { notes } : {}),
-  };
-}
-
-function parseProfileJson(raw: string): unknown | null {
+export function parseProfileJson(raw: string): unknown | null {
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -434,6 +583,44 @@ function parseProfileJson(raw: string): unknown | null {
     }
     return null;
   }
+}
+
+export function normalizeWhaleProfile(raw: unknown): WhaleProfile | null {
+  const parsed = whaleProfileOutputSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const archetype = parsed.data.archetype
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  if (!archetype) return null;
+  const categories = normalizeCategoryList(parsed.data.categories ?? []).filter(
+    (entry) => categorySchema.safeParse(entry).success,
+  ).slice(0, 3);
+  const themeFocus = Array.from(
+    new Set(
+      (parsed.data.theme_focus ?? [])
+        .map((entry) => entry.trim().toLowerCase())
+        .filter((entry) => entry.length > 0),
+    ),
+  ).slice(0, 3);
+  const evidence = Array.from(
+    new Set(parsed.data.evidence.map((entry) => entry.trim()).filter(Boolean)),
+  ).slice(0, 4);
+  const notes = parsed.data.notes?.trim() || undefined;
+
+  return {
+    label_short: parsed.data.label_short,
+    label_long: parsed.data.label_long,
+    archetype,
+    ...(categories.length ? { categories } : {}),
+    ...(themeFocus.length ? { theme_focus: themeFocus } : {}),
+    risk_style: parsed.data.risk_style,
+    confidence: parsed.data.confidence,
+    evidence,
+    ...(notes ? { notes } : {}),
+  };
 }
 
 function mapCategory(raw: string): WhaleCategory | null {
@@ -535,6 +722,7 @@ export function mapWhaleMarketToProfileMarket(
   market: WhaleMarketRow,
   nowMs: number = Date.now(),
 ): ProfileTopMarket {
+  const snapshotAt = market.snapshot_at ? market.snapshot_at.toISOString() : null;
   const closeTime = market.close_time ? market.close_time.toISOString() : null;
   const expirationTime = market.expiration_time
     ? market.expiration_time.toISOString()
@@ -564,6 +752,7 @@ export function mapWhaleMarketToProfileMarket(
   return {
     market_id: market.market_id,
     market_title: market.market_title,
+    event_id: market.event_id,
     event_title: market.event_title,
     venue: market.venue,
     category: market.category,
@@ -572,12 +761,15 @@ export function mapWhaleMarketToProfileMarket(
     expiration_time: expirationTime,
     resolved_outcome: market.resolved_outcome,
     is_active: isActive,
-    volume_usd: parseNumber(market.volume_usd),
-    activity_count: market.activity_count,
-    last_activity_at: market.last_activity_at
-      ? market.last_activity_at.toISOString()
-      : null,
-    avg_price: parseNumber(market.avg_price),
+    snapshot_at: snapshotAt,
+    recent_activity: {
+      last_activity_at: market.recent_last_activity_at
+        ? market.recent_last_activity_at.toISOString()
+        : null,
+      volume_usd: parseNumber(market.recent_volume_usd),
+      activity_count: market.recent_activity_count,
+      avg_price: parseNumber(market.recent_avg_price),
+    },
     best_bid: parseNumber(market.best_bid),
     best_ask: parseNumber(market.best_ask),
     last_yes_price: lastYesPrice,
@@ -615,7 +807,6 @@ export function computeProfileSideBias(markets: ProfileTopMarket[]): {
       (market.position_side?.toUpperCase() === "YES"
         ? (market.position_value_usd ??
             market.position_shares ??
-            market.volume_usd ??
             0)
         : 0);
     noValue +=
@@ -624,7 +815,6 @@ export function computeProfileSideBias(markets: ProfileTopMarket[]): {
       (market.position_side?.toUpperCase() === "NO"
         ? (market.position_value_usd ??
             market.position_shares ??
-            market.volume_usd ??
             0)
         : 0);
   }
@@ -696,7 +886,7 @@ function toActivityKind(
 
 function buildProfileInput(
   wallet: WhaleRow,
-  topMarkets: WhaleMarketRow[],
+  currentMarkets: WhaleMarketRow[],
   context: {
     marketLimit: number;
     windowDays: number;
@@ -706,88 +896,36 @@ function buildProfileInput(
     styleGuide: string;
   },
 ): WhaleProfileInput {
-  const now = Date.now();
-  const markets = topMarkets.map((market) =>
-    mapWhaleMarketToProfileMarket(market, now),
+  const allCurrentMarkets = currentMarkets.map((market) =>
+    mapWhaleMarketToProfileMarket(market),
   );
-
-  const totalVolume = markets.reduce(
-    (sum, market) => sum + (market.volume_usd ?? 0),
-    0,
-  );
-  const topVolume = markets[0]?.volume_usd ?? null;
-  const concentration =
-    topVolume != null && totalVolume > 0 ? topVolume / totalVolume : null;
-
-  const { yesValue, noValue, sideRatio, sideBiasLabel } =
-    computeProfileSideBias(markets);
-
-  const concentrationLabel: WhaleProfileInput["summary"]["concentration_label"] =
-    concentration == null
-      ? "unknown"
-      : concentration >= 0.6
-        ? "high"
-        : concentration >= 0.3
-          ? "medium"
-          : "low";
-
-  const categoryCounts = markets.reduce<Record<string, number>>((acc, market) => {
-    const category = market.category?.trim();
-    if (!category) return acc;
-    acc[category] = (acc[category] ?? 0) + 1;
-    return acc;
-  }, {});
-
-  const marketStateCounts = markets.reduce(
-    (acc, market) => {
-      if (market.resolved_outcome) {
-        acc.resolved += 1;
-        return acc;
-      }
-      const status = market.status?.toUpperCase();
-      if (status && status !== "ACTIVE") {
-        acc.ended += 1;
-        return acc;
-      }
-      const closeAt = market.close_time ?? market.expiration_time;
-      if (closeAt && new Date(closeAt).getTime() < now) {
-        acc.ended += 1;
-        return acc;
-      }
-      acc.active += 1;
-      return acc;
-    },
-    { active: 0, ended: 0, resolved: 0 },
-  );
-
-  const eventRollup = new Map<
-    string,
-    { title: string; total: number; count: number }
-  >();
-  for (const market of markets) {
-    const rawTitle = market.event_title?.trim() || market.market_title?.trim();
-    if (!rawTitle) continue;
-    const entry = eventRollup.get(rawTitle) ?? {
-      title: rawTitle,
-      total: 0,
-      count: 0,
-    };
-    entry.total += market.volume_usd ?? 0;
-    entry.count += 1;
-    eventRollup.set(rawTitle, entry);
-  }
-  const topEvents = Array.from(eventRollup.values())
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 3)
-    .map((entry) => ({
-      event_title: entry.title,
-      total_volume_usd: entry.total || null,
-      market_count: entry.count,
-    }));
-
-  const walletKind: WhaleProfileInput["wallet"]["kind"] =
-    wallet.is_safe ? "safe" : "eoa";
-  const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
+  const {
+    topMarkets,
+    currentPortfolio,
+    topEvents,
+    summary,
+  } = summarizeProfileMarkets(allCurrentMarkets, context.marketLimit);
+  const grossExposureUsd = parseNumber(wallet.exposure_usd);
+  const portfolioGrossUsd = currentPortfolio.gross_usd_total;
+  const effectiveGrossUsd =
+    grossExposureUsd != null && grossExposureUsd > 0
+      ? grossExposureUsd
+      : portfolioGrossUsd > 0
+        ? portfolioGrossUsd
+        : null;
+  const effectiveHedgedNotionalUsd = parseNumber(wallet.hedged_notional_usd);
+  const effectiveHedgeRatio =
+    parseNumber(wallet.hedge_ratio) ??
+    (effectiveGrossUsd && effectiveGrossUsd > 0
+      ? clampNumber(
+          Math.max(0, effectiveHedgedNotionalUsd ?? 0) / effectiveGrossUsd,
+          0,
+          1,
+        )
+      : null);
+  const derivedTwoSidedMarkets = allCurrentMarkets.filter(
+    (market) => market.is_two_sided,
+  ).length;
   const ownerRole: WhaleProfileInput["wallet"]["owner_role"] =
     wallet.owner_address ? "signer_wallet" : "unknown";
   const recentSummary = context.recentSummary;
@@ -825,6 +963,9 @@ function buildProfileInput(
     unusual_score: recentSummary?.unusualScore ?? null,
     top_changes: recentTopChanges,
   };
+  const walletKind: WhaleProfileInput["wallet"]["kind"] =
+    wallet.is_safe ? "safe" : "eoa";
+  const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
 
   return {
     context: {
@@ -864,19 +1005,70 @@ function buildProfileInput(
       resolved_count:
         wallet.inferred_total != null ? Number(wallet.inferred_total) : null,
     },
-    exposure_usd: parseNumber(wallet.exposure_usd),
     exposure: {
-      gross_usd: parseNumber(wallet.exposure_usd),
+      gross_usd: effectiveGrossUsd,
       net_imbalance_usd: parseNumber(wallet.net_imbalance_usd),
-      hedged_notional_usd: parseNumber(wallet.hedged_notional_usd),
-      hedge_ratio: parseNumber(wallet.hedge_ratio),
-      two_sided_markets: wallet.two_sided_markets ?? 0,
+      hedged_notional_usd: effectiveHedgedNotionalUsd,
+      hedge_ratio: effectiveHedgeRatio,
+      two_sided_markets: Math.max(
+        0,
+        Math.trunc(wallet.two_sided_markets ?? derivedTwoSidedMarkets),
+      ),
       posture: resolveExposurePosture({
-        exposureUsd: parseNumber(wallet.exposure_usd),
-        hedgedNotionalUsd: parseNumber(wallet.hedged_notional_usd),
-        hedgeRatio: parseNumber(wallet.hedge_ratio),
-        twoSidedMarkets: wallet.two_sided_markets,
+        exposureUsd: effectiveGrossUsd,
+        hedgedNotionalUsd: effectiveHedgedNotionalUsd,
+        hedgeRatio: effectiveHedgeRatio,
+        twoSidedMarkets: wallet.two_sided_markets ?? derivedTwoSidedMarkets,
       }),
+    },
+    current_portfolio: {
+      ...currentPortfolio,
+      gross_usd_total: effectiveGrossUsd ?? currentPortfolio.gross_usd_total,
+      yes_gross_usd:
+        effectiveGrossUsd != null &&
+        currentPortfolio.gross_usd_total > 0 &&
+        currentPortfolio.yes_gross_usd > 0
+          ? clampNumber(
+              (currentPortfolio.yes_gross_usd / currentPortfolio.gross_usd_total) *
+                effectiveGrossUsd,
+              0,
+              effectiveGrossUsd,
+            )
+          : currentPortfolio.yes_gross_usd,
+      no_gross_usd:
+        effectiveGrossUsd != null &&
+        currentPortfolio.gross_usd_total > 0 &&
+        currentPortfolio.no_gross_usd > 0
+          ? clampNumber(
+              (currentPortfolio.no_gross_usd / currentPortfolio.gross_usd_total) *
+                effectiveGrossUsd,
+              0,
+              effectiveGrossUsd,
+            )
+          : currentPortfolio.no_gross_usd,
+      top_markets_gross_usd:
+        effectiveGrossUsd != null &&
+        currentPortfolio.gross_usd_total > 0 &&
+        currentPortfolio.top_markets_gross_usd > 0
+          ? clampNumber(
+              (currentPortfolio.top_markets_gross_usd /
+                currentPortfolio.gross_usd_total) *
+                effectiveGrossUsd,
+              0,
+              effectiveGrossUsd,
+            )
+          : currentPortfolio.top_markets_gross_usd,
+      omitted_gross_usd:
+        effectiveGrossUsd != null &&
+        currentPortfolio.gross_usd_total > 0 &&
+        currentPortfolio.omitted_gross_usd > 0
+          ? clampNumber(
+              (currentPortfolio.omitted_gross_usd / currentPortfolio.gross_usd_total) *
+                effectiveGrossUsd,
+              0,
+              effectiveGrossUsd,
+            )
+          : currentPortfolio.omitted_gross_usd,
     },
     activity: {
       last_activity_at: wallet.last_activity_at
@@ -887,21 +1079,10 @@ function buildProfileInput(
         wallet.has_holder_activity,
       ),
     },
-    summary: {
-      top_market_concentration: concentration,
-      concentration_label: concentrationLabel,
-      side_bias: {
-        yes: yesValue,
-        no: noValue,
-        ratio: sideRatio,
-      },
-      side_bias_label: sideBiasLabel,
-      category_counts: categoryCounts,
-      market_state_counts: marketStateCounts,
-    },
+    summary,
     top_events: topEvents,
     recent_window: recentWindow,
-    top_markets: markets,
+    top_markets: topMarkets,
   };
 }
 
@@ -933,6 +1114,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const windowDays = Math.max(1, options.windowDays);
   const verbose = Boolean(options.verbose);
   const logEvery = Math.max(1, Math.trunc(options.logEvery ?? 10));
+  const effectiveProfileVersion = `${PROFILE_VERSION}:${policy.promptVersion.trim() || "v1"}`;
   const signalsWindowHours = Math.max(1, policy.selectionSignalsWindowHours);
   let selectRecentLimit = Math.max(0, Math.trunc(policy.selectionRecentLimit));
   let selectPnlLimit = Math.max(0, Math.trunc(policy.selectionPnlLimit));
@@ -1237,120 +1419,131 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     }
     const marketRows = await client.query<WhaleMarketRow>(
       `
-        select
-          ranked.*,
-          pos.outcome_side as position_side,
-          pos.has_yes_position,
-          pos.has_no_position,
-          pos.shares as position_shares,
-          pos.size_usd as position_value_usd,
-          pos.price as position_price,
-          pos.yes_shares as yes_position_shares,
-          pos.yes_size_usd as yes_position_value_usd,
-          pos.yes_price as yes_position_price,
-          pos.no_shares as no_position_shares,
-          pos.no_size_usd as no_position_value_usd,
-          pos.no_price as no_position_price
-        from (
+        with latest_snapshots as (
+          select
+            ws.wallet_id,
+            ws.venue,
+            max(ws.snapshot_at) as snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = any($1::uuid[])
+          group by ws.wallet_id, ws.venue
+        ),
+        recent_activity as (
           select
             wa.wallet_id,
             wa.market_id,
-            um.title as market_title,
-            ue.title as event_title,
             wa.venue,
-            um.category,
-            um.status,
-            um.close_time,
-            um.expiration_time,
-            um.resolved_outcome,
-            sum(wa.size_usd) as volume_usd,
-            count(*)::int as activity_count,
-            max(wa.occurred_at) as last_activity_at,
+            sum(wa.size_usd) as recent_volume_usd,
+            count(*)::int as recent_activity_count,
+            max(wa.occurred_at) as recent_last_activity_at,
             case
               when sum(wa.delta_shares) is null or sum(wa.delta_shares) = 0
                 then null
               else sum(wa.price * wa.delta_shares) / nullif(sum(wa.delta_shares), 0)
-            end as avg_price,
-            um.best_bid,
-            um.best_ask,
-            um.last_price,
-            row_number() over (
-              partition by wa.wallet_id
-              order by sum(wa.size_usd) desc nulls last,
-                       count(*) desc,
-                       max(wa.occurred_at) desc
-            ) as rn
+            end as recent_avg_price
           from wallet_activity_events wa
-          left join unified_markets um on um.id = wa.market_id
-          left join unified_events ue on ue.id = um.event_id
           where wa.wallet_id = any($1::uuid[])
             and wa.activity_type in ('delta', 'trade', 'holder')
-            and wa.occurred_at >= now() - ($3::text || ' days')::interval
-          group by
-            wa.wallet_id,
-            wa.market_id,
-            um.title,
-            ue.title,
-            wa.venue,
-            um.category,
-            um.best_bid,
-            um.best_ask,
-            um.last_price,
-            um.status,
-            um.close_time,
-            um.expiration_time,
-            um.resolved_outcome
-        ) ranked
-        left join lateral (
-          with latest_positions as (
-            select distinct on (upper(coalesce(ws.outcome_side, '')))
-              upper(coalesce(ws.outcome_side, '')) as outcome_side,
-              ws.shares,
-              ws.size_usd,
-              ws.price
-            from wallet_position_snapshots ws
-            where ws.wallet_id = ranked.wallet_id
-              and ws.market_id = ranked.market_id
-              and ws.shares > 0
-            order by
-              upper(coalesce(ws.outcome_side, '')),
-              ws.snapshot_at desc,
-              ws.size_usd desc nulls last,
-              ws.shares desc
-          )
+            and wa.occurred_at >= now() - ($2::text || ' days')::interval
+          group by wa.wallet_id, wa.market_id, wa.venue
+        ),
+        current_rows as (
           select
-            case
-              when bool_or(lp.outcome_side = 'YES')
-               and bool_or(lp.outcome_side = 'NO')
-                then 'BOTH'
-              when bool_or(lp.outcome_side = 'YES')
-                then 'YES'
-              when bool_or(lp.outcome_side = 'NO')
-                then 'NO'
-              else null
-            end as outcome_side,
-            bool_or(lp.outcome_side = 'YES') as has_yes_position,
-            bool_or(lp.outcome_side = 'NO') as has_no_position,
-            sum(lp.shares) as shares,
-            sum(lp.size_usd) as size_usd,
-            case
-              when bool_or(lp.outcome_side = 'YES')
-               and bool_or(lp.outcome_side = 'NO')
-                then null
-              else max(lp.price)
-            end as price,
-            sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
-            sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
-            max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
-            sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
-            sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
-            max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
-          from latest_positions lp
-        ) pos on true
-        where ranked.rn <= $2
-        order by ranked.wallet_id, ranked.rn
+            ws.wallet_id,
+            ws.market_id,
+            ws.venue,
+            ws.snapshot_at,
+            upper(coalesce(ws.outcome_side, '')) as normalized_outcome_side,
+            ws.shares,
+            ws.size_usd,
+            ws.price
+          from wallet_position_snapshots ws
+          join latest_snapshots ls
+            on ls.wallet_id = ws.wallet_id
+           and ls.venue = ws.venue
+           and ls.snapshot_at = ws.snapshot_at
+          where ws.wallet_id = any($1::uuid[])
+            and ws.shares > 0
+        )
+        select
+          cr.wallet_id,
+          cr.market_id,
+          um.event_id,
+          um.title as market_title,
+          ue.title as event_title,
+          cr.venue,
+          um.category,
+          um.status,
+          um.close_time,
+          um.expiration_time,
+          um.resolved_outcome,
+          max(cr.snapshot_at) as snapshot_at,
+          ra.recent_volume_usd,
+          coalesce(ra.recent_activity_count, 0)::int as recent_activity_count,
+          ra.recent_last_activity_at,
+          ra.recent_avg_price,
+          um.best_bid,
+          um.best_ask,
+          um.last_price,
+          case
+            when bool_or(cr.normalized_outcome_side = 'YES')
+             and bool_or(cr.normalized_outcome_side = 'NO')
+              then 'BOTH'
+            when bool_or(cr.normalized_outcome_side = 'YES')
+              then 'YES'
+            when bool_or(cr.normalized_outcome_side = 'NO')
+              then 'NO'
+            else null
+          end as position_side,
+          bool_or(cr.normalized_outcome_side = 'YES') as has_yes_position,
+          bool_or(cr.normalized_outcome_side = 'NO') as has_no_position,
+          sum(cr.shares) as position_shares,
+          sum(cr.size_usd) as position_value_usd,
+          case
+            when bool_or(cr.normalized_outcome_side = 'YES')
+             and bool_or(cr.normalized_outcome_side = 'NO')
+              then null
+            else max(cr.price)
+          end as position_price,
+          sum(case when cr.normalized_outcome_side = 'YES' then cr.shares else 0 end) as yes_position_shares,
+          sum(case when cr.normalized_outcome_side = 'YES' then cr.size_usd else 0 end) as yes_position_value_usd,
+          max(case when cr.normalized_outcome_side = 'YES' then cr.price end) as yes_position_price,
+          sum(case when cr.normalized_outcome_side = 'NO' then cr.shares else 0 end) as no_position_shares,
+          sum(case when cr.normalized_outcome_side = 'NO' then cr.size_usd else 0 end) as no_position_value_usd,
+          max(case when cr.normalized_outcome_side = 'NO' then cr.price end) as no_position_price
+        from current_rows cr
+        left join unified_markets um on um.id = cr.market_id
+        left join unified_events ue on ue.id = um.event_id
+        left join recent_activity ra
+          on ra.wallet_id = cr.wallet_id
+         and ra.market_id = cr.market_id
+         and ra.venue = cr.venue
+        group by
+          cr.wallet_id,
+          cr.market_id,
+          um.event_id,
+          um.title,
+          ue.title,
+          cr.venue,
+          um.category,
+          um.status,
+          um.close_time,
+          um.expiration_time,
+          um.resolved_outcome,
+          ra.recent_volume_usd,
+          ra.recent_activity_count,
+          ra.recent_last_activity_at,
+          ra.recent_avg_price,
+          um.best_bid,
+          um.best_ask,
+          um.last_price
+        order by
+          cr.wallet_id,
+          sum(cr.size_usd) desc nulls last,
+          sum(cr.shares) desc nulls last,
+          coalesce(um.title, cr.market_id) asc
       `,
-      [whaleIds, marketLimit, windowDays],
+      [whaleIds, windowDays],
     );
     console.log("[whale-profile] top markets loaded", {
       wallets: whaleIds.length,
@@ -1405,9 +1598,9 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           rankSignal: whale.rank_signal,
         });
       }
-      const topMarkets = marketMap.get(whale.id) ?? [];
+      const currentMarkets = marketMap.get(whale.id) ?? [];
       const recentSummary = recentSummaryMap.get(whale.id) ?? null;
-      const input = buildProfileInput(whale, topMarkets, {
+      const input = buildProfileInput(whale, currentMarkets, {
         marketLimit,
         windowDays,
         recentSummary,
@@ -1420,7 +1613,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       if (
         !options.force &&
         existing?.featuresHash === featuresHash &&
-        existing.version === PROFILE_VERSION
+        existing.version === effectiveProfileVersion
       ) {
         skipped += 1;
         if (verbose) {
@@ -1443,21 +1636,22 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         "You are a market analyst writing concise, user-facing whale profiles. Return strict JSON only.";
       const user = `Create a compact whale profile for display in a product UI.
 Output JSON with:
-- label_short: short name (<= 40 chars), no venue names, no chain names.
-- label_long: 1–2 sentences (<= 220 chars) summarizing the main behavior pattern.
+- label_short: short name (target <= 36 chars, hard max 56), no venue names, no chain names.
+- label_long: 1–2 sentences (target <= 200 chars, hard max 320) summarizing the main behavior pattern.
 - archetype: short snake_case tag.
 - categories: array of 1–3 from [sports, politics, crypto, finance, entertainment, tech, macro, social, other].
 - theme_focus: array of up to 3 lowercase tags.
-- risk_style: short phrase (<= 60 chars).
+- risk_style: short phrase (target <= 54 chars, hard max 96).
 - confidence: number 0–1.
 - evidence: array of 2–4 short market or event titles (prefer event titles if multiple markets share the same event).
-- notes: optional 2–3 sentences (<= 300 chars) with extra context for the detail view.
+- notes: optional 2–3 sentences (target <= 220 chars, hard max 420) with extra context for the detail view.
 
 Rules:
 - Use ONLY provided data. Do NOT mention wallet IDs or addresses.
 - No claims of insider or informed intent.
 - Be factual, pattern-based, and neutral in tone.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
+- Stay comfortably below the hard limits; exact character counting is approximate.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
 - Exposure fields:
@@ -1469,16 +1663,25 @@ Rules:
 - Do not describe a wallet as strongly bullish or bearish from gross exposure alone.
 - If exposure.posture is partially_hedged or heavily_hedged, say that the wallet uses offsetting or two-sided positioning.
 - If net imbalance is much smaller than gross exposure, emphasize balanced or hedged positioning over conviction.
+- current_portfolio summarizes the full current tracked portfolio.
+  - current_portfolio.market_count_total is the total number of currently held markets.
+  - current_portfolio.top_markets_gross_usd is the gross value represented by top_markets.
+  - current_portfolio.omitted_market_count and omitted_gross_usd describe the held tail not listed in top_markets.
 - recent_window summarizes the last recent_window.window_hours hours.
   Use it to explain what changed recently (net change, many exits, spikes),
   but treat it as secondary to the broader 30d pattern.
 - recent_window.top_changes are already aggregated per market/outcome;
   avoid repeating identical markets.
+- top_markets are the largest current held positions, ordered by current gross value.
+- top_events are rolled up from current held positions, not from recent traded volume.
 - Price fields:
   - top_markets.last_yes_price is the YES price from the market.
   - top_markets.held_odds is the side-aware price (YES/NO) for the held position.
     It is null when top_markets.position_side is BOTH.
   - top_changes.odds is also side-aware for the change row.
+- Recent activity fields:
+  - top_markets.recent_activity.last_activity_at is the latest recent activity timestamp for that held market.
+  - top_markets.recent_activity.volume_usd and top_markets.recent_activity.activity_count describe recent activity on that held market.
 - Position fields:
   - top_markets.position_side can be YES, NO, or BOTH.
   - BOTH means the wallet currently holds both YES and NO in that market.
@@ -1489,17 +1692,17 @@ Rules:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
- - Prefer evidence from top_events when available; fall back to top_markets.
+- Prefer evidence from top_events when available; fall back to top_markets or recent_window.top_changes.
 - Use summary.side_bias_label and summary.concentration_label as hints.
 - If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, mention two-sided or hedged positioning unless one side is clearly negligible.
 - Style guide: ${policy.styleGuide}
-- Profile revision: ${PROFILE_VERSION}
+- Profile revision: ${effectiveProfileVersion}
 - Never suggest insider information.
 
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
+Extra constraint: Use the lower end of the soft targets. Keep notes <= 110 chars and prefer shorter labels.`;
 
       let profileRaw = "";
       try {
@@ -1562,7 +1765,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         }
       }
 
-      let normalized = normalizeProfile(parsed);
+      let normalized = normalizeWhaleProfile(parsed);
       if (!normalized) {
         failed += 1;
         console.warn("[whale-profile] invalid json", {
@@ -1597,7 +1800,7 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
         if (verbose) {
           console.log("[whale-profile] wallet dry-run update", {
             walletId: whale.id,
-            markets: topMarkets.length,
+            markets: currentMarkets.length,
           });
         } else if (processed % logEvery === 0) {
           console.log("[whale-profile] progress", {
@@ -1634,14 +1837,14 @@ Extra constraint: Keep notes <= 120 chars and prefer shorter labels.`;
           JSON.stringify(normalized),
           featuresHash,
           policy.model,
-          PROFILE_VERSION,
+          effectiveProfileVersion,
         ],
       );
       updated += 1;
       if (verbose) {
         console.log("[whale-profile] wallet updated", {
           walletId: whale.id,
-          markets: topMarkets.length,
+          markets: currentMarkets.length,
         });
       } else if (processed % logEvery === 0) {
         console.log("[whale-profile] progress", {

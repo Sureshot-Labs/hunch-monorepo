@@ -51,6 +51,9 @@ import {
 import {
   computeProfileSideBias,
   mapWhaleMarketToProfileMarket,
+  normalizeWhaleProfile,
+  parseProfileJson,
+  summarizeProfileMarkets,
 } from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import { walletActivitySignalsQuerySchema } from "./schemas/wallet-intel.js";
@@ -1169,6 +1172,7 @@ const tests: TestCase[] = [
         {
           wallet_id: "wallet-1",
           market_id: "market-1",
+          event_id: "event-1",
           market_title: "ETH above threshold?",
           event_title: "ETH above threshold?",
           venue: "limitless",
@@ -1177,10 +1181,11 @@ const tests: TestCase[] = [
           close_time: new Date("2026-01-12T13:00:00.000Z"),
           expiration_time: new Date("2026-01-12T13:00:00.000Z"),
           resolved_outcome: null,
-          volume_usd: "1.484",
-          activity_count: 2,
-          last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
-          avg_price: "0.742",
+          snapshot_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_volume_usd: "1.484",
+          recent_activity_count: 2,
+          recent_last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_avg_price: "0.742",
           best_bid: "0.742",
           best_ask: "0.742",
           last_price: "0.742",
@@ -1215,6 +1220,7 @@ const tests: TestCase[] = [
         {
           wallet_id: "wallet-1",
           market_id: "market-1",
+          event_id: "event-1",
           market_title: "ETH above threshold?",
           event_title: "ETH above threshold?",
           venue: "limitless",
@@ -1223,10 +1229,11 @@ const tests: TestCase[] = [
           close_time: new Date("2026-01-12T13:00:00.000Z"),
           expiration_time: new Date("2026-01-12T13:00:00.000Z"),
           resolved_outcome: null,
-          volume_usd: "1.484",
-          activity_count: 2,
-          last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
-          avg_price: "0.742",
+          snapshot_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_volume_usd: "1.484",
+          recent_activity_count: 2,
+          recent_last_activity_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_avg_price: "0.742",
           best_bid: "0.742",
           best_ask: "0.742",
           last_price: "0.742",
@@ -1251,6 +1258,132 @@ const tests: TestCase[] = [
       assert.equal(summary.noValue, 0.258);
       assert.ok(Math.abs((summary.sideRatio ?? 0) - 0.742) < 1e-9);
       assert.equal(summary.sideBiasLabel, "mostly_yes");
+    },
+  },
+  {
+    name: "whale profile current portfolio summary tracks omitted tail from current holdings",
+    run: () => {
+      const now = new Date("2026-03-05T21:00:00.000Z").getTime();
+      const large = mapWhaleMarketToProfileMarket(
+        {
+          wallet_id: "wallet-1",
+          market_id: "market-large",
+          event_id: "event-1",
+          market_title: "Iran regime fall by March 31?",
+          event_title: "Iran regime fall by March 31?",
+          venue: "polymarket",
+          category: "politics",
+          status: "ACTIVE",
+          close_time: new Date("2026-03-31T23:59:59.000Z"),
+          expiration_time: new Date("2026-03-31T23:59:59.000Z"),
+          resolved_outcome: null,
+          snapshot_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_volume_usd: "10",
+          recent_activity_count: 1,
+          recent_last_activity_at: new Date("2026-03-05T19:00:00.000Z"),
+          recent_avg_price: "0.84",
+          best_bid: "0.15",
+          best_ask: "0.16",
+          last_price: "0.16",
+          position_side: "NO",
+          has_yes_position: false,
+          has_no_position: true,
+          position_shares: "1000",
+          position_value_usd: "840",
+          position_price: "0.84",
+          yes_position_shares: "0",
+          yes_position_value_usd: "0",
+          yes_position_price: null,
+          no_position_shares: "1000",
+          no_position_value_usd: "840",
+          no_position_price: "0.84",
+        } as never,
+        now,
+      );
+      const small = mapWhaleMarketToProfileMarket(
+        {
+          wallet_id: "wallet-1",
+          market_id: "market-small",
+          event_id: "event-2",
+          market_title: "Fed decision in March?",
+          event_title: "Fed decision in March?",
+          venue: "polymarket",
+          category: "macro",
+          status: "ACTIVE",
+          close_time: new Date("2026-03-19T18:00:00.000Z"),
+          expiration_time: new Date("2026-03-19T18:00:00.000Z"),
+          resolved_outcome: null,
+          snapshot_at: new Date("2026-03-05T21:00:00.000Z"),
+          recent_volume_usd: "50",
+          recent_activity_count: 4,
+          recent_last_activity_at: new Date("2026-03-05T20:00:00.000Z"),
+          recent_avg_price: "0.63",
+          best_bid: "0.62",
+          best_ask: "0.63",
+          last_price: "0.63",
+          position_side: "YES",
+          has_yes_position: true,
+          has_no_position: false,
+          position_shares: "100",
+          position_value_usd: "63",
+          position_price: "0.63",
+          yes_position_shares: "100",
+          yes_position_value_usd: "63",
+          yes_position_price: "0.63",
+          no_position_shares: "0",
+          no_position_value_usd: "0",
+          no_position_price: null,
+        } as never,
+        now,
+      );
+
+      const summary = summarizeProfileMarkets([small, large], 1);
+      assert.equal(summary.topMarkets.length, 1);
+      assert.equal(summary.topMarkets[0]?.market_id, "market-large");
+      assert.equal(summary.currentPortfolio.market_count_total, 2);
+      assert.equal(summary.currentPortfolio.event_count_total, 2);
+      assert.equal(summary.currentPortfolio.gross_usd_total, 903);
+      assert.equal(summary.currentPortfolio.top_markets_gross_usd, 840);
+      assert.equal(summary.currentPortfolio.omitted_market_count, 1);
+      assert.equal(summary.currentPortfolio.omitted_gross_usd, 63);
+      assert.ok(Math.abs((summary.currentPortfolio.largest_position_share ?? 0) - (840 / 903)) < 1e-9);
+      assert.equal(summary.summary.side_bias_label, "mostly_no");
+      assert.equal(summary.topEvents[0]?.event_title, "Iran regime fall by March 31?");
+      assert.equal(summary.topEvents[0]?.gross_usd, 840);
+    },
+  },
+  {
+    name: "whale profile parser accepts wrapped strict json and normalizes output",
+    run: () => {
+      const raw = `Profile follows.\n{\n  "label_short": " Two-sided ETH hourly dabbler ",\n  "label_long": "Minimal, one-off activity in a single ETH hourly threshold market, holding both YES and NO.",\n  "archetype": "two-sided dabbler",\n  "categories": ["crypto", "blockchain"],\n  "theme_focus": [" ETH ", "hourly", "eth"],\n  "risk_style": "Small, mixed hourly exposure",\n  "confidence": "0.42",\n  "evidence": ["ETH above threshold?", "ETH above threshold?"],\n  "notes": " Short-lived, two-sided activity. ",\n  "extra": "ignored"\n}`;
+      const parsed = parseProfileJson(raw);
+      const normalized = normalizeWhaleProfile(parsed);
+      assert.ok(normalized);
+      assert.equal(normalized?.label_short, "Two-sided ETH hourly dabbler");
+      assert.equal(normalized?.archetype, "two_sided_dabbler");
+      assert.deepEqual(normalized?.categories, ["crypto"]);
+      assert.deepEqual(normalized?.theme_focus, ["eth", "hourly"]);
+      assert.deepEqual(normalized?.evidence, ["ETH above threshold?"]);
+      assert.equal(normalized?.confidence, 0.42);
+      assert.equal(normalized?.notes, "Short-lived, two-sided activity.");
+    },
+  },
+  {
+    name: "whale profile parser rejects schema-invalid json",
+    run: () => {
+      const parsed = parseProfileJson(
+        JSON.stringify({
+          label_short: "Bad profile",
+          label_long: "Has an unexpected extra key.",
+          archetype: "bad_profile",
+          categories: ["crypto"],
+          theme_focus: ["eth"],
+          risk_style: "Mixed",
+          confidence: 1.5,
+          evidence: ["ETH above threshold?"],
+        }),
+      );
+      assert.equal(normalizeWhaleProfile(parsed), null);
     },
   },
 ];
