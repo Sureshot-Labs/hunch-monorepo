@@ -15,7 +15,10 @@ import {
   type SolanaTokenBalance,
 } from "./services/solana-rpc.js";
 import { syncPositionsForUserWallet } from "./services/positions-sync.js";
-import { normalizeOutcomeSideForStorage } from "./services/wallet-intel-helpers.js";
+import {
+  normalizeOutcomeSideForStorage,
+  shouldSuppressLegacySideTransitionDelta,
+} from "./services/wallet-intel-helpers.js";
 import {
   createWalletIntelRetryTelemetry,
   type WalletIntelRetryTelemetry,
@@ -1095,6 +1098,11 @@ async function applySnapshotDeltas(
   const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
   const currentMap = new Map<string, typeof currentRows.rows[number]>();
   const prevMap = new Map<string, typeof prevRows.rows[number]>();
+  const currentRowsByMarket = new Map<
+    string,
+    Array<typeof currentRows.rows[number]>
+  >();
+  const prevRowsByMarket = new Map<string, Array<typeof prevRows.rows[number]>>();
 
   const makeKey = (row: {
     wallet_id: string;
@@ -1103,18 +1111,82 @@ async function applySnapshotDeltas(
     outcome_side: string | null;
   }) =>
     `${row.wallet_id}|${row.venue}|${row.market_id}|${normalizeOutcomeSideForStorage(row.outcome_side)}`;
+  const makeMarketKey = (row: {
+    wallet_id: string;
+    venue: string;
+    market_id: string;
+  }) => `${row.wallet_id}|${row.venue}|${row.market_id}`;
 
   for (const row of currentRows.rows) {
     currentMap.set(makeKey(row), row);
+    const marketKey = makeMarketKey(row);
+    const list = currentRowsByMarket.get(marketKey) ?? [];
+    list.push(row);
+    currentRowsByMarket.set(marketKey, list);
   }
   for (const row of prevRows.rows) {
     prevMap.set(makeKey(row), row);
+    const marketKey = makeMarketKey(row);
+    const list = prevRowsByMarket.get(marketKey) ?? [];
+    list.push(row);
+    prevRowsByMarket.set(marketKey, list);
   }
 
   const keys = new Set<string>([
     ...currentMap.keys(),
     ...prevMap.keys(),
   ]);
+  const marketKeys = new Set<string>([
+    ...currentRowsByMarket.keys(),
+    ...prevRowsByMarket.keys(),
+  ]);
+  const suppressedLegacyTransitionMarkets = new Set<string>();
+
+  for (const marketKey of marketKeys) {
+    const currentMarketRows = currentRowsByMarket.get(marketKey) ?? [];
+    const previousMarketRows = prevRowsByMarket.get(marketKey) ?? [];
+    if (
+      !shouldSuppressLegacySideTransitionDelta({
+        currentRows: currentMarketRows,
+        previousRows: previousMarketRows,
+      })
+    ) {
+      continue;
+    }
+    suppressedLegacyTransitionMarkets.add(marketKey);
+
+    const legacyPrevious = previousMarketRows.find(
+      (row) => normalizeOutcomeSideForStorage(row.outcome_side) === "",
+    );
+    if (!legacyPrevious) continue;
+    const prevShares = legacyPrevious.shares ? Number(legacyPrevious.shares) : 0;
+    if (!Number.isFinite(prevShares) || prevShares <= 0) continue;
+
+    const snapshotSource = parseMetadataSource(legacyPrevious.metadata);
+    await upsertWalletVenue(client, legacyPrevious.wallet_id, legacyPrevious.venue as Venue);
+    await upsertWalletPositionSnapshot(client, {
+      walletId: legacyPrevious.wallet_id,
+      venue: legacyPrevious.venue,
+      marketId: legacyPrevious.market_id,
+      outcomeSide: legacyPrevious.outcome_side ?? null,
+      shares: 0,
+      sizeUsd: 0,
+      price:
+        legacyPrevious.price != null && Number.isFinite(Number(legacyPrevious.price))
+          ? Number(legacyPrevious.price)
+          : null,
+      metadata: {
+        ...((legacyPrevious.metadata ?? {}) as Record<string, unknown>),
+        source: "snapshot_transition_reset",
+        snapshotSource,
+        prevShares: Number(prevShares.toFixed(9)),
+        currShares: 0,
+        deltaShares: 0,
+        suppressedLegacyTransition: true,
+      },
+      snapshotAt: inputs.occurredAt,
+    });
+  }
 
   const inserts = 0;
   let updates = 0;
@@ -1122,6 +1194,12 @@ async function applySnapshotDeltas(
   for (const key of keys) {
     const current = currentMap.get(key);
     const previous = prevMap.get(key);
+    const marketKey = current
+      ? makeMarketKey(current)
+      : previous
+        ? makeMarketKey(previous)
+        : null;
+    if (marketKey && suppressedLegacyTransitionMarkets.has(marketKey)) continue;
     const walletId = current?.wallet_id ?? previous?.wallet_id;
     if (!walletId) continue;
     if (!prevWallets.has(walletId)) continue;
@@ -2895,9 +2973,10 @@ async function main() {
   try {
     const locked = await acquireRefreshAdvisoryLock(lockClient);
     if (!locked) {
-      throw new Error(
-        "Another wallet intel refresh is already running; advisory lock is held.",
+      console.warn(
+        "[wallets:intel:refresh] skipped; advisory lock is already held",
       );
+      return;
     }
 
     const [refreshPolicy, whalePolicy] = await Promise.all([

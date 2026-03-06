@@ -524,22 +524,23 @@ export async function fetchMarketHolderData(inputs: {
               : (inputs.telemetry?.holdersAlchemyBase ?? null),
           ),
         ]);
-        for (const owner of yesOwners) {
-          holderEntries.push({
-            wallet: owner.wallet,
-            side: "YES",
-            shares: owner.shares,
-          });
-        }
-        for (const owner of noOwners) {
-          holderEntries.push({
-            wallet: owner.wallet,
-            side: "NO",
-            shares: owner.shares,
-          });
-        }
-        if (holderEntries.length === 0 && alchemyFailed) {
+        if (alchemyFailed) {
           source = "unavailable";
+        } else {
+          for (const owner of yesOwners) {
+            holderEntries.push({
+              wallet: owner.wallet,
+              side: "YES",
+              shares: owner.shares,
+            });
+          }
+          for (const owner of noOwners) {
+            holderEntries.push({
+              wallet: owner.wallet,
+              side: "NO",
+              shares: owner.shares,
+            });
+          }
         }
       }
     }
@@ -579,22 +580,23 @@ export async function fetchMarketHolderData(inputs: {
     };
     const yesOwners = await safeFetch(yesMint);
     const noOwners = await safeFetch(noMint);
-    for (const owner of yesOwners) {
-      holderEntries.push({
-        wallet: owner.wallet,
-        side: "YES",
-        shares: owner.shares,
-      });
-    }
-    for (const owner of noOwners) {
-      holderEntries.push({
-        wallet: owner.wallet,
-        side: "NO",
-        shares: owner.shares,
-      });
-    }
-    if (holderEntries.length === 0 && solanaFailed) {
+    if (solanaFailed) {
       source = "unavailable";
+    } else {
+      for (const owner of yesOwners) {
+        holderEntries.push({
+          wallet: owner.wallet,
+          side: "YES",
+          shares: owner.shares,
+        });
+      }
+      for (const owner of noOwners) {
+        holderEntries.push({
+          wallet: owner.wallet,
+          side: "NO",
+          shares: owner.shares,
+        });
+      }
     }
   }
 

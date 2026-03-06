@@ -41,6 +41,7 @@ import { fetchMarketHolderData } from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
   normalizeOutcomeSideForStorage,
+  shouldSuppressLegacySideTransitionDelta,
 } from "./services/wallet-intel-helpers.js";
 import {
   MM_HEDGE_RATIO_MIN,
@@ -56,7 +57,10 @@ import {
   summarizeProfileMarkets,
 } from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
-import { walletActivitySignalsQuerySchema } from "./schemas/wallet-intel.js";
+import {
+  walletActivitySignalsQuerySchema,
+  walletPositionsQuerySchema,
+} from "./schemas/wallet-intel.js";
 
 type TestCase = {
   name: string;
@@ -957,6 +961,38 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "legacy blank-side transition suppresses first side-safe delta generation",
+    run: () => {
+      assert.equal(
+        shouldSuppressLegacySideTransitionDelta({
+          currentRows: [
+            { outcome_side: "YES" },
+            { outcome_side: "NO" },
+          ],
+          previousRows: [{ outcome_side: "" }],
+        }),
+        true,
+      );
+      assert.equal(
+        shouldSuppressLegacySideTransitionDelta({
+          currentRows: [{ outcome_side: "YES" }],
+          previousRows: [{ outcome_side: "YES" }],
+        }),
+        false,
+      );
+      assert.equal(
+        shouldSuppressLegacySideTransitionDelta({
+          currentRows: [{ outcome_side: "YES" }],
+          previousRows: [
+            { outcome_side: "" },
+            { outcome_side: "YES" },
+          ],
+        }),
+        false,
+      );
+    },
+  },
+  {
     name: "mm helper uses hedge ratio, two-sided markets, and whale threshold gate",
     run: () => {
       const refreshPolicy = {
@@ -1029,6 +1065,23 @@ const tests: TestCase[] = [
       });
       assert.equal(parsedTrue.excludeMmLike, true);
       assert.equal(parsedTrue.includeAttribution, true);
+    },
+  },
+  {
+    name: "wallet positions query parses includeSmall safely",
+    run: () => {
+      const defaults = walletPositionsQuerySchema.parse({});
+      assert.equal(defaults.includeSmall, false);
+
+      const parsedTrue = walletPositionsQuerySchema.parse({
+        includeSmall: "true",
+      });
+      assert.equal(parsedTrue.includeSmall, true);
+
+      const parsedFalse = walletPositionsQuerySchema.parse({
+        includeSmall: "0",
+      });
+      assert.equal(parsedFalse.includeSmall, false);
     },
   },
   {
@@ -1112,6 +1165,227 @@ const tests: TestCase[] = [
         globalThis.fetch = originalFetch;
         env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
         env.limitlessConditionalTokensAddress = originalLimitlessContract;
+      }
+    },
+  },
+  {
+    name: "market holder fetch rejects partial alchemy side coverage",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress = "0xlimitless";
+
+      globalThis.fetch = async (input: string | URL | Request) => {
+        const url = String(input);
+        if (!url.includes("getOwnersForNFT")) {
+          throw new Error(`unexpected fetch url: ${url}`);
+        }
+        if (url.includes("tokenId=yes-token")) {
+          throw new Error("transient alchemy failure");
+        }
+        return new Response(
+          JSON.stringify({
+            owners: [
+              {
+                ownerAddress: "0xabc",
+                tokenBalances: [{ balance: "2" }],
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:yes-token",
+                  token_no: "limitless:no-token",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "limitless:yes-token", side: "YES" },
+                { token_id: "limitless:no-token", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3 || queryCount === 4) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "limitless:market-1",
+          limit: 10,
+          client: client as never,
+        });
+
+        assert.equal(result.source, "unavailable");
+        assert.deepEqual(result.holders, []);
+        assert.deepEqual(result.tokenIdsBySide, {
+          YES: "limitless:yes-token",
+          NO: "limitless:no-token",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+      }
+    },
+  },
+  {
+    name: "market holder fetch rejects partial solana side coverage",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalSolanaRpcUrls = env.solanaRpcUrls;
+      const originalSolanaRpcTimeoutMs = env.solanaRpcTimeoutMs;
+
+      env.solanaRpcUrls = ["https://solana.example"];
+      env.solanaRpcTimeoutMs = 1_000;
+
+      globalThis.fetch = async (_input, init) => {
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        const method = body?.method;
+        const params = body?.params;
+        if (method === "getTokenLargestAccounts" && params?.[0] === "mint-yes") {
+          return new Response("rpc failure", {
+            status: 500,
+            statusText: "Internal Server Error",
+          });
+        }
+        if (method === "getTokenLargestAccounts" && params?.[0] === "mint-no") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: [
+                  {
+                    address: "acct-no",
+                    amount: "1000",
+                    decimals: 3,
+                    uiAmountString: "1",
+                  },
+                ],
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        if (method === "getMultipleAccounts") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: [
+                  {
+                    data: {
+                      parsed: {
+                        info: {
+                          owner: "owner-no",
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        throw new Error(`unexpected solana rpc method: ${String(method)}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "kalshi:market-1",
+                  venue: "kalshi",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "mint-yes",
+                  token_no: "mint-no",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "mint-yes", side: "YES" },
+                { token_id: "mint-no", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3 || queryCount === 4) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "kalshi:market-1",
+          limit: 10,
+          client: client as never,
+        });
+
+        assert.equal(result.source, "unavailable");
+        assert.deepEqual(result.holders, []);
+        assert.deepEqual(result.tokenIdsBySide, {
+          YES: "mint-yes",
+          NO: "mint-no",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.solanaRpcUrls = originalSolanaRpcUrls;
+        env.solanaRpcTimeoutMs = originalSolanaRpcTimeoutMs;
       }
     },
   },

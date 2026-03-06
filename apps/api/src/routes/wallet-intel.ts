@@ -3075,19 +3075,23 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         params.push(query.since);
       }
 
-      const minUsdParam = idx++;
-      params.push(env.walletIntelMinPositionUsd);
-      const minSharesParam = idx++;
-      params.push(env.walletIntelMinPositionShares);
-      const positionFilterSql = `
-        (
-          case
-            when ws.size_usd is not null then ws.size_usd >= $${minUsdParam}
-            when ws.shares is not null then ws.shares >= $${minSharesParam}
-            else true
-          end
-        )
-      `;
+      const positionFilterSql = query.includeSmall
+        ? "true"
+        : (() => {
+            const minUsdParam = idx++;
+            params.push(env.walletIntelMinPositionUsd);
+            const minSharesParam = idx++;
+            params.push(env.walletIntelMinPositionShares);
+            return `
+              (
+                case
+                  when ws.size_usd is not null then ws.size_usd >= $${minUsdParam}
+                  when ws.shares is not null then ws.shares >= $${minSharesParam}
+                  else true
+                end
+              )
+            `;
+          })();
 
       params.push(query.limit + 1, query.offset);
       const limitParam = idx++;
