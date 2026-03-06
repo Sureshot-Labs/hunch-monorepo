@@ -677,11 +677,27 @@ export async function fetchReferralFeeTotalsByChain(
 
 export async function fetchQualifiedReferralCount(
   pool: DbQuery,
-  inputs: { userId: string },
+  inputs: { userId: string; threshold: number },
 ): Promise<number> {
   const { rows } = await pool.query<{ total: string }>(
-    `select count(*)::text as total from referrals where referrer_user_id = $1 and status = 'qualified'`,
-    [inputs.userId],
+    `
+      with points as (
+        select user_id, coalesce(sum(points_awarded), 0) as points
+        from volume_events
+        group by user_id
+      )
+      select count(*)::text as total
+      from referrals r
+      left join points pref
+        on pref.user_id = r.referrer_user_id
+      left join points prefed
+        on prefed.user_id = r.referred_user_id
+      where r.referrer_user_id = $1
+        and r.status <> 'blocked'
+        and coalesce(pref.points, 0) >= $2
+        and coalesce(prefed.points, 0) >= $2
+    `,
+    [inputs.userId, inputs.threshold],
   );
   return Number(rows[0]?.total ?? 0);
 }

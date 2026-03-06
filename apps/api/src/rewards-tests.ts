@@ -19,6 +19,10 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  fetchQualifiedReferralCount,
+  markQualifiedReferralsForUser,
+} from "./repos/rewards.js";
+import {
   capTreasurySweepAmountMicro,
   computeTreasuryChainMath,
 } from "./services/rewards-treasury.js";
@@ -198,6 +202,59 @@ function createReferralAttachDb(seed: {
       }
 
       throw new Error(`Unhandled SQL in referral attach test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
+function createQualifiedReferralCountDb(seed: {
+  referrals: Array<{
+    referrer_user_id: string;
+    referred_user_id: string;
+    status: "pending" | "qualified" | "blocked";
+  }>;
+  points: Record<string, number>;
+}): import("./db.js").DbQuery {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      const values = Array.isArray(params) ? params : [];
+
+      if (
+        sql.includes("select count(*)::text as total") &&
+        sql.includes("from referrals r") &&
+        sql.includes("left join points pref")
+      ) {
+        const userId = String(values[0] ?? "");
+        const threshold = Number(values[1] ?? 0);
+        const total = seed.referrals.filter((row) => {
+          if (row.referrer_user_id !== userId) return false;
+          if (row.status === "blocked") return false;
+          const referrerPoints = seed.points[row.referrer_user_id] ?? 0;
+          const referredPoints = seed.points[row.referred_user_id] ?? 0;
+          return referrerPoints >= threshold && referredPoints >= threshold;
+        }).length;
+        return { rows: [{ total: String(total) }] };
+      }
+
+      if (
+        sql.includes("update referrals r") &&
+        sql.includes("set status = 'qualified'")
+      ) {
+        const userId = String(values[0] ?? "");
+        const threshold = Number(values[1] ?? 0);
+        for (const row of seed.referrals) {
+          if (row.referrer_user_id !== userId || row.status !== "pending") {
+            continue;
+          }
+          const referrerPoints = seed.points[row.referrer_user_id] ?? 0;
+          const referredPoints = seed.points[row.referred_user_id] ?? 0;
+          if (referrerPoints >= threshold && referredPoints >= threshold) {
+            row.status = "qualified";
+          }
+        }
+        return { rows: [] };
+      }
+
+      throw new Error(`Unhandled SQL in qualified referral count test db: ${sql}`);
     },
   } as import("./db.js").DbQuery;
 }
@@ -577,6 +634,85 @@ const tests: TestCase[] = [
         referralCode: "missing",
       });
       assert.equal(missing.status, "not_found");
+    },
+  },
+  {
+    name: "qualified referral count uses effective qualification from current points",
+    run: async () => {
+      const db = createQualifiedReferralCountDb({
+        referrals: [
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-b",
+            status: "pending",
+          },
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-c",
+            status: "qualified",
+          },
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-d",
+            status: "blocked",
+          },
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-e",
+            status: "pending",
+          },
+        ],
+        points: {
+          "user-a": 750,
+          "user-b": 600,
+          "user-c": 800,
+          "user-d": 900,
+          "user-e": 100,
+        },
+      });
+
+      const total = await fetchQualifiedReferralCount(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      assert.equal(total, 2);
+    },
+  },
+  {
+    name: "mark qualified referrals upgrades pending rows once threshold is met",
+    run: async () => {
+      const db = createQualifiedReferralCountDb({
+        referrals: [
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-b",
+            status: "pending",
+          },
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-c",
+            status: "pending",
+          },
+        ],
+        points: {
+          "user-a": 600,
+          "user-b": 550,
+          "user-c": 250,
+        },
+      });
+
+      await markQualifiedReferralsForUser(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      const total = await fetchQualifiedReferralCount(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      assert.equal(total, 1);
     },
   },
 ];

@@ -684,6 +684,7 @@ export async function getRewardsSummary(
   });
   const qualifiedCount = await fetchQualifiedReferralCount(pool, {
     userId: inputs.userId,
+    threshold: OBSERVER_THRESHOLD,
   });
   const bonus = resolveReferralBonus(qualifiedCount, policy.referralBonus);
   const bonusBps = bonus?.bonusBps ?? 0;
