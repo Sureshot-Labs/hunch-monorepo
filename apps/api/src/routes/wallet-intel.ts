@@ -862,21 +862,7 @@ async function loadWhaleTopMarkets(
   if (walletIds.length === 0) return byWallet;
   const marketRows = await client.query<WhaleMarketRow>(
     `
-      select
-        ranked.*,
-        pos.outcome_side as position_side,
-        pos.has_yes_position,
-        pos.has_no_position,
-        pos.shares as position_shares,
-        pos.size_usd as position_value_usd,
-        pos.price as position_price,
-        pos.yes_shares as yes_position_shares,
-        pos.yes_size_usd as yes_position_value_usd,
-        pos.yes_price as yes_position_price,
-        pos.no_shares as no_position_shares,
-        pos.no_size_usd as no_position_value_usd,
-        pos.no_price as no_position_price
-      from (
+      with recent_markets as (
         select
           wah.wallet_id,
           wah.market_id,
@@ -900,13 +886,7 @@ async function loadWhaleTopMarkets(
           um.status as market_status,
           um.close_time,
           um.expiration_time,
-          um.resolved_outcome,
-          row_number() over (
-            partition by wah.wallet_id
-            order by sum(wah.volume_usd) desc nulls last,
-                     sum(wah.event_count) desc,
-                     max(wah.last_occurred_at) desc
-          ) as rn
+          um.resolved_outcome
         from wallet_activity_hourly wah
         left join unified_markets um on um.id = wah.market_id
         left join unified_events ue on ue.id = um.event_id
@@ -927,62 +907,126 @@ async function loadWhaleTopMarkets(
           um.close_time,
           um.expiration_time,
           um.resolved_outcome
-      ) ranked
-      left join lateral (
-        with latest_snapshot as (
-          select max(ws.snapshot_at) as snapshot_at
-          from wallet_position_snapshots ws
-          where ws.wallet_id = ranked.wallet_id
-            and ws.venue = ranked.venue
-        ),
-        latest_positions as (
-          select distinct on (upper(coalesce(ws.outcome_side, '')))
-            upper(coalesce(ws.outcome_side, '')) as outcome_side,
-            ws.shares,
-            ws.size_usd,
-            ws.price
-          from wallet_position_snapshots ws
-          join latest_snapshot ls
-            on ls.snapshot_at = ws.snapshot_at
-          where ws.wallet_id = ranked.wallet_id
-            and ws.venue = ranked.venue
-            and ws.market_id = ranked.market_id
-            and ws.shares > 0
-          order by
-            upper(coalesce(ws.outcome_side, '')),
-            ws.snapshot_at desc,
-            ws.size_usd desc nulls last,
-            ws.shares desc
-        )
+      ),
+      ranked as (
         select
-          case
-            when bool_or(lp.outcome_side = 'YES')
-             and bool_or(lp.outcome_side = 'NO')
-              then 'BOTH'
-            when bool_or(lp.outcome_side = 'YES')
-              then 'YES'
-            when bool_or(lp.outcome_side = 'NO')
-              then 'NO'
-            else null
-          end as outcome_side,
-          bool_or(lp.outcome_side = 'YES') as has_yes_position,
-          bool_or(lp.outcome_side = 'NO') as has_no_position,
-          sum(lp.shares) as shares,
-          sum(lp.size_usd) as size_usd,
-          case
-            when bool_or(lp.outcome_side = 'YES')
-             and bool_or(lp.outcome_side = 'NO')
-              then null
-            else max(lp.price)
-          end as price,
-          sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
-          sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
-          max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
-          sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
-          sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
-          max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
-        from latest_positions lp
-      ) pos on true
+          recent_markets.*,
+          pos.outcome_side as position_side,
+          pos.has_yes_position,
+          pos.has_no_position,
+          pos.shares as position_shares,
+          pos.size_usd as position_value_usd,
+          pos.price as position_price,
+          pos.yes_shares as yes_position_shares,
+          pos.yes_size_usd as yes_position_value_usd,
+          pos.yes_price as yes_position_price,
+          pos.no_shares as no_position_shares,
+          pos.no_size_usd as no_position_value_usd,
+          pos.no_price as no_position_price,
+          row_number() over (
+            partition by recent_markets.wallet_id
+            order by recent_markets.volume_usd desc nulls last,
+                     recent_markets.activity_count desc,
+                     recent_markets.last_activity_at desc
+          ) as rn
+        from recent_markets
+        left join lateral (
+          with latest_snapshot as (
+            select max(ws.snapshot_at) as snapshot_at
+            from wallet_position_snapshots ws
+            where ws.wallet_id = recent_markets.wallet_id
+              and ws.venue = recent_markets.venue
+          ),
+          latest_positions as (
+            select distinct on (upper(coalesce(ws.outcome_side, '')))
+              upper(coalesce(ws.outcome_side, '')) as outcome_side,
+              ws.shares,
+              ws.size_usd,
+              ws.price
+            from wallet_position_snapshots ws
+            join latest_snapshot ls
+              on ls.snapshot_at = ws.snapshot_at
+            where ws.wallet_id = recent_markets.wallet_id
+              and ws.venue = recent_markets.venue
+              and ws.market_id = recent_markets.market_id
+              and ws.shares > 0
+            order by
+              upper(coalesce(ws.outcome_side, '')),
+              ws.snapshot_at desc,
+              ws.size_usd desc nulls last,
+              ws.shares desc
+          )
+          select
+            case
+              when bool_or(lp.outcome_side = 'YES')
+               and bool_or(lp.outcome_side = 'NO')
+                then 'BOTH'
+              when bool_or(lp.outcome_side = 'YES')
+                then 'YES'
+              when bool_or(lp.outcome_side = 'NO')
+                then 'NO'
+              else null
+            end as outcome_side,
+            bool_or(lp.outcome_side = 'YES') as has_yes_position,
+            bool_or(lp.outcome_side = 'NO') as has_no_position,
+            sum(lp.shares) as shares,
+            sum(lp.size_usd) as size_usd,
+            case
+              when bool_or(lp.outcome_side = 'YES')
+               and bool_or(lp.outcome_side = 'NO')
+                then null
+              else max(lp.price)
+            end as price,
+            sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
+            sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
+            max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
+            sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
+            sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
+            max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
+          from latest_positions lp
+        ) pos on true
+        where (coalesce(pos.has_yes_position, false) or coalesce(pos.has_no_position, false))
+          and recent_markets.resolved_outcome is null
+          and (
+            recent_markets.market_status is null
+            or upper(recent_markets.market_status) not in ('CLOSED', 'SETTLED', 'ARCHIVED')
+          )
+          and (
+            coalesce(recent_markets.close_time, recent_markets.expiration_time) is null
+            or coalesce(recent_markets.close_time, recent_markets.expiration_time) >= now()
+          )
+      )
+      select
+        ranked.wallet_id,
+        ranked.market_id,
+        ranked.market_title,
+        ranked.event_id,
+        ranked.event_title,
+        ranked.venue,
+        ranked.market_status,
+        ranked.close_time,
+        ranked.expiration_time,
+        ranked.resolved_outcome,
+        ranked.activity_count,
+        ranked.volume_usd,
+        ranked.avg_price,
+        ranked.best_bid,
+        ranked.best_ask,
+        ranked.last_price,
+        ranked.position_side,
+        ranked.has_yes_position,
+        ranked.has_no_position,
+        ranked.position_shares,
+        ranked.position_value_usd,
+        ranked.position_price,
+        ranked.yes_position_shares,
+        ranked.yes_position_value_usd,
+        ranked.yes_position_price,
+        ranked.no_position_shares,
+        ranked.no_position_value_usd,
+        ranked.no_position_price,
+        ranked.last_activity_at
+      from ranked
       where ranked.rn <= $2
       order by ranked.wallet_id, ranked.rn
     `,
