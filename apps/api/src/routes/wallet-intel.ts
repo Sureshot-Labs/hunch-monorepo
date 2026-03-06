@@ -989,7 +989,7 @@ async function loadWhaleTopMarkets(
           and recent_markets.resolved_outcome is null
           and (
             recent_markets.market_status is null
-            or upper(recent_markets.market_status) not in ('CLOSED', 'SETTLED', 'ARCHIVED')
+            or recent_markets.market_status not in ('CLOSED', 'SETTLED', 'ARCHIVED')
           )
           and (
             coalesce(recent_markets.close_time, recent_markets.expiration_time) is null
