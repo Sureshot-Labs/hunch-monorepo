@@ -112,8 +112,7 @@ services:
     command:
       [
         "node",
-        "--experimental-specifier-resolution=node",
-        "apps/indexer-polymarket/dist/apps/indexer-polymarket/src/main.js"
+        "apps/indexer-polymarket/dist/main.js"
       ]
 
   indexer-limitless:
@@ -136,8 +135,7 @@ services:
     command:
       [
         "node",
-        "--experimental-specifier-resolution=node",
-        "apps/indexer-limitless/dist/apps/indexer-limitless/src/main.js"
+        "apps/indexer-limitless/dist/main.js"
       ]
 
   indexer-dflow:
@@ -160,8 +158,7 @@ services:
     command:
       [
         "node",
-        "--experimental-specifier-resolution=node",
-        "apps/indexer-dflow/dist/apps/indexer-dflow/src/main.js"
+        "apps/indexer-dflow/dist/main.js"
       ]
 
   ai-worker:
@@ -179,7 +176,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    command: ["node", "apps/ai-worker/dist/apps/ai-worker/src/main.js"]
+    command: ["node", "apps/ai-worker/dist/main.js"]
 
   finance-worker:
     build:

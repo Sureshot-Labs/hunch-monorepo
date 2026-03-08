@@ -1,9 +1,10 @@
 import { config } from "dotenv";
-import { resolve } from "path";
+import { dirname, resolve } from "path";
 import { hostname } from "os";
+import { fileURLToPath } from "url";
 
-const cwd = process.cwd(); // apps/ai-worker
-config({ path: resolve(cwd, "../../.env"), override: true });
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+config({ path: envPath, override: true });
 
 function parseOptionalInt(v: string | undefined): number | undefined {
   if (v == null || v.trim() === "") return undefined;
@@ -22,7 +23,7 @@ function clampInt(
 function req(name: string): string {
   const v = process.env[name];
   if (!v) {
-    console.error(`[env] Missing ${name}. Make sure it's in ../../.env`);
+    console.error(`[env] Missing ${name}. Make sure it's in ${envPath}`);
     process.exit(1);
   }
   return v;

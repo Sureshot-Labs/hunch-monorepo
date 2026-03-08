@@ -1,22 +1,17 @@
 {
-  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "node",
-    "allowSyntheticDefaultImports": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "esModuleInterop": true,
-    "skipLibCheck": true,
     "strict": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "baseUrl": ".",
-    "paths": {
-      "@hunch/*": ["../../packages/*/src"]
-    }
+    "skipLibCheck": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
   },
-  "include": ["src/**/*"],
+  "include": ["src"],
   "exclude": ["node_modules", "dist"]
 }

@@ -4,9 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { env } from "./env";
-import { redis } from "./redis";
-import { pool } from "./db";
+import { env } from "./env.js";
+import { redis } from "./redis.js";
+import { pool } from "./db.js";
 import { writeUnifiedBookTop } from "@hunch/db";
 import { createTopTickGate } from "@hunch/infra";
 

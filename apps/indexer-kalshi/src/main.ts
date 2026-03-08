@@ -1,7 +1,7 @@
-import { bootstrapKalshi } from "./bootstrap";
-import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket";
-import { log } from "./log";
-import { env } from "./env";
+import { bootstrapKalshi } from "./bootstrap.js";
+import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
+import { log } from "./log.js";
+import { env } from "./env.js";
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 
 let bootstrapping = false;

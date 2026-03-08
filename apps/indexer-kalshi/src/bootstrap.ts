@@ -1,9 +1,9 @@
 // apps/indexer-kalshi/src/bootstrap.ts
-import { ensureRedis, redis } from "./redis";
-import { env } from "./env";
-import { iterateEventsWithMarkets } from "./marketClient";
-import { mapTokens, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers";
-import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo";
+import { ensureRedis, redis } from "./redis.js";
+import { env } from "./env.js";
+import { iterateEventsWithMarkets } from "./marketClient.js";
+import { mapTokens, mapToUnifiedEvent, mapToUnifiedMarket } from "./mappers.js";
+import { upsertKalshiEvent, upsertKalshiMarket } from "./kalshi-repo.js";
 import {
   getVenueId,
   upsertUnifiedEvent,
@@ -11,7 +11,7 @@ import {
   upsertUnifiedToken,
   writeUnifiedBookTop,
 } from "@hunch/db";
-import { pool } from "./db";
+import { pool } from "./db.js";
 import {
   buildTopMarketsText,
   createTopTickGate,
@@ -19,7 +19,7 @@ import {
   type EmbedQueueItem,
 } from "@hunch/infra";
 import PQueue from "p-queue";
-import { getOrderbookTop } from "./orderbookClient";
+import { getOrderbookTop } from "./orderbookClient.js";
 import { v4 as uuid } from "uuid";
 
 async function publishKalshiTopNow(

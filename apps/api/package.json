@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "exports": {
+    "./jobs/finance-jobs": "./dist/jobs/finance-jobs.js"
+  },
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json",

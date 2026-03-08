@@ -1,8 +1,16 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
-import { AuthService, WalletNotFoundError } from "./auth.js";
+import type { PoolClient } from "pg";
+import {
+  AuthService,
+  PrivyAccountRecoveryRequiredError,
+  PrivyTerminalAuthError,
+  WalletNotFoundError,
+} from "./auth.js";
 import { pool } from "./db.js";
+import { parseJwtExpiresInToMs } from "./env.js";
+import type { PrivyUser } from "./privy-service.js";
 import { MAX_WALLET_NAME_LENGTH, normalizeWalletNameInput } from "./lib/wallet-name.js";
 
 type TestCase = {
@@ -115,6 +123,218 @@ const tests: TestCase[] = [
       } finally {
         poolAny.query = originalQuery;
       }
+    },
+  },
+  {
+    name: "parseJwtExpiresInToMs matches configured duration semantics",
+    run: () => {
+      assert.equal(parseJwtExpiresInToMs("24h"), 24 * 60 * 60 * 1000);
+      assert.equal(parseJwtExpiresInToMs("30m"), 30 * 60 * 1000);
+      assert.equal(parseJwtExpiresInToMs("1500ms"), 1000);
+      assert.throws(() => parseJwtExpiresInToMs("120"), /at least 1 second/i);
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient recovers by linked wallet",
+    run: async () => {
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          calls.push({ sql, params });
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [{ user_id: "user-wallet-match" }] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      const userId =
+        await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+          privyUserId: "did:privy:new-user",
+          privyWallets: [
+            {
+              address: "0xabc0000000000000000000000000000000000000",
+              walletType: "ethereum",
+            },
+          ],
+          email: "user@example.com",
+        });
+
+      assert.equal(userId, "user-wallet-match");
+      assert.equal(calls.length, 2);
+      assert.match(
+        calls[1].sql,
+        /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
+      );
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient rejects email-only recovery",
+    run: async () => {
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)/i.test(sql)) {
+            return { rows: [{ id: "user-email-only" }] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+            privyUserId: "did:privy:new-user",
+            privyWallets: [
+              {
+                address: "0xabc0000000000000000000000000000000000000",
+                walletType: "ethereum",
+              },
+            ],
+            email: "user@example.com",
+          }),
+        (error: unknown) =>
+          error instanceof PrivyAccountRecoveryRequiredError &&
+          /email only/i.test(error.message),
+      );
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient rejects multi-user wallet conflicts as terminal",
+    run: async () => {
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            if (params?.[1] === "0xabc0000000000000000000000000000000000000") {
+              return { rows: [{ user_id: "user-1" }, { user_id: "user-2" }] };
+            }
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+            privyUserId: "did:privy:new-user",
+            privyWallets: [
+              {
+                address: "0xabc0000000000000000000000000000000000000",
+                walletType: "ethereum",
+              },
+            ],
+            email: null,
+          }),
+        (error: unknown) =>
+          error instanceof PrivyTerminalAuthError &&
+          error.code === "account_merge_required" &&
+          /merge users before login/i.test(error.message),
+      );
+    },
+  },
+  {
+    name: "createOrUpdateUserFromPrivyWithClient rejects cross-account email conflicts as terminal",
+    run: async () => {
+      const privyUser = {
+        id: "did:privy:user-1",
+        email: { address: "user@example.com" },
+        linkedAccounts: [
+          {
+            type: "wallet",
+            chainType: "ethereum",
+            address: "0xabc0000000000000000000000000000000000000",
+          },
+        ],
+        wallet: {
+          chainType: "ethereum",
+          address: "0xabc0000000000000000000000000000000000000",
+        },
+      } as unknown as PrivyUser;
+
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [{ id: "user-1" }] };
+          }
+          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(sql)) {
+            return { rows: [{ id: "user-2" }] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.createOrUpdateUserFromPrivyWithClient(
+            client,
+            privyUser,
+            {} as never,
+          ),
+        (error: unknown) =>
+          error instanceof PrivyTerminalAuthError &&
+          error.code === "email_conflict" &&
+          /email already linked/i.test(error.message),
+      );
+    },
+  },
+  {
+    name: "createOrUpdateUserFromPrivyWithClient rejects cross-account wallet conflicts as terminal",
+    run: async () => {
+      const privyUser = {
+        id: "did:privy:user-1",
+        email: { address: "user@example.com" },
+        linkedAccounts: [
+          {
+            type: "wallet",
+            chainType: "ethereum",
+            address: "0xabc0000000000000000000000000000000000000",
+          },
+        ],
+        wallet: {
+          chainType: "ethereum",
+          address: "0xabc0000000000000000000000000000000000000",
+        },
+      } as unknown as PrivyUser;
+
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [{ id: "user-1" }] };
+          }
+          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [{ user_id: "user-2" }] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.createOrUpdateUserFromPrivyWithClient(
+            client,
+            privyUser,
+            {} as never,
+          ),
+        (error: unknown) =>
+          error instanceof PrivyTerminalAuthError &&
+          error.code === "wallet_conflict" &&
+          /wallet address already linked/i.test(error.message),
+      );
     },
   },
 ];

@@ -34,6 +34,18 @@ function isWalletAccount(
   return account.type === "wallet";
 }
 
+export class PrivyAccessTokenError extends Error {
+  constructor(message = "Invalid Privy access token") {
+    super(message);
+  }
+}
+
+export class PrivyUpstreamError extends Error {
+  constructor(message = "Privy service is unavailable") {
+    super(message);
+  }
+}
+
 export class PrivyService {
   /**
    * Verify a Privy access token and return the user claims
@@ -42,7 +54,7 @@ export class PrivyService {
     try {
       return await privyClient.verifyAuthToken(accessToken);
     } catch (error) {
-      throw new Error(
+      throw new PrivyAccessTokenError(
         `Invalid Privy access token: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
@@ -55,7 +67,7 @@ export class PrivyService {
     try {
       return await privyClient.getUser(privyClaims.userId);
     } catch (error) {
-      throw new Error(
+      throw new PrivyUpstreamError(
         `Failed to fetch user data from Privy: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }

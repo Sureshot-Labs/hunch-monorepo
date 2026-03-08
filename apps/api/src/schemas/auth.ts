@@ -7,6 +7,63 @@ export const authPrivyBodySchema = z.object({
   inviteConfirmed: z.boolean().optional(),
 });
 
+export const inviteReasonSchema = z.enum([
+  "missing_code",
+  "invalid_code",
+  "not_found",
+  "self_referral",
+]);
+
+export const authErrorResponseSchema = z.object({
+  error: z.string(),
+  message: z.string().optional(),
+});
+
+export const authInviteRequiredResponseSchema = z.object({
+  error: z.literal("invite_required"),
+  reason: inviteReasonSchema,
+  inviteOnly: z.literal(true),
+  invitePolicyVersion: z.string(),
+});
+
+export const authPrivyTerminalErrorCodeSchema = z.enum([
+  "account_recovery_required",
+  "account_merge_required",
+  "email_conflict",
+  "wallet_conflict",
+]);
+
+export const authPrivyTerminalErrorResponseSchema = z.object({
+  error: authPrivyTerminalErrorCodeSchema,
+  message: z.string(),
+});
+
+export const authPrivySuccessResponseSchema = z.object({
+  user: z.object({
+    id: z.string(),
+    email: z.string().optional(),
+    username: z.string().optional(),
+    displayName: z.string().optional(),
+    avatarUrl: z.string().optional(),
+    isAdmin: z.boolean(),
+    isActive: z.boolean(),
+    isVerified: z.boolean(),
+    createdAt: z.string(),
+    lastLoginAt: z.string().optional(),
+  }),
+  session: z.object({
+    token: z.string(),
+    expiresAt: z.string(),
+    csrfToken: z.string(),
+  }),
+  walletAddresses: z.array(z.string()),
+  primaryWalletAddress: z.string(),
+  privyUserId: z.string(),
+  invitePrompt: z.boolean().optional(),
+  inviteReason: inviteReasonSchema.optional(),
+  invitePolicyVersion: z.string().optional(),
+});
+
 export const venueCredentialsBodySchema = z.object({
   venue: zVenue,
   apiKey: zRequiredString("apiKey is required"),

@@ -1,7 +1,7 @@
 // apps/indexer-kalshi/src/kalshi-repo.ts
-import { pool } from "./db";
+import { pool } from "./db.js";
 import type { z } from "zod";
-import { KalshiEvent, KalshiMarket } from "./types";
+import { KalshiEvent, KalshiMarket } from "./types.js";
 
 const n = (v: unknown): number | null => {
   if (v == null) return null;

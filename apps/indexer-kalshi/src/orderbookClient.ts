@@ -1,5 +1,5 @@
-import { KalshiClient } from "./kalshiClient";
-import { KalshiOrderbook } from "./types";
+import { KalshiClient } from "./kalshiClient.js";
+import { KalshiOrderbook } from "./types.js";
 
 const c = new KalshiClient();
 

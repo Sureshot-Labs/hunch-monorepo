@@ -8,6 +8,7 @@ import { ethers } from "ethers";
 import { z as zod } from "zod";
 import {
   AuthService,
+  PrivyTerminalAuthError,
   WalletAlreadyExistsError,
   WalletNotFoundError,
   WalletUnlinkNotAllowedError,
@@ -18,10 +19,18 @@ import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { normalizeWalletNameInput } from "../lib/wallet-name.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { PrivyService } from "../privy-service.js";
+import {
+  PrivyAccessTokenError,
+  PrivyService,
+  PrivyUpstreamError,
+} from "../privy-service.js";
 import {
   addWalletBodySchema,
+  authErrorResponseSchema,
   authPrivyBodySchema,
+  authPrivySuccessResponseSchema,
+  authInviteRequiredResponseSchema,
+  authPrivyTerminalErrorResponseSchema,
   walletNonceBodySchema,
   polymarketConnectBodySchema,
   polymarketCredentialsBodySchema,
@@ -46,6 +55,67 @@ const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
 );
+
+function getPrivyTerminalAuthMessage(error: PrivyTerminalAuthError): string {
+  switch (error.code) {
+    case "account_recovery_required":
+      return "Account recovery required. Please contact support to recover this account.";
+    case "account_merge_required":
+      return "Account merge required. Please contact support to merge these accounts before logging in.";
+    case "email_conflict":
+      return "This email is already linked to another Hunch account. Please contact support to recover or merge the account.";
+    case "wallet_conflict":
+      return "One of this Privy account's wallets is already linked to another Hunch account. Please contact support to recover or merge the account.";
+    default:
+      return "Privy authentication could not be completed. Please contact support.";
+  }
+}
+
+function getPrivyAuthFailureResponse(error: unknown): {
+  status: 400 | 401 | 500 | 503;
+  body: { error: string; message?: string };
+} {
+  if (error instanceof PrivyAccessTokenError) {
+    return {
+      status: 401,
+      body: {
+        error: "invalid_privy_access_token",
+        message: "Privy authentication failed. Please try logging in again.",
+      },
+    };
+  }
+
+  if (error instanceof PrivyUpstreamError) {
+    return {
+      status: 503,
+      body: {
+        error: "auth_unavailable",
+        message: "Authentication is temporarily unavailable. Please try again later.",
+      },
+    };
+  }
+
+  if (
+    error instanceof Error &&
+    error.message === "No wallet address found in Privy user data"
+  ) {
+    return {
+      status: 400,
+      body: {
+        error: "invalid_privy_user",
+        message: "No supported wallet address was found in the Privy account.",
+      },
+    };
+  }
+
+  return {
+    status: 500,
+    body: {
+      error: "auth_unavailable",
+      message: "Authentication is temporarily unavailable. Please try again later.",
+    },
+  };
+}
 
 function normalizeWalletType(input?: string): string {
   const raw = (input ?? "").trim().toLowerCase();
@@ -160,12 +230,27 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    */
   z.post(
     "/auth/privy",
-    { schema: { body: authPrivyBodySchema } },
+    {
+      schema: {
+        body: authPrivyBodySchema,
+        response: {
+          200: authPrivySuccessResponseSchema,
+          400: authErrorResponseSchema,
+          401: authErrorResponseSchema,
+          403: authInviteRequiredResponseSchema,
+          409: authPrivyTerminalErrorResponseSchema,
+          429: authErrorResponseSchema,
+          500: authErrorResponseSchema,
+          503: authErrorResponseSchema,
+        },
+      },
+    },
     async (request, reply) => {
       const body = request.body;
 
       const clientIp = resolveSecurityClientIp(request);
       const userAgent = request.headers["user-agent"] || "unknown";
+      let primaryWalletAddress = "unknown";
 
       try {
         const canProceed = await checkRateLimit(
@@ -183,13 +268,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           claims,
           user: privyUser,
           walletAddresses,
-          primaryWalletAddress,
+          primaryWalletAddress: resolvedPrimaryWalletAddress,
         } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
+        primaryWalletAddress = resolvedPrimaryWalletAddress ?? "unknown";
 
-        if (!primaryWalletAddress) {
+        if (!resolvedPrimaryWalletAddress) {
           reply.code(400);
           return reply.send({
-            error: "No wallet address found in Privy user data",
+            error: "invalid_privy_user",
+            message: "No supported wallet address was found in the Privy account.",
           });
         }
 
@@ -332,40 +419,63 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             isAdmin: user.isAdmin,
             isActive: user.isActive,
             isVerified: user.isVerified,
-            createdAt: user.createdAt,
-            lastLoginAt: user.lastLoginAt,
+            createdAt: user.createdAt.toISOString(),
+            lastLoginAt: user.lastLoginAt?.toISOString(),
           },
           session: {
             token: sessionToken,
-            expiresAt: session.expiresAt,
+            expiresAt: session.expiresAt.toISOString(),
             csrfToken: session.csrfToken,
           },
           walletAddresses,
           primaryWalletAddress,
           privyUserId: privyUser.id,
           invitePrompt: invitePrompt || undefined,
-          inviteReason: invitePrompt ? inviteReason : undefined,
+          inviteReason: invitePrompt ? (inviteReason ?? undefined) : undefined,
           invitePolicyVersion:
             invitePrompt && effectiveAccessState === "prompt"
               ? policyVersion
               : undefined,
         });
       } catch (error) {
-        app.log.error({ error }, "Privy authentication failed");
+        const authFailureMessage =
+          error instanceof Error ? error.message : "Unknown error";
+
+        if (error instanceof PrivyTerminalAuthError) {
+          app.log.warn({ error }, "Privy authentication requires user action");
+
+          await AuthService.recordAuthAttempt(
+            primaryWalletAddress,
+            "privy-auth",
+            false,
+            clientIp,
+            userAgent,
+            authFailureMessage,
+          );
+
+          reply.code(409);
+          return reply.send({
+            error: error.code,
+            message: getPrivyTerminalAuthMessage(error),
+          });
+        }
+
+        const authFailure = getPrivyAuthFailureResponse(error);
+        const log = authFailure.status >= 500 ? app.log.error : app.log.warn;
+
+        log({ error }, "Privy authentication failed");
 
         await AuthService.recordAuthAttempt(
-          "unknown",
+          primaryWalletAddress,
           "privy-auth",
           false,
           clientIp,
           userAgent,
-          error instanceof Error ? error.message : "Unknown error",
+          authFailureMessage,
         );
 
-        reply.code(401);
-        return reply.send({
-          error: "Authentication failed",
-        });
+        reply.code(authFailure.status);
+        return reply.send(authFailure.body);
       }
     },
   );

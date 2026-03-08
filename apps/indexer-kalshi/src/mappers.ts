@@ -1,7 +1,7 @@
 // apps/indexer-kalshi/src/mappers.ts
 import { v4 as uuid } from "uuid";
 import type { z } from "zod";
-import { KalshiEvent, KalshiMarket } from "./types";
+import { KalshiEvent, KalshiMarket } from "./types.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 const KALSHI_U64_SENTINEL_MIN = 9e18;

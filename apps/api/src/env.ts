@@ -126,7 +126,79 @@ function parseEnum<T extends string>(
   return match ?? fallback;
 }
 
+const JWT_EXPIRES_IN_UNIT_MS: Record<string, number> = {
+  ms: 1,
+  msec: 1,
+  msecs: 1,
+  millisecond: 1,
+  milliseconds: 1,
+  s: 1_000,
+  sec: 1_000,
+  secs: 1_000,
+  second: 1_000,
+  seconds: 1_000,
+  m: 60_000,
+  min: 60_000,
+  mins: 60_000,
+  minute: 60_000,
+  minutes: 60_000,
+  h: 3_600_000,
+  hr: 3_600_000,
+  hrs: 3_600_000,
+  hour: 3_600_000,
+  hours: 3_600_000,
+  d: 86_400_000,
+  day: 86_400_000,
+  days: 86_400_000,
+  w: 604_800_000,
+  week: 604_800_000,
+  weeks: 604_800_000,
+  y: 31_557_600_000,
+  yr: 31_557_600_000,
+  yrs: 31_557_600_000,
+  year: 31_557_600_000,
+  years: 31_557_600_000,
+};
+
+// Mirror jsonwebtoken's string duration semantics for session TTLs:
+// bare numeric strings are milliseconds, then floored to whole seconds.
+export function parseJwtExpiresInToMs(value: string): number {
+  const trimmed = value.trim();
+  const match = /^(-?\d+(?:\.\d+)?)\s*([a-z]+)?$/i.exec(trimmed);
+  if (!match) {
+    throw new Error(
+      `[env] Invalid JWT_EXPIRES_IN value "${value}" (expected e.g. "24h", "30m", or "900000")`,
+    );
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(
+      `[env] Invalid JWT_EXPIRES_IN value "${value}" (duration must be positive)`,
+    );
+  }
+
+  const unit = match[2]?.toLowerCase() ?? "ms";
+  const multiplier = JWT_EXPIRES_IN_UNIT_MS[unit];
+  if (!multiplier) {
+    throw new Error(
+      `[env] Invalid JWT_EXPIRES_IN unit "${unit}" in "${value}"`,
+    );
+  }
+
+  const ttlSeconds = Math.floor((amount * multiplier) / 1_000);
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds < 1) {
+    throw new Error(
+      `[env] Invalid JWT_EXPIRES_IN value "${value}" (resolved duration must be at least 1 second)`,
+    );
+  }
+
+  return ttlSeconds * 1_000;
+}
+
 const nodeEnv = process.env.NODE_ENV ?? "development";
+const authJwtExpiresIn = process.env.JWT_EXPIRES_IN?.trim() || "24h";
+const authSessionTtlMs = parseJwtExpiresInToMs(authJwtExpiresIn);
 const enableSwaggerSetting = parseOptionalBool(process.env.ENABLE_SWAGGER);
 const enableSwagger =
   enableSwaggerSetting ?? nodeEnv.toLowerCase() !== "production";
@@ -529,6 +601,9 @@ export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),
+  jwtSecret: req("JWT_SECRET"),
+  authJwtExpiresIn,
+  authSessionTtlMs,
   redisUrl: process.env.REDIS_URL ?? "", // optional
   nodeEnv,
   enableSwagger,

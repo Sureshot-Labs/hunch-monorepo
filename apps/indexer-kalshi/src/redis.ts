@@ -3,7 +3,7 @@ import {
   ensureRedis as ensure,
   type RedisClientType,
 } from "@hunch/infra";
-import { env } from "./env";
+import { env } from "./env.js";
 
 export const redis: RedisClientType = createRedisClient({ url: env.redisUrl });
 

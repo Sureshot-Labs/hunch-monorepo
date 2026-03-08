@@ -4,8 +4,13 @@ import type { SignOptions } from "jsonwebtoken";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
-import "./env.js";
-import { PrivyService, PrivyUser, PrivyClaims } from "./privy-service.js";
+import { env } from "./env.js";
+import {
+  PrivyService,
+  type PrivyClaims,
+  type PrivyUser,
+  type PrivyWallet,
+} from "./privy-service.js";
 import {
   decryptCredentialsString,
   encryptCredentialsString,
@@ -15,12 +20,9 @@ import { resolveSecurityClientIp } from "./lib/request-ip.js";
 import { checkRateLimit } from "./lib/rate-limit.js";
 
 // JWT secret - in production, this should be in environment variables
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET environment variable is required");
-}
-const JWT_EXPIRES_IN: SignOptions["expiresIn"] =
-  (process.env.JWT_EXPIRES_IN as SignOptions["expiresIn"]) ?? "24h";
+const JWT_SECRET = env.jwtSecret;
+const JWT_EXPIRES_IN = env.authJwtExpiresIn as SignOptions["expiresIn"];
+const SESSION_TTL_MS = env.authSessionTtlMs;
 
 export interface User {
   id: string;
@@ -99,6 +101,27 @@ export class WalletNotFoundError extends Error {
 export class WalletUnlinkNotAllowedError extends Error {
   constructor(message = "Cannot unlink the only wallet") {
     super(message);
+  }
+}
+
+export type PrivyTerminalAuthErrorCode =
+  | "account_recovery_required"
+  | "account_merge_required"
+  | "email_conflict"
+  | "wallet_conflict";
+
+export class PrivyTerminalAuthError extends Error {
+  readonly code: PrivyTerminalAuthErrorCode;
+
+  constructor(code: PrivyTerminalAuthErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export class PrivyAccountRecoveryRequiredError extends PrivyTerminalAuthError {
+  constructor(message = "Privy account requires manual recovery") {
+    super("account_recovery_required", message);
   }
 }
 
@@ -414,7 +437,7 @@ export class AuthService {
       jti: crypto.randomBytes(16).toString("hex"), // Unique token identifier
     };
 
-    return jwt.sign(payload, JWT_SECRET as string, {
+    return jwt.sign(payload, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     });
   }
@@ -424,7 +447,7 @@ export class AuthService {
    */
   static verifyToken(token: string): { userId: string } | null {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET as string);
+      const decoded = jwt.verify(token, JWT_SECRET);
       if (typeof decoded !== "object" || decoded === null) return null;
       const userId = (decoded as Record<string, unknown>).userId;
       if (typeof userId !== "string") return null;
@@ -542,6 +565,82 @@ export class AuthService {
   }
 
   /**
+   * Resolve an existing local account for Privy login using stable identifiers only.
+   * Email can be used to detect a risky legacy match, but never to rebind an account.
+   */
+  static async resolveExistingUserIdForPrivyLoginWithClient(
+    client: Pick<PoolClient, "query">,
+    params: {
+      privyUserId: string;
+      privyWallets: PrivyWallet[];
+      email: string | null;
+    },
+  ): Promise<string | null> {
+    const { privyUserId, privyWallets, email } = params;
+
+    const userByPrivyId = await client.query<{ id: string }>(
+      "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
+      [privyUserId],
+    );
+    const userByPrivyIdMatch = userByPrivyId.rows[0]?.id ?? null;
+    if (userByPrivyIdMatch) return userByPrivyIdMatch;
+
+    const matchedUserIds = new Set<string>();
+    for (const wallet of privyWallets) {
+      const match = ETH_ADDRESS_RE.test(wallet.address)
+        ? "lower(wallet_address) = lower($2)"
+        : "wallet_address = $2";
+
+      const owner = await client.query<{ user_id: string }>(
+        `SELECT user_id
+           FROM user_wallets
+           WHERE wallet_type = $1
+             AND ${match}
+           LIMIT 2`,
+        [wallet.walletType, wallet.address],
+      );
+
+      for (const row of owner.rows) matchedUserIds.add(row.user_id);
+      if (matchedUserIds.size > 1) break;
+    }
+
+    if (matchedUserIds.size > 1) {
+      throw new PrivyTerminalAuthError(
+        "account_merge_required",
+        "Privy wallets resolve to multiple users; merge users before login",
+      );
+    }
+
+    if (matchedUserIds.size === 1) {
+      return matchedUserIds.values().next().value ?? null;
+    }
+
+    if (!email) return null;
+
+    const userByEmail = await client.query<{ id: string }>(
+      `SELECT id
+         FROM users
+        WHERE lower(email) = lower($1)
+        LIMIT 2`,
+      [email],
+    );
+
+    if (userByEmail.rows.length > 1) {
+      throw new PrivyAccountRecoveryRequiredError(
+        "Multiple users share this email; merge users before login",
+      );
+    }
+
+    if (userByEmail.rows.length === 1) {
+      throw new PrivyAccountRecoveryRequiredError(
+        "Existing account matched by email only; manual recovery required",
+      );
+    }
+
+    return null;
+  }
+
+  /**
    * Create or update user from Privy authentication
    */
   static async createOrUpdateUserFromPrivyWithClient(
@@ -560,66 +659,14 @@ export class AuthService {
 
     const primaryWalletAddress = primaryWallet.address;
 
-    let userId: string | null = null;
-
-    const userByPrivyId = await client.query<{ id: string }>(
-      "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
-      [privyUserId],
+    let userId = await AuthService.resolveExistingUserIdForPrivyLoginWithClient(
+      client,
+      {
+        privyUserId,
+        privyWallets,
+        email,
+      },
     );
-    userId = userByPrivyId.rows[0]?.id ?? null;
-
-    // Backward-compatibility path:
-    // if Privy user id changes (e.g. app migration) recover the account by linked wallet ownership.
-    if (!userId) {
-      const matchedUserIds = new Set<string>();
-      for (const wallet of privyWallets) {
-        const match = ETH_ADDRESS_RE.test(wallet.address)
-          ? "lower(wallet_address) = lower($2)"
-          : "wallet_address = $2";
-
-        const owner = await client.query<{ user_id: string }>(
-          `SELECT user_id
-             FROM user_wallets
-             WHERE wallet_type = $1
-               AND ${match}
-             LIMIT 2`,
-          [wallet.walletType, wallet.address],
-        );
-
-        for (const row of owner.rows) matchedUserIds.add(row.user_id);
-        if (matchedUserIds.size > 1) break;
-      }
-
-      if (matchedUserIds.size > 1) {
-        throw new WalletAlreadyExistsError(
-          "Privy wallets resolve to multiple users; merge users before login",
-        );
-      }
-
-      if (matchedUserIds.size === 1) {
-        userId = matchedUserIds.values().next().value ?? null;
-      }
-    }
-
-    // Secondary recovery path:
-    // if Privy DID changed and wallet matching is inconclusive, recover by email.
-    if (!userId && email) {
-      const userByEmail = await client.query<{ id: string }>(
-        `SELECT id
-           FROM users
-          WHERE lower(email) = lower($1)
-          LIMIT 2`,
-        [email],
-      );
-
-      if (userByEmail.rows.length > 1) {
-        throw new Error(
-          "Multiple users share this email; merge users before login",
-        );
-      }
-
-      userId = userByEmail.rows[0]?.id ?? null;
-    }
 
     if (userId) {
       if (email) {
@@ -633,7 +680,10 @@ export class AuthService {
         );
 
         if (emailConflict.rows.length > 0) {
-          throw new Error("Email already linked to another account");
+          throw new PrivyTerminalAuthError(
+            "email_conflict",
+            "Email already linked to another account",
+          );
         }
       }
 
@@ -653,7 +703,8 @@ export class AuthService {
         );
 
         if (conflict.rows.length > 0) {
-          throw new WalletAlreadyExistsError(
+          throw new PrivyTerminalAuthError(
+            "wallet_conflict",
             "Wallet address already linked to another account",
           );
         }
@@ -1623,7 +1674,7 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string,
   ): Promise<AuthSession> {
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
     const sessionTokenHash = hashSessionToken(sessionToken);
     const dbFeatures = await getSessionDbFeatures();
 

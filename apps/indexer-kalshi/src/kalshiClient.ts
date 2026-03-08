@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import PQueue from "p-queue";
-import { env } from "./env";
+import { env } from "./env.js";
 
 let cachedKeyPem: string | undefined;
 let cachedKeyPath: string | undefined;

@@ -1,7 +1,7 @@
 // apps/indexer-kalshi/src/marketsClient.ts
-import { KalshiClient } from "./kalshiClient";
+import { KalshiClient } from "./kalshiClient.js";
 import type { z } from "zod";
-import { KalshiEvent, KalshiEventsPage } from "./types";
+import { KalshiEvent, KalshiEventsPage } from "./types.js";
 
 const c = new KalshiClient();
 type KalshiEventType = z.infer<typeof KalshiEvent>;

@@ -1,9 +1,10 @@
 import { config } from "dotenv";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const cwd = process.cwd(); // apps/indexer-kalshi
-config({ path: resolve(cwd, "../../.env"), override: true });
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+config({ path: envPath, override: true });
 
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
   (k) => delete process.env[k],
@@ -12,7 +13,7 @@ config({ path: resolve(cwd, "../../.env"), override: true });
 function req(name: string): string {
   const v = process.env[name];
   if (!v) {
-    console.error(`[env] Missing ${name}. Put it in ../../.env`);
+    console.error(`[env] Missing ${name}. Put it in ${envPath}`);
     process.exit(1);
   }
   return v;

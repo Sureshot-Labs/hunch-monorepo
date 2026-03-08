@@ -1,8 +1,9 @@
 import { config } from "dotenv";
-import { resolve } from "path";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 
-const cwd = process.cwd(); // apps/indexer-polymarket
-config({ path: resolve(cwd, "../../.env"), override: true }); // load repo .env
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+config({ path: envPath, override: true }); // load repo .env
 
 // 🧹 Prevent pg from mixing PG* env with your connectionString
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
@@ -67,7 +68,7 @@ function clampFloat(
 function req(name: string): string {
   const v = process.env[name];
   if (!v) {
-    console.error(`[env] Missing ${name}. Make sure it's in ../../.env`);
+    console.error(`[env] Missing ${name}. Make sure it's in ${envPath}`);
     process.exit(1);
   }
   return v;

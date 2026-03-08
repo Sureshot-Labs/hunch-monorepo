@@ -53,7 +53,7 @@ type FinanceJobsModule = {
 let modulePromise: Promise<FinanceJobsModule> | null = null;
 
 async function loadFinanceJobsModule(): Promise<FinanceJobsModule> {
-  const moduleId = "api/dist/jobs/finance-jobs.js";
+  const moduleId = "api/jobs/finance-jobs";
   return (await import(moduleId)) as FinanceJobsModule;
 }
 
