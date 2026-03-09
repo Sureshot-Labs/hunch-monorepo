@@ -4,18 +4,25 @@ set -euo pipefail
 # Usage:
 #   BASE_URL="http://localhost:3001" ./scripts/wallet-intel-regression-test.sh
 #   BASE_URL="https://app.hunch.trade/api/hunch" COOKIE="session=..." ./scripts/wallet-intel-regression-test.sh --full
+#   BASE_URL="https://app.hunch.trade/api/hunch" \
+#   COOKIE_FILE="/tmp/hunch.cookies" \
+#   HUNCH_WALLET="0xd829f31579e3129a551c9ab3980efa8e5e041131" \
+#   ./scripts/wallet-intel-regression-test.sh --full
 #   WHALES_URL="https://app.hunch.trade/api/hunch/wallets/whales" \
 #   SUMMARY_URL="https://app.hunch.trade/api/hunch/wallets/activity/summary" \
+#   SIGNALS_URL="https://app.hunch.trade/api/hunch/wallets/activity/signals" \
 #   ./scripts/wallet-intel-regression-test.sh
 #
 # Notes:
-# - /wallets/whales and /wallets/activity/summary are auth-protected.
-# - Provide COOKIE and/or AUTH_HEADER if the target requires auth.
+# - /wallets/whales, /wallets/activity/summary, and /wallets/activity/signals
+#   are auth-protected.
+# - Provide COOKIE / COOKIE_FILE and/or AUTH_HEADER if the target requires auth.
 #   Example: AUTH_HEADER="Authorization: Bearer <token>"
 
 BASE_URL="${BASE_URL:-http://localhost:3001}"
 WHALES_URL="${WHALES_URL:-${BASE_URL%/}/wallets/whales}"
 SUMMARY_URL="${SUMMARY_URL:-${BASE_URL%/}/wallets/activity/summary}"
+SIGNALS_URL="${SIGNALS_URL:-${BASE_URL%/}/wallets/activity/signals}"
 
 LIMIT="${LIMIT:-30}"
 OFFSETS_SET="${OFFSETS+x}"
@@ -34,9 +41,22 @@ SUMMARY_SCOPES="${SUMMARY_SCOPES:-all whales following}"
 SUMMARY_SORTS_SET="${SUMMARY_SORTS+x}"
 SUMMARY_SORTS="${SUMMARY_SORTS:-last_activity net_change_usd unusual_score}"
 
+SIGNAL_SCOPES_SET="${SIGNAL_SCOPES+x}"
+SIGNAL_SCOPES="${SIGNAL_SCOPES:-all active following}"
+
 COOKIE="${COOKIE:-}"
+COOKIE_FILE="${COOKIE_FILE:-}"
 AUTH_HEADER="${AUTH_HEADER:-}"
+HUNCH_WALLET="${HUNCH_WALLET:-}"
 EXTRA_CURL_ARGS="${EXTRA_CURL_ARGS:-}"
+
+if [[ -z "$COOKIE" && -n "$COOKIE_FILE" ]]; then
+  if [[ ! -f "$COOKIE_FILE" ]]; then
+    echo "COOKIE_FILE does not exist: $COOKIE_FILE" >&2
+    exit 1
+  fi
+  COOKIE="$(tr -d '\r\n' < "$COOKIE_FILE")"
+fi
 
 FULL=0
 if [[ "${1-}" == "--full" ]]; then
@@ -56,6 +76,9 @@ if [[ "$FULL" == "1" ]]; then
   if [[ -z "${SUMMARY_SORTS_SET}" ]]; then
     SUMMARY_SORTS="last_activity net_change_usd unusual_score"
   fi
+  if [[ -z "${SIGNAL_SCOPES_SET}" ]]; then
+    SIGNAL_SCOPES="all active following"
+  fi
 fi
 
 whales_case_labels=()
@@ -72,6 +95,13 @@ add_summary_case() {
   summary_case_queries+=("$2")
 }
 
+signals_case_labels=()
+signals_case_queries=()
+add_signals_case() {
+  signals_case_labels+=("$1")
+  signals_case_queries+=("$2")
+}
+
 # Whales: base requested shape + toggles/filters.
 add_whales_case "base" "includeSummary=true&includeAttribution=true&windowHours=${WINDOW_HOURS}"
 add_whales_case "attr:off" "includeSummary=true&includeAttribution=false&windowHours=${WINDOW_HOURS}"
@@ -84,6 +114,16 @@ add_summary_case "base" "includeAttribution=true&windowHours=${WINDOW_HOURS}"
 add_summary_case "attr:off" "includeAttribution=false&windowHours=${WINDOW_HOURS}"
 add_summary_case "window:24h" "includeAttribution=true&windowHours=24"
 add_summary_case "window:336h" "includeAttribution=true&windowHours=336"
+
+# Signals: base requested shape + signal-specific filters/toggles.
+add_signals_case "base" "includeAttribution=true&windowHours=${WINDOW_HOURS}"
+add_signals_case "attr:off" "includeAttribution=false&windowHours=${WINDOW_HOURS}"
+add_signals_case "window:24h" "includeAttribution=true&windowHours=24"
+add_signals_case "window:336h" "includeAttribution=true&windowHours=336"
+add_signals_case "mm:exclude" "includeAttribution=true&excludeMmLike=true&windowHours=${WINDOW_HOURS}"
+add_signals_case "severity:high" "includeAttribution=true&severity=high&windowHours=${WINDOW_HOURS}"
+add_signals_case "type:late" "includeAttribution=true&signalType=longshot_large_late&windowHours=${WINDOW_HOURS}"
+add_signals_case "late:very" "includeAttribution=true&lateBucket=very_late&windowHours=${WINDOW_HOURS}"
 
 if [[ "$FULL" == "1" ]]; then
   add_whales_case "cat:crypto" "categories=crypto"
@@ -103,6 +143,17 @@ if [[ "$FULL" == "1" ]]; then
   add_summary_case "primary:whale" "primary=whale"
   add_summary_case "label:high_conviction" "labels=high_conviction"
   add_summary_case "label:hc+mv(all)" "labels=high_conviction,market_mover&labelMode=all"
+
+  add_signals_case "cat:crypto" "includeAttribution=true&categories=crypto&windowHours=${WINDOW_HOURS}"
+  add_signals_case "cat:politics" "includeAttribution=true&categories=politics&windowHours=${WINDOW_HOURS}"
+  add_signals_case "tag:whale" "includeAttribution=true&tags=whale&windowHours=${WINDOW_HOURS}"
+  add_signals_case "tag:whale+fresh(all)" "includeAttribution=true&tags=whale,fresh&tagMode=all&windowHours=${WINDOW_HOURS}"
+  add_signals_case "primary:whale" "includeAttribution=true&primary=whale&windowHours=${WINDOW_HOURS}"
+  add_signals_case "label:high_conviction" "includeAttribution=true&labels=high_conviction&windowHours=${WINDOW_HOURS}"
+  add_signals_case "label:hc+mv(all)" "includeAttribution=true&labels=high_conviction,market_mover&labelMode=all&windowHours=${WINDOW_HOURS}"
+  add_signals_case "reason:late_entry" "includeAttribution=true&displayReasons=late_entry&windowHours=${WINDOW_HOURS}"
+  add_signals_case "reason:late+longshot(all)" "includeAttribution=true&displayReasons=late_entry,longshot_odds&signalReasonMode=all&windowHours=${WINDOW_HOURS}"
+  add_signals_case "threshold:tight" "includeAttribution=true&minScore=0.7&maxOdds=0.15&minStakeUsd=500&minIdleDays=14&maxPriorMarkets=1&minPayoutUsd=2500&windowHours=${WINDOW_HOURS}"
 fi
 
 request_probe() {
@@ -122,6 +173,9 @@ request_probe() {
   fi
   if [[ -n "$AUTH_HEADER" ]]; then
     cmd+=(-H "${AUTH_HEADER}")
+  fi
+  if [[ -n "$HUNCH_WALLET" ]]; then
+    cmd+=(-H "x-hunch-wallet: ${HUNCH_WALLET}")
   fi
   if [[ -n "$EXTRA_CURL_ARGS" ]]; then
     # shellcheck disable=SC2206
@@ -145,11 +199,14 @@ query_has_param() {
 
 printf "whales_url\t%s\n" "$WHALES_URL"
 printf "summary_url\t%s\n" "$SUMMARY_URL"
+printf "signals_url\t%s\n" "$SIGNALS_URL"
 printf "limit\t%s\n" "$LIMIT"
 printf "window_hours\t%s\n" "$WINDOW_HOURS"
 printf "top_changes\t%s\n" "$TOP_CHANGES"
 printf "auth_cookie\t%s\n" "$([[ -n "$COOKIE" ]] && echo "set" || echo "unset")"
+printf "auth_cookie_file\t%s\n" "$([[ -n "$COOKIE_FILE" ]] && echo "$COOKIE_FILE" || echo "unset")"
 printf "auth_header\t%s\n" "$([[ -n "$AUTH_HEADER" ]] && echo "set" || echo "unset")"
+printf "hunch_wallet\t%s\n" "$([[ -n "$HUNCH_WALLET" ]] && echo "set" || echo "unset")"
 printf "endpoint\tcase\tscope\tsort\toffset\tstatus\tms\n"
 
 for sort in $WHALES_SORTS; do
@@ -192,6 +249,24 @@ for scope in $SUMMARY_SCOPES; do
         ms="${probe##*$'\t'}"
         printf "wallets/activity/summary\t%s\t%s\t%s\t%s\t%s\t%s\n" "$label" "$scope" "$sort" "$offset" "$status" "$ms"
       done
+    done
+  done
+done
+
+for scope in $SIGNAL_SCOPES; do
+  for offset in $OFFSETS; do
+    for idx in "${!signals_case_labels[@]}"; do
+      label="${signals_case_labels[$idx]}"
+      extra="${signals_case_queries[$idx]}"
+      qs="scope=${scope}&limit=${LIMIT}&offset=${offset}"
+      if [[ -n "$extra" ]]; then
+        qs="${qs}&${extra}"
+      fi
+      url="${SIGNALS_URL}?${qs}"
+      probe="$(request_probe "$url")"
+      status="${probe%%$'\t'*}"
+      ms="${probe##*$'\t'}"
+      printf "wallets/activity/signals\t%s\t%s\t-\t%s\t%s\t%s\n" "$label" "$scope" "$offset" "$status" "$ms"
     done
   done
 done

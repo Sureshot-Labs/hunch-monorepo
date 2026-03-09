@@ -48,6 +48,7 @@ import {
   getReferralAttachmentStatus,
   type ReferralAttachmentStatus,
 } from "../services/rewards.js";
+import { getPrivyTerminalAuthMessage } from "../lib/privy-auth-errors.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -55,21 +56,6 @@ const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
 );
-
-function getPrivyTerminalAuthMessage(error: PrivyTerminalAuthError): string {
-  switch (error.code) {
-    case "account_recovery_required":
-      return "Account recovery required. Please contact support to recover this account.";
-    case "account_merge_required":
-      return "Account merge required. Please contact support to merge these accounts before logging in.";
-    case "email_conflict":
-      return "This email is already linked to another Hunch account. Please contact support to recover or merge the account.";
-    case "wallet_conflict":
-      return "One of this Privy account's wallets is already linked to another Hunch account. Please contact support to recover or merge the account.";
-    default:
-      return "Privy authentication could not be completed. Please contact support.";
-  }
-}
 
 function getPrivyAuthFailureResponse(error: unknown): {
   status: 400 | 401 | 500 | 503;
@@ -454,9 +440,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           );
 
           reply.code(409);
+          const terminalMessage = getPrivyTerminalAuthMessage(error.code);
           return reply.send({
             error: error.code,
-            message: getPrivyTerminalAuthMessage(error),
+            message: terminalMessage,
           });
         }
 

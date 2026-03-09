@@ -684,6 +684,42 @@ async function loadWalletRowsByIds(
   const categoryFilter = categories && categories.length > 0 ? categories : null;
   const rows = await client.query<CandidateWalletRow>(
     `
+      with wallet_set as (
+        select unnest($2::uuid[]) as wallet_id
+      ),
+      tags_agg as (
+        select
+          tm.wallet_id,
+          jsonb_agg(jsonb_build_object(
+            'slug', t.slug,
+            'label', t.label,
+            'tag_type', t.tag_type,
+            'is_system', t.is_system
+          ) order by t.tag_type, t.slug) as tags
+        from wallet_tag_map tm
+        join wallet_set ws on ws.wallet_id = tm.wallet_id
+        join wallet_tags t on t.id = tm.tag_id
+        group by tm.wallet_id
+      ),
+      latest_metrics as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          jsonb_build_object(
+            'period', s.period,
+            'as_of', s.as_of,
+            'trades_count', s.trades_count,
+            'volume_usd', s.volume_usd,
+            'pnl_usd', s.pnl_usd,
+            'roi', s.roi,
+            'win_rate', s.win_rate,
+            'avg_hold_hours', s.avg_hold_hours,
+            'last_trade_at', s.last_trade_at
+          ) as metrics
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = '30d'
+        order by s.wallet_id, s.as_of desc
+      )
       select
         w.id,
         w.address,
@@ -693,45 +729,19 @@ async function loadWalletRowsByIds(
         w.is_system_flagged,
         w.first_seen_at,
         w.last_seen_at,
-        tags.tags,
-        metrics.metrics,
+        ta.tags,
+        lm.metrics,
         wp.profile,
         wp.updated_at as profile_updated_at
-      from wallets w
+      from wallet_set ws
+      join wallets w on w.id = ws.wallet_id
       left join wallet_user_labels wl
         on wl.wallet_id = w.id
        and wl.user_id = $1
-      left join lateral (
-        select jsonb_agg(jsonb_build_object(
-          'slug', t.slug,
-          'label', t.label,
-          'tag_type', t.tag_type,
-          'is_system', t.is_system
-        ) order by t.tag_type, t.slug) as tags
-        from wallet_tag_map tm
-        join wallet_tags t on t.id = tm.tag_id
-        where tm.wallet_id = w.id
-      ) tags on true
-      left join lateral (
-        select jsonb_build_object(
-          'period', s.period,
-          'as_of', s.as_of,
-          'trades_count', s.trades_count,
-          'volume_usd', s.volume_usd,
-          'pnl_usd', s.pnl_usd,
-          'roi', s.roi,
-          'win_rate', s.win_rate,
-          'avg_hold_hours', s.avg_hold_hours,
-          'last_trade_at', s.last_trade_at
-        ) as metrics
-        from wallet_metrics_snapshots s
-        where s.wallet_id = w.id and s.period = '30d'
-        order by s.as_of desc
-        limit 1
-      ) metrics on true
+      left join tags_agg ta on ta.wallet_id = w.id
+      left join latest_metrics lm on lm.wallet_id = w.id
       left join wallet_profiles wp on wp.wallet_id = w.id
-      where w.id = any($2::uuid[])
-        and ($3::text[] is null or wp.profile->'categories' ?| $3::text[])
+      where ($3::text[] is null or wp.profile->'categories' ?| $3::text[])
       order by w.last_seen_at desc
     `,
     [userId, walletIds, categoryFilter],
@@ -862,7 +872,10 @@ async function loadWhaleTopMarkets(
   if (walletIds.length === 0) return byWallet;
   const marketRows = await client.query<WhaleMarketRow>(
     `
-      with recent_markets as (
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      recent_markets as (
         select
           wah.wallet_id,
           wah.market_id,
@@ -888,10 +901,10 @@ async function loadWhaleTopMarkets(
           um.expiration_time,
           um.resolved_outcome
         from wallet_activity_hourly wah
+        join wallet_set ws on ws.wallet_id = wah.wallet_id
         left join unified_markets um on um.id = wah.market_id
         left join unified_events ue on ue.id = um.event_id
-        where wah.wallet_id = any($1::uuid[])
-          and wah.activity_type in ('delta', 'trade', 'holder')
+        where wah.activity_type in ('delta', 'trade', 'holder')
           and wah.hour_bucket >= now() - ($3::text || ' days')::interval
         group by
           wah.wallet_id,
