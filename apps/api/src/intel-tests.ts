@@ -49,6 +49,7 @@ import {
   buildWalletMmDiagnostics,
   computeMmSuspected,
 } from "./services/wallet-intel-mm.js";
+import { resolveSparklineBucketHours } from "./services/wallet-intel-series.js";
 import {
   computeProfileSideBias,
   mapWhaleMarketToProfileMarket,
@@ -59,7 +60,10 @@ import {
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import {
   walletActivitySignalsQuerySchema,
+  walletActivitySummaryQuerySchema,
   walletPositionsQuerySchema,
+  walletSeriesQuerySchema,
+  walletWhalesQuerySchema,
 } from "./schemas/wallet-intel.js";
 
 type TestCase = {
@@ -204,6 +208,37 @@ const tests: TestCase[] = [
         resolveSignalWindowHours(24, { windowHoursDefault: 72, windowHoursMax: 24 }),
         24,
       );
+    },
+  },
+  {
+    name: "sparkline bucket resolver keeps point counts bounded with simple buckets",
+    run: () => {
+      assert.equal(resolveSparklineBucketHours(24), 1);
+      assert.equal(resolveSparklineBucketHours(48), 2);
+      assert.equal(resolveSparklineBucketHours(96), 4);
+      assert.equal(resolveSparklineBucketHours(168), 6);
+      assert.equal(resolveSparklineBucketHours(336), 12);
+      assert.equal(resolveSparklineBucketHours(720), 24);
+      assert.equal(resolveSparklineBucketHours(168, 3), 3);
+      assert.equal(resolveSparklineBucketHours(24, 72), 24);
+    },
+  },
+  {
+    name: "wallet intel schemas parse sparkline and series query defaults",
+    run: () => {
+      const whales = walletWhalesQuerySchema.parse({
+        includeSparkline: "true",
+      });
+      const summary = walletActivitySummaryQuerySchema.parse({
+        includeSparkline: "1",
+      });
+      const series = walletSeriesQuerySchema.parse({});
+
+      assert.equal(whales.includeSparkline, true);
+      assert.equal(summary.includeSparkline, true);
+      assert.equal(series.windowHours, 168);
+      assert.equal(series.period, "30d");
+      assert.equal(series.limit, 120);
     },
   },
   {

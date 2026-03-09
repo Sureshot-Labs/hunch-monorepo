@@ -96,6 +96,7 @@ export const walletActivitySummaryQuerySchema = z.object({
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
   includeAttribution: queryBooleanSchema.default(true),
+  includeSparkline: queryBooleanSchema.default(false),
 });
 
 export const walletActivitySignalsQuerySchema = z.object({
@@ -189,4 +190,12 @@ export const walletWhalesQuerySchema = z.object({
   labels: csvStringArraySchema.optional(),
   labelMode: filterModeSchema,
   includeAttribution: queryBooleanSchema.default(true),
+  includeSparkline: queryBooleanSchema.default(false),
+});
+
+export const walletSeriesQuerySchema = z.object({
+  windowHours: z.coerce.number().int().min(1).max(24 * 30).default(168),
+  bucketHours: z.coerce.number().int().min(1).max(24 * 14).optional(),
+  period: z.enum(["1d", "7d", "30d", "all"]).default("30d"),
+  limit: z.coerce.number().int().min(1).max(240).default(120),
 });

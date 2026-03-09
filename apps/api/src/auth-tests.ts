@@ -151,7 +151,7 @@ const tests: TestCase[] = [
         },
       } as unknown as Pick<PoolClient, "query">;
 
-      const userId =
+      const result =
         await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
           privyUserId: "did:privy:new-user",
           privyWallets: [
@@ -163,12 +163,56 @@ const tests: TestCase[] = [
           email: "user@example.com",
         });
 
-      assert.equal(userId, "user-wallet-match");
+      assert.equal(result.userId, "user-wallet-match");
+      assert.equal(result.consumeBindGrant, false);
       assert.equal(calls.length, 2);
       assert.match(
         calls[1].sql,
         /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
       );
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient consumes an active email bind grant",
+    run: async () => {
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  id: "user-email-only",
+                  privy_bind_grant_expires_at: new Date(
+                    Date.now() + 60 * 60 * 1000
+                  ),
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      const result =
+        await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+          privyUserId: "did:privy:new-user",
+          privyWallets: [
+            {
+              address: "0xabc0000000000000000000000000000000000000",
+              walletType: "ethereum",
+            },
+          ],
+          email: "user@example.com",
+        });
+
+      assert.equal(result.userId, "user-email-only");
+      assert.equal(result.consumeBindGrant, true);
     },
   },
   {
@@ -183,7 +227,14 @@ const tests: TestCase[] = [
             return { rows: [] };
           }
           if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)/i.test(sql)) {
-            return { rows: [{ id: "user-email-only" }] };
+            return {
+              rows: [
+                {
+                  id: "user-email-only",
+                  privy_bind_grant_expires_at: null,
+                },
+              ],
+            };
           }
           throw new Error(`unexpected query: ${sql}`);
         },

@@ -19,6 +19,12 @@ import {
   type WalletActivityTopChange,
 } from "../services/wallet-activity-summary.js";
 import {
+  buildEmptyWalletActivitySparkline,
+  fetchWalletActivitySparklines,
+  fetchWalletPerformanceSeries,
+  type WalletActivitySparkline,
+} from "../services/wallet-intel-series.js";
+import {
   resolveSignalWindowHours,
   resolveWalletIntelAttributionPolicy,
   resolveWalletIntelRefreshPolicy,
@@ -54,6 +60,7 @@ import {
   walletFollowingQuerySchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
+  walletSeriesQuerySchema,
   walletWhalesQuerySchema,
 } from "../schemas/wallet-intel.js";
 
@@ -191,6 +198,7 @@ type WhaleWalletItem = {
   unusualTier: WalletActivitySummary["unusualTier"];
   topChanges: WalletActivityTopChange[];
   topMarkets: WhaleMarketItem[];
+  sparkline?: WalletActivitySparkline;
   attribution?: WalletAttribution;
 };
 
@@ -232,6 +240,7 @@ type WalletActivitySummaryItem = {
   unusualScore: number | null;
   unusualTier: WalletActivitySummary["unusualTier"];
   topChanges: WalletActivityTopChange[];
+  sparkline?: WalletActivitySparkline;
   attribution?: WalletAttribution;
 };
 
@@ -2062,6 +2071,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             query.marketLimit,
             query.windowDays,
           );
+          const sparklineMap = query.includeSparkline
+            ? await fetchWalletActivitySparklines(client, pagedIds, {
+                windowHours,
+              })
+            : new Map<string, WalletActivitySparkline>();
 
           let pageAttributionMap = attributionMapForFilters;
           if (includeAttributionInResponse) {
@@ -2089,9 +2103,20 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               query.includeSummary,
               topMarketMap.get(row.walletId) ?? [],
             );
-            return includeAttributionInResponse
-              ? { ...hydrated, attribution: pageAttributionMap.get(row.walletId) }
+            const withSparkline = query.includeSparkline
+              ? {
+                  ...hydrated,
+                  sparkline:
+                    sparklineMap.get(row.walletId) ??
+                    buildEmptyWalletActivitySparkline({ windowHours }),
+                }
               : hydrated;
+            return includeAttributionInResponse
+              ? {
+                  ...withSparkline,
+                  attribution: pageAttributionMap.get(row.walletId),
+                }
+              : withSparkline;
           });
 
           return {
@@ -2235,6 +2260,73 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/:walletId/series
+   */
+  z.get(
+    "/wallets/:walletId/series",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletProfileParamsSchema,
+        querystring: walletSeriesQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const walletId = request.params.walletId;
+      const query = request.query;
+      const client = await pool.connect();
+      try {
+        const walletExists = await client.query<{ id: string }>(
+          `select id from wallets where id = $1 limit 1`,
+          [walletId],
+        );
+        if (!walletExists.rows[0]?.id) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+
+        const [activityMap, performance] = await Promise.all([
+          fetchWalletActivitySparklines(client, [walletId], {
+            windowHours: query.windowHours,
+            bucketHours: query.bucketHours,
+          }),
+          fetchWalletPerformanceSeries(client, walletId, {
+            period: query.period,
+            limit: query.limit,
+          }),
+        ]);
+
+        return reply.send({
+          ok: true,
+          walletId,
+          activity:
+            activityMap.get(walletId) ??
+            buildEmptyWalletActivitySparkline({
+              windowHours: query.windowHours,
+              bucketHours: query.bucketHours,
+            }),
+          performance,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, walletId, userId: user.id, query },
+          "Failed to load wallet series",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load wallet series" });
       } finally {
         client.release();
       }
@@ -2446,6 +2538,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           const start = query.offset;
           const end = start + query.limit;
           const pagedRows = sorted.slice(start, end);
+          const sparklineMap = query.includeSparkline
+            ? await fetchWalletActivitySparklines(
+                client,
+                pagedRows.map((row) => row.walletId),
+                { windowHours },
+              )
+            : new Map<string, WalletActivitySparkline>();
           if (includeAttributionInResponse) {
             attributionMap = await buildWalletAttributionMap(
               client,
@@ -2463,11 +2562,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
           }
 
-          const items = pagedRows.map((row) =>
-            includeAttributionInResponse
-              ? { ...row, attribution: attributionMap.get(row.walletId) }
-              : row,
-          );
+          const items = pagedRows.map((row) => {
+            const withSparkline = query.includeSparkline
+              ? {
+                  ...row,
+                  sparkline:
+                    sparklineMap.get(row.walletId) ??
+                    buildEmptyWalletActivitySparkline({ windowHours }),
+                }
+              : row;
+            return includeAttributionInResponse
+              ? {
+                  ...withSparkline,
+                  attribution: attributionMap.get(row.walletId),
+                }
+              : withSparkline;
+          });
 
           return {
             ok: true,

@@ -210,6 +210,30 @@ export const adminUserMergeSchema = z
     }
   });
 
+export const adminUserPrivyBindGrantSchema = z
+  .object({
+    userId: z.string().uuid().optional(),
+    walletAddress: z.string().min(1).optional(),
+    expiresInHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
+    note: z.string().trim().max(500).optional(),
+    clear: z.coerce.boolean().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.userId && !value.walletAddress) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide userId or walletAddress",
+      });
+    }
+    if (!value.clear && value.expiresInHours == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expiresInHours"],
+        message: "Provide expiresInHours unless clear is true",
+      });
+    }
+  });
+
 export const adminPointsSchema = z
   .object({
     userId: z.string().uuid().optional(),
@@ -280,6 +304,9 @@ export type AdminUserKalshiProofBypassBody = z.infer<
   typeof adminUserKalshiProofBypassSchema
 >;
 export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
+export type AdminUserPrivyBindGrantBody = z.infer<
+  typeof adminUserPrivyBindGrantSchema
+>;
 export type AdminIntelPolicyParams = z.infer<typeof adminIntelPolicyParamsSchema>;
 export type AdminIntelPolicyBody = z.infer<typeof adminIntelPolicyBodySchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;

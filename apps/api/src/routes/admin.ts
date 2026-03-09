@@ -65,6 +65,7 @@ import {
   adminUserReferralCodeSchema,
   adminUserActivityQuerySchema,
   adminUserMergeSchema,
+  adminUserPrivyBindGrantSchema,
   adminUserParamsSchema,
   adminUsersQuerySchema,
 } from "../schemas/admin.js";
@@ -1720,6 +1721,68 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         dryRun: result.dryRun,
         summary: result.summary,
+      });
+    },
+  );
+
+  z.post(
+    "/admin/users/privy-bind-grant",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { body: adminUserPrivyBindGrantSchema },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      let userId = body.userId ?? null;
+
+      if (!userId && body.walletAddress) {
+        userId = await resolveUserIdByWallet(body.walletAddress);
+      }
+
+      if (!userId) {
+        reply.code(400);
+        return reply.send({ error: "Resolve user failed" });
+      }
+
+      const note = body.note?.trim() || null;
+      const clear = Boolean(body.clear);
+      const expiresInHours = clear ? null : Number(body.expiresInHours ?? 24);
+
+      const { rows } = await pool.query<{
+        id: string;
+        privy_bind_grant_expires_at: Date | null;
+        privy_bind_grant_note: string | null;
+      }>(
+        `
+          update users
+          set privy_bind_grant_expires_at =
+                case
+                  when $2::boolean then null
+                  else now() + ($3::int * interval '1 hour')
+                end,
+              privy_bind_grant_note =
+                case
+                  when $2::boolean then null
+                  else $4
+                end,
+              updated_at = now()
+          where id = $1
+          returning id, privy_bind_grant_expires_at, privy_bind_grant_note
+        `,
+        [userId, clear, expiresInHours, note],
+      );
+
+      if (!rows.length) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        userId: rows[0].id,
+        expiresAt: rows[0].privy_bind_grant_expires_at?.toISOString() ?? null,
+        note: rows[0].privy_bind_grant_note ?? null,
       });
     },
   );

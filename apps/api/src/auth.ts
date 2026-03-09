@@ -151,6 +151,11 @@ function mapUserWalletRow(row: UserWalletRow): UserWallet {
   };
 }
 
+type ResolvedPrivyLoginMatch = {
+  userId: string | null;
+  consumeBindGrant: boolean;
+};
+
 type AuthSessionRow = {
   id: string;
   user_id: string;
@@ -575,7 +580,7 @@ export class AuthService {
       privyWallets: PrivyWallet[];
       email: string | null;
     },
-  ): Promise<string | null> {
+  ): Promise<ResolvedPrivyLoginMatch> {
     const { privyUserId, privyWallets, email } = params;
 
     const userByPrivyId = await client.query<{ id: string }>(
@@ -583,7 +588,9 @@ export class AuthService {
       [privyUserId],
     );
     const userByPrivyIdMatch = userByPrivyId.rows[0]?.id ?? null;
-    if (userByPrivyIdMatch) return userByPrivyIdMatch;
+    if (userByPrivyIdMatch) {
+      return { userId: userByPrivyIdMatch, consumeBindGrant: false };
+    }
 
     const matchedUserIds = new Set<string>();
     for (const wallet of privyWallets) {
@@ -612,13 +619,20 @@ export class AuthService {
     }
 
     if (matchedUserIds.size === 1) {
-      return matchedUserIds.values().next().value ?? null;
+      return {
+        userId: matchedUserIds.values().next().value ?? null,
+        consumeBindGrant: false,
+      };
     }
 
-    if (!email) return null;
+    if (!email) return { userId: null, consumeBindGrant: false };
 
-    const userByEmail = await client.query<{ id: string }>(
+    const userByEmail = await client.query<{
+      id: string;
+      privy_bind_grant_expires_at: Date | null;
+    }>(
       `SELECT id
+              , privy_bind_grant_expires_at
          FROM users
         WHERE lower(email) = lower($1)
         LIMIT 2`,
@@ -632,12 +646,19 @@ export class AuthService {
     }
 
     if (userByEmail.rows.length === 1) {
+      const grantExpiresAt = userByEmail.rows[0]?.privy_bind_grant_expires_at;
+      if (grantExpiresAt && grantExpiresAt.getTime() > Date.now()) {
+        return {
+          userId: userByEmail.rows[0]?.id ?? null,
+          consumeBindGrant: true,
+        };
+      }
       throw new PrivyAccountRecoveryRequiredError(
         "Existing account matched by email only; manual recovery required",
       );
     }
 
-    return null;
+    return { userId: null, consumeBindGrant: false };
   }
 
   /**
@@ -659,14 +680,13 @@ export class AuthService {
 
     const primaryWalletAddress = primaryWallet.address;
 
-    let userId = await AuthService.resolveExistingUserIdForPrivyLoginWithClient(
-      client,
-      {
+    const resolvedExistingUser =
+      await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
         privyUserId,
         privyWallets,
         email,
-      },
-    );
+      });
+    let userId = resolvedExistingUser.userId;
 
     if (userId) {
       if (email) {
@@ -715,10 +735,12 @@ export class AuthService {
         `UPDATE users SET
            email = $1,
            privy_user_id = $2,
+           privy_bind_grant_expires_at = case when $4 then null else privy_bind_grant_expires_at end,
+           privy_bind_grant_note = case when $4 then null else privy_bind_grant_note end,
            last_login_at = now(),
            updated_at = now()
            WHERE id = $3`,
-        [email, privyUserId, userId],
+        [email, privyUserId, userId, resolvedExistingUser.consumeBindGrant],
       );
 
       // Remove wallets that were unlinked in Privy (and dependent venue creds).
