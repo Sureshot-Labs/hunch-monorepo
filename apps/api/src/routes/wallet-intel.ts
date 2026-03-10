@@ -1336,25 +1336,6 @@ async function loadWalletRowsByIds(
         join wallet_set ws on ws.wallet_id = tm.wallet_id
         join wallet_tags t on t.id = tm.tag_id
         group by tm.wallet_id
-      ),
-      latest_metrics as (
-        select distinct on (s.wallet_id)
-          s.wallet_id,
-          jsonb_build_object(
-            'period', s.period,
-            'as_of', s.as_of,
-            'trades_count', s.trades_count,
-            'volume_usd', s.volume_usd,
-            'pnl_usd', s.pnl_usd,
-            'roi', s.roi,
-            'win_rate', s.win_rate,
-            'avg_hold_hours', s.avg_hold_hours,
-            'last_trade_at', s.last_trade_at
-          ) as metrics
-        from wallet_metrics_snapshots s
-        join wallet_set ws on ws.wallet_id = s.wallet_id
-        where s.period = '30d'
-        order by s.wallet_id, s.as_of desc
       )
       select
         w.id,
@@ -1375,7 +1356,23 @@ async function loadWalletRowsByIds(
         on wl.wallet_id = w.id
        and wl.user_id = $1
       left join tags_agg ta on ta.wallet_id = w.id
-      left join latest_metrics lm on lm.wallet_id = w.id
+      left join lateral (
+        select jsonb_build_object(
+          'period', s.period,
+          'as_of', s.as_of,
+          'trades_count', s.trades_count,
+          'volume_usd', s.volume_usd,
+          'pnl_usd', s.pnl_usd,
+          'roi', s.roi,
+          'win_rate', s.win_rate,
+          'avg_hold_hours', s.avg_hold_hours,
+          'last_trade_at', s.last_trade_at
+        ) as metrics
+        from wallet_metrics_snapshots s
+        where s.wallet_id = w.id and s.period = '30d'
+        order by s.as_of desc
+        limit 1
+      ) lm on true
       left join wallet_profiles wp on wp.wallet_id = w.id
       where ($3::text[] is null or wp.profile->'categories' ?| $3::text[])
       order by w.last_seen_at desc
@@ -1451,10 +1448,26 @@ async function loadWhalePageMetadataByIds(
       join wallets w on w.id = ws.wallet_id
       left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
       left join wallet_user_labels wl
-        on wl.wallet_id = w.id
-       and wl.user_id = $1
+       on wl.wallet_id = w.id
+      and wl.user_id = $1
       left join tags_agg ta on ta.wallet_id = w.id
-      left join latest_metrics lm on lm.wallet_id = w.id
+      left join lateral (
+        select jsonb_build_object(
+          'period', s.period,
+          'as_of', s.as_of,
+          'trades_count', s.trades_count,
+          'volume_usd', s.volume_usd,
+          'pnl_usd', s.pnl_usd,
+          'roi', s.roi,
+          'win_rate', s.win_rate,
+          'avg_hold_hours', s.avg_hold_hours,
+          'last_trade_at', s.last_trade_at
+        ) as metrics
+        from wallet_metrics_snapshots s
+        where s.wallet_id = w.id and s.period = '30d'
+        order by s.as_of desc
+        limit 1
+      ) lm on true
       left join lateral (
         select
           w2.address as owner_address,
@@ -2724,18 +2737,23 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           if (needsSummaryForPage) {
             const missingIds = pagedIds.filter((id) => !summaryMapForPage.has(id));
             if (missingIds.length > 0) {
-              const pageSummary = await fetchWalletActivitySummaries(
-                client,
-                missingIds,
-                {
-                  windowHours,
-                  topChanges: query.topChanges,
-                  baselineDays: 30,
-                  enteredLateHours: 24,
-                },
-              );
-              for (const [walletId, summary] of pageSummary.entries()) {
-                summaryMapForPage.set(walletId, summary);
+              const summaryOptions = {
+                windowHours,
+                topChanges: query.topChanges,
+                baselineDays: 30,
+                enteredLateHours: 24,
+              };
+              const [pageSummaryStats, pageTopChanges] = await Promise.all([
+                fetchWalletActivitySummaryStats(client, missingIds, summaryOptions),
+                fetchWalletActivityTopChanges(client, missingIds, summaryOptions),
+              ]);
+              for (const walletId of missingIds) {
+                const summaryStats = pageSummaryStats.get(walletId);
+                if (!summaryStats) continue;
+                summaryMapForPage.set(walletId, {
+                  ...summaryStats,
+                  topChanges: pageTopChanges.get(walletId) ?? [],
+                });
               }
             }
           }
