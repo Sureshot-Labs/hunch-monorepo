@@ -342,6 +342,10 @@ const FAST_SIGNAL_REASON_FILTERS = new Set([
   "narrow_history",
   "reactivated_after_idle",
 ]);
+const EXACT_ATTRIBUTION_SQL_LABEL_FILTERS = new Set<WalletAttributionLabelKey>([
+  "high_conviction",
+  "market_mover",
+]);
 
 function filtersRequireSummaryHydration(
   primaryFilters: WalletAttributionPrimaryKey[],
@@ -357,6 +361,17 @@ function displayReasonFiltersSupportedByFastSignals(
   filters: string[],
 ): boolean {
   return filters.every((value) => FAST_SIGNAL_REASON_FILTERS.has(value));
+}
+
+function canUseExactAttributionSqlLabelFilter(
+  primaryFilters: WalletAttributionPrimaryKey[],
+  labelFilters: WalletAttributionLabelKey[],
+): boolean {
+  return (
+    primaryFilters.length === 0 &&
+    labelFilters.length > 0 &&
+    labelFilters.every((value) => EXACT_ATTRIBUTION_SQL_LABEL_FILTERS.has(value))
+  );
 }
 
 async function resolveWhaleTagId(client: PoolClient): Promise<string> {
@@ -778,6 +793,214 @@ async function filterWalletIdsByMmExclusion(
   return rows.rows.map((row) => row.wallet_id);
 }
 
+async function loadWalletIdsForHighConvictionLabel(
+  client: PoolClient,
+  walletIds: string[],
+  attributionPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelAttributionPolicy>
+  >["effective"],
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const rows = await client.query<{ wallet_id: string }>(
+    `
+      with venue_thresholds(venue, min_stake_usd) as (
+        values
+          ('polymarket', $2::numeric),
+          ('kalshi', $3::numeric),
+          ('limitless', $4::numeric)
+      )
+      select distinct scoped.wallet_id
+      from (
+        select
+          wah.wallet_id,
+          wah.venue,
+          max(
+            coalesce(wah.max_abs_delta_usd, wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)
+          ) as max_stake_usd
+        from wallet_activity_hourly wah
+        where wah.wallet_id = any($1::uuid[])
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '30 days'
+        group by wah.wallet_id, wah.venue
+      ) scoped
+      join venue_thresholds vt on vt.venue = scoped.venue
+      where vt.min_stake_usd > 0
+        and scoped.max_stake_usd >= vt.min_stake_usd
+    `,
+    [
+      walletIds,
+      attributionPolicy.venueThresholds.polymarket.highConvictionStakeUsd,
+      attributionPolicy.venueThresholds.kalshi.highConvictionStakeUsd,
+      attributionPolicy.venueThresholds.limitless.highConvictionStakeUsd,
+    ],
+  );
+  return rows.rows.map((row) => row.wallet_id);
+}
+
+async function loadWalletIdsForMarketMoverLabel(
+  client: PoolClient,
+  walletIds: string[],
+  attributionPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelAttributionPolicy>
+  >["effective"],
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const rows = await client.query<{ wallet_id: string }>(
+    `
+      with venue_thresholds(venue, min_stake_usd, min_ratio) as (
+        values
+          ('polymarket', $2::numeric, $5::numeric),
+          ('kalshi', $3::numeric, $6::numeric),
+          ('limitless', $4::numeric, $7::numeric)
+      ),
+      stake_by_wallet_venue as (
+        select
+          wah.wallet_id,
+          wah.venue,
+          max(
+            coalesce(wah.max_abs_delta_usd, wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)
+          ) as max_stake_usd
+        from wallet_activity_hourly wah
+        where wah.wallet_id = any($1::uuid[])
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '30 days'
+        group by wah.wallet_id, wah.venue
+      ),
+      wallet_market as (
+        select
+          wah.wallet_id,
+          wah.venue,
+          wah.market_id,
+          sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as wallet_notional_24h
+        from wallet_activity_hourly wah
+        where wah.wallet_id = any($1::uuid[])
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '24 hours'
+        group by wah.wallet_id, wah.venue, wah.market_id
+      ),
+      market_scope as (
+        select distinct venue, market_id
+        from wallet_market
+      ),
+      market_total as (
+        select
+          wah.venue,
+          wah.market_id,
+          sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as market_notional_24h
+        from wallet_activity_hourly wah
+        join market_scope ms
+          on ms.venue = wah.venue
+         and ms.market_id = wah.market_id
+        where wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '24 hours'
+        group by wah.venue, wah.market_id
+      ),
+      ratio_by_wallet_venue as (
+        select
+          wm.wallet_id,
+          wm.venue,
+          max(
+            case
+              when mt.market_notional_24h > 0
+                then wm.wallet_notional_24h / mt.market_notional_24h
+              else null
+            end
+          ) as max_stake_to_market_vol_ratio
+        from wallet_market wm
+        left join market_total mt
+          on mt.venue = wm.venue
+         and mt.market_id = wm.market_id
+        group by wm.wallet_id, wm.venue
+      )
+      select distinct scoped.wallet_id
+      from stake_by_wallet_venue scoped
+      join venue_thresholds vt on vt.venue = scoped.venue
+      left join ratio_by_wallet_venue rv
+        on rv.wallet_id = scoped.wallet_id
+       and rv.venue = scoped.venue
+      where vt.min_stake_usd > 0
+        and scoped.max_stake_usd >= vt.min_stake_usd
+        and (
+          vt.min_ratio <= 0
+          or coalesce(rv.max_stake_to_market_vol_ratio, 0) >= vt.min_ratio
+        )
+    `,
+    [
+      walletIds,
+      attributionPolicy.venueThresholds.polymarket.marketMoverStakeUsd,
+      attributionPolicy.venueThresholds.kalshi.marketMoverStakeUsd,
+      attributionPolicy.venueThresholds.limitless.marketMoverStakeUsd,
+      attributionPolicy.venueThresholds.polymarket.marketMoverStakeToMarketVolRatio,
+      attributionPolicy.venueThresholds.kalshi.marketMoverStakeToMarketVolRatio,
+      attributionPolicy.venueThresholds.limitless.marketMoverStakeToMarketVolRatio,
+    ],
+  );
+  return rows.rows.map((row) => row.wallet_id);
+}
+
+async function filterWalletIdsByExactAttributionLabels(
+  client: PoolClient,
+  walletIds: string[],
+  attributionPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelAttributionPolicy>
+  >["effective"],
+  filters: {
+    primaryTyped: WalletAttributionPrimaryKey[];
+    labelsTyped: WalletAttributionLabelKey[];
+    labelMode?: "any" | "all";
+  },
+): Promise<string[] | null> {
+  if (
+    !canUseExactAttributionSqlLabelFilter(filters.primaryTyped, filters.labelsTyped)
+  ) {
+    return null;
+  }
+
+  const uniqueLabels = Array.from(new Set(filters.labelsTyped));
+  const resultSets = await Promise.all(
+    uniqueLabels.map(async (label) => {
+      switch (label) {
+        case "high_conviction":
+          return new Set(
+            await loadWalletIdsForHighConvictionLabel(
+              client,
+              walletIds,
+              attributionPolicy,
+            ),
+          );
+        case "market_mover":
+          return new Set(
+            await loadWalletIdsForMarketMoverLabel(
+              client,
+              walletIds,
+              attributionPolicy,
+            ),
+          );
+        default:
+          return new Set<string>();
+      }
+    }),
+  );
+
+  if (resultSets.length === 0) return walletIds;
+
+  if ((filters.labelMode ?? "any") === "all") {
+    const intersection = new Set(resultSets[0] ?? []);
+    for (const resultSet of resultSets.slice(1)) {
+      for (const walletId of Array.from(intersection)) {
+        if (!resultSet.has(walletId)) intersection.delete(walletId);
+      }
+    }
+    return walletIds.filter((walletId) => intersection.has(walletId));
+  }
+
+  const union = new Set<string>();
+  for (const resultSet of resultSets) {
+    for (const walletId of resultSet) union.add(walletId);
+  }
+  return walletIds.filter((walletId) => union.has(walletId));
+}
+
 async function loadWalletAttributionFilterRowsByIds(
   client: PoolClient,
   walletIds: string[],
@@ -828,6 +1051,19 @@ async function filterWalletIdsByAttribution(
   },
 ): Promise<string[]> {
   if (walletIds.length === 0) return [];
+  const exactSqlLabelFiltered = await filterWalletIdsByExactAttributionLabels(
+    client,
+    walletIds,
+    attributionPolicy,
+    {
+      primaryTyped: filters.primaryTyped,
+      labelsTyped: filters.labelsTyped,
+      labelMode: filters.labelMode,
+    },
+  );
+  if (exactSqlLabelFiltered) {
+    return exactSqlLabelFiltered;
+  }
   const rows = await loadWalletAttributionFilterRowsByIds(client, walletIds);
   const attributionMap = await buildWalletAttributionMap(
     client,
