@@ -214,12 +214,64 @@ type WhaleProfileRow = {
   profile_updated_at: Date | null;
 };
 
+type WhaleSelectorRow = WalletRow &
+  WhaleProfileRow & {
+    is_followed: boolean;
+    tags: WalletTagRow[] | null;
+    metrics: WalletMetricsRow | null;
+    last_activity_at: Date | null;
+    has_trade_activity: boolean | null;
+    has_holder_activity: boolean | null;
+    metrics_volume: string | null;
+    metrics_pnl: string | null;
+    metrics_trades: number | null;
+    exposure_usd: string | null;
+    hedged_notional_usd: string | null;
+    net_imbalance_usd: string | null;
+    hedge_ratio: string | null;
+    two_sided_markets: number | null;
+    whale_score: string | null;
+    is_safe: boolean;
+    owner_address: string | null;
+    owner_label: string | null;
+    owner_wallet_id: string | null;
+    inferred_wins: number | null;
+    inferred_total: number | null;
+    user_label: string | null;
+  };
+
+type WhaleSelectorSlimRow = WalletRow & {
+  last_activity_at: Date | null;
+  has_trade_activity: boolean | null;
+  has_holder_activity: boolean | null;
+  metrics_volume: string | null;
+  metrics_pnl: string | null;
+  metrics_trades: number | null;
+  exposure_usd: string | null;
+  hedged_notional_usd: string | null;
+  net_imbalance_usd: string | null;
+  hedge_ratio: string | null;
+  two_sided_markets: number | null;
+  whale_score: string | null;
+  is_safe: boolean;
+  owner_address: string | null;
+  inferred_wins: number | null;
+  inferred_total: number | null;
+};
+
 type CandidateWalletRow = WalletRow &
   WhaleProfileRow & {
     user_label: string | null;
     tags: WalletTagRow[] | null;
     metrics: WalletMetricsRow | null;
   };
+
+type WhalePageMetadataRow = CandidateWalletRow & {
+  is_followed: boolean;
+  owner_address: string | null;
+  owner_label: string | null;
+  owner_wallet_id: string | null;
+};
 
 type WalletAttributionFilterRow = {
   id: string;
@@ -405,32 +457,88 @@ function walletIntelCacheKey(
   return `wallet-intel:v1:${routeKey}:${userId}:${digest}`;
 }
 
+function buildSlimWhaleSelectorSql(
+  orderBy: string,
+  includeInferred: boolean,
+): string {
+  const inferredSelect = includeInferred
+    ? `,
+                inferred.wins as inferred_wins,
+                inferred.total as inferred_total`
+    : `,
+                null::int as inferred_wins,
+                null::int as inferred_total`;
+  const inferredJoin = includeInferred
+    ? `
+              left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id`
+    : "";
+  return `
+              select
+                w.id,
+                w.address,
+                w.chain,
+                w.label,
+                w.is_system_flagged,
+                (w.metadata->>'kind' = 'safe') as is_safe,
+                w.first_seen_at,
+                w.last_seen_at,
+                metrics.metrics_volume,
+                metrics.metrics_pnl,
+                metrics.metrics_trades,
+                exposure.exposure_usd,
+                exposure.hedged_notional_usd,
+                exposure.net_imbalance_usd,
+                exposure.hedge_ratio,
+                exposure.two_sided_markets,
+                case
+                  when w.chain = 'solana'
+                    then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
+                  else coalesce(metrics.metrics_volume, 0)
+                end as whale_score,
+                owner.owner_address,
+                activity.last_activity_at,
+                activity.has_trade_activity,
+                activity.has_holder_activity${inferredSelect}
+              from wallets w
+              join wallet_tag_map tm on tm.wallet_id = w.id
+               and tm.tag_id = $3::uuid
+              left join lateral (
+                select
+                  s.volume_usd as metrics_volume,
+                  s.pnl_usd as metrics_pnl,
+                  s.trades_count as metrics_trades
+                from wallet_metrics_snapshots s
+                where s.wallet_id = w.id and s.period = '30d'
+                order by s.as_of desc
+                limit 1
+              ) metrics on true
+              left join lateral (
+                select
+                  max(wah.last_occurred_at) as last_activity_at,
+                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+                  bool_or(wah.activity_type = 'holder') as has_holder_activity
+                from wallet_activity_hourly wah
+                where wah.wallet_id = w.id
+                  and wah.hour_bucket >= now() - ($2::text || ' days')::interval
+              ) activity on true
+              left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+              left join lateral (
+                select w2.address as owner_address
+                from wallets w2
+                where w.metadata->>'kind' = 'safe'
+                  and w2.metadata->>'kind' = 'safe_owner'
+                  and w2.metadata->>'derivedFrom' = w.address
+                  and w2.chain = w.chain
+                limit 1
+              ) owner on true${inferredJoin}
+              where activity.last_activity_at is not null
+              order by ${orderBy}
+              limit $1
+            `;
+}
+
 function mapWhaleRowToItem(
-  row: WalletRow &
-    WhaleProfileRow & {
-      is_followed: boolean;
-      tags: WalletTagRow[] | null;
-      metrics: WalletMetricsRow | null;
-      last_activity_at: Date | null;
-      has_trade_activity: boolean | null;
-      has_holder_activity: boolean | null;
-      metrics_volume: string | null;
-      metrics_pnl: string | null;
-      metrics_trades: number | null;
-      exposure_usd: string | null;
-      hedged_notional_usd: string | null;
-      net_imbalance_usd: string | null;
-      hedge_ratio: string | null;
-      two_sided_markets: number | null;
-      whale_score: string | null;
-      is_safe: boolean;
-      owner_address: string | null;
-      owner_label: string | null;
-      owner_wallet_id: string | null;
-      inferred_wins: number | null;
-      inferred_total: number | null;
-      user_label: string | null;
-    },
+  row: WhaleSelectorRow,
   refreshPolicy: Awaited<ReturnType<typeof resolveWalletIntelRefreshPolicy>>["effective"],
 ): WhaleWalletItem {
   const mmDiagnostics =
@@ -504,6 +612,64 @@ function mapWhaleRowToItem(
     unusualTier: null,
     topChanges: [],
     topMarkets: [],
+  };
+}
+
+function mapWhaleSlimRowToItem(
+  row: WhaleSelectorSlimRow,
+  refreshPolicy: Awaited<ReturnType<typeof resolveWalletIntelRefreshPolicy>>["effective"],
+): WhaleWalletItem {
+  return mapWhaleRowToItem(
+    {
+      ...row,
+      is_followed: false,
+      tags: [],
+      metrics:
+        row.metrics_volume != null ||
+        row.metrics_pnl != null ||
+        row.metrics_trades != null
+          ? {
+              period: "30d",
+              as_of: row.last_seen_at,
+              trades_count: row.metrics_trades,
+              volume_usd: row.metrics_volume,
+              pnl_usd: row.metrics_pnl,
+              roi: null,
+              win_rate: null,
+              avg_hold_hours: null,
+              last_trade_at: null,
+            }
+          : null,
+      profile: null,
+      profile_updated_at: null,
+      owner_label: null,
+      owner_wallet_id: null,
+      user_label: null,
+    },
+    refreshPolicy,
+  );
+}
+
+function hydrateWhaleItemMetadata(
+  item: WhaleWalletItem,
+  row: WhalePageMetadataRow | null,
+): WhaleWalletItem {
+  if (!row) return item;
+  return {
+    ...item,
+    label: row.label,
+    userLabel: row.user_label ?? null,
+    isSystemFlagged: row.is_system_flagged,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    isFollowed: row.is_followed,
+    tags: row.tags ?? [],
+    metrics: row.metrics ?? null,
+    ownerAddress: row.owner_address ?? item.ownerAddress,
+    ownerLabel: row.owner_label ?? null,
+    ownerWalletId: row.owner_wallet_id ?? null,
+    profile: row.profile ?? null,
+    profileUpdatedAt: row.profile_updated_at ?? null,
   };
 }
 
@@ -1217,6 +1383,98 @@ async function loadWalletRowsByIds(
     [userId, walletIds, categoryFilter],
   );
   return rows.rows;
+}
+
+async function loadWhalePageMetadataByIds(
+  client: PoolClient,
+  userId: string,
+  walletIds: string[],
+): Promise<Map<string, WhalePageMetadataRow>> {
+  const byId = new Map<string, WhalePageMetadataRow>();
+  if (walletIds.length === 0) return byId;
+  const rows = await client.query<WhalePageMetadataRow>(
+    `
+      with wallet_set as (
+        select unnest($2::uuid[]) as wallet_id
+      ),
+      tags_agg as (
+        select
+          tm.wallet_id,
+          jsonb_agg(jsonb_build_object(
+            'slug', t.slug,
+            'label', t.label,
+            'tag_type', t.tag_type,
+            'is_system', t.is_system
+          ) order by t.tag_type, t.slug) as tags
+        from wallet_tag_map tm
+        join wallet_set ws on ws.wallet_id = tm.wallet_id
+        join wallet_tags t on t.id = tm.tag_id
+        group by tm.wallet_id
+      ),
+      latest_metrics as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          jsonb_build_object(
+            'period', s.period,
+            'as_of', s.as_of,
+            'trades_count', s.trades_count,
+            'volume_usd', s.volume_usd,
+            'pnl_usd', s.pnl_usd,
+            'roi', s.roi,
+            'win_rate', s.win_rate,
+            'avg_hold_hours', s.avg_hold_hours,
+            'last_trade_at', s.last_trade_at
+          ) as metrics
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = '30d'
+        order by s.wallet_id, s.as_of desc
+      )
+      select
+        w.id,
+        w.address,
+        w.chain,
+        w.label,
+        wl.label as user_label,
+        w.is_system_flagged,
+        w.first_seen_at,
+        w.last_seen_at,
+        (wf.wallet_id is not null) as is_followed,
+        ta.tags,
+        lm.metrics,
+        owner.owner_address,
+        owner.owner_label,
+        owner.owner_wallet_id,
+        wp.profile,
+        wp.updated_at as profile_updated_at
+      from wallet_set ws
+      join wallets w on w.id = ws.wallet_id
+      left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
+      left join wallet_user_labels wl
+        on wl.wallet_id = w.id
+       and wl.user_id = $1
+      left join tags_agg ta on ta.wallet_id = w.id
+      left join latest_metrics lm on lm.wallet_id = w.id
+      left join lateral (
+        select
+          w2.address as owner_address,
+          w2.label as owner_label,
+          w2.id as owner_wallet_id
+        from wallets w2
+        where w.metadata->>'kind' = 'safe'
+          and w2.metadata->>'kind' = 'safe_owner'
+          and w2.metadata->>'derivedFrom' = w.address
+          and w2.chain = w.chain
+        limit 1
+      ) owner on true
+      left join wallet_profiles wp on wp.wallet_id = w.id
+    `,
+    [userId, walletIds],
+  );
+  for (const row of rows.rows) {
+    byId.set(row.id, row);
+  }
+  return byId;
 }
 
 async function loadWalletMmDiagnosticsMap(
@@ -2133,145 +2391,129 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             Math.trunc(queryControls.whalesBatchSize),
           );
           const whaleTagId = await resolveWhaleTagId(client);
+          const useSlimWhaleSelector =
+            categoryFilter.length === 0 &&
+            tagsFilter.length === 0 &&
+            primaryFilter.length === 0 &&
+            labelsFilter.length === 0;
 
-          const whaleRows = await client.query<
-            WalletRow &
-              WhaleProfileRow & {
-                is_followed: boolean;
-                tags: WalletTagRow[] | null;
-                metrics: WalletMetricsRow | null;
-                last_activity_at: Date | null;
-                has_trade_activity: boolean | null;
-                has_holder_activity: boolean | null;
-                metrics_volume: string | null;
-                metrics_pnl: string | null;
-                metrics_trades: number | null;
-                exposure_usd: string | null;
-                hedged_notional_usd: string | null;
-                net_imbalance_usd: string | null;
-                hedge_ratio: string | null;
-                two_sided_markets: number | null;
-                whale_score: string | null;
-                is_safe: boolean;
-                owner_address: string | null;
-                owner_label: string | null;
-                owner_wallet_id: string | null;
-                inferred_wins: number | null;
-                inferred_total: number | null;
-                user_label: string | null;
-              }
-          >(
-            `
-              select
-                w.id,
-                w.address,
-                w.chain,
-                w.label,
-                wl.label as user_label,
-                w.is_system_flagged,
-                (w.metadata->>'kind' = 'safe') as is_safe,
-                w.first_seen_at,
-                w.last_seen_at,
-                (wf.wallet_id is not null) as is_followed,
-                tags.tags,
-                metrics.metrics,
-                metrics.metrics_volume,
-                metrics.metrics_pnl,
-                metrics.metrics_trades,
-                exposure.exposure_usd,
-                exposure.hedged_notional_usd,
-                exposure.net_imbalance_usd,
-                exposure.hedge_ratio,
-                exposure.two_sided_markets,
-                case
-                  when w.chain = 'solana'
-                    then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
-                  else coalesce(metrics.metrics_volume, 0)
-                end as whale_score,
-                owner.owner_address,
-                owner.owner_label,
-                owner.owner_wallet_id,
-                wp.profile as profile,
-                wp.updated_at as profile_updated_at,
-                activity.last_activity_at,
-                inferred.wins as inferred_wins,
-                inferred.total as inferred_total
-              from wallets w
-              join wallet_tag_map tm on tm.wallet_id = w.id
-               and tm.tag_id = $5::uuid
-              left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
-              left join wallet_user_labels wl
-                on wl.wallet_id = w.id
-               and wl.user_id = $1
-              left join lateral (
-                select jsonb_agg(jsonb_build_object(
-                  'slug', t.slug,
-                  'label', t.label,
-                  'tag_type', t.tag_type,
-                  'is_system', t.is_system
-                ) order by t.tag_type, t.slug) as tags
-                from wallet_tag_map tm
-                join wallet_tags t on t.id = tm.tag_id
-                where tm.wallet_id = w.id
-              ) tags on true
-              left join lateral (
-                select
-                  jsonb_build_object(
-                    'period', s.period,
-                    'as_of', s.as_of,
-                    'trades_count', s.trades_count,
-                    'volume_usd', s.volume_usd,
-                    'pnl_usd', s.pnl_usd,
-                    'roi', s.roi,
-                    'win_rate', s.win_rate,
-                    'avg_hold_hours', s.avg_hold_hours,
-                    'last_trade_at', s.last_trade_at
-                  ) as metrics,
-                  s.volume_usd as metrics_volume,
-                  s.pnl_usd as metrics_pnl,
-                  s.trades_count as metrics_trades
-                from wallet_metrics_snapshots s
-                where s.wallet_id = w.id and s.period = '30d'
-                order by s.as_of desc
-                limit 1
-              ) metrics on true
-              left join lateral (
-                select
-                  max(wah.last_occurred_at) as last_activity_at,
-                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
-                  bool_or(wah.activity_type = 'holder') as has_holder_activity
-                from wallet_activity_hourly wah
-                where wah.wallet_id = w.id
-                  and wah.hour_bucket >= now() - ($3::text || ' days')::interval
-              ) activity on true
-              left join wallet_position_exposure exposure on exposure.wallet_id = w.id
-              left join lateral (
-                select
-                  w2.address as owner_address,
-                  w2.label as owner_label,
-                  w2.id as owner_wallet_id
-                from wallets w2
-                where w.metadata->>'kind' = 'safe'
-                  and w2.metadata->>'kind' = 'safe_owner'
-                  and w2.metadata->>'derivedFrom' = w.address
-                  and w2.chain = w.chain
-                limit 1
-              ) owner on true
-              left join wallet_profiles wp on wp.wallet_id = w.id
-              left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
-              where ($4::text[] is null or wp.profile->'categories' ?| $4::text[])
-                and activity.last_activity_at is not null
-              order by ${orderBy}
-              limit $2
-            `,
-            [
-              user.id,
-              maxScanCandidates + 1,
-              query.windowDays,
-              categoryFilter.length > 0 ? categoryFilter : null,
-              whaleTagId,
-            ],
-          );
+          const whaleRows = useSlimWhaleSelector
+            ? await client.query<WhaleSelectorSlimRow>(
+                buildSlimWhaleSelectorSql(orderBy, query.sort === "winrate"),
+                [maxScanCandidates + 1, query.windowDays, whaleTagId],
+              )
+            : await client.query<WhaleSelectorRow>(
+                `
+                  select
+                    w.id,
+                    w.address,
+                    w.chain,
+                    w.label,
+                    wl.label as user_label,
+                    w.is_system_flagged,
+                    (w.metadata->>'kind' = 'safe') as is_safe,
+                    w.first_seen_at,
+                    w.last_seen_at,
+                    (wf.wallet_id is not null) as is_followed,
+                    tags.tags,
+                    metrics.metrics,
+                    metrics.metrics_volume,
+                    metrics.metrics_pnl,
+                    metrics.metrics_trades,
+                    exposure.exposure_usd,
+                    exposure.hedged_notional_usd,
+                    exposure.net_imbalance_usd,
+                    exposure.hedge_ratio,
+                    exposure.two_sided_markets,
+                    case
+                      when w.chain = 'solana'
+                        then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
+                      else coalesce(metrics.metrics_volume, 0)
+                    end as whale_score,
+                    owner.owner_address,
+                    owner.owner_label,
+                    owner.owner_wallet_id,
+                    wp.profile as profile,
+                    wp.updated_at as profile_updated_at,
+                    activity.last_activity_at,
+                    inferred.wins as inferred_wins,
+                    inferred.total as inferred_total
+                  from wallets w
+                  join wallet_tag_map tm on tm.wallet_id = w.id
+                   and tm.tag_id = $5::uuid
+                  left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
+                  left join wallet_user_labels wl
+                    on wl.wallet_id = w.id
+                   and wl.user_id = $1
+                  left join lateral (
+                    select jsonb_agg(jsonb_build_object(
+                      'slug', t.slug,
+                      'label', t.label,
+                      'tag_type', t.tag_type,
+                      'is_system', t.is_system
+                    ) order by t.tag_type, t.slug) as tags
+                    from wallet_tag_map tm
+                    join wallet_tags t on t.id = tm.tag_id
+                    where tm.wallet_id = w.id
+                  ) tags on true
+                  left join lateral (
+                    select
+                      jsonb_build_object(
+                        'period', s.period,
+                        'as_of', s.as_of,
+                        'trades_count', s.trades_count,
+                        'volume_usd', s.volume_usd,
+                        'pnl_usd', s.pnl_usd,
+                        'roi', s.roi,
+                        'win_rate', s.win_rate,
+                        'avg_hold_hours', s.avg_hold_hours,
+                        'last_trade_at', s.last_trade_at
+                      ) as metrics,
+                      s.volume_usd as metrics_volume,
+                      s.pnl_usd as metrics_pnl,
+                      s.trades_count as metrics_trades
+                    from wallet_metrics_snapshots s
+                    where s.wallet_id = w.id and s.period = '30d'
+                    order by s.as_of desc
+                    limit 1
+                  ) metrics on true
+                  left join lateral (
+                    select
+                      max(wah.last_occurred_at) as last_activity_at,
+                      bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+                      bool_or(wah.activity_type = 'holder') as has_holder_activity
+                    from wallet_activity_hourly wah
+                    where wah.wallet_id = w.id
+                      and wah.hour_bucket >= now() - ($3::text || ' days')::interval
+                  ) activity on true
+                  left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+                  left join lateral (
+                    select
+                      w2.address as owner_address,
+                      w2.label as owner_label,
+                      w2.id as owner_wallet_id
+                    from wallets w2
+                    where w.metadata->>'kind' = 'safe'
+                      and w2.metadata->>'kind' = 'safe_owner'
+                      and w2.metadata->>'derivedFrom' = w.address
+                      and w2.chain = w.chain
+                    limit 1
+                  ) owner on true
+                  left join wallet_profiles wp on wp.wallet_id = w.id
+                  left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
+                  where ($4::text[] is null or wp.profile->'categories' ?| $4::text[])
+                    and activity.last_activity_at is not null
+                  order by ${orderBy}
+                  limit $2
+                `,
+                [
+                  user.id,
+                  maxScanCandidates + 1,
+                  query.windowDays,
+                  categoryFilter.length > 0 ? categoryFilter : null,
+                  whaleTagId,
+                ],
+              );
 
           const hasMoreCandidates = whaleRows.rows.length > maxScanCandidates;
           const hitScanCap = hasMoreCandidates;
@@ -2280,7 +2522,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             : whaleRows.rows;
 
           const filteredByActivity = scannedRows
-            .map((row) => mapWhaleRowToItem(row, refreshPolicy.effective))
+            .map((row) =>
+              useSlimWhaleSelector
+                ? mapWhaleSlimRowToItem(row as WhaleSelectorSlimRow, refreshPolicy.effective)
+                : mapWhaleRowToItem(row as WhaleSelectorRow, refreshPolicy.effective),
+            )
             .filter((row) => Boolean(row.lastActivityAt));
 
           const deduped = new Map<string, WhaleWalletItem>();
@@ -2452,11 +2698,25 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             };
           }
 
-          const pagedRows = postFilterRows.slice(
+          let pagedRows = postFilterRows.slice(
             query.offset,
             query.offset + query.limit,
           );
           const pagedIds = pagedRows.map((row) => row.walletId);
+
+          if (useSlimWhaleSelector && pagedIds.length > 0) {
+            const pageMetadataMap = await loadWhalePageMetadataByIds(
+              client,
+              user.id,
+              pagedIds,
+            );
+            pagedRows = pagedRows.map((row) =>
+              hydrateWhaleItemMetadata(
+                row,
+                pageMetadataMap.get(row.walletId) ?? null,
+              ),
+            );
+          }
 
           const summaryMapForPage =
             summaryMapForFilters ?? new Map<string, WalletActivitySummary>();

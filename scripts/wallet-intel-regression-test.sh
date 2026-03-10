@@ -7,6 +7,7 @@ set -euo pipefail
 #   BASE_URL="https://app.hunch.trade/api/hunch" \
 #   COOKIE_FILE="/tmp/hunch.cookies" \
 #   HUNCH_WALLET="0xd829f31579e3129a551c9ab3980efa8e5e041131" \
+#   INCLUDE_SPARKLINE=1 \
 #   ./scripts/wallet-intel-regression-test.sh --full
 #   WHALES_URL="https://app.hunch.trade/api/hunch/wallets/whales" \
 #   SUMMARY_URL="https://app.hunch.trade/api/hunch/wallets/activity/summary" \
@@ -31,6 +32,7 @@ WINDOW_HOURS="${WINDOW_HOURS:-168}"
 TOP_CHANGES="${TOP_CHANGES:-3}"
 WINDOW_DAYS="${WINDOW_DAYS:-30}"
 MARKET_LIMIT="${MARKET_LIMIT:-5}"
+INCLUDE_SPARKLINE="${INCLUDE_SPARKLINE:-0}"
 
 WHALES_SORTS_SET="${WHALES_SORTS+x}"
 WHALES_SORTS="${WHALES_SORTS:-last_activity pnl_30d volume_30d exposure_usd trades_30d winrate}"
@@ -84,15 +86,27 @@ fi
 whales_case_labels=()
 whales_case_queries=()
 add_whales_case() {
+  local query="$2"
+  local include_sparkline_normalized
+  include_sparkline_normalized="$(printf '%s' "${INCLUDE_SPARKLINE}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${include_sparkline_normalized}" == "1" || "${include_sparkline_normalized}" == "true" ]]; then
+    query="includeSparkline=true${query:+&${query}}"
+  fi
   whales_case_labels+=("$1")
-  whales_case_queries+=("$2")
+  whales_case_queries+=("$query")
 }
 
 summary_case_labels=()
 summary_case_queries=()
 add_summary_case() {
+  local query="$2"
+  local include_sparkline_normalized
+  include_sparkline_normalized="$(printf '%s' "${INCLUDE_SPARKLINE}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${include_sparkline_normalized}" == "1" || "${include_sparkline_normalized}" == "true" ]]; then
+    query="includeSparkline=true${query:+&${query}}"
+  fi
   summary_case_labels+=("$1")
-  summary_case_queries+=("$2")
+  summary_case_queries+=("$query")
 }
 
 signals_case_labels=()
@@ -203,6 +217,7 @@ printf "signals_url\t%s\n" "$SIGNALS_URL"
 printf "limit\t%s\n" "$LIMIT"
 printf "window_hours\t%s\n" "$WINDOW_HOURS"
 printf "top_changes\t%s\n" "$TOP_CHANGES"
+printf "include_sparkline\t%s\n" "$INCLUDE_SPARKLINE"
 printf "auth_cookie\t%s\n" "$([[ -n "$COOKIE" ]] && echo "set" || echo "unset")"
 printf "auth_cookie_file\t%s\n" "$([[ -n "$COOKIE_FILE" ]] && echo "$COOKIE_FILE" || echo "unset")"
 printf "auth_header\t%s\n" "$([[ -n "$AUTH_HEADER" ]] && echo "set" || echo "unset")"
