@@ -57,6 +57,17 @@ type WalletActivitySignalRowDbRow = {
   reason_codes: string[] | null;
 };
 
+type WalletActivitySignalPageLabelDbRow = {
+  wallet_id: string;
+  venue: string;
+  market_id: string;
+  outcome_side: string | null;
+  unusual_size: boolean;
+  on_pattern: boolean;
+  has_profile_categories: boolean;
+  category: string | null;
+};
+
 export type WalletActivitySignalType = "longshot_large" | "longshot_large_late";
 export type WalletActivityLateBucket = "late" | "very_late" | "unknown";
 export type WalletActivityUnusualTier =
@@ -141,6 +152,13 @@ export type WalletActivitySignalRow = {
   lateBucket: WalletActivityLateBucket | null;
   occurredAt: Date;
   reasonCodes: string[];
+};
+
+export type WalletActivitySignalPageLabelFlags = {
+  unusualSize: boolean;
+  onPattern: boolean;
+  hasProfileCategories: boolean;
+  category: string | null;
 };
 
 type WalletActivityQueryOptions = {
@@ -436,6 +454,17 @@ function buildWalletActivityParams(
   ];
 }
 
+function buildWalletActivitySummaryStatsParams(
+  walletIds: string[],
+  options: ReturnType<typeof resolveWalletActivityQuery>,
+): unknown[] {
+  return [
+    walletIds,
+    options.windowHours,
+    options.baselineDays,
+  ];
+}
+
 const FETCH_WALLET_ACTIVITY_BASE_SQL = `
   with wallet_set as (
     select unnest($1::uuid[]) as wallet_id
@@ -446,18 +475,18 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
   history as (
     with history_events as (
       select
-        wae.wallet_id,
-        wae.market_id,
-        max(wae.occurred_at) as last_prior_activity_at
-      from wallet_activity_events wae
-      join wallet_set ws on ws.wallet_id = wae.wallet_id
-      where wae.activity_type in ('delta', 'trade')
-        and wae.occurred_at < (select ts from window_start)
+        wah.wallet_id,
+        wah.market_id,
+        max(wah.last_occurred_at) as last_prior_activity_at
+      from wallet_activity_hourly wah
+      join wallet_set ws on ws.wallet_id = wah.wallet_id
+      where wah.activity_type in ('delta', 'trade')
+        and wah.last_occurred_at < (select ts from window_start)
         and (
           $11::int = 0
-          or wae.occurred_at >= now() - ($11::text || ' days')::interval
+          or wah.last_occurred_at >= now() - ($11::text || ' days')::interval
         )
-      group by wae.wallet_id, wae.market_id
+      group by wah.wallet_id, wah.market_id
     )
     select
       ws.wallet_id,
@@ -835,26 +864,67 @@ ${FETCH_WALLET_ACTIVITY_SUMMARY_CTE_SQL}
 `;
 
 const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
-${FETCH_WALLET_ACTIVITY_BASE_SQL}
-,
-  summary_param_hints as (
+  with wallet_set as (
+    select unnest($1::uuid[]) as wallet_id
+  ),
+  baseline as (
     select
-      $4::int as top_changes_hint,
-      $5::numeric as max_odds_hint,
-      $6::numeric as min_stake_usd_hint,
-      $7::numeric as min_payout_usd_hint,
-      $8::int as max_prior_markets_hint,
-      $9::numeric as late_hours_hint,
-      $10::numeric as very_late_hours_hint,
-      $12::numeric as min_idle_days_hint,
-      $13::numeric as weight_stake_hint,
-      $14::numeric as weight_odds_hint,
-      $15::numeric as weight_idle_hint,
-      $16::numeric as weight_novelty_hint,
-      $17::numeric as weight_sum_hint,
-      $18::numeric as min_score_hint
+      wb.wallet_id,
+      wb.p90_usd
+    from wallet_activity_baseline wb
+    join wallet_set ws on ws.wallet_id = wb.wallet_id
+    where wb.window_days = $3::int
+  ),
+  baseline_samples as (
+    with baseline_event_counts as (
+      select
+        wae.wallet_id,
+        count(*)::int as baseline_sample_count
+      from wallet_activity_events wae
+      join wallet_set ws on ws.wallet_id = wae.wallet_id
+      where wae.activity_type in ('delta', 'trade')
+        and wae.size_usd is not null
+        and wae.occurred_at >= now() - ($3::text || ' days')::interval
+        and wae.occurred_at <= now()
+      group by wae.wallet_id
+    )
+    select
+      ws.wallet_id,
+      coalesce(bec.baseline_sample_count, 0)::int as baseline_sample_count
+    from wallet_set ws
+    left join baseline_event_counts bec on bec.wallet_id = ws.wallet_id
+  ),
+  summary as (
+    select
+      wah.wallet_id,
+      max(wah.last_occurred_at) as last_activity_at,
+      sum(coalesce(wah.signed_delta_usd, 0)) as net_change_usd,
+      sum(
+        case
+          when upper(coalesce(wah.outcome_side, '')) = 'YES'
+            then coalesce(wah.signed_delta_usd, 0)
+          else 0
+        end
+      ) as net_change_yes_usd,
+      sum(
+        case
+          when upper(coalesce(wah.outcome_side, '')) = 'NO'
+            then coalesce(wah.signed_delta_usd, 0)
+          else 0
+        end
+      ) as net_change_no_usd,
+      sum(coalesce(wah.counts_opened, 0))::int as counts_new,
+      sum(coalesce(wah.counts_closed, 0))::int as counts_exit,
+      sum(coalesce(wah.counts_increased, 0))::int as counts_increase,
+      sum(coalesce(wah.counts_reduced, 0))::int as counts_reduce,
+      0::int as counts_flip,
+      max(coalesce(wah.max_abs_delta_usd, 0)) as max_abs_delta_usd_window
+    from wallet_activity_hourly wah
+    join wallet_set ws on ws.wallet_id = wah.wallet_id
+    where wah.activity_type in ('delta', 'trade')
+      and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
+    group by wah.wallet_id
   )
-${FETCH_WALLET_ACTIVITY_SUMMARY_CTE_SQL}
   select
     s.wallet_id,
     s.last_activity_at,
@@ -867,9 +937,11 @@ ${FETCH_WALLET_ACTIVITY_SUMMARY_CTE_SQL}
     s.counts_reduce,
     s.counts_flip,
     s.max_abs_delta_usd_window,
-    s.baseline_p90_usd,
-    s.baseline_sample_count
+    b.p90_usd as baseline_p90_usd,
+    coalesce(bs.baseline_sample_count, 0)::int as baseline_sample_count
   from summary s
+  left join baseline b on b.wallet_id = s.wallet_id
+  left join baseline_samples bs on bs.wallet_id = s.wallet_id
 `;
 
 const FETCH_WALLET_ACTIVITY_SUMMARY_TOP_CHANGES_SQL = `
@@ -994,6 +1066,463 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
   offset $25
 `;
 
+const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
+  with wallet_set as (
+    select unnest($1::uuid[]) as wallet_id
+  ),
+  window_start as (
+    select now() - ($2::text || ' hours')::interval as ts
+  ),
+  signal_param_hints as (
+    select
+      $3::int as baseline_days_hint,
+      $4::int as top_changes_hint,
+      $19::int as min_baseline_sample_count_hint
+  ),
+  history as (
+    with history_events as (
+      select
+        wah.wallet_id,
+        wah.market_id,
+        max(wah.last_occurred_at) as last_prior_activity_at
+      from wallet_activity_hourly wah
+      join wallet_set ws on ws.wallet_id = wah.wallet_id
+      where wah.activity_type in ('delta', 'trade')
+        and wah.last_occurred_at < (select ts from window_start)
+        and (
+          $11::int = 0
+          or wah.last_occurred_at >= now() - ($11::text || ' days')::interval
+        )
+      group by wah.wallet_id, wah.market_id
+    )
+    select
+      ws.wallet_id,
+      count(he.market_id)::int as prior_distinct_markets,
+      max(he.last_prior_activity_at) as last_prior_activity_at
+    from wallet_set ws
+    left join history_events he on he.wallet_id = ws.wallet_id
+    group by ws.wallet_id
+  ),
+  events_window as (
+    select
+      wah.wallet_id,
+      wah.venue,
+      wah.market_id,
+      nullif(wah.outcome_side, '') as outcome_side,
+      sum(coalesce(wah.signed_delta_shares, 0)) as signed_delta_shares,
+      sum(coalesce(wah.signed_delta_usd, 0)) as signed_delta_usd,
+      sum(coalesce(wah.abs_delta_usd, 0)) as gross_abs_delta_usd,
+      max(wah.last_occurred_at) as last_occurred_at,
+      (array_agg(wah.last_price order by wah.last_occurred_at desc))[1] as last_price,
+      (array_agg(wah.last_change_action order by wah.last_occurred_at desc))[1] as change_action,
+      bool_or(wah.entered_late) as entered_late
+    from wallet_activity_hourly wah
+    join wallet_set ws on ws.wallet_id = wah.wallet_id
+    where wah.activity_type in ('delta', 'trade')
+      and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
+    group by wah.wallet_id, wah.venue, wah.market_id, wah.outcome_side
+  ),
+  enriched as (
+    select
+      ew.*,
+      h.prior_distinct_markets,
+      h.last_prior_activity_at,
+      um.title as market_title,
+      um.event_id,
+      ue.title as event_title,
+      um.status as market_status,
+      um.close_time,
+      um.expiration_time,
+      um.resolved_outcome,
+      lower(coalesce(um.category, ue.category)) as category,
+      um.last_price as market_last_price
+    from events_window ew
+    left join history h on h.wallet_id = ew.wallet_id
+    left join unified_markets um on um.id = ew.market_id
+    left join unified_events ue on ue.id = um.event_id
+  ),
+  scored_rows as (
+    select
+      e.wallet_id,
+      e.market_id,
+      e.market_title,
+      e.event_id,
+      e.event_title,
+      e.venue,
+      e.market_status,
+      e.close_time,
+      e.expiration_time,
+      e.resolved_outcome,
+      e.category,
+      e.change_action,
+      e.outcome_side,
+      e.signed_delta_shares,
+      e.signed_delta_usd,
+      coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0) as stake_usd,
+      case
+        when e.last_price is not null then e.last_price
+        when upper(coalesce(e.outcome_side, '')) = 'NO'
+          and e.market_last_price is not null
+          then 1 - e.market_last_price
+        else e.market_last_price
+      end as odds,
+      case
+        when
+          case
+            when e.last_price is not null then e.last_price
+            when upper(coalesce(e.outcome_side, '')) = 'NO'
+              and e.market_last_price is not null
+              then 1 - e.market_last_price
+            else e.market_last_price
+          end > 0
+          then coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0)
+            / (
+              case
+                when e.last_price is not null then e.last_price
+                when upper(coalesce(e.outcome_side, '')) = 'NO'
+                  and e.market_last_price is not null
+                  then 1 - e.market_last_price
+                else e.market_last_price
+              end
+            )
+        else null
+      end as potential_payout_usd,
+      case
+        when e.last_prior_activity_at is not null
+          and e.last_occurred_at is not null
+          then greatest(
+            extract(epoch from (e.last_occurred_at - e.last_prior_activity_at))
+            / 86400.0,
+            0
+          )
+        else null
+      end as idle_days,
+      e.prior_distinct_markets,
+      case
+        when coalesce(e.close_time, e.expiration_time) is null then 'unknown'
+        when e.last_occurred_at is null then 'unknown'
+        when coalesce(e.close_time, e.expiration_time) <= e.last_occurred_at
+          then 'unknown'
+        when extract(
+          epoch from (coalesce(e.close_time, e.expiration_time) - e.last_occurred_at)
+        ) / 3600.0 <= $10::numeric then 'very_late'
+        when extract(
+          epoch from (coalesce(e.close_time, e.expiration_time) - e.last_occurred_at)
+        ) / 3600.0 <= $9::numeric then 'late'
+        else null
+      end as late_bucket,
+      e.last_occurred_at as occurred_at,
+      e.entered_late,
+      (
+        (
+          $13::numeric * (
+            case
+              when $6::numeric <= 0 then 0
+              else least(
+                coalesce(coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0), 0)
+                / $6::numeric,
+                1
+              )
+            end
+          )
+        )
+        + (
+          $14::numeric * (
+            case
+              when (
+                case
+                  when e.last_price is not null then e.last_price
+                  when upper(coalesce(e.outcome_side, '')) = 'NO'
+                    and e.market_last_price is not null
+                    then 1 - e.market_last_price
+                  else e.market_last_price
+                end
+              ) is null or $5::numeric <= 0 then 0
+              else greatest(
+                0,
+                least(
+                  1,
+                  (
+                    $5::numeric - (
+                      case
+                        when e.last_price is not null then e.last_price
+                        when upper(coalesce(e.outcome_side, '')) = 'NO'
+                          and e.market_last_price is not null
+                          then 1 - e.market_last_price
+                        else e.market_last_price
+                      end
+                    )
+                  ) / $5::numeric
+                )
+              )
+            end
+          )
+        )
+        + (
+          $15::numeric * (
+            case
+              when $12::numeric <= 0 then 0
+              else least(
+                coalesce(
+                  case
+                    when e.last_prior_activity_at is not null
+                      and e.last_occurred_at is not null
+                      then greatest(
+                        extract(epoch from (e.last_occurred_at - e.last_prior_activity_at))
+                        / 86400.0,
+                        0
+                      )
+                    else null
+                  end,
+                  0
+                ) / $12::numeric,
+                1
+              )
+            end
+          )
+        )
+        + (
+          $16::numeric * (
+            case
+              when coalesce(e.prior_distinct_markets, 0) <= $8::int then 1
+              else greatest(
+                0,
+                1 - (
+                  (coalesce(e.prior_distinct_markets, 0) - $8::int)::numeric
+                  / greatest($8::numeric + 1, 1)
+                )
+              )
+            end
+          )
+        )
+      ) / greatest($17::numeric, 0.0001) as signal_score
+    from enriched e
+  ),
+  signal_rows as (
+    select
+      sr.wallet_id,
+      sr.market_id,
+      sr.market_title,
+      sr.event_id,
+      sr.event_title,
+      sr.venue,
+      sr.market_status,
+      sr.close_time,
+      sr.expiration_time,
+      sr.resolved_outcome,
+      sr.category,
+      sr.change_action,
+      sr.outcome_side,
+      sr.signed_delta_shares,
+      sr.signed_delta_usd,
+      sr.stake_usd,
+      sr.odds,
+      sr.potential_payout_usd,
+      sr.idle_days,
+      sr.prior_distinct_markets,
+      sr.signal_score,
+      case
+        when sr.odds is not null
+         and sr.odds <= $5::numeric
+         and coalesce(sr.stake_usd, 0) >= $6::numeric
+         and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
+         and sr.signal_score >= $18::numeric
+          then case
+            when sr.late_bucket in ('late', 'very_late')
+              then 'longshot_large_late'
+            else 'longshot_large'
+          end
+        else null
+      end as signal_type,
+      sr.late_bucket,
+      sr.occurred_at,
+      array_remove(array[
+        case when sr.odds is not null and sr.odds <= $5::numeric then 'longshot_odds' end,
+        case when coalesce(sr.stake_usd, 0) >= $6::numeric then 'high_notional' end,
+        case when coalesce(sr.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
+        case when coalesce(sr.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
+        case when sr.entered_late then 'late_entry' end,
+        case
+          when sr.odds is not null
+           and sr.odds <= $5::numeric
+           and coalesce(sr.stake_usd, 0) >= $6::numeric
+           and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
+           and coalesce(sr.idle_days, 0) >= $12::numeric
+           and coalesce(sr.prior_distinct_markets, 0) <= $8::int
+           and sr.signal_score >= $18::numeric
+            then 'high_risk_longshot'
+        end
+      ], null) as reason_codes
+    from scored_rows sr
+  )
+  select
+    sr.wallet_id,
+    sr.market_id,
+    sr.market_title,
+    sr.event_id,
+    sr.event_title,
+    sr.venue,
+    sr.market_status,
+    sr.close_time,
+    sr.expiration_time,
+    sr.resolved_outcome,
+    sr.category,
+    sr.change_action,
+    sr.outcome_side,
+    sr.signed_delta_shares,
+    sr.signed_delta_usd,
+    sr.stake_usd,
+    sr.odds,
+    sr.potential_payout_usd,
+    sr.idle_days,
+    sr.prior_distinct_markets,
+    sr.signal_score,
+    sr.signal_type,
+    sr.late_bucket,
+    sr.occurred_at,
+    sr.reason_codes
+  from signal_rows sr
+  where sr.signal_type is not null
+    and sr.change_action in ('OPENED', 'INCREASED')
+    and upper(coalesce(sr.market_status::text, '')) = 'ACTIVE'
+    and nullif(btrim(coalesce(sr.resolved_outcome, '')), '') is null
+    and coalesce(sr.close_time, sr.expiration_time) is not null
+    and coalesce(sr.close_time, sr.expiration_time) > now()
+    and ($20::text is null or sr.signal_type = $20::text)
+    and ($21::text is null or sr.late_bucket = $21::text)
+    and (
+      $22::text[] is null
+      or (
+        lower($23::text) = 'all'
+        and sr.reason_codes @> $22::text[]
+      )
+      or (
+        lower($23::text) <> 'all'
+        and sr.reason_codes && $22::text[]
+      )
+    )
+  order by sr.signal_score desc nulls last, sr.close_time asc nulls last, sr.market_id, sr.wallet_id
+  limit $24
+  offset $25
+`;
+
+const FETCH_WALLET_ACTIVITY_SIGNAL_PAGE_LABELS_SQL = `
+  with page_rows as (
+    select
+      pr.wallet_id,
+      pr.venue,
+      pr.market_id,
+      nullif(pr.outcome_side, '') as outcome_side
+    from unnest($1::uuid[], $2::text[], $3::text[], $4::text[]) as pr(
+      wallet_id,
+      venue,
+      market_id,
+      outcome_side
+    )
+  ),
+  wallet_set as (
+    select distinct wallet_id from page_rows
+  ),
+  baseline as (
+    select
+      wb.wallet_id,
+      wb.p90_usd
+    from wallet_activity_baseline wb
+    join wallet_set ws on ws.wallet_id = wb.wallet_id
+    where wb.window_days = $6::int
+  ),
+  baseline_samples as (
+    with baseline_event_counts as (
+      select
+        wae.wallet_id,
+        count(*)::int as baseline_sample_count
+      from wallet_activity_events wae
+      join wallet_set ws on ws.wallet_id = wae.wallet_id
+      where wae.activity_type in ('delta', 'trade')
+        and wae.size_usd is not null
+        and wae.occurred_at >= now() - ($6::text || ' days')::interval
+        and wae.occurred_at <= now()
+      group by wae.wallet_id
+    )
+    select
+      ws.wallet_id,
+      coalesce(bec.baseline_sample_count, 0)::int as baseline_sample_count
+    from wallet_set ws
+    left join baseline_event_counts bec on bec.wallet_id = ws.wallet_id
+  ),
+  profiles as (
+    select
+      wp.wallet_id,
+      array(
+        select lower(value)
+        from jsonb_array_elements_text(
+          coalesce(wp.profile->'categories', '[]'::jsonb)
+        ) value
+      ) as categories
+    from wallet_profiles wp
+    join wallet_set ws on ws.wallet_id = wp.wallet_id
+  ),
+  window_rows as (
+    select
+      pr.wallet_id,
+      pr.venue,
+      pr.market_id,
+      pr.outcome_side,
+      max(coalesce(wah.max_abs_delta_usd, 0)) as max_abs_delta_usd,
+      lower(coalesce(um.category, ue.category)) as category
+    from page_rows pr
+    join wallet_activity_hourly wah
+      on wah.wallet_id = pr.wallet_id
+     and wah.venue = pr.venue
+     and wah.market_id = pr.market_id
+     and coalesce(nullif(wah.outcome_side, ''), '') = coalesce(pr.outcome_side, '')
+    left join unified_markets um on um.id = wah.market_id
+    left join unified_events ue on ue.id = um.event_id
+    where wah.activity_type in ('delta', 'trade')
+      and wah.hour_bucket >= now() - ($5::text || ' hours')::interval
+    group by
+      pr.wallet_id,
+      pr.venue,
+      pr.market_id,
+      pr.outcome_side,
+      lower(coalesce(um.category, ue.category))
+  )
+  select
+    pr.wallet_id,
+    pr.venue,
+    pr.market_id,
+    pr.outcome_side,
+    case
+      when coalesce(bs.baseline_sample_count, 0) >= $7::int
+       and b.p90_usd is not null
+       and b.p90_usd > 0
+       and coalesce(wr.max_abs_delta_usd, 0) >= b.p90_usd
+        then true
+      else false
+    end as unusual_size,
+    case
+      when p.categories is not null
+       and wr.category is not null
+       and wr.category = any(p.categories)
+        then true
+      else false
+    end as on_pattern,
+    case
+      when p.categories is not null then true
+      else false
+    end as has_profile_categories,
+    wr.category
+  from page_rows pr
+  left join window_rows wr
+    on wr.wallet_id = pr.wallet_id
+   and wr.venue = pr.venue
+   and wr.market_id = pr.market_id
+   and coalesce(wr.outcome_side, '') = coalesce(pr.outcome_side, '')
+  left join baseline b on b.wallet_id = pr.wallet_id
+  left join baseline_samples bs on bs.wallet_id = pr.wallet_id
+  left join profiles p on p.wallet_id = pr.wallet_id
+`;
+
 /**
  * Compute wallet activity summaries and top changes for a set of wallet IDs.
  *
@@ -1040,7 +1569,7 @@ export async function fetchWalletActivitySummaryStats(
   const resolved = resolveWalletActivityQuery(options);
   const result = await client.query<WalletActivitySummaryStatsDbRow>(
     FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL,
-    buildWalletActivityParams(walletIds, resolved),
+    buildWalletActivitySummaryStatsParams(walletIds, resolved),
   );
   const map = new Map<string, WalletActivitySummaryStats>();
   for (const row of result.rows) {
@@ -1127,4 +1656,101 @@ export async function fetchWalletActivitySignalRows(
     occurredAt: row.occurred_at,
     reasonCodes: normalizeStringArray(row.reason_codes),
   }));
+}
+
+export async function fetchWalletActivitySignalRowsFast(
+  client: PoolClient,
+  walletIds: string[],
+  options: WalletActivityQueryOptions & {
+    signalType?: WalletActivitySignalType | null;
+    lateBucket?: WalletActivityLateBucket | null;
+    reasonCodes?: string[] | null;
+    reasonMode?: "any" | "all";
+    limit?: number;
+    offset?: number;
+  },
+): Promise<WalletActivitySignalRow[]> {
+  if (walletIds.length === 0) return [];
+  const resolved = resolveWalletActivityQuery(options);
+  const result = await client.query<WalletActivitySignalRowDbRow>(
+    FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL,
+    [
+      ...buildWalletActivityParams(walletIds, resolved),
+      options.signalType ?? null,
+      options.lateBucket ?? null,
+      options.reasonCodes?.length ? options.reasonCodes : null,
+      options.reasonMode ?? "any",
+      Math.max(1, Math.trunc(options.limit ?? 30)),
+      Math.max(0, Math.trunc(options.offset ?? 0)),
+    ],
+  );
+  return result.rows.map((row) => ({
+    walletId: row.wallet_id,
+    marketId: row.market_id,
+    marketTitle: row.market_title,
+    eventId: row.event_id,
+    eventTitle: row.event_title,
+    venue: row.venue,
+    marketStatus: row.market_status,
+    closeTime: row.close_time,
+    expirationTime: row.expiration_time,
+    resolvedOutcome: row.resolved_outcome,
+    category: row.category,
+    action: row.change_action,
+    positionSide: row.outcome_side,
+    deltaShares: parseNumber(row.signed_delta_shares),
+    deltaUsd: parseNumber(row.signed_delta_usd),
+    stakeUsd: parseNumber(row.stake_usd),
+    odds: parseNumber(row.odds),
+    potentialPayoutUsd: parseNumber(row.potential_payout_usd),
+    idleDays: parseNumber(row.idle_days),
+    priorDistinctMarkets: row.prior_distinct_markets,
+    signalScore: parseNumber(row.signal_score),
+    signalType: row.signal_type,
+    lateBucket: row.late_bucket,
+    occurredAt: row.occurred_at,
+    reasonCodes: normalizeStringArray(row.reason_codes),
+  }));
+}
+
+export async function fetchWalletActivitySignalPageLabels(
+  client: PoolClient,
+  rows: Array<{
+    walletId: string;
+    venue: string;
+    marketId: string;
+    positionSide: string | null;
+  }>,
+  options: WalletActivityQueryOptions,
+): Promise<Map<string, WalletActivitySignalPageLabelFlags>> {
+  if (rows.length === 0) return new Map();
+  const resolved = resolveWalletActivityQuery(options);
+  const result = await client.query<WalletActivitySignalPageLabelDbRow>(
+    FETCH_WALLET_ACTIVITY_SIGNAL_PAGE_LABELS_SQL,
+    [
+      rows.map((row) => row.walletId),
+      rows.map((row) => row.venue),
+      rows.map((row) => row.marketId),
+      rows.map((row) => row.positionSide ?? ""),
+      resolved.windowHours,
+      resolved.baselineDays,
+      resolved.minBaselineSampleCount,
+    ],
+  );
+  const map = new Map<string, WalletActivitySignalPageLabelFlags>();
+  for (const row of result.rows) {
+    const key = [
+      row.wallet_id,
+      row.venue,
+      row.market_id,
+      row.outcome_side ?? "",
+    ].join(":");
+    map.set(key, {
+      unusualSize: row.unusual_size,
+      onPattern: row.on_pattern,
+      hasProfileCategories: row.has_profile_categories,
+      category: row.category,
+    });
+  }
+  return map;
 }
