@@ -161,6 +161,13 @@ export type WalletActivitySignalPageLabelFlags = {
   category: string | null;
 };
 
+type WalletActivitySignalSeverityThresholds = {
+  default: { medium: number; high: number; critical: number };
+  polymarket: { medium: number; high: number; critical: number };
+  kalshi: { medium: number; high: number; critical: number };
+  limitless: { medium: number; high: number; critical: number };
+};
+
 type WalletActivityQueryOptions = {
   windowHours: number;
   topChanges: number;
@@ -1401,6 +1408,37 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
         and sr.reason_codes && $22::text[]
       )
     )
+    and (
+      $26::text[] is null
+      or (
+        case lower(coalesce(sr.venue, ''))
+          when 'polymarket' then case
+            when coalesce(sr.signal_score, 0) >= $32::numeric then 'critical'
+            when coalesce(sr.signal_score, 0) >= $31::numeric then 'high'
+            when coalesce(sr.signal_score, 0) >= $30::numeric then 'medium'
+            else 'low'
+          end
+          when 'kalshi' then case
+            when coalesce(sr.signal_score, 0) >= $35::numeric then 'critical'
+            when coalesce(sr.signal_score, 0) >= $34::numeric then 'high'
+            when coalesce(sr.signal_score, 0) >= $33::numeric then 'medium'
+            else 'low'
+          end
+          when 'limitless' then case
+            when coalesce(sr.signal_score, 0) >= $38::numeric then 'critical'
+            when coalesce(sr.signal_score, 0) >= $37::numeric then 'high'
+            when coalesce(sr.signal_score, 0) >= $36::numeric then 'medium'
+            else 'low'
+          end
+          else case
+            when coalesce(sr.signal_score, 0) >= $29::numeric then 'critical'
+            when coalesce(sr.signal_score, 0) >= $28::numeric then 'high'
+            when coalesce(sr.signal_score, 0) >= $27::numeric then 'medium'
+            else 'low'
+          end
+        end
+      ) = any($26::text[])
+    )
   order by sr.signal_score desc nulls last, sr.close_time asc nulls last, sr.market_id, sr.wallet_id
   limit $24
   offset $25
@@ -1666,12 +1704,20 @@ export async function fetchWalletActivitySignalRowsFast(
     lateBucket?: WalletActivityLateBucket | null;
     reasonCodes?: string[] | null;
     reasonMode?: "any" | "all";
+    severityFilters?: string[] | null;
+    severityThresholds?: WalletActivitySignalSeverityThresholds | null;
     limit?: number;
     offset?: number;
   },
 ): Promise<WalletActivitySignalRow[]> {
   if (walletIds.length === 0) return [];
   const resolved = resolveWalletActivityQuery(options);
+  const severityThresholds = options.severityThresholds ?? {
+    default: { medium: 0.35, high: 0.6, critical: 0.85 },
+    polymarket: { medium: 0.35, high: 0.6, critical: 0.85 },
+    kalshi: { medium: 0.35, high: 0.6, critical: 0.85 },
+    limitless: { medium: 0.35, high: 0.6, critical: 0.85 },
+  };
   const result = await client.query<WalletActivitySignalRowDbRow>(
     FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL,
     [
@@ -1682,6 +1728,19 @@ export async function fetchWalletActivitySignalRowsFast(
       options.reasonMode ?? "any",
       Math.max(1, Math.trunc(options.limit ?? 30)),
       Math.max(0, Math.trunc(options.offset ?? 0)),
+      options.severityFilters?.length ? options.severityFilters : null,
+      severityThresholds.default.medium,
+      severityThresholds.default.high,
+      severityThresholds.default.critical,
+      severityThresholds.polymarket.medium,
+      severityThresholds.polymarket.high,
+      severityThresholds.polymarket.critical,
+      severityThresholds.kalshi.medium,
+      severityThresholds.kalshi.high,
+      severityThresholds.kalshi.critical,
+      severityThresholds.limitless.medium,
+      severityThresholds.limitless.high,
+      severityThresholds.limitless.critical,
     ],
   );
   return result.rows.map((row) => ({

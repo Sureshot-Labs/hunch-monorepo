@@ -42,6 +42,8 @@ import {
 import { normalizeOutcomeSideForApi } from "../services/wallet-intel-helpers.js";
 import {
   buildWalletMmDiagnostics,
+  MM_HEDGE_RATIO_MIN,
+  MM_TWO_SIDED_MARKETS_MIN,
   type WalletMmDiagnostics,
 } from "../services/wallet-intel-mm.js";
 import {
@@ -219,6 +221,11 @@ type CandidateWalletRow = WalletRow &
     metrics: WalletMetricsRow | null;
   };
 
+type WalletAttributionFilterRow = {
+  id: string;
+  tags: WalletTagRow[] | null;
+};
+
 type WalletActivitySummaryItem = {
   walletId: string;
   address: string;
@@ -327,6 +334,14 @@ const SUMMARY_DEPENDENT_LABEL_FILTERS = new Set<WalletAttributionLabelKey>([
   "late_entry",
   "unusual_behavior",
 ]);
+const FAST_SIGNAL_REASON_FILTERS = new Set([
+  "high_notional",
+  "high_risk_longshot",
+  "late_entry",
+  "longshot_odds",
+  "narrow_history",
+  "reactivated_after_idle",
+]);
 
 function filtersRequireSummaryHydration(
   primaryFilters: WalletAttributionPrimaryKey[],
@@ -336,6 +351,12 @@ function filtersRequireSummaryHydration(
     primaryFilters.some((value) => SUMMARY_DEPENDENT_PRIMARY_FILTERS.has(value)) ||
     labelFilters.some((value) => SUMMARY_DEPENDENT_LABEL_FILTERS.has(value))
   );
+}
+
+function displayReasonFiltersSupportedByFastSignals(
+  filters: string[],
+): boolean {
+  return filters.every((value) => FAST_SIGNAL_REASON_FILTERS.has(value));
 }
 
 async function resolveWhaleTagId(client: PoolClient): Promise<string> {
@@ -720,6 +741,123 @@ async function filterWalletIdsByMetadata(
     [walletIds, categoryFilter, tagsFilter, filters.tagMode ?? "any"],
   );
   return rows.rows.map((row) => row.wallet_id);
+}
+
+async function filterWalletIdsByMmExclusion(
+  client: PoolClient,
+  walletIds: string[],
+  refreshPolicy: Awaited<ReturnType<typeof resolveWalletIntelRefreshPolicy>>["effective"],
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const rows = await client.query<{ wallet_id: string }>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      )
+      select ws.wallet_id
+      from wallet_set ws
+      join wallets w on w.id = ws.wallet_id
+      left join wallet_position_exposure wpe on wpe.wallet_id = ws.wallet_id
+      where not (
+        coalesce(wpe.hedge_ratio, 0) >= $2::numeric
+        and coalesce(wpe.two_sided_markets, 0) >= $3::int
+        and coalesce(wpe.exposure_usd, 0) >= case
+          when w.chain = 'solana' then $5::numeric
+          else $4::numeric
+        end
+      )
+    `,
+    [
+      walletIds,
+      MM_HEDGE_RATIO_MIN,
+      MM_TWO_SIDED_MARKETS_MIN,
+      refreshPolicy.whaleUsd,
+      refreshPolicy.whaleUsdSolana,
+    ],
+  );
+  return rows.rows.map((row) => row.wallet_id);
+}
+
+async function loadWalletAttributionFilterRowsByIds(
+  client: PoolClient,
+  walletIds: string[],
+): Promise<WalletAttributionFilterRow[]> {
+  if (walletIds.length === 0) return [];
+  const rows = await client.query<WalletAttributionFilterRow>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      tags_agg as (
+        select
+          tm.wallet_id,
+          jsonb_agg(jsonb_build_object(
+            'slug', t.slug,
+            'label', t.label,
+            'tag_type', t.tag_type,
+            'is_system', t.is_system
+          ) order by t.tag_type, t.slug) as tags
+        from wallet_tag_map tm
+        join wallet_set ws on ws.wallet_id = tm.wallet_id
+        join wallet_tags t on t.id = tm.tag_id
+        group by tm.wallet_id
+      )
+      select
+        ws.wallet_id as id,
+        ta.tags
+      from wallet_set ws
+      left join tags_agg ta on ta.wallet_id = ws.wallet_id
+    `,
+    [walletIds],
+  );
+  return rows.rows;
+}
+
+async function filterWalletIdsByAttribution(
+  client: PoolClient,
+  walletIds: string[],
+  attributionPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelAttributionPolicy>
+  >["effective"],
+  filters: {
+    primary: string[];
+    labels: string[];
+    labelMode?: "any" | "all";
+    primaryTyped: WalletAttributionPrimaryKey[];
+    labelsTyped: WalletAttributionLabelKey[];
+  },
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const rows = await loadWalletAttributionFilterRowsByIds(client, walletIds);
+  const attributionMap = await buildWalletAttributionMap(
+    client,
+    rows.map((row) => ({
+      walletId: row.id,
+      tags: row.tags ?? [],
+      metrics: null,
+      inferredWinRate: null,
+      inferredResolvedCount: null,
+      trackedExposureUsd: null,
+      topChanges: [],
+    })),
+    attributionPolicy,
+    {
+      mode: "filters",
+      filterPrimary: filters.primaryTyped,
+      filterLabels: filters.labelsTyped,
+    },
+  );
+  return rows
+    .filter((row) =>
+    walletMatchesFilters(row.tags, attributionMap.get(row.id), {
+      tags: [],
+      tagMode: "any",
+      primary: filters.primary,
+      labels: filters.labels,
+      labelMode: filters.labelMode,
+    }),
+  )
+    .map((row) => row.id);
 }
 
 async function loadWalletIdsForSummaryScope(
@@ -2408,6 +2546,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const labelsFilter = normalizeStringArray(query.labels);
       const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
       const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
+      const requiresSummaryForAttributionFilters = filtersRequireSummaryHydration(
+        primaryFilterTyped,
+        labelsFilterTyped,
+      );
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey(
@@ -2461,7 +2603,26 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tagMode: query.tagMode,
             },
           );
-          if (filteredWalletIds.length === 0) {
+          let workingWalletIds = filteredWalletIds;
+          if (
+            needsAttributionForFilters &&
+            !requiresSummaryForAttributionFilters &&
+            workingWalletIds.length > 0
+          ) {
+            workingWalletIds = await filterWalletIdsByAttribution(
+              client,
+              workingWalletIds,
+              attributionPolicy.effective,
+              {
+                primary: primaryFilter,
+                labels: labelsFilter,
+                labelMode: query.labelMode,
+                primaryTyped: primaryFilterTyped,
+                labelsTyped: labelsFilterTyped,
+              },
+            );
+          }
+          if (workingWalletIds.length === 0) {
             return { ok: true, items: [] as WalletActivitySummaryItem[] };
           }
 
@@ -2486,10 +2647,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               minScore: signalConfig.minScore,
             },
           };
-          if (!needsAttributionForFilters) {
+          if (!needsAttributionForFilters || !requiresSummaryForAttributionFilters) {
             const summaryStatsMap = await fetchWalletActivitySummaryStats(
               client,
-              filteredWalletIds,
+              workingWalletIds,
               summaryOptions,
             );
             const sortMode = query.sort;
@@ -2831,6 +2992,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const labelsFilter = normalizeStringArray(query.labels);
       const primaryFilterTyped = normalizeAttributionPrimaryFilters(primaryFilter);
       const labelsFilterTyped = normalizeAttributionLabelFilters(labelsFilter);
+      const requiresSummaryForAttributionFilters = filtersRequireSummaryHydration(
+        primaryFilterTyped,
+        labelsFilterTyped,
+      );
       const severityFilter = normalizeStringArray(
         (query.severity as string[] | undefined) ?? [],
       );
@@ -2896,7 +3061,33 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tagMode: query.tagMode,
             },
           );
-          if (filteredWalletIds.length === 0) {
+          let workingWalletIds = filteredWalletIds;
+          if (query.excludeMmLike && workingWalletIds.length > 0) {
+            workingWalletIds = await filterWalletIdsByMmExclusion(
+              client,
+              workingWalletIds,
+              refreshPolicy.effective,
+            );
+          }
+          if (
+            needsAttributionForFilters &&
+            !requiresSummaryForAttributionFilters &&
+            workingWalletIds.length > 0
+          ) {
+            workingWalletIds = await filterWalletIdsByAttribution(
+              client,
+              workingWalletIds,
+              attributionPolicy.effective,
+              {
+                primary: primaryFilter,
+                labels: labelsFilter,
+                labelMode: query.labelMode,
+                primaryTyped: primaryFilterTyped,
+                labelsTyped: labelsFilterTyped,
+              },
+            );
+          }
+          if (workingWalletIds.length === 0) {
             return { ok: true, items: [] as WalletActivitySignalItem[] };
           }
 
@@ -2922,19 +3113,26 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             },
           };
           const canUseSignalsSqlFastPath =
-            !needsAttributionForFilters &&
-            !query.excludeMmLike &&
-            severityFilter.length === 0 &&
-            displayReasonFilter.length === 0;
+            !requiresSummaryForAttributionFilters &&
+            displayReasonFiltersSupportedByFastSignals(displayReasonFilter);
 
           if (canUseSignalsSqlFastPath) {
             const signalRows = await fetchWalletActivitySignalRowsFast(
               client,
-              filteredWalletIds,
+              workingWalletIds,
               {
                 ...signalSummaryOptions,
                 signalType: query.signalType ?? null,
                 lateBucket: query.lateBucket ?? null,
+                reasonCodes:
+                  displayReasonFilter.length > 0 ? displayReasonFilter : null,
+                reasonMode: query.signalReasonMode,
+                severityFilters:
+                  severityFilter.length > 0
+                    ? (severityFilter as WalletSignalSeverity[])
+                    : null,
+                severityThresholds:
+                  attributionPolicy.effective.signalsDisplay.severityThresholds,
                 limit: query.limit,
                 offset: query.offset,
               },
@@ -3162,7 +3360,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           const candidates = await loadWalletRowsByIds(
             client,
             user.id,
-            filteredWalletIds,
+            workingWalletIds,
             null,
           );
           const walletIds = candidates.map((row) => row.id);
