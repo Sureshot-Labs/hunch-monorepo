@@ -111,6 +111,18 @@ type WalletMetricsRow = {
   last_trade_at: Date | null;
 };
 
+export type WalletTopLabelVariant =
+  | "hot-streak"
+  | "trending-trader"
+  | "rising-star"
+  | "market-mover";
+
+export type WalletHeadlineTag = {
+  key: WalletAttributionLabelKey;
+  label: string;
+  source: "secondary" | "supporting";
+};
+
 type WhaleMarketRow = {
   wallet_id: string;
   market_id: string;
@@ -179,6 +191,7 @@ type WhaleWalletItem = {
   chain: string;
   label: string | null;
   userLabel: string | null;
+  followersCount: number | null;
   isSystemFlagged: boolean;
   firstSeenAt: Date;
   lastSeenAt: Date;
@@ -218,6 +231,8 @@ type WhaleWalletItem = {
   topMarkets: WhaleMarketItem[];
   sparkline?: WalletActivitySparkline;
   attribution?: WalletAttribution;
+  topLabelVariant: WalletTopLabelVariant | null;
+  headlineTag: WalletHeadlineTag | null;
 };
 
 type WhaleProfileRow = {
@@ -295,6 +310,7 @@ type WalletActivitySummaryItem = {
   chain: string;
   label: string | null;
   userLabel: string | null;
+  followersCount: number | null;
   isSystemFlagged: boolean;
   firstSeenAt: Date;
   lastSeenAt: Date;
@@ -317,6 +333,8 @@ type WalletActivitySummaryItem = {
   topChanges: WalletActivityTopChange[];
   sparkline?: WalletActivitySparkline;
   attribution?: WalletAttribution;
+  topLabelVariant: WalletTopLabelVariant | null;
+  headlineTag: WalletHeadlineTag | null;
 };
 
 type WalletActivitySignalItem = {
@@ -461,6 +479,138 @@ function nullableNumber(
   if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
+  sports_specialist: "Sports Specialist",
+  politics_specialist: "Politics Specialist",
+  crypto_specialist: "Crypto Specialist",
+  macro_specialist: "Macro Specialist",
+  weather_specialist: "Weather Specialist",
+  high_win_rate: "High Win Rate",
+  high_conviction: "High Conviction",
+  consistent_performer: "Consistent Performer",
+  "100k_pnl": "100K+ PnL",
+  "1m_pnl": "1M+ PnL",
+  "10m_pnl": "10M+ PnL",
+  large_positions: "Large Positions",
+  market_mover: "Market Mover",
+  fresh_wallet: "Fresh Wallet",
+  dormant_wake_up: "Dormant Wake Up",
+  late_entry: "Late Entry",
+  close_to_settlement: "Close to Settlement",
+  unusual_behavior: "Unusual Behavior",
+  high_frequency: "High Frequency",
+  volume_trader: "Volume Trader",
+};
+
+const SPECIALIST_HEADLINE_TAG_ORDER: WalletAttributionLabelKey[] = [
+  "crypto_specialist",
+  "sports_specialist",
+  "politics_specialist",
+  "macro_specialist",
+  "weather_specialist",
+];
+
+const HEADLINE_TAG_PRIORITY: WalletAttributionLabelKey[] = [
+  "market_mover",
+  ...SPECIALIST_HEADLINE_TAG_ORDER,
+  "high_conviction",
+  "high_win_rate",
+  "volume_trader",
+  "high_frequency",
+  "fresh_wallet",
+  "dormant_wake_up",
+  "late_entry",
+  "close_to_settlement",
+  "unusual_behavior",
+];
+
+function buildWalletLabelSet(
+  attribution: WalletAttribution | null | undefined,
+): Set<WalletAttributionLabelKey> {
+  return new Set([
+    ...(attribution?.secondary ?? []),
+    ...(attribution?.supporting ?? []),
+  ]);
+}
+
+export function resolveWalletHeadlineTag(
+  attribution: WalletAttribution | null | undefined,
+): WalletHeadlineTag | null {
+  if (!attribution) return null;
+
+  const secondarySet = new Set(attribution.secondary ?? []);
+  const supportingSet = new Set(attribution.supporting ?? []);
+
+  const resolveFrom = (
+    key: WalletAttributionLabelKey,
+  ): WalletHeadlineTag | null => {
+    if (secondarySet.has(key)) {
+      return {
+        key,
+        label: ATTRIBUTION_LABEL_TEXT[key],
+        source: "secondary",
+      };
+    }
+    if (supportingSet.has(key)) {
+      return {
+        key,
+        label: ATTRIBUTION_LABEL_TEXT[key],
+        source: "supporting",
+      };
+    }
+    return null;
+  };
+
+  if (attribution.primary === "specialist") {
+    for (const key of SPECIALIST_HEADLINE_TAG_ORDER) {
+      const specialistTag = resolveFrom(key);
+      if (specialistTag) return specialistTag;
+    }
+  }
+
+  for (const key of HEADLINE_TAG_PRIORITY) {
+    const headlineTag = resolveFrom(key);
+    if (headlineTag) return headlineTag;
+  }
+
+  return null;
+}
+
+export function resolveWalletTopLabelVariant(input: {
+  attribution: WalletAttribution | null | undefined;
+  metrics?: {
+    roi?: string | number | null;
+    pnl_usd?: string | number | null;
+  } | null;
+  lastActivityAt?: Date | null;
+}): WalletTopLabelVariant | null {
+  const labels = buildWalletLabelSet(input.attribution);
+  const roi = nullableNumber(input.metrics?.roi);
+  const pnlUsd = nullableNumber(input.metrics?.pnl_usd);
+
+  if (labels.has("market_mover")) return "market-mover";
+  if (
+    labels.has("fresh_wallet") &&
+    (labels.has("high_win_rate") ||
+      labels.has("high_conviction") ||
+      (roi != null && roi > 0) ||
+      (pnlUsd != null && pnlUsd > 0))
+  ) {
+    return "rising-star";
+  }
+  if (
+    (labels.has("high_win_rate") || labels.has("consistent_performer")) &&
+    (pnlUsd != null && pnlUsd > 0) &&
+    input.lastActivityAt != null
+  ) {
+    return "hot-streak";
+  }
+  if (labels.has("high_frequency") || labels.has("volume_trader")) {
+    return "trending-trader";
+  }
+  return null;
 }
 
 const SUMMARY_DEPENDENT_PRIMARY_FILTERS = new Set<WalletAttributionPrimaryKey>([
@@ -649,6 +799,7 @@ function mapWhaleRowToItem(
     chain: row.chain,
     label: row.label,
     userLabel: row.user_label ?? null,
+    followersCount: null,
     isSystemFlagged: row.is_system_flagged,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
@@ -698,6 +849,8 @@ function mapWhaleRowToItem(
     unusualTier: null,
     topChanges: [],
     topMarkets: [],
+    topLabelVariant: null,
+    headlineTag: null,
   };
 }
 
@@ -1576,6 +1729,56 @@ async function loadWhalePageMetadataByIds(
   return byId;
 }
 
+async function loadWalletFollowerCountsMap(
+  client: PoolClient,
+  walletIds: string[],
+): Promise<Map<string, number>> {
+  const byWalletId = new Map<string, number>();
+  if (walletIds.length === 0) return byWalletId;
+
+  const rows = await client.query<{
+    wallet_id: string;
+    followers_count: number | string;
+  }>(
+    `
+      select
+        wallet_id,
+        count(*)::int as followers_count
+      from wallet_follows
+      where wallet_id = any($1::uuid[])
+      group by wallet_id
+    `,
+    [walletIds],
+  );
+
+  for (const row of rows.rows) {
+    byWalletId.set(row.wallet_id, Number(row.followers_count));
+  }
+
+  return byWalletId;
+}
+
+function applyWalletPresentationFields<T extends {
+  metrics: WalletMetricsRow | null;
+  lastActivityAt: Date | null;
+  attribution?: WalletAttribution;
+}>(
+  item: T,
+): T & {
+  topLabelVariant: WalletTopLabelVariant | null;
+  headlineTag: WalletHeadlineTag | null;
+} {
+  return {
+    ...item,
+    topLabelVariant: resolveWalletTopLabelVariant({
+      attribution: item.attribution,
+      metrics: item.metrics,
+      lastActivityAt: item.lastActivityAt,
+    }),
+    headlineTag: resolveWalletHeadlineTag(item.attribution),
+  };
+}
+
 async function loadWalletMmDiagnosticsMap(
   client: PoolClient,
   wallets: Array<{ walletId: string; chain: string }>,
@@ -2306,14 +2509,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             delete from wallet_follows
             where user_id = $1 and wallet_id = $2
             returning id
-          `,
-          [user.id, walletRow.id],
-        );
-
-        await client.query(
-          `
-            delete from wallet_user_labels
-            where user_id = $1 and wallet_id = $2
           `,
           [user.id, walletRow.id],
         );
@@ -3385,17 +3580,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             }
           }
 
-          const topMarketMap = await loadWhaleTopMarkets(
-            client,
-            pagedIds,
-            query.marketLimit,
-            query.windowDays,
-          );
-          const sparklineMap = query.includeSparkline
-            ? await fetchWalletActivitySparklines(client, pagedIds, {
-                windowHours,
-              })
-            : new Map<string, WalletActivitySparkline>();
+          const [topMarketMap, followerCountsMap, sparklineMap] = await Promise.all([
+            loadWhaleTopMarkets(client, pagedIds, query.marketLimit, query.windowDays),
+            loadWalletFollowerCountsMap(client, pagedIds),
+            query.includeSparkline
+              ? fetchWalletActivitySparklines(client, pagedIds, {
+                  windowHours,
+                })
+              : Promise.resolve(new Map<string, WalletActivitySparkline>()),
+          ]);
 
           let pageAttributionMap = attributionMapForFilters;
           if (includeAttributionInResponse) {
@@ -3418,7 +3611,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           const wallets = pagedRows.map((row) => {
             const summary = summaryMapForPage.get(row.walletId) ?? null;
             const hydrated = hydrateWhaleItemFromSummary(
-              row,
+              {
+                ...row,
+                followersCount: followerCountsMap.get(row.walletId) ?? 0,
+              },
               summary,
               query.includeSummary,
               topMarketMap.get(row.walletId) ?? [],
@@ -3431,12 +3627,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     buildEmptyWalletActivitySparkline({ windowHours }),
                 }
               : hydrated;
-            return includeAttributionInResponse
+            const withAttribution = includeAttributionInResponse
               ? {
                   ...withSparkline,
                   attribution: pageAttributionMap.get(row.walletId),
                 }
               : withSparkline;
+            return applyWalletPresentationFields(withAttribution);
           });
 
           return {
@@ -3505,6 +3702,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           WalletRow & {
             tags: WalletTagRow[] | null;
             metrics: WalletMetricsRow | null;
+            user_label: string | null;
+            followers_count: number | string | null;
           }
         >(
           `
@@ -3513,12 +3712,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               w.address,
               w.chain,
               w.label,
+              wl.label as user_label,
               w.is_system_flagged,
               w.first_seen_at,
               w.last_seen_at,
+              followers.followers_count,
               tags.tags,
               metrics.metrics
             from wallets w
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $2
+            left join lateral (
+              select count(*)::int as followers_count
+              from wallet_follows wf
+              where wf.wallet_id = w.id
+            ) followers on true
             left join lateral (
               select jsonb_agg(jsonb_build_object(
                 'slug', t.slug,
@@ -3550,7 +3759,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             where w.id = $1
             limit 1
           `,
-          [walletId],
+          [walletId, user.id],
         );
 
         const wallet = result.rows[0];
@@ -3566,6 +3775,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
+            userLabel: wallet.user_label ?? null,
+            followersCount:
+              wallet.followers_count != null
+                ? Number(wallet.followers_count)
+                : 0,
             isSystemFlagged: wallet.is_system_flagged,
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
@@ -3819,12 +4033,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (pagedIds.length === 0) {
               return { ok: true, items: [] as WalletActivitySummaryItem[] };
             }
-            const [pageRows, pageTopChangesMap, sparklineMap] = await Promise.all([
+            const [pageRows, pageTopChangesMap, sparklineMap, followerCountsMap] =
+              await Promise.all([
               loadWalletRowsByIds(client, user.id, pagedIds, null),
               fetchWalletActivityTopChanges(client, pagedIds, summaryOptions),
               query.includeSparkline
                 ? fetchWalletActivitySparklines(client, pagedIds, { windowHours })
                 : Promise.resolve(new Map<string, WalletActivitySparkline>()),
+              loadWalletFollowerCountsMap(client, pagedIds),
             ]);
             const rowById = new Map(pageRows.map((row) => [row.id, row] as const));
             const attributionMap = includeAttributionInResponse
@@ -3871,6 +4087,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   chain: row.chain,
                   label: row.label,
                   userLabel: row.user_label ?? null,
+                  followersCount: followerCountsMap.get(row.id) ?? 0,
                   isSystemFlagged: row.is_system_flagged,
                   firstSeenAt: row.first_seen_at,
                   lastSeenAt: row.last_seen_at,
@@ -3891,6 +4108,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   unusualScore: summary.unusualScore,
                   unusualTier: summary.unusualTier,
                   topChanges: pageTopChangesMap.get(row.id) ?? [],
+                  topLabelVariant: null,
+                  headlineTag: null,
                 };
                 const withSparkline = query.includeSparkline
                   ? {
@@ -3900,12 +4119,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                         buildEmptyWalletActivitySparkline({ windowHours }),
                     }
                   : baseItem;
-                return includeAttributionInResponse
+                const withAttribution = includeAttributionInResponse
                   ? {
                       ...withSparkline,
                       attribution: attributionMap.get(row.id),
                     }
                   : withSparkline;
+                return applyWalletPresentationFields(withAttribution);
               })
               .filter((row): row is WalletActivitySummaryItem => Boolean(row));
             return { ok: true, items };
@@ -3933,6 +4153,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 chain: row.chain,
                 label: row.label,
                 userLabel: row.user_label ?? null,
+                followersCount: null,
                 isSystemFlagged: row.is_system_flagged,
                 firstSeenAt: row.first_seen_at,
                 lastSeenAt: row.last_seen_at,
@@ -3953,6 +4174,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 unusualScore: summary.unusualScore,
                 unusualTier: summary.unusualTier,
                 topChanges: [],
+                topLabelVariant: null,
+                headlineTag: null,
               };
             })
             .filter((row): row is WalletActivitySummaryItem => Boolean(row));
@@ -4035,9 +4258,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               pageTopChangesMap.set(walletId, topChanges);
             }
           }
-          const sparklineMap = query.includeSparkline
-            ? await fetchWalletActivitySparklines(client, pagedIds, { windowHours })
-            : new Map<string, WalletActivitySparkline>();
+          const [sparklineMap, followerCountsMap] = await Promise.all([
+            query.includeSparkline
+              ? fetchWalletActivitySparklines(client, pagedIds, { windowHours })
+              : Promise.resolve(new Map<string, WalletActivitySparkline>()),
+            loadWalletFollowerCountsMap(client, pagedIds),
+          ]);
           if (includeAttributionInResponse) {
             attributionMap = await buildWalletAttributionMap(
               client,
@@ -4058,6 +4284,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           const items = pagedRows.map((row) => {
             const withTopChanges = {
               ...row,
+              followersCount: followerCountsMap.get(row.walletId) ?? 0,
               topChanges: pageTopChangesMap.get(row.walletId) ?? [],
             };
             const withSparkline = query.includeSparkline
@@ -4068,12 +4295,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     buildEmptyWalletActivitySparkline({ windowHours }),
                 }
               : withTopChanges;
-            return includeAttributionInResponse
+            const withAttribution = includeAttributionInResponse
               ? {
                   ...withSparkline,
                   attribution: attributionMap.get(row.walletId),
                 }
               : withSparkline;
+            return applyWalletPresentationFields(withAttribution);
           });
 
           return { ok: true, items };

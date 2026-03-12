@@ -26,7 +26,11 @@ import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
-import { shouldReturnFilterTooBroad } from "./routes/wallet-intel.js";
+import {
+  resolveWalletHeadlineTag,
+  resolveWalletTopLabelVariant,
+  shouldReturnFilterTooBroad,
+} from "./routes/wallet-intel.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import {
   getOpenRouterEmbeddingPricingPerM,
@@ -221,6 +225,134 @@ const tests: TestCase[] = [
       assert.equal(resolveSparklineBucketHours(720), 24);
       assert.equal(resolveSparklineBucketHours(168, 3), 3);
       assert.equal(resolveSparklineBucketHours(24, 72), 24);
+    },
+  },
+  {
+    name: "headline tag prefers specialist labels and stable priority",
+    run: () => {
+      const specialistHeadline = resolveWalletHeadlineTag({
+        primary: "specialist",
+        primaryCandidates: [],
+        secondary: ["crypto_specialist", "high_conviction"],
+        supporting: ["volume_trader"],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(specialistHeadline, {
+        key: "crypto_specialist",
+        label: "Crypto Specialist",
+        source: "secondary",
+      });
+
+      const priorityHeadline = resolveWalletHeadlineTag({
+        primary: null,
+        primaryCandidates: [],
+        secondary: [],
+        supporting: ["market_mover", "high_frequency"],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(priorityHeadline, {
+        key: "market_mover",
+        label: "Market Mover",
+        source: "supporting",
+      });
+    },
+  },
+  {
+    name: "top label variant resolves backend headline badges deterministically",
+    run: () => {
+      const risingStar = resolveWalletTopLabelVariant({
+        attribution: {
+          primary: null,
+          primaryCandidates: [],
+          secondary: ["fresh_wallet", "high_conviction"],
+          supporting: [],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        metrics: { roi: "0.12", pnl_usd: "1200" },
+        lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
+      });
+      assert.equal(risingStar, "rising-star");
+
+      const hotStreak = resolveWalletTopLabelVariant({
+        attribution: {
+          primary: null,
+          primaryCandidates: [],
+          secondary: ["high_win_rate"],
+          supporting: ["consistent_performer"],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        metrics: { pnl_usd: "750" },
+        lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
+      });
+      assert.equal(hotStreak, "hot-streak");
+
+      const trendingTrader = resolveWalletTopLabelVariant({
+        attribution: {
+          primary: null,
+          primaryCandidates: [],
+          secondary: ["high_frequency"],
+          supporting: [],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        metrics: { pnl_usd: "-10" },
+        lastActivityAt: null,
+      });
+      assert.equal(trendingTrader, "trending-trader");
+
+      const marketMover = resolveWalletTopLabelVariant({
+        attribution: {
+          primary: null,
+          primaryCandidates: [],
+          secondary: ["market_mover", "fresh_wallet", "high_win_rate"],
+          supporting: [],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        metrics: { roi: "0.3", pnl_usd: "5000" },
+        lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
+      });
+      assert.equal(marketMover, "market-mover");
     },
   },
   {

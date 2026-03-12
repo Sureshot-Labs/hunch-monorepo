@@ -217,6 +217,49 @@ async function main() {
     }
 
     {
+      const followResponse = await app.inject({
+        method: "POST",
+        url: "/wallets/follow",
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: {
+          address: labeledAddress,
+          chain: "polygon",
+        },
+      });
+      assert.equal(followResponse.statusCode, 201);
+
+      const profileResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${labeledWalletId}`,
+        headers: authHeaders,
+      });
+      assert.equal(profileResponse.statusCode, 200);
+      const profileBody = profileResponse.json();
+      assert.equal(profileBody.wallet.userLabel, "Renamed whale");
+      assert.equal(profileBody.wallet.followersCount, 1);
+
+      const unfollowResponse = await app.inject({
+        method: "DELETE",
+        url: `/wallets/follow/${labeledAddress}?chain=polygon`,
+        headers: authHeaders,
+      });
+      assert.equal(unfollowResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/private/${labeledAddress}?chain=polygon`,
+        headers: authHeaders,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.followed, false);
+      assert.equal(body.userLabel, "Renamed whale");
+    }
+
+    {
       const invalidSolana = "not-a-solana-address";
       const response = await app.inject({
         method: "PATCH",
@@ -259,6 +302,40 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       const body = response.json();
+      assert.equal(body.notes.length, 1);
+      assert.equal(body.notes[0]?.note, "First note");
+    }
+
+    {
+      const followResponse = await app.inject({
+        method: "POST",
+        url: "/wallets/follow",
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: {
+          address: notesAddress,
+          chain: "polygon",
+        },
+      });
+      assert.equal(followResponse.statusCode, 201);
+
+      const unfollowResponse = await app.inject({
+        method: "DELETE",
+        url: `/wallets/follow/${notesAddress}?chain=polygon`,
+        headers: authHeaders,
+      });
+      assert.equal(unfollowResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/private/${notesAddress}?chain=polygon`,
+        headers: authHeaders,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.followed, false);
       assert.equal(body.notes.length, 1);
       assert.equal(body.notes[0]?.note, "First note");
     }
