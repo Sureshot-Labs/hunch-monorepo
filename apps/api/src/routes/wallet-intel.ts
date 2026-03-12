@@ -109,6 +109,13 @@ type WalletPrivateMetaRow = {
   user_label_color: WalletLabelColor | null;
 };
 
+type WalletCategoryMixItem = {
+  category: string;
+  volumeUsd: number;
+  tradeCount: number;
+  share: number;
+};
+
 type WalletMetricsRow = {
   period: string;
   as_of: Date;
@@ -119,6 +126,17 @@ type WalletMetricsRow = {
   win_rate: string | null;
   avg_hold_hours: string | null;
   last_trade_at: Date | null;
+  winning_count?: number | null;
+  losing_count?: number | null;
+  resolved_count?: number | null;
+};
+
+type WalletResolvedTradeStats = {
+  walletId: string;
+  resolvedCount: number;
+  winningCount: number;
+  losingCount: number;
+  winRate: number | null;
 };
 
 export type WalletTopLabelVariant =
@@ -376,6 +394,8 @@ type WalletActivitySummaryItem = {
   lastSeenAt: Date;
   tags: WalletTagRow[];
   metrics: WalletMetricsRow | null;
+  inferredWinRate: number | null;
+  inferredResolvedCount: number | null;
   profile: unknown | null;
   profileUpdatedAt: Date | null;
   windowHours: number;
@@ -414,6 +434,8 @@ type WalletActivitySignalItem = {
   lastSeenAt: Date;
   tags: WalletTagRow[];
   metrics: WalletMetricsRow | null;
+  inferredWinRate: number | null;
+  inferredResolvedCount: number | null;
   profile: unknown | null;
   profileUpdatedAt: Date | null;
   marketId: string;
@@ -596,7 +618,11 @@ const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
   politics_specialist: "Politics Specialist",
   crypto_specialist: "Crypto Specialist",
   macro_specialist: "Macro Specialist",
+  tech_specialist: "Tech Specialist",
   weather_specialist: "Weather Specialist",
+  health_specialist: "Health Specialist",
+  culture_specialist: "Culture Specialist",
+  mentions_specialist: "Mentions Specialist",
   high_win_rate: "High Win Rate",
   high_conviction: "High Conviction",
   consistent_performer: "Consistent Performer",
@@ -629,11 +655,15 @@ const BADGE_TEXT: Record<WalletPresentationBadgeKey, string> = {
 };
 
 const SPECIALIST_HEADLINE_TAG_ORDER: WalletAttributionLabelKey[] = [
+  "mentions_specialist",
   "crypto_specialist",
   "sports_specialist",
   "politics_specialist",
   "macro_specialist",
+  "tech_specialist",
   "weather_specialist",
+  "health_specialist",
+  "culture_specialist",
 ];
 
 const HEADLINE_TAG_PRIORITY: WalletAttributionLabelKey[] = [
@@ -2047,6 +2077,61 @@ async function loadWalletFollowerCountsMap(
   return byWalletId;
 }
 
+async function loadWalletCategoryMix(
+  client: PoolClient,
+  walletId: string,
+  windowDays = 30,
+): Promise<WalletCategoryMixItem[]> {
+  const rows = await client.query<{
+    category: string;
+    volume_usd: string | null;
+    trade_count: number | null;
+    share: string | null;
+  }>(
+    `
+      with category_mix as (
+        select
+          lower(coalesce(nullif(trim(um.category), ''), 'other')) as category,
+          sum(wa.size_usd)::double precision as volume_usd,
+          count(*)::int as trade_count
+        from wallet_activity_events wa
+        left join unified_markets um on um.id = wa.market_id
+        where wa.wallet_id = $1::uuid
+          and wa.occurred_at >= now() - ($2::text || ' days')::interval
+          and wa.size_usd is not null
+        group by 1
+      ),
+      totals as (
+        select sum(volume_usd)::double precision as total_volume_usd
+        from category_mix
+      )
+      select
+        cm.category,
+        cm.volume_usd::text as volume_usd,
+        cm.trade_count,
+        case
+          when t.total_volume_usd is null or t.total_volume_usd <= 0 then null
+          else (cm.volume_usd / t.total_volume_usd)::text
+        end as share
+      from category_mix cm
+      cross join totals t
+      where cm.volume_usd > 0
+      order by cm.volume_usd desc, cm.trade_count desc, cm.category asc
+      limit 6
+    `,
+    [walletId, Math.max(1, Math.trunc(windowDays))],
+  );
+
+  return rows.rows
+    .map((row) => ({
+      category: row.category,
+      volumeUsd: nullableNumber(row.volume_usd) ?? 0,
+      tradeCount: row.trade_count ?? 0,
+      share: nullableNumber(row.share) ?? 0,
+    }))
+    .filter((row) => row.volumeUsd > 0);
+}
+
 async function loadWalletEntryBracketStats(
   client: PoolClient,
   walletId: string,
@@ -2075,7 +2160,7 @@ async function loadWalletEntryBracketStats(
         left join unified_markets um on um.id = wa.market_id
         where wa.wallet_id = $1::uuid
           and wa.activity_type in ('delta', 'trade')
-          and coalesce(wa.action, '') in ('OPENED', 'INCREASED')
+          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
           and wa.occurred_at >= now() - ($2::text || ' days')::interval
           and wa.size_usd is not null
           and wa.price is not null
@@ -2138,6 +2223,107 @@ async function loadWalletEntryBracketStats(
       winRate: row ? nullableNumber(row.win_rate) : null,
     };
   });
+}
+
+async function loadWalletResolvedTradeStatsMap(
+  client: PoolClient,
+  walletIds: string[],
+  windowDays = 30,
+): Promise<Map<string, WalletResolvedTradeStats>> {
+  const byWalletId = new Map<string, WalletResolvedTradeStats>();
+  if (walletIds.length === 0) return byWalletId;
+
+  const rows = await client.query<{
+    wallet_id: string;
+    resolved_count: number | null;
+    winning_count: number | null;
+  }>(
+    `
+      with resolved_rows as (
+        select
+          wa.wallet_id,
+          upper(coalesce(wa.outcome_side, '')) as outcome_side,
+          upper(coalesce(um.resolved_outcome, '')) as resolved_outcome
+        from wallet_activity_events wa
+        left join unified_markets um on um.id = wa.market_id
+        where wa.wallet_id = any($1::uuid[])
+          and wa.activity_type in ('delta', 'trade')
+          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+          and wa.occurred_at >= now() - ($2::text || ' days')::interval
+      )
+      select
+        wallet_id,
+        count(*) filter (
+          where resolved_outcome in ('YES', 'NO')
+            and outcome_side in ('YES', 'NO')
+        )::int as resolved_count,
+        count(*) filter (
+          where resolved_outcome in ('YES', 'NO')
+            and outcome_side = resolved_outcome
+        )::int as winning_count
+      from resolved_rows
+      group by wallet_id
+    `,
+    [walletIds, Math.max(1, Math.trunc(windowDays))],
+  );
+
+  for (const row of rows.rows) {
+    const resolvedCount = Math.max(0, Number(row.resolved_count ?? 0));
+    const winningCount = Math.max(0, Number(row.winning_count ?? 0));
+    const losingCount = Math.max(resolvedCount - winningCount, 0);
+    byWalletId.set(row.wallet_id, {
+      walletId: row.wallet_id,
+      resolvedCount,
+      winningCount,
+      losingCount,
+      winRate: resolvedCount > 0 ? winningCount / resolvedCount : null,
+    });
+  }
+
+  return byWalletId;
+}
+
+export function applyResolvedTradeStatsToMetrics(
+  metrics: WalletMetricsRow | null,
+  stats: WalletResolvedTradeStats | null | undefined,
+  asOfFallback: Date | null = null,
+): WalletMetricsRow | null {
+  if (!stats) return metrics;
+  const nextWinRate =
+    metrics?.win_rate ??
+    (stats.winRate != null ? String(stats.winRate) : null);
+  const nextWinningCount =
+    metrics?.winning_count ?? stats.winningCount;
+  const nextLosingCount =
+    metrics?.losing_count ?? stats.losingCount;
+  const nextResolvedCount =
+    metrics?.resolved_count ?? stats.resolvedCount;
+
+  if (!metrics) {
+    if (nextWinRate == null && nextResolvedCount <= 0) return null;
+    return {
+      period: "30d",
+      as_of: asOfFallback ?? new Date(),
+      trades_count: null,
+      volume_usd: null,
+      pnl_usd: null,
+      roi: null,
+      win_rate: nextWinRate,
+      avg_hold_hours: null,
+      last_trade_at: null,
+      winning_count: nextWinningCount,
+      losing_count: nextLosingCount,
+      resolved_count: nextResolvedCount,
+    };
+  }
+
+  return {
+    ...metrics,
+    win_rate: nextWinRate,
+    winning_count: nextWinningCount,
+    losing_count: nextLosingCount,
+    resolved_count: nextResolvedCount,
+  };
 }
 
 function applyWalletPresentationFields<T extends {
@@ -3564,6 +3750,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           `,
           [user.id, query.limit, query.offset],
         );
+        const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
+          client,
+          rows.rows.map((row) => row.id),
+        );
 
         return reply.send({
           ok: true,
@@ -3578,13 +3768,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             lastSeenAt: row.last_seen_at,
             followedAt: row.follow_created_at,
             tags: row.tags ?? [],
-            metrics: row.metrics ?? null,
+            metrics: applyResolvedTradeStatsToMetrics(
+              row.metrics ?? null,
+              resolvedTradeStatsMap.get(row.id),
+              row.last_seen_at,
+            ),
             inferredWinRate:
               row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
                 ? Number(row.inferred_wins) / Number(row.inferred_total)
-                : null,
+                : resolvedTradeStatsMap.get(row.id)?.winRate ?? null,
             inferredResolvedCount:
-              row.inferred_total != null ? Number(row.inferred_total) : null,
+              row.inferred_total != null
+                ? Number(row.inferred_total)
+                : resolvedTradeStatsMap.get(row.id)?.resolvedCount ?? null,
             profile: row.profile ?? null,
             profileUpdatedAt: row.profile_updated_at ?? null,
             userLabel: row.user_label ?? null,
@@ -4030,6 +4226,26 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               ),
             );
           }
+          if (pagedIds.length > 0) {
+            const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
+              client,
+              pagedIds,
+            );
+            pagedRows = pagedRows.map((row) => {
+              const stats = resolvedTradeStatsMap.get(row.walletId);
+              return {
+                ...row,
+                metrics: applyResolvedTradeStatsToMetrics(
+                  row.metrics ?? null,
+                  stats,
+                  row.lastSeenAt,
+                ),
+                inferredWinRate: row.inferredWinRate ?? stats?.winRate ?? null,
+                inferredResolvedCount:
+                  row.inferredResolvedCount ?? stats?.resolvedCount ?? null,
+              };
+            });
+          }
 
           const summaryMapForPage =
             summaryMapForFilters ?? new Map<string, WalletActivitySummary>();
@@ -4186,14 +4402,31 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           reply.code(404);
           return reply.send({ error: "Wallet not found" });
         }
+        const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
+          client,
+          [walletId],
+        );
+        wallet.metrics = applyResolvedTradeStatsToMetrics(
+          wallet.metrics ?? null,
+          resolvedTradeStatsMap.get(walletId),
+          wallet.last_seen_at,
+        );
 
-        const [followerCountsMap, refreshPolicy, attributionPolicy, signalsPolicy, entryBracketStats] =
+        const [
+          followerCountsMap,
+          refreshPolicy,
+          attributionPolicy,
+          signalsPolicy,
+          entryBracketStats,
+          categoryMix,
+        ] =
           await Promise.all([
             loadWalletFollowerCountsMap(client, [walletId]),
             resolveWalletIntelRefreshPolicy(client),
             resolveWalletIntelAttributionPolicy(client),
             resolveWalletIntelSignalsPolicy(client),
             loadWalletEntryBracketStats(client, walletId),
+            loadWalletCategoryMix(client, walletId),
           ]);
 
         const summary = (
@@ -4249,6 +4482,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           attribution,
         );
 
+        const responseProfile = isRecord(wallet.profile)
+          ? {
+              ...wallet.profile,
+              categories:
+                categoryMix.length > 0
+                  ? categoryMix.map((item) => item.category)
+                  : Array.isArray(wallet.profile.categories)
+                    ? wallet.profile.categories
+                    : [],
+            }
+          : wallet.profile ?? null;
+
         return reply.send({
           ok: true,
           wallet: {
@@ -4271,9 +4516,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             lastSeenAt: wallet.last_seen_at,
             tags: wallet.tags ?? [],
             metrics: wallet.metrics ?? null,
-            profile: wallet.profile ?? null,
+            profile: responseProfile,
             profileUpdatedAt: wallet.profile_updated_at ?? null,
             attribution,
+            categoryMix,
             entryBracketStats,
           },
         });
@@ -4586,6 +4832,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   lastSeenAt: row.last_seen_at,
                   tags: row.tags ?? [],
                   metrics: row.metrics ?? null,
+                  inferredWinRate: null,
+                  inferredResolvedCount: null,
                   profile: row.profile ?? null,
                   profileUpdatedAt: row.profile_updated_at ?? null,
                   windowHours: summary.windowHours,
@@ -4661,6 +4909,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 lastSeenAt: row.last_seen_at,
                 tags: row.tags ?? [],
                 metrics: row.metrics ?? null,
+                inferredWinRate: null,
+                inferredResolvedCount: null,
                 profile: row.profile ?? null,
                 profileUpdatedAt: row.profile_updated_at ?? null,
                 windowHours: summary.windowHours,
@@ -4686,24 +4936,46 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             })
             .filter((row): row is WalletActivitySummaryItem => Boolean(row));
 
+          const resolvedTradeStatsMap =
+            merged.length > 0
+              ? await loadWalletResolvedTradeStatsMap(
+                  client,
+                  merged.map((row) => row.walletId),
+                )
+              : new Map<string, WalletResolvedTradeStats>();
+          const mergedWithResolved = merged.map((row) => {
+            const stats = resolvedTradeStatsMap.get(row.walletId);
+            return {
+              ...row,
+              metrics: applyResolvedTradeStatsToMetrics(
+                row.metrics ?? null,
+                stats,
+                row.lastSeenAt,
+              ),
+              inferredWinRate: row.inferredWinRate ?? stats?.winRate ?? null,
+              inferredResolvedCount:
+                row.inferredResolvedCount ?? stats?.resolvedCount ?? null,
+            };
+          });
+
           let topChangesForFilters = new Map<string, WalletActivityTopChange[]>();
           let attributionMap = new Map<string, WalletAttribution>();
-          let filtered = merged;
+          let filtered = mergedWithResolved;
 
-          if (merged.length > 0) {
+          if (mergedWithResolved.length > 0) {
             topChangesForFilters = await fetchWalletActivityTopChanges(
               client,
-              merged.map((row) => row.walletId),
+              mergedWithResolved.map((row) => row.walletId),
               summaryOptions,
             );
             attributionMap = await buildWalletAttributionMap(
               client,
-              merged.map((row) => ({
+              mergedWithResolved.map((row) => ({
                 walletId: row.walletId,
                 tags: row.tags,
                 metrics: row.metrics,
-                inferredWinRate: null,
-                inferredResolvedCount: null,
+                inferredWinRate: row.inferredWinRate,
+                inferredResolvedCount: row.inferredResolvedCount,
                 trackedExposureUsd: null,
                 topChanges: topChangesForFilters.get(row.walletId) ?? [],
               })),
@@ -4714,7 +4986,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 filterLabels: labelsFilterTyped,
               },
             );
-            filtered = merged.filter((row) =>
+            filtered = mergedWithResolved.filter((row) =>
               walletMatchesFilters(row.tags, attributionMap.get(row.walletId), {
                 tags: [],
                 tagMode: "any",
@@ -5092,6 +5364,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   lastSeenAt: candidate.last_seen_at,
                   tags: candidate.tags ?? [],
                   metrics: candidate.metrics ?? null,
+                  inferredWinRate: null,
+                  inferredResolvedCount: null,
                   profile: candidate.profile ?? null,
                   profileUpdatedAt: candidate.profile_updated_at ?? null,
                   marketId: signalRow.marketId,
@@ -5330,6 +5604,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 lastSeenAt: row.last_seen_at,
                 tags: row.tags ?? [],
                 metrics: row.metrics ?? null,
+                inferredWinRate: null,
+                inferredResolvedCount: null,
                 profile: row.profile ?? null,
                 profileUpdatedAt: row.profile_updated_at ?? null,
                 marketId: change.marketId,

@@ -14,7 +14,11 @@ export type WalletAttributionLabelKey =
   | "politics_specialist"
   | "crypto_specialist"
   | "macro_specialist"
+  | "tech_specialist"
   | "weather_specialist"
+  | "health_specialist"
+  | "culture_specialist"
+  | "mentions_specialist"
   | "high_win_rate"
   | "high_conviction"
   | "consistent_performer"
@@ -156,7 +160,16 @@ type InferredOutcomeRow = {
   total: number;
 };
 
-type SpecialistFamily = "sports" | "politics" | "crypto" | "macro" | "weather";
+type SpecialistFamily =
+  | "sports"
+  | "politics"
+  | "crypto"
+  | "macro"
+  | "technology"
+  | "weather"
+  | "health"
+  | "culture"
+  | "mentions";
 
 const SPECIALIST_LABEL_BY_FAMILY: Record<SpecialistFamily, WalletAttributionLabelKey> =
   {
@@ -164,7 +177,11 @@ const SPECIALIST_LABEL_BY_FAMILY: Record<SpecialistFamily, WalletAttributionLabe
     politics: "politics_specialist",
     crypto: "crypto_specialist",
     macro: "macro_specialist",
+    technology: "tech_specialist",
     weather: "weather_specialist",
+    health: "health_specialist",
+    culture: "culture_specialist",
+    mentions: "mentions_specialist",
   };
 
 const FAMILY_ALIASES: Record<SpecialistFamily, Set<string>> = {
@@ -196,16 +213,27 @@ const FAMILY_ALIASES: Record<SpecialistFamily, Set<string>> = {
   ]),
   macro: new Set([
     "economics",
+    "economy",
     "financials",
     "business",
     "companies",
+    "company news",
+    "company-news",
+    "oil & gas",
+    "oil-gas",
+    "commodities",
+  ]),
+  technology: new Set([
     "technology",
     "tech",
     "science and technology",
     "science",
-    "health",
+    "space",
   ]),
   weather: new Set(["weather", "climate and weather"]),
+  health: new Set(["health", "coronavirus", "medical", "biotech"]),
+  culture: new Set(["entertainment", "pop-culture", "culture", "art"]),
+  mentions: new Set(["mentions"]),
 };
 
 const UNMAPPED_CATEGORY_ALIASES = new Set([
@@ -215,12 +243,7 @@ const UNMAPPED_CATEGORY_ALIASES = new Set([
   "this vs that",
   "off the pitch",
   "korean market",
-  "company news",
-  "culture",
   "other",
-  "mentions",
-  "entertainment",
-  "pop-culture",
 ]);
 
 const PRIMARY_KEY_ORDER_FALLBACK: WalletAttributionPrimaryKey[] = [
@@ -235,7 +258,11 @@ const LABEL_ORDER: WalletAttributionLabelKey[] = [
   "politics_specialist",
   "crypto_specialist",
   "macro_specialist",
+  "tech_specialist",
   "weather_specialist",
+  "health_specialist",
+  "culture_specialist",
+  "mentions_specialist",
   "high_win_rate",
   "high_conviction",
   "consistent_performer",
@@ -262,7 +289,11 @@ const SPECIALIST_LABEL_SET = new Set<WalletAttributionLabelKey>([
   "politics_specialist",
   "crypto_specialist",
   "macro_specialist",
+  "tech_specialist",
   "weather_specialist",
+  "health_specialist",
+  "culture_specialist",
+  "mentions_specialist",
 ]);
 
 const VENUE_ORDER_FALLBACK: VenueKey[] = ["polymarket", "kalshi", "limitless"];

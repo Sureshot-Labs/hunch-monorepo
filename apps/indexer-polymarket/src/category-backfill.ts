@@ -114,7 +114,6 @@ async function backfillEvents({
     for (const row of rows) {
       const nextCategory =
         resolvePolymarketCategoryFromRaw(row.raw, {
-          explicitCategory: row.category,
           title: row.title,
           description: row.description,
         }) ?? null;
@@ -210,7 +209,6 @@ async function backfillMarkets({
         resolvePolymarketCategoryFromRaw(
           mergeMarketAndEventRaw(row.raw, row.event_raw),
           {
-            explicitCategory: row.category ?? row.event_category,
             title: row.question,
             description: row.description,
           },

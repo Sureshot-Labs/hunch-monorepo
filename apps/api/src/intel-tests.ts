@@ -27,6 +27,7 @@ import {
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
 import {
+  applyResolvedTradeStatsToMetrics,
   resolveEntryBracketKey,
   resolveWalletAvgTradeSizeUsd,
   resolveWalletBadges,
@@ -274,6 +275,26 @@ const tests: TestCase[] = [
         label: "Market Mover",
         source: "supporting",
       });
+
+      const mentionsHeadline = resolveWalletHeadlineTag({
+        primary: "specialist",
+        primaryCandidates: [],
+        secondary: ["mentions_specialist", "high_frequency"],
+        supporting: ["high_conviction"],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(mentionsHeadline, {
+        key: "mentions_specialist",
+        label: "Mentions Specialist",
+        source: "secondary",
+      });
     },
   },
   {
@@ -315,6 +336,25 @@ const tests: TestCase[] = [
       assert.deepEqual(insiderPrimary, {
         key: "potential_insider",
         label: "Potential Insider",
+      });
+
+      const mentionsPrimary = resolveWalletPrimaryLabel({
+        primary: "specialist",
+        primaryCandidates: [],
+        secondary: ["mentions_specialist", "market_mover"],
+        supporting: [],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(mentionsPrimary, {
+        key: "mentions_specialist",
+        label: "Mentions Specialist",
       });
 
       const secondary = resolveWalletSecondaryLabels(
@@ -486,6 +526,36 @@ const tests: TestCase[] = [
         lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
       });
       assert.equal(marketMover, "market-mover");
+    },
+  },
+  {
+    name: "resolved trade stats backfill missing win rate metrics",
+    run: () => {
+      const patched = applyResolvedTradeStatsToMetrics(
+        {
+          period: "30d",
+          as_of: new Date("2026-03-10T00:00:00.000Z"),
+          trades_count: 6,
+          volume_usd: "453273.53",
+          pnl_usd: "9050.5",
+          roi: "0.3786",
+          win_rate: null,
+          avg_hold_hours: null,
+          last_trade_at: new Date("2026-03-10T00:00:00.000Z"),
+        },
+        {
+          walletId: "7f9c0d1e-cddb-4ff4-9894-ccd9ba88d3db",
+          resolvedCount: 6,
+          winningCount: 4,
+          losingCount: 2,
+          winRate: 4 / 6,
+        },
+      );
+
+      assert.equal(patched?.win_rate, String(4 / 6));
+      assert.equal(patched?.winning_count, 4);
+      assert.equal(patched?.losing_count, 2);
+      assert.equal(patched?.resolved_count, 6);
     },
   },
   {

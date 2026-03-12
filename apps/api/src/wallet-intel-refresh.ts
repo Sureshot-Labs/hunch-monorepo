@@ -1406,6 +1406,25 @@ async function refreshMetrics(
           where mark_value is not null
           group by wallet_id
         ),
+        resolved_trade_stats as (
+          select
+            wa.wallet_id,
+            count(*) filter (
+              where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
+                and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
+            )::int as resolved_count,
+            count(*) filter (
+              where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
+                and upper(coalesce(wa.outcome_side, '')) = upper(coalesce(um.resolved_outcome, ''))
+            )::int as winning_count
+          from wallet_activity_events wa
+          left join unified_markets um on um.id = wa.market_id
+          where wa.wallet_id = any($1::uuid[])
+            and wa.activity_type in ('delta', 'trade')
+            and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+            ${whereSince}
+          group by wa.wallet_id
+        ),
         upserted as (
           insert into wallet_metrics_snapshots (
             wallet_id,
@@ -1416,6 +1435,7 @@ async function refreshMetrics(
             volume_usd,
             pnl_usd,
             roi,
+            win_rate,
             last_trade_at
           )
           select
@@ -1433,16 +1453,22 @@ async function refreshMetrics(
                 then null
               else pnl.pnl_usd / cost_basis.gross_cost_basis_usd
             end as roi,
+            case
+              when rts.resolved_count is null or rts.resolved_count <= 0 then null
+              else rts.winning_count::numeric / rts.resolved_count::numeric
+            end as win_rate,
             agg.last_trade_at
           from agg
           left join pnl on pnl.wallet_id = agg.wallet_id
           left join cost_basis on cost_basis.wallet_id = agg.wallet_id
+          left join resolved_trade_stats rts on rts.wallet_id = agg.wallet_id
           on conflict (wallet_id, venue, period, as_of)
           do update set
             trades_count = excluded.trades_count,
             volume_usd = excluded.volume_usd,
             pnl_usd = excluded.pnl_usd,
             roi = excluded.roi,
+            win_rate = excluded.win_rate,
             last_trade_at = excluded.last_trade_at,
             updated_at = now()
           returning wallet_id

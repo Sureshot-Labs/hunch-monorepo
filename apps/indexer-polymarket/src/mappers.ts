@@ -8,14 +8,16 @@ import type {
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
 type PolymarketCategory =
-  | "Politics"
-  | "Crypto"
-  | "Sports"
-  | "Economics"
-  | "Technology"
-  | "Entertainment"
-  | "Weather"
-  | "Health";
+  | "politics"
+  | "crypto"
+  | "sports"
+  | "economics"
+  | "technology"
+  | "entertainment"
+  | "weather"
+  | "health"
+  | "mentions"
+  | "other";
 
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;
@@ -57,49 +59,228 @@ type PolymarketTagInput =
   | undefined;
 
 const CATEGORY_PRIORITY: readonly PolymarketCategory[] = [
-  "Politics",
-  "Crypto",
-  "Sports",
-  "Economics",
-  "Technology",
-  "Entertainment",
-  "Weather",
-  "Health",
+  "mentions",
+  "politics",
+  "crypto",
+  "sports",
+  "economics",
+  "technology",
+  "entertainment",
+  "weather",
+  "health",
+  "other",
 ];
 
-const CATEGORY_LABELS = new Map<string, PolymarketCategory>([
-  ["politics", "Politics"],
-  ["politic", "Politics"],
-  ["geopolitics", "Politics"],
-  ["foreign-policy", "Politics"],
-  ["foreign policy", "Politics"],
-  ["world", "Politics"],
-  ["macro-geopolitics", "Politics"],
-  ["macro geopolitics", "Politics"],
-  ["ukraine", "Politics"],
-  ["iran", "Politics"],
-  ["israel", "Politics"],
-  ["middle-east", "Politics"],
-  ["middle east", "Politics"],
-  ["crypto", "Crypto"],
-  ["cryptocurrency", "Crypto"],
-  ["crypto-prices", "Crypto"],
-  ["crypto prices", "Crypto"],
-  ["sports", "Sports"],
-  ["sport", "Sports"],
-  ["games", "Sports"],
-  ["economics", "Economics"],
-  ["economy", "Economics"],
-  ["finance", "Economics"],
-  ["technology", "Technology"],
-  ["tech", "Technology"],
-  ["entertainment", "Entertainment"],
-  ["pop-culture", "Entertainment"],
-  ["pop culture", "Entertainment"],
-  ["culture", "Entertainment"],
-  ["weather", "Weather"],
-  ["climate", "Weather"],
-  ["health", "Health"],
+const MENTION_TAGS = new Set(["mention-markets", "tweets-markets"]);
+
+const EXPLICIT_CATEGORY_MAP = new Map<string, PolymarketCategory>([
+  ["mentions", "mentions"],
+  ["mention", "mentions"],
+  ["mention-markets", "mentions"],
+  ["tweets-markets", "mentions"],
+
+  ["politics", "politics"],
+  ["politic", "politics"],
+  ["geopolitics", "politics"],
+  ["global-politics", "politics"],
+  ["global politics", "politics"],
+  ["foreign-policy", "politics"],
+  ["foreign policy", "politics"],
+  ["world", "politics"],
+  ["macro-geopolitics", "politics"],
+  ["macro geopolitics", "politics"],
+  ["ukraine", "politics"],
+  ["ukraine-&-russia", "politics"],
+  ["ukraine & russia", "politics"],
+  ["iran", "politics"],
+  ["israel", "politics"],
+  ["middle-east", "politics"],
+  ["middle east", "politics"],
+  ["us-current-affairs", "politics"],
+  ["current-affairs", "politics"],
+  ["elections", "politics"],
+
+  ["crypto", "crypto"],
+  ["cryptocurrency", "crypto"],
+  ["crypto-prices", "crypto"],
+  ["crypto prices", "crypto"],
+  ["bitcoin", "crypto"],
+  ["ethereum", "crypto"],
+  ["solana", "crypto"],
+  ["nft", "crypto"],
+  ["nfts", "crypto"],
+
+  ["sports", "sports"],
+  ["sport", "sports"],
+  ["games", "sports"],
+  ["football matches", "sports"],
+  ["nba playoffs", "sports"],
+  ["olympics", "sports"],
+  ["chess", "sports"],
+  ["poker", "sports"],
+  ["cricket", "sports"],
+  ["esports", "sports"],
+
+  ["economics", "economics"],
+  ["economy", "economics"],
+  ["finance", "economics"],
+  ["financials", "economics"],
+  ["business", "economics"],
+  ["companies", "economics"],
+  ["company-news", "economics"],
+  ["company news", "economics"],
+  ["oil-gas", "economics"],
+  ["oil & gas", "economics"],
+
+  ["technology", "technology"],
+  ["tech", "technology"],
+  ["science", "technology"],
+  ["science-and-technology", "technology"],
+  ["science and technology", "technology"],
+  ["space", "technology"],
+
+  ["entertainment", "entertainment"],
+  ["pop-culture", "entertainment"],
+  ["pop culture", "entertainment"],
+  ["culture", "entertainment"],
+  ["art", "entertainment"],
+
+  ["weather", "weather"],
+  ["climate", "weather"],
+  ["climate-and-weather", "weather"],
+  ["climate and weather", "weather"],
+
+  ["health", "health"],
+  ["coronavirus", "health"],
+
+  ["other", "other"],
+]);
+
+const SPORTS_TAGS = new Set([
+  "sports",
+  "nba",
+  "nfl",
+  "nhl",
+  "mlb",
+  "soccer",
+  "football",
+  "basketball",
+  "baseball",
+  "hockey",
+  "tennis",
+  "cricket",
+  "ufc",
+  "ncaa",
+  "ncaa-basketball",
+  "cwbb",
+  "cbb",
+  "cfb",
+  "epl",
+  "premier-league",
+  "efl-championship",
+  "international-cricket",
+  "la-liga",
+  "mls",
+  "bundesliga",
+  "ligue-1",
+  "khl",
+  "ucl",
+  "uel",
+  "wnba",
+  "brazil-serie-a",
+  "saudi-professional-league",
+  "serie-b",
+  "champions-league",
+  "euroleague-basketball",
+  "primeira-liga",
+  "fa-cup",
+  "ligue-2",
+  "fifa-friendly",
+  "esports",
+  "counter-strike",
+  "counter-strike-2",
+  "cs2",
+  "dota-2",
+  "league-of-legends",
+  "lol",
+  "valorant",
+  "honor-of-kings",
+  "chess",
+  "poker",
+  "olympics",
+]);
+
+const POLITICS_TAGS = new Set([
+  "politics",
+  "geopolitics",
+  "foreign-policy",
+  "macro-geopolitics",
+  "ukraine",
+  "iran",
+  "israel",
+  "middle-east",
+  "putin",
+  "trump",
+  "midterms",
+  "house-elections",
+  "global-elections",
+  "us-election",
+  "nov-4-elections",
+  "primaries",
+  "breaking-news",
+  "world",
+]);
+
+const ECONOMICS_TAGS = new Set([
+  "finance",
+  "economy",
+  "economics",
+  "equities",
+  "stocks",
+  "stock-prices",
+  "earnings",
+  "commodities",
+  "business",
+  "financials",
+  "companies",
+  "company-news",
+  "indicies",
+  "oil-gas",
+]);
+
+const TECHNOLOGY_TAGS = new Set([
+  "tech",
+  "big-tech",
+  "ai",
+  "science",
+  "science-and-technology",
+  "space",
+]);
+
+const ENTERTAINMENT_TAGS = new Set([
+  "pop-culture",
+  "movies",
+  "music",
+  "awards",
+  "celebrities",
+  "art",
+  "culture",
+]);
+
+const WEATHER_TAGS = new Set([
+  "weather",
+  "temperature",
+  "climate",
+  "climate-and-weather",
+]);
+
+const HEALTH_TAGS = new Set([
+  "health",
+  "medical",
+  "covid",
+  "coronavirus",
+  "pandemic",
+  "biotech",
 ]);
 
 function normalizeTagToken(value: string | null | undefined): string | undefined {
@@ -111,13 +292,13 @@ function normalizeTagToken(value: string | null | undefined): string | undefined
 
 function normalizeExplicitCategory(
   value: string | null | undefined,
-): string | undefined {
+): PolymarketCategory | undefined {
   const trimmed = s(value);
   if (!trimmed) return undefined;
   const normalized =
-    CATEGORY_LABELS.get(trimmed.toLowerCase()) ??
-    CATEGORY_LABELS.get(normalizeTagToken(trimmed) ?? "");
-  return normalized ?? trimmed;
+    EXPLICIT_CATEGORY_MAP.get(trimmed.toLowerCase()) ??
+    EXPLICIT_CATEGORY_MAP.get(normalizeTagToken(trimmed) ?? "");
+  return normalized;
 }
 
 function extractTagTokens(tags: unknown): string[] {
@@ -141,25 +322,22 @@ function extractTagTokens(tags: unknown): string[] {
 function scoreTagCategory(tag: string): { category: PolymarketCategory; weight: number } | null {
   if (!tag) return null;
 
+  if (MENTION_TAGS.has(tag)) {
+    return { category: "mentions", weight: 10 };
+  }
+
   if (
-    tag === "politics" ||
-    tag === "geopolitics" ||
-    tag === "foreign-policy" ||
-    tag === "macro-geopolitics" ||
-    tag === "ukraine" ||
-    tag === "iran" ||
-    tag === "israel" ||
-    tag === "middle-east" ||
+    POLITICS_TAGS.has(tag) ||
     tag.includes("election") ||
     tag.includes("presidency") ||
     tag.includes("foreign-policy") ||
     tag.includes("peace-deal") ||
     tag.includes("geopolitics") ||
-    tag === "putin"
+    tag.includes("current-affairs")
   ) {
-    return { category: "Politics", weight: 3 };
+    return { category: "politics", weight: 3 };
   }
-  if (tag === "world") return { category: "Politics", weight: 1 };
+  if (tag === "world") return { category: "politics", weight: 1 };
 
   if (
     tag === "crypto" ||
@@ -171,70 +349,26 @@ function scoreTagCategory(tag: string): { category: PolymarketCategory; weight: 
     tag === "ripple" ||
     tag === "defi" ||
     tag === "nft" ||
+    tag === "nfts" ||
     tag.includes("up-or-down")
   ) {
-    return { category: "Crypto", weight: 3 };
+    return { category: "crypto", weight: 3 };
   }
 
-  if (
-    tag === "sports" ||
-    tag === "nba" ||
-    tag === "nfl" ||
-    tag === "nhl" ||
-    tag === "mlb" ||
-    tag === "soccer" ||
-    tag === "football" ||
-    tag === "basketball" ||
-    tag === "baseball" ||
-    tag === "hockey" ||
-    tag === "tennis" ||
-    tag === "cricket" ||
-    tag === "ufc"
-  ) {
-    return { category: "Sports", weight: 3 };
-  }
-  if (tag === "games") return { category: "Sports", weight: 1 };
+  if (SPORTS_TAGS.has(tag)) return { category: "sports", weight: 3 };
+  if (tag === "games") return { category: "sports", weight: 1 };
 
-  if (
-    tag === "finance" ||
-    tag === "economy" ||
-    tag === "equities" ||
-    tag === "stocks" ||
-    tag === "stock-prices" ||
-    tag === "earnings" ||
-    tag === "commodities" ||
-    tag === "business"
-  ) {
-    return { category: "Economics", weight: 3 };
+  if (ECONOMICS_TAGS.has(tag)) return { category: "economics", weight: 3 };
+
+  if (TECHNOLOGY_TAGS.has(tag)) return { category: "technology", weight: 3 };
+
+  if (ENTERTAINMENT_TAGS.has(tag)) {
+    return { category: "entertainment", weight: 3 };
   }
 
-  if (tag === "tech" || tag === "big-tech" || tag === "ai") {
-    return { category: "Technology", weight: 3 };
-  }
+  if (WEATHER_TAGS.has(tag)) return { category: "weather", weight: 3 };
 
-  if (
-    tag === "pop-culture" ||
-    tag === "movies" ||
-    tag === "music" ||
-    tag === "awards" ||
-    tag === "celebrities"
-  ) {
-    return { category: "Entertainment", weight: 3 };
-  }
-
-  if (tag === "weather" || tag === "temperature" || tag === "climate") {
-    return { category: "Weather", weight: 3 };
-  }
-
-  if (
-    tag === "health" ||
-    tag === "medical" ||
-    tag === "covid" ||
-    tag === "pandemic" ||
-    tag === "biotech"
-  ) {
-    return { category: "Health", weight: 3 };
-  }
+  if (HEALTH_TAGS.has(tag)) return { category: "health", weight: 3 };
 
   return null;
 }
@@ -558,7 +692,7 @@ export function mapPolymarketMarketRow(
 function extractCategoryFromTitle(
   title: string,
   description?: string | null,
-): string | undefined {
+): PolymarketCategory | undefined {
   const text = `${title} ${description || ""}`.toLowerCase();
   const tokens = tokenizeText(text);
 
@@ -571,7 +705,7 @@ function extractCategoryFromTitle(
     if (score > 0) scores.set(category, (scores.get(category) ?? 0) + score);
   };
 
-  addScore("Politics", [
+  addScore("politics", [
     "election",
     "elections",
     "president",
@@ -597,7 +731,7 @@ function extractCategoryFromTitle(
     /foreign policy/,
     /middle east/,
   ]);
-  addScore("Crypto", [
+  addScore("crypto", [
     "bitcoin",
     "ethereum",
     "crypto",
@@ -611,7 +745,7 @@ function extractCategoryFromTitle(
     "polygon",
     "token",
   ]);
-  addScore("Sports", [
+  addScore("sports", [
     "nfl",
     "nba",
     "mlb",
@@ -625,7 +759,7 @@ function extractCategoryFromTitle(
     "playoff",
     /super bowl/,
   ]);
-  addScore("Economics", [
+  addScore("economics", [
     "gdp",
     "inflation",
     "recession",
@@ -637,7 +771,7 @@ function extractCategoryFromTitle(
     "stocks",
     "earnings",
   ]);
-  addScore("Technology", [
+  addScore("technology", [
     "ai",
     "tech",
     "apple",
@@ -648,7 +782,7 @@ function extractCategoryFromTitle(
     "amazon",
     /artificial intelligence/,
   ]);
-  addScore("Entertainment", [
+  addScore("entertainment", [
     "movie",
     "film",
     "oscar",
@@ -660,7 +794,7 @@ function extractCategoryFromTitle(
     "award",
     /star wars/,
   ]);
-  addScore("Weather", [
+  addScore("weather", [
     "hurricane",
     "tornado",
     "weather",
@@ -670,7 +804,7 @@ function extractCategoryFromTitle(
     "storm",
     "rain",
   ]);
-  addScore("Health", [
+  addScore("health", [
     "covid",
     "pandemic",
     "vaccine",
@@ -705,11 +839,12 @@ export function resolvePolymarketCategory(input: {
   tags?: unknown;
   title: string;
   description?: string | null;
-}): string | undefined {
+}): PolymarketCategory {
   return (
     normalizeExplicitCategory(input.explicitCategory) ??
     deriveCategoryFromTags(input.tags) ??
-    extractCategoryFromTitle(input.title, input.description)
+    extractCategoryFromTitle(input.title, input.description) ??
+    "other"
   );
 }
 
@@ -720,7 +855,7 @@ export function resolvePolymarketCategoryFromRaw(
     title?: string | null;
     description?: string | null;
   } = {},
-): string | undefined {
+): PolymarketCategory {
   const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const explicitCategory =
     (typeof record.category === "string" ? record.category : undefined) ??
@@ -729,7 +864,7 @@ export function resolvePolymarketCategoryFromRaw(
     (typeof record.title === "string" ? record.title : undefined) ??
     (typeof record.question === "string" ? record.question : undefined) ??
     fallback.title;
-  if (!title) return normalizeExplicitCategory(explicitCategory);
+  if (!title) return normalizeExplicitCategory(explicitCategory) ?? "other";
   const description =
     (typeof record.description === "string" ? record.description : undefined) ??
     fallback.description;

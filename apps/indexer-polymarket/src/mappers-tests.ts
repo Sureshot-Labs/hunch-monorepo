@@ -23,7 +23,48 @@ test("deriveCategoryFromTags prefers politics/geopolitics tags", () => {
     { label: "Ukraine", slug: "ukraine" },
     { label: "Politics", slug: "politics" },
   ]);
-  assert.equal(category, "Politics");
+  assert.equal(category, "politics");
+});
+
+test("deriveCategoryFromTags prefers mentions when mention tags are present", () => {
+  const category = deriveCategoryFromTags([
+    { label: "Politics", slug: "politics" },
+    { label: "Mention Markets", slug: "mention-markets" },
+  ]);
+  assert.equal(category, "mentions");
+});
+
+test("deriveCategoryFromTags maps sports leagues to sports", () => {
+  const category = deriveCategoryFromTags([
+    { label: "Premier League", slug: "premier-league" },
+  ]);
+  assert.equal(category, "sports");
+});
+
+test("deriveCategoryFromTags maps esports to sports", () => {
+  const category = deriveCategoryFromTags([
+    { label: "Counter-Strike 2", slug: "counter-strike-2" },
+  ]);
+  assert.equal(category, "sports");
+});
+
+test("resolvePolymarketCategory normalizes explicit categories", () => {
+  assert.equal(
+    resolvePolymarketCategory({
+      explicitCategory: "science and technology",
+      title: "Will a space launch happen?",
+      description: "Space and science category normalization",
+    }),
+    "technology",
+  );
+  assert.equal(
+    resolvePolymarketCategory({
+      explicitCategory: "financials",
+      title: "Will a bank beat earnings?",
+      description: "Financial category normalization",
+    }),
+    "economics",
+  );
 });
 
 test("resolvePolymarketCategory falls back conservatively for ceasefire text", () => {
@@ -32,7 +73,7 @@ test("resolvePolymarketCategory falls back conservatively for ceasefire text", (
     description:
       'This market will resolve to "Yes" if there is an official ceasefire agreement, defined as a publicly announced and mutually agreed halt in military engagement, between Russia and Ukraine.',
   });
-  assert.equal(category, "Politics");
+  assert.equal(category, "politics");
 });
 
 test("resolvePolymarketCategory does not misclassify 'defined' as defi", () => {
@@ -40,7 +81,7 @@ test("resolvePolymarketCategory does not misclassify 'defined' as defi", () => {
     title: "Will a defined policy be announced?",
     description: "Defined terms only. No crypto content here.",
   });
-  assert.notEqual(category, "Crypto");
+  assert.notEqual(category, "crypto");
 });
 
 test("market mapping inherits event tags when market category is missing", () => {
@@ -65,5 +106,5 @@ test("market mapping inherits event tags when market category is missing", () =>
   } as unknown as TPolymarketMarket;
 
   const unified = mapToUnifiedMarket(market, event.id, event);
-  assert.equal(unified.category, "Politics");
+  assert.equal(unified.category, "politics");
 });
