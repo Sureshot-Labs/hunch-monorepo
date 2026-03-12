@@ -48,7 +48,10 @@ import {
   getReferralAttachmentStatus,
   type ReferralAttachmentStatus,
 } from "../services/rewards.js";
-import { getPrivyTerminalAuthMessage } from "../lib/privy-auth-errors.js";
+import {
+  DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
+  getPrivyTerminalAuthMessage,
+} from "../lib/privy-auth-errors.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -56,6 +59,24 @@ const ED25519_SPKI_PREFIX = Buffer.from(
   "302a300506032b6570032100",
   "hex",
 );
+
+function readRequestHeaderValue(
+  headers: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  const raw = headers[name.toLowerCase()];
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw) && typeof raw[0] === "string") return raw[0];
+  return undefined;
+}
+
+function readRequestUserAgent(headers: Record<string, unknown>): string {
+  return (
+    readRequestHeaderValue(headers, "x-hunch-user-agent") ??
+    readRequestHeaderValue(headers, "user-agent") ??
+    "unknown"
+  );
+}
 
 function getPrivyAuthFailureResponse(error: unknown): {
   status: 400 | 401 | 500 | 503;
@@ -235,7 +256,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       const clientIp = resolveSecurityClientIp(request);
-      const userAgent = request.headers["user-agent"] || "unknown";
+      const userAgent = readRequestUserAgent(
+        request.headers as Record<string, unknown>,
+      );
       let primaryWalletAddress = "unknown";
 
       try {
@@ -440,7 +463,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           );
 
           reply.code(409);
-          const terminalMessage = getPrivyTerminalAuthMessage(error.code);
+          const terminalMessage =
+            getPrivyTerminalAuthMessage(error.code) ||
+            DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE;
           return reply.send({
             error: error.code,
             message: terminalMessage,

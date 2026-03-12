@@ -1975,6 +1975,13 @@ function readHeaderValue(
   return undefined;
 }
 
+function readRequestUserAgent(headers: FastifyRequest["headers"]): string | undefined {
+  return (
+    readHeaderValue(headers, "x-hunch-user-agent") ??
+    readHeaderValue(headers, "user-agent")
+  );
+}
+
 function requiresCsrf(method: string): boolean {
   switch (method.toUpperCase()) {
     case "GET":
@@ -2010,7 +2017,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
       return reply.send({ error: "Invalid or expired session" });
     }
 
-    const requestAgent = readHeaderValue(request.headers, "user-agent");
+    const requestAgent = readRequestUserAgent(request.headers);
     if (session.userAgent && requestAgent && session.userAgent !== requestAgent) {
       request.log.warn(
         { sessionAgent: session.userAgent, requestAgent },

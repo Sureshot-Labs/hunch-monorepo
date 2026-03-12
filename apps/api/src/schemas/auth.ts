@@ -35,7 +35,7 @@ export const authPrivyTerminalErrorCodeSchema = z.enum([
 
 export const authPrivyTerminalErrorResponseSchema = z.object({
   error: authPrivyTerminalErrorCodeSchema,
-  message: z.string(),
+  message: z.string().optional(),
 });
 
 export const authPrivySuccessResponseSchema = z.object({
