@@ -7,6 +7,16 @@ import type {
 } from "./types.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
+type PolymarketCategory =
+  | "Politics"
+  | "Crypto"
+  | "Sports"
+  | "Economics"
+  | "Technology"
+  | "Entertainment"
+  | "Weather"
+  | "Health";
+
 const n = (v: unknown): number | null => {
   if (v === null || v === undefined) return null;
   const x = typeof v === "string" ? parseFloat(v) : (v as number);
@@ -39,6 +49,245 @@ const compactMetadata = (
   }
   return Object.keys(out).length ? out : undefined;
 };
+
+type PolymarketTagInput =
+  | string
+  | { label?: string | null; slug?: string | null }
+  | null
+  | undefined;
+
+const CATEGORY_PRIORITY: readonly PolymarketCategory[] = [
+  "Politics",
+  "Crypto",
+  "Sports",
+  "Economics",
+  "Technology",
+  "Entertainment",
+  "Weather",
+  "Health",
+];
+
+const CATEGORY_LABELS = new Map<string, PolymarketCategory>([
+  ["politics", "Politics"],
+  ["politic", "Politics"],
+  ["geopolitics", "Politics"],
+  ["foreign-policy", "Politics"],
+  ["foreign policy", "Politics"],
+  ["world", "Politics"],
+  ["macro-geopolitics", "Politics"],
+  ["macro geopolitics", "Politics"],
+  ["ukraine", "Politics"],
+  ["iran", "Politics"],
+  ["israel", "Politics"],
+  ["middle-east", "Politics"],
+  ["middle east", "Politics"],
+  ["crypto", "Crypto"],
+  ["cryptocurrency", "Crypto"],
+  ["crypto-prices", "Crypto"],
+  ["crypto prices", "Crypto"],
+  ["sports", "Sports"],
+  ["sport", "Sports"],
+  ["games", "Sports"],
+  ["economics", "Economics"],
+  ["economy", "Economics"],
+  ["finance", "Economics"],
+  ["technology", "Technology"],
+  ["tech", "Technology"],
+  ["entertainment", "Entertainment"],
+  ["pop-culture", "Entertainment"],
+  ["pop culture", "Entertainment"],
+  ["culture", "Entertainment"],
+  ["weather", "Weather"],
+  ["climate", "Weather"],
+  ["health", "Health"],
+]);
+
+function normalizeTagToken(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/[_\s]+/g, "-");
+}
+
+function normalizeExplicitCategory(
+  value: string | null | undefined,
+): string | undefined {
+  const trimmed = s(value);
+  if (!trimmed) return undefined;
+  const normalized =
+    CATEGORY_LABELS.get(trimmed.toLowerCase()) ??
+    CATEGORY_LABELS.get(normalizeTagToken(trimmed) ?? "");
+  return normalized ?? trimmed;
+}
+
+function extractTagTokens(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [];
+  const out = new Set<string>();
+  for (const tag of tags as PolymarketTagInput[]) {
+    if (typeof tag === "string") {
+      const normalized = normalizeTagToken(tag);
+      if (normalized) out.add(normalized);
+      continue;
+    }
+    if (!tag || typeof tag !== "object") continue;
+    const normalizedSlug = normalizeTagToken(tag.slug);
+    const normalizedLabel = normalizeTagToken(tag.label);
+    if (normalizedSlug) out.add(normalizedSlug);
+    if (normalizedLabel) out.add(normalizedLabel);
+  }
+  return Array.from(out);
+}
+
+function scoreTagCategory(tag: string): { category: PolymarketCategory; weight: number } | null {
+  if (!tag) return null;
+
+  if (
+    tag === "politics" ||
+    tag === "geopolitics" ||
+    tag === "foreign-policy" ||
+    tag === "macro-geopolitics" ||
+    tag === "ukraine" ||
+    tag === "iran" ||
+    tag === "israel" ||
+    tag === "middle-east" ||
+    tag.includes("election") ||
+    tag.includes("presidency") ||
+    tag.includes("foreign-policy") ||
+    tag.includes("peace-deal") ||
+    tag.includes("geopolitics") ||
+    tag === "putin"
+  ) {
+    return { category: "Politics", weight: 3 };
+  }
+  if (tag === "world") return { category: "Politics", weight: 1 };
+
+  if (
+    tag === "crypto" ||
+    tag === "crypto-prices" ||
+    tag === "bitcoin" ||
+    tag === "ethereum" ||
+    tag === "solana" ||
+    tag === "xrp" ||
+    tag === "ripple" ||
+    tag === "defi" ||
+    tag === "nft" ||
+    tag.includes("up-or-down")
+  ) {
+    return { category: "Crypto", weight: 3 };
+  }
+
+  if (
+    tag === "sports" ||
+    tag === "nba" ||
+    tag === "nfl" ||
+    tag === "nhl" ||
+    tag === "mlb" ||
+    tag === "soccer" ||
+    tag === "football" ||
+    tag === "basketball" ||
+    tag === "baseball" ||
+    tag === "hockey" ||
+    tag === "tennis" ||
+    tag === "cricket" ||
+    tag === "ufc"
+  ) {
+    return { category: "Sports", weight: 3 };
+  }
+  if (tag === "games") return { category: "Sports", weight: 1 };
+
+  if (
+    tag === "finance" ||
+    tag === "economy" ||
+    tag === "equities" ||
+    tag === "stocks" ||
+    tag === "stock-prices" ||
+    tag === "earnings" ||
+    tag === "commodities" ||
+    tag === "business"
+  ) {
+    return { category: "Economics", weight: 3 };
+  }
+
+  if (tag === "tech" || tag === "big-tech" || tag === "ai") {
+    return { category: "Technology", weight: 3 };
+  }
+
+  if (
+    tag === "pop-culture" ||
+    tag === "movies" ||
+    tag === "music" ||
+    tag === "awards" ||
+    tag === "celebrities"
+  ) {
+    return { category: "Entertainment", weight: 3 };
+  }
+
+  if (tag === "weather" || tag === "temperature" || tag === "climate") {
+    return { category: "Weather", weight: 3 };
+  }
+
+  if (
+    tag === "health" ||
+    tag === "medical" ||
+    tag === "covid" ||
+    tag === "pandemic" ||
+    tag === "biotech"
+  ) {
+    return { category: "Health", weight: 3 };
+  }
+
+  return null;
+}
+
+export function deriveCategoryFromTags(tags: unknown): PolymarketCategory | undefined {
+  const tokens = extractTagTokens(tags);
+  if (!tokens.length) return undefined;
+
+  const scores = new Map<PolymarketCategory, number>();
+  for (const token of tokens) {
+    const scored = scoreTagCategory(token);
+    if (!scored) continue;
+    scores.set(scored.category, (scores.get(scored.category) ?? 0) + scored.weight);
+  }
+  if (!scores.size) return undefined;
+
+  let best: { category: PolymarketCategory; score: number } | null = null;
+  let tied = false;
+  for (const category of CATEGORY_PRIORITY) {
+    const score = scores.get(category);
+    if (score == null) continue;
+    if (!best || score > best.score) {
+      best = { category, score };
+      tied = false;
+      continue;
+    }
+    if (best && score === best.score) tied = true;
+  }
+
+  if (!best || tied) return undefined;
+  return best.category;
+}
+
+function tokenizeText(text: string): Set<string> {
+  const tokens = text.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [];
+  return new Set(tokens);
+}
+
+function countTextMatches(
+  tokens: Set<string>,
+  text: string,
+  patterns: readonly (string | RegExp)[],
+): number {
+  let matches = 0;
+  for (const pattern of patterns) {
+    if (typeof pattern === "string") {
+      if (tokens.has(pattern)) matches += 1;
+      continue;
+    }
+    if (pattern.test(text)) matches += 1;
+  }
+  return matches;
+}
 
 function parseOutcomePrices(raw: unknown): number[] | null {
   if (raw == null) return null;
@@ -148,6 +397,7 @@ export function mapTokens(
 
 // New Polymarket-specific mappers
 export function mapPolymarketEventRow(e: TPolymarketEvent) {
+  const extra = e as Record<string, unknown>;
   return {
     id: e.id,
     ticker: e.ticker,
@@ -158,7 +408,13 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
     start_date: e.startDate ? new Date(e.startDate) : null,
     creation_date: e.creationDate ? new Date(e.creationDate) : null,
     end_date: e.endDate ? new Date(e.endDate) : null,
-    category: e.category ?? null,
+    category:
+      resolvePolymarketCategory({
+        explicitCategory: e.category,
+        tags: extra.tags,
+        title: e.title,
+        description: e.description,
+      }) ?? null,
     image: e.image,
     icon: e.icon,
     active: e.active ?? true,
@@ -186,7 +442,12 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
   };
 }
 
-export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
+export function mapPolymarketMarketRow(
+  eventId: string,
+  m: TPolymarketMarket,
+  event?: TPolymarketEvent,
+) {
+  const extra = m as Record<string, unknown>;
   return {
     id: m.id,
     event_id: eventId,
@@ -195,7 +456,15 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     slug: m.slug,
     resolution_source: m.resolutionSource,
     end_date: m.endDate ? new Date(m.endDate) : null,
-    category: m.category ?? null,
+    category:
+      resolvePolymarketCategory({
+        explicitCategory: m.category ?? event?.category ?? null,
+        tags:
+          (Array.isArray(extra.tags) && extra.tags) ||
+          ((event as Record<string, unknown> | undefined)?.tags as unknown),
+        title: m.question,
+        description: m.description,
+      }) ?? null,
     liquidity: m.liquidity,
     start_date: m.startDate ? new Date(m.startDate) : null,
     image: m.image,
@@ -286,124 +555,190 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
 }
 
 // Unified table mappers for Polymarket
-// Category extraction function for Polymarket
 function extractCategoryFromTitle(
   title: string,
   description?: string | null,
 ): string | undefined {
   const text = `${title} ${description || ""}`.toLowerCase();
+  const tokens = tokenizeText(text);
 
-  // Define category keywords
-  const categories = {
-    Politics: [
-      "election",
-      "president",
-      "congress",
-      "senate",
-      "vote",
-      "candidate",
-      "political",
-      "government",
-      "policy",
-      "democrat",
-      "republican",
-      "biden",
-      "trump",
-    ],
-    Crypto: [
-      "bitcoin",
-      "ethereum",
-      "crypto",
-      "blockchain",
-      "defi",
-      "nft",
-      "altcoin",
-      "dogecoin",
-      "solana",
-      "cardano",
-      "polygon",
-    ],
-    Sports: [
-      "nfl",
-      "nba",
-      "mlb",
-      "soccer",
-      "football",
-      "basketball",
-      "baseball",
-      "hockey",
-      "olympics",
-      "championship",
-      "playoff",
-      "super bowl",
-    ],
-    Economics: [
-      "gdp",
-      "inflation",
-      "recession",
-      "fed",
-      "interest rate",
-      "unemployment",
-      "market",
-      "economy",
-      "financial",
-    ],
-    Technology: [
-      "ai",
-      "artificial intelligence",
-      "tech",
-      "apple",
-      "google",
-      "microsoft",
-      "tesla",
-      "meta",
-      "amazon",
-    ],
-    Entertainment: [
-      "movie",
-      "film",
-      "oscar",
-      "netflix",
-      "disney",
-      "marvel",
-      "star wars",
-      "entertainment",
-      "celebrity",
-    ],
-    Weather: [
-      "hurricane",
-      "tornado",
-      "weather",
-      "climate",
-      "temperature",
-      "rain",
-      "snow",
-      "storm",
-    ],
-    Health: [
-      "covid",
-      "pandemic",
-      "vaccine",
-      "health",
-      "medical",
-      "disease",
-      "hospital",
-    ],
+  const scores = new Map<PolymarketCategory, number>();
+  const addScore = (
+    category: PolymarketCategory,
+    patterns: readonly (string | RegExp)[],
+  ) => {
+    const score = countTextMatches(tokens, text, patterns);
+    if (score > 0) scores.set(category, (scores.get(category) ?? 0) + score);
   };
 
-  // Find the category with the most keyword matches
-  let bestCategory: string | undefined;
-  let maxMatches = 0;
+  addScore("Politics", [
+    "election",
+    "elections",
+    "president",
+    "congress",
+    "senate",
+    "vote",
+    "candidate",
+    "government",
+    "policy",
+    "democrat",
+    "republican",
+    "biden",
+    "trump",
+    "iran",
+    "israel",
+    "ukraine",
+    "russia",
+    "ceasefire",
+    "war",
+    "strike",
+    "leader",
+    "sanctions",
+    /foreign policy/,
+    /middle east/,
+  ]);
+  addScore("Crypto", [
+    "bitcoin",
+    "ethereum",
+    "crypto",
+    "blockchain",
+    "defi",
+    "nft",
+    "altcoin",
+    "dogecoin",
+    "solana",
+    "cardano",
+    "polygon",
+    "token",
+  ]);
+  addScore("Sports", [
+    "nfl",
+    "nba",
+    "mlb",
+    "soccer",
+    "football",
+    "basketball",
+    "baseball",
+    "hockey",
+    "olympics",
+    "championship",
+    "playoff",
+    /super bowl/,
+  ]);
+  addScore("Economics", [
+    "gdp",
+    "inflation",
+    "recession",
+    "fed",
+    "economy",
+    "financial",
+    /interest rate/,
+    "unemployment",
+    "stocks",
+    "earnings",
+  ]);
+  addScore("Technology", [
+    "ai",
+    "tech",
+    "apple",
+    "google",
+    "microsoft",
+    "tesla",
+    "meta",
+    "amazon",
+    /artificial intelligence/,
+  ]);
+  addScore("Entertainment", [
+    "movie",
+    "film",
+    "oscar",
+    "netflix",
+    "disney",
+    "marvel",
+    "celebrity",
+    "music",
+    "award",
+    /star wars/,
+  ]);
+  addScore("Weather", [
+    "hurricane",
+    "tornado",
+    "weather",
+    "climate",
+    "temperature",
+    "snow",
+    "storm",
+    "rain",
+  ]);
+  addScore("Health", [
+    "covid",
+    "pandemic",
+    "vaccine",
+    "health",
+    "medical",
+    "disease",
+    "hospital",
+    "biotech",
+  ]);
 
-  for (const [category, keywords] of Object.entries(categories)) {
-    const matches = keywords.filter((keyword) => text.includes(keyword)).length;
-    if (matches > maxMatches) {
-      maxMatches = matches;
-      bestCategory = category;
+  if (!scores.size) return undefined;
+
+  let best: { category: PolymarketCategory; score: number } | null = null;
+  let tied = false;
+  for (const category of CATEGORY_PRIORITY) {
+    const score = scores.get(category);
+    if (score == null) continue;
+    if (!best || score > best.score) {
+      best = { category, score };
+      tied = false;
+      continue;
     }
+    if (best && score === best.score) tied = true;
   }
 
-  return maxMatches > 0 ? bestCategory : undefined;
+  if (!best || tied) return undefined;
+  return best.category;
+}
+
+export function resolvePolymarketCategory(input: {
+  explicitCategory?: string | null;
+  tags?: unknown;
+  title: string;
+  description?: string | null;
+}): string | undefined {
+  return (
+    normalizeExplicitCategory(input.explicitCategory) ??
+    deriveCategoryFromTags(input.tags) ??
+    extractCategoryFromTitle(input.title, input.description)
+  );
+}
+
+export function resolvePolymarketCategoryFromRaw(
+  raw: unknown,
+  fallback: {
+    explicitCategory?: string | null;
+    title?: string | null;
+    description?: string | null;
+  } = {},
+): string | undefined {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const explicitCategory =
+    (typeof record.category === "string" ? record.category : undefined) ??
+    fallback.explicitCategory;
+  const title =
+    (typeof record.title === "string" ? record.title : undefined) ??
+    (typeof record.question === "string" ? record.question : undefined) ??
+    fallback.title;
+  if (!title) return normalizeExplicitCategory(explicitCategory);
+  const description =
+    (typeof record.description === "string" ? record.description : undefined) ??
+    fallback.description;
+  return resolvePolymarketCategory({
+    explicitCategory,
+    tags: record.tags,
+    title,
+    description,
+  });
 }
 
 export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
@@ -460,7 +795,12 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     venue_event_id: e.id,
     title: e.title,
     description: e.description ?? undefined,
-    category: e.category ?? extractCategoryFromTitle(e.title, e.description), // Use API category if available, else extract from title/description
+    category: resolvePolymarketCategory({
+      explicitCategory: e.category,
+      tags: extra.tags,
+      title: e.title,
+      description: e.description,
+    }),
     status,
     series_key: seriesKey ?? undefined,
     series_title: seriesTitle ?? undefined,
@@ -482,6 +822,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
 export function mapToUnifiedMarket(
   m: TPolymarketMarket,
   eventId: string,
+  event?: TPolymarketEvent,
 ): UnifiedMarketRow {
   const extra = m as Record<string, unknown>;
 
@@ -571,7 +912,14 @@ export function mapToUnifiedMarket(
     event_id: `polymarket:${eventId}`,
     title,
     description: m.description ?? undefined,
-    category: m.category ?? extractCategoryFromTitle(m.question, m.description), // Use API category if available, else extract from question/description
+    category: resolvePolymarketCategory({
+      explicitCategory: m.category ?? event?.category ?? null,
+      tags:
+        (Array.isArray(extra.tags) && extra.tags) ||
+        ((event as Record<string, unknown> | undefined)?.tags as unknown),
+      title: m.question,
+      description: m.description,
+    }),
     status,
     market_type: "binary", // Polymarket markets are binary
     open_time: m.startDate ? new Date(m.startDate) : undefined,

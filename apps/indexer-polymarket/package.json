@@ -7,6 +7,7 @@
     "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
+    "category:backfill": "tsx src/category-backfill.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

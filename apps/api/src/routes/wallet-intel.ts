@@ -133,6 +133,42 @@ export type WalletHeadlineTag = {
   source: "secondary" | "supporting";
 };
 
+export type WalletPrimaryLabelKey =
+  | WalletAttributionLabelKey
+  | "potential_insider"
+  | "bot";
+
+export type WalletPresentationLabel = {
+  key: WalletPrimaryLabelKey | WalletAttributionLabelKey;
+  label: string;
+};
+
+export type WalletPresentationBadgeKey =
+  | "whale"
+  | "unusual_activity"
+  | "hot_streak";
+
+export type WalletPresentationBadge = {
+  key: WalletPresentationBadgeKey;
+  label: string;
+};
+
+export type WalletEntryBracketKey =
+  | "0-20"
+  | "20-40"
+  | "40-60"
+  | "60-80"
+  | "80-100";
+
+export type WalletEntryBracketStat = {
+  bracket: WalletEntryBracketKey;
+  avgStakeUsd: number | null;
+  totalStakeUsd: number;
+  tradeCount: number;
+  resolvedCount: number;
+  winRate: number | null;
+};
+
 type WhaleMarketRow = {
   wallet_id: string;
   market_id: string;
@@ -245,6 +281,10 @@ type WhaleWalletItem = {
   attribution?: WalletAttribution;
   topLabelVariant: WalletTopLabelVariant | null;
   headlineTag: WalletHeadlineTag | null;
+  primaryLabel: WalletPresentationLabel | null;
+  secondaryLabels: WalletPresentationLabel[];
+  badges: WalletPresentationBadge[];
+  avgTradeSizeUsd: number | null;
 };
 
 type WhaleProfileRow = {
@@ -355,6 +395,10 @@ type WalletActivitySummaryItem = {
   attribution?: WalletAttribution;
   topLabelVariant: WalletTopLabelVariant | null;
   headlineTag: WalletHeadlineTag | null;
+  primaryLabel: WalletPresentationLabel | null;
+  secondaryLabels: WalletPresentationLabel[];
+  badges: WalletPresentationBadge[];
+  avgTradeSizeUsd: number | null;
 };
 
 type WalletActivitySignalItem = {
@@ -570,6 +614,20 @@ const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
   volume_trader: "Volume Trader",
 };
 
+const PRIMARY_LABEL_TEXT: Record<
+  Exclude<WalletPrimaryLabelKey, WalletAttributionLabelKey>,
+  string
+> = {
+  potential_insider: "Potential Insider",
+  bot: "Bot",
+};
+
+const BADGE_TEXT: Record<WalletPresentationBadgeKey, string> = {
+  whale: "Whale",
+  unusual_activity: "Unusual Activity",
+  hot_streak: "Hot Streak",
+};
+
 const SPECIALIST_HEADLINE_TAG_ORDER: WalletAttributionLabelKey[] = [
   "crypto_specialist",
   "sports_specialist",
@@ -590,6 +648,28 @@ const HEADLINE_TAG_PRIORITY: WalletAttributionLabelKey[] = [
   "late_entry",
   "close_to_settlement",
   "unusual_behavior",
+];
+
+const SECONDARY_LABEL_PRIORITY: WalletAttributionLabelKey[] = [
+  "market_mover",
+  "high_conviction",
+  "high_win_rate",
+  "consistent_performer",
+  "fresh_wallet",
+  "volume_trader",
+  "high_frequency",
+  "late_entry",
+  "close_to_settlement",
+  "dormant_wake_up",
+  "unusual_behavior",
+];
+
+const ENTRY_BRACKET_KEYS: WalletEntryBracketKey[] = [
+  "0-20",
+  "20-40",
+  "40-60",
+  "60-80",
+  "80-100",
 ];
 
 function buildWalletLabelSet(
@@ -677,6 +757,127 @@ export function resolveWalletTopLabelVariant(input: {
     return "trending-trader";
   }
   return null;
+}
+
+function toPresentationLabel(
+  key: WalletAttributionLabelKey | WalletPrimaryLabelKey,
+): WalletPresentationLabel {
+  return {
+    key,
+    label:
+      key in ATTRIBUTION_LABEL_TEXT
+        ? ATTRIBUTION_LABEL_TEXT[key as WalletAttributionLabelKey]
+        : PRIMARY_LABEL_TEXT[key as Exclude<WalletPrimaryLabelKey, WalletAttributionLabelKey>],
+  };
+}
+
+export function resolveWalletPrimaryLabel(
+  attribution: WalletAttribution | null | undefined,
+): WalletPresentationLabel | null {
+  if (!attribution) return null;
+
+  if (attribution.primary === "specialist") {
+    for (const key of SPECIALIST_HEADLINE_TAG_ORDER) {
+      if (
+        (attribution.secondary ?? []).includes(key) ||
+        (attribution.supporting ?? []).includes(key)
+      ) {
+        return toPresentationLabel(key);
+      }
+    }
+    return null;
+  }
+
+  if (attribution.primary === "insider") {
+    return toPresentationLabel("potential_insider");
+  }
+
+  if (attribution.primary === "bot") {
+    return toPresentationLabel("bot");
+  }
+
+  return null;
+}
+
+export function resolveWalletSecondaryLabels(
+  attribution: WalletAttribution | null | undefined,
+  limit = 2,
+): WalletPresentationLabel[] {
+  if (!attribution) return [];
+  const labelSet = buildWalletLabelSet(attribution);
+  return SECONDARY_LABEL_PRIORITY.filter((key) => labelSet.has(key))
+    .slice(0, Math.max(0, limit))
+    .map((key) => toPresentationLabel(key));
+}
+
+export function resolveWalletAvgTradeSizeUsd(
+  metrics: WalletMetricsRow | null | undefined,
+): number | null {
+  const volumeUsd = nullableNumber(metrics?.volume_usd);
+  const tradesCount =
+    metrics?.trades_count != null ? Number(metrics.trades_count) : null;
+  if (volumeUsd == null || tradesCount == null || tradesCount <= 0) return null;
+  return volumeUsd / tradesCount;
+}
+
+export function resolveWalletBadges(input: {
+  attribution: WalletAttribution | null | undefined;
+  tags: WalletTagRow[] | null | undefined;
+  unusualTier: WalletActivitySummary["unusualTier"] | null | undefined;
+  metrics?: {
+    roi?: string | number | null;
+    pnl_usd?: string | number | null;
+  } | null;
+  lastActivityAt?: Date | null;
+}): WalletPresentationBadge[] {
+  const badges: WalletPresentationBadge[] = [];
+  const tagSet = new Set((input.tags ?? []).map((tag) => tag.slug));
+
+  if (
+    tagSet.has("whale") ||
+    input.attribution?.primary === "whale" ||
+    (input.attribution?.primaryCandidates ?? []).some(
+      (candidate) => candidate.key === "whale",
+    )
+  ) {
+    badges.push({ key: "whale", label: BADGE_TEXT.whale });
+  }
+
+  if (input.unusualTier) {
+    badges.push({
+      key: "unusual_activity",
+      label: BADGE_TEXT.unusual_activity,
+    });
+  }
+
+  if (
+    resolveWalletTopLabelVariant({
+      attribution: input.attribution,
+      metrics: input.metrics,
+      lastActivityAt: input.lastActivityAt,
+    }) === "hot-streak"
+  ) {
+    badges.push({
+      key: "hot_streak",
+      label: BADGE_TEXT.hot_streak,
+    });
+  }
+
+  return badges;
+}
+
+export function resolveEntryBracketKey(
+  rawPrice: number | null | undefined,
+): WalletEntryBracketKey | null {
+  if (rawPrice == null || !Number.isFinite(rawPrice)) return null;
+  const normalized =
+    rawPrice > 1 && rawPrice <= 100 ? rawPrice / 100 : rawPrice;
+  if (normalized < 0 || normalized > 1) return null;
+  if (normalized < 0.2) return "0-20";
+  if (normalized < 0.4) return "20-40";
+  if (normalized < 0.6) return "40-60";
+  if (normalized < 0.8) return "60-80";
+  return "80-100";
 }
 
 const SUMMARY_DEPENDENT_PRIMARY_FILTERS = new Set<WalletAttributionPrimaryKey>([
@@ -921,6 +1122,10 @@ function mapWhaleRowToItem(
     topMarkets: [],
     topLabelVariant: null,
     headlineTag: null,
+    primaryLabel: null,
+    secondaryLabels: [],
+    badges: [],
+    avgTradeSizeUsd: null,
   };
 }
 
@@ -1842,15 +2047,114 @@ async function loadWalletFollowerCountsMap(
   return byWalletId;
 }
 
+async function loadWalletEntryBracketStats(
+  client: PoolClient,
+  walletId: string,
+  windowDays = 30,
+): Promise<WalletEntryBracketStat[]> {
+  const rows = await client.query<{
+    bracket: WalletEntryBracketKey;
+    avg_stake_usd: string | null;
+    total_stake_usd: string | null;
+    trade_count: number | null;
+    resolved_count: number | null;
+    win_rate: string | null;
+  }>(
+    `
+      with entry_events as (
+        select
+          case
+            when wa.price is null then null
+            when wa.price > 1 and wa.price <= 100 then wa.price / 100.0
+            else wa.price
+          end as price_probability,
+          wa.size_usd::double precision as stake_usd,
+          upper(coalesce(wa.outcome_side, '')) as outcome_side,
+          upper(coalesce(um.resolved_outcome, '')) as resolved_outcome
+        from wallet_activity_events wa
+        left join unified_markets um on um.id = wa.market_id
+        where wa.wallet_id = $1::uuid
+          and wa.activity_type in ('delta', 'trade')
+          and coalesce(wa.action, '') in ('OPENED', 'INCREASED')
+          and wa.occurred_at >= now() - ($2::text || ' days')::interval
+          and wa.size_usd is not null
+          and wa.price is not null
+      ),
+      bucketed as (
+        select
+          case
+            when price_probability < 0 or price_probability > 1 then null
+            when price_probability < 0.2 then '0-20'
+            when price_probability < 0.4 then '20-40'
+            when price_probability < 0.6 then '40-60'
+            when price_probability < 0.8 then '60-80'
+            else '80-100'
+          end as bracket,
+          stake_usd,
+          case
+            when resolved_outcome in ('YES', 'NO')
+             and outcome_side in ('YES', 'NO')
+              then 1
+            else 0
+          end as resolved_row,
+          case
+            when resolved_outcome in ('YES', 'NO')
+             and outcome_side = resolved_outcome
+              then 1
+            else 0
+          end as win_row
+        from entry_events
+      )
+      select
+        bracket,
+        avg(stake_usd)::text as avg_stake_usd,
+        coalesce(sum(stake_usd), 0)::text as total_stake_usd,
+        count(*)::int as trade_count,
+        sum(resolved_row)::int as resolved_count,
+        case
+          when sum(resolved_row) > 0
+            then (sum(win_row)::double precision / sum(resolved_row))::text
+          else null
+        end as win_rate
+      from bucketed
+      where bracket is not null
+      group by bracket
+    `,
+    [walletId, Math.max(1, Math.trunc(windowDays))],
+  );
+
+  const rowByBracket = new Map(
+    rows.rows.map((row) => [row.bracket, row] as const),
+  );
+
+  return ENTRY_BRACKET_KEYS.map((bracket) => {
+    const row = rowByBracket.get(bracket);
+    return {
+      bracket,
+      avgStakeUsd: row ? nullableNumber(row.avg_stake_usd) : null,
+      totalStakeUsd: row ? nullableNumber(row.total_stake_usd) ?? 0 : 0,
+      tradeCount: row?.trade_count ?? 0,
+      resolvedCount: row?.resolved_count ?? 0,
+      winRate: row ? nullableNumber(row.win_rate) : null,
+    };
+  });
+}
+
 function applyWalletPresentationFields<T extends {
   metrics: WalletMetricsRow | null;
   lastActivityAt: Date | null;
+  tags: WalletTagRow[];
+  unusualTier: WalletActivitySummary["unusualTier"] | null;
 }>(
   item: T,
   attribution: WalletAttribution | null | undefined,
 ): T & {
   topLabelVariant: WalletTopLabelVariant | null;
   headlineTag: WalletHeadlineTag | null;
+  primaryLabel: WalletPresentationLabel | null;
+  secondaryLabels: WalletPresentationLabel[];
+  badges: WalletPresentationBadge[];
+  avgTradeSizeUsd: number | null;
 } {
   return {
     ...item,
@@ -1860,6 +2164,16 @@ function applyWalletPresentationFields<T extends {
       lastActivityAt: item.lastActivityAt,
     }),
     headlineTag: resolveWalletHeadlineTag(attribution),
+    primaryLabel: resolveWalletPrimaryLabel(attribution),
+    secondaryLabels: resolveWalletSecondaryLabels(attribution),
+    badges: resolveWalletBadges({
+      attribution,
+      tags: item.tags,
+      unusualTier: item.unusualTier,
+      metrics: item.metrics,
+      lastActivityAt: item.lastActivityAt,
+    }),
+    avgTradeSizeUsd: resolveWalletAvgTradeSizeUsd(item.metrics),
   };
 }
 
@@ -3873,12 +4187,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Wallet not found" });
         }
 
-        const [followerCountsMap, refreshPolicy, attributionPolicy, signalsPolicy] =
+        const [followerCountsMap, refreshPolicy, attributionPolicy, signalsPolicy, entryBracketStats] =
           await Promise.all([
             loadWalletFollowerCountsMap(client, [walletId]),
             resolveWalletIntelRefreshPolicy(client),
             resolveWalletIntelAttributionPolicy(client),
             resolveWalletIntelSignalsPolicy(client),
+            loadWalletEntryBracketStats(client, walletId),
           ]);
 
         const summary = (
@@ -3928,6 +4243,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           {
             metrics: wallet.metrics ?? null,
             lastActivityAt: summary?.lastActivityAt ?? wallet.last_seen_at,
+            tags: wallet.tags ?? [],
+            unusualTier: summary?.unusualTier ?? null,
           },
           attribution,
         );
@@ -3945,6 +4262,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             followersCount: followerCountsMap.get(wallet.id) ?? 0,
             topLabelVariant: presentation.topLabelVariant,
             headlineTag: presentation.headlineTag,
+            primaryLabel: presentation.primaryLabel,
+            secondaryLabels: presentation.secondaryLabels,
+            badges: presentation.badges,
+            avgTradeSizeUsd: presentation.avgTradeSizeUsd,
             isSystemFlagged: wallet.is_system_flagged,
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
@@ -3953,6 +4274,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             profile: wallet.profile ?? null,
             profileUpdatedAt: wallet.profile_updated_at ?? null,
             attribution,
+            entryBracketStats,
           },
         });
       } catch (error) {
@@ -4281,6 +4603,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   topChanges: pageTopChangesMap.get(row.id) ?? [],
                   topLabelVariant: null,
                   headlineTag: null,
+                  primaryLabel: null,
+                  secondaryLabels: [],
+                  badges: [],
+                  avgTradeSizeUsd: null,
                 };
                 const withSparkline = query.includeSparkline
                   ? {
@@ -4352,6 +4678,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 topChanges: [],
                 topLabelVariant: null,
                 headlineTag: null,
+                primaryLabel: null,
+                secondaryLabels: [],
+                badges: [],
+                avgTradeSizeUsd: null,
               };
             })
             .filter((row): row is WalletActivitySummaryItem => Boolean(row));

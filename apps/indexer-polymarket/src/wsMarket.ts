@@ -929,10 +929,14 @@ function enqueueEventRefresh(eventId: string): void {
         const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
         const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
         const polymarketMarketRows = parsedEvents.flatMap((event) =>
-          event.markets.map((market) => mapPolymarketMarketRow(event.id, market)),
+          event.markets.map((market) =>
+            mapPolymarketMarketRow(event.id, market, event),
+          ),
         );
         const unifiedMarketRows = parsedEvents.flatMap((event) =>
-          event.markets.map((market) => mapToUnifiedMarket(market, event.id)),
+          event.markets.map((market) =>
+            mapToUnifiedMarket(market, event.id, event),
+          ),
         );
         const unifiedTokenRows = parsedEvents.flatMap((event) =>
           event.markets.flatMap((market) => {

@@ -27,6 +27,11 @@ import {
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
 import {
+  resolveEntryBracketKey,
+  resolveWalletAvgTradeSizeUsd,
+  resolveWalletBadges,
+  resolveWalletPrimaryLabel,
+  resolveWalletSecondaryLabels,
   resolveWalletHeadlineTag,
   resolveWalletTopLabelVariant,
   shouldReturnFilterTooBroad,
@@ -272,6 +277,134 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "presentation labels split primary and secondary semantics cleanly",
+    run: () => {
+      const specialistPrimary = resolveWalletPrimaryLabel({
+        primary: "specialist",
+        primaryCandidates: [],
+        secondary: ["sports_specialist", "market_mover", "high_conviction"],
+        supporting: ["high_win_rate"],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(specialistPrimary, {
+        key: "sports_specialist",
+        label: "Sports Specialist",
+      });
+
+      const insiderPrimary = resolveWalletPrimaryLabel({
+        primary: "insider",
+        primaryCandidates: [],
+        secondary: [],
+        supporting: [],
+        display: {
+          listPrimary: [],
+          listSecondary: [],
+          detailsSecondary: [],
+          detailsSupporting: [],
+        },
+        reasons: [],
+        version: "v1",
+      });
+      assert.deepEqual(insiderPrimary, {
+        key: "potential_insider",
+        label: "Potential Insider",
+      });
+
+      const secondary = resolveWalletSecondaryLabels(
+        {
+          primary: "specialist",
+          primaryCandidates: [],
+          secondary: [
+            "market_mover",
+            "high_conviction",
+            "high_win_rate",
+            "sports_specialist",
+          ],
+          supporting: ["consistent_performer", "late_entry"],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        2,
+      );
+      assert.deepEqual(secondary, [
+        { key: "market_mover", label: "Market Mover" },
+        { key: "high_conviction", label: "High Conviction" },
+      ]);
+    },
+  },
+  {
+    name: "presentation badges and average trade size derive from existing intel signals",
+    run: () => {
+      const badges = resolveWalletBadges({
+        attribution: {
+          primary: "specialist",
+          primaryCandidates: [],
+          secondary: ["high_win_rate"],
+          supporting: ["consistent_performer"],
+          display: {
+            listPrimary: [],
+            listSecondary: [],
+            detailsSecondary: [],
+            detailsSupporting: [],
+          },
+          reasons: [],
+          version: "v1",
+        },
+        tags: [{ slug: "whale", label: "Whale", tag_type: "system", is_system: true }],
+        unusualTier: "very_unusual",
+        metrics: { pnl_usd: "2500", roi: "0.18" },
+        lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
+      });
+      assert.deepEqual(badges, [
+        { key: "whale", label: "Whale" },
+        { key: "unusual_activity", label: "Unusual Activity" },
+        { key: "hot_streak", label: "Hot Streak" },
+      ]);
+
+      assert.equal(
+        resolveWalletAvgTradeSizeUsd({
+          period: "30d",
+          as_of: new Date("2026-03-10T00:00:00.000Z"),
+          trades_count: 4,
+          volume_usd: "1200",
+          pnl_usd: "100",
+          roi: "0.1",
+          win_rate: "0.5",
+          avg_hold_hours: null,
+          last_trade_at: null,
+        }),
+        300,
+      );
+      assert.equal(
+        resolveWalletAvgTradeSizeUsd({
+          period: "30d",
+          as_of: new Date("2026-03-10T00:00:00.000Z"),
+          trades_count: 0,
+          volume_usd: "1200",
+          pnl_usd: "100",
+          roi: "0.1",
+          win_rate: "0.5",
+          avg_hold_hours: null,
+          last_trade_at: null,
+        }),
+        null,
+      );
+    },
+  },
+  {
     name: "top label variant resolves backend headline badges deterministically",
     run: () => {
       const risingStar = resolveWalletTopLabelVariant({
@@ -353,6 +486,18 @@ const tests: TestCase[] = [
         lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
       });
       assert.equal(marketMover, "market-mover");
+    },
+  },
+  {
+    name: "entry bracket resolver normalizes fractional and cents-style prices",
+    run: () => {
+      assert.equal(resolveEntryBracketKey(0.19), "0-20");
+      assert.equal(resolveEntryBracketKey(0.2), "20-40");
+      assert.equal(resolveEntryBracketKey(0.95), "80-100");
+      assert.equal(resolveEntryBracketKey(95), "80-100");
+      assert.equal(resolveEntryBracketKey(15), "0-20");
+      assert.equal(resolveEntryBracketKey(-1), null);
+      assert.equal(resolveEntryBracketKey(120), null);
     },
   },
   {
