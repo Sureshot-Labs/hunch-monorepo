@@ -56,40 +56,26 @@ async function createTestUser(): Promise<{
   };
 }
 
-async function ensurePrivateWalletTables(): Promise<void> {
-  await pool.query(`
-    create table if not exists wallet_user_labels (
-      user_id uuid not null references users(id) on delete cascade,
-      wallet_id uuid not null references wallets(id) on delete cascade,
-      label text not null,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(),
-      primary key (user_id, wallet_id)
-    )
+async function assertPrivateWalletTablesExist(): Promise<void> {
+  const result = await pool.query<{
+    wallet_user_labels: string | null;
+    wallet_user_notes: string | null;
+  }>(`
+    select
+      to_regclass('public.wallet_user_labels')::text as wallet_user_labels,
+      to_regclass('public.wallet_user_notes')::text as wallet_user_notes
   `);
-  await pool.query(`
-    create index if not exists wallet_user_labels_wallet_id_idx
-      on wallet_user_labels (wallet_id)
-  `);
-  await pool.query(`
-    create table if not exists wallet_user_notes (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid not null references users(id) on delete cascade,
-      wallet_id uuid not null references wallets(id) on delete cascade,
-      note text not null,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(),
-      check (btrim(note) <> '')
-    )
-  `);
-  await pool.query(`
-    create index if not exists wallet_user_notes_user_wallet_created_idx
-      on wallet_user_notes (user_id, wallet_id, created_at desc)
-  `);
-  await pool.query(`
-    create index if not exists wallet_user_notes_wallet_id_idx
-      on wallet_user_notes (wallet_id)
-  `);
+  const row = result.rows[0];
+  assert.equal(
+    row?.wallet_user_labels,
+    "wallet_user_labels",
+    "wallet_user_labels migration must be applied before running route tests",
+  );
+  assert.equal(
+    row?.wallet_user_notes,
+    "wallet_user_notes",
+    "wallet_user_notes migration must be applied before running route tests",
+  );
 }
 
 async function cleanup(context: TestContext): Promise<void> {
@@ -104,7 +90,7 @@ async function cleanup(context: TestContext): Promise<void> {
 }
 
 async function main() {
-  await ensurePrivateWalletTables();
+  await assertPrivateWalletTablesExist();
   const app = await buildApp();
   const { userId, authHeaders } = await createTestUser();
   const context: TestContext = { userId, authHeaders, createdWallets: [] };

@@ -1761,9 +1761,9 @@ async function loadWalletFollowerCountsMap(
 function applyWalletPresentationFields<T extends {
   metrics: WalletMetricsRow | null;
   lastActivityAt: Date | null;
-  attribution?: WalletAttribution;
 }>(
   item: T,
+  attribution: WalletAttribution | null | undefined,
 ): T & {
   topLabelVariant: WalletTopLabelVariant | null;
   headlineTag: WalletHeadlineTag | null;
@@ -1771,11 +1771,11 @@ function applyWalletPresentationFields<T extends {
   return {
     ...item,
     topLabelVariant: resolveWalletTopLabelVariant({
-      attribution: item.attribution,
+      attribution,
       metrics: item.metrics,
       lastActivityAt: item.lastActivityAt,
     }),
-    headlineTag: resolveWalletHeadlineTag(item.attribution),
+    headlineTag: resolveWalletHeadlineTag(attribution),
   };
 }
 
@@ -2490,6 +2490,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const address = normalizeAddress(request.params.address);
       const chain = request.query.chain.toLowerCase();
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({
+          error:
+            chain === "solana"
+              ? "Invalid Solana wallet address"
+              : "Invalid EVM wallet address",
+        });
+      }
 
       const client = await pool.connect();
       try {
@@ -3590,23 +3600,23 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               : Promise.resolve(new Map<string, WalletActivitySparkline>()),
           ]);
 
-          let pageAttributionMap = attributionMapForFilters;
-          if (includeAttributionInResponse) {
-            pageAttributionMap = await buildWalletAttributionMap(
-              client,
-              pagedRows.map((row) => ({
-                walletId: row.walletId,
-                tags: row.tags ?? [],
-                metrics: row.metrics ?? null,
-                inferredWinRate: row.inferredWinRate,
-                inferredResolvedCount: row.inferredResolvedCount,
-                trackedExposureUsd: row.trackedExposureUsd,
-                topChanges: summaryMapForPage.get(row.walletId)?.topChanges ?? [],
-              })),
-              attributionPolicy.effective,
-              { mode: "full" },
-            );
-          }
+          const pageAttributionMap =
+            pagedRows.length > 0
+              ? await buildWalletAttributionMap(
+                  client,
+                  pagedRows.map((row) => ({
+                    walletId: row.walletId,
+                    tags: row.tags ?? [],
+                    metrics: row.metrics ?? null,
+                    inferredWinRate: row.inferredWinRate,
+                    inferredResolvedCount: row.inferredResolvedCount,
+                    trackedExposureUsd: row.trackedExposureUsd,
+                    topChanges: summaryMapForPage.get(row.walletId)?.topChanges ?? [],
+                  })),
+                  attributionPolicy.effective,
+                  { mode: "full" },
+                )
+              : new Map<string, WalletAttribution>();
 
           const wallets = pagedRows.map((row) => {
             const summary = summaryMapForPage.get(row.walletId) ?? null;
@@ -3633,7 +3643,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   attribution: pageAttributionMap.get(row.walletId),
                 }
               : withSparkline;
-            return applyWalletPresentationFields(withAttribution);
+            return applyWalletPresentationFields(
+              withAttribution,
+              pageAttributionMap.get(row.walletId),
+            );
           });
 
           return {
@@ -4043,40 +4056,41 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               loadWalletFollowerCountsMap(client, pagedIds),
             ]);
             const rowById = new Map(pageRows.map((row) => [row.id, row] as const));
-            const attributionMap = includeAttributionInResponse
-              ? await buildWalletAttributionMap(
-                  client,
-                  pagedIds
-                    .map((walletId) => {
-                      const row = rowById.get(walletId);
-                      if (!row) return null;
-                      return {
-                        walletId,
-                        tags: row.tags ?? [],
-                        metrics: row.metrics ?? null,
-                        inferredWinRate: null,
-                        inferredResolvedCount: null,
-                        trackedExposureUsd: null,
-                        topChanges: pageTopChangesMap.get(walletId) ?? [],
-                      };
-                    })
-                    .filter(
-                      (
-                        entry,
-                      ): entry is {
-                        walletId: string;
-                        tags: WalletTagRow[];
-                        metrics: WalletMetricsRow | null;
-                        inferredWinRate: null;
-                        inferredResolvedCount: null;
-                        trackedExposureUsd: null;
-                        topChanges: WalletActivityTopChange[];
-                      } => Boolean(entry),
-                    ),
-                  attributionPolicy.effective,
-                  { mode: "full" },
-                )
-              : new Map<string, WalletAttribution>();
+            const attributionMap =
+              pagedIds.length > 0
+                ? await buildWalletAttributionMap(
+                    client,
+                    pagedIds
+                      .map((walletId) => {
+                        const row = rowById.get(walletId);
+                        if (!row) return null;
+                        return {
+                          walletId,
+                          tags: row.tags ?? [],
+                          metrics: row.metrics ?? null,
+                          inferredWinRate: null,
+                          inferredResolvedCount: null,
+                          trackedExposureUsd: null,
+                          topChanges: pageTopChangesMap.get(walletId) ?? [],
+                        };
+                      })
+                      .filter(
+                        (
+                          entry,
+                        ): entry is {
+                          walletId: string;
+                          tags: WalletTagRow[];
+                          metrics: WalletMetricsRow | null;
+                          inferredWinRate: null;
+                          inferredResolvedCount: null;
+                          trackedExposureUsd: null;
+                          topChanges: WalletActivityTopChange[];
+                        } => Boolean(entry),
+                      ),
+                    attributionPolicy.effective,
+                    { mode: "full" },
+                  )
+                : new Map<string, WalletAttribution>();
             const items = pagedStats
               .map<WalletActivitySummaryItem | null>((summary) => {
                 const row = rowById.get(summary.walletId);
@@ -4125,7 +4139,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       attribution: attributionMap.get(row.id),
                     }
                   : withSparkline;
-                return applyWalletPresentationFields(withAttribution);
+                return applyWalletPresentationFields(
+                  withAttribution,
+                  attributionMap.get(row.id),
+                );
               })
               .filter((row): row is WalletActivitySummaryItem => Boolean(row));
             return { ok: true, items };
@@ -4264,22 +4281,23 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               : Promise.resolve(new Map<string, WalletActivitySparkline>()),
             loadWalletFollowerCountsMap(client, pagedIds),
           ]);
-          if (includeAttributionInResponse) {
-            attributionMap = await buildWalletAttributionMap(
-              client,
-              pagedRows.map((row) => ({
-                walletId: row.walletId,
-                tags: row.tags,
-                metrics: row.metrics,
-                inferredWinRate: null,
-                inferredResolvedCount: null,
-                trackedExposureUsd: null,
-                topChanges: pageTopChangesMap.get(row.walletId) ?? [],
-              })),
-              attributionPolicy.effective,
-              { mode: "full" },
-            );
-          }
+          attributionMap =
+            pagedRows.length > 0
+              ? await buildWalletAttributionMap(
+                  client,
+                  pagedRows.map((row) => ({
+                    walletId: row.walletId,
+                    tags: row.tags,
+                    metrics: row.metrics,
+                    inferredWinRate: null,
+                    inferredResolvedCount: null,
+                    trackedExposureUsd: null,
+                    topChanges: pageTopChangesMap.get(row.walletId) ?? [],
+                  })),
+                  attributionPolicy.effective,
+                  { mode: "full" },
+                )
+              : new Map<string, WalletAttribution>();
 
           const items = pagedRows.map((row) => {
             const withTopChanges = {
@@ -4301,7 +4319,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   attribution: attributionMap.get(row.walletId),
                 }
               : withSparkline;
-            return applyWalletPresentationFields(withAttribution);
+            return applyWalletPresentationFields(
+              withAttribution,
+              attributionMap.get(row.walletId),
+            );
           });
 
           return { ok: true, items };
