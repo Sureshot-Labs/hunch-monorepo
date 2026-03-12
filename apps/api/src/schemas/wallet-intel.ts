@@ -5,6 +5,13 @@ import { zVenue } from "./common.js";
 const zChain = z.enum(["polygon", "base", "solana"]);
 const filterModeSchema = z.enum(["any", "all"]).default("any");
 const signalSeveritySchema = z.enum(["low", "medium", "high", "critical"]);
+const walletLabelColorSchema = z.enum([
+  "orange",
+  "cyan",
+  "green",
+  "gold",
+  "pink",
+]);
 
 const csvStringArraySchema = z.preprocess(
   value => {
@@ -76,6 +83,33 @@ export const walletFollowPatchBodySchema = z.object({
     z.string().max(120).nullable()
   ),
 });
+
+const nullableTrimmedStringSchema = z.preprocess(
+  value => {
+    if (value === undefined) return undefined;
+    if (value == null) return null;
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+  },
+  z.string().max(120).nullable().optional()
+);
+
+export const walletPrivateMetaPatchBodySchema = z
+  .object({
+    name: nullableTrimmedStringSchema,
+    label: nullableTrimmedStringSchema,
+    labelColor: walletLabelColorSchema.nullable().optional(),
+  })
+  .refine(
+    value =>
+      value.name !== undefined ||
+      value.label !== undefined ||
+      value.labelColor !== undefined,
+    {
+      message: "At least one field must be provided",
+    }
+  );
 
 export const walletPrivateNoteBodySchema = z.object({
   note: z.preprocess(

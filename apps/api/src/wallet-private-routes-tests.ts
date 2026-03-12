@@ -58,14 +58,21 @@ async function createTestUser(): Promise<{
 
 async function assertPrivateWalletTablesExist(): Promise<void> {
   const result = await pool.query<{
+    wallet_user_names: string | null;
     wallet_user_labels: string | null;
     wallet_user_notes: string | null;
   }>(`
     select
+      to_regclass('public.wallet_user_names')::text as wallet_user_names,
       to_regclass('public.wallet_user_labels')::text as wallet_user_labels,
       to_regclass('public.wallet_user_notes')::text as wallet_user_notes
   `);
   const row = result.rows[0];
+  assert.equal(
+    row?.wallet_user_names,
+    "wallet_user_names",
+    "wallet_user_names migration must be applied before running route tests",
+  );
   assert.equal(
     row?.wallet_user_labels,
     "wallet_user_labels",
@@ -109,7 +116,9 @@ async function main() {
       assert.equal(body.ok, true);
       assert.equal(body.wallet.walletId, null);
       assert.equal(body.followed, false);
+      assert.equal(body.userName, null);
       assert.equal(body.userLabel, null);
+      assert.equal(body.userLabelColor, null);
       assert.deepEqual(body.notes, []);
     }
 
@@ -130,7 +139,9 @@ async function main() {
       assert.equal(response.statusCode, 200);
       const body = response.json();
       assert.equal(body.wallet.walletId, null);
+      assert.equal(body.userName, null);
       assert.equal(body.userLabel, null);
+      assert.equal(body.userLabelColor, null);
       const after = await pool.query<{ count: string }>(
         "select count(*)::text as count from wallets where address = $1 and chain = $2",
         [unknownAddress, "polygon"],
@@ -154,10 +165,42 @@ async function main() {
       const body = response.json();
       assert.equal(body.ok, true);
       assert.equal(body.followed, false);
+      assert.equal(body.userName, null);
       assert.equal(body.userLabel, "My test whale");
+      assert.equal(body.userLabelColor, null);
       labeledWalletId = body.wallet.walletId;
       assert.ok(labeledWalletId);
       context.createdWallets.push({ address: labeledAddress, chain: "polygon" });
+    }
+
+    {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/wallets/private/${labeledAddress}?chain=polygon`,
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: { labelColor: "green" },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.userLabel, "My test whale");
+      assert.equal(body.userLabelColor, "green");
+    }
+
+    {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/wallets/private/${randomEvmAddress()}?chain=polygon`,
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: { labelColor: "gold" },
+      });
+      assert.equal(response.statusCode, 400);
+      assert.match(response.body, /Label color requires an existing label/);
     }
 
     {
@@ -174,11 +217,13 @@ async function main() {
           ...authHeaders,
           "content-type": "application/json",
         },
-        payload: { label: "Renamed whale" },
+        payload: { name: "Custom whale", label: "Renamed whale" },
       });
       assert.equal(response.statusCode, 200);
       const body = response.json();
+      assert.equal(body.userName, "Custom whale");
       assert.equal(body.userLabel, "Renamed whale");
+      assert.equal(body.userLabelColor, "green");
 
       const wallet = await pool.query<{ last_seen_at: Date }>(
         "select last_seen_at from wallets where id = $1",
@@ -198,8 +243,44 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       const body = response.json();
+      assert.equal(body.userName, "Custom whale");
       assert.equal(body.userLabel, "Renamed whale");
+      assert.equal(body.userLabelColor, "green");
       assert.deepEqual(body.notes, []);
+    }
+
+    {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/wallets/private/${labeledAddress}?chain=polygon`,
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: { label: null },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.userName, "Custom whale");
+      assert.equal(body.userLabel, null);
+      assert.equal(body.userLabelColor, null);
+    }
+
+    {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/wallets/private/${labeledAddress}?chain=polygon`,
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: { label: "Renamed whale again", labelColor: "pink" },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.userName, "Custom whale");
+      assert.equal(body.userLabel, "Renamed whale again");
+      assert.equal(body.userLabelColor, "pink");
     }
 
     {
@@ -224,7 +305,9 @@ async function main() {
       });
       assert.equal(profileResponse.statusCode, 200);
       const profileBody = profileResponse.json();
-      assert.equal(profileBody.wallet.userLabel, "Renamed whale");
+      assert.equal(profileBody.wallet.userName, "Custom whale");
+      assert.equal(profileBody.wallet.userLabel, "Renamed whale again");
+      assert.equal(profileBody.wallet.userLabelColor, "pink");
       assert.equal(profileBody.wallet.followersCount, 1);
 
       const unfollowResponse = await app.inject({
@@ -242,7 +325,22 @@ async function main() {
       assert.equal(response.statusCode, 200);
       const body = response.json();
       assert.equal(body.followed, false);
-      assert.equal(body.userLabel, "Renamed whale");
+      assert.equal(body.userName, "Custom whale");
+      assert.equal(body.userLabel, "Renamed whale again");
+      assert.equal(body.userLabelColor, "pink");
+    }
+
+    {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/wallets/follow/${labeledAddress}?chain=polygon`,
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        payload: { label: "Follow-only label" },
+      });
+      assert.equal(response.statusCode, 404);
     }
 
     {
