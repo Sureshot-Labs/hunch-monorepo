@@ -1393,6 +1393,19 @@ async function refreshMetrics(
           where mark_value is not null
           group by wallet_id
         ),
+        cost_basis as (
+          select
+            wallet_id,
+            sum(
+              case
+                when net_cost > 0 then net_cost
+                else 0::numeric
+              end
+            ) as gross_cost_basis_usd
+          from leg_marks
+          where mark_value is not null
+          group by wallet_id
+        ),
         upserted as (
           insert into wallet_metrics_snapshots (
             wallet_id,
@@ -1402,6 +1415,7 @@ async function refreshMetrics(
             trades_count,
             volume_usd,
             pnl_usd,
+            roi,
             last_trade_at
           )
           select
@@ -1412,14 +1426,23 @@ async function refreshMetrics(
             agg.trades_count,
             agg.volume_usd,
             pnl.pnl_usd,
+            case
+              when cost_basis.gross_cost_basis_usd is null
+                or cost_basis.gross_cost_basis_usd <= 0
+                or pnl.pnl_usd is null
+                then null
+              else pnl.pnl_usd / cost_basis.gross_cost_basis_usd
+            end as roi,
             agg.last_trade_at
           from agg
           left join pnl on pnl.wallet_id = agg.wallet_id
+          left join cost_basis on cost_basis.wallet_id = agg.wallet_id
           on conflict (wallet_id, venue, period, as_of)
           do update set
             trades_count = excluded.trades_count,
             volume_usd = excluded.volume_usd,
             pnl_usd = excluded.pnl_usd,
+            roi = excluded.roi,
             last_trade_at = excluded.last_trade_at,
             updated_at = now()
           returning wallet_id

@@ -77,6 +77,22 @@ export const walletFollowPatchBodySchema = z.object({
   ),
 });
 
+export const walletPrivateNoteBodySchema = z.object({
+  note: z.preprocess(
+    value => {
+      if (typeof value !== "string") return value;
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : undefined;
+    },
+    z.string().max(500)
+  ),
+});
+
+export const walletPrivateNoteParamsSchema = z.object({
+  address: z.string().min(4),
+  noteId: z.string().uuid(),
+});
+
 export const walletFollowingQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),

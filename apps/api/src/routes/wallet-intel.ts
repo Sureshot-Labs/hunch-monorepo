@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
+import { PublicKey } from "@solana/web3.js";
 import type { PoolClient } from "pg";
 import { createHash } from "node:crypto";
 
@@ -66,6 +67,8 @@ import {
   walletFollowPatchBodySchema,
   walletFollowParamsSchema,
   walletFollowingQuerySchema,
+  walletPrivateNoteBodySchema,
+  walletPrivateNoteParamsSchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
   walletSeriesQuerySchema,
@@ -87,6 +90,13 @@ type WalletTagRow = {
   label: string;
   tag_type: string;
   is_system: boolean;
+};
+
+type WalletPrivateNoteRow = {
+  id: string;
+  note: string;
+  created_at: Date;
+  updated_at: Date;
 };
 
 type WalletMetricsRow = {
@@ -357,6 +367,81 @@ type WalletActivitySignalItem = {
 function normalizeAddress(address: string): string {
   if (address.startsWith("0x")) return address.toLowerCase();
   return address.trim();
+}
+
+function isValidWalletAddressForChain(address: string, chain: string): boolean {
+  if (chain === "solana") {
+    try {
+      new PublicKey(address);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return ethers.isAddress(address);
+}
+
+async function findWalletByAddressAndChain(
+  client: PoolClient,
+  address: string,
+  chain: string,
+): Promise<WalletRow | null> {
+  const result = await client.query<WalletRow>(
+    `
+      select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+      from wallets
+      where address = $1 and chain = $2
+      limit 1
+    `,
+    [address, chain],
+  );
+
+  return result.rows[0] ?? null;
+}
+
+async function ensureWalletByAddressAndChain(
+  client: PoolClient,
+  address: string,
+  chain: string,
+): Promise<WalletRow> {
+  const existing = await findWalletByAddressAndChain(client, address, chain);
+  if (existing) return existing;
+
+  const inserted = await client.query<WalletRow>(
+    `
+      insert into wallets (address, chain, label)
+      values ($1, $2, null)
+      on conflict (address, chain)
+      do nothing
+      returning id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+    `,
+    [address, chain],
+  );
+  if (inserted.rows[0]) return inserted.rows[0];
+
+  const raced = await findWalletByAddressAndChain(client, address, chain);
+  if (!raced) {
+    throw new Error("Failed to resolve wallet after insert");
+  }
+  return raced;
+}
+
+async function loadWalletPrivateNotes(
+  client: PoolClient,
+  userId: string,
+  walletId: string,
+): Promise<WalletPrivateNoteRow[]> {
+  const result = await client.query<WalletPrivateNoteRow>(
+    `
+      select id, note, created_at, updated_at
+      from wallet_user_notes
+      where user_id = $1 and wallet_id = $2
+      order by created_at asc, id asc
+    `,
+    [userId, walletId],
+  );
+
+  return result.rows;
 }
 
 function normalizeStringArray(values: string[] | undefined): string[] {
@@ -2241,6 +2326,434 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to unfollow wallet" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/private/:address
+   */
+  z.get(
+    "/wallets/private/:address",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletFollowParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const chain = request.query.chain.toLowerCase();
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({ error: chain === "solana" ? "Invalid Solana wallet address" : "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallet = await findWalletByAddressAndChain(client, address, chain);
+        if (!wallet) {
+          return reply.send({
+            ok: true,
+            wallet: {
+              walletId: null,
+              address,
+              chain,
+              label: null,
+            },
+            followed: false,
+            userLabel: null,
+            notes: [],
+          });
+        }
+
+        const metaResult = await client.query<{
+          followed: boolean;
+          user_label: string | null;
+        }>(
+          `
+            select
+              exists(
+                select 1
+                from wallet_follows wf
+                where wf.user_id = $1 and wf.wallet_id = $2
+              ) as followed,
+              (
+                select wl.label
+                from wallet_user_labels wl
+                where wl.user_id = $1 and wl.wallet_id = $2
+                limit 1
+              ) as user_label
+          `,
+          [user.id, wallet.id],
+        );
+        const notes = await loadWalletPrivateNotes(client, user.id, wallet.id);
+        const meta = metaResult.rows[0];
+
+        return reply.send({
+          ok: true,
+          wallet: {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+            label: wallet.label,
+          },
+          followed: meta?.followed ?? false,
+          userLabel: meta?.user_label ?? null,
+          notes: notes.map((note) => ({
+            id: note.id,
+            note: note.note,
+            createdAt: note.created_at,
+            updatedAt: note.updated_at,
+          })),
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain },
+          "Failed to load private wallet metadata",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load private wallet metadata" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * PATCH /wallets/private/:address
+   * Update or clear a private wallet label without requiring a follow row.
+   */
+  z.patch(
+    "/wallets/private/:address",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletFollowParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+        body: walletFollowPatchBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const chain = request.query.chain.toLowerCase();
+      const label = request.body.label;
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({ error: chain === "solana" ? "Invalid Solana wallet address" : "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallet =
+          label == null
+            ? await findWalletByAddressAndChain(client, address, chain)
+            : await ensureWalletByAddressAndChain(client, address, chain);
+
+        if (!wallet) {
+          return reply.send({
+            ok: true,
+            wallet: {
+              walletId: null,
+              address,
+              chain,
+              label: null,
+            },
+            followed: false,
+            userLabel: null,
+            notes: [],
+          });
+        }
+
+        if (label) {
+          await client.query(
+            `
+              insert into wallet_user_labels (user_id, wallet_id, label)
+              values ($1, $2, $3)
+              on conflict (user_id, wallet_id)
+              do update set
+                label = excluded.label,
+                updated_at = now()
+            `,
+            [user.id, wallet.id, label],
+          );
+        } else {
+          await client.query(
+            `
+              delete from wallet_user_labels
+              where user_id = $1 and wallet_id = $2
+            `,
+            [user.id, wallet.id],
+          );
+        }
+
+        const followResult = await client.query<{ followed: boolean }>(
+          `
+            select exists(
+              select 1
+              from wallet_follows
+              where user_id = $1 and wallet_id = $2
+            ) as followed
+          `,
+          [user.id, wallet.id],
+        );
+        const notes = await loadWalletPrivateNotes(client, user.id, wallet.id);
+
+        return reply.send({
+          ok: true,
+          wallet: {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+            label: wallet.label,
+          },
+          followed: followResult.rows[0]?.followed ?? false,
+          userLabel: label,
+          notes: notes.map((note) => ({
+            id: note.id,
+            note: note.note,
+            createdAt: note.created_at,
+            updatedAt: note.updated_at,
+          })),
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain, label },
+          "Failed to update private wallet label",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to update private wallet label" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * POST /wallets/private/:address/notes
+   */
+  z.post(
+    "/wallets/private/:address/notes",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletFollowParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+        body: walletPrivateNoteBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const chain = request.query.chain.toLowerCase();
+      const note = request.body.note;
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({ error: chain === "solana" ? "Invalid Solana wallet address" : "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallet = await ensureWalletByAddressAndChain(client, address, chain);
+        const insertResult = await client.query<WalletPrivateNoteRow>(
+          `
+            insert into wallet_user_notes (user_id, wallet_id, note)
+            values ($1, $2, $3)
+            returning id, note, created_at, updated_at
+          `,
+          [user.id, wallet.id, note],
+        );
+
+        reply.code(201);
+        return reply.send({
+          ok: true,
+          wallet: {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+          },
+          note: {
+            id: insertResult.rows[0].id,
+            note: insertResult.rows[0].note,
+            createdAt: insertResult.rows[0].created_at,
+            updatedAt: insertResult.rows[0].updated_at,
+          },
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain },
+          "Failed to create private wallet note",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to create private wallet note" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * PATCH /wallets/private/:address/notes/:noteId
+   */
+  z.patch(
+    "/wallets/private/:address/notes/:noteId",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletPrivateNoteParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+        body: walletPrivateNoteBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const noteId = request.params.noteId;
+      const chain = request.query.chain.toLowerCase();
+      const note = request.body.note;
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({ error: chain === "solana" ? "Invalid Solana wallet address" : "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallet = await findWalletByAddressAndChain(client, address, chain);
+        if (!wallet) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+
+        const updateResult = await client.query<WalletPrivateNoteRow>(
+          `
+            update wallet_user_notes
+            set note = $4,
+                updated_at = now()
+            where id = $1 and user_id = $2 and wallet_id = $3
+            returning id, note, created_at, updated_at
+          `,
+          [noteId, user.id, wallet.id, note],
+        );
+
+        if (updateResult.rowCount === 0) {
+          reply.code(404);
+          return reply.send({ error: "Wallet note not found" });
+        }
+
+        return reply.send({
+          ok: true,
+          wallet: {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+          },
+          note: {
+            id: updateResult.rows[0].id,
+            note: updateResult.rows[0].note,
+            createdAt: updateResult.rows[0].created_at,
+            updatedAt: updateResult.rows[0].updated_at,
+          },
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain, noteId },
+          "Failed to update private wallet note",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to update private wallet note" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * DELETE /wallets/private/:address/notes/:noteId
+   */
+  z.delete(
+    "/wallets/private/:address/notes/:noteId",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletPrivateNoteParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const noteId = request.params.noteId;
+      const chain = request.query.chain.toLowerCase();
+
+      if (!isValidWalletAddressForChain(address, chain)) {
+        reply.code(400);
+        return reply.send({ error: chain === "solana" ? "Invalid Solana wallet address" : "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallet = await findWalletByAddressAndChain(client, address, chain);
+        if (!wallet) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+
+        const deleteResult = await client.query(
+          `
+            delete from wallet_user_notes
+            where id = $1 and user_id = $2 and wallet_id = $3
+            returning id
+          `,
+          [noteId, user.id, wallet.id],
+        );
+
+        if (deleteResult.rowCount === 0) {
+          reply.code(404);
+          return reply.send({ error: "Wallet note not found" });
+        }
+
+        return reply.send({ ok: true });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain, noteId },
+          "Failed to delete private wallet note",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to delete private wallet note" });
       } finally {
         client.release();
       }
