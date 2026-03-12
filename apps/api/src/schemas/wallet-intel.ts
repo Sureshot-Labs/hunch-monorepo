@@ -59,8 +59,22 @@ export const walletFollowParamsSchema = z.object({
   address: z.string().min(4),
 });
 
-export const walletFollowDeleteQuerySchema = z.object({
+export const walletFollowChainQuerySchema = z.object({
   chain: zChain,
+});
+
+export const walletFollowDeleteQuerySchema = walletFollowChainQuerySchema;
+
+export const walletFollowPatchBodySchema = z.object({
+  label: z.preprocess(
+    value => {
+      if (value == null) return null;
+      if (typeof value !== "string") return value;
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : null;
+    },
+    z.string().max(120).nullable()
+  ),
 });
 
 export const walletFollowingQuerySchema = z.object({

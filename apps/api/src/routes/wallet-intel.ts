@@ -62,7 +62,8 @@ import {
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
   walletFollowBodySchema,
-  walletFollowDeleteQuerySchema,
+  walletFollowChainQuerySchema,
+  walletFollowPatchBodySchema,
   walletFollowParamsSchema,
   walletFollowingQuerySchema,
   walletPositionsQuerySchema,
@@ -2068,6 +2069,114 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * PATCH /wallets/follow/:address
+   * Update or clear a private label for an existing followed wallet.
+   */
+  z.patch(
+    "/wallets/follow/:address",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletFollowParamsSchema,
+        querystring: walletFollowChainQuerySchema,
+        body: walletFollowPatchBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const address = normalizeAddress(request.params.address);
+      const chain = request.query.chain.toLowerCase();
+      const label = request.body.label;
+
+      if (chain !== "solana" && !ethers.isAddress(address)) {
+        reply.code(400);
+        return reply.send({ error: "Invalid EVM wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const walletResult = await client.query<WalletRow>(
+          `
+            select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+            from wallets
+            where address = $1 and chain = $2
+          `,
+          [address, chain],
+        );
+
+        const wallet = walletResult.rows[0];
+        if (!wallet) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not found" });
+        }
+
+        const followResult = await client.query<{ id: string }>(
+          `
+            select id
+            from wallet_follows
+            where user_id = $1 and wallet_id = $2
+            limit 1
+          `,
+          [user.id, wallet.id],
+        );
+
+        if (followResult.rowCount === 0) {
+          reply.code(404);
+          return reply.send({ error: "Wallet not followed" });
+        }
+
+        if (label) {
+          await client.query(
+            `
+              insert into wallet_user_labels (user_id, wallet_id, label)
+              values ($1, $2, $3)
+              on conflict (user_id, wallet_id)
+              do update set
+                label = excluded.label,
+                updated_at = now()
+            `,
+            [user.id, wallet.id, label],
+          );
+        } else {
+          await client.query(
+            `
+              delete from wallet_user_labels
+              where user_id = $1 and wallet_id = $2
+            `,
+            [user.id, wallet.id],
+          );
+        }
+
+        return reply.send({
+          ok: true,
+          wallet: {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+            label: wallet.label,
+            userLabel: label,
+          },
+          followed: true,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address, chain, label },
+          "Failed to update followed wallet label",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to update wallet label" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
    * DELETE /wallets/follow/:address
    */
   z.delete(
@@ -2076,7 +2185,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       preHandler: createAuthMiddleware(),
       schema: {
         params: walletFollowParamsSchema,
-        querystring: walletFollowDeleteQuerySchema,
+        querystring: walletFollowChainQuerySchema,
       },
     },
     async (request, reply) => {
