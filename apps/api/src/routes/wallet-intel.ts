@@ -3711,75 +3711,72 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const walletId = request.params.walletId;
       const client = await pool.connect();
       try {
-        const result = await client.query<
-          WalletRow & {
-            tags: WalletTagRow[] | null;
-            metrics: WalletMetricsRow | null;
-            user_label: string | null;
-            followers_count: number | string | null;
-          }
-        >(
-          `
-            select
-              w.id,
-              w.address,
-              w.chain,
-              w.label,
-              wl.label as user_label,
-              w.is_system_flagged,
-              w.first_seen_at,
-              w.last_seen_at,
-              followers.followers_count,
-              tags.tags,
-              metrics.metrics
-            from wallets w
-            left join wallet_user_labels wl
-              on wl.wallet_id = w.id
-             and wl.user_id = $2
-            left join lateral (
-              select count(*)::int as followers_count
-              from wallet_follows wf
-              where wf.wallet_id = w.id
-            ) followers on true
-            left join lateral (
-              select jsonb_agg(jsonb_build_object(
-                'slug', t.slug,
-                'label', t.label,
-                'tag_type', t.tag_type,
-                'is_system', t.is_system
-              ) order by t.tag_type, t.slug) as tags
-              from wallet_tag_map tm
-              join wallet_tags t on t.id = tm.tag_id
-              where tm.wallet_id = w.id
-            ) tags on true
-            left join lateral (
-              select jsonb_build_object(
-                'period', s.period,
-                'as_of', s.as_of,
-                'trades_count', s.trades_count,
-                'volume_usd', s.volume_usd,
-                'pnl_usd', s.pnl_usd,
-                'roi', s.roi,
-                'win_rate', s.win_rate,
-                'avg_hold_hours', s.avg_hold_hours,
-                'last_trade_at', s.last_trade_at
-              ) as metrics
-              from wallet_metrics_snapshots s
-              where s.wallet_id = w.id and s.period = '30d'
-              order by s.as_of desc
-              limit 1
-            ) metrics on true
-            where w.id = $1
-            limit 1
-          `,
-          [walletId, user.id],
-        );
-
-        const wallet = result.rows[0];
+        const wallet = (
+          await loadWalletRowsByIds(client, user.id, [walletId], null)
+        ).find(candidate => candidate.id === walletId) ?? null;
         if (!wallet) {
           reply.code(404);
           return reply.send({ error: "Wallet not found" });
         }
+
+        const [followerCountsMap, refreshPolicy, attributionPolicy, signalsPolicy] =
+          await Promise.all([
+            loadWalletFollowerCountsMap(client, [walletId]),
+            resolveWalletIntelRefreshPolicy(client),
+            resolveWalletIntelAttributionPolicy(client),
+            resolveWalletIntelSignalsPolicy(client),
+          ]);
+
+        const summary = (
+          await fetchWalletActivitySummaries(client, [walletId], {
+            windowHours: 720,
+            topChanges: 10,
+            baselineDays: 30,
+            enteredLateHours: 24,
+            signalConfig: {
+              maxOdds: signalsPolicy.effective.maxOdds,
+              minStakeUsd: signalsPolicy.effective.minStakeUsd,
+              minIdleDays: signalsPolicy.effective.minIdleDays,
+              maxPriorMarkets: signalsPolicy.effective.maxPriorMarkets,
+              minPayoutUsd: signalsPolicy.effective.minPayoutUsd,
+              lateHours: signalsPolicy.effective.lateHours,
+              veryLateHours: signalsPolicy.effective.veryLateHours,
+              retentionDaysActivity: refreshPolicy.effective.retentionDaysActivity,
+              weightStake: signalsPolicy.effective.weightStake,
+              weightOdds: signalsPolicy.effective.weightOdds,
+              weightIdle: signalsPolicy.effective.weightIdle,
+              weightNovelty: signalsPolicy.effective.weightNovelty,
+              minScore: signalsPolicy.effective.minScore,
+            },
+          })
+        ).get(walletId) ?? null;
+
+        const attribution = (
+          await buildWalletAttributionMap(
+            client,
+            [
+              {
+                walletId: wallet.id,
+                tags: wallet.tags ?? [],
+                metrics: wallet.metrics ?? null,
+                inferredWinRate: null,
+                inferredResolvedCount: null,
+                trackedExposureUsd: null,
+                topChanges: summary?.topChanges ?? [],
+              },
+            ],
+            attributionPolicy.effective,
+            { mode: "full" },
+          )
+        ).get(walletId) ?? null;
+
+        const presentation = applyWalletPresentationFields(
+          {
+            metrics: wallet.metrics ?? null,
+            lastActivityAt: summary?.lastActivityAt ?? wallet.last_seen_at,
+          },
+          attribution,
+        );
 
         return reply.send({
           ok: true,
@@ -3789,15 +3786,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             chain: wallet.chain,
             label: wallet.label,
             userLabel: wallet.user_label ?? null,
-            followersCount:
-              wallet.followers_count != null
-                ? Number(wallet.followers_count)
-                : 0,
+            followersCount: followerCountsMap.get(wallet.id) ?? 0,
+            topLabelVariant: presentation.topLabelVariant,
+            headlineTag: presentation.headlineTag,
             isSystemFlagged: wallet.is_system_flagged,
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
             tags: wallet.tags ?? [],
             metrics: wallet.metrics ?? null,
+            profile: wallet.profile ?? null,
+            profileUpdatedAt: wallet.profile_updated_at ?? null,
+            attribution,
           },
         });
       } catch (error) {
