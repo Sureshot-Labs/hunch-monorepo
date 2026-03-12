@@ -2025,7 +2025,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           "Polymarket order placement upstream failed",
         );
         const responseStatus =
-          upstream.status === 429 ? 429 : upstream.status >= 500 ? 502 : 400;
+          upstream.status >= 500
+            ? 502
+            : upstream.status >= 400
+              ? upstream.status
+              : 400;
         reply.code(responseStatus);
         return reply.send({
           error: "Polymarket order placement failed",

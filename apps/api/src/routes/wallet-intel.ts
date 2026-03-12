@@ -2178,9 +2178,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const chain = request.query.chain.toLowerCase();
       const label = request.body.label;
 
-      if (chain !== "solana" && !ethers.isAddress(address)) {
+      if (!isValidWalletAddressForChain(address, chain)) {
         reply.code(400);
-        return reply.send({ error: "Invalid EVM wallet address" });
+        return reply.send({
+          error:
+            chain === "solana"
+              ? "Invalid Solana wallet address"
+              : "Invalid EVM wallet address",
+        });
       }
 
       const client = await pool.connect();
