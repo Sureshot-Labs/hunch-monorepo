@@ -90,17 +90,24 @@ function createPolymarketBuilderHeaders(inputs: {
 }
 
 async function readJsonOrText(res: Response): Promise<unknown> {
-  const contentType = res.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
-    try {
-      return (await res.json()) as unknown;
-    } catch {
-      return null;
-    }
-  }
   try {
     const text = await res.text();
-    return text.length ? text : null;
+    if (!text.length) return null;
+
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        return JSON.parse(text) as unknown;
+      } catch {
+        return text;
+      }
+    }
+
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
   } catch {
     return null;
   }

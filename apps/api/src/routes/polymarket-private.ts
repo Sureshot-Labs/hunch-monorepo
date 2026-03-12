@@ -139,6 +139,68 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function extractPolymarketUpstreamMessage(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed.length ? trimmed : null;
+  }
+  if (!isRecord(payload)) return null;
+
+  const direct = [
+    payload.error,
+    payload.message,
+    payload.msg,
+    payload.detail,
+    payload.reason,
+  ];
+  for (const value of direct) {
+    if (typeof value === "string" && value.trim().length) {
+      return value.trim();
+    }
+  }
+
+  const nestedError = payload.error;
+  if (isRecord(nestedError)) {
+    const nested = [
+      nestedError.message,
+      nestedError.error,
+      nestedError.msg,
+      nestedError.detail,
+      nestedError.reason,
+    ];
+    for (const value of nested) {
+      if (typeof value === "string" && value.trim().length) {
+        return value.trim();
+      }
+    }
+  }
+
+  const errors = payload.errors;
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (typeof entry === "string" && entry.trim().length) {
+        return entry.trim();
+      }
+      if (isRecord(entry)) {
+        const nested = [
+          entry.message,
+          entry.error,
+          entry.msg,
+          entry.detail,
+          entry.reason,
+        ];
+        for (const value of nested) {
+          if (typeof value === "string" && value.trim().length) {
+            return value.trim();
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function extractPolymarketOrderStatus(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
   const direct = payload.status;
@@ -1949,7 +2011,22 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
-        reply.code(502);
+        const upstreamMessage = extractPolymarketUpstreamMessage(upstream.payload);
+        request.log.warn(
+          {
+            upstreamStatus: upstream.status,
+            upstreamMessage,
+            upstreamPayload: upstream.payload,
+            signer,
+            funder,
+            tokenId: orderTokenId,
+            orderType,
+          },
+          "Polymarket order placement upstream failed",
+        );
+        const responseStatus =
+          upstream.status === 429 ? 429 : upstream.status >= 500 ? 502 : 400;
+        reply.code(responseStatus);
         return reply.send({
           error: "Polymarket order placement failed",
           status: upstream.status,
