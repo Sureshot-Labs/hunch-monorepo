@@ -658,7 +658,7 @@ const PRIMARY_LABEL_TEXT: Record<
 
 const BADGE_TEXT: Record<WalletPresentationBadgeKey, string> = {
   whale: "Whale",
-  unusual_activity: "Unusual Activity",
+  unusual_activity: "Unusual",
   hot_streak: "Hot Streak",
 };
 

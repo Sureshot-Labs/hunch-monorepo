@@ -3174,25 +3174,34 @@ async function runSnapshot(snapshotAt: Date) {
           );
         }
 
-        const inserted = await runWithTelemetry(
-          telemetry.followedSnapshotPolygon,
-          () =>
-            snapshotFollowedWalletHoldingsEvm(client, {
-              walletId: followed.wallet_id,
-              address: normalizeAddress(followed.address, "polygon"),
-              venue: "polymarket",
-              rpcUrl: env.polygonRpcUrl,
-              rpcTimeoutMs: env.polygonRpcTimeoutMs,
-              contractAddress: env.polymarketConditionalTokensAddress,
-              tokenIds: tokenIdsByVenue.polymarket,
-              tokenIndex: tokenIndexByVenue.polymarket,
-              occurredAt: snapshotAt,
-            }),
-        );
-        if (inserted > 0) {
-          followedRows += inserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += inserted;
+        try {
+          const inserted = await runWithTelemetry(
+            telemetry.followedSnapshotPolygon,
+            () =>
+              snapshotFollowedWalletHoldingsEvm(client, {
+                walletId: followed.wallet_id,
+                address: normalizeAddress(followed.address, "polygon"),
+                venue: "polymarket",
+                rpcUrl: env.polygonRpcUrl,
+                rpcTimeoutMs: env.polygonRpcTimeoutMs,
+                contractAddress: env.polymarketConditionalTokensAddress,
+                tokenIds: tokenIdsByVenue.polymarket,
+                tokenIndex: tokenIndexByVenue.polymarket,
+                occurredAt: snapshotAt,
+              }),
+          );
+          if (inserted > 0) {
+            followedRows += inserted;
+            touchedWalletIds.add(followed.wallet_id);
+            activityRows += inserted;
+          }
+        } catch (error) {
+          const retryable = isRpcRateLimit(error) || isAbortError(error);
+          const message = retryable
+            ? "[wallets:intel:refresh] polymarket followed snapshot skipped"
+            : "[wallets:intel:refresh] polymarket followed snapshot failed";
+          const log = retryable ? console.warn : console.error;
+          log(message, { wallet: followed.address }, error);
         }
 
         const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -3235,25 +3244,34 @@ async function runSnapshot(snapshotAt: Date) {
           }
         }
 
-        const inserted = await runWithTelemetry(
-          telemetry.followedSnapshotBase,
-          () =>
-            snapshotFollowedWalletHoldingsEvm(client, {
-              walletId: followed.wallet_id,
-              address: normalizeAddress(followed.address, "base"),
-              venue: "limitless",
-              rpcUrl: env.baseRpcUrl,
-              rpcTimeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: env.limitlessConditionalTokensAddress,
-              tokenIds: tokenIdsByVenue.limitless,
-              tokenIndex: tokenIndexByVenue.limitless,
-              occurredAt: snapshotAt,
-            }),
-        );
-        if (inserted > 0) {
-          followedRows += inserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += inserted;
+        try {
+          const inserted = await runWithTelemetry(
+            telemetry.followedSnapshotBase,
+            () =>
+              snapshotFollowedWalletHoldingsEvm(client, {
+                walletId: followed.wallet_id,
+                address: normalizeAddress(followed.address, "base"),
+                venue: "limitless",
+                rpcUrl: env.baseRpcUrl,
+                rpcTimeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: env.limitlessConditionalTokensAddress,
+                tokenIds: tokenIdsByVenue.limitless,
+                tokenIndex: tokenIndexByVenue.limitless,
+                occurredAt: snapshotAt,
+              }),
+          );
+          if (inserted > 0) {
+            followedRows += inserted;
+            touchedWalletIds.add(followed.wallet_id);
+            activityRows += inserted;
+          }
+        } catch (error) {
+          const retryable = isRpcRateLimit(error) || isAbortError(error);
+          const message = retryable
+            ? "[wallets:intel:refresh] limitless followed snapshot skipped"
+            : "[wallets:intel:refresh] limitless followed snapshot failed";
+          const log = retryable ? console.warn : console.error;
+          log(message, { wallet: followed.address }, error);
         }
 
         const positionsInserted = await snapshotFollowedWalletPositions(client, {

@@ -54,6 +54,7 @@ import {
   computeRobustUnusualScore,
   resolveUnusualTier,
 } from "./services/wallet-activity-summary.js";
+import { fetchEvmBalance } from "./services/polygon-rpc.js";
 import { fetchWalletPerformanceSeries, resolveSparklineBucketHours } from "./services/wallet-intel-series.js";
 import { fetchMarketHolderData } from "./services/holders-core.js";
 import {
@@ -417,7 +418,7 @@ const tests: TestCase[] = [
       });
       assert.deepEqual(badges, [
         { key: "whale", label: "Whale" },
-        { key: "unusual_activity", label: "Unusual Activity" },
+        { key: "unusual_activity", label: "Unusual" },
         { key: "hot_streak", label: "Hot Streak" },
       ]);
 
@@ -1754,6 +1755,108 @@ const tests: TestCase[] = [
       assert.equal(isRetryableHttpStatus(429), true);
       assert.equal(isRetryableHttpStatus(503), true);
       assert.equal(isRetryableHttpStatus(404), false);
+    },
+  },
+  {
+    name: "polygon rpc retries HTTP 429 before succeeding",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
+      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
+      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+
+      env.walletIntelRetryMaxAttempts = 2;
+      env.walletIntelRetryBaseBackoffMs = 1;
+      env.walletIntelRetryMaxBackoffMs = 1;
+
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response("rate limited", {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: { "retry-after": "0" },
+          });
+        }
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x2a" }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      try {
+        const balance = await fetchEvmBalance({
+          rpcUrl: "https://polygon.example",
+          timeoutMs: 100,
+          address: "0x0000000000000000000000000000000000000001",
+        });
+
+        assert.equal(balance, 42n);
+        assert.equal(calls, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
+        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
+        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+      }
+    },
+  },
+  {
+    name: "polygon rpc retries rate-limit JSON-RPC errors before succeeding",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
+      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
+      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+
+      env.walletIntelRetryMaxAttempts = 2;
+      env.walletIntelRetryBaseBackoffMs = 1;
+      env.walletIntelRetryMaxBackoffMs = 1;
+
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              error: { message: "too many requests" },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x2b" }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      try {
+        const balance = await fetchEvmBalance({
+          rpcUrl: "https://polygon.example",
+          timeoutMs: 100,
+          address: "0x0000000000000000000000000000000000000001",
+        });
+
+        assert.equal(balance, 43n);
+        assert.equal(calls, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
+        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
+        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+      }
     },
   },
   {

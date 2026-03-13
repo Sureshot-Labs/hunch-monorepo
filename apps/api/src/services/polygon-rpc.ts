@@ -1,3 +1,10 @@
+import {
+  isAbortError,
+  isRetryableHttpStatus,
+  isRpcRateLimit,
+  parseRetryAfterMs,
+  sleep,
+} from "@hunch/shared";
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
 import { abis } from "../lib/contracts.js";
@@ -80,52 +87,97 @@ function createTimedCache<T>(ttlMs: number) {
 const codeCache = createTimedCache<string>(CODE_CACHE_TTL_MS);
 const approvalCache = createTimedCache<boolean>(APPROVAL_CACHE_TTL_MS);
 
+function computeBackoffMs(attempt: number, retryAfterMs: number | null): number {
+  if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    return Math.min(
+      retryAfterMs,
+      Math.max(env.walletIntelRetryBaseBackoffMs, env.walletIntelRetryMaxBackoffMs),
+    );
+  }
+  const exponential =
+    env.walletIntelRetryBaseBackoffMs * Math.max(1, 2 ** Math.max(0, attempt));
+  return Math.min(exponential, env.walletIntelRetryMaxBackoffMs);
+}
+
 async function ethRpcRequest<T>(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   method: string;
   params: unknown[];
 }): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+  let lastError: unknown = null;
+  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
 
-  try {
-    const response = await fetch(inputs.rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: inputs.method,
-        params: inputs.params,
-      }),
-      signal: controller.signal,
-    });
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
 
-    if (!response.ok) {
-      throw new Error(
-        `Polygon RPC error: ${response.status} ${response.statusText}`,
-      );
+    try {
+      const response = await fetch(inputs.rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: inputs.method,
+          params: inputs.params,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const error = new Error(
+          `Polygon RPC error: ${response.status} ${response.statusText}`,
+        );
+        lastError = error;
+        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        const retryable =
+          attempt < maxAttempts - 1 && isRetryableHttpStatus(response.status);
+        if (retryable) {
+          await sleep(computeBackoffMs(attempt, retryAfterMs));
+          continue;
+        }
+        throw error;
+      }
+
+      const json = (await response.json()) as unknown;
+      if (!isRecord(json)) {
+        throw new Error("Polygon RPC: invalid JSON response");
+      }
+
+      const rpc = json as JsonRpcResponse<T>;
+      if ("error" in rpc) {
+        const message =
+          typeof rpc.error.message === "string"
+            ? rpc.error.message
+            : "Unknown Polygon RPC error";
+        const error = new Error(`Polygon RPC ${inputs.method} error: ${message}`);
+        lastError = error;
+        const retryable = attempt < maxAttempts - 1 && isRpcRateLimit(error);
+        if (retryable) {
+          await sleep(computeBackoffMs(attempt, null));
+          continue;
+        }
+        throw error;
+      }
+
+      return rpc.result;
+    } catch (error) {
+      lastError = error;
+      const retryable =
+        attempt < maxAttempts - 1 &&
+        (isAbortError(error) || isRpcRateLimit(error));
+      if (retryable) {
+        await sleep(computeBackoffMs(attempt, null));
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const json = (await response.json()) as unknown;
-    if (!isRecord(json)) {
-      throw new Error("Polygon RPC: invalid JSON response");
-    }
-
-    const rpc = json as JsonRpcResponse<T>;
-    if ("error" in rpc) {
-      const message =
-        typeof rpc.error.message === "string"
-          ? rpc.error.message
-          : "Unknown Polygon RPC error";
-      throw new Error(`Polygon RPC ${inputs.method} error: ${message}`);
-    }
-
-    return rpc.result;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError ?? new Error(`Polygon RPC ${inputs.method} failed`);
 }
 
 export async function fetchErc1155BalancesByOwner(inputs: {
