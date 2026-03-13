@@ -33,8 +33,12 @@ type WalletActivitySignalRowDbRow = {
   wallet_id: string;
   market_id: string;
   market_title: string | null;
+  market_image: string | null;
+  market_icon: string | null;
   event_id: string | null;
   event_title: string | null;
+  event_image: string | null;
+  event_icon: string | null;
   venue: string;
   market_status: string | null;
   close_time: Date | null;
@@ -78,8 +82,12 @@ export type WalletActivityUnusualTier =
 export type WalletActivityTopChange = {
   marketId: string;
   marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
   eventId: string | null;
   eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
   venue: string;
   marketStatus: string | null;
   closeTime: Date | null;
@@ -130,8 +138,12 @@ export type WalletActivitySignalRow = {
   walletId: string;
   marketId: string;
   marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
   eventId: string | null;
   eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
   venue: string;
   marketStatus: string | null;
   closeTime: Date | null;
@@ -327,8 +339,13 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
       marketId: String(record.marketId ?? ""),
       marketTitle:
         record.marketTitle == null ? null : String(record.marketTitle ?? ""),
+      marketImage:
+        record.marketImage == null ? null : String(record.marketImage),
+      marketIcon: record.marketIcon == null ? null : String(record.marketIcon),
       eventId: record.eventId == null ? null : String(record.eventId),
       eventTitle: record.eventTitle == null ? null : String(record.eventTitle),
+      eventImage: record.eventImage == null ? null : String(record.eventImage),
+      eventIcon: record.eventIcon == null ? null : String(record.eventIcon),
       venue: String(record.venue ?? ""),
       marketStatus:
         record.marketStatus == null ? null : String(record.marketStatus),
@@ -570,8 +587,12 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
     select
       ew.*,
       um.title as market_title,
+      um.image as market_image,
+      um.icon as market_icon,
       um.event_id,
       ue.title as event_title,
+      ue.image as event_image,
+      ue.icon as event_icon,
       um.status as market_status,
       um.close_time,
       um.expiration_time,
@@ -627,8 +648,12 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       cr.market_id,
       cr.outcome_side,
       cr.market_title,
+      cr.market_image,
+      cr.market_icon,
       cr.event_id,
       cr.event_title,
+      cr.event_image,
+      cr.event_icon,
       cr.market_status,
       cr.close_time,
       cr.expiration_time,
@@ -772,8 +797,12 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
         jsonb_build_object(
           'marketId', cc.market_id,
           'marketTitle', cc.market_title,
+          'marketImage', cc.market_image,
+          'marketIcon', cc.market_icon,
           'eventId', cc.event_id,
           'eventTitle', cc.event_title,
+          'eventImage', cc.event_image,
+          'eventIcon', cc.event_icon,
           'venue', cc.venue,
           'marketStatus', cc.market_status,
           'closeTime', cc.close_time,
@@ -974,8 +1003,12 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       sc.wallet_id,
       sc.market_id,
       sc.market_title,
+      sc.market_image,
+      sc.market_icon,
       sc.event_id,
       sc.event_title,
+      sc.event_image,
+      sc.event_icon,
       sc.venue,
       sc.market_status,
       sc.close_time,
@@ -1034,8 +1067,12 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
     sr.wallet_id,
     sr.market_id,
     sr.market_title,
+    sr.market_image,
+    sr.market_icon,
     sr.event_id,
     sr.event_title,
+    sr.event_image,
+    sr.event_icon,
     sr.venue,
     sr.market_status,
     sr.close_time,
@@ -1135,8 +1172,12 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       h.prior_distinct_markets,
       h.last_prior_activity_at,
       um.title as market_title,
+      um.image as market_image,
+      um.icon as market_icon,
       um.event_id,
       ue.title as event_title,
+      ue.image as event_image,
+      ue.icon as event_icon,
       um.status as market_status,
       um.close_time,
       um.expiration_time,
@@ -1153,8 +1194,12 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       e.wallet_id,
       e.market_id,
       e.market_title,
+      e.market_image,
+      e.market_icon,
       e.event_id,
       e.event_title,
+      e.event_image,
+      e.event_icon,
       e.venue,
       e.market_status,
       e.close_time,
@@ -1310,8 +1355,12 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.wallet_id,
       sr.market_id,
       sr.market_title,
+      sr.market_image,
+      sr.market_icon,
       sr.event_id,
       sr.event_title,
+      sr.event_image,
+      sr.event_icon,
       sr.venue,
       sr.market_status,
       sr.close_time,
@@ -1366,8 +1415,12 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
     sr.wallet_id,
     sr.market_id,
     sr.market_title,
+    sr.market_image,
+    sr.market_icon,
     sr.event_id,
     sr.event_title,
+    sr.event_image,
+    sr.event_icon,
     sr.venue,
     sr.market_status,
     sr.close_time,
@@ -1671,8 +1724,12 @@ export async function fetchWalletActivitySignalRows(
     walletId: row.wallet_id,
     marketId: row.market_id,
     marketTitle: row.market_title,
+    marketImage: row.market_image,
+    marketIcon: row.market_icon,
     eventId: row.event_id,
     eventTitle: row.event_title,
+    eventImage: row.event_image,
+    eventIcon: row.event_icon,
     venue: row.venue,
     marketStatus: row.market_status,
     closeTime: row.close_time,
@@ -1747,8 +1804,12 @@ export async function fetchWalletActivitySignalRowsFast(
     walletId: row.wallet_id,
     marketId: row.market_id,
     marketTitle: row.market_title,
+    marketImage: row.market_image,
+    marketIcon: row.market_icon,
     eventId: row.event_id,
     eventTitle: row.event_title,
+    eventImage: row.event_image,
+    eventIcon: row.event_icon,
     venue: row.venue,
     marketStatus: row.market_status,
     closeTime: row.close_time,

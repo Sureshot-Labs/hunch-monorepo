@@ -448,8 +448,12 @@ type WalletActivitySignalItem = {
   profileUpdatedAt: Date | null;
   marketId: string;
   marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
   eventId: string | null;
   eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
   venue: string;
   marketStatus: string | null;
   closeTime: Date | null;
@@ -1313,8 +1317,12 @@ function signalRowToTopChange(
   return {
     marketId: row.marketId,
     marketTitle: row.marketTitle,
+    marketImage: row.marketImage,
+    marketIcon: row.marketIcon,
     eventId: row.eventId,
     eventTitle: row.eventTitle,
+    eventImage: row.eventImage,
+    eventIcon: row.eventIcon,
     venue: row.venue,
     marketStatus: row.marketStatus,
     closeTime: row.closeTime,
@@ -5258,16 +5266,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             query.maxPriorMarkets ?? signalConfig.maxPriorMarkets;
           const minPayoutUsd = query.minPayoutUsd ?? signalConfig.minPayoutUsd;
 
-          const candidateWalletIds = await loadWalletIdsForSignalScope(
-            client,
-            user.id,
-            query.scope,
-            windowHours,
-            {
-              minActivityUsd: refreshPolicy.effective.minActivityUsd,
-              minActivityShares: refreshPolicy.effective.minActivityShares,
-            },
-          );
+          const candidateWalletIds = query.walletId
+            ? [query.walletId]
+            : await loadWalletIdsForSignalScope(
+                client,
+                user.id,
+                query.scope,
+                windowHours,
+                {
+                  minActivityUsd: refreshPolicy.effective.minActivityUsd,
+                  minActivityShares: refreshPolicy.effective.minActivityShares,
+                },
+              );
           const filteredWalletIds = await filterWalletIdsByMetadata(
             client,
             candidateWalletIds,
@@ -5435,8 +5445,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   profileUpdatedAt: candidate.profile_updated_at ?? null,
                   marketId: signalRow.marketId,
                   marketTitle: signalRow.marketTitle,
+                  marketImage: signalRow.marketImage,
+                  marketIcon: signalRow.marketIcon,
                   eventId: signalRow.eventId,
                   eventTitle: signalRow.eventTitle,
+                  eventImage: signalRow.eventImage,
+                  eventIcon: signalRow.eventIcon,
                   venue: signalRow.venue,
                   marketStatus: signalRow.marketStatus,
                   closeTime: signalRow.closeTime,
@@ -5484,8 +5498,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       walletId: item.walletId,
                       marketId: item.marketId,
                       marketTitle: item.marketTitle,
+                      marketImage: item.marketImage,
+                      marketIcon: item.marketIcon,
                       eventId: item.eventId,
                       eventTitle: item.eventTitle,
+                      eventImage: item.eventImage,
+                      eventIcon: item.eventIcon,
                       venue: item.venue,
                       marketStatus: item.marketStatus,
                       closeTime: item.closeTime,
@@ -5522,8 +5540,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       walletId: item.walletId,
                       marketId: item.marketId,
                       marketTitle: item.marketTitle,
+                      marketImage: item.marketImage,
+                      marketIcon: item.marketIcon,
                       eventId: item.eventId,
                       eventTitle: item.eventTitle,
+                      eventImage: item.eventImage,
+                      eventIcon: item.eventIcon,
                       venue: item.venue,
                       marketStatus: item.marketStatus,
                       closeTime: item.closeTime,
@@ -5675,8 +5697,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 profileUpdatedAt: row.profile_updated_at ?? null,
                 marketId: change.marketId,
                 marketTitle: change.marketTitle ?? null,
+                marketImage: change.marketImage ?? null,
+                marketIcon: change.marketIcon ?? null,
                 eventId: change.eventId ?? null,
                 eventTitle: change.eventTitle ?? null,
+                eventImage: change.eventImage ?? null,
+                eventIcon: change.eventIcon ?? null,
                 venue: change.venue,
                 marketStatus: change.marketStatus ?? null,
                 closeTime: change.closeTime ?? null,
@@ -5738,8 +5764,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   {
                     marketId: item.marketId,
                     marketTitle: item.marketTitle ?? null,
+                    marketImage: item.marketImage ?? null,
+                    marketIcon: item.marketIcon ?? null,
                     eventId: item.eventId ?? null,
                     eventTitle: item.eventTitle ?? null,
+                    eventImage: item.eventImage ?? null,
+                    eventIcon: item.eventIcon ?? null,
                     venue: item.venue,
                     marketStatus: item.marketStatus ?? null,
                     closeTime: item.closeTime ?? null,
@@ -5940,8 +5970,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: string;
           market_id: string;
           market_title: string | null;
+          market_image: string | null;
+          market_icon: string | null;
           event_id: string | null;
           event_title: string | null;
+          event_image: string | null;
+          event_icon: string | null;
           best_bid: string | null;
           best_ask: string | null;
           last_price: string | null;
@@ -5972,8 +6006,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               wa.venue,
               wa.market_id,
               um.title as market_title,
+              um.image as market_image,
+              um.icon as market_icon,
               um.event_id as event_id,
               ue.title as event_title,
+              ue.image as event_image,
+              ue.icon as event_icon,
               um.best_bid,
               um.best_ask,
               um.last_price,
@@ -6025,8 +6063,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
+          marketImage: row.market_image,
+          marketIcon: row.market_icon,
           eventId: row.event_id,
           eventTitle: row.event_title,
+          eventImage: row.event_image,
+          eventIcon: row.event_icon,
           bestBid: row.best_bid ? Number(row.best_bid) : null,
           bestAsk: row.best_ask ? Number(row.best_ask) : null,
           lastPrice: row.last_price ? Number(row.last_price) : null,
@@ -6168,8 +6210,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
+                um.image as market_image,
+                um.icon as market_icon,
                 um.event_id as event_id,
                 ue.title as event_title,
+                ue.image as event_image,
+                ue.icon as event_icon,
                 um.status as market_status,
                 um.close_time,
                 um.expiration_time,
@@ -6221,8 +6267,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
+                um.image as market_image,
+                um.icon as market_icon,
                 um.event_id as event_id,
                 ue.title as event_title,
+                ue.image as event_image,
+                ue.icon as event_icon,
                 um.status as market_status,
                 um.close_time,
                 um.expiration_time,
@@ -6271,8 +6321,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: string;
           market_id: string;
           market_title: string | null;
+          market_image: string | null;
+          market_icon: string | null;
           event_id: string | null;
           event_title: string | null;
+          event_image: string | null;
+          event_icon: string | null;
           market_status: string | null;
           close_time: Date | null;
           expiration_time: Date | null;
@@ -6304,8 +6358,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
+          marketImage: row.market_image,
+          marketIcon: row.market_icon,
           eventId: row.event_id,
           eventTitle: row.event_title,
+          eventImage: row.event_image,
+          eventIcon: row.event_icon,
           bestBid: row.best_bid ? Number(row.best_bid) : null,
           bestAsk: row.best_ask ? Number(row.best_ask) : null,
           lastPrice: row.last_price ? Number(row.last_price) : null,

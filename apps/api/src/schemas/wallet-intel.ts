@@ -164,6 +164,7 @@ export const walletActivitySummaryQuerySchema = z.object({
 });
 
 export const walletActivitySignalsQuerySchema = z.object({
+  walletId: z.string().uuid().optional(),
   scope: z.enum(["following", "active", "all"]).default("following"),
   windowHours: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
