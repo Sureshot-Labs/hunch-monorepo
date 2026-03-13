@@ -1544,7 +1544,7 @@ async function refreshLedgerWindowMetrics(
     walletIds: string[];
     asOf: Date;
   } & {
-    period: "30d" | "all";
+    period: "1d" | "7d" | "30d" | "all";
     since: Date | null;
   },
 ): Promise<void> {
@@ -1708,6 +1708,34 @@ async function refreshLedgerWindowMetrics(
   }
 }
 
+async function refreshOneDayMetrics(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+  },
+): Promise<void> {
+  await refreshLedgerWindowMetrics(client, {
+    ...inputs,
+    period: "1d",
+    since: periodStart(inputs.asOf, 1),
+  });
+}
+
+async function refreshSevenDayMetrics(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+  },
+): Promise<void> {
+  await refreshLedgerWindowMetrics(client, {
+    ...inputs,
+    period: "7d",
+    since: periodStart(inputs.asOf, 7),
+  });
+}
+
 async function refreshThirtyDayMetrics(
   client: Queryable,
   inputs: {
@@ -1744,206 +1772,28 @@ async function refreshMetrics(
   },
 ) {
   if (inputs.walletIds.length === 0) return;
-  const periods: Array<{ period: "1d" | "7d" | "30d" | "all"; since: string | null }> = [
-    { period: "1d", since: "1 day" },
-    { period: "7d", since: "7 days" },
-    { period: "30d", since: "30 days" },
-    { period: "all", since: null },
+  const periods: Array<"1d" | "7d" | "30d" | "all"> = [
+    "1d",
+    "7d",
+    "30d",
+    "all",
   ];
 
-  for (const entry of periods) {
-    if (entry.period === "30d") {
+  for (const period of periods) {
+    if (period === "1d") {
+      await refreshOneDayMetrics(client, inputs);
+      continue;
+    }
+    if (period === "7d") {
+      await refreshSevenDayMetrics(client, inputs);
+      continue;
+    }
+    if (period === "30d") {
       await refreshThirtyDayMetrics(client, inputs);
       continue;
     }
-    if (entry.period === "all") {
+    if (period === "all") {
       await refreshAllTimeMetrics(client, inputs);
-      continue;
-    }
-    const whereSince = entry.since
-      ? `and wa.occurred_at >= $3::timestamptz - interval '${entry.since}' and wa.occurred_at <= $3::timestamptz`
-      : "and wa.occurred_at <= $3::timestamptz";
-    const metricsResult = await client.query<{ negative_legs: number | string }>(
-      `
-        with base_events as (
-          select
-            wa.wallet_id,
-            wa.market_id,
-            upper(coalesce(wa.outcome_side, '')) as outcome_side,
-            coalesce(
-              wa.size_usd,
-              abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
-            ) as notional_usd,
-            (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
-              * coalesce(wa.delta_shares, 0) as signed_shares,
-            (case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end)
-              * coalesce(
-                  wa.size_usd,
-                  abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0)
-                ) as signed_usd,
-            wa.occurred_at
-          from wallet_activity_events wa
-          where wa.wallet_id = any($1::uuid[])
-            and wa.activity_type in ('delta', 'trade')
-            ${whereSince}
-        ),
-        agg as (
-          select
-            wallet_id,
-            count(*)::int as trades_count,
-            sum(notional_usd) as volume_usd,
-            max(occurred_at) as last_trade_at
-          from base_events
-          group by wallet_id
-        ),
-        legs as (
-          select
-            wallet_id,
-            market_id,
-            outcome_side,
-            sum(signed_shares) as net_shares,
-            sum(signed_usd) as net_cost
-          from base_events
-          where outcome_side in ('YES', 'NO')
-          group by wallet_id, market_id, outcome_side
-        ),
-        negative_legs as (
-          select count(*)::int as negative_legs
-          from legs
-          where net_shares < -${NET_SHARES_EPSILON}
-        ),
-        leg_marks as (
-          select
-            l.wallet_id,
-            l.net_shares,
-            l.net_cost,
-            case
-              when upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
-                then case
-                  when l.outcome_side = upper(coalesce(um.resolved_outcome, ''))
-                    then l.net_shares
-                  else 0
-                end
-              else
-                case
-                  when l.outcome_side = 'YES' then greatest(
-                    0::numeric,
-                    least(1::numeric, coalesce(um.best_ask, um.best_bid, um.last_price))
-                  )
-                  when l.outcome_side = 'NO' then
-                    case
-                      when coalesce(um.best_ask, um.best_bid, um.last_price) is null then null
-                      else 1::numeric - greatest(
-                        0::numeric,
-                        least(1::numeric, coalesce(um.best_ask, um.best_bid, um.last_price))
-                      )
-                    end
-                  else null
-                end * l.net_shares
-            end as mark_value
-          from legs l
-          left join unified_markets um on um.id = l.market_id
-          where l.net_shares >= ${NET_SHARES_EPSILON}
-        ),
-        pnl as (
-          select
-            wallet_id,
-            sum(mark_value - net_cost) as pnl_usd
-          from leg_marks
-          where mark_value is not null
-          group by wallet_id
-        ),
-        cost_basis as (
-          select
-            wallet_id,
-            sum(
-              case
-                when net_cost > 0 then net_cost
-                else 0::numeric
-              end
-            ) as gross_cost_basis_usd
-          from leg_marks
-          where mark_value is not null
-          group by wallet_id
-        ),
-        resolved_trade_stats as (
-          select
-            wa.wallet_id,
-            count(*) filter (
-              where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
-                and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
-            )::int as resolved_count,
-            count(*) filter (
-              where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
-                and upper(coalesce(wa.outcome_side, '')) = upper(coalesce(um.resolved_outcome, ''))
-            )::int as winning_count
-          from wallet_activity_events wa
-          left join unified_markets um on um.id = wa.market_id
-          where wa.wallet_id = any($1::uuid[])
-            and wa.activity_type in ('delta', 'trade')
-            and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
-            ${whereSince}
-          group by wa.wallet_id
-        ),
-        upserted as (
-          insert into wallet_metrics_snapshots (
-            wallet_id,
-            venue,
-            period,
-            as_of,
-            trades_count,
-            volume_usd,
-            pnl_usd,
-            roi,
-            win_rate,
-            last_trade_at
-          )
-          select
-            agg.wallet_id,
-            null,
-            $2::text,
-            $3::timestamptz,
-            agg.trades_count,
-            agg.volume_usd,
-            pnl.pnl_usd,
-            case
-              when cost_basis.gross_cost_basis_usd is null
-                or cost_basis.gross_cost_basis_usd <= 0
-                or pnl.pnl_usd is null
-                then null
-              else pnl.pnl_usd / cost_basis.gross_cost_basis_usd
-            end as roi,
-            case
-              when rts.resolved_count is null or rts.resolved_count <= 0 then null
-              else rts.winning_count::numeric / rts.resolved_count::numeric
-            end as win_rate,
-            agg.last_trade_at
-          from agg
-          left join pnl on pnl.wallet_id = agg.wallet_id
-          left join cost_basis on cost_basis.wallet_id = agg.wallet_id
-          left join resolved_trade_stats rts on rts.wallet_id = agg.wallet_id
-          on conflict (wallet_id, venue, period, as_of)
-          do update set
-            trades_count = excluded.trades_count,
-            volume_usd = excluded.volume_usd,
-            pnl_usd = excluded.pnl_usd,
-            roi = excluded.roi,
-            win_rate = excluded.win_rate,
-            last_trade_at = excluded.last_trade_at,
-            updated_at = now()
-          returning wallet_id
-        )
-        select negative_legs.negative_legs
-        from negative_legs
-      `,
-      [inputs.walletIds, entry.period, inputs.asOf],
-    );
-    const negativeLegs = Number(metricsResult.rows[0]?.negative_legs ?? 0);
-    if (negativeLegs > 0) {
-      console.warn("[wallets:intel:refresh] pnl skipped negative net-share legs", {
-        period: entry.period,
-        negativeLegs,
-      });
     }
   }
 }
