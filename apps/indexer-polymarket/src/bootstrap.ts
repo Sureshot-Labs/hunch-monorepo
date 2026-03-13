@@ -105,7 +105,7 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
   const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
 
   const polymarketMarketRows = parsedEvents.flatMap((event) =>
-    event.markets.map((market) => mapPolymarketMarketRow(event.id, market, event)),
+    event.markets.map((market) => mapPolymarketMarketRow(event.id, market)),
   );
   const unifiedMarketRows = parsedEvents.flatMap((event) =>
     event.markets.map((market) => mapToUnifiedMarket(market, event.id, event)),

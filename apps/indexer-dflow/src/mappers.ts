@@ -3,7 +3,40 @@ import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types.js";
 import type { DflowSeriesInfo } from "./seriesClient.js";
 
+export type DflowCategory =
+  | "politics"
+  | "crypto"
+  | "sports"
+  | "economics"
+  | "technology"
+  | "entertainment"
+  | "weather"
+  | "health"
+  | "mentions"
+  | "other";
+
 const DFLOW_U64_SENTINEL_MIN = 9e18;
+
+const DFLOW_CATEGORY_MAP = new Map<string, DflowCategory>([
+  ["politics", "politics"],
+  ["crypto", "crypto"],
+  ["sports", "sports"],
+  ["economics", "economics"],
+  ["technology", "technology"],
+  ["entertainment", "entertainment"],
+  ["weather", "weather"],
+  ["health", "health"],
+  ["mentions", "mentions"],
+  ["other", "other"],
+  ["climate", "weather"],
+  ["climate and weather", "weather"],
+  ["financials", "economics"],
+  ["science and technology", "technology"],
+  ["companies", "economics"],
+  ["elections", "politics"],
+  ["world", "politics"],
+  ["social", "other"],
+]);
 
 function n(v: unknown): number | undefined {
   if (v == null) return undefined;
@@ -22,6 +55,12 @@ function s(v: unknown): string | undefined {
   return trimmed.length ? trimmed : undefined;
 }
 
+function normalizeCategoryKey(value: string | null | undefined): string | undefined {
+  const trimmed = s(value);
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase().replace(/\s*&\s*/g, " and ").replace(/\s+/g, " ");
+}
+
 function compactMetadata(
   values: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
@@ -33,6 +72,49 @@ function compactMetadata(
     out[key] = value;
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+export function normalizeDflowCategory(
+  value: string | null | undefined,
+): DflowCategory | undefined {
+  const normalized = normalizeCategoryKey(value);
+  if (!normalized) return undefined;
+  return DFLOW_CATEGORY_MAP.get(normalized);
+}
+
+export function resolveDflowSeriesTagCategory(
+  tags?: string[] | null,
+): DflowCategory | undefined {
+  if (!tags?.length) return undefined;
+  for (const tag of tags) {
+    const normalized = normalizeDflowCategory(tag);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+export function resolveDflowEventCategory(input: {
+  eventCategory?: string | null;
+  seriesCategory?: string | null;
+  seriesTags?: string[] | null;
+}): DflowCategory {
+  return (
+    normalizeDflowCategory(input.eventCategory) ??
+    normalizeDflowCategory(input.seriesCategory) ??
+    resolveDflowSeriesTagCategory(input.seriesTags) ??
+    "other"
+  );
+}
+
+export function resolveDflowMarketCategory(input: {
+  marketCategory?: string | null;
+  eventCategory?: string | null;
+}): DflowCategory {
+  return (
+    normalizeDflowCategory(input.marketCategory) ??
+    normalizeDflowCategory(input.eventCategory) ??
+    "other"
+  );
 }
 
 function pickNumber(
@@ -215,10 +297,19 @@ export function mapToUnifiedEvent(
   const seriesInfo =
     seriesTicker && seriesLookup ? seriesLookup.get(seriesTicker) : undefined;
   const seriesTitleResolved = seriesTitle ?? seriesInfo?.title;
-  const seriesCategory =
-    typeof e.category === "string" && e.category.trim().length
-      ? e.category.trim()
-      : seriesInfo?.category;
+  const seriesTags =
+    Array.isArray(extra.seriesTags) &&
+    extra.seriesTags.every((value) => typeof value === "string")
+      ? (extra.seriesTags as string[])
+      : Array.isArray(extra.series_tags) &&
+            extra.series_tags.every((value) => typeof value === "string")
+        ? (extra.series_tags as string[])
+        : seriesInfo?.tags;
+  const eventCategory = resolveDflowEventCategory({
+    eventCategory: e.category,
+    seriesCategory: seriesInfo?.category,
+    seriesTags,
+  });
   const competition = s(extra.competition);
   const competitionScope = s(extra.competitionScope) ?? s(extra.competition_scope);
   const strikeDate = s(extra.strikeDate) ?? s(extra.strike_date);
@@ -239,7 +330,7 @@ export function mapToUnifiedEvent(
     strikePeriod,
     settlementSources,
     seriesCategory: seriesInfo?.category,
-    seriesTags: seriesInfo?.tags,
+    seriesTags,
     seriesTitle: seriesTitleResolved,
   });
 
@@ -255,7 +346,7 @@ export function mapToUnifiedEvent(
       typeof (e as Record<string, unknown>).description === "string"
         ? ((e as Record<string, unknown>).description as string)
         : undefined,
-    category: seriesCategory,
+    category: eventCategory,
     status,
     series_key: seriesTicker ?? undefined,
     series_title: seriesTitleResolved ?? undefined,
@@ -331,6 +422,7 @@ export function mapToUnifiedMarket(
   market: TDflowMarket,
   eventId: string,
   eventTitle: string,
+  eventCategory: string | null | undefined,
   usdcMint: string,
   requireInitialized: boolean,
 ): DflowMappedMarket | null {
@@ -487,10 +579,13 @@ export function mapToUnifiedMarket(
       typeof (market as Record<string, unknown>).description === "string"
         ? ((market as Record<string, unknown>).description as string)
         : undefined,
-    category:
-      typeof (market as Record<string, unknown>).category === "string"
-        ? ((market as Record<string, unknown>).category as string)
-        : undefined,
+    category: resolveDflowMarketCategory({
+      marketCategory:
+        typeof (market as Record<string, unknown>).category === "string"
+          ? ((market as Record<string, unknown>).category as string)
+          : undefined,
+      eventCategory,
+    }),
     status,
     market_type: "binary",
     open_time,

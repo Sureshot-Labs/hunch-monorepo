@@ -1,8 +1,8 @@
 import { pool } from "./db.js";
 import { log } from "./log.js";
 import {
-  resolvePolymarketEventCategory,
-  resolvePolymarketMarketCategory,
+  resolveDflowEventCategory,
+  resolveDflowMarketCategory,
 } from "./mappers.js";
 
 type Args = {
@@ -75,6 +75,24 @@ function parseArgs(argv: string[]): Args {
   return out;
 }
 
+function toMetadata(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function readSeriesCategory(metadata: unknown): string | null {
+  const record = toMetadata(metadata);
+  return typeof record.seriesCategory === "string" ? record.seriesCategory : null;
+}
+
+function readSeriesTags(metadata: unknown): string[] | null {
+  const record = toMetadata(metadata);
+  if (!Array.isArray(record.seriesTags)) return null;
+  const tags = record.seriesTags.filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  return tags.length ? tags : null;
+}
+
 async function applyUnifiedEventUpdates(updates: UpdateRow[]) {
   if (!updates.length) return;
   await pool.query(
@@ -82,8 +100,8 @@ async function applyUnifiedEventUpdates(updates: UpdateRow[]) {
       update unified_events ue
       set category = x.category
       from jsonb_to_recordset($1::jsonb) as x(id text, category text)
-      where ue.venue = 'polymarket'
-        and ue.venue_event_id = x.id
+      where ue.venue = 'kalshi'
+        and ue.id = x.id
         and ue.category is distinct from x.category
     `,
     [JSON.stringify(updates)],
@@ -97,8 +115,8 @@ async function applyUnifiedMarketUpdates(updates: UpdateRow[]) {
       update unified_markets um
       set category = x.category
       from jsonb_to_recordset($1::jsonb) as x(id text, category text)
-      where um.venue = 'polymarket'
-        and um.venue_market_id = x.id
+      where um.venue = 'kalshi'
+        and um.id = x.id
         and um.category is distinct from x.category
     `,
     [JSON.stringify(updates)],
@@ -118,22 +136,13 @@ async function backfillEvents({
   while (true) {
     const params: unknown[] = [];
     let query = `
-      select
-        pe.id,
-        pe.title,
-        pe.description,
-        pe.category as source_category,
-        pe.raw,
-        ue.id as unified_id,
-        ue.category as unified_category
-      from polymarket_events pe
-      left join unified_events ue
-        on ue.venue = 'polymarket'
-       and ue.venue_event_id = pe.id
+      select id, category, metadata
+      from unified_events
+      where venue = 'kalshi'
     `;
 
     if (cursor !== null) {
-      query += ` where pe.id > $${params.push(cursor)} `;
+      query += ` and id > $${params.push(cursor)} `;
     }
 
     const remaining =
@@ -142,31 +151,25 @@ async function backfillEvents({
 
     const pageSize =
       remaining == null ? batchSize : Math.min(batchSize, remaining);
-    query += ` order by pe.id asc limit $${params.push(pageSize)} `;
+    query += ` order by id asc limit $${params.push(pageSize)} `;
 
     const { rows } = await pool.query<{
-      description: string | null;
+      category: string | null;
       id: string;
-      raw: unknown;
-      source_category: string | null;
-      title: string | null;
-      unified_category: string | null;
-      unified_id: string | null;
+      metadata: unknown;
     }>(query, params);
 
     if (!rows.length) break;
 
     const updates: UpdateRow[] = [];
     for (const row of rows) {
-      if (!row.unified_id) continue;
-      const nextCategory = resolvePolymarketEventCategory({
-        raw: row.raw,
-        explicitCategory: row.source_category,
-        title: row.title,
-        description: row.description,
+      const nextCategory = resolveDflowEventCategory({
+        eventCategory: row.category,
+        seriesCategory: readSeriesCategory(row.metadata),
+        seriesTags: readSeriesTags(row.metadata),
       });
 
-      if (row.unified_category === nextCategory) continue;
+      if (row.category === nextCategory) continue;
       updates.push({ id: row.id, category: nextCategory });
       if (sampleUpdates.length < SAMPLE_LIMIT) {
         sampleUpdates.push({ id: row.id, category: nextCategory });
@@ -188,7 +191,7 @@ async function backfillEvents({
     totalUpdates += updates.length;
     cursor = rows.at(-1)?.id ?? null;
 
-    log.info("Polymarket event category backfill batch", {
+    log.info("DFlow event category backfill batch", {
       batchExamined: rows.length,
       batchUpdates: updates.length,
       dryRun,
@@ -214,24 +217,17 @@ async function backfillMarkets({
     const params: unknown[] = [];
     let query = `
       select
-        pm.id,
-        pm.question,
-        pm.description,
-        pm.category as source_category,
-        pm.raw as market_raw,
-        pe.category as event_source_category,
-        pe.raw as event_raw,
-        um.id as unified_id,
-        um.category as unified_category
-      from polymarket_markets pm
-      join polymarket_events pe on pe.id = pm.event_id
-      left join unified_markets um
-        on um.venue = 'polymarket'
-       and um.venue_market_id = pm.id
+        um.id,
+        um.category,
+        ue.category as event_category,
+        ue.metadata as event_metadata
+      from unified_markets um
+      join unified_events ue on ue.id = um.event_id
+      where um.venue = 'kalshi'
     `;
 
     if (cursor !== null) {
-      query += ` where pm.id > $${params.push(cursor)} `;
+      query += ` and um.id > $${params.push(cursor)} `;
     }
 
     const remaining =
@@ -240,35 +236,30 @@ async function backfillMarkets({
 
     const pageSize =
       remaining == null ? batchSize : Math.min(batchSize, remaining);
-    query += ` order by pm.id asc limit $${params.push(pageSize)} `;
+    query += ` order by um.id asc limit $${params.push(pageSize)} `;
 
     const { rows } = await pool.query<{
-      description: string | null;
-      event_raw: unknown;
-      event_source_category: string | null;
+      category: string | null;
+      event_category: string | null;
+      event_metadata: unknown;
       id: string;
-      market_raw: unknown;
-      question: string | null;
-      source_category: string | null;
-      unified_category: string | null;
-      unified_id: string | null;
     }>(query, params);
 
     if (!rows.length) break;
 
     const updates: UpdateRow[] = [];
     for (const row of rows) {
-      if (!row.unified_id) continue;
-      const nextCategory = resolvePolymarketMarketCategory({
-        marketRaw: row.market_raw,
-        eventRaw: row.event_raw,
-        marketCategory: row.source_category,
-        eventCategory: row.event_source_category,
-        title: row.question,
-        description: row.description,
+      const normalizedEventCategory = resolveDflowEventCategory({
+        eventCategory: row.event_category,
+        seriesCategory: readSeriesCategory(row.event_metadata),
+        seriesTags: readSeriesTags(row.event_metadata),
+      });
+      const nextCategory = resolveDflowMarketCategory({
+        marketCategory: row.category,
+        eventCategory: normalizedEventCategory,
       });
 
-      if (row.unified_category === nextCategory) continue;
+      if (row.category === nextCategory) continue;
       updates.push({ id: row.id, category: nextCategory });
       if (sampleUpdates.length < SAMPLE_LIMIT) {
         sampleUpdates.push({ id: row.id, category: nextCategory });
@@ -290,7 +281,7 @@ async function backfillMarkets({
     totalUpdates += updates.length;
     cursor = rows.at(-1)?.id ?? null;
 
-    log.info("Polymarket market category backfill batch", {
+    log.info("DFlow market category backfill batch", {
       batchExamined: rows.length,
       batchUpdates: updates.length,
       dryRun,
@@ -310,12 +301,12 @@ async function main() {
   try {
     if (runEvents) {
       const events = await backfillEvents(args);
-      log.info("Polymarket event category backfill complete", events);
+      log.info("DFlow event category backfill complete", events);
     }
 
     if (runMarkets) {
       const markets = await backfillMarkets(args);
-      log.info("Polymarket market category backfill complete", markets);
+      log.info("DFlow market category backfill complete", markets);
     }
   } finally {
     await pool.end();
@@ -323,6 +314,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  log.err("Polymarket category backfill failed", error);
+  log.err("DFlow category backfill failed", error);
   process.exitCode = 1;
 });

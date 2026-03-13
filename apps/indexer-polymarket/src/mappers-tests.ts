@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import {
   deriveCategoryFromTags,
   mapToUnifiedMarket,
+  resolvePolymarketEventCategory,
   resolvePolymarketCategory,
+  resolvePolymarketMarketCategory,
 } from "./mappers.js";
 import type { TPolymarketEvent, TPolymarketMarket } from "./types.js";
 
@@ -107,4 +109,64 @@ test("market mapping inherits event tags when market category is missing", () =>
 
   const unified = mapToUnifiedMarket(market, event.id, event);
   assert.equal(unified.category, "politics");
+});
+
+test("event backfill resolver matches live event mapping", () => {
+  const event = {
+    id: "1",
+    title: "Will a major AI company announce a new model?",
+    description: "Science and technology event",
+    category: "science and technology",
+    tags: [],
+    markets: [],
+  } as unknown as TPolymarketEvent;
+
+  const liveCategory = resolvePolymarketCategory({
+    explicitCategory: event.category,
+    tags: (event as Record<string, unknown>).tags,
+    title: event.title,
+    description: event.description,
+  });
+  const backfillCategory = resolvePolymarketEventCategory({
+    raw: event,
+    explicitCategory: event.category,
+    title: event.title,
+    description: event.description,
+  });
+
+  assert.equal(backfillCategory, liveCategory);
+});
+
+test("market backfill resolver matches live market mapping", () => {
+  const event = {
+    id: "31759",
+    title: "Russia x Ukraine ceasefire by March 31, 2026?",
+    description: "A ceasefire agreement between Russia and Ukraine.",
+    category: null,
+    tags: [
+      { label: "Geopolitics", slug: "geopolitics" },
+      { label: "Foreign Policy", slug: "foreign-policy" },
+    ],
+    markets: [],
+  } as unknown as TPolymarketEvent;
+  const market = {
+    id: "561829",
+    question: "Russia x Ukraine ceasefire by March 31, 2026?",
+    description: "A ceasefire agreement between Russia and Ukraine.",
+    category: null,
+    active: true,
+    closed: false,
+  } as unknown as TPolymarketMarket;
+
+  const liveCategory = mapToUnifiedMarket(market, event.id, event).category;
+  const backfillCategory = resolvePolymarketMarketCategory({
+    marketRaw: market,
+    eventRaw: event,
+    marketCategory: market.category,
+    eventCategory: event.category,
+    title: market.question,
+    description: market.description,
+  });
+
+  assert.equal(backfillCategory, liveCategory);
 });

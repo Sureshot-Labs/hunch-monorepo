@@ -628,15 +628,22 @@ export async function resolveHotTickersForWs(): Promise<string[]> {
 
 async function fetchMarketEventInfoByTickers(
   tickers: string[],
-): Promise<Map<string, { eventId: string; eventTitle: string }>> {
+): Promise<
+  Map<string, { eventCategory: string | null; eventId: string; eventTitle: string }>
+> {
   if (!tickers.length) return new Map();
   const { rows } = await pool.query<{
+    event_category: string | null;
     venue_market_id: string;
     event_id: string;
     event_title: string;
   }>(
     `
-      select m.venue_market_id, m.event_id, e.title as event_title
+      select
+        m.venue_market_id,
+        m.event_id,
+        e.title as event_title,
+        e.category as event_category
       from unified_markets m
       join unified_events e on e.id = m.event_id
       where m.venue = 'kalshi'
@@ -645,9 +652,13 @@ async function fetchMarketEventInfoByTickers(
     [tickers],
   );
 
-  const map = new Map<string, { eventId: string; eventTitle: string }>();
+  const map = new Map<
+    string,
+    { eventCategory: string | null; eventId: string; eventTitle: string }
+  >();
   for (const row of rows) {
     map.set(row.venue_market_id, {
+      eventCategory: row.event_category,
       eventId: row.event_id,
       eventTitle: row.event_title,
     });
@@ -798,6 +809,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
           market,
           eventInfo.eventId,
           eventInfo.eventTitle,
+          eventInfo.eventCategory,
           env.solanaUsdcMint,
           env.requireInitialized,
         );
@@ -902,6 +914,7 @@ async function processEvents(
         m,
         unifiedEvent.id,
         unifiedEvent.title,
+        unifiedEvent.category,
         env.solanaUsdcMint,
         env.requireInitialized,
       );

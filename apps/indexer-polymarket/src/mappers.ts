@@ -423,6 +423,17 @@ function countTextMatches(
   return matches;
 }
 
+function toRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+}
+
+function pickStringValue(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  return typeof record[key] === "string" ? (record[key] as string) : undefined;
+}
+
 function parseOutcomePrices(raw: unknown): number[] | null {
   if (raw == null) return null;
   if (Array.isArray(raw)) {
@@ -531,7 +542,6 @@ export function mapTokens(
 
 // New Polymarket-specific mappers
 export function mapPolymarketEventRow(e: TPolymarketEvent) {
-  const extra = e as Record<string, unknown>;
   return {
     id: e.id,
     ticker: e.ticker,
@@ -542,13 +552,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
     start_date: e.startDate ? new Date(e.startDate) : null,
     creation_date: e.creationDate ? new Date(e.creationDate) : null,
     end_date: e.endDate ? new Date(e.endDate) : null,
-    category:
-      resolvePolymarketCategory({
-        explicitCategory: e.category,
-        tags: extra.tags,
-        title: e.title,
-        description: e.description,
-      }) ?? null,
+    category: e.category ?? null,
     image: e.image,
     icon: e.icon,
     active: e.active ?? true,
@@ -579,9 +583,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
 export function mapPolymarketMarketRow(
   eventId: string,
   m: TPolymarketMarket,
-  event?: TPolymarketEvent,
 ) {
-  const extra = m as Record<string, unknown>;
   return {
     id: m.id,
     event_id: eventId,
@@ -590,15 +592,7 @@ export function mapPolymarketMarketRow(
     slug: m.slug,
     resolution_source: m.resolutionSource,
     end_date: m.endDate ? new Date(m.endDate) : null,
-    category:
-      resolvePolymarketCategory({
-        explicitCategory: m.category ?? event?.category ?? null,
-        tags:
-          (Array.isArray(extra.tags) && extra.tags) ||
-          ((event as Record<string, unknown> | undefined)?.tags as unknown),
-        title: m.question,
-        description: m.description,
-      }) ?? null,
+    category: m.category ?? null,
     liquidity: m.liquidity,
     start_date: m.startDate ? new Date(m.startDate) : null,
     image: m.image,
@@ -848,29 +842,61 @@ export function resolvePolymarketCategory(input: {
   );
 }
 
-export function resolvePolymarketCategoryFromRaw(
-  raw: unknown,
-  fallback: {
-    explicitCategory?: string | null;
-    title?: string | null;
-    description?: string | null;
-  } = {},
-): PolymarketCategory {
-  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+export function resolvePolymarketEventCategory(input: {
+  raw?: unknown;
+  explicitCategory?: string | null;
+  tags?: unknown;
+  title?: string | null;
+  description?: string | null;
+}): PolymarketCategory {
+  const record = toRecord(input.raw);
   const explicitCategory =
-    (typeof record.category === "string" ? record.category : undefined) ??
-    fallback.explicitCategory;
-  const title =
-    (typeof record.title === "string" ? record.title : undefined) ??
-    (typeof record.question === "string" ? record.question : undefined) ??
-    fallback.title;
+    pickStringValue(record, "category") ?? input.explicitCategory;
+  const title = pickStringValue(record, "title") ?? input.title;
   if (!title) return normalizeExplicitCategory(explicitCategory) ?? "other";
   const description =
-    (typeof record.description === "string" ? record.description : undefined) ??
-    fallback.description;
+    pickStringValue(record, "description") ?? input.description;
   return resolvePolymarketCategory({
     explicitCategory,
-    tags: record.tags,
+    tags: Array.isArray(record.tags) ? record.tags : input.tags,
+    title,
+    description,
+  });
+}
+
+export function resolvePolymarketMarketCategory(input: {
+  marketRaw?: unknown;
+  eventRaw?: unknown;
+  marketCategory?: string | null;
+  eventCategory?: string | null;
+  marketTags?: unknown;
+  eventTags?: unknown;
+  title?: string | null;
+  description?: string | null;
+}): PolymarketCategory {
+  const marketRecord = toRecord(input.marketRaw);
+  const eventRecord = toRecord(input.eventRaw);
+  const explicitCategory =
+    pickStringValue(marketRecord, "category") ??
+    input.marketCategory ??
+    pickStringValue(eventRecord, "category") ??
+    input.eventCategory;
+  const title =
+    pickStringValue(marketRecord, "question") ??
+    pickStringValue(marketRecord, "title") ??
+    input.title;
+  if (!title) return normalizeExplicitCategory(explicitCategory) ?? "other";
+  const description =
+    pickStringValue(marketRecord, "description") ?? input.description;
+  const marketTags = Array.isArray(marketRecord.tags)
+    ? marketRecord.tags
+    : input.marketTags;
+  const eventTags = Array.isArray(eventRecord.tags)
+    ? eventRecord.tags
+    : input.eventTags;
+  return resolvePolymarketCategory({
+    explicitCategory,
+    tags: marketTags ?? eventTags,
     title,
     description,
   });
@@ -930,7 +956,8 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     venue_event_id: e.id,
     title: e.title,
     description: e.description ?? undefined,
-    category: resolvePolymarketCategory({
+    category: resolvePolymarketEventCategory({
+      raw: e,
       explicitCategory: e.category,
       tags: extra.tags,
       title: e.title,
@@ -1047,11 +1074,13 @@ export function mapToUnifiedMarket(
     event_id: `polymarket:${eventId}`,
     title,
     description: m.description ?? undefined,
-    category: resolvePolymarketCategory({
-      explicitCategory: m.category ?? event?.category ?? null,
-      tags:
-        (Array.isArray(extra.tags) && extra.tags) ||
-        ((event as Record<string, unknown> | undefined)?.tags as unknown),
+    category: resolvePolymarketMarketCategory({
+      marketRaw: m,
+      eventRaw: event,
+      marketCategory: m.category,
+      eventCategory: event?.category ?? null,
+      marketTags: Array.isArray(extra.tags) ? extra.tags : undefined,
+      eventTags: (event as Record<string, unknown> | undefined)?.tags,
       title: m.question,
       description: m.description,
     }),

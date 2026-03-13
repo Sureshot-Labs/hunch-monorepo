@@ -929,9 +929,7 @@ function enqueueEventRefresh(eventId: string): void {
         const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
         const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
         const polymarketMarketRows = parsedEvents.flatMap((event) =>
-          event.markets.map((market) =>
-            mapPolymarketMarketRow(event.id, market, event),
-          ),
+          event.markets.map((market) => mapPolymarketMarketRow(event.id, market)),
         );
         const unifiedMarketRows = parsedEvents.flatMap((event) =>
           event.markets.map((market) =>
