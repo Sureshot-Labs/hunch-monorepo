@@ -1538,24 +1538,26 @@ async function loadWalletMetricMarketMarkMap(
   return byMarket;
 }
 
-async function refreshThirtyDayMetrics(
+async function refreshLedgerWindowMetrics(
   client: Queryable,
   inputs: {
     walletIds: string[];
     asOf: Date;
+  } & {
+    period: "30d" | "all";
+    since: Date | null;
   },
 ): Promise<void> {
-  const since = periodStart(inputs.asOf, 30);
   const aggregates = await loadWalletMetricsAggregateRows(client, {
     walletIds: inputs.walletIds,
     asOf: inputs.asOf,
-    since,
+    since: inputs.since,
   });
 
   const ledgerRows = await loadWalletMetricLedgerRows(client, {
     walletIds: inputs.walletIds,
     asOf: inputs.asOf,
-    since,
+    since: inputs.since,
   });
 
   const ledgerRowsByKey = new Map<string, WalletPositionLedgerRow[]>();
@@ -1689,18 +1691,49 @@ async function refreshThirtyDayMetrics(
           last_trade_at: row.lastTradeAt?.toISOString() ?? null,
         })),
       ),
-      "30d",
+      inputs.period,
       inputs.asOf,
     ],
   );
 
   if (approximateWalletCount > 0 || unmarkedOpenLegCount > 0) {
-    console.warn("[wallets:intel:refresh] 30d pnl uses approximate ledger replay", {
-      walletCount: upsertRows.length,
-      approximateWalletCount,
-      unmarkedOpenLegCount,
-    });
+    console.warn(
+      `[wallets:intel:refresh] ${inputs.period} pnl uses approximate ledger replay`,
+      {
+        walletCount: upsertRows.length,
+        approximateWalletCount,
+        unmarkedOpenLegCount,
+      },
+    );
   }
+}
+
+async function refreshThirtyDayMetrics(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+  },
+): Promise<void> {
+  await refreshLedgerWindowMetrics(client, {
+    ...inputs,
+    period: "30d",
+    since: periodStart(inputs.asOf, 30),
+  });
+}
+
+async function refreshAllTimeMetrics(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+  },
+): Promise<void> {
+  await refreshLedgerWindowMetrics(client, {
+    ...inputs,
+    period: "all",
+    since: null,
+  });
 }
 
 async function refreshMetrics(
@@ -1721,6 +1754,10 @@ async function refreshMetrics(
   for (const entry of periods) {
     if (entry.period === "30d") {
       await refreshThirtyDayMetrics(client, inputs);
+      continue;
+    }
+    if (entry.period === "all") {
+      await refreshAllTimeMetrics(client, inputs);
       continue;
     }
     const whereSince = entry.since
