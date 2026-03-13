@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
 
 import { isRetryableHttpStatus, parseRetryAfterMs } from "@hunch/shared";
 
@@ -10,6 +11,7 @@ import {
   listActiveRuntimePolicies,
 } from "./repos/runtime-policies.js";
 import {
+  getIntelPolicyDefaults,
   resolveIntelPolicy,
   resolveSignalWindowHours,
 } from "./services/runtime-policies.js";
@@ -35,6 +37,10 @@ import {
 import { buildWalletThirtyDayMetricsUpsertRows } from "./services/wallet-metrics-30d.js";
 import {
   applyResolvedTradeStatsToMetrics,
+  buildWalletAttributionInputMapFromSignalItems,
+  buildWalletSignalItemFromSignalRow,
+  buildWalletSignalItemFromTopChange,
+  buildWalletSummaryItem,
   resolveEntryBracketKey,
   resolveWalletAvgTradeSizeUsd,
   resolveWalletBadges,
@@ -42,6 +48,7 @@ import {
   resolveWalletSecondaryLabels,
   resolveWalletHeadlineTag,
   resolveWalletTopLabelVariant,
+  signalItemToTopChange,
   shouldReturnFilterTooBroad,
 } from "./routes/wallet-intel.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
@@ -69,6 +76,12 @@ import {
   computeMmSuspected,
 } from "./services/wallet-intel-mm.js";
 import {
+  filterPrefetchedPolymarketOwnerBalances,
+  prefetchFollowedPolymarketOwnerBalances,
+  resolvePolymarketOwnerAddresses,
+  resolvePolymarketTrackedTokenUniverse,
+} from "./services/positions-sync.js";
+import {
   computeProfileSideBias,
   mapWhaleMarketToProfileMarket,
   normalizeWhaleProfile,
@@ -88,6 +101,108 @@ type TestCase = {
   name: string;
   run: () => void | Promise<void>;
 };
+
+const testErc1155Iface = new Interface([
+  "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+]);
+const testAttributionPolicy = getIntelPolicyDefaults("wallet_intel_attribution");
+
+function createTestCandidateWalletRow(
+  overrides: Partial<Parameters<typeof buildWalletSummaryItem>[0]> = {},
+): Parameters<typeof buildWalletSummaryItem>[0] {
+  return {
+    id: "wallet-1",
+    address: "0x0000000000000000000000000000000000000001",
+    chain: "polygon",
+    label: "Alpha",
+    is_system_flagged: false,
+    first_seen_at: new Date("2026-01-01T00:00:00.000Z"),
+    last_seen_at: new Date("2026-01-02T00:00:00.000Z"),
+    profile: null,
+    profile_updated_at: null,
+    user_name: "alpha",
+    user_label: "watch",
+    user_label_color: "gold",
+    tags: [
+      {
+        slug: "whale",
+        label: "Whale",
+        tag_type: "performance",
+        is_system: true,
+      },
+    ],
+    metrics: {
+      period: "30d",
+      as_of: new Date("2026-01-02T00:00:00.000Z"),
+      trades_count: 4,
+      volume_usd: "1000",
+      pnl_usd: "125",
+      roi: "0.125",
+      win_rate: "0.75",
+      avg_hold_hours: "12",
+      last_trade_at: new Date("2026-01-02T00:00:00.000Z"),
+    },
+    ...overrides,
+  };
+}
+
+function createTestSummaryStats(
+  overrides: Partial<Parameters<typeof buildWalletSummaryItem>[1]> = {},
+): Parameters<typeof buildWalletSummaryItem>[1] {
+  return {
+    walletId: "wallet-1",
+    windowHours: 24,
+    lastActivityAt: new Date("2026-01-02T12:00:00.000Z"),
+    netChangeUsd: 150,
+    netChangeYesUsd: 120,
+    netChangeNoUsd: 30,
+    countsNew: 1,
+    countsExit: 0,
+    countsIncrease: 2,
+    countsReduce: 1,
+    countsFlip: 0,
+    unusualScore: 0.8,
+    unusualTier: "very_unusual",
+    ...overrides,
+  } as Parameters<typeof buildWalletSummaryItem>[1];
+}
+
+function createTestSignalRow(
+  overrides: Partial<Parameters<typeof buildWalletSignalItemFromSignalRow>[0]["signalRow"]> = {},
+): Parameters<typeof buildWalletSignalItemFromSignalRow>[0]["signalRow"] {
+  return {
+    walletId: "wallet-1",
+    marketId: "market-1",
+    marketTitle: "Market",
+    marketImage: null,
+    marketIcon: null,
+    eventId: "event-1",
+    eventTitle: "Event",
+    eventImage: null,
+    eventIcon: null,
+    venue: "polymarket",
+    marketStatus: "ACTIVE",
+    closeTime: new Date("2026-01-03T00:00:00.000Z"),
+    expirationTime: null,
+    resolvedOutcome: null,
+    category: "crypto",
+    action: "OPENED",
+    positionSide: "YES",
+    deltaShares: 25,
+    deltaUsd: 15,
+    stakeUsd: 15,
+    odds: 0.2,
+    potentialPayoutUsd: 75,
+    idleDays: 12,
+    priorDistinctMarkets: 1,
+    signalScore: 0.92,
+    signalType: "longshot_large_late",
+    lateBucket: "late",
+    occurredAt: new Date("2026-01-02T12:00:00.000Z"),
+    reasonCodes: ["late_entry", "longshot_odds"],
+    ...overrides,
+  };
+}
 
 const tests: TestCase[] = [
   {
@@ -1244,6 +1359,227 @@ const tests: TestCase[] = [
         "b",
         "c",
       ]);
+    },
+  },
+  {
+    name: "polymarket prefetch helpers keep owner priority and numeric token union",
+    run: () => {
+      const signer = "0x0000000000000000000000000000000000000001";
+      const funder = "0x0000000000000000000000000000000000000002";
+
+      assert.deepEqual(resolvePolymarketOwnerAddresses(signer, null), [signer]);
+      assert.deepEqual(resolvePolymarketOwnerAddresses(signer, signer), [signer]);
+      assert.deepEqual(resolvePolymarketOwnerAddresses(signer, funder), [
+        funder,
+        signer,
+      ]);
+      assert.deepEqual(
+        resolvePolymarketTrackedTokenUniverse(
+          ["1", "2", "bad", "", "2"],
+          ["2", "3", "abc", "4"],
+        ),
+        ["1", "2", "3", "4"],
+      );
+    },
+  },
+  {
+    name: "followed polymarket prefetch includes tracked ids and signer-funder balances",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const signer = "0x0000000000000000000000000000000000000001";
+      const funder = "0x0000000000000000000000000000000000000002";
+
+      const pool = {
+        query: async (sql: string) => {
+          if (sql.includes("from user_venue_credentials")) {
+            return {
+              rows: [{ funder_address: funder }],
+            };
+          }
+          if (sql.includes("with watchlist_tokens")) {
+            return {
+              rows: [{ token_id: "1" }, { token_id: "10" }],
+            };
+          }
+          throw new Error(`Unexpected query in test: ${sql.slice(0, 60)}`);
+        },
+      } as unknown as import("@hunch/infra").Pool;
+
+      globalThis.fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          params?: Array<{ data?: string } | string>;
+        };
+        const call = body.params?.[0];
+        if (!call || typeof call === "string" || typeof call.data !== "string") {
+          throw new Error("Expected ERC1155 eth_call payload");
+        }
+        const [owners, ids] = testErc1155Iface.decodeFunctionData(
+          "balanceOfBatch",
+          call.data,
+        ) as unknown as [string[], bigint[]];
+        const owner = owners[0]?.toLowerCase() ?? "";
+        const balances = ids.map((id) => {
+          const tokenId = id.toString();
+          if (owner === funder.toLowerCase()) {
+            return tokenId === "9" ? 4_000_000n : 0n;
+          }
+          if (tokenId === "1") return 5_000_000n;
+          if (tokenId === "10") return 2_000_000n;
+          return 0n;
+        });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: testErc1155Iface.encodeFunctionResult("balanceOfBatch", [
+              balances,
+            ]),
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      try {
+        const prefetched = await prefetchFollowedPolymarketOwnerBalances(pool, {
+          userId: "user-1",
+          walletAddress: signer,
+          trackedTokenIds: ["9", "10", "bad"],
+        });
+
+        assert.deepEqual(prefetched.owners, [funder, signer]);
+        assert.deepEqual(prefetched.candidateTokenIds, ["1", "10"]);
+        assert.deepEqual(prefetched.trackedTokenIds, ["9", "10"]);
+        assert.deepEqual(prefetched.unionTokenIds, ["1", "10", "9"]);
+        assert.equal(prefetched.rpcCallEstimate, 2);
+        assert.equal(prefetched.rpcCallCount, 2);
+        assert.deepEqual(
+          prefetched.balancesByOwner.get(funder.toLowerCase())?.map((row) => row.tokenId),
+          ["9"],
+        );
+        assert.deepEqual(
+          prefetched.balancesByOwner.get(signer.toLowerCase())?.map((row) => row.tokenId),
+          ["1", "10"],
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "prefetched polymarket balances filter to sync candidate token ids",
+    run: () => {
+      const signer = "0x0000000000000000000000000000000000000001";
+      const funder = "0x0000000000000000000000000000000000000002";
+      const filtered = filterPrefetchedPolymarketOwnerBalances({
+        prefetched: {
+          owners: [funder, signer],
+          funderAddress: funder,
+          candidateTokenIds: ["1"],
+          trackedTokenIds: ["9"],
+          unionTokenIds: ["1", "9"],
+          rpcCallEstimate: 2,
+          rpcCallCount: 2,
+          balancesByOwner: new Map([
+            [funder.toLowerCase(), [{ tokenId: "9", size: "4.0" }]],
+            [
+              signer.toLowerCase(),
+              [
+                { tokenId: "1", size: "5.0" },
+                { tokenId: "9", size: "1.0" },
+              ],
+            ],
+          ]),
+        },
+        owners: [funder, signer],
+        tokenIds: ["1"],
+      });
+
+      assert.deepEqual(filtered, [
+        { owner: funder, held: [] },
+        { owner: signer, held: [{ tokenId: "1", size: "5.0" }] },
+      ]);
+    },
+  },
+  {
+    name: "wallet summary helper keeps summary stats and open-position overlay aligned",
+    run: () => {
+      const signalItem = buildWalletSignalItemFromSignalRow({
+        candidate: createTestCandidateWalletRow(),
+        signalRow: createTestSignalRow(),
+        mmDiagnostics: null,
+        pageLabels: null,
+        attributionPolicy: testAttributionPolicy,
+      });
+      const item = buildWalletSummaryItem(
+        createTestCandidateWalletRow(),
+        createTestSummaryStats(),
+        {
+          followersCount: 7,
+          topChanges: [signalItemToTopChange(signalItem)],
+          openPositionStats: {
+            trackedExposureUsd: 320,
+            openPositionsCount: 4,
+            openMarketsCount: 3,
+            avgOpenPositionSizeUsd: 80,
+            avgOpenEntryPrice: 0.42,
+            avgOpenEntryApprox: true,
+          },
+        },
+      );
+
+      assert.equal(item.walletId, "wallet-1");
+      assert.equal(item.followersCount, 7);
+      assert.equal(item.netChangeUsd, 150);
+      assert.equal(item.trackedExposureUsd, 320);
+      assert.equal(item.openPositionsCount, 4);
+      assert.equal(item.openMarketsCount, 3);
+      assert.equal(item.avgOpenEntryPrice, 0.42);
+      assert.equal(item.avgOpenEntryApprox, true);
+      assert.deepEqual(item.topChanges.map((change) => change.marketId), ["market-1"]);
+    },
+  },
+  {
+    name: "wallet signal helper paths stay aligned and attribution inputs aggregate top changes",
+    run: () => {
+      const candidate = createTestCandidateWalletRow();
+      const fastPathItem = buildWalletSignalItemFromSignalRow({
+        candidate,
+        signalRow: createTestSignalRow(),
+        mmDiagnostics: null,
+        pageLabels: {
+          unusualSize: true,
+          onPattern: false,
+          hasProfileCategories: true,
+          category: "crypto",
+        },
+        attributionPolicy: testAttributionPolicy,
+      });
+      const fallbackItem = buildWalletSignalItemFromTopChange({
+        candidate,
+        change: signalItemToTopChange(fastPathItem),
+        mmDiagnostics: null,
+        attributionPolicy: testAttributionPolicy,
+      });
+      const attributionInputs = buildWalletAttributionInputMapFromSignalItems([
+        fastPathItem,
+        {
+          ...fallbackItem,
+          marketId: "market-2",
+          occurredAt: new Date("2026-01-02T13:00:00.000Z"),
+        },
+      ]);
+
+      assert.equal(fallbackItem.marketId, fastPathItem.marketId);
+      assert.deepEqual(fallbackItem.reasonCodes, fastPathItem.reasonCodes);
+      assert.deepEqual(fallbackItem.displayReasons, fastPathItem.displayReasons);
+      assert.equal(fallbackItem.severity, fastPathItem.severity);
+      assert.deepEqual(
+        attributionInputs.get("wallet-1")?.topChanges.map((change) => change.marketId),
+        ["market-1", "market-2"],
+      );
     },
   },
   {

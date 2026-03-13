@@ -1,6 +1,9 @@
 import type { PoolClient } from "pg";
 
-import type { WalletActivityTopChange } from "./wallet-activity-summary.js";
+import type {
+  WalletActivitySignalSummary,
+  WalletActivityTopChange,
+} from "./wallet-activity-summary.js";
 import type { WalletIntelAttributionPolicy } from "./runtime-policies.js";
 
 export type WalletAttributionPrimaryKey =
@@ -78,6 +81,7 @@ export type WalletAttributionInput = {
   inferredWinRate?: number | null;
   inferredResolvedCount?: number | null;
   trackedExposureUsd?: number | null;
+  signalSummary?: WalletActivitySignalSummary | null;
   topChanges?: WalletActivityTopChange[] | null;
 };
 
@@ -400,6 +404,44 @@ function normalizedReasonCodes(change: WalletActivityTopChange): string[] {
     if (label?.trim()) merged.add(label.trim());
   }
   return Array.from(merged);
+}
+
+function deriveSignalSummaryFromTopChanges(
+  topChanges: WalletActivityTopChange[],
+): WalletActivitySignalSummary {
+  const signalScores = topChanges
+    .map((change) => toNumber(change.signalScore))
+    .filter((value): value is number => value != null);
+  return {
+    criticalSignals30d: signalScores.filter((score) => score >= 0.9).length,
+    avgSignalScore30d:
+      signalScores.length > 0
+        ? signalScores.reduce((sum, value) => sum + value, 0) /
+          signalScores.length
+        : null,
+    hasReactivatedAfterIdle: topChanges.some((change) =>
+      normalizedReasonCodes(change).includes("reactivated_after_idle"),
+    ),
+    hasLateEntry: topChanges.some((change) => {
+      const labels = new Set(normalizedReasonCodes(change));
+      return (
+        labels.has("entered_late") ||
+        change.lateBucket === "late" ||
+        change.lateBucket === "very_late"
+      );
+    }),
+    hasVeryLateEntry: topChanges.some(
+      (change) => change.lateBucket === "very_late",
+    ),
+    hasUnusualBehavior: topChanges.some((change) => {
+      const labels = new Set(normalizedReasonCodes(change));
+      return (
+        labels.has("unusual_size") ||
+        labels.has("out_of_pattern") ||
+        labels.has("high_risk_longshot")
+      );
+    }),
+  };
 }
 
 function sortReasonCodes(reasonCodes: string[]): string[] {
@@ -1013,7 +1055,7 @@ function deriveSecondaryAndSupportingLabels(inputs: {
   computed: WalletComputedStats;
   venueStatsMap: Map<VenueKey, WalletVenueStats>;
   hasWhaleTag: boolean;
-  topChanges: WalletActivityTopChange[];
+  signalSummary: WalletActivitySignalSummary;
 }): { secondary: WalletAttributionLabelKey[]; supporting: WalletAttributionLabelKey[]; reasons: string[] } {
   const secondary = new Set<WalletAttributionLabelKey>();
   const supporting = new Set<WalletAttributionLabelKey>();
@@ -1111,31 +1153,19 @@ function deriveSecondaryAndSupportingLabels(inputs: {
 
   const tagSlugs = new Set((inputs.wallet.tags ?? []).map((tag) => tag.slug));
   if (tagSlugs.has("fresh")) secondary.add("fresh_wallet");
-  const hasReactivated = inputs.topChanges.some((change) =>
-    normalizedReasonCodes(change).includes("reactivated_after_idle"),
-  );
-  if (tagSlugs.has("dormant") && hasReactivated) {
+  if (tagSlugs.has("dormant") && inputs.signalSummary.hasReactivatedAfterIdle) {
     secondary.add("dormant_wake_up");
   }
   if (tagSlugs.has("whale") || inputs.hasWhaleTag) {
     reasons.add("whale_tag");
   }
 
-  for (const change of inputs.topChanges) {
-    const labels = new Set(normalizedReasonCodes(change));
-    if (labels.has("entered_late") || change.lateBucket === "late" || change.lateBucket === "very_late") {
-      supporting.add("late_entry");
-    }
-    if (change.lateBucket === "very_late") {
-      supporting.add("close_to_settlement");
-    }
-    if (
-      labels.has("unusual_size") ||
-      labels.has("out_of_pattern") ||
-      labels.has("high_risk_longshot")
-    ) {
-      supporting.add("unusual_behavior");
-    }
+  if (inputs.signalSummary.hasLateEntry) supporting.add("late_entry");
+  if (inputs.signalSummary.hasVeryLateEntry) {
+    supporting.add("close_to_settlement");
+  }
+  if (inputs.signalSummary.hasUnusualBehavior) {
+    supporting.add("unusual_behavior");
   }
 
   return {
@@ -1194,14 +1224,10 @@ export async function buildWalletAttributionMap(
       } satisfies WalletComputedStats);
     const hasWhaleTag = (wallet.tags ?? []).some((tag) => tag.slug === "whale");
     const topChanges = wallet.topChanges ?? [];
-    const signalScores = topChanges
-      .map((change) => toNumber(change.signalScore))
-      .filter((value): value is number => value != null);
-    const criticalSignals30d = signalScores.filter((score) => score >= 0.9).length;
-    const avgSignalScore30d =
-      signalScores.length > 0
-        ? signalScores.reduce((sum, value) => sum + value, 0) / signalScores.length
-        : null;
+    const signalSummary =
+      wallet.signalSummary ?? deriveSignalSummaryFromTopChanges(topChanges);
+    const criticalSignals30d = signalSummary.criticalSignals30d;
+    const avgSignalScore30d = signalSummary.avgSignalScore30d;
 
     const candidateByKey = new Map<WalletAttributionPrimaryKey, CandidateScore>();
     for (const [venue, stats] of venueStatsMap.entries()) {
@@ -1267,7 +1293,7 @@ export async function buildWalletAttributionMap(
       computed,
       venueStatsMap,
       hasWhaleTag,
-      topChanges,
+      signalSummary,
     });
     const reasons = new Set<string>(labelResult.reasons);
     if (primaryCandidate) {

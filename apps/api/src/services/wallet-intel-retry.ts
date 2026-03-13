@@ -11,6 +11,7 @@ export type WalletIntelRetryTelemetry = {
   source: string;
   attempted: number;
   succeeded: number;
+  skipped: number;
   retried: number;
   failed: number;
   rateLimited: number;
@@ -27,6 +28,7 @@ export function createWalletIntelRetryTelemetry(
     source,
     attempted: 0,
     succeeded: 0,
+    skipped: 0,
     retried: 0,
     failed: 0,
     rateLimited: 0,

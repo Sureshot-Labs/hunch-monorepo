@@ -14,7 +14,13 @@ import {
   fetchSolanaTokenBalancesByOwner,
   type SolanaTokenBalance,
 } from "./services/solana-rpc.js";
-import { syncPositionsForUserWallet } from "./services/positions-sync.js";
+import {
+  estimateErc1155BalanceRpcCalls,
+  prefetchFollowedPolymarketOwnerBalances,
+  readPrefetchRpcTelemetry,
+  syncPositionsForUserWallet,
+  type PrefetchedPolymarketOwnerBalances,
+} from "./services/positions-sync.js";
 import {
   normalizeOutcomeSideForStorage,
   shouldSuppressLegacySideTransitionDelta,
@@ -49,6 +55,7 @@ type WalletIntelRefreshTelemetry = {
   holdersAlchemyPolygon: WalletIntelRetryTelemetry;
   holdersAlchemyBase: WalletIntelRetryTelemetry;
   holdersSolana: WalletIntelRetryTelemetry;
+  followedPrefetchPolymarket: WalletIntelRetryTelemetry;
   followedPositionsPolymarket: WalletIntelRetryTelemetry;
   followedPositionsLimitless: WalletIntelRetryTelemetry;
   followedPositionsKalshi: WalletIntelRetryTelemetry;
@@ -113,6 +120,9 @@ function createRefreshTelemetry(): WalletIntelRefreshTelemetry {
     ),
     holdersAlchemyBase: createWalletIntelRetryTelemetry("holders_alchemy_base"),
     holdersSolana: createWalletIntelRetryTelemetry("holders_solana"),
+    followedPrefetchPolymarket: createWalletIntelRetryTelemetry(
+      "followed_prefetch_polymarket",
+    ),
     followedPositionsPolymarket: createWalletIntelRetryTelemetry(
       "followed_positions_polymarket",
     ),
@@ -150,6 +160,7 @@ function logRefreshTelemetry(telemetry: WalletIntelRefreshTelemetry) {
         {
           attempted: bucket.attempted,
           succeeded: bucket.succeeded,
+          skipped: bucket.skipped,
           retried: bucket.retried,
           failed: bucket.failed,
           rateLimited: bucket.rateLimited,
@@ -206,9 +217,12 @@ function logRetryableFailureSummary(
 async function runWithTelemetry<T>(
   bucket: WalletIntelRetryTelemetry,
   fn: () => Promise<T>,
+  options?: { countActualCall?: boolean },
 ): Promise<T> {
   bucket.attempted += 1;
-  bucket.actualCalls += 1;
+  if (options?.countActualCall !== false) {
+    bucket.actualCalls += 1;
+  }
   try {
     const result = await fn();
     bucket.succeeded += 1;
@@ -224,6 +238,12 @@ async function runWithTelemetry<T>(
     }
     throw error;
   }
+}
+
+function markTelemetrySkipped(bucket: WalletIntelRetryTelemetry) {
+  bucket.skipped += 1;
+  if (bucket.failed > 0) bucket.failed -= 1;
+  if (bucket.otherErrors > 0) bucket.otherErrors -= 1;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -886,29 +906,22 @@ async function snapshotFollowedWalletHoldingsEvm(
     tokenIds: string[];
     tokenIndex: Map<string, TokenIndexEntry>;
     occurredAt: Date;
+    prefetchedBalances?: Array<{ tokenId: string; size: string }> | null;
   },
 ): Promise<number> {
   if (inputs.tokenIds.length === 0) return 0;
-  const chunkSize = 200;
-  let inserted = 0;
+  const trackedTokenIds = new Set(inputs.tokenIds);
 
-  for (let i = 0; i < inputs.tokenIds.length; i += chunkSize) {
-    const chunk = inputs.tokenIds.slice(i, i + chunkSize);
-    const balances = await fetchErc1155BalancesByOwner({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.rpcTimeoutMs,
-      contractAddress: inputs.contractAddress,
-      owner: inputs.address,
-      tokenIds: chunk,
-    });
-
-    for (const tokenId of chunk) {
-      const balance = balances.get(tokenId) ?? 0n;
-      if (balance <= 0n) continue;
-      const entry = inputs.tokenIndex.get(tokenId);
+  const snapshotTokenBalances = async (
+    tokenBalances: Array<{ tokenId: string; size: string }>,
+  ) => {
+    let inserted = 0;
+    for (const balance of tokenBalances) {
+      if (!trackedTokenIds.has(balance.tokenId)) continue;
+      const entry = inputs.tokenIndex.get(balance.tokenId);
       if (!entry) continue;
 
-      const shares = Number(ethers.formatUnits(balance, 6));
+      const shares = Number(balance.size);
       if (!Number.isFinite(shares) || shares <= 0) continue;
 
       const sizeUsd =
@@ -927,7 +940,7 @@ async function snapshotFollowedWalletHoldingsEvm(
         metadata: {
           source: "followed_wallet",
           tokenId: entry.tokenId,
-          onchainTokenId: tokenId,
+          onchainTokenId: balance.tokenId,
           shares,
         },
         snapshotAt: inputs.occurredAt,
@@ -935,9 +948,526 @@ async function snapshotFollowedWalletHoldingsEvm(
 
       inserted += 1;
     }
+    return inserted;
+  };
+
+  if (inputs.prefetchedBalances) {
+    return snapshotTokenBalances(inputs.prefetchedBalances);
+  }
+
+  const chunkSize = 200;
+  let inserted = 0;
+
+  for (let i = 0; i < inputs.tokenIds.length; i += chunkSize) {
+    const chunk = inputs.tokenIds.slice(i, i + chunkSize);
+    const balances = await fetchErc1155BalancesByOwner({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.rpcTimeoutMs,
+      contractAddress: inputs.contractAddress,
+      owner: inputs.address,
+      tokenIds: chunk,
+    });
+    const chunkBalances: Array<{ tokenId: string; size: string }> = [];
+    for (const tokenId of chunk) {
+      const balance = balances.get(tokenId) ?? 0n;
+      if (balance <= 0n) continue;
+      chunkBalances.push({
+        tokenId,
+        size: ethers.formatUnits(balance, 6),
+      });
+    }
+    inserted += await snapshotTokenBalances(chunkBalances);
   }
 
   return inserted;
+}
+
+type FollowedWalletRow = {
+  user_id: string;
+  wallet_id: string;
+  address: string;
+  chain: Chain;
+};
+
+type FollowedCollectionResult = {
+  processed: number;
+  rowInserts: number;
+  activityRows: number;
+};
+
+async function collectFollowedWalletSnapshotRows(
+  client: Queryable,
+  inputs: {
+    followedWallets: FollowedWalletRow[];
+    snapshotAt: Date;
+    tokenIdsByVenue: Record<Venue, string[]>;
+    tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>>;
+    telemetry: WalletIntelRefreshTelemetry;
+    followedFetchConcurrency: number;
+    touchedWalletIds: Set<string>;
+    poolClient: typeof pool;
+  },
+): Promise<FollowedCollectionResult> {
+  const followedByChain = { polygon: 0, base: 0, solana: 0 };
+  for (const followed of inputs.followedWallets) {
+    followedByChain[followed.chain] += 1;
+  }
+
+  const estPolygonHoldingsRpcCalls =
+    estimateErc1155BalanceRpcCalls(
+      followedByChain.polygon,
+      inputs.tokenIdsByVenue.polymarket,
+    );
+  const estBaseHoldingsRpcCalls =
+    estimateErc1155BalanceRpcCalls(
+      followedByChain.base,
+      inputs.tokenIdsByVenue.limitless,
+    );
+  const estSolanaHoldingsRpcCalls =
+    inputs.tokenIdsByVenue.kalshi.length > 0 ? followedByChain.solana : 0;
+  inputs.telemetry.followedSnapshotPolygon.estimatedCalls +=
+    followedByChain.polygon;
+  inputs.telemetry.followedSnapshotBase.estimatedCalls += estBaseHoldingsRpcCalls;
+  inputs.telemetry.followedSnapshotSolana.estimatedCalls +=
+    estSolanaHoldingsRpcCalls;
+  inputs.telemetry.followedPositionsPolymarket.estimatedCalls +=
+    followedByChain.polygon;
+  inputs.telemetry.followedPositionsLimitless.estimatedCalls += followedByChain.base;
+  inputs.telemetry.followedPositionsKalshi.estimatedCalls +=
+    followedByChain.solana;
+
+  const followedPrefetchPolymarketRetryable = createRetryableFailureSummary();
+  const followedPositionsPolymarketRetryable = createRetryableFailureSummary();
+  const followedSnapshotPolygonRetryable = createRetryableFailureSummary();
+  const followedSnapshotBaseRetryable = createRetryableFailureSummary();
+
+  console.log("[wallets:intel:refresh] followed fanout", {
+    followed: inputs.followedWallets.length,
+    followedByChain,
+    tokenIds: {
+      polymarket: inputs.tokenIdsByVenue.polymarket.length,
+      limitless: inputs.tokenIdsByVenue.limitless.length,
+      kalshi: inputs.tokenIdsByVenue.kalshi.length,
+    },
+    holdingsRpcEstimate: {
+      polymarketTrackedOnly: estPolygonHoldingsRpcCalls,
+      base: estBaseHoldingsRpcCalls,
+      solana: estSolanaHoldingsRpcCalls,
+    },
+    concurrency: {
+      followedFetch: inputs.followedFetchConcurrency,
+    },
+  });
+
+  const prefetchedSolanaBalances = new Map<string, SolanaTokenBalance[] | null>();
+  const prefetchedPolymarketBalances = new Map<
+    string,
+    PrefetchedPolymarketOwnerBalances | null
+  >();
+
+  const solanaFollowedWallets = inputs.followedWallets.filter(
+    (row) => row.chain === "solana",
+  );
+  if (
+    solanaFollowedWallets.length > 0 &&
+    inputs.tokenIdsByVenue.kalshi.length > 0
+  ) {
+    await mapWithConcurrency(
+      solanaFollowedWallets,
+      inputs.followedFetchConcurrency,
+      async (followed) => {
+        try {
+          const balances = await runWithTelemetry(
+            inputs.telemetry.followedSnapshotSolana,
+            () =>
+              fetchSolanaTokenBalancesByOwner({
+                rpcUrls: env.solanaRpcUrls,
+                timeoutMs: env.solanaRpcTimeoutMs,
+                owner: followed.address,
+                includeToken2022: true,
+              }),
+          );
+          prefetchedSolanaBalances.set(followed.wallet_id, balances);
+        } catch (error) {
+          prefetchedSolanaBalances.set(followed.wallet_id, null);
+          console.error(
+            "[wallets:intel:refresh] prefetched solana balances failed",
+            { wallet: followed.address },
+            error,
+          );
+        }
+      },
+    );
+  }
+
+  const polygonFollowedWallets = inputs.followedWallets.filter(
+    (row) => row.chain === "polygon",
+  );
+  if (polygonFollowedWallets.length > 0) {
+    await mapWithConcurrency(
+      polygonFollowedWallets,
+      inputs.followedFetchConcurrency,
+      async (followed) => {
+        try {
+          const prefetched = await runWithTelemetry(
+            inputs.telemetry.followedPrefetchPolymarket,
+            () =>
+              prefetchFollowedPolymarketOwnerBalances(inputs.poolClient, {
+                userId: followed.user_id,
+                walletAddress: followed.address,
+                trackedTokenIds: inputs.tokenIdsByVenue.polymarket,
+              }),
+            { countActualCall: false },
+          );
+          inputs.telemetry.followedPrefetchPolymarket.estimatedCalls +=
+            prefetched.rpcCallEstimate;
+          inputs.telemetry.followedPrefetchPolymarket.actualCalls +=
+            prefetched.rpcCallCount;
+          prefetchedPolymarketBalances.set(followed.wallet_id, prefetched);
+        } catch (error) {
+          prefetchedPolymarketBalances.set(followed.wallet_id, null);
+          const rpcTelemetry = readPrefetchRpcTelemetry(error);
+          inputs.telemetry.followedPrefetchPolymarket.estimatedCalls +=
+            rpcTelemetry.estimatedCalls;
+          inputs.telemetry.followedPrefetchPolymarket.actualCalls +=
+            rpcTelemetry.actualCalls;
+          if (
+            !recordRetryableFailure(
+              followedPrefetchPolymarketRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] prefetched polymarket balances failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
+        }
+      },
+    );
+  }
+
+  let processed = 0;
+  let rowInserts = 0;
+  let activityRows = 0;
+
+  for (const followed of inputs.followedWallets) {
+    processed += 1;
+    if (followed.chain === "polygon") {
+      const prefetchedPolymarket =
+        prefetchedPolymarketBalances.get(followed.wallet_id) ?? null;
+
+      try {
+        await runWithTelemetry(
+          inputs.telemetry.followedPositionsPolymarket,
+          () =>
+            syncPositionsForUserWallet(inputs.poolClient, {
+              userId: followed.user_id,
+              walletAddress: followed.address,
+              venue: "polymarket",
+              positionScope: "followed",
+              prefetchedPolymarketBalances: prefetchedPolymarket,
+            }),
+        );
+      } catch (error) {
+        if (
+          !recordRetryableFailure(
+            followedPositionsPolymarketRetryable,
+            followed.address,
+            error,
+          )
+        ) {
+          console.error(
+            "[wallets:intel:refresh] polymarket positions sync failed",
+            error,
+          );
+        }
+      }
+
+      try {
+        const inserted = await runWithTelemetry(
+          inputs.telemetry.followedSnapshotPolygon,
+          () =>
+            snapshotFollowedWalletHoldingsEvm(client, {
+              walletId: followed.wallet_id,
+              address: normalizeAddress(followed.address, "polygon"),
+              venue: "polymarket",
+              rpcUrl: env.polygonRpcUrl,
+              rpcTimeoutMs: env.polygonRpcTimeoutMs,
+              contractAddress: env.polymarketConditionalTokensAddress,
+              tokenIds: inputs.tokenIdsByVenue.polymarket,
+              tokenIndex: inputs.tokenIndexByVenue.polymarket,
+              occurredAt: inputs.snapshotAt,
+              prefetchedBalances:
+                prefetchedPolymarket?.balancesByOwner.get(
+                  followed.address.toLowerCase(),
+                ) ?? null,
+            }),
+        );
+        if (inserted > 0) {
+          rowInserts += inserted;
+          inputs.touchedWalletIds.add(followed.wallet_id);
+          activityRows += inserted;
+        }
+      } catch (error) {
+        if (
+          !recordRetryableFailure(
+            followedSnapshotPolygonRetryable,
+            followed.address,
+            error,
+          )
+        ) {
+          console.error(
+            "[wallets:intel:refresh] polymarket followed snapshot failed",
+            { wallet: followed.address },
+            error,
+          );
+        }
+      }
+
+      const positionsInserted = await snapshotFollowedWalletPositions(client, {
+        userId: followed.user_id,
+        walletId: followed.wallet_id,
+        walletAddress: followed.address,
+        venue: "polymarket",
+        occurredAt: inputs.snapshotAt,
+      });
+      if (positionsInserted > 0) {
+        rowInserts += positionsInserted;
+        inputs.touchedWalletIds.add(followed.wallet_id);
+        activityRows += positionsInserted;
+      }
+      continue;
+    }
+
+    if (followed.chain === "base") {
+      try {
+        await runWithTelemetry(
+          inputs.telemetry.followedPositionsLimitless,
+          () =>
+            syncPositionsForUserWallet(inputs.poolClient, {
+              userId: followed.user_id,
+              walletAddress: followed.address,
+              venue: "limitless",
+              positionScope: "followed",
+            }),
+        );
+      } catch (error) {
+        if (isLimitlessSessionMissing(error)) {
+          markTelemetrySkipped(inputs.telemetry.followedPositionsLimitless);
+          console.info(
+            "[wallets:intel:refresh] limitless positions sync skipped (no session)",
+            { wallet: followed.address },
+          );
+        } else {
+          console.error(
+            "[wallets:intel:refresh] limitless positions sync failed",
+            error,
+          );
+        }
+      }
+
+      try {
+        const inserted = await runWithTelemetry(
+          inputs.telemetry.followedSnapshotBase,
+          () =>
+            snapshotFollowedWalletHoldingsEvm(client, {
+              walletId: followed.wallet_id,
+              address: normalizeAddress(followed.address, "base"),
+              venue: "limitless",
+              rpcUrl: env.baseRpcUrl,
+              rpcTimeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: env.limitlessConditionalTokensAddress,
+              tokenIds: inputs.tokenIdsByVenue.limitless,
+              tokenIndex: inputs.tokenIndexByVenue.limitless,
+              occurredAt: inputs.snapshotAt,
+            }),
+        );
+        if (inserted > 0) {
+          rowInserts += inserted;
+          inputs.touchedWalletIds.add(followed.wallet_id);
+          activityRows += inserted;
+        }
+      } catch (error) {
+        if (
+          !recordRetryableFailure(
+            followedSnapshotBaseRetryable,
+            followed.address,
+            error,
+          )
+        ) {
+          console.error(
+            "[wallets:intel:refresh] limitless followed snapshot failed",
+            { wallet: followed.address },
+            error,
+          );
+        }
+      }
+
+      const positionsInserted = await snapshotFollowedWalletPositions(client, {
+        userId: followed.user_id,
+        walletId: followed.wallet_id,
+        walletAddress: followed.address,
+        venue: "limitless",
+        occurredAt: inputs.snapshotAt,
+      });
+      if (positionsInserted > 0) {
+        rowInserts += positionsInserted;
+        inputs.touchedWalletIds.add(followed.wallet_id);
+        activityRows += positionsInserted;
+      }
+      continue;
+    }
+
+    if (followed.chain === "solana") {
+      try {
+        await runWithTelemetry(
+          inputs.telemetry.followedPositionsKalshi,
+          () =>
+            syncPositionsForUserWallet(inputs.poolClient, {
+              userId: followed.user_id,
+              walletAddress: followed.address,
+              venue: "kalshi",
+              positionScope: "followed",
+              prefetchedSolanaBalances:
+                prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+            }),
+        );
+      } catch (error) {
+        console.error(
+          "[wallets:intel:refresh] kalshi positions sync failed",
+          error,
+        );
+      }
+
+      const inserted = await snapshotFollowedWalletHoldingsSolana(client, {
+        walletId: followed.wallet_id,
+        address: followed.address,
+        tokenMints: inputs.tokenIdsByVenue.kalshi,
+        tokenIndex: inputs.tokenIndexByVenue.kalshi,
+        occurredAt: inputs.snapshotAt,
+        balances: prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+        telemetry: inputs.telemetry.followedSnapshotSolana,
+      });
+      if (inserted > 0) {
+        rowInserts += inserted;
+        inputs.touchedWalletIds.add(followed.wallet_id);
+        activityRows += inserted;
+      }
+
+      const positionsInserted = await snapshotFollowedWalletPositions(client, {
+        userId: followed.user_id,
+        walletId: followed.wallet_id,
+        walletAddress: followed.address,
+        venue: "kalshi",
+        occurredAt: inputs.snapshotAt,
+      });
+      if (positionsInserted > 0) {
+        rowInserts += positionsInserted;
+        inputs.touchedWalletIds.add(followed.wallet_id);
+        activityRows += positionsInserted;
+      }
+    }
+  }
+
+  logRetryableFailureSummary(
+    "[wallets:intel:refresh] polymarket followed prefetch throttled",
+    followedPrefetchPolymarketRetryable,
+  );
+  logRetryableFailureSummary(
+    "[wallets:intel:refresh] polymarket followed positions throttled",
+    followedPositionsPolymarketRetryable,
+  );
+  logRetryableFailureSummary(
+    "[wallets:intel:refresh] polymarket followed snapshot throttled",
+    followedSnapshotPolygonRetryable,
+  );
+  logRetryableFailureSummary(
+    "[wallets:intel:refresh] limitless followed snapshot throttled",
+    followedSnapshotBaseRetryable,
+  );
+
+  return {
+    processed,
+    rowInserts,
+    activityRows,
+  };
+}
+
+async function refreshTouchedWalletArtifacts(
+  client: Queryable,
+  inputs: {
+    touchedWalletIds: Set<string>;
+    selectedMarketIds: string[];
+    snapshotAt: Date;
+    tagIds: Record<string, string>;
+  },
+): Promise<{ deltaInserts: number; deltaUpdates: number }> {
+  const deltaResult = await applySnapshotDeltas(client, {
+    walletIds: Array.from(inputs.touchedWalletIds),
+    occurredAt: inputs.snapshotAt,
+    marketIds: inputs.selectedMarketIds,
+  });
+
+  const walletIds = Array.from(inputs.touchedWalletIds);
+  await refreshMetrics(client, {
+    walletIds,
+    asOf: inputs.snapshotAt,
+  });
+
+  await refreshSystemTags(client, {
+    walletIds,
+    tagIds: inputs.tagIds,
+    freshDays: walletIntelRefreshPolicy.freshDays,
+    dormantDays: walletIntelRefreshPolicy.dormantDays,
+    whaleUsd: walletIntelRefreshPolicy.whaleUsd,
+    whaleUsdSolana: walletIntelRefreshPolicy.whaleUsdSolana,
+    asOf: inputs.snapshotAt,
+  });
+
+  const whaleRows = await client.query<{ wallet_id: string }>(
+    `
+      select tm.wallet_id
+      from wallet_tag_map tm
+      join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+    `,
+  );
+  const aggregateWalletIds = Array.from(
+    new Set([
+      ...walletIds,
+      ...whaleRows.rows.map((row) => row.wallet_id),
+    ]),
+  );
+
+  const activityLookbackDays = 365;
+  const activitySince = new Date(
+    inputs.snapshotAt.getTime() - activityLookbackDays * 24 * 60 * 60 * 1000,
+  );
+
+  await refreshWalletActivityBaseline(client, {
+    walletIds: aggregateWalletIds,
+    asOf: inputs.snapshotAt,
+    windowDays: 30,
+  });
+  await refreshWalletActivityHourly(client, {
+    walletIds: aggregateWalletIds,
+    since: activitySince,
+    enteredLateHours: 24,
+  });
+  await refreshWalletPositionExposure(client, {
+    walletIds: aggregateWalletIds,
+    asOf: inputs.snapshotAt,
+  });
+  await refreshWalletInferredOutcomes(client, {
+    walletIds: aggregateWalletIds,
+  });
+
+  return {
+    deltaInserts: deltaResult.inserts,
+    deltaUpdates: deltaResult.updates,
+  };
 }
 
 async function snapshotFollowedWalletHoldingsSolana(
@@ -2796,12 +3326,11 @@ async function runSnapshot(snapshotAt: Date) {
     let activityRows = 0;
     let deltaInserts = 0;
     let deltaUpdates = 0;
+    let followedProcessed = 0;
+    let followedRows = 0;
     let holderRateLimitErrors = 0;
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
-    const followedPositionsPolymarketRetryable = createRetryableFailureSummary();
-    const followedSnapshotPolygonRetryable = createRetryableFailureSummary();
-    const followedSnapshotBaseRetryable = createRetryableFailureSummary();
 
     const marketResults = await mapWithConcurrency(
       marketRows,
@@ -3015,368 +3544,34 @@ async function runSnapshot(snapshotAt: Date) {
       [walletIntelRefreshPolicy.followedWalletLimit],
     );
 
-    const followedByChain = { polygon: 0, base: 0, solana: 0 };
-    for (const followed of followedWallets.rows) {
-      followedByChain[followed.chain] += 1;
-    }
-    const estPolygonHoldingsRpcCalls =
-      followedByChain.polygon *
-      Math.ceil(tokenIdsByVenue.polymarket.length / 200);
-    const estBaseHoldingsRpcCalls =
-      followedByChain.base * Math.ceil(tokenIdsByVenue.limitless.length / 200);
-    const estSolanaHoldingsRpcCalls =
-      tokenIdsByVenue.kalshi.length > 0 ? followedByChain.solana : 0;
-    telemetry.followedSnapshotPolygon.estimatedCalls += estPolygonHoldingsRpcCalls;
-    telemetry.followedSnapshotBase.estimatedCalls += estBaseHoldingsRpcCalls;
-    telemetry.followedSnapshotSolana.estimatedCalls += estSolanaHoldingsRpcCalls;
-    telemetry.followedPositionsPolymarket.estimatedCalls += followedByChain.polygon;
-    telemetry.followedPositionsLimitless.estimatedCalls += followedByChain.base;
-    telemetry.followedPositionsKalshi.estimatedCalls += followedByChain.solana;
-    console.log("[wallets:intel:refresh] followed fanout", {
-      followed: followedWallets.rows.length,
-      followedByChain,
-      tokenIds: {
-        polymarket: tokenIdsByVenue.polymarket.length,
-        limitless: tokenIdsByVenue.limitless.length,
-        kalshi: tokenIdsByVenue.kalshi.length,
-      },
-      holdingsRpcEstimate: {
-        polygon: estPolygonHoldingsRpcCalls,
-        base: estBaseHoldingsRpcCalls,
-        solana: estSolanaHoldingsRpcCalls,
-      },
-      concurrency: {
-        marketFetch: marketFetchConcurrency,
-        followedFetch: followedFetchConcurrency,
-      },
+    const followedCollection = await collectFollowedWalletSnapshotRows(client, {
+      followedWallets: followedWallets.rows,
+      snapshotAt,
+      tokenIdsByVenue,
+      tokenIndexByVenue,
+      telemetry,
+      followedFetchConcurrency,
+      touchedWalletIds,
+      poolClient: pool,
     });
+    followedProcessed = followedCollection.processed;
+    followedRows += followedCollection.rowInserts;
+    activityRows += followedCollection.activityRows;
 
-    let followedProcessed = 0;
-    let followedRows = 0;
-    const prefetchedSolanaBalances = new Map<string, SolanaTokenBalance[] | null>();
-
-    const solanaFollowedWallets = followedWallets.rows.filter(
-      (row) => row.chain === "solana",
-    );
-    if (
-      solanaFollowedWallets.length > 0 &&
-      tokenIdsByVenue.kalshi.length > 0
-    ) {
-      await mapWithConcurrency(
-        solanaFollowedWallets,
-        followedFetchConcurrency,
-        async (followed) => {
-          try {
-            const balances = await runWithTelemetry(
-              telemetry.followedSnapshotSolana,
-              () =>
-                fetchSolanaTokenBalancesByOwner({
-                  rpcUrls: env.solanaRpcUrls,
-                  timeoutMs: env.solanaRpcTimeoutMs,
-                  owner: followed.address,
-                  includeToken2022: true,
-                }),
-            );
-            prefetchedSolanaBalances.set(followed.wallet_id, balances);
-          } catch (error) {
-            prefetchedSolanaBalances.set(followed.wallet_id, null);
-            console.error(
-              "[wallets:intel:refresh] prefetched solana balances failed",
-              { wallet: followed.address },
-              error,
-            );
-          }
-        },
-      );
-    }
-
-    for (const followed of followedWallets.rows) {
-      followedProcessed += 1;
-      if (followed.chain === "polygon") {
-        try {
-          await runWithTelemetry(
-            telemetry.followedPositionsPolymarket,
-            () =>
-              syncPositionsForUserWallet(pool, {
-                userId: followed.user_id,
-                walletAddress: followed.address,
-                venue: "polymarket",
-                positionScope: "followed",
-              }),
-          );
-        } catch (error) {
-          if (
-            !recordRetryableFailure(
-              followedPositionsPolymarketRetryable,
-              followed.address,
-              error,
-            )
-          ) {
-            console.error(
-              "[wallets:intel:refresh] polymarket positions sync failed",
-              error,
-            );
-          }
-        }
-
-        try {
-          const inserted = await runWithTelemetry(
-            telemetry.followedSnapshotPolygon,
-            () =>
-              snapshotFollowedWalletHoldingsEvm(client, {
-                walletId: followed.wallet_id,
-                address: normalizeAddress(followed.address, "polygon"),
-                venue: "polymarket",
-                rpcUrl: env.polygonRpcUrl,
-                rpcTimeoutMs: env.polygonRpcTimeoutMs,
-                contractAddress: env.polymarketConditionalTokensAddress,
-                tokenIds: tokenIdsByVenue.polymarket,
-                tokenIndex: tokenIndexByVenue.polymarket,
-                occurredAt: snapshotAt,
-              }),
-          );
-          if (inserted > 0) {
-            followedRows += inserted;
-            touchedWalletIds.add(followed.wallet_id);
-            activityRows += inserted;
-          }
-        } catch (error) {
-          if (
-            !recordRetryableFailure(
-              followedSnapshotPolygonRetryable,
-              followed.address,
-              error,
-            )
-          ) {
-            console.error(
-              "[wallets:intel:refresh] polymarket followed snapshot failed",
-              { wallet: followed.address },
-              error,
-            );
-          }
-        }
-
-        const positionsInserted = await snapshotFollowedWalletPositions(client, {
-          userId: followed.user_id,
-          walletId: followed.wallet_id,
-          walletAddress: followed.address,
-          venue: "polymarket",
-          occurredAt: snapshotAt,
-        });
-        if (positionsInserted > 0) {
-          followedRows += positionsInserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += positionsInserted;
-        }
-      }
-
-      if (followed.chain === "base") {
-        try {
-          await runWithTelemetry(
-            telemetry.followedPositionsLimitless,
-            () =>
-              syncPositionsForUserWallet(pool, {
-                userId: followed.user_id,
-                walletAddress: followed.address,
-                venue: "limitless",
-                positionScope: "followed",
-              }),
-          );
-        } catch (error) {
-          if (isLimitlessSessionMissing(error)) {
-            console.info(
-              "[wallets:intel:refresh] limitless positions sync skipped (no session)",
-              { wallet: followed.address },
-            );
-          } else {
-            console.error(
-              "[wallets:intel:refresh] limitless positions sync failed",
-              error,
-            );
-          }
-        }
-
-        try {
-          const inserted = await runWithTelemetry(
-            telemetry.followedSnapshotBase,
-            () =>
-              snapshotFollowedWalletHoldingsEvm(client, {
-                walletId: followed.wallet_id,
-                address: normalizeAddress(followed.address, "base"),
-                venue: "limitless",
-                rpcUrl: env.baseRpcUrl,
-                rpcTimeoutMs: env.baseRpcTimeoutMs,
-                contractAddress: env.limitlessConditionalTokensAddress,
-                tokenIds: tokenIdsByVenue.limitless,
-                tokenIndex: tokenIndexByVenue.limitless,
-                occurredAt: snapshotAt,
-              }),
-          );
-          if (inserted > 0) {
-            followedRows += inserted;
-            touchedWalletIds.add(followed.wallet_id);
-            activityRows += inserted;
-          }
-        } catch (error) {
-          if (
-            !recordRetryableFailure(
-              followedSnapshotBaseRetryable,
-              followed.address,
-              error,
-            )
-          ) {
-            console.error(
-              "[wallets:intel:refresh] limitless followed snapshot failed",
-              { wallet: followed.address },
-              error,
-            );
-          }
-        }
-
-        const positionsInserted = await snapshotFollowedWalletPositions(client, {
-          userId: followed.user_id,
-          walletId: followed.wallet_id,
-          walletAddress: followed.address,
-          venue: "limitless",
-          occurredAt: snapshotAt,
-        });
-        if (positionsInserted > 0) {
-          followedRows += positionsInserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += positionsInserted;
-        }
-      }
-
-      if (followed.chain === "solana") {
-        try {
-          await runWithTelemetry(
-            telemetry.followedPositionsKalshi,
-            () =>
-              syncPositionsForUserWallet(pool, {
-                userId: followed.user_id,
-                walletAddress: followed.address,
-                venue: "kalshi",
-                positionScope: "followed",
-                prefetchedSolanaBalances:
-                  prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-              }),
-          );
-        } catch (error) {
-          console.error(
-            "[wallets:intel:refresh] kalshi positions sync failed",
-            error,
-          );
-        }
-
-        const inserted = await snapshotFollowedWalletHoldingsSolana(client, {
-          walletId: followed.wallet_id,
-          address: followed.address,
-          tokenMints: tokenIdsByVenue.kalshi,
-          tokenIndex: tokenIndexByVenue.kalshi,
-          occurredAt: snapshotAt,
-          balances: prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-          telemetry: telemetry.followedSnapshotSolana,
-        });
-        if (inserted > 0) {
-          followedRows += inserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += inserted;
-        }
-
-        const positionsInserted = await snapshotFollowedWalletPositions(client, {
-          userId: followed.user_id,
-          walletId: followed.wallet_id,
-          walletAddress: followed.address,
-          venue: "kalshi",
-          occurredAt: snapshotAt,
-        });
-        if (positionsInserted > 0) {
-          followedRows += positionsInserted;
-          touchedWalletIds.add(followed.wallet_id);
-          activityRows += positionsInserted;
-        }
-      }
-    }
-
-    logRetryableFailureSummary(
-      "[wallets:intel:refresh] polymarket followed positions throttled",
-      followedPositionsPolymarketRetryable,
-    );
-    logRetryableFailureSummary(
-      "[wallets:intel:refresh] polymarket followed snapshot throttled",
-      followedSnapshotPolygonRetryable,
-    );
-    logRetryableFailureSummary(
-      "[wallets:intel:refresh] limitless followed snapshot throttled",
-      followedSnapshotBaseRetryable,
-    );
-
-    const deltaResult = await applySnapshotDeltas(client, {
-      walletIds: Array.from(touchedWalletIds),
-      occurredAt: snapshotAt,
-      marketIds: selectedMarketIds,
-    });
-    deltaInserts += deltaResult.inserts;
-    deltaUpdates += deltaResult.updates;
-
-    const walletIds = Array.from(touchedWalletIds);
-    await refreshMetrics(client, {
-      walletIds,
-      asOf: snapshotAt,
-    });
-
-    await refreshSystemTags(client, {
-      walletIds,
+    const artifactRefresh = await refreshTouchedWalletArtifacts(client, {
+      touchedWalletIds,
+      selectedMarketIds,
+      snapshotAt,
       tagIds,
-      freshDays: walletIntelRefreshPolicy.freshDays,
-      dormantDays: walletIntelRefreshPolicy.dormantDays,
-      whaleUsd: walletIntelRefreshPolicy.whaleUsd,
-      whaleUsdSolana: walletIntelRefreshPolicy.whaleUsdSolana,
-      asOf: snapshotAt,
     });
-
-    const whaleRows = await client.query<{ wallet_id: string }>(
-      `
-        select tm.wallet_id
-        from wallet_tag_map tm
-        join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
-      `,
-    );
-    const aggregateWalletIds = Array.from(
-      new Set([
-        ...walletIds,
-        ...whaleRows.rows.map((row) => row.wallet_id),
-      ]),
-    );
-
-    const activityLookbackDays = 365;
-    const activitySince = new Date(
-      snapshotAt.getTime() - activityLookbackDays * 24 * 60 * 60 * 1000,
-    );
-
-    await refreshWalletActivityBaseline(client, {
-      walletIds: aggregateWalletIds,
-      asOf: snapshotAt,
-      windowDays: 30,
-    });
-    await refreshWalletActivityHourly(client, {
-      walletIds: aggregateWalletIds,
-      since: activitySince,
-      enteredLateHours: 24,
-    });
-    await refreshWalletPositionExposure(client, {
-      walletIds: aggregateWalletIds,
-      asOf: snapshotAt,
-    });
-    await refreshWalletInferredOutcomes(client, {
-      walletIds: aggregateWalletIds,
-    });
+    deltaInserts += artifactRefresh.deltaInserts;
+    deltaUpdates += artifactRefresh.deltaUpdates;
 
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
     logRefreshTelemetry(telemetry);
 
     console.log(
-      `[wallets:intel:refresh] done markets=${marketsProcessed} wallets=${walletIds.length} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} whaleOwnersLinked=${whaleOwnersLinked}`,
+      `[wallets:intel:refresh] done markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} whaleOwnersLinked=${whaleOwnersLinked}`,
     );
   } finally {
     client.release();

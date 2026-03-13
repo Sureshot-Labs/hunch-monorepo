@@ -29,6 +29,16 @@ type WalletActivityTopChangesDbRow = {
   top_changes: unknown;
 };
 
+type WalletActivitySignalSummaryDbRow = {
+  wallet_id: string;
+  critical_signals_30d: number | null;
+  avg_signal_score_30d: string | null;
+  has_reactivated_after_idle: boolean | null;
+  has_late_entry: boolean | null;
+  has_very_late_entry: boolean | null;
+  has_unusual_behavior: boolean | null;
+};
+
 type WalletActivitySignalRowDbRow = {
   wallet_id: string;
   market_id: string;
@@ -134,6 +144,15 @@ export type WalletActivitySummaryStats = Omit<
   "topChanges"
 >;
 
+export type WalletActivitySignalSummary = {
+  criticalSignals30d: number;
+  avgSignalScore30d: number | null;
+  hasReactivatedAfterIdle: boolean;
+  hasLateEntry: boolean;
+  hasVeryLateEntry: boolean;
+  hasUnusualBehavior: boolean;
+};
+
 export type WalletActivitySignalRow = {
   walletId: string;
   marketId: string;
@@ -172,6 +191,42 @@ export type WalletActivitySignalPageLabelFlags = {
   hasProfileCategories: boolean;
   category: string | null;
 };
+
+function mapWalletActivitySignalRow(
+  row: WalletActivitySignalRowDbRow,
+): WalletActivitySignalRow {
+  return {
+    walletId: row.wallet_id,
+    marketId: row.market_id,
+    marketTitle: row.market_title,
+    marketImage: row.market_image,
+    marketIcon: row.market_icon,
+    eventId: row.event_id,
+    eventTitle: row.event_title,
+    eventImage: row.event_image,
+    eventIcon: row.event_icon,
+    venue: row.venue,
+    marketStatus: row.market_status,
+    closeTime: row.close_time,
+    expirationTime: row.expiration_time,
+    resolvedOutcome: row.resolved_outcome,
+    category: row.category,
+    action: row.change_action,
+    positionSide: row.outcome_side,
+    deltaShares: parseNumber(row.signed_delta_shares),
+    deltaUsd: parseNumber(row.signed_delta_usd),
+    stakeUsd: parseNumber(row.stake_usd),
+    odds: parseNumber(row.odds),
+    potentialPayoutUsd: parseNumber(row.potential_payout_usd),
+    idleDays: parseNumber(row.idle_days),
+    priorDistinctMarkets: row.prior_distinct_markets,
+    signalScore: parseNumber(row.signal_score),
+    signalType: row.signal_type,
+    lateBucket: row.late_bucket,
+    occurredAt: row.occurred_at,
+    reasonCodes: normalizeStringArray(row.reason_codes),
+  };
+}
 
 type WalletActivitySignalSeverityThresholds = {
   default: { medium: number; high: number; critical: number };
@@ -990,6 +1045,47 @@ ${FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL}
   from top_changes tc
 `;
 
+const FETCH_WALLET_ACTIVITY_SIGNAL_SUMMARY_SQL = `
+${FETCH_WALLET_ACTIVITY_BASE_SQL}
+${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
+  select
+    cc.wallet_id,
+    count(*) filter (
+      where cc.rn <= $4 and cc.signal_score >= 0.9
+    )::int as critical_signals_30d,
+    avg(cc.signal_score) filter (
+      where cc.rn <= $4
+    )::text as avg_signal_score_30d,
+    bool_or(
+      coalesce(cc.idle_days, 0) >= $12::numeric
+    ) filter (
+      where cc.rn <= $4
+    ) as has_reactivated_after_idle,
+    bool_or(
+      cc.entered_late or cc.late_bucket in ('late', 'very_late')
+    ) filter (
+      where cc.rn <= $4
+    ) as has_late_entry,
+    bool_or(
+      cc.late_bucket = 'very_late'
+    ) filter (
+      where cc.rn <= $4
+    ) as has_very_late_entry,
+    bool_or(
+      cc.unusual_size
+      or (
+        cc.has_profile_categories
+        and coalesce(cc.on_pattern, false) = false
+        and cc.category is not null
+      )
+      or cc.is_high_risk
+    ) filter (
+      where cc.rn <= $4
+    ) as has_unusual_behavior
+  from classified_changes cc
+  group by cc.wallet_id
+`;
+
 const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_SQL = `
 ${FETCH_WALLET_ACTIVITY_BASE_SQL}
 ,
@@ -1694,6 +1790,34 @@ export async function fetchWalletActivityTopChanges(
   return map;
 }
 
+export async function fetchWalletActivitySignalSummary(
+  client: PoolClient,
+  walletIds: string[],
+  options: WalletActivityQueryOptions,
+): Promise<Map<string, WalletActivitySignalSummary>> {
+  if (walletIds.length === 0) return new Map();
+  const resolved = resolveWalletActivityQuery(options);
+  const result = await client.query<WalletActivitySignalSummaryDbRow>(
+    FETCH_WALLET_ACTIVITY_SIGNAL_SUMMARY_SQL,
+    buildWalletActivityParams(walletIds, resolved),
+  );
+  const map = new Map<string, WalletActivitySignalSummary>();
+  for (const row of result.rows) {
+    map.set(row.wallet_id, {
+      criticalSignals30d: Math.max(
+        0,
+        Math.trunc(row.critical_signals_30d ?? 0),
+      ),
+      avgSignalScore30d: parseNumber(row.avg_signal_score_30d),
+      hasReactivatedAfterIdle: row.has_reactivated_after_idle === true,
+      hasLateEntry: row.has_late_entry === true,
+      hasVeryLateEntry: row.has_very_late_entry === true,
+      hasUnusualBehavior: row.has_unusual_behavior === true,
+    });
+  }
+  return map;
+}
+
 export async function fetchWalletActivitySignalRows(
   client: PoolClient,
   walletIds: string[],
@@ -1720,37 +1844,7 @@ export async function fetchWalletActivitySignalRows(
       Math.max(0, Math.trunc(options.offset ?? 0)),
     ],
   );
-  return result.rows.map((row) => ({
-    walletId: row.wallet_id,
-    marketId: row.market_id,
-    marketTitle: row.market_title,
-    marketImage: row.market_image,
-    marketIcon: row.market_icon,
-    eventId: row.event_id,
-    eventTitle: row.event_title,
-    eventImage: row.event_image,
-    eventIcon: row.event_icon,
-    venue: row.venue,
-    marketStatus: row.market_status,
-    closeTime: row.close_time,
-    expirationTime: row.expiration_time,
-    resolvedOutcome: row.resolved_outcome,
-    category: row.category,
-    action: row.change_action,
-    positionSide: row.outcome_side,
-    deltaShares: parseNumber(row.signed_delta_shares),
-    deltaUsd: parseNumber(row.signed_delta_usd),
-    stakeUsd: parseNumber(row.stake_usd),
-    odds: parseNumber(row.odds),
-    potentialPayoutUsd: parseNumber(row.potential_payout_usd),
-    idleDays: parseNumber(row.idle_days),
-    priorDistinctMarkets: row.prior_distinct_markets,
-    signalScore: parseNumber(row.signal_score),
-    signalType: row.signal_type,
-    lateBucket: row.late_bucket,
-    occurredAt: row.occurred_at,
-    reasonCodes: normalizeStringArray(row.reason_codes),
-  }));
+  return result.rows.map(mapWalletActivitySignalRow);
 }
 
 export async function fetchWalletActivitySignalRowsFast(
@@ -1800,37 +1894,7 @@ export async function fetchWalletActivitySignalRowsFast(
       severityThresholds.limitless.critical,
     ],
   );
-  return result.rows.map((row) => ({
-    walletId: row.wallet_id,
-    marketId: row.market_id,
-    marketTitle: row.market_title,
-    marketImage: row.market_image,
-    marketIcon: row.market_icon,
-    eventId: row.event_id,
-    eventTitle: row.event_title,
-    eventImage: row.event_image,
-    eventIcon: row.event_icon,
-    venue: row.venue,
-    marketStatus: row.market_status,
-    closeTime: row.close_time,
-    expirationTime: row.expiration_time,
-    resolvedOutcome: row.resolved_outcome,
-    category: row.category,
-    action: row.change_action,
-    positionSide: row.outcome_side,
-    deltaShares: parseNumber(row.signed_delta_shares),
-    deltaUsd: parseNumber(row.signed_delta_usd),
-    stakeUsd: parseNumber(row.stake_usd),
-    odds: parseNumber(row.odds),
-    potentialPayoutUsd: parseNumber(row.potential_payout_usd),
-    idleDays: parseNumber(row.idle_days),
-    priorDistinctMarkets: row.prior_distinct_markets,
-    signalScore: parseNumber(row.signal_score),
-    signalType: row.signal_type,
-    lateBucket: row.late_bucket,
-    occurredAt: row.occurred_at,
-    reasonCodes: normalizeStringArray(row.reason_codes),
-  }));
+  return result.rows.map(mapWalletActivitySignalRow);
 }
 
 export async function fetchWalletActivitySignalPageLabels(

@@ -161,6 +161,221 @@ function mergeWalletTokenBalances(
   }));
 }
 
+function normalizeNumericTokenIds(tokenIds: string[]): string[] {
+  return Array.from(
+    new Set(
+      tokenIds
+        .map((tokenId) => tokenId.trim())
+        .filter((tokenId) => tokenId.length > 0 && /^[0-9]+$/.test(tokenId)),
+    ),
+  );
+}
+
+export function resolvePolymarketOwnerAddresses(
+  walletAddress: string,
+  funderAddress: string | null,
+): string[] {
+  const ownerCandidates = [funderAddress, walletAddress].filter(
+    (address): address is string => Boolean(address),
+  );
+  return Array.from(
+    new Map(
+      ownerCandidates.map((address) => [address.toLowerCase(), address]),
+    ).values(),
+  );
+}
+
+export function resolvePolymarketTrackedTokenUniverse(
+  candidateTokenIds: string[],
+  trackedTokenIds: string[],
+): string[] {
+  return normalizeNumericTokenIds([...candidateTokenIds, ...trackedTokenIds]);
+}
+
+export function estimateErc1155BalanceRpcCalls(
+  ownerCount: number,
+  tokenIds: string[],
+  chunkSize = 200,
+): number {
+  const normalizedTokenIds = normalizeNumericTokenIds(tokenIds);
+  const owners = Math.max(0, Math.trunc(ownerCount));
+  const safeChunkSize = Math.max(1, Math.trunc(chunkSize));
+  if (owners === 0 || normalizedTokenIds.length === 0) return 0;
+  return owners * Math.ceil(normalizedTokenIds.length / safeChunkSize);
+}
+
+async function fetchErc1155OwnerTokenBalances(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  owner: string;
+  tokenIds: string[];
+  onRpcCall?: (() => void) | null;
+}): Promise<WalletTokenBalance[]> {
+  const tokenIds = normalizeNumericTokenIds(inputs.tokenIds);
+  if (tokenIds.length === 0) return [];
+
+  const balances: WalletTokenBalance[] = [];
+  const chunkSize = 200;
+  for (let i = 0; i < tokenIds.length; i += chunkSize) {
+    const chunk = tokenIds.slice(i, i + chunkSize);
+    inputs.onRpcCall?.();
+    const chunkBalances = await fetchErc1155BalancesByOwner({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      contractAddress: inputs.contractAddress,
+      owner: inputs.owner,
+      tokenIds: chunk,
+    });
+
+    for (const tokenId of chunk) {
+      const balance = chunkBalances.get(tokenId) ?? 0n;
+      if (balance <= 0n) continue;
+      balances.push({
+        tokenId,
+        size: ethers.formatUnits(balance, 6),
+      });
+    }
+  }
+
+  return balances;
+}
+
+export type PrefetchedPolymarketOwnerBalances = {
+  owners: string[];
+  funderAddress: string | null;
+  candidateTokenIds: string[];
+  trackedTokenIds: string[];
+  unionTokenIds: string[];
+  rpcCallEstimate: number;
+  rpcCallCount: number;
+  balancesByOwner: Map<string, WalletTokenBalance[]>;
+};
+
+type PrefetchRpcTelemetryMetadata = {
+  walletIntelRpcCallCount?: number;
+  walletIntelRpcCallEstimate?: number;
+};
+
+function attachPrefetchRpcTelemetry(
+  error: unknown,
+  metadata: PrefetchRpcTelemetryMetadata,
+) {
+  if (!error || typeof error !== "object") return error;
+  const target = error as PrefetchRpcTelemetryMetadata;
+  target.walletIntelRpcCallCount = metadata.walletIntelRpcCallCount ?? 0;
+  target.walletIntelRpcCallEstimate = metadata.walletIntelRpcCallEstimate ?? 0;
+  return error;
+}
+
+export function readPrefetchRpcTelemetry(error: unknown): {
+  actualCalls: number;
+  estimatedCalls: number;
+} {
+  if (!error || typeof error !== "object") {
+    return { actualCalls: 0, estimatedCalls: 0 };
+  }
+  const target = error as PrefetchRpcTelemetryMetadata;
+  const actualCalls = Number.isFinite(target.walletIntelRpcCallCount)
+    ? Math.max(0, Math.trunc(target.walletIntelRpcCallCount ?? 0))
+    : 0;
+  const estimatedCalls = Number.isFinite(target.walletIntelRpcCallEstimate)
+    ? Math.max(0, Math.trunc(target.walletIntelRpcCallEstimate ?? 0))
+    : 0;
+  return { actualCalls, estimatedCalls };
+}
+
+export function filterPrefetchedPolymarketOwnerBalances(inputs: {
+  prefetched: PrefetchedPolymarketOwnerBalances;
+  owners: string[];
+  tokenIds: string[];
+}): Array<{ owner: string; held: WalletTokenBalance[] }> {
+  const tokenIdSet = new Set(normalizeNumericTokenIds(inputs.tokenIds));
+  return inputs.owners.map((owner) => ({
+    owner,
+    held: (inputs.prefetched.balancesByOwner.get(owner.toLowerCase()) ?? []).filter(
+      (balance) => tokenIdSet.has(balance.tokenId),
+    ),
+  }));
+}
+
+export async function prefetchFollowedPolymarketOwnerBalances(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    trackedTokenIds: string[];
+  },
+): Promise<PrefetchedPolymarketOwnerBalances> {
+  let rpcCallCount = 0;
+  let rpcCallEstimate = 0;
+
+  try {
+    const funderAddress =
+      (await fetchPolymarketFunderAddress(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+      })) ?? null;
+
+    const owners = resolvePolymarketOwnerAddresses(
+      inputs.walletAddress,
+      funderAddress,
+    );
+
+    const candidateTokenIds = await fetchPolymarketCandidateTokenIds(pool, {
+      userId: inputs.userId,
+      walletAddresses: owners,
+      limit: 1000,
+    });
+    const trackedTokenIds = normalizeNumericTokenIds(inputs.trackedTokenIds);
+    const unionTokenIds = resolvePolymarketTrackedTokenUniverse(
+      candidateTokenIds,
+      trackedTokenIds,
+    );
+    rpcCallEstimate = estimateErc1155BalanceRpcCalls(owners.length, unionTokenIds);
+
+    const balancesByOwner = new Map<string, WalletTokenBalance[]>();
+    if (unionTokenIds.length > 0) {
+      const conditionalTokensAddress = env.polymarketConditionalTokensAddress;
+      const ownerResults = await Promise.all(
+        owners.map(async (owner) => ({
+          owner,
+          balances: await fetchErc1155OwnerTokenBalances({
+            rpcUrl: env.polygonRpcUrl,
+            timeoutMs: env.polygonRpcTimeoutMs,
+            contractAddress: conditionalTokensAddress,
+            owner,
+            tokenIds: unionTokenIds,
+            onRpcCall: () => {
+              rpcCallCount += 1;
+            },
+          }),
+        })),
+      );
+
+      for (const { owner, balances } of ownerResults) {
+        balancesByOwner.set(owner.toLowerCase(), balances);
+      }
+    }
+
+    return {
+      owners,
+      funderAddress,
+      candidateTokenIds,
+      trackedTokenIds,
+      unionTokenIds,
+      rpcCallEstimate,
+      rpcCallCount,
+      balancesByOwner,
+    };
+  } catch (error) {
+    throw attachPrefetchRpcTelemetry(error, {
+      walletIntelRpcCallCount: rpcCallCount,
+      walletIntelRpcCallEstimate: rpcCallEstimate,
+    });
+  }
+}
+
 function addTokenBalance(
   output: WalletTokenBalance[],
   seen: Set<string>,
@@ -498,33 +713,24 @@ async function fetchLimitlessOnchainTokenBalances(
 
   if (tokenIds.length === 0) return [];
 
-  const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
+  const balances = await fetchErc1155OwnerTokenBalances({
+    rpcUrl: env.baseRpcUrl,
+    timeoutMs: env.baseRpcTimeoutMs,
+    contractAddress: env.limitlessConditionalTokensAddress,
+    owner: inputs.walletAddress,
+    tokenIds,
+  });
 
-  const balances: WalletTokenBalance[] = [];
-  const chunkSize = 200;
-  for (let i = 0; i < tokenIds.length; i += chunkSize) {
-    const chunk = tokenIds.slice(i, i + chunkSize);
-    const chunkBalances = await fetchErc1155BalancesByOwner({
-      rpcUrl: env.baseRpcUrl,
-      timeoutMs: env.baseRpcTimeoutMs,
-      contractAddress: conditionalTokensAddress,
-      owner: inputs.walletAddress,
-      tokenIds: chunk,
-    });
-
-    for (const tokenId of chunk) {
-      const balance = chunkBalances.get(tokenId) ?? 0n;
-      if (balance <= 0n) continue;
-      const scopedTokenId = normalizeLimitlessScopedTokenId(tokenId);
-      if (!scopedTokenId) continue;
-      balances.push({
+  return balances
+    .map((balance) => {
+      const scopedTokenId = normalizeLimitlessScopedTokenId(balance.tokenId);
+      if (!scopedTokenId) return null;
+      return {
         tokenId: scopedTokenId,
-        size: ethers.formatUnits(balance, 6),
-      });
-    }
-  }
-
-  return balances;
+        size: balance.size,
+      };
+    })
+    .filter((balance): balance is WalletTokenBalance => balance != null);
 }
 
 async function fetchPolymarketFunderAddress(
@@ -950,7 +1156,12 @@ async function syncKalshiPositionsFromSolana(
 
 async function syncPolymarketPositionsFromPolygon(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+    prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
+  },
 ): Promise<PositionsSyncResult> {
   if (inputs.positionScope !== "followed") {
     try {
@@ -963,22 +1174,18 @@ async function syncPolymarketPositionsFromPolygon(
     }
   }
 
-  const funder =
-    (await fetchPolymarketFunderAddress(pool, {
+  const prefetched = inputs.prefetchedBalances ?? null;
+  const funder = prefetched?.funderAddress ?? null;
+  const owners =
+    prefetched?.owners ??
+    resolvePolymarketOwnerAddresses(inputs.walletAddress, funder);
+  const tokenIds =
+    prefetched?.candidateTokenIds ??
+    (await fetchPolymarketCandidateTokenIds(pool, {
       userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-    })) ?? inputs.walletAddress;
-  const ownerCandidates = [funder, inputs.walletAddress].filter(Boolean);
-  const owners = Array.from(
-    new Map(
-      ownerCandidates.map((address) => [address.toLowerCase(), address]),
-    ).values(),
-  );
-  const tokenIds = await fetchPolymarketCandidateTokenIds(pool, {
-    userId: inputs.userId,
-    walletAddresses: owners,
-    limit: 1000,
-  });
+      walletAddresses: owners,
+      limit: 1000,
+    }));
 
   if (tokenIds.length === 0) {
     return {
@@ -991,38 +1198,29 @@ async function syncPolymarketPositionsFromPolygon(
     };
   }
 
-  const conditionalTokensAddress =
-    process.env.POLYMARKET_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
-    "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-
   const heldByOwner = new Map<string, Array<{ tokenId: string; size: string }>>();
   const allHeldTokens = new Set<string>();
-  const chunkSize = 200;
 
-  const fetchHeldForOwner = async (owner: string) => {
-    const held: Array<{ tokenId: string; size: string }> = [];
-    for (let i = 0; i < tokenIds.length; i += chunkSize) {
-      const chunk = tokenIds.slice(i, i + chunkSize);
-      const balances = await fetchErc1155BalancesByOwner({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        contractAddress: conditionalTokensAddress,
-        owner,
-        tokenIds: chunk,
-      });
+  const ownerHeldResults =
+    prefetched != null
+      ? filterPrefetchedPolymarketOwnerBalances({
+          prefetched,
+          owners,
+          tokenIds,
+        })
+      : await Promise.all(
+          owners.map(async (owner) => ({
+            owner,
+            held: await fetchErc1155OwnerTokenBalances({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              contractAddress: env.polymarketConditionalTokensAddress,
+              owner,
+              tokenIds,
+            }),
+          })),
+        );
 
-      for (const tokenId of chunk) {
-        const balance = balances.get(tokenId) ?? 0n;
-        if (balance <= 0n) continue;
-        held.push({ tokenId, size: ethers.formatUnits(balance, 6) });
-      }
-    }
-    return { owner, held };
-  };
-
-  const ownerHeldResults = await Promise.all(
-    owners.map((owner) => fetchHeldForOwner(owner)),
-  );
   for (const { owner, held } of ownerHeldResults) {
     for (const item of held) {
       allHeldTokens.add(item.tokenId);
@@ -1226,6 +1424,7 @@ export async function syncPositionsForUserWallet(
     venue?: Position["venue"];
     positionScope?: PositionScope;
     prefetchedSolanaBalances?: SolanaTokenBalance[] | null;
+    prefetchedPolymarketBalances?: PrefetchedPolymarketOwnerBalances | null;
   },
 ): Promise<PositionsSyncResult> {
   const requestedVenue = inputs.venue;
@@ -1259,6 +1458,7 @@ export async function syncPositionsForUserWallet(
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
       positionScope,
+      prefetchedBalances: inputs.prefetchedPolymarketBalances ?? null,
     });
   }
 
