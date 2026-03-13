@@ -24,11 +24,11 @@ import {
   type WalletIntelRetryTelemetry,
 } from "./services/wallet-intel-retry.js";
 import {
-  computeWalletLedgerApproxMetricTotals,
   makeWalletPositionLedgerKey,
   replayWalletPositionLedgerRows,
   type WalletPositionLedgerRow,
 } from "./services/wallet-position-ledger.js";
+import { buildWalletThirtyDayMetricsUpsertRows } from "./services/wallet-metrics-30d.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
 import {
   getIntelPolicyDefaults,
@@ -37,7 +37,10 @@ import {
   type AiWhaleProfilesPolicy,
   type WalletIntelRefreshPolicy,
 } from "./services/runtime-policies.js";
-import { NET_SHARES_EPSILON } from "./services/wallet-intel-pnl.js";
+import {
+  NET_SHARES_EPSILON,
+  resolveApproxYesMarkPrice,
+} from "./services/wallet-intel-pnl.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -499,6 +502,7 @@ type WalletMetricsAggregateRow = {
 type WalletMetricMarketRow = {
   id: string;
   resolved_outcome: string | null;
+  resolved_outcome_pct: string | null;
   best_ask: string | null;
   best_bid: string | null;
   last_price: string | null;
@@ -509,18 +513,6 @@ type WalletMetricMarketMark = {
   yesMarkPrice: number | null;
 };
 
-type WalletMetricsUpsertRow = {
-  walletId: string;
-  tradesCount: number;
-  volumeUsd: number | null;
-  pnlUsd: number | null;
-  roi: number | null;
-  winRate: number | null;
-  lastTradeAt: Date | null;
-  approximate: boolean;
-  unmarkedOpenLegCount: number;
-};
-
 function parseNumeric(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim().length > 0) {
@@ -528,13 +520,6 @@ function parseNumeric(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
-}
-
-function normalizeProbability(value: number | null | undefined): number | null {
-  if (value == null || !Number.isFinite(value)) return null;
-  if (value < 0) return 0;
-  if (value > 1) return Math.min(1, value / 100);
-  return value;
 }
 
 function periodStart(asOf: Date, days: number | null): Date | null {
@@ -1476,6 +1461,7 @@ async function loadWalletMetricMarketMarkMap(
       select
         um.id,
         upper(coalesce(um.resolved_outcome::text, '')) as resolved_outcome,
+        um.resolved_outcome_pct::text as resolved_outcome_pct,
         um.best_ask::text as best_ask,
         um.best_bid::text as best_bid,
         um.last_price::text as last_price
@@ -1491,11 +1477,14 @@ async function loadWalletMetricMarketMarkMap(
         row.resolved_outcome === "YES" || row.resolved_outcome === "NO"
           ? row.resolved_outcome
           : null,
-      yesMarkPrice: normalizeProbability(
-        parseNumeric(row.best_ask) ??
+      yesMarkPrice: resolveApproxYesMarkPrice({
+        resolvedOutcome: row.resolved_outcome,
+        resolvedOutcomePct: parseNumeric(row.resolved_outcome_pct),
+        markPrice:
+          parseNumeric(row.best_ask) ??
           parseNumeric(row.best_bid) ??
           parseNumeric(row.last_price),
-      ),
+      }),
     });
   }
 
@@ -1515,7 +1504,6 @@ async function refreshThirtyDayMetrics(
     asOf: inputs.asOf,
     since,
   });
-  if (aggregates.length === 0) return;
 
   const ledgerRows = await loadWalletMetricLedgerRows(client, {
     walletIds: inputs.walletIds,
@@ -1566,44 +1554,22 @@ async function refreshThirtyDayMetrics(
     Array.from(openMarketIds),
   );
 
-  let approximateWalletCount = 0;
-  let unmarkedOpenLegCount = 0;
-  const upsertRows: WalletMetricsUpsertRow[] = aggregates.map((aggregate) => {
-    const walletLedgers = ledgersByWallet.get(aggregate.wallet_id) ?? [];
-    const totals = computeWalletLedgerApproxMetricTotals(
-      walletLedgers.map((entry) => ({
-        outcomeSide: entry.outcomeSide,
-        ledger: entry.ledger,
-        resolvedOutcome: marketMarksById.get(entry.marketId)?.resolvedOutcome ?? null,
-        yesMarkPrice: marketMarksById.get(entry.marketId)?.yesMarkPrice ?? null,
-      })),
-    );
-    if (totals.approximate) approximateWalletCount += 1;
-    unmarkedOpenLegCount += totals.unmarkedOpenLegCount;
-
-    const pnlUsd = totals.pnlUsd;
-    const roi =
-      pnlUsd != null &&
-      totals.costBasisUsd != null &&
-      totals.costBasisUsd > NET_SHARES_EPSILON
-        ? pnlUsd / totals.costBasisUsd
-        : null;
-    const winRate =
-      aggregate.resolved_count > 0
-        ? aggregate.winning_count / aggregate.resolved_count
-        : null;
-
-    return {
+  const {
+    rows: upsertRows,
+    approximateWalletCount,
+    unmarkedOpenLegCount,
+  } = buildWalletThirtyDayMetricsUpsertRows({
+    walletIds: inputs.walletIds,
+    aggregates: aggregates.map((aggregate) => ({
       walletId: aggregate.wallet_id,
       tradesCount: aggregate.trades_count,
       volumeUsd: parseNumeric(aggregate.volume_usd),
-      pnlUsd,
-      roi,
-      winRate,
       lastTradeAt: aggregate.last_trade_at,
-      approximate: totals.approximate,
-      unmarkedOpenLegCount: totals.unmarkedOpenLegCount,
-    };
+      resolvedCount: aggregate.resolved_count,
+      winningCount: aggregate.winning_count,
+    })),
+    ledgersByWallet,
+    marketMarksById,
   });
 
   await client.query(

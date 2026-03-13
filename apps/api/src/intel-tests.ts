@@ -25,12 +25,14 @@ import {
 import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
+  resolveApproxYesMarkPrice,
 } from "./services/wallet-intel-pnl.js";
 import {
   computeWalletLedgerApproxMetricTotals,
   replayWalletPositionLedgerRows,
   resolveApproxOpenEntryFromLedger,
 } from "./services/wallet-position-ledger.js";
+import { buildWalletThirtyDayMetricsUpsertRows } from "./services/wallet-metrics-30d.js";
 import {
   applyResolvedTradeStatsToMetrics,
   resolveEntryBracketKey,
@@ -1437,6 +1439,72 @@ const tests: TestCase[] = [
       assert.equal(totals.unmarkedOpenLegCount, 1);
       assert.ok(Math.abs((totals.costBasisUsd ?? 0) - 0.6) < 1e-9);
       assert.ok(Math.abs((totals.pnlUsd ?? 0) - 0.2) < 1e-9);
+    },
+  },
+  {
+    name: "resolved outcome pct mark parity prefers scalar payout over live mark",
+    run: () => {
+      const yesPrice = resolveApproxYesMarkPrice({
+        resolvedOutcome: null,
+        resolvedOutcomePct: 2500,
+        markPrice: 0.91,
+      });
+
+      assert.ok(Math.abs((yesPrice ?? 0) - 0.25) < 1e-9);
+
+      const yesPnl = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: 10,
+        netCost: 4,
+        markPrice: yesPrice,
+      });
+      const noPnl = computeApproxLegPnlUsd({
+        outcomeSide: "NO",
+        netShares: 10,
+        netCost: 4,
+        markPrice: yesPrice,
+      });
+
+      assert.ok(Math.abs((yesPnl ?? 0) - -1.5) < 1e-9);
+      assert.ok(Math.abs((noPnl ?? 0) - 3.5) < 1e-9);
+    },
+  },
+  {
+    name: "30d metric builder emits fresh zero-activity rows for dormant wallets",
+    run: () => {
+      const metrics = buildWalletThirtyDayMetricsUpsertRows({
+        walletIds: ["wallet-active", "wallet-dormant"],
+        aggregates: [
+          {
+            walletId: "wallet-active",
+            tradesCount: 3,
+            volumeUsd: 125,
+            lastTradeAt: new Date("2026-03-01T00:00:00.000Z"),
+            resolvedCount: 2,
+            winningCount: 1,
+          },
+        ],
+        ledgersByWallet: new Map(),
+        marketMarksById: new Map(),
+      });
+
+      assert.equal(metrics.rows.length, 2);
+
+      const active = metrics.rows.find((row) => row.walletId === "wallet-active");
+      const dormant = metrics.rows.find((row) => row.walletId === "wallet-dormant");
+
+      assert.ok(active);
+      assert.equal(active?.tradesCount, 3);
+      assert.equal(active?.volumeUsd, 125);
+      assert.ok(active?.lastTradeAt instanceof Date);
+
+      assert.ok(dormant);
+      assert.equal(dormant?.tradesCount, 0);
+      assert.equal(dormant?.volumeUsd, 0);
+      assert.equal(dormant?.pnlUsd, null);
+      assert.equal(dormant?.roi, null);
+      assert.equal(dormant?.winRate, null);
+      assert.equal(dormant?.lastTradeAt, null);
     },
   },
   {

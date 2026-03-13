@@ -12,11 +12,31 @@ function isFiniteNumber(value: number | null | undefined): value is number {
   return Number.isFinite(value);
 }
 
+export type ApproxYesMarkPriceInput = {
+  resolvedOutcome?: string | null;
+  resolvedOutcomePct?: number | null;
+  markPrice?: number | null;
+};
+
 export function clampProbability(
   value: number | null | undefined,
 ): number | null {
   if (!isFiniteNumber(value)) return null;
   return Math.max(0, Math.min(1, value));
+}
+
+export function resolveApproxYesMarkPrice(
+  input: ApproxYesMarkPriceInput,
+): number | null {
+  const resolved = input.resolvedOutcome?.trim().toUpperCase() ?? null;
+  if (resolved === "YES") return 1;
+  if (resolved === "NO") return 0;
+
+  if (isFiniteNumber(input.resolvedOutcomePct)) {
+    return clampProbability(input.resolvedOutcomePct / 10000);
+  }
+
+  return clampProbability(input.markPrice);
 }
 
 export function computeApproxLegMarkValueUsd(

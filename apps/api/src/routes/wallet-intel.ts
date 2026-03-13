@@ -4593,6 +4593,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           }),
           fetchWalletPerformanceSeries(client, walletId, {
             period: query.period,
+            windowHours: query.windowHours,
+            bucketHours: query.bucketHours,
             limit: query.limit,
           }),
         ]);

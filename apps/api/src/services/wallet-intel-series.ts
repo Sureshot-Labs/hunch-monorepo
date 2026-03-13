@@ -200,42 +200,125 @@ export async function fetchWalletPerformanceSeries(
   input?: {
     period?: WalletPerformanceSeriesPeriod;
     limit?: number;
+    windowHours?: number | null;
+    bucketHours?: number | null;
+    asOf?: Date;
   },
 ): Promise<WalletPerformanceSeries> {
   const period = input?.period ?? "30d";
   const limit = Math.max(1, Math.min(240, Math.trunc(input?.limit ?? 120)));
+  const windowHours =
+    input?.windowHours != null
+      ? Math.max(1, Math.trunc(input.windowHours))
+      : null;
+  const bucketHours =
+    windowHours != null
+      ? resolveSparklineBucketHours(windowHours, input?.bucketHours)
+      : null;
+  const asOf = input?.asOf ?? new Date();
 
-  const rows = await client.query<WalletPerformanceSeriesDbRow>(
-    `
-      select
-        s.as_of,
-        s.pnl_usd::text,
-        s.roi::text,
-        s.volume_usd::text,
-        s.trades_count,
-        s.win_rate::text,
-        s.avg_hold_hours::text,
-        s.last_trade_at
-      from (
-        select
-          as_of,
-          pnl_usd,
-          roi,
-          volume_usd,
-          trades_count,
-          win_rate,
-          avg_hold_hours,
-          last_trade_at
-        from wallet_metrics_snapshots
-        where wallet_id = $1::uuid
-          and period = $2::text
-        order by as_of desc
-        limit $3
-      ) s
-      order by s.as_of asc
-    `,
-    [walletId, period, limit],
-  );
+  const rows =
+    windowHours != null && bucketHours != null
+      ? await client.query<WalletPerformanceSeriesDbRow>(
+          `
+            with filtered as (
+              select
+                s.as_of,
+                s.pnl_usd,
+                s.roi,
+                s.volume_usd,
+                s.trades_count,
+                s.win_rate,
+                s.avg_hold_hours,
+                s.last_trade_at,
+                floor(
+                  extract(epoch from s.as_of) / ($4::int * 3600)
+                )::bigint as bucket_index
+              from wallet_metrics_snapshots s
+              where s.wallet_id = $1::uuid
+                and s.period = $2::text
+                and s.as_of >= $3::timestamptz
+                and s.as_of <= $5::timestamptz
+            ),
+            bucketed as (
+              select distinct on (bucket_index)
+                as_of,
+                pnl_usd,
+                roi,
+                volume_usd,
+                trades_count,
+                win_rate,
+                avg_hold_hours,
+                last_trade_at
+              from filtered
+              order by bucket_index, as_of desc
+            ),
+            limited as (
+              select
+                as_of,
+                pnl_usd,
+                roi,
+                volume_usd,
+                trades_count,
+                win_rate,
+                avg_hold_hours,
+                last_trade_at
+              from bucketed
+              order by as_of desc
+              limit $6
+            )
+            select
+              as_of,
+              pnl_usd::text,
+              roi::text,
+              volume_usd::text,
+              trades_count,
+              win_rate::text,
+              avg_hold_hours::text,
+              last_trade_at
+            from limited
+            order by as_of asc
+          `,
+          [
+            walletId,
+            period,
+            new Date(asOf.getTime() - windowHours * 60 * 60 * 1000),
+            bucketHours,
+            asOf,
+            limit,
+          ],
+        )
+      : await client.query<WalletPerformanceSeriesDbRow>(
+          `
+            select
+              s.as_of,
+              s.pnl_usd::text,
+              s.roi::text,
+              s.volume_usd::text,
+              s.trades_count,
+              s.win_rate::text,
+              s.avg_hold_hours::text,
+              s.last_trade_at
+            from (
+              select
+                as_of,
+                pnl_usd,
+                roi,
+                volume_usd,
+                trades_count,
+                win_rate,
+                avg_hold_hours,
+                last_trade_at
+              from wallet_metrics_snapshots
+              where wallet_id = $1::uuid
+                and period = $2::text
+              order by as_of desc
+              limit $3
+            ) s
+            order by s.as_of asc
+          `,
+          [walletId, period, limit],
+        );
 
   return {
     period,

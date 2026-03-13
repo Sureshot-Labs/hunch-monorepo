@@ -10,9 +10,9 @@ import {
   type WalletPositionLedgerState,
 } from "./wallet-position-ledger.js";
 import {
-  clampProbability,
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
+  resolveApproxYesMarkPrice,
 } from "./wallet-intel-pnl.js";
 
 type Queryable = Pick<PoolClient, "query">;
@@ -51,21 +51,11 @@ function resolveMarkPrice(input: WalletPositionApproxInput): number | null {
   const side = normalizeOutcomeSideForStorage(input.outcomeSide);
   if (side !== "YES" && side !== "NO") return null;
 
-  const resolvedOutcome = input.resolvedOutcome?.trim().toUpperCase() ?? null;
-  if (resolvedOutcome === "YES" || resolvedOutcome === "NO") {
-    return resolvedOutcome === "YES" ? 1 : 0;
-  }
-
-  const resolvedOutcomePct = parseNumber(input.resolvedOutcomePct);
-  if (resolvedOutcomePct != null) {
-    const yesPrice = clampProbability(resolvedOutcomePct / 10000);
-    return yesPrice;
-  }
-
-  const yesPrice = clampProbability(
-    input.bestAsk ?? input.bestBid ?? input.lastPrice,
-  );
-  return yesPrice;
+  return resolveApproxYesMarkPrice({
+    resolvedOutcome: input.resolvedOutcome,
+    resolvedOutcomePct: parseNumber(input.resolvedOutcomePct),
+    markPrice: input.bestAsk ?? input.bestBid ?? input.lastPrice,
+  });
 }
 
 function extractFallbackShares(
