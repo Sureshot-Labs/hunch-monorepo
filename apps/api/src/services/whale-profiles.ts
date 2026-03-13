@@ -7,20 +7,35 @@ import { env } from "../env.js";
 import { normalizeOutcomeSideForApi } from "./wallet-intel-helpers.js";
 import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
+  fetchWalletActivitySignalRowsFast,
+  fetchWalletActivitySignalSummary,
   fetchWalletActivitySummaries,
+  type WalletActivitySignalRow,
+  type WalletActivitySignalSummary,
   type WalletActivitySummary,
 } from "./wallet-activity-summary.js";
+import {
+  loadWalletCategoryMix,
+  loadWalletEntryBracketStats,
+  loadWalletPerformance30dSummary,
+  loadWalletResolvedPositionSamples,
+  type WalletCategoryMixItem,
+  type WalletEntryBracketStat,
+  type WalletPerformance30dSummary,
+  type WalletResolvedPositionSample,
+} from "./wallet-profile-features.js";
 
-const PROFILE_VERSION = "v7";
+const PROFILE_VERSION = "v9";
 const CATEGORY_VALUES = [
-  "sports",
   "politics",
   "crypto",
-  "finance",
+  "sports",
+  "economics",
+  "technology",
   "entertainment",
-  "tech",
-  "macro",
-  "social",
+  "weather",
+  "health",
+  "mentions",
   "other",
 ] as const;
 
@@ -28,20 +43,20 @@ type WhaleCategory = (typeof CATEGORY_VALUES)[number];
 const categorySchema = z.enum(CATEGORY_VALUES);
 const whaleProfileOutputSchema = z
   .object({
-    label_short: z.string().trim().min(1).max(56),
-    label_long: z.string().trim().min(1).max(320),
+    label_short: z.string().trim().min(1).max(256),
+    label_long: z.string().trim().min(1).max(2_000),
     archetype: z
       .string()
       .trim()
       .min(1)
-      .max(80)
+      .max(256)
       .regex(/^[a-z0-9_ -]+$/i),
-    categories: z.array(z.string().trim().min(1).max(48)).max(6).optional(),
-    theme_focus: z.array(z.string().trim().min(1).max(48)).max(6).optional(),
-    risk_style: z.string().trim().min(1).max(96),
+    categories: z.array(z.string().trim().min(1).max(96)).max(12).optional(),
+    theme_focus: z.array(z.string().trim().min(1).max(96)).max(12).optional(),
+    risk_style: z.string().trim().min(1).max(256),
     confidence: z.coerce.number().min(0).max(1),
-    evidence: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
-    notes: z.string().trim().min(1).max(420).optional(),
+    evidence: z.array(z.string().trim().min(1).max(512)).min(1).max(12),
+    notes: z.string().trim().min(1).max(4_000).optional(),
   })
   .passthrough();
 
@@ -68,10 +83,9 @@ type WhaleProfileInput = {
     style_guide: string;
   };
   wallet: {
-    address: string;
     chain: string;
-    label: string | null;
-    owner_address: string | null;
+    source_label: string | null;
+    source_label_quality: "descriptive" | "generic" | "missing";
     owner_label: string | null;
     kind: "eoa" | "safe" | "contract" | "unknown";
     role: "trading_wallet" | "signer_wallet" | "unknown";
@@ -120,6 +134,30 @@ type WhaleProfileInput = {
     category_counts: Record<string, number>;
     market_state_counts: { active: number; ended: number; resolved: number };
   };
+  category_mix: WalletCategoryMixItem[];
+  entry_brackets: WalletEntryBracketStat[];
+  performance_30d: WalletPerformance30dSummary;
+  signals: {
+    summary: WalletActivitySignalSummary | null;
+    examples: Array<{
+      market_title: string | null;
+      event_title: string | null;
+      venue: string;
+      category: string | null;
+      market_status: string | null;
+      resolved_outcome: string | null;
+      action: string | null;
+      position_side: string | null;
+      delta_usd: number | null;
+      stake_usd: number | null;
+      odds: number | null;
+      signal_score: number | null;
+      signal_type: string | null;
+      late_bucket: string | null;
+      reason_codes: string[];
+      occurred_at: string | null;
+    }>;
+  };
   top_events: Array<{
     event_title: string;
     gross_usd: number | null;
@@ -154,6 +192,7 @@ type WhaleProfileInput = {
       occurred_at: string | null;
     }>;
   };
+  closed_positions_sample: WalletResolvedPositionSample[];
   top_markets: Array<{
     market_id: string;
     market_title: string | null;
@@ -277,6 +316,177 @@ const parseNumber = (value: string | number | null | undefined): number | null =
   return Number.isFinite(num) ? num : null;
 };
 
+function normalizeText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatShortAddressLike(address: string): string {
+  return address.length > 14
+    ? `${address.slice(0, 6)}...${address.slice(-4)}`
+    : address;
+}
+
+const GENERIC_WALLET_LABEL_PATTERNS = [
+  /^wallet(?: \d+)?$/i,
+  /^(unknown|unnamed) wallet$/i,
+  /^(evm|sol)(?: wallet)? [a-z0-9].*$/i,
+  /^safe(?: wallet)?$/i,
+  /^contract(?: wallet)?$/i,
+  /^wallet(?: \d+)?(?: \(auto\))?$/i,
+  /^trading wallet(?: \(auto\))?$/i,
+  /^signer wallet$/i,
+  /^directional trader$/i,
+  /^active trader$/i,
+  /^mixed trader$/i,
+  /^hedged trader$/i,
+  /^whale trader$/i,
+  /^event trader$/i,
+  /^portfolio$/i,
+];
+
+function isGenericWalletLabel(
+  label: string | null | undefined,
+  address: string | null | undefined,
+): boolean {
+  const normalizedLabel = normalizeText(label)?.toLowerCase();
+  if (!normalizedLabel) return true;
+  const normalizedAddress = normalizeText(address)?.toLowerCase() ?? null;
+  const shortAddress = normalizedAddress
+    ? formatShortAddressLike(normalizedAddress).toLowerCase()
+    : null;
+  const shortAddressEllipsis = shortAddress?.replace("...", "…") ?? null;
+  if (
+    normalizedAddress &&
+    (normalizedLabel === normalizedAddress ||
+      normalizedLabel === shortAddress ||
+      normalizedLabel === shortAddressEllipsis)
+  ) {
+    return true;
+  }
+  return GENERIC_WALLET_LABEL_PATTERNS.some((pattern) =>
+    pattern.test(normalizedLabel),
+  );
+}
+
+function resolveWalletLabelQuality(
+  label: string | null | undefined,
+  address: string | null | undefined,
+): WhaleProfileInput["wallet"]["source_label_quality"] {
+  const normalized = normalizeText(label);
+  if (!normalized) return "missing";
+  return isGenericWalletLabel(normalized, address) ? "generic" : "descriptive";
+}
+
+function titleCaseToken(token: string): string {
+  if (!token) return token;
+  if (/^[a-z]{1,3}$/i.test(token)) return token.toUpperCase();
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+}
+
+const LABEL_STOP_WORDS = new Set([
+  "wallet",
+  "trader",
+  "trading",
+  "portfolio",
+  "event",
+  "events",
+  "market",
+  "markets",
+  "directional",
+  "mixed",
+  "hedged",
+  "active",
+  "auto",
+  "yes",
+  "no",
+  "high",
+  "odds",
+  "probability",
+  "sweep",
+  "sweeper",
+  "accumulator",
+  "the",
+  "a",
+  "an",
+  "of",
+  "in",
+  "on",
+  "to",
+  "for",
+  "by",
+  "before",
+  "after",
+  "when",
+  "will",
+  "is",
+  "be",
+  "become",
+]);
+
+function formatFocusCandidate(raw: string | null | undefined): string | null {
+  const normalized = normalizeText(raw);
+  if (!normalized) return null;
+  const cleaned = normalized
+    .replace(/[?()[\],:/]+/g, " ")
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !LABEL_STOP_WORDS.has(token.toLowerCase()));
+  if (cleaned.length === 0) return null;
+  return cleaned.slice(0, 2).map(titleCaseToken).join(" ");
+}
+
+function isGenericProfileLabelShort(
+  label: string | null | undefined,
+  input: WhaleProfileInput,
+): boolean {
+  const normalized = normalizeText(label);
+  if (!normalized) return true;
+  if (isGenericWalletLabel(normalized, null)) return true;
+  if (
+    input.wallet.source_label_quality === "generic" &&
+    input.wallet.source_label &&
+    normalized.toLowerCase() === input.wallet.source_label.toLowerCase()
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function resolveFallbackProfileLabelShort(
+  input: WhaleProfileInput,
+): string {
+  const focusCandidates = [
+    ...input.signals.examples.flatMap((example) => [
+      example.event_title,
+      example.market_title,
+    ]),
+    ...input.top_events.map((event) => event.event_title),
+    ...(input.category_mix.length > 0
+      ? input.category_mix.map((item) => item.category)
+      : Object.keys(input.summary.category_counts)),
+  ];
+  const focus =
+    focusCandidates
+      .map((candidate) => formatFocusCandidate(candidate))
+      .find(Boolean) ?? "Event";
+  const stance =
+    input.exposure.posture === "partially_hedged" ||
+    input.exposure.posture === "heavily_hedged"
+      ? "Hedged"
+      : input.summary.side_bias_label === "mostly_no"
+        ? "NO"
+        : input.summary.side_bias_label === "mostly_yes"
+          ? "YES"
+          : "Mixed";
+  const noun =
+    input.current_portfolio.market_count_total >= 20 ? "Portfolio" : "Trader";
+  return truncateText(`${focus} ${stance} ${noun}`.replace(/\s+/g, " ").trim(), 56);
+}
+
 const USD_BUCKETS = [
   100,
   1_000,
@@ -304,6 +514,44 @@ const COUNT_BUCKETS = [
 ] as const;
 
 const UNUSUAL_BUCKETS = [1, 2, 5, 10, 20, 50] as const;
+
+function bucketRate(value: number | null | undefined, step = 0.05): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return clampNumber(Math.round(value / step) * step, 0, 1);
+}
+
+function bucketSignedDecimal(
+  value: number | null | undefined,
+  step = 0.05,
+  maxAbs = 5,
+): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  const rounded = Math.round(value / step) * step;
+  return clampNumber(rounded, -maxAbs, maxAbs);
+}
+
+function normalizeBulletNotes(value: string | null | undefined): string | undefined {
+  const normalized = normalizeText(value);
+  if (!normalized) return undefined;
+  const lines = normalized
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^[•*-]\s*/, "")
+        .replace(/^\d+[.)]\s*/, "")
+        .trim(),
+    )
+    .filter(Boolean);
+  if (lines.length === 0) return undefined;
+  return lines.slice(0, 5).map((line) => `- ${line}`).join("\n");
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, Math.max(0, maxLength - 1)).trimEnd() + "…";
+}
 
 function bucketSignedUsd(value: number | null | undefined): number | null {
   if (value == null || !Number.isFinite(value)) return null;
@@ -552,9 +800,72 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
       },
     ],
   };
+  const performanceHash: WhaleProfileInput["performance_30d"] = {
+    ...input.performance_30d,
+    startAsOf: truncateIsoToHour(input.performance_30d.startAsOf),
+    endAsOf: truncateIsoToHour(input.performance_30d.endAsOf),
+    startPnlUsd: bucketSignedUsd(input.performance_30d.startPnlUsd),
+    endPnlUsd: bucketSignedUsd(input.performance_30d.endPnlUsd),
+    deltaPnlUsd: bucketSignedUsd(input.performance_30d.deltaPnlUsd),
+    startRoi: bucketSignedDecimal(input.performance_30d.startRoi),
+    endRoi: bucketSignedDecimal(input.performance_30d.endRoi),
+    deltaRoi: bucketSignedDecimal(input.performance_30d.deltaRoi),
+    minPnlUsd: bucketSignedUsd(input.performance_30d.minPnlUsd),
+    maxPnlUsd: bucketSignedUsd(input.performance_30d.maxPnlUsd),
+    minRoi: bucketSignedDecimal(input.performance_30d.minRoi),
+    maxRoi: bucketSignedDecimal(input.performance_30d.maxRoi),
+    points: input.performance_30d.points.slice(0, 6).map((point) => ({
+      asOf: truncateIsoToHour(point.asOf) ?? point.asOf,
+      pnlUsd: bucketSignedUsd(point.pnlUsd),
+      roi: bucketSignedDecimal(point.roi),
+    })),
+  };
+  const signalsHash: WhaleProfileInput["signals"] = {
+    summary: input.signals.summary
+      ? {
+          criticalSignals30d: bucketCount(input.signals.summary.criticalSignals30d),
+          avgSignalScore30d: bucketRate(input.signals.summary.avgSignalScore30d),
+          hasReactivatedAfterIdle: input.signals.summary.hasReactivatedAfterIdle,
+          hasLateEntry: input.signals.summary.hasLateEntry,
+          hasVeryLateEntry: input.signals.summary.hasVeryLateEntry,
+          hasUnusualBehavior: input.signals.summary.hasUnusualBehavior,
+        }
+      : null,
+    examples: input.signals.examples.slice(0, 3).map((example) => ({
+      ...example,
+      delta_usd: bucketSignedUsd(example.delta_usd),
+      stake_usd: bucketSignedUsd(example.stake_usd),
+      odds: bucketRate(example.odds),
+      signal_score: bucketRate(example.signal_score),
+      occurred_at: truncateIsoToHour(example.occurred_at),
+      reason_codes: example.reason_codes.slice(0, 4),
+    })),
+  };
 
   return {
     ...input,
+    category_mix: input.category_mix.map((item) => ({
+      category: item.category,
+      volumeUsd: bucketSignedUsd(item.volumeUsd) ?? 0,
+      tradeCount: bucketCount(item.tradeCount),
+      share: bucketRate(item.share) ?? 0,
+    })),
+    entry_brackets: input.entry_brackets.map((item) => ({
+      bracket: item.bracket,
+      avgStakeUsd: bucketSignedUsd(item.avgStakeUsd),
+      totalStakeUsd: bucketSignedUsd(item.totalStakeUsd) ?? 0,
+      tradeCount: bucketCount(item.tradeCount),
+      resolvedCount: bucketCount(item.resolvedCount),
+      winRate: bucketRate(item.winRate),
+    })),
+    performance_30d: performanceHash,
+    signals: signalsHash,
+    closed_positions_sample: input.closed_positions_sample.slice(0, 4).map((item) => ({
+      ...item,
+      sizeUsd: bucketSignedUsd(item.sizeUsd),
+      entryPrice: bucketRate(item.entryPrice),
+      snapshotAt: truncateIsoToHour(item.snapshotAt),
+    })),
     recent_window: recentHash,
   };
 }
@@ -607,54 +918,78 @@ export function normalizeWhaleProfile(raw: unknown): WhaleProfile | null {
   ).slice(0, 3);
   const evidence = Array.from(
     new Set(parsed.data.evidence.map((entry) => entry.trim()).filter(Boolean)),
-  ).slice(0, 4);
-  const notes = parsed.data.notes?.trim() || undefined;
+  )
+    .slice(0, 4)
+    .map((entry) => truncateText(entry, 160));
+  const notes = normalizeBulletNotes(parsed.data.notes);
+  const labelShort = truncateText(parsed.data.label_short.trim(), 56);
+  const labelLong = parsed.data.label_long.trim();
+  const riskStyle = truncateText(parsed.data.risk_style.trim(), 96);
 
   return {
-    label_short: parsed.data.label_short,
-    label_long: parsed.data.label_long,
-    archetype,
+    label_short: labelShort,
+    label_long: labelLong,
+    archetype: truncateText(archetype, 80),
     ...(categories.length ? { categories } : {}),
     ...(themeFocus.length ? { theme_focus: themeFocus } : {}),
-    risk_style: parsed.data.risk_style,
+    risk_style: riskStyle,
     confidence: parsed.data.confidence,
     evidence,
-    ...(notes ? { notes } : {}),
+    ...(notes ? { notes: truncateText(notes, 560) } : {}),
   };
 }
 
 function mapCategory(raw: string): WhaleCategory | null {
   const key = raw.trim().toLowerCase();
   if (!key) return null;
+  if (CATEGORY_VALUES.includes(key as WhaleCategory)) return key as WhaleCategory;
   if (key.includes("sport")) return "sports";
-  if (key.includes("politic") || key.includes("election") || key.includes("geopolit")) {
+  if (
+    key.includes("politic") ||
+    key.includes("election") ||
+    key.includes("geopolit") ||
+    key === "world"
+  ) {
     return "politics";
   }
   if (key.includes("crypto") || key.includes("blockchain") || key.includes("web3")) {
     return "crypto";
   }
-  if (key.includes("macro") || key.includes("rates") || key.includes("fed")) {
-    return "macro";
+  if (key.includes("weather") || key.includes("climate")) {
+    return "weather";
   }
   if (
     key.includes("finance") ||
+    key.includes("financial") ||
     key.includes("econom") ||
+    key.includes("macro") ||
+    key.includes("rates") ||
+    key.includes("fed") ||
     key.includes("stocks") ||
     key.includes("equities") ||
-    key.includes("markets")
+    key.includes("markets") ||
+    key.includes("companies")
   ) {
-    return "finance";
+    return "economics";
   }
   if (key.includes("entertain") || key.includes("culture") || key.includes("celebrity") || key.includes("music")) {
     return "entertainment";
   }
-  if (key.includes("tech") || key.includes("ai") || key.includes("software")) {
-    return "tech";
+  if (
+    key.includes("tech") ||
+    key.includes("ai") ||
+    key.includes("software") ||
+    key.includes("science")
+  ) {
+    return "technology";
   }
+  if (key.includes("health") || key.includes("medicine")) {
+    return "health";
+  }
+  if (key.includes("mention")) return "mentions";
   if (key.includes("social") || key.includes("twitter") || key.includes("tweets")) {
-    return "social";
+    return "other";
   }
-  if (CATEGORY_VALUES.includes(key as WhaleCategory)) return key as WhaleCategory;
   return null;
 }
 
@@ -674,6 +1009,11 @@ function deriveCategoriesFromInput(
   themeFocus?: string[],
 ): WhaleCategory[] {
   const counts = new Map<WhaleCategory, number>();
+  for (const item of input.category_mix) {
+    const mapped = mapCategory(item.category);
+    if (!mapped) continue;
+    counts.set(mapped, (counts.get(mapped) ?? 0) + Math.max(item.share, 0));
+  }
   for (const [rawKey, count] of Object.entries(input.summary.category_counts)) {
     const mapped = mapCategory(rawKey);
     if (!mapped) continue;
@@ -884,6 +1224,29 @@ function toActivityKind(
   return "unknown";
 }
 
+function mapSignalRowToProfileSignalExample(
+  row: WalletActivitySignalRow,
+): WhaleProfileInput["signals"]["examples"][number] {
+  return {
+    market_title: row.marketTitle ?? null,
+    event_title: row.eventTitle ?? null,
+    venue: row.venue,
+    category: row.category ?? null,
+    market_status: row.marketStatus ?? null,
+    resolved_outcome: row.resolvedOutcome ?? null,
+    action: row.action ?? null,
+    position_side: row.positionSide ?? null,
+    delta_usd: row.deltaUsd ?? null,
+    stake_usd: row.stakeUsd ?? null,
+    odds: row.odds ?? null,
+    signal_score: row.signalScore ?? null,
+    signal_type: row.signalType ?? null,
+    late_bucket: row.lateBucket ?? null,
+    reason_codes: row.reasonCodes ?? [],
+    occurred_at: row.occurredAt ? row.occurredAt.toISOString() : null,
+  };
+}
+
 function buildProfileInput(
   wallet: WhaleRow,
   currentMarkets: WhaleMarketRow[],
@@ -894,6 +1257,12 @@ function buildProfileInput(
     recentWindowHours: number;
     recentTopChanges: number;
     styleGuide: string;
+    categoryMix: WalletCategoryMixItem[];
+    entryBracketStats: WalletEntryBracketStat[];
+    performance30d: WalletPerformance30dSummary;
+    signalSummary: WalletActivitySignalSummary | null;
+    signalExamples: WalletActivitySignalRow[];
+    closedPositionsSample: WalletResolvedPositionSample[];
   },
 ): WhaleProfileInput {
   const allCurrentMarkets = currentMarkets.map((market) =>
@@ -966,24 +1335,24 @@ function buildProfileInput(
   const walletKind: WhaleProfileInput["wallet"]["kind"] =
     wallet.is_safe ? "safe" : "eoa";
   const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
+  const sourceLabel = normalizeText(wallet.label);
 
   return {
     context: {
       purpose: "wallet_whale_profile",
-      ui: "Shown in a whale list and a detail modal on the Wallets/Trackers page.",
+      ui: "Shown in tracker list cards and the wallet detail page.",
       top_markets_limit: context.marketLimit,
       window_days: context.windowDays,
       currency: "USD",
       display_notes:
-        "Write for end-users. Avoid jargon, avoid market IDs, no insider claims.",
+        "Write for end-users. Notes render as multiline bullets in the wallet detail view.",
       style_guide: context.styleGuide,
     },
     wallet: {
-      address: wallet.address,
       chain: wallet.chain,
-      label: wallet.label,
-      owner_address: wallet.owner_address,
-      owner_label: wallet.owner_label,
+      source_label: sourceLabel,
+      source_label_quality: resolveWalletLabelQuality(sourceLabel, wallet.address),
+      owner_label: normalizeText(wallet.owner_label),
       kind: walletKind,
       role: walletRole,
       owner_role: ownerRole,
@@ -1080,8 +1449,18 @@ function buildProfileInput(
       ),
     },
     summary,
+    category_mix: context.categoryMix,
+    entry_brackets: context.entryBracketStats,
+    performance_30d: context.performance30d,
+    signals: {
+      summary: context.signalSummary,
+      examples: context.signalExamples
+        .slice(0, 3)
+        .map(mapSignalRowToProfileSignalExample),
+    },
     top_events: topEvents,
     recent_window: recentWindow,
+    closed_positions_sample: context.closedPositionsSample.slice(0, 5),
     top_markets: topMarkets,
   };
 }
@@ -1152,6 +1531,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   // Keep recent-window inputs small and stable; hashing is bucketed below.
   const recentWindowHours = 24;
   const recentTopChanges = 3;
+  const profileSignalsWindowHours = 720;
   const client = await pool.connect();
   try {
     const whaleRows = await client.query<WhaleRow>(
@@ -1325,6 +1705,10 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           wb.metrics_win_rate,
           wb.metrics_last_trade_at,
           wb.exposure_usd,
+          wb.hedged_notional_usd,
+          wb.net_imbalance_usd,
+          wb.hedge_ratio,
+          wb.two_sided_markets,
           wb.whale_score,
           wb.signal_abs_usd,
           wb.last_activity_at,
@@ -1416,6 +1800,25 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       });
     } catch (error) {
       console.warn("[whale-profile] recent summary failed", { error });
+    }
+    let signalSummaryMap = new Map<string, WalletActivitySignalSummary>();
+    try {
+      signalSummaryMap = await fetchWalletActivitySignalSummary(
+        client,
+        whaleIds,
+        {
+          windowHours: profileSignalsWindowHours,
+          baselineDays: windowDays,
+          topChanges: recentTopChanges,
+        },
+      );
+      console.log("[whale-profile] signal summary loaded", {
+        wallets: whaleIds.length,
+        summarized: signalSummaryMap.size,
+        windowHours: profileSignalsWindowHours,
+      });
+    } catch (error) {
+      console.warn("[whale-profile] signal summary failed", { error });
     }
     const marketRows = await client.query<WhaleMarketRow>(
       `
@@ -1600,6 +2003,24 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       }
       const currentMarkets = marketMap.get(whale.id) ?? [];
       const recentSummary = recentSummaryMap.get(whale.id) ?? null;
+      const [
+        categoryMix,
+        entryBracketStats,
+        performance30d,
+        closedPositionsSample,
+        signalExamples,
+      ] = await Promise.all([
+        loadWalletCategoryMix(client, whale.id, windowDays),
+        loadWalletEntryBracketStats(client, whale.id, windowDays),
+        loadWalletPerformance30dSummary(client, whale.id),
+        loadWalletResolvedPositionSamples(client, whale.id, 5),
+        fetchWalletActivitySignalRowsFast(client, [whale.id], {
+          windowHours: profileSignalsWindowHours,
+          baselineDays: windowDays,
+          topChanges: recentTopChanges,
+          limit: 3,
+        }),
+      ]);
       const input = buildProfileInput(whale, currentMarkets, {
         marketLimit,
         windowDays,
@@ -1607,6 +2028,12 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         recentWindowHours,
         recentTopChanges,
         styleGuide: policy.styleGuide,
+        categoryMix,
+        entryBracketStats,
+        performance30d,
+        signalSummary: signalSummaryMap.get(whale.id) ?? null,
+        signalExamples,
+        closedPositionsSample,
       });
       const featuresHash = hashProfileInput(input);
       const existing = existingMap.get(whale.id);
@@ -1633,23 +2060,30 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       }
 
       const system =
-        "You are a market analyst writing concise, user-facing whale profiles. Return strict JSON only.";
-      const user = `Create a compact whale profile for display in a product UI.
+        "You are a market analyst writing concise, factual wallet profiles for a trading product. Return strict JSON only.";
+      const user = `Create a compact whale profile for a tracker UI.
 Output JSON with:
-- label_short: short name (target <= 36 chars, hard max 56), no venue names, no chain names.
-- label_long: 1–2 sentences (target <= 200 chars, hard max 320) summarizing the main behavior pattern.
+- label_short: short display alias (target <= 36 chars, hard max 56).
+  If wallet.source_label_quality is "descriptive" and wallet.source_label exists, keep label_short close to that source label instead of inventing a persona name.
+  If wallet.source_label_quality is "generic" or "missing", create a concise descriptive alias from the trading pattern.
+  Avoid hype, jokes, mascots, and fantasy nicknames.
+- label_long: exactly 1 sentence (target <= 260 chars, keep it concise but do not cut thoughts short if the data needs a bit more room).
 - archetype: short snake_case tag.
-- categories: array of 1–3 from [sports, politics, crypto, finance, entertainment, tech, macro, social, other].
+- categories: array of 1–3 from [politics, crypto, sports, economics, technology, entertainment, weather, health, mentions, other].
 - theme_focus: array of up to 3 lowercase tags.
 - risk_style: short phrase (target <= 54 chars, hard max 96).
 - confidence: number 0–1.
 - evidence: array of 2–4 short market or event titles (prefer event titles if multiple markets share the same event).
-- notes: optional 2–3 sentences (target <= 220 chars, hard max 420) with extra context for the detail view.
+- notes: multiline string with 3–5 bullet lines for the detail view.
+  Each line must start with "- ".
+  Each bullet should contain one concrete observation, not generic filler.
+  Prefer distinct bullets about current focus, positioning/risk, recent signals or changes, entry price bands, and historical performance/resolved behavior.
 
 Rules:
 - Use ONLY provided data. Do NOT mention wallet IDs or addresses.
 - No claims of insider or informed intent.
 - Be factual, pattern-based, and neutral in tone.
+- Write like an analyst, not a marketer.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - Stay comfortably below the hard limits; exact character counting is approximate.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
@@ -1667,6 +2101,15 @@ Rules:
   - current_portfolio.market_count_total is the total number of currently held markets.
   - current_portfolio.top_markets_gross_usd is the gross value represented by top_markets.
   - current_portfolio.omitted_market_count and omitted_gross_usd describe the held tail not listed in top_markets.
+- category_mix is the 30d traded-volume mix by canonical category.
+- entry_brackets describes where this wallet tends to enter positions, grouped by implied probability bands.
+- performance_30d summarizes the 30d PnL/ROI path.
+  - delta_* shows change across the 30d window.
+  - min_* and max_* show the range inside the window.
+  - points is a compressed chart sample for trend direction only.
+- signals.summary describes recent unusual/late/reactivation behavior.
+- signals.examples are the strongest recent signal rows.
+- closed_positions_sample are recent ended/resolved examples. Use them to talk about historical behavior, not current exposure.
 - recent_window summarizes the last recent_window.window_hours hours.
   Use it to explain what changed recently (net change, many exits, spikes),
   but treat it as secondary to the broader 30d pattern.
@@ -1692,9 +2135,16 @@ Rules:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
+- Naming:
+  - If wallet.source_label_quality is "descriptive", preserve the semantics of wallet.source_label.
+  - Do not replace a meaningful existing label with a completely unrelated nickname.
 - Prefer evidence from top_events when available; fall back to top_markets or recent_window.top_changes.
 - Use summary.side_bias_label and summary.concentration_label as hints.
 - If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, mention two-sided or hedged positioning unless one side is clearly negligible.
+- If signals.summary or signals.examples indicate late entry, reactivation, or unusual behavior, mention that carefully as observed trading behavior, not intent.
+- Use category_mix plus top_events/top_markets to describe thematic focus.
+- Use entry_brackets and held_odds to describe favored price bands or entry style, but do not overclaim conviction.
+- When performance_30d and closed_positions_sample are sparse or mixed, say so.
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
 - Never suggest insider information.
@@ -1702,7 +2152,7 @@ Rules:
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Use the lower end of the soft targets. Keep notes <= 110 chars and prefer shorter labels.`;
+Extra constraint: Keep label_short and label_long compact. Keep notes to 3 bullet lines when data is sparse and 5 max.`;
 
       let profileRaw = "";
       try {
@@ -1783,6 +2233,13 @@ Extra constraint: Use the lower end of the soft targets. Keep notes <= 110 chars
           });
         }
         continue;
+      }
+
+      if (isGenericProfileLabelShort(normalized.label_short, input)) {
+        normalized = {
+          ...normalized,
+          label_short: resolveFallbackProfileLabelShort(input),
+        };
       }
 
       if (!normalized.categories || normalized.categories.length === 0) {

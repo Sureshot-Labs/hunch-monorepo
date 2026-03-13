@@ -2794,7 +2794,30 @@ const tests: TestCase[] = [
       assert.deepEqual(normalized?.theme_focus, ["eth", "hourly"]);
       assert.deepEqual(normalized?.evidence, ["ETH above threshold?"]);
       assert.equal(normalized?.confidence, 0.42);
-      assert.equal(normalized?.notes, "Short-lived, two-sided activity.");
+      assert.equal(normalized?.notes, "- Short-lived, two-sided activity.");
+    },
+  },
+  {
+    name: "whale profile parser preserves long label_long text without ellipsis truncation",
+    run: () => {
+      const labelLong =
+        "High-volume, diversified NO-side trader concentrating in 80-100% implied odds across sports, politics, and Fed-rate markets, with a recent burst of adds and limited hedging across many active positions rather than one concentrated directional bet.";
+      const parsed = parseProfileJson(
+        JSON.stringify({
+          label_short: "Diversified NO-side trader",
+          label_long: labelLong,
+          archetype: "no_side_spread_trader",
+          categories: ["sports", "politics"],
+          theme_focus: ["fed", "elections"],
+          risk_style: "Broad NO-side exposure",
+          confidence: 0.72,
+          evidence: ["Fed decision in March?", "Republican Presidential Nominee 2028"],
+          notes: "- Current exposure is broad and mostly NO-side.",
+        }),
+      );
+      const normalized = normalizeWhaleProfile(parsed);
+      assert.ok(normalized);
+      assert.equal(normalized?.label_long, labelLong);
     },
   },
   {

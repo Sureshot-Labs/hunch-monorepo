@@ -35,6 +35,11 @@ import {
   type WalletActivitySparkline,
 } from "../services/wallet-intel-series.js";
 import {
+  loadWalletCategoryMix,
+  loadWalletEntryBracketStats,
+  type WalletEntryBracketKey,
+} from "../services/wallet-profile-features.js";
+import {
   resolveSignalWindowHours,
   resolveWalletIntelAttributionPolicy,
   resolveWalletIntelRefreshPolicy,
@@ -116,13 +121,6 @@ type WalletPrivateMetaRow = {
   user_label_color: WalletLabelColor | null;
 };
 
-type WalletCategoryMixItem = {
-  category: string;
-  volumeUsd: number;
-  tradeCount: number;
-  share: number;
-};
-
 type WalletMetricsRow = {
   period: string;
   as_of: Date;
@@ -176,22 +174,6 @@ export type WalletPresentationBadgeKey =
 export type WalletPresentationBadge = {
   key: WalletPresentationBadgeKey;
   label: string;
-};
-
-export type WalletEntryBracketKey =
-  | "0-20"
-  | "20-40"
-  | "40-60"
-  | "60-80"
-  | "80-100";
-
-export type WalletEntryBracketStat = {
-  bracket: WalletEntryBracketKey;
-  avgStakeUsd: number | null;
-  totalStakeUsd: number;
-  tradeCount: number;
-  resolvedCount: number;
-  winRate: number | null;
 };
 
 type WhaleMarketRow = {
@@ -814,14 +796,6 @@ const SECONDARY_LABEL_PRIORITY: WalletAttributionLabelKey[] = [
   "close_to_settlement",
   "dormant_wake_up",
   "unusual_behavior",
-];
-
-const ENTRY_BRACKET_KEYS: WalletEntryBracketKey[] = [
-  "0-20",
-  "20-40",
-  "40-60",
-  "60-80",
-  "80-100",
 ];
 
 function buildWalletLabelSet(
@@ -2536,154 +2510,6 @@ async function loadWalletFollowerCountsMap(
   }
 
   return byWalletId;
-}
-
-async function loadWalletCategoryMix(
-  client: PoolClient,
-  walletId: string,
-  windowDays = 30,
-): Promise<WalletCategoryMixItem[]> {
-  const rows = await client.query<{
-    category: string;
-    volume_usd: string | null;
-    trade_count: number | null;
-    share: string | null;
-  }>(
-    `
-      with category_mix as (
-        select
-          lower(coalesce(nullif(trim(um.category), ''), 'other')) as category,
-          sum(wa.size_usd)::double precision as volume_usd,
-          count(*)::int as trade_count
-        from wallet_activity_events wa
-        left join unified_markets um on um.id = wa.market_id
-        where wa.wallet_id = $1::uuid
-          and wa.occurred_at >= now() - ($2::text || ' days')::interval
-          and wa.size_usd is not null
-        group by 1
-      ),
-      totals as (
-        select sum(volume_usd)::double precision as total_volume_usd
-        from category_mix
-      )
-      select
-        cm.category,
-        cm.volume_usd::text as volume_usd,
-        cm.trade_count,
-        case
-          when t.total_volume_usd is null or t.total_volume_usd <= 0 then null
-          else (cm.volume_usd / t.total_volume_usd)::text
-        end as share
-      from category_mix cm
-      cross join totals t
-      where cm.volume_usd > 0
-      order by cm.volume_usd desc, cm.trade_count desc, cm.category asc
-      limit 6
-    `,
-    [walletId, Math.max(1, Math.trunc(windowDays))],
-  );
-
-  return rows.rows
-    .map((row) => ({
-      category: row.category,
-      volumeUsd: nullableNumber(row.volume_usd) ?? 0,
-      tradeCount: row.trade_count ?? 0,
-      share: nullableNumber(row.share) ?? 0,
-    }))
-    .filter((row) => row.volumeUsd > 0);
-}
-
-async function loadWalletEntryBracketStats(
-  client: PoolClient,
-  walletId: string,
-  windowDays = 30,
-): Promise<WalletEntryBracketStat[]> {
-  const rows = await client.query<{
-    bracket: WalletEntryBracketKey;
-    avg_stake_usd: string | null;
-    total_stake_usd: string | null;
-    trade_count: number | null;
-    resolved_count: number | null;
-    win_rate: string | null;
-  }>(
-    `
-      with entry_events as (
-        select
-          case
-            when wa.price is null then null
-            when wa.price > 1 and wa.price <= 100 then wa.price / 100.0
-            else wa.price
-          end as price_probability,
-          wa.size_usd::double precision as stake_usd,
-          upper(coalesce(wa.outcome_side, '')) as outcome_side,
-          upper(coalesce(um.resolved_outcome, '')) as resolved_outcome
-        from wallet_activity_events wa
-        left join unified_markets um on um.id = wa.market_id
-        where wa.wallet_id = $1::uuid
-          and wa.activity_type in ('delta', 'trade')
-          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
-          and wa.occurred_at >= now() - ($2::text || ' days')::interval
-          and wa.size_usd is not null
-          and wa.price is not null
-      ),
-      bucketed as (
-        select
-          case
-            when price_probability < 0 or price_probability > 1 then null
-            when price_probability < 0.2 then '0-20'
-            when price_probability < 0.4 then '20-40'
-            when price_probability < 0.6 then '40-60'
-            when price_probability < 0.8 then '60-80'
-            else '80-100'
-          end as bracket,
-          stake_usd,
-          case
-            when resolved_outcome in ('YES', 'NO')
-             and outcome_side in ('YES', 'NO')
-              then 1
-            else 0
-          end as resolved_row,
-          case
-            when resolved_outcome in ('YES', 'NO')
-             and outcome_side = resolved_outcome
-              then 1
-            else 0
-          end as win_row
-        from entry_events
-      )
-      select
-        bracket,
-        avg(stake_usd)::text as avg_stake_usd,
-        coalesce(sum(stake_usd), 0)::text as total_stake_usd,
-        count(*)::int as trade_count,
-        sum(resolved_row)::int as resolved_count,
-        case
-          when sum(resolved_row) > 0
-            then (sum(win_row)::double precision / sum(resolved_row))::text
-          else null
-        end as win_rate
-      from bucketed
-      where bracket is not null
-      group by bracket
-    `,
-    [walletId, Math.max(1, Math.trunc(windowDays))],
-  );
-
-  const rowByBracket = new Map(
-    rows.rows.map((row) => [row.bracket, row] as const),
-  );
-
-  return ENTRY_BRACKET_KEYS.map((bracket) => {
-    const row = rowByBracket.get(bracket);
-    return {
-      bracket,
-      avgStakeUsd: row ? nullableNumber(row.avg_stake_usd) : null,
-      totalStakeUsd: row ? nullableNumber(row.total_stake_usd) ?? 0 : 0,
-      tradeCount: row?.trade_count ?? 0,
-      resolvedCount: row?.resolved_count ?? 0,
-      winRate: row ? nullableNumber(row.win_rate) : null,
-    };
-  });
 }
 
 async function loadWalletResolvedTradeStatsMap(
