@@ -41,6 +41,7 @@ import {
   mergeWalletIdsForScope,
 } from "../services/wallet-intel-filters.js";
 import { normalizeOutcomeSideForApi } from "../services/wallet-intel-helpers.js";
+import { loadWalletPositionApproxMetrics } from "../services/wallet-position-approx.js";
 import {
   buildWalletMmDiagnostics,
   MM_HEDGE_RATIO_MIN,
@@ -6109,6 +6110,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.close_time,
                 um.expiration_time,
                 um.resolved_outcome,
+                um.resolved_outcome_pct::text as resolved_outcome_pct,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -6161,6 +6163,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.close_time,
                 um.expiration_time,
                 um.resolved_outcome,
+                um.resolved_outcome_pct::text as resolved_outcome_pct,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -6210,6 +6213,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           close_time: Date | null;
           expiration_time: Date | null;
           resolved_outcome: string | null;
+          resolved_outcome_pct: string | null;
           best_bid: string | null;
           best_ask: string | null;
           last_price: string | null;
@@ -6224,7 +6228,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const hasMore = rows.rows.length > query.limit;
         const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
 
-        const items = pageRows.map((row) => ({
+        const baseItems = pageRows.map((row) => ({
           walletId: row.wallet_id,
           address: row.address,
           chain: row.chain,
@@ -6247,6 +6251,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? row.expiration_time.toISOString()
             : null,
           resolvedOutcome: row.resolved_outcome,
+          resolvedOutcomePct: row.resolved_outcome_pct
+            ? Number(row.resolved_outcome_pct)
+            : null,
           outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
           shares: row.shares ? Number(row.shares) : null,
           sizeUsd: row.size_usd ? Number(row.size_usd) : null,
@@ -6254,6 +6261,25 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           snapshotAt: row.snapshot_at,
           metadata: row.metadata ?? null,
         }));
+
+        const approxMetrics = await loadWalletPositionApproxMetrics(
+          client,
+          baseItems,
+        );
+
+        const items = baseItems.map((item) => {
+          const metrics = approxMetrics.get(
+            `${item.walletId}::${item.marketId}::${item.outcomeSide ?? ""}`,
+          );
+          const { resolvedOutcomePct: _resolvedOutcomePct, ...rest } = item;
+          return {
+            ...rest,
+            approxEntryPrice: metrics?.approxEntryPrice ?? null,
+            approxPnlUsd: metrics?.approxPnlUsd ?? null,
+            approxReliable: metrics?.approxReliable ?? false,
+            approxPnlSource: metrics?.approxPnlSource ?? null,
+          };
+        });
 
         return reply.send({
           ok: true,
