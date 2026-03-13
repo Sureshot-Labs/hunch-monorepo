@@ -520,11 +520,16 @@ function parseRetentionConfig(): RetentionConfig {
   };
 }
 
-function normalizeAddress(address: string, chain: Chain): string {
+function isZeroEvmWalletAddress(address: string): boolean {
+  return address.toLowerCase() === ethers.ZeroAddress;
+}
+
+function normalizeAddress(address: string, chain: Chain): string | null {
   const trimmed = address.trim();
   if (chain === "solana") return trimmed;
-  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
-  return trimmed.toLowerCase();
+  const normalized = trimmed.toLowerCase();
+  if (isZeroEvmWalletAddress(normalized)) return null;
+  return normalized;
 }
 
 function normalizeOnchainTokenId(
@@ -727,6 +732,9 @@ async function upsertWallet(
   client: Queryable,
   inputs: { address: string; chain: Chain },
 ): Promise<string> {
+  if (inputs.chain !== "solana" && isZeroEvmWalletAddress(inputs.address)) {
+    throw new Error("Refusing to persist zero EVM wallet address");
+  }
   const result = await client.query<{ id: string }>(
     `
       insert into wallets (address, chain, last_seen_at)
@@ -746,6 +754,9 @@ async function upsertWalletWithMetadata(
   client: Queryable,
   inputs: { address: string; chain: Chain; metadata: Record<string, unknown> },
 ): Promise<string> {
+  if (inputs.chain !== "solana" && isZeroEvmWalletAddress(inputs.address)) {
+    throw new Error("Refusing to persist zero EVM wallet address");
+  }
   const result = await client.query<{ id: string }>(
     `
       insert into wallets (address, chain, last_seen_at, metadata)
@@ -1156,6 +1167,11 @@ async function collectFollowedWalletSnapshotRows(
   for (const followed of inputs.followedWallets) {
     processed += 1;
     if (followed.chain === "polygon") {
+      const normalizedFollowedAddress = normalizeAddress(
+        followed.address,
+        "polygon",
+      );
+      if (!normalizedFollowedAddress) continue;
       const prefetchedPolymarket =
         prefetchedPolymarketBalances.get(followed.wallet_id) ?? null;
 
@@ -1192,7 +1208,7 @@ async function collectFollowedWalletSnapshotRows(
           () =>
             snapshotFollowedWalletHoldingsEvm(client, {
               walletId: followed.wallet_id,
-              address: normalizeAddress(followed.address, "polygon"),
+              address: normalizedFollowedAddress,
               venue: "polymarket",
               rpcUrl: env.polygonRpcUrl,
               rpcTimeoutMs: env.polygonRpcTimeoutMs,
@@ -1243,6 +1259,11 @@ async function collectFollowedWalletSnapshotRows(
     }
 
     if (followed.chain === "base") {
+      const normalizedFollowedAddress = normalizeAddress(
+        followed.address,
+        "base",
+      );
+      if (!normalizedFollowedAddress) continue;
       try {
         await runWithTelemetry(
           inputs.telemetry.followedPositionsLimitless,
@@ -1275,7 +1296,7 @@ async function collectFollowedWalletSnapshotRows(
           () =>
             snapshotFollowedWalletHoldingsEvm(client, {
               walletId: followed.wallet_id,
-              address: normalizeAddress(followed.address, "base"),
+              address: normalizedFollowedAddress,
               venue: "limitless",
               rpcUrl: env.baseRpcUrl,
               rpcTimeoutMs: env.baseRpcTimeoutMs,

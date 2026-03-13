@@ -512,8 +512,13 @@ type WalletOpenPositionOverlay = {
 };
 
 function normalizeAddress(address: string): string {
-  if (address.startsWith("0x")) return address.toLowerCase();
-  return address.trim();
+  const trimmed = address.trim();
+  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
+  return trimmed;
+}
+
+function isZeroEvmWalletAddress(address: string): boolean {
+  return address.toLowerCase() === ethers.ZeroAddress;
 }
 
 function isValidWalletAddressForChain(address: string, chain: string): boolean {
@@ -525,7 +530,7 @@ function isValidWalletAddressForChain(address: string, chain: string): boolean {
       return false;
     }
   }
-  return ethers.isAddress(address);
+  return ethers.isAddress(address) && !isZeroEvmWalletAddress(address);
 }
 
 async function findWalletByAddressAndChain(
@@ -3150,9 +3155,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const address = normalizeAddress(body.address);
       const baseLabel = body.label?.trim() || null;
 
-      if (chain !== "solana" && !ethers.isAddress(address)) {
+      if (!isValidWalletAddressForChain(address, chain)) {
         reply.code(400);
-        return reply.send({ error: "Invalid EVM wallet address" });
+        return reply.send({
+          error:
+            chain === "solana"
+              ? "Invalid Solana wallet address"
+              : "Invalid EVM wallet address",
+        });
       }
 
       const client = await pool.connect();
@@ -3199,7 +3209,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           );
         }
 
-        if (chain === "polygon" && ethers.isAddress(address)) {
+        if (chain === "polygon" && isValidWalletAddressForChain(address, chain)) {
           try {
             const funderResult = await derivePolymarketFunders({
               signer: address,
@@ -3213,56 +3223,58 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
             if (safeCandidate) {
               const safeAddress = normalizeAddress(safeCandidate.funder);
-              const safeLabel = baseLabel
-                ? `${baseLabel} (Trading wallet)`
-                : "Trading wallet (auto)";
-              const safeWalletResult = await client.query<WalletRow>(
-                `
-                  insert into wallets (address, chain, label, metadata)
-                  values ($1, $2, $3, $4)
-                  on conflict (address, chain)
-                  do update set
-                    label = coalesce(wallets.label, excluded.label),
-                    metadata = coalesce(wallets.metadata, '{}'::jsonb) || excluded.metadata,
-                    last_seen_at = greatest(wallets.last_seen_at, now()),
-                    updated_at = now()
-                  returning id
-                `,
-                [
-                  safeAddress,
-                  "polygon",
-                  safeLabel,
-                  {
-                    kind: "safe",
-                    derivedFrom: address,
-                    owners: safeCandidate.safeOwners ?? null,
-                    threshold: safeCandidate.safeThreshold ?? null,
-                  },
-                ],
-              );
-              const safeWalletId = safeWalletResult.rows[0]?.id;
-              if (safeWalletId) {
-                await client.query(
+              if (isValidWalletAddressForChain(safeAddress, "polygon")) {
+                const safeLabel = baseLabel
+                  ? `${baseLabel} (Trading wallet)`
+                  : "Trading wallet (auto)";
+                const safeWalletResult = await client.query<WalletRow>(
                   `
-                    insert into wallet_follows (user_id, wallet_id)
-                    values ($1, $2)
-                    on conflict (user_id, wallet_id)
-                    do nothing
+                    insert into wallets (address, chain, label, metadata)
+                    values ($1, $2, $3, $4)
+                    on conflict (address, chain)
+                    do update set
+                      label = coalesce(wallets.label, excluded.label),
+                      metadata = coalesce(wallets.metadata, '{}'::jsonb) || excluded.metadata,
+                      last_seen_at = greatest(wallets.last_seen_at, now()),
+                      updated_at = now()
+                    returning id
                   `,
-                  [user.id, safeWalletId],
+                  [
+                    safeAddress,
+                    "polygon",
+                    safeLabel,
+                    {
+                      kind: "safe",
+                      derivedFrom: address,
+                      owners: safeCandidate.safeOwners ?? null,
+                      threshold: safeCandidate.safeThreshold ?? null,
+                    },
+                  ],
                 );
-                if (baseLabel) {
+                const safeWalletId = safeWalletResult.rows[0]?.id;
+                if (safeWalletId) {
                   await client.query(
                     `
-                      insert into wallet_user_labels (user_id, wallet_id, label)
-                      values ($1, $2, $3)
+                      insert into wallet_follows (user_id, wallet_id)
+                      values ($1, $2)
                       on conflict (user_id, wallet_id)
-                      do update set
-                        label = excluded.label,
-                        updated_at = now()
+                      do nothing
                     `,
-                    [user.id, safeWalletId, `${baseLabel} (Trading wallet)`],
+                    [user.id, safeWalletId],
                   );
+                  if (baseLabel) {
+                    await client.query(
+                      `
+                        insert into wallet_user_labels (user_id, wallet_id, label)
+                        values ($1, $2, $3)
+                        on conflict (user_id, wallet_id)
+                        do update set
+                          label = excluded.label,
+                          updated_at = now()
+                      `,
+                      [user.id, safeWalletId, `${baseLabel} (Trading wallet)`],
+                    );
+                  }
                 }
               }
             }
@@ -3295,7 +3307,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
               if (safeInfo.owners && safeInfo.owners.length === 1) {
                 const owner = normalizeAddress(safeInfo.owners[0]);
-                if (owner !== address) {
+                if (
+                  isValidWalletAddressForChain(owner, "polygon") &&
+                  owner !== address
+                ) {
                   const ownerLabel = baseLabel
                     ? `${baseLabel} (Signer wallet)`
                     : "Signer wallet (auto)";
