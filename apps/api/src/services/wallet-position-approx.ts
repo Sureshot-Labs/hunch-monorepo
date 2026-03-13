@@ -3,6 +3,13 @@ import type { PoolClient } from "pg";
 import { isRecord } from "../lib/type-guards.js";
 import { normalizeOutcomeSideForStorage } from "./wallet-intel-helpers.js";
 import {
+  loadWalletPositionLedgerMap,
+  makeWalletPositionLedgerKey,
+  resolveApproxOpenEntryFromLedger,
+  sharesApproximatelyMatch,
+  type WalletPositionLedgerState,
+} from "./wallet-position-ledger.js";
+import {
   clampProbability,
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
@@ -24,26 +31,6 @@ type WalletPositionApproxInput = {
   metadata?: unknown;
 };
 
-type ActivityLegRow = {
-  wallet_id: string;
-  market_id: string;
-  outcome_side: string | null;
-  action: string | null;
-  delta_shares: string | null;
-  size_usd: string | null;
-  price: string | null;
-};
-
-type ActivityAgg = {
-  buyShares: number;
-  buyCostUsd: number;
-  sellShares: number;
-  netShares: number;
-  netCostUsd: number;
-  hasIncompleteEvents: boolean;
-  eventCount: number;
-};
-
 export type WalletPositionApproxMetrics = {
   approxEntryPrice: number | null;
   approxPnlUsd: number | null;
@@ -58,18 +45,6 @@ function parseNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
-}
-
-function makeKey(
-  walletId: string,
-  marketId: string,
-  outcomeSide: string | null | undefined,
-): string {
-  return [
-    walletId,
-    marketId,
-    normalizeOutcomeSideForStorage(outcomeSide),
-  ].join("::");
 }
 
 function resolveMarkPrice(input: WalletPositionApproxInput): number | null {
@@ -153,9 +128,9 @@ function buildSnapshotFallback(
   };
 }
 
-function buildApproxFromActivity(
+function buildApproxFromLedger(
   input: WalletPositionApproxInput,
-  agg: ActivityAgg,
+  ledger: WalletPositionLedgerState,
   markPrice: number | null,
 ): WalletPositionApproxMetrics {
   const side = normalizeOutcomeSideForStorage(input.outcomeSide);
@@ -163,36 +138,52 @@ function buildApproxFromActivity(
     return buildSnapshotFallback(input, markPrice);
   }
 
-  if (agg.netShares < -NET_SHARES_EPSILON) {
+  const snapshotShares = parseNumber(input.shares);
+  const sharesMismatch =
+    snapshotShares != null &&
+    snapshotShares > NET_SHARES_EPSILON &&
+    !sharesApproximatelyMatch(snapshotShares, ledger.remainingShares);
+
+  if (sharesMismatch) {
     return buildSnapshotFallback(input, markPrice);
   }
 
-  const approxEntryPrice =
-    agg.netShares >= NET_SHARES_EPSILON && agg.netCostUsd > 0
-      ? agg.netCostUsd / agg.netShares
-      : agg.buyShares >= NET_SHARES_EPSILON && agg.buyCostUsd > 0
-        ? agg.buyCostUsd / agg.buyShares
-        : null;
+  const openEntry = resolveApproxOpenEntryFromLedger({
+    ledger,
+    observedPrice: input.price,
+    snapshotShares,
+  });
+  if (
+    ledger.remainingShares > NET_SHARES_EPSILON &&
+    openEntry.source !== "activity"
+  ) {
+    return buildSnapshotFallback(input, markPrice);
+  }
+  const approxEntryPrice = openEntry.source === "activity" ? openEntry.entryPrice : null;
 
-  const approxPnlUsd =
-    Math.abs(agg.netShares) <= NET_SHARES_EPSILON
-      ? -agg.netCostUsd
-      : computeApproxLegPnlUsd({
+  const openLegPnlUsd =
+    ledger.remainingShares > NET_SHARES_EPSILON
+      ? computeApproxLegPnlUsd({
           outcomeSide: side,
-          netShares: Math.max(0, agg.netShares),
-          netCost: agg.netCostUsd,
+          netShares: ledger.remainingShares,
+          netCost: ledger.remainingBasisUsd,
           resolvedOutcome: input.resolvedOutcome,
           markPrice,
-        });
+        })
+      : 0;
+  const approxPnlUsd =
+    openLegPnlUsd == null
+      ? ledger.remainingShares > NET_SHARES_EPSILON
+        ? buildSnapshotFallback(input, markPrice).approxPnlUsd
+        : ledger.realizedPnlUsd
+      : ledger.realizedPnlUsd + openLegPnlUsd;
 
-  if (approxPnlUsd == null && approxEntryPrice == null) {
+  if (approxPnlUsd == null && openEntry.entryPrice == null) {
     return buildSnapshotFallback(input, markPrice);
   }
 
   const approxReliable =
-    !agg.hasIncompleteEvents &&
-    agg.netShares >= -NET_SHARES_EPSILON &&
-    agg.sellShares <= agg.buyShares + NET_SHARES_EPSILON;
+    !ledger.hasIncompleteEvents && !ledger.oversold && !sharesMismatch;
 
   return {
     approxEntryPrice,
@@ -202,65 +193,6 @@ function buildApproxFromActivity(
   };
 }
 
-function aggregateActivityRows(rows: ActivityLegRow[]): Map<string, ActivityAgg> {
-  const byKey = new Map<string, ActivityAgg>();
-
-  for (const row of rows) {
-    const key = makeKey(row.wallet_id, row.market_id, row.outcome_side);
-    const agg = byKey.get(key) ?? {
-      buyShares: 0,
-      buyCostUsd: 0,
-      sellShares: 0,
-      netShares: 0,
-      netCostUsd: 0,
-      hasIncompleteEvents: false,
-      eventCount: 0,
-    };
-
-    const price = parseNumber(row.price);
-    let shares = parseNumber(row.delta_shares);
-    let notionalUsd = parseNumber(row.size_usd);
-
-    if (shares == null && price != null && notionalUsd != null && price > 0) {
-      shares = Math.abs(notionalUsd / price);
-    }
-
-    if (notionalUsd == null && shares != null && price != null) {
-      notionalUsd = Math.abs(shares * price);
-    }
-
-    if (
-      shares == null ||
-      !Number.isFinite(shares) ||
-      shares <= 0 ||
-      notionalUsd == null ||
-      !Number.isFinite(notionalUsd) ||
-      notionalUsd < 0
-    ) {
-      agg.hasIncompleteEvents = true;
-      byKey.set(key, agg);
-      continue;
-    }
-
-    const isSell = row.action?.trim().toUpperCase() === "SELL";
-    if (isSell) {
-      agg.sellShares += shares;
-      agg.netShares -= shares;
-      agg.netCostUsd -= notionalUsd;
-    } else {
-      agg.buyShares += shares;
-      agg.buyCostUsd += notionalUsd;
-      agg.netShares += shares;
-      agg.netCostUsd += notionalUsd;
-    }
-
-    agg.eventCount += 1;
-    byKey.set(key, agg);
-  }
-
-  return byKey;
-}
-
 export async function loadWalletPositionApproxMetrics(
   client: Queryable,
   inputs: WalletPositionApproxInput[],
@@ -268,37 +200,27 @@ export async function loadWalletPositionApproxMetrics(
   const metricsByKey = new Map<string, WalletPositionApproxMetrics>();
   if (inputs.length === 0) return metricsByKey;
 
-  const walletIds = Array.from(new Set(inputs.map((row) => row.walletId)));
-  const marketIds = Array.from(new Set(inputs.map((row) => row.marketId)));
-
-  const { rows } = await client.query<ActivityLegRow>(
-    `
-      select
-        wallet_id,
-        market_id,
-        outcome_side,
-        action,
-        delta_shares::text as delta_shares,
-        size_usd::text as size_usd,
-        price::text as price
-      from wallet_activity_events
-      where wallet_id = any($1::uuid[])
-        and market_id = any($2::text[])
-        and activity_type in ('delta', 'trade')
-    `,
-    [walletIds, marketIds],
+  const ledgerByKey = await loadWalletPositionLedgerMap(
+    client,
+    inputs.map((input) => ({
+      walletId: input.walletId,
+      marketId: input.marketId,
+      outcomeSide: input.outcomeSide,
+    })),
   );
 
-  const activityByKey = aggregateActivityRows(rows);
-
   for (const input of inputs) {
-    const key = makeKey(input.walletId, input.marketId, input.outcomeSide);
-    const agg = activityByKey.get(key);
+    const key = makeWalletPositionLedgerKey(
+      input.walletId,
+      input.marketId,
+      input.outcomeSide,
+    );
+    const ledger = ledgerByKey.get(key);
     const markPrice = resolveMarkPrice(input);
 
     const metrics =
-      agg && agg.eventCount > 0
-        ? buildApproxFromActivity(input, agg, markPrice)
+      ledger && ledger.eventCount > 0
+        ? buildApproxFromLedger(input, ledger, markPrice)
         : buildSnapshotFallback(input, markPrice);
 
     metricsByKey.set(key, metrics);

@@ -27,6 +27,11 @@ import {
   NET_SHARES_EPSILON,
 } from "./services/wallet-intel-pnl.js";
 import {
+  computeWalletLedgerApproxMetricTotals,
+  replayWalletPositionLedgerRows,
+  resolveApproxOpenEntryFromLedger,
+} from "./services/wallet-position-ledger.js";
+import {
   applyResolvedTradeStatsToMetrics,
   resolveEntryBracketKey,
   resolveWalletAvgTradeSizeUsd,
@@ -1291,6 +1296,176 @@ const tests: TestCase[] = [
         markPrice: 0.9,
       });
       assert.equal(nearZeroNetShares, null);
+    },
+  },
+  {
+    name: "wallet position ledger preserves remaining basis across partial sells",
+    run: () => {
+      const ledger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "BUY",
+          deltaShares: "10",
+          sizeUsd: "4",
+          price: "0.4",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "buy-1",
+        },
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "SELL",
+          deltaShares: "5",
+          sizeUsd: "3",
+          price: "0.6",
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          createdAt: new Date("2026-01-02T00:00:01.000Z"),
+          id: "sell-1",
+        },
+      ]);
+
+      assert.ok(Math.abs(ledger.remainingShares - 5) < 1e-9);
+      assert.ok(Math.abs(ledger.remainingBasisUsd - 2) < 1e-9);
+      assert.ok(Math.abs(ledger.realizedPnlUsd - 1) < 1e-9);
+      assert.ok(Math.abs(ledger.realizedBasisUsd - 2) < 1e-9);
+
+      const openEntry = resolveApproxOpenEntryFromLedger({
+        ledger,
+        observedPrice: 0.55,
+        snapshotShares: 5,
+      });
+      assert.equal(openEntry.source, "activity");
+      assert.equal(openEntry.approximate, false);
+      assert.ok(Math.abs((openEntry.entryPrice ?? 0) - 0.4) < 1e-9);
+
+      const openLegPnl = computeApproxLegPnlUsd({
+        outcomeSide: "YES",
+        netShares: ledger.remainingShares,
+        netCost: ledger.remainingBasisUsd,
+        markPrice: 0.5,
+      });
+      assert.ok(Math.abs((ledger.realizedPnlUsd + (openLegPnl ?? 0)) - 1.5) < 1e-9);
+    },
+  },
+  {
+    name: "wallet ledger totals combine realized and open pnl using remaining basis",
+    run: () => {
+      const ledger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "BUY",
+          deltaShares: "10",
+          sizeUsd: "4",
+          price: "0.4",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "buy-1",
+        },
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "SELL",
+          deltaShares: "5",
+          sizeUsd: "3",
+          price: "0.6",
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          createdAt: new Date("2026-01-02T00:00:01.000Z"),
+          id: "sell-1",
+        },
+      ]);
+
+      const totals = computeWalletLedgerApproxMetricTotals([
+        {
+          outcomeSide: "YES",
+          ledger,
+          yesMarkPrice: 0.5,
+        },
+      ]);
+
+      assert.equal(totals.approximate, false);
+      assert.equal(totals.unmarkedOpenLegCount, 0);
+      assert.ok(Math.abs((totals.costBasisUsd ?? 0) - 4) < 1e-9);
+      assert.ok(Math.abs((totals.pnlUsd ?? 0) - 1.5) < 1e-9);
+    },
+  },
+  {
+    name: "wallet ledger totals flag missing open marks but keep realized pnl",
+    run: () => {
+      const ledger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          action: "BUY",
+          deltaShares: "4",
+          sizeUsd: "2.4",
+          price: "0.6",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "buy-1",
+        },
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          action: "SELL",
+          deltaShares: "1",
+          sizeUsd: "0.8",
+          price: "0.8",
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          createdAt: new Date("2026-01-02T00:00:01.000Z"),
+          id: "sell-1",
+        },
+      ]);
+
+      const totals = computeWalletLedgerApproxMetricTotals([
+        {
+          outcomeSide: "NO",
+          ledger,
+          yesMarkPrice: null,
+        },
+      ]);
+
+      assert.equal(totals.approximate, true);
+      assert.equal(totals.unmarkedOpenLegCount, 1);
+      assert.ok(Math.abs((totals.costBasisUsd ?? 0) - 0.6) < 1e-9);
+      assert.ok(Math.abs((totals.pnlUsd ?? 0) - 0.2) < 1e-9);
+    },
+  },
+  {
+    name: "wallet open entry falls back to snapshot when ledger no longer reconciles to current shares",
+    run: () => {
+      const ledger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "BUY",
+          deltaShares: "10",
+          sizeUsd: "4",
+          price: "0.4",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "buy-1",
+        },
+      ]);
+
+      const fallback = resolveApproxOpenEntryFromLedger({
+        ledger,
+        observedPrice: 0.63,
+        snapshotShares: 7,
+      });
+
+      assert.equal(fallback.source, "snapshot");
+      assert.equal(fallback.approximate, true);
+      assert.ok(Math.abs((fallback.entryPrice ?? 0) - 0.63) < 1e-9);
     },
   },
   {
