@@ -314,6 +314,7 @@ export type WalletIntelAttributionVenueThresholdPolicy = {
   marketMoverStakeToMarketVolRatio: number;
   highFrequencyTrades30d: number;
   botMinActiveDays30d: number;
+  botMinActiveUtcHourSlots30d: number;
   botMaxMedianStakeUsd: number;
   volumeTraderVolume30dUsd: number;
   specialistCategoryShareMin: number;
@@ -756,6 +757,7 @@ const attributionVenueThresholdSchema = z
     marketMoverStakeToMarketVolRatio: ratio,
     highFrequencyTrades30d: nonNegativeInt,
     botMinActiveDays30d: nonNegativeInt.max(31),
+    botMinActiveUtcHourSlots30d: nonNegativeInt.max(24),
     botMaxMedianStakeUsd: nonNegativeNumber,
     volumeTraderVolume30dUsd: nonNegativeNumber,
     specialistCategoryShareMin: ratio,
@@ -926,6 +928,7 @@ const attributionVenueDefault: WalletIntelAttributionVenueThresholdPolicy = {
   marketMoverStakeToMarketVolRatio: 0.05,
   highFrequencyTrades30d: 120,
   botMinActiveDays30d: 12,
+  botMinActiveUtcHourSlots30d: 16,
   botMaxMedianStakeUsd: 750,
   volumeTraderVolume30dUsd: 250_000,
   specialistCategoryShareMin: 0.6,
@@ -1388,6 +1391,11 @@ function normalizeAttributionVenueThresholds(
     ),
     highFrequencyTrades30d: Math.max(0, Math.trunc(value.highFrequencyTrades30d)),
     botMinActiveDays30d: clamp(Math.trunc(value.botMinActiveDays30d), 0, 31),
+    botMinActiveUtcHourSlots30d: clamp(
+      Math.trunc(value.botMinActiveUtcHourSlots30d),
+      0,
+      24,
+    ),
     botMaxMedianStakeUsd: Math.max(0, value.botMaxMedianStakeUsd),
     volumeTraderVolume30dUsd: Math.max(0, value.volumeTraderVolume30dUsd),
     specialistCategoryShareMin: clamp(value.specialistCategoryShareMin, 0, 1),

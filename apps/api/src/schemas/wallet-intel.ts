@@ -132,6 +132,10 @@ export const walletFollowingQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+export const walletResolverParamsSchema = z.object({
+  address: z.string().min(4),
+});
+
 export const walletProfileParamsSchema = z.object({
   walletId: z.string().uuid(),
 });

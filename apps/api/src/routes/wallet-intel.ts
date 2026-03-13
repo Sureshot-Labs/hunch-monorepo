@@ -78,6 +78,7 @@ import {
   walletPrivateNoteParamsSchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
+  walletResolverParamsSchema,
   walletSeriesQuerySchema,
   walletWhalesQuerySchema,
 } from "../schemas/wallet-intel.js";
@@ -496,6 +497,7 @@ type WalletAttributionInputSeed = {
   trackedExposureUsd: number | null | undefined;
   topChanges: WalletActivityTopChange[] | null | undefined;
   signalSummary?: WalletActivitySignalSummary | null | undefined;
+  mmSuspected?: boolean | null | undefined;
 };
 
 const ATTRIBUTION_SIGNAL_SUMMARY_TOP_CHANGES = 5;
@@ -542,6 +544,23 @@ async function findWalletByAddressAndChain(
   );
 
   return result.rows[0] ?? null;
+}
+
+async function findWalletsByAddress(
+  client: PoolClient,
+  address: string,
+): Promise<WalletRow[]> {
+  const result = await client.query<WalletRow>(
+    `
+      select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+      from wallets
+      where address = $1
+      order by last_seen_at desc, first_seen_at desc, chain asc
+    `,
+    [address],
+  );
+
+  return result.rows;
 }
 
 async function ensureWalletByAddressAndChain(
@@ -631,6 +650,65 @@ async function loadWalletPrivateMeta(
       user_label_color: null,
     }
   );
+}
+
+async function loadWalletPrivateMetaByWalletIds(
+  client: PoolClient,
+  userId: string,
+  walletIds: string[],
+): Promise<Map<string, WalletPrivateMetaRow>> {
+  const byWallet = new Map<string, WalletPrivateMetaRow>();
+  if (walletIds.length === 0) return byWallet;
+
+  const result = await client.query<
+    WalletPrivateMetaRow & {
+      wallet_id: string;
+    }
+  >(
+    `
+      with wallet_set as (
+        select unnest($2::uuid[]) as wallet_id
+      )
+      select
+        ws.wallet_id,
+        exists(
+          select 1
+          from wallet_follows wf
+          where wf.user_id = $1 and wf.wallet_id = ws.wallet_id
+        ) as followed,
+        (
+          select wn.name
+          from wallet_user_names wn
+          where wn.user_id = $1 and wn.wallet_id = ws.wallet_id
+          limit 1
+        ) as user_name,
+        (
+          select wl.label
+          from wallet_user_labels wl
+          where wl.user_id = $1 and wl.wallet_id = ws.wallet_id
+          limit 1
+        ) as user_label,
+        (
+          select wl.color
+          from wallet_user_labels wl
+          where wl.user_id = $1 and wl.wallet_id = ws.wallet_id
+          limit 1
+        ) as user_label_color
+      from wallet_set ws
+    `,
+    [userId, walletIds],
+  );
+
+  for (const row of result.rows) {
+    byWallet.set(row.wallet_id, {
+      followed: row.followed,
+      user_name: row.user_name ?? null,
+      user_label: row.user_label ?? null,
+      user_label_color: row.user_label_color ?? null,
+    });
+  }
+
+  return byWallet;
 }
 
 function normalizeStringArray(values: string[] | undefined): string[] {
@@ -1304,6 +1382,7 @@ export function buildWalletAttributionInput(
   trackedExposureUsd: number | null;
   topChanges: WalletActivityTopChange[];
   signalSummary: WalletActivitySignalSummary | null;
+  mmSuspected: boolean | null;
 } {
   return {
     walletId: input.walletId,
@@ -1314,6 +1393,7 @@ export function buildWalletAttributionInput(
     trackedExposureUsd: input.trackedExposureUsd ?? null,
     topChanges: input.topChanges ?? [],
     signalSummary: input.signalSummary ?? null,
+    mmSuspected: input.mmSuspected ?? null,
   };
 }
 
@@ -1612,26 +1692,84 @@ export function signalItemToTopChange(
   };
 }
 
+function createEmptySignalSummary(): WalletActivitySignalSummary {
+  return {
+    criticalSignals30d: 0,
+    avgSignalScore30d: null,
+    hasReactivatedAfterIdle: false,
+    hasLateEntry: false,
+    hasVeryLateEntry: false,
+    hasUnusualBehavior: false,
+  };
+}
+
+function buildSignalSummaryFromItems(
+  items: WalletActivitySignalItem[],
+): WalletActivitySignalSummary {
+  const signalScores = items
+    .map((item) => item.signalScore)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+  const summary = createEmptySignalSummary();
+  summary.criticalSignals30d = signalScores.filter((score) => score >= 0.9).length;
+  summary.avgSignalScore30d =
+    signalScores.length > 0
+      ? signalScores.reduce((sum, value) => sum + value, 0) / signalScores.length
+      : null;
+
+  for (const item of items) {
+    const reasonCodes = new Set([
+      ...item.signalLabels,
+      ...item.labels,
+      ...item.reasonCodes,
+    ]);
+    summary.hasReactivatedAfterIdle =
+      summary.hasReactivatedAfterIdle ||
+      reasonCodes.has("reactivated_after_idle");
+    summary.hasLateEntry =
+      summary.hasLateEntry ||
+      reasonCodes.has("entered_late") ||
+      item.lateBucket === "late" ||
+      item.lateBucket === "very_late";
+    summary.hasVeryLateEntry =
+      summary.hasVeryLateEntry || item.lateBucket === "very_late";
+    summary.hasUnusualBehavior =
+      summary.hasUnusualBehavior ||
+      reasonCodes.has("unusual_size") ||
+      reasonCodes.has("out_of_pattern") ||
+      reasonCodes.has("high_risk_longshot");
+  }
+
+  return summary;
+}
+
 export function buildWalletAttributionInputMapFromSignalItems(
   items: WalletActivitySignalItem[],
 ): Map<string, ReturnType<typeof buildWalletAttributionInput>> {
-  const byWallet = new Map<string, ReturnType<typeof buildWalletAttributionInput>>();
+  const groupedItems = new Map<string, WalletActivitySignalItem[]>();
   for (const item of items) {
-    const current = byWallet.get(item.walletId);
-    if (current) {
-      current.topChanges = [...current.topChanges, signalItemToTopChange(item)];
-      continue;
-    }
+    const current = groupedItems.get(item.walletId) ?? [];
+    current.push(item);
+    groupedItems.set(item.walletId, current);
+  }
+
+  const byWallet = new Map<string, ReturnType<typeof buildWalletAttributionInput>>();
+  for (const [walletId, walletItems] of groupedItems) {
+    const first = walletItems[0];
+    if (!first) continue;
     byWallet.set(
-      item.walletId,
+      walletId,
       buildWalletAttributionInput({
-        walletId: item.walletId,
-        tags: item.tags,
-        metrics: item.metrics,
+        walletId,
+        tags: first.tags,
+        metrics: first.metrics,
         inferredWinRate: null,
         inferredResolvedCount: null,
         trackedExposureUsd: null,
-        topChanges: [signalItemToTopChange(item)],
+        topChanges: [],
+        signalSummary: buildSignalSummaryFromItems(walletItems),
+        mmSuspected: walletItems.some(
+          (item) => item.mmDiagnostics?.mmSuspected === true,
+        ),
       }),
     );
   }
@@ -3929,6 +4067,180 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * GET /wallets/resolve/:address
+   */
+  z.get(
+    "/wallets/resolve/:address",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        params: walletResolverParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const rawAddress = request.params.address.trim();
+      const address = normalizeAddress(rawAddress);
+      const looksValid =
+        isValidWalletAddressForChain(address, "solana") ||
+        isValidWalletAddressForChain(address, "polygon");
+      if (!looksValid) {
+        reply.code(400);
+        return reply.send({ error: "Invalid wallet address" });
+      }
+
+      const client = await pool.connect();
+      try {
+        const wallets = await findWalletsByAddress(client, address);
+        const privateMetaByWallet = await loadWalletPrivateMetaByWalletIds(
+          client,
+          user.id,
+          wallets.map((wallet) => wallet.id),
+        );
+        const matches = wallets.map((wallet) => {
+          const meta = privateMetaByWallet.get(wallet.id);
+          return {
+            walletId: wallet.id,
+            address: wallet.address,
+            chain: wallet.chain,
+            label: wallet.label,
+            followed: meta?.followed ?? false,
+            userName: meta?.user_name ?? null,
+            userLabel: meta?.user_label ?? null,
+            userLabelColor: meta?.user_label_color ?? null,
+          };
+        });
+        const resolvedWallet =
+          matches.find((wallet) => wallet.followed && Boolean(wallet.walletId)) ??
+          matches.find((wallet) => Boolean(wallet.walletId)) ??
+          null;
+
+        return reply.send({
+          ok: true,
+          wallet: resolvedWallet,
+          matches,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, address },
+          "Failed to resolve wallet by address",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to resolve wallet" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/following-lite
+   */
+  z.get(
+    "/wallets/following-lite",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: walletFollowingQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const client = await pool.connect();
+      try {
+        const rows = await client.query<
+          WalletRow & {
+            follow_created_at: Date;
+            metrics: WalletMetricsRow | null;
+            user_name: string | null;
+            user_label: string | null;
+            user_label_color: WalletLabelColor | null;
+          }
+        >(
+          `
+            select
+              w.id,
+              w.address,
+              w.chain,
+              w.label,
+              w.is_system_flagged,
+              w.first_seen_at,
+              w.last_seen_at,
+              wf.created_at as follow_created_at,
+              wn.name as user_name,
+              wl.label as user_label,
+              wl.color as user_label_color,
+              lm.metrics
+            from wallet_follows wf
+            join wallets w on w.id = wf.wallet_id
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $1
+            left join wallet_user_names wn
+              on wn.wallet_id = w.id
+             and wn.user_id = $1
+            left join lateral (
+              select jsonb_build_object(
+                'period', s.period,
+                'as_of', s.as_of,
+                'trades_count', s.trades_count,
+                'volume_usd', s.volume_usd,
+                'pnl_usd', s.pnl_usd,
+                'roi', s.roi,
+                'win_rate', s.win_rate,
+                'avg_hold_hours', s.avg_hold_hours,
+                'last_trade_at', s.last_trade_at
+              ) as metrics
+              from wallet_metrics_snapshots s
+              where s.wallet_id = w.id and s.period = '30d'
+              order by s.as_of desc
+              limit 1
+            ) lm on true
+            where wf.user_id = $1
+            order by wf.created_at desc
+            limit $2
+            offset $3
+          `,
+          [user.id, query.limit, query.offset],
+        );
+
+        return reply.send({
+          ok: true,
+          wallets: rows.rows.map((row) => ({
+            walletId: row.id,
+            address: row.address,
+            chain: row.chain,
+            label: row.label,
+            userName: row.user_name ?? null,
+            userLabel: row.user_label ?? null,
+            userLabelColor: row.user_label_color ?? null,
+            followedAt: row.follow_created_at,
+            metrics: row.metrics ?? null,
+          })),
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id },
+          "Failed to list lightweight followed wallets",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to list followed wallets" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
    * GET /wallets/following
    */
   z.get(
@@ -4753,30 +5065,43 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             loadWalletCategoryMix(client, walletId),
           ]);
         const openPositionStats = openPositionStatsMap.get(walletId) ?? null;
+        const signalSummaryOptions = {
+          windowHours: 720,
+          topChanges: ATTRIBUTION_SIGNAL_SUMMARY_TOP_CHANGES,
+          baselineDays: 30,
+          enteredLateHours: 24,
+          signalConfig: {
+            maxOdds: signalsPolicy.effective.maxOdds,
+            minStakeUsd: signalsPolicy.effective.minStakeUsd,
+            minIdleDays: signalsPolicy.effective.minIdleDays,
+            maxPriorMarkets: signalsPolicy.effective.maxPriorMarkets,
+            minPayoutUsd: signalsPolicy.effective.minPayoutUsd,
+            lateHours: signalsPolicy.effective.lateHours,
+            veryLateHours: signalsPolicy.effective.veryLateHours,
+            retentionDaysActivity: refreshPolicy.effective.retentionDaysActivity,
+            weightStake: signalsPolicy.effective.weightStake,
+            weightOdds: signalsPolicy.effective.weightOdds,
+            weightIdle: signalsPolicy.effective.weightIdle,
+            weightNovelty: signalsPolicy.effective.weightNovelty,
+            minScore: signalsPolicy.effective.minScore,
+          },
+        };
 
-        const summary = (
-          await fetchWalletActivitySummaries(client, [walletId], {
-            windowHours: 720,
-            topChanges: 10,
-            baselineDays: 30,
-            enteredLateHours: 24,
-            signalConfig: {
-              maxOdds: signalsPolicy.effective.maxOdds,
-              minStakeUsd: signalsPolicy.effective.minStakeUsd,
-              minIdleDays: signalsPolicy.effective.minIdleDays,
-              maxPriorMarkets: signalsPolicy.effective.maxPriorMarkets,
-              minPayoutUsd: signalsPolicy.effective.minPayoutUsd,
-              lateHours: signalsPolicy.effective.lateHours,
-              veryLateHours: signalsPolicy.effective.veryLateHours,
-              retentionDaysActivity: refreshPolicy.effective.retentionDaysActivity,
-              weightStake: signalsPolicy.effective.weightStake,
-              weightOdds: signalsPolicy.effective.weightOdds,
-              weightIdle: signalsPolicy.effective.weightIdle,
-              weightNovelty: signalsPolicy.effective.weightNovelty,
-              minScore: signalsPolicy.effective.minScore,
-            },
-          })
-        ).get(walletId) ?? null;
+        const [summary, signalSummaryMap, mmDiagnosticsByWallet] =
+          await Promise.all([
+            fetchWalletActivitySummaryStats(client, [walletId], signalSummaryOptions),
+            fetchWalletActivitySignalSummary(
+              client,
+              [walletId],
+              signalSummaryOptions,
+            ),
+            loadWalletMmDiagnosticsMap(
+              client,
+              [{ walletId, chain: wallet.chain }],
+              refreshPolicy.effective,
+            ),
+          ]);
+        const walletSummary = summary.get(walletId) ?? null;
 
         const attribution = (
           await buildWalletAttributionMap(
@@ -4789,7 +5114,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 inferredWinRate: null,
                 inferredResolvedCount: null,
                 trackedExposureUsd: openPositionStats?.trackedExposureUsd ?? null,
-                topChanges: summary?.topChanges,
+                topChanges: [],
+                signalSummary: signalSummaryMap.get(walletId) ?? null,
+                mmSuspected:
+                  mmDiagnosticsByWallet.get(walletId)?.mmSuspected ?? null,
               }),
             ],
             attributionPolicy.effective,
@@ -4800,9 +5128,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const presentation = applyWalletPresentationFields(
           {
             metrics: wallet.metrics ?? null,
-            lastActivityAt: summary?.lastActivityAt ?? wallet.last_seen_at,
+            lastActivityAt: walletSummary?.lastActivityAt ?? wallet.last_seen_at,
             tags: wallet.tags ?? [],
-            unusualTier: summary?.unusualTier ?? null,
+            unusualTier: walletSummary?.unusualTier ?? null,
           },
           attribution,
         );
@@ -5136,6 +5464,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               loadWalletOpenPositionStatsMap(client, pagedIds),
               loadWalletResolvedTradeStatsMap(client, pagedIds),
             ]);
+            const mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
+              client,
+              pageRows.map((row) => ({
+                walletId: row.id,
+                chain: row.chain,
+              })),
+              refreshPolicy.effective,
+            );
             const rowById = new Map(
               pageRows.map((row) => {
                 const resolvedStats = resolvedTradeStatsMap.get(row.id);
@@ -5169,9 +5505,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                           trackedExposureUsd:
                             openPositionStatsMap.get(walletId)?.trackedExposureUsd ??
                             null,
-                          topChanges: pageTopChangesMap.get(walletId),
+                          topChanges: [],
                           signalSummary:
                             pageSignalSummaryMap.get(walletId) ?? null,
+                          mmSuspected:
+                            mmDiagnosticsByWallet.get(walletId)?.mmSuspected ??
+                            null,
                         });
                       })
                       .filter(
@@ -5267,15 +5606,27 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             string,
             WalletActivitySignalSummary
           >();
+          let mmDiagnosticsByWallet = new Map<string, WalletMmDiagnostics>();
           let attributionMap = new Map<string, WalletAttribution>();
           let filtered = mergedWithResolved;
 
           if (mergedWithResolved.length > 0) {
-            signalSummaryForFilters = await fetchWalletActivitySignalSummary(
-              client,
-              mergedWithResolved.map((row) => row.walletId),
-              attributionSummaryOptions,
-            );
+            [signalSummaryForFilters, mmDiagnosticsByWallet] =
+              await Promise.all([
+                fetchWalletActivitySignalSummary(
+                  client,
+                  mergedWithResolved.map((row) => row.walletId),
+                  attributionSummaryOptions,
+                ),
+                loadWalletMmDiagnosticsMap(
+                  client,
+                  mergedWithResolved.map((row) => ({
+                    walletId: row.walletId,
+                    chain: row.chain,
+                  })),
+                  refreshPolicy.effective,
+                ),
+              ]);
             attributionMap = await buildWalletAttributionMap(
               client,
               mergedWithResolved.map((row) =>
@@ -5289,6 +5640,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   topChanges: [],
                   signalSummary:
                     signalSummaryForFilters.get(row.walletId) ?? null,
+                  mmSuspected:
+                    mmDiagnosticsByWallet.get(row.walletId)?.mmSuspected ?? null,
                 }),
               ),
               attributionPolicy.effective,
@@ -5362,9 +5715,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       trackedExposureUsd:
                         openPositionStatsMap.get(row.walletId)?.trackedExposureUsd ??
                         null,
-                      topChanges: pageTopChangesMap.get(row.walletId),
+                      topChanges: [],
                       signalSummary:
                         signalSummaryForFilters.get(row.walletId) ?? null,
+                      mmSuspected:
+                        mmDiagnosticsByWallet.get(row.walletId)?.mmSuspected ??
+                        null,
                     }),
                   ),
                   attributionPolicy.effective,

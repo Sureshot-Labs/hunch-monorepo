@@ -83,6 +83,7 @@ export type WalletAttributionInput = {
   trackedExposureUsd?: number | null;
   signalSummary?: WalletActivitySignalSummary | null;
   topChanges?: WalletActivityTopChange[] | null;
+  mmSuspected?: boolean | null;
 };
 
 export type WalletAttributionBuildOptions = {
@@ -97,6 +98,8 @@ type WalletVenueStats = {
   volume30dUsd: number;
   trades30d: number;
   activeDays30d: number;
+  activeHours30d: number;
+  activeUtcHourSlots30d: number;
   maxStakeUsd: number;
   medianStakeUsd: number | null;
   maxStakeToMarketVolRatio: number | null;
@@ -132,6 +135,8 @@ type VenueStatsRow = {
   volume_30d_usd: string | null;
   trades_30d: number | null;
   active_days_30d: number | null;
+  active_hours_30d: number | null;
+  active_utc_hour_slots_30d: number | null;
   max_stake_usd: string | null;
   median_stake_usd: string | null;
 };
@@ -552,6 +557,8 @@ async function loadVenueStats(
           sum(coalesce(wah.volume_usd, abs(wah.signed_delta_usd), 0)) as volume_30d_usd,
           sum(coalesce(wah.event_count, 0))::int as trades_30d,
           count(distinct date(wah.hour_bucket))::int as active_days_30d,
+          count(distinct wah.hour_bucket)::int as active_hours_30d,
+          count(distinct extract(hour from wah.hour_bucket))::int as active_utc_hour_slots_30d,
           max(coalesce(wah.max_abs_delta_usd, wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as max_stake_usd,
           percentile_cont(0.5) within group (
             order by coalesce(
@@ -684,6 +691,11 @@ async function loadVenueStats(
       volume30dUsd: toNumber(row.volume_30d_usd) ?? 0,
       trades30d: Math.max(0, Number(row.trades_30d ?? 0)),
       activeDays30d: Math.max(0, Number(row.active_days_30d ?? 0)),
+      activeHours30d: Math.max(0, Number(row.active_hours_30d ?? 0)),
+      activeUtcHourSlots30d: Math.max(
+        0,
+        Number(row.active_utc_hour_slots_30d ?? 0),
+      ),
       maxStakeUsd: toNumber(row.max_stake_usd) ?? 0,
       medianStakeUsd: toNumber(row.median_stake_usd),
       maxStakeToMarketVolRatio: null,
@@ -859,6 +871,7 @@ function scoreVenueCandidate(inputs: {
   hasWhaleTag: boolean;
   criticalSignals30d: number;
   avgSignalScore30d: number | null;
+  mmSuspected: boolean;
 }): CandidateScore[] {
   const candidates: CandidateScore[] = [];
   const thresholds = inputs.policy.venueThresholds[inputs.venue];
@@ -968,13 +981,27 @@ function scoreVenueCandidate(inputs: {
         0,
         1,
       );
+      const hourlyCoverageBoost =
+        !inputs.mmSuspected &&
+        thresholds.botMinActiveUtcHourSlots30d > 0 &&
+        inputs.stats.activeUtcHourSlots30d >=
+          thresholds.botMinActiveUtcHourSlots30d
+          ? 0.15
+          : 0;
       candidates.push({
         key: "bot",
-        score: botScore * Math.max(0, inputs.policy.ruleWeights.bot),
+        score: clamp(botScore + hourlyCoverageBoost, 0, 1) *
+          Math.max(0, inputs.policy.ruleWeights.bot),
         reasons: [
           "trades30d>=bot_hf_min",
           "active_days30d>=bot_active_days_min",
           "median_stake<=bot_median_stake_max",
+          ...(!inputs.mmSuspected &&
+          thresholds.botMinActiveUtcHourSlots30d > 0 &&
+          inputs.stats.activeUtcHourSlots30d >=
+            thresholds.botMinActiveUtcHourSlots30d
+            ? ["active_utc_hour_slots30d>=bot_hour_slots_min"]
+            : []),
         ],
         venue: inputs.venue,
         venueVolume30d: venueVolume,
@@ -1247,6 +1274,7 @@ export async function buildWalletAttributionMap(
         hasWhaleTag,
         criticalSignals30d,
         avgSignalScore30d,
+        mmSuspected: wallet.mmSuspected === true,
       });
       for (const candidate of venueCandidates) {
         const existing = candidateByKey.get(candidate.key);

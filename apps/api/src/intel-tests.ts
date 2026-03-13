@@ -1147,6 +1147,7 @@ const tests: TestCase[] = [
               marketMoverStakeToMarketVolRatio: 0.05,
               highFrequencyTrades30d: 120,
               botMinActiveDays30d: 12,
+              botMinActiveUtcHourSlots30d: 16,
               botMaxMedianStakeUsd: 750,
               volumeTraderVolume30dUsd: 250000,
               specialistCategoryShareMin: 0.6,
@@ -1163,6 +1164,7 @@ const tests: TestCase[] = [
               marketMoverStakeToMarketVolRatio: 0.05,
               highFrequencyTrades30d: 120,
               botMinActiveDays30d: 12,
+              botMinActiveUtcHourSlots30d: 16,
               botMaxMedianStakeUsd: 750,
               volumeTraderVolume30dUsd: 250000,
               specialistCategoryShareMin: 0.6,
@@ -1179,6 +1181,7 @@ const tests: TestCase[] = [
               marketMoverStakeToMarketVolRatio: 0.05,
               highFrequencyTrades30d: 120,
               botMinActiveDays30d: 12,
+              botMinActiveUtcHourSlots30d: 16,
               botMaxMedianStakeUsd: 750,
               volumeTraderVolume30dUsd: 250000,
               specialistCategoryShareMin: 0.6,
@@ -1542,7 +1545,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "wallet signal helper paths stay aligned and attribution inputs aggregate top changes",
+    name: "wallet signal helper paths stay aligned and attribution inputs aggregate signal summaries",
     run: () => {
       const candidate = createTestCandidateWalletRow();
       const fastPathItem = buildWalletSignalItemFromSignalRow({
@@ -1576,10 +1579,12 @@ const tests: TestCase[] = [
       assert.deepEqual(fallbackItem.reasonCodes, fastPathItem.reasonCodes);
       assert.deepEqual(fallbackItem.displayReasons, fastPathItem.displayReasons);
       assert.equal(fallbackItem.severity, fastPathItem.severity);
-      assert.deepEqual(
-        attributionInputs.get("wallet-1")?.topChanges.map((change) => change.marketId),
-        ["market-1", "market-2"],
-      );
+      const walletInput = attributionInputs.get("wallet-1");
+      assert.deepEqual(walletInput?.topChanges, []);
+      assert.equal(walletInput?.signalSummary?.criticalSignals30d, 2);
+      assert.equal(walletInput?.signalSummary?.avgSignalScore30d, 0.92);
+      assert.equal(walletInput?.signalSummary?.hasLateEntry, true);
+      assert.equal(walletInput?.mmSuspected, false);
     },
   },
   {

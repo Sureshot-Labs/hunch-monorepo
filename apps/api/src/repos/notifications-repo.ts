@@ -155,15 +155,17 @@ export async function fetchNotifications(
       order by created_at desc, id desc
       limit $${paramCount + 1}
     `,
-    [...params, inputs.limit],
+    [...params, inputs.limit + 1],
   );
+  const hasMore = rows.length > inputs.limit;
+  const limitedRows = hasMore ? rows.slice(0, inputs.limit) : rows;
+  const last = limitedRows[limitedRows.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeCursor({ createdAt: last.created_at, id: last.id })
+      : null;
 
-  const last = rows[rows.length - 1];
-  const nextCursor = last
-    ? encodeCursor({ createdAt: last.created_at, id: last.id })
-    : null;
-
-  return { rows, nextCursor };
+  return { rows: limitedRows, nextCursor };
 }
 
 export async function markNotificationRead(
