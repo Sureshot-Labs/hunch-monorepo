@@ -85,7 +85,7 @@ export function buildWalletThirtyDayMetricsUpsertRows(input: {
     return {
       walletId,
       tradesCount: aggregate?.tradesCount ?? 0,
-      volumeUsd: aggregate?.volumeUsd ?? 0,
+      volumeUsd: aggregate == null ? 0 : aggregate.volumeUsd,
       pnlUsd,
       roi,
       winRate,

@@ -54,6 +54,7 @@ import {
   computeRobustUnusualScore,
   resolveUnusualTier,
 } from "./services/wallet-activity-summary.js";
+import { fetchWalletPerformanceSeries, resolveSparklineBucketHours } from "./services/wallet-intel-series.js";
 import { fetchMarketHolderData } from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
@@ -66,7 +67,6 @@ import {
   buildWalletMmDiagnostics,
   computeMmSuspected,
 } from "./services/wallet-intel-mm.js";
-import { resolveSparklineBucketHours } from "./services/wallet-intel-series.js";
 import {
   computeProfileSideBias,
   mapWhaleMarketToProfileMarket,
@@ -590,9 +590,70 @@ const tests: TestCase[] = [
 
       assert.equal(whales.includeSparkline, true);
       assert.equal(summary.includeSparkline, true);
-      assert.equal(series.windowHours, 168);
+      assert.equal(series.windowHours, undefined);
+      assert.equal(series.bucketHours, undefined);
       assert.equal(series.period, "30d");
       assert.equal(series.limit, 120);
+    },
+  },
+  {
+    name: "wallet performance series default query stays unwindowed",
+    run: async () => {
+      const calls: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[]) => {
+          calls.push({ sql, params });
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      await fetchWalletPerformanceSeries(
+        client,
+        "00000000-0000-0000-0000-000000000001",
+        {
+          period: "30d",
+          limit: 24,
+        },
+      );
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.params.length, 3);
+      assert.ok(!calls[0]?.sql.includes("bucket_index"));
+    },
+  },
+  {
+    name: "wallet performance series windows only when explicitly requested",
+    run: async () => {
+      const calls: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[]) => {
+          calls.push({ sql, params });
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+      const asOf = new Date("2026-03-13T12:00:00.000Z");
+
+      await fetchWalletPerformanceSeries(
+        client,
+        "00000000-0000-0000-0000-000000000001",
+        {
+          period: "7d",
+          windowHours: 168,
+          bucketHours: 1,
+          limit: 24,
+          asOf,
+        },
+      );
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.params.length, 6);
+      assert.ok(calls[0]?.sql.includes("bucket_index"));
+      assert.equal(
+        (calls[0]?.params[2] as Date).toISOString(),
+        new Date(asOf.getTime() - 168 * 60 * 60 * 1000).toISOString(),
+      );
+      assert.equal(calls[0]?.params[3], 1);
+      assert.equal((calls[0]?.params[4] as Date).toISOString(), asOf.toISOString());
     },
   },
   {
@@ -1505,6 +1566,31 @@ const tests: TestCase[] = [
       assert.equal(dormant?.roi, null);
       assert.equal(dormant?.winRate, null);
       assert.equal(dormant?.lastTradeAt, null);
+    },
+  },
+  {
+    name: "30d metric builder preserves null volume for unresolved aggregates",
+    run: () => {
+      const metrics = buildWalletThirtyDayMetricsUpsertRows({
+        walletIds: ["wallet-unknown-volume"],
+        aggregates: [
+          {
+            walletId: "wallet-unknown-volume",
+            tradesCount: 2,
+            volumeUsd: null,
+            lastTradeAt: new Date("2026-03-01T00:00:00.000Z"),
+            resolvedCount: 0,
+            winningCount: 0,
+          },
+        ],
+        ledgersByWallet: new Map(),
+        marketMarksById: new Map(),
+      });
+
+      assert.equal(metrics.rows.length, 1);
+      assert.equal(metrics.rows[0]?.tradesCount, 2);
+      assert.equal(metrics.rows[0]?.volumeUsd, null);
+      assert.ok(metrics.rows[0]?.lastTradeAt instanceof Date);
     },
   },
   {

@@ -258,7 +258,7 @@ export const walletWhalesQuerySchema = z.object({
 });
 
 export const walletSeriesQuerySchema = z.object({
-  windowHours: z.coerce.number().int().min(1).max(24 * 30).default(168),
+  windowHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
   bucketHours: z.coerce.number().int().min(1).max(24 * 14).optional(),
   period: z.enum(["1d", "7d", "30d", "all"]).default("30d"),
   limit: z.coerce.number().int().min(1).max(240).default(120),

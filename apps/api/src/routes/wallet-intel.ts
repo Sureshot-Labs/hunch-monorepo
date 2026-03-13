@@ -4586,15 +4586,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Wallet not found" });
         }
 
+        const activityWindowHours = query.windowHours ?? 168;
         const [activityMap, performance] = await Promise.all([
           fetchWalletActivitySparklines(client, [walletId], {
-            windowHours: query.windowHours,
+            windowHours: activityWindowHours,
             bucketHours: query.bucketHours,
           }),
           fetchWalletPerformanceSeries(client, walletId, {
             period: query.period,
             windowHours: query.windowHours,
-            bucketHours: query.bucketHours,
+            bucketHours:
+              query.windowHours != null ? query.bucketHours : undefined,
             limit: query.limit,
           }),
         ]);
@@ -4605,7 +4607,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           activity:
             activityMap.get(walletId) ??
             buildEmptyWalletActivitySparkline({
-              windowHours: query.windowHours,
+              windowHours: activityWindowHours,
               bucketHours: query.bucketHours,
             }),
           performance,
