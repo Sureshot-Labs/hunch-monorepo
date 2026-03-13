@@ -58,6 +58,13 @@ type WalletIntelRefreshTelemetry = {
   limitlessPriceBackfill: WalletIntelRetryTelemetry;
 };
 
+type RetryableFailureSummary = {
+  count: number;
+  rateLimited: number;
+  aborted: number;
+  sampleWallets: string[];
+};
+
 let walletIntelRefreshPolicy: WalletIntelRefreshPolicy = getIntelPolicyDefaults(
   "wallet_intel_refresh",
 );
@@ -154,6 +161,46 @@ function logRefreshTelemetry(telemetry: WalletIntelRefreshTelemetry) {
       ]),
     ),
   );
+}
+
+function createRetryableFailureSummary(): RetryableFailureSummary {
+  return {
+    count: 0,
+    rateLimited: 0,
+    aborted: 0,
+    sampleWallets: [],
+  };
+}
+
+function recordRetryableFailure(
+  summary: RetryableFailureSummary,
+  wallet: string,
+  error: unknown,
+): boolean {
+  const rateLimited = isRpcRateLimit(error);
+  const aborted = isAbortError(error);
+  if (!rateLimited && !aborted) return false;
+
+  summary.count += 1;
+  if (rateLimited) summary.rateLimited += 1;
+  if (aborted) summary.aborted += 1;
+  if (summary.sampleWallets.length < 3 && !summary.sampleWallets.includes(wallet)) {
+    summary.sampleWallets.push(wallet);
+  }
+  return true;
+}
+
+function logRetryableFailureSummary(
+  label: string,
+  summary: RetryableFailureSummary,
+) {
+  if (summary.count <= 0) return;
+  console.warn(label, {
+    count: summary.count,
+    rateLimited: summary.rateLimited,
+    aborted: summary.aborted,
+    sampleWallets: summary.sampleWallets,
+  });
 }
 
 async function runWithTelemetry<T>(
@@ -2865,6 +2912,9 @@ async function runSnapshot(snapshotAt: Date) {
     let holderRateLimitErrors = 0;
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
+    const followedPositionsPolymarketRetryable = createRetryableFailureSummary();
+    const followedSnapshotPolygonRetryable = createRetryableFailureSummary();
+    const followedSnapshotBaseRetryable = createRetryableFailureSummary();
 
     const marketResults = await mapWithConcurrency(
       marketRows,
@@ -3168,10 +3218,18 @@ async function runSnapshot(snapshotAt: Date) {
               }),
           );
         } catch (error) {
-          console.error(
-            "[wallets:intel:refresh] polymarket positions sync failed",
-            error,
-          );
+          if (
+            !recordRetryableFailure(
+              followedPositionsPolymarketRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] polymarket positions sync failed",
+              error,
+            );
+          }
         }
 
         try {
@@ -3196,12 +3254,19 @@ async function runSnapshot(snapshotAt: Date) {
             activityRows += inserted;
           }
         } catch (error) {
-          const retryable = isRpcRateLimit(error) || isAbortError(error);
-          const message = retryable
-            ? "[wallets:intel:refresh] polymarket followed snapshot skipped"
-            : "[wallets:intel:refresh] polymarket followed snapshot failed";
-          const log = retryable ? console.warn : console.error;
-          log(message, { wallet: followed.address }, error);
+          if (
+            !recordRetryableFailure(
+              followedSnapshotPolygonRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] polymarket followed snapshot failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
         }
 
         const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -3266,12 +3331,19 @@ async function runSnapshot(snapshotAt: Date) {
             activityRows += inserted;
           }
         } catch (error) {
-          const retryable = isRpcRateLimit(error) || isAbortError(error);
-          const message = retryable
-            ? "[wallets:intel:refresh] limitless followed snapshot skipped"
-            : "[wallets:intel:refresh] limitless followed snapshot failed";
-          const log = retryable ? console.warn : console.error;
-          log(message, { wallet: followed.address }, error);
+          if (
+            !recordRetryableFailure(
+              followedSnapshotBaseRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] limitless followed snapshot failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
         }
 
         const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -3338,6 +3410,19 @@ async function runSnapshot(snapshotAt: Date) {
         }
       }
     }
+
+    logRetryableFailureSummary(
+      "[wallets:intel:refresh] polymarket followed positions throttled",
+      followedPositionsPolymarketRetryable,
+    );
+    logRetryableFailureSummary(
+      "[wallets:intel:refresh] polymarket followed snapshot throttled",
+      followedSnapshotPolygonRetryable,
+    );
+    logRetryableFailureSummary(
+      "[wallets:intel:refresh] limitless followed snapshot throttled",
+      followedSnapshotBaseRetryable,
+    );
 
     const deltaResult = await applySnapshotDeltas(client, {
       walletIds: Array.from(touchedWalletIds),
