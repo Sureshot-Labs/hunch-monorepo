@@ -6,6 +6,160 @@ import type {
 } from "./limitless-repo.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
+export type LimitlessCategory =
+  | "politics"
+  | "crypto"
+  | "sports"
+  | "economics"
+  | "technology"
+  | "entertainment"
+  | "weather"
+  | "health"
+  | "mentions"
+  | "other";
+
+type CategoryResolutionInput = {
+  categories?: string[] | null;
+  tags?: string[] | null;
+  title?: string | null;
+  description?: string | null;
+  fallbackCategories?: string[] | null;
+  fallbackTags?: string[] | null;
+  fallbackTitle?: string | null;
+  fallbackDescription?: string | null;
+};
+
+const CATEGORY_PRIORITY: readonly LimitlessCategory[] = [
+  "mentions",
+  "politics",
+  "crypto",
+  "sports",
+  "economics",
+  "technology",
+  "entertainment",
+  "weather",
+  "health",
+  "other",
+];
+
+const IGNORE_CATEGORY_TOKENS = new Set([
+  "15-min",
+  "15m",
+  "daily",
+  "hourly",
+  "monthly",
+  "recurring",
+  "weekly",
+]);
+
+const EXPLICIT_CATEGORY_MAP = new Map<string, LimitlessCategory>([
+  ["mentions", "mentions"],
+  ["mention-markets", "mentions"],
+  ["tweet-markets", "mentions"],
+  ["tweets-markets", "mentions"],
+
+  ["politics", "politics"],
+  ["politic", "politics"],
+  ["military", "politics"],
+
+  ["crypto", "crypto"],
+  ["bitcoin", "crypto"],
+  ["btc", "crypto"],
+  ["ethereum", "crypto"],
+  ["eth", "crypto"],
+  ["solana", "crypto"],
+  ["xrp", "crypto"],
+  ["pre-tge", "crypto"],
+
+  ["sports", "sports"],
+  ["football", "sports"],
+  ["football-matches", "sports"],
+  ["football-matches-", "sports"],
+  ["cricket", "sports"],
+  ["f1", "sports"],
+  ["nba", "sports"],
+  ["nhl", "sports"],
+  ["winter-olympics", "sports"],
+  ["esports", "sports"],
+  ["off-the-pitch", "sports"],
+
+  ["economics", "economics"],
+  ["economy", "economics"],
+  ["company-news", "economics"],
+  ["commodities", "economics"],
+  ["oil-gas", "economics"],
+  ["oil-and-gas", "economics"],
+  ["korean-market", "economics"],
+
+  ["technology", "technology"],
+  ["tech", "technology"],
+  ["ai", "technology"],
+
+  ["entertainment", "entertainment"],
+  ["culture", "entertainment"],
+
+  ["weather", "weather"],
+  ["climate", "weather"],
+
+  ["health", "health"],
+
+  ["other", "other"],
+]);
+
+const SPORTS_TAGS = new Set([
+  "sports",
+  "football",
+  "football-matches",
+  "cricket",
+  "f1",
+  "nba",
+  "nhl",
+  "winter-olympics",
+  "esports",
+  "off-the-pitch",
+]);
+
+const POLITICS_TAGS = new Set(["politics", "military"]);
+const CRYPTO_TAGS = new Set([
+  "crypto",
+  "bitcoin",
+  "btc",
+  "ethereum",
+  "eth",
+  "solana",
+  "xrp",
+  "pre-tge",
+  "nav-domain-crypto",
+]);
+const ECONOMICS_TAGS = new Set([
+  "economy",
+  "company-news",
+  "commodities",
+  "oil-gas",
+  "oil-and-gas",
+  "korean-market",
+  "finance",
+  "nav-domain-finance",
+]);
+const TECHNOLOGY_TAGS = new Set([
+  "technology",
+  "tech",
+  "ai",
+  "nav-domain-technology",
+]);
+const ENTERTAINMENT_TAGS = new Set(["entertainment", "culture"]);
+const WEATHER_TAGS = new Set(["weather", "climate"]);
+const HEALTH_TAGS = new Set(["health"]);
+const MENTIONS_TAGS = new Set(["mentions", "mention-markets", "tweets-markets"]);
+const POLITICS_DOMAIN_TAGS = new Set([
+  "nav-domain-politics",
+  "nav-domain-news",
+]);
+const SPORTS_DOMAIN_TAGS = new Set([
+  "nav-domain-sports",
+  "nav-domain-sport",
+]);
+
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
 function parseVolume(
   volume?: string | number | null,
@@ -54,6 +208,188 @@ const parseDate = (dateStr?: string | null): Date | null => {
   const date = new Date(dateStr);
   return isNaN(date.getTime()) ? null : date;
 };
+
+function normalizeToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_/]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function normalizeCategoryList(values?: string[] | null): string[] {
+  if (!values?.length) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value) continue;
+    const token = normalizeToken(value);
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
+function collectTextTokens(...inputs: Array<string | null | undefined>): Set<string> {
+  const tokens = new Set<string>();
+  for (const input of inputs) {
+    if (!input) continue;
+    for (const token of normalizeToken(input).split("-")) {
+      if (token) tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+function scoreCategoryToken(
+  token: string,
+  scores: Map<LimitlessCategory, number>,
+): void {
+  if (IGNORE_CATEGORY_TOKENS.has(token)) return;
+
+  const explicit = EXPLICIT_CATEGORY_MAP.get(token);
+  if (explicit) {
+    scores.set(explicit, (scores.get(explicit) ?? 0) + 3);
+    return;
+  }
+
+  if (MENTIONS_TAGS.has(token)) {
+    scores.set("mentions", (scores.get("mentions") ?? 0) + 4);
+    return;
+  }
+  if (POLITICS_TAGS.has(token)) {
+    scores.set("politics", (scores.get("politics") ?? 0) + 3);
+    return;
+  }
+  if (POLITICS_DOMAIN_TAGS.has(token)) {
+    scores.set("politics", (scores.get("politics") ?? 0) + 3);
+    return;
+  }
+  if (CRYPTO_TAGS.has(token)) {
+    scores.set("crypto", (scores.get("crypto") ?? 0) + 3);
+    return;
+  }
+  if (SPORTS_TAGS.has(token)) {
+    scores.set("sports", (scores.get("sports") ?? 0) + 3);
+    return;
+  }
+  if (SPORTS_DOMAIN_TAGS.has(token)) {
+    scores.set("sports", (scores.get("sports") ?? 0) + 3);
+    return;
+  }
+  if (ECONOMICS_TAGS.has(token)) {
+    scores.set("economics", (scores.get("economics") ?? 0) + 3);
+    return;
+  }
+  if (TECHNOLOGY_TAGS.has(token)) {
+    scores.set("technology", (scores.get("technology") ?? 0) + 3);
+    return;
+  }
+  if (ENTERTAINMENT_TAGS.has(token)) {
+    scores.set("entertainment", (scores.get("entertainment") ?? 0) + 3);
+    return;
+  }
+  if (WEATHER_TAGS.has(token)) {
+    scores.set("weather", (scores.get("weather") ?? 0) + 3);
+    return;
+  }
+  if (HEALTH_TAGS.has(token)) {
+    scores.set("health", (scores.get("health") ?? 0) + 3);
+  }
+}
+
+function bestScoredCategory(
+  scores: Map<LimitlessCategory, number>,
+): LimitlessCategory | undefined {
+  let best: LimitlessCategory | undefined;
+  let bestScore = 0;
+  for (const category of CATEGORY_PRIORITY) {
+    const score = scores.get(category) ?? 0;
+    if (score > bestScore) {
+      best = category;
+      bestScore = score;
+    }
+  }
+  if (!best || bestScore <= 0) return undefined;
+  return best;
+}
+
+function deriveCategoryFromTokens(tokens: string[]): LimitlessCategory | undefined {
+  const scores = new Map<LimitlessCategory, number>();
+  for (const token of tokens) {
+    scoreCategoryToken(token, scores);
+  }
+  return bestScoredCategory(scores);
+}
+
+function deriveCategoryFromText(
+  title?: string | null,
+  description?: string | null,
+): LimitlessCategory | undefined {
+  const tokens = collectTextTokens(title, description);
+
+  if (tokens.has("trump") || tokens.has("president") || tokens.has("election")) {
+    return "politics";
+  }
+  if (tokens.has("bitcoin") || tokens.has("ethereum") || tokens.has("solana")) {
+    return "crypto";
+  }
+  if (tokens.has("binance") || tokens.has("token")) {
+    return "crypto";
+  }
+  if (
+    tokens.has("nba") ||
+    tokens.has("nhl") ||
+    tokens.has("football") ||
+    tokens.has("match") ||
+    tokens.has("cricket")
+  ) {
+    return "sports";
+  }
+  if (
+    tokens.has("earnings") ||
+    tokens.has("company") ||
+    tokens.has("commodities") ||
+    tokens.has("oil")
+  ) {
+    return "economics";
+  }
+  if (tokens.has("ai") || tokens.has("tech")) {
+    return "technology";
+  }
+  return undefined;
+}
+
+export function resolveLimitlessCategory({
+  categories,
+  tags,
+  title,
+  description,
+  fallbackCategories,
+  fallbackTags,
+  fallbackTitle,
+  fallbackDescription,
+}: CategoryResolutionInput): LimitlessCategory {
+  const categoryTokens = normalizeCategoryList(categories);
+  const tagTokens = normalizeCategoryList(tags);
+  const fallbackCategoryTokens = normalizeCategoryList(fallbackCategories);
+  const fallbackTagTokens = normalizeCategoryList(fallbackTags);
+
+  return (
+    deriveCategoryFromTokens(categoryTokens) ??
+    deriveCategoryFromTokens(tagTokens) ??
+    deriveCategoryFromTokens(fallbackCategoryTokens) ??
+    deriveCategoryFromTokens(fallbackTagTokens) ??
+    deriveCategoryFromText(title, description) ??
+    deriveCategoryFromText(fallbackTitle, fallbackDescription) ??
+    "other"
+  );
+}
 
 function normalizePriceValue(
   value: number | undefined,
@@ -411,6 +747,12 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const image = pickImage(lm);
   const icon = pickIcon(lm);
   const venueInfo = extractVenueInfo(lm);
+  const category = resolveLimitlessCategory({
+    categories: lm.categories,
+    tags: lm.tags,
+    title: lm.title,
+    description: lm.description,
+  });
 
   return {
     id: `limitless:${lm.id}`,
@@ -418,7 +760,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     venue_event_id: String(lm.id),
     title: lm.title,
     description: lm.description,
-    category: lm.categories?.[0], // First category
+    category,
     status,
     start_date: parseDate(lm.createdAt) || undefined,
     end_date: expirationDate,
@@ -446,6 +788,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
 export function mapToUnifiedMarket(
   market: TLimitlessMarketItem | TLimitlessMarket,
   eventId: string,
+  event?: TLimitlessMarket,
 ): UnifiedMarketRow {
   // Map Limitless status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
@@ -484,6 +827,16 @@ export function mapToUnifiedMarket(
   const image = pickImage(market);
   const icon = pickIcon(market);
   const venueInfo = extractVenueInfo(market);
+  const category = resolveLimitlessCategory({
+    categories: market.categories,
+    tags: market.tags,
+    title: market.title,
+    description: market.description,
+    fallbackCategories: event?.categories,
+    fallbackTags: event?.tags,
+    fallbackTitle: event?.title,
+    fallbackDescription: event?.description,
+  });
 
   return {
     id: `limitless:${market.id}`,
@@ -492,7 +845,7 @@ export function mapToUnifiedMarket(
     event_id: `limitless:${eventId}`,
     title: market.title,
     description: market.description,
-    category: market.categories?.[0], // First category
+    category,
     status,
     market_type: market.marketType === "group" ? "group" : "binary",
     open_time: parseDate(market.createdAt) || undefined,

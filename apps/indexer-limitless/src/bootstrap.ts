@@ -340,6 +340,7 @@ async function processLimitlessMarket(
     const unifiedMarketRow = mapToUnifiedMarket(
       mergedTop,
       String(mergedTop.id),
+      mergedTop,
     );
     if (mergedTop.tradeType?.toLowerCase() === "clob") {
       await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
@@ -413,6 +414,7 @@ async function processLimitlessMarket(
       const unifiedMarketRow = mapToUnifiedMarket(
         mergedSub,
         String(mergedTop.id),
+        mergedTop,
       );
       if (mergedSub.tradeType?.toLowerCase() === "clob") {
         await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
