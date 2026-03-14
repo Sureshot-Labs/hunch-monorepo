@@ -25,7 +25,7 @@ import {
   type WalletResolvedPositionSample,
 } from "./wallet-profile-features.js";
 
-const PROFILE_VERSION = "v9";
+const PROFILE_VERSION = "v10";
 const CATEGORY_VALUES = [
   "politics",
   "crypto",
@@ -2067,17 +2067,23 @@ Output JSON with:
   If wallet.source_label_quality is "descriptive" and wallet.source_label exists, keep label_short close to that source label instead of inventing a persona name.
   If wallet.source_label_quality is "generic" or "missing", create a concise descriptive alias from the trading pattern.
   Avoid hype, jokes, mascots, and fantasy nicknames.
-- label_long: exactly 1 sentence (target <= 260 chars, keep it concise but do not cut thoughts short if the data needs a bit more room).
+- label_long: exactly 1 short sentence (target <= 140 chars, hard max 200).
+  This is the one-line summary shown above the trader bullets.
 - archetype: short snake_case tag.
 - categories: array of 1–3 from [politics, crypto, sports, economics, technology, entertainment, weather, health, mentions, other].
 - theme_focus: array of up to 3 lowercase tags.
 - risk_style: short phrase (target <= 54 chars, hard max 96).
 - confidence: number 0–1.
 - evidence: array of 2–4 short market or event titles (prefer event titles if multiple markets share the same event).
-- notes: multiline string with 3–5 bullet lines for the detail view.
+- notes: multiline string with exactly 4 bullet lines for the detail view.
   Each line must start with "- ".
-  Each bullet should contain one concrete observation, not generic filler.
-  Prefer distinct bullets about current focus, positioning/risk, recent signals or changes, entry price bands, and historical performance/resolved behavior.
+  The 4 bullets must answer, in order:
+  1. what markets the trader focuses on
+  2. how they usually enter positions
+  3. whether they trade early, late, or around events
+  4. their general style
+  Keep each bullet short and readable.
+  Use numbers only when they clarify the behavior. Do not make the bullets read like a metrics dump.
 
 Rules:
 - Use ONLY provided data. Do NOT mention wallet IDs or addresses.
@@ -2086,6 +2092,7 @@ Rules:
 - Write like an analyst, not a marketer.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - Stay comfortably below the hard limits; exact character counting is approximate.
+- Prioritize immediate trader understanding over exhaustive detail.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
 - Exposure fields:
@@ -2111,7 +2118,7 @@ Rules:
 - signals.examples are the strongest recent signal rows.
 - closed_positions_sample are recent ended/resolved examples. Use them to talk about historical behavior, not current exposure.
 - recent_window summarizes the last recent_window.window_hours hours.
-  Use it to explain what changed recently (net change, many exits, spikes),
+  Use it to explain timing behavior or what changed recently,
   but treat it as secondary to the broader 30d pattern.
 - recent_window.top_changes are already aggregated per market/outcome;
   avoid repeating identical markets.
@@ -2144,6 +2151,7 @@ Rules:
 - If signals.summary or signals.examples indicate late entry, reactivation, or unusual behavior, mention that carefully as observed trading behavior, not intent.
 - Use category_mix plus top_events/top_markets to describe thematic focus.
 - Use entry_brackets and held_odds to describe favored price bands or entry style, but do not overclaim conviction.
+- Prefer simple phrases like "focuses on", "usually enters", "often trades around", and "style is".
 - When performance_30d and closed_positions_sample are sparse or mixed, say so.
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
@@ -2152,7 +2160,7 @@ Rules:
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Keep label_short and label_long compact. Keep notes to 3 bullet lines when data is sparse and 5 max.`;
+Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines.`;
 
       let profileRaw = "";
       try {
