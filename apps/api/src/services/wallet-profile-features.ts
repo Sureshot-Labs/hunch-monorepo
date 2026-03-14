@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 
 import {
   fetchWalletPerformanceSeries,
+  fetchWalletPortfolioPnlSeries,
 } from "./wallet-intel-series.js";
 
 export type WalletCategoryMixItem = {
@@ -277,40 +278,51 @@ export async function loadWalletPerformance30dSummary(
   client: PoolClient,
   walletId: string,
 ): Promise<WalletPerformance30dSummary> {
-  const series = await fetchWalletPerformanceSeries(client, walletId, {
-    period: "30d",
-    windowHours: 720,
-    bucketHours: 24,
-    limit: 60,
-  });
-  const normalizedPoints = series.points.map((point) => ({
+  const [tradeSeries, portfolioPnlSeries] = await Promise.all([
+    fetchWalletPerformanceSeries(client, walletId, {
+      period: "30d",
+      windowHours: 720,
+      bucketHours: 24,
+      limit: 60,
+    }),
+    fetchWalletPortfolioPnlSeries(client, walletId, {
+      rangeHours: 720,
+      bucketHours: 24,
+      limit: 60,
+    }),
+  ]);
+  const tradeRoiByAsOf = new Map(
+    tradeSeries.points.map((point) => [
+      point.asOf.toISOString(),
+      normalizeRate(nullableNumber(point.roi)),
+    ]),
+  );
+  const normalizedPoints = portfolioPnlSeries.points.map((point) => ({
     asOf: point.asOf.toISOString(),
     pnlUsd: nullableNumber(point.pnlUsd),
-    roi: normalizeRate(nullableNumber(point.roi)),
+    roi: tradeRoiByAsOf.get(point.asOf.toISOString()) ?? null,
   }));
   const sampledPoints = downsamplePerformancePoints(normalizedPoints, 12);
-  const start = normalizedPoints[0] ?? null;
-  const end = normalizedPoints[normalizedPoints.length - 1] ?? null;
+  const start = tradeSeries.points[0] ?? null;
+  const end = tradeSeries.points[tradeSeries.points.length - 1] ?? null;
+  const portfolioPerformance = portfolioPnlSeries.performance;
+  const startRoi = normalizeRate(nullableNumber(start?.roi ?? null));
+  const endRoi = normalizeRate(nullableNumber(end?.roi ?? null));
   const pnlRange = summarizeRange(normalizedPoints.map((point) => point.pnlUsd));
   const roiRange = summarizeRange(normalizedPoints.map((point) => point.roi));
 
   return {
     period: "30d",
     pointCount: normalizedPoints.length,
-    startAsOf: start?.asOf ?? null,
-    endAsOf: end?.asOf ?? null,
-    startPnlUsd: start?.pnlUsd ?? null,
-    endPnlUsd: end?.pnlUsd ?? null,
-    deltaPnlUsd:
-      start?.pnlUsd != null && end?.pnlUsd != null
-        ? end.pnlUsd - start.pnlUsd
-        : null,
-    startRoi: start?.roi ?? null,
-    endRoi: end?.roi ?? null,
+    startAsOf: portfolioPerformance?.startAsOf?.toISOString() ?? null,
+    endAsOf: portfolioPerformance?.endAsOf?.toISOString() ?? null,
+    startPnlUsd: portfolioPerformance?.startPnlUsd ?? null,
+    endPnlUsd: portfolioPerformance?.endPnlUsd ?? null,
+    deltaPnlUsd: portfolioPerformance?.pnlUsd ?? null,
+    startRoi,
+    endRoi,
     deltaRoi:
-      start?.roi != null && end?.roi != null
-        ? end.roi - start.roi
-        : null,
+      startRoi != null && endRoi != null ? endRoi - startRoi : null,
     minPnlUsd: pnlRange.min,
     maxPnlUsd: pnlRange.max,
     minRoi: roiRange.min,

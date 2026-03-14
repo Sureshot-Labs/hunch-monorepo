@@ -31,6 +31,29 @@ export type WalletPerformanceSeries = {
   points: WalletPerformanceSeriesPoint[];
 };
 
+export type WalletPortfolioPerformance = {
+  rangeHours: number;
+  startAsOf: Date | null;
+  endAsOf: Date | null;
+  startPnlUsd: number | null;
+  endPnlUsd: number | null;
+  pnlUsd: number | null;
+  baselineApprox: boolean;
+};
+
+export type WalletPortfolioPnlSeriesPoint = {
+  asOf: Date;
+  pnlUsd: number;
+};
+
+export type WalletPortfolioPnlSeries = {
+  rangeHours: number;
+  mode: "delta_from_start";
+  baselineApprox: boolean;
+  performance: WalletPortfolioPerformance | null;
+  points: WalletPortfolioPnlSeriesPoint[];
+};
+
 type WalletActivitySparklineDbRow = {
   wallet_id: string;
   bucket_start: Date;
@@ -50,12 +73,39 @@ type WalletPerformanceSeriesDbRow = {
   last_trade_at: Date | null;
 };
 
+type WalletPortfolioPerformanceDbRow = {
+  wallet_id: string;
+  start_as_of: Date | null;
+  start_pnl_usd: string | null;
+  end_as_of: Date | null;
+  end_pnl_usd: string | null;
+  baseline_approx: boolean | null;
+};
+
 function nullableNumber(
   value: string | number | null | undefined,
 ): number | null {
   if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolvePortfolioPerformance(
+  row: WalletPortfolioPerformanceDbRow,
+  rangeHours: number,
+): WalletPortfolioPerformance {
+  const startPnlUsd = nullableNumber(row.start_pnl_usd);
+  const endPnlUsd = nullableNumber(row.end_pnl_usd);
+  return {
+    rangeHours,
+    startAsOf: row.start_as_of ?? null,
+    endAsOf: row.end_as_of ?? null,
+    startPnlUsd,
+    endPnlUsd,
+    pnlUsd:
+      startPnlUsd != null && endPnlUsd != null ? endPnlUsd - startPnlUsd : null,
+    baselineApprox: row.baseline_approx === true,
+  };
 }
 
 export function resolveSparklineBucketHours(
@@ -189,6 +239,85 @@ export async function fetchWalletActivitySparklines(
       bucketHours,
       points,
     });
+  }
+
+  return byWallet;
+}
+
+export async function loadWalletPortfolioPerformanceMap(
+  client: PoolClient,
+  walletIds: string[],
+  input: {
+    rangeHours: number;
+    asOf?: Date;
+  },
+): Promise<Map<string, WalletPortfolioPerformance>> {
+  const byWallet = new Map<string, WalletPortfolioPerformance>();
+  if (walletIds.length === 0) return byWallet;
+
+  const rangeHours = Math.max(1, Math.trunc(input.rangeHours));
+  const asOf = input.asOf ?? new Date();
+  const rangeStart = new Date(asOf.getTime() - rangeHours * 60 * 60 * 1000);
+
+  const rows = await client.query<WalletPortfolioPerformanceDbRow>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      start_snap as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = 'all'
+          and s.as_of <= $2::timestamptz
+        order by s.wallet_id, s.as_of desc
+      ),
+      fallback_start as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = 'all'
+          and s.as_of > $2::timestamptz
+          and s.as_of <= $3::timestamptz
+        order by s.wallet_id, s.as_of asc
+      ),
+      end_snap as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = 'all'
+          and s.as_of <= $3::timestamptz
+        order by s.wallet_id, s.as_of desc
+      )
+      select
+        ws.wallet_id,
+        coalesce(ss.as_of, fs.as_of) as start_as_of,
+        coalesce(ss.pnl_usd::text, fs.pnl_usd::text) as start_pnl_usd,
+        es.as_of as end_as_of,
+        es.pnl_usd::text as end_pnl_usd,
+        (ss.as_of is null and fs.as_of is not null) as baseline_approx
+      from wallet_set ws
+      left join start_snap ss on ss.wallet_id = ws.wallet_id
+      left join fallback_start fs on fs.wallet_id = ws.wallet_id
+      left join end_snap es on es.wallet_id = ws.wallet_id
+    `,
+    [walletIds, rangeStart, asOf],
+  );
+
+  for (const row of rows.rows) {
+    byWallet.set(
+      row.wallet_id,
+      resolvePortfolioPerformance(row, rangeHours),
+    );
   }
 
   return byWallet;
@@ -332,5 +461,77 @@ export async function fetchWalletPerformanceSeries(
       avgHoldHours: nullableNumber(row.avg_hold_hours),
       lastTradeAt: row.last_trade_at,
     })),
+  };
+}
+
+export async function fetchWalletPortfolioPnlSeries(
+  client: PoolClient,
+  walletId: string,
+  input: {
+    rangeHours: number;
+    limit?: number;
+    bucketHours?: number | null;
+    asOf?: Date;
+  },
+): Promise<WalletPortfolioPnlSeries> {
+  const rangeHours = Math.max(1, Math.trunc(input.rangeHours));
+  const asOf = input.asOf ?? new Date();
+  const windowStart = new Date(asOf.getTime() - rangeHours * 60 * 60 * 1000);
+
+  const [portfolioPerformanceMap, rawSeries] = await Promise.all([
+    loadWalletPortfolioPerformanceMap(client, [walletId], {
+      rangeHours,
+      asOf,
+    }),
+    fetchWalletPerformanceSeries(client, walletId, {
+      period: "all",
+      windowHours: rangeHours,
+      bucketHours: input.bucketHours,
+      limit: input.limit,
+      asOf,
+    }),
+  ]);
+
+  const performance = portfolioPerformanceMap.get(walletId) ?? null;
+  const baselinePnlUsd = performance?.startPnlUsd ?? null;
+
+  if (baselinePnlUsd == null) {
+    return {
+      rangeHours,
+      mode: "delta_from_start",
+      baselineApprox: performance?.baselineApprox ?? false,
+      performance,
+      points: [],
+    };
+  }
+
+  const points: WalletPortfolioPnlSeriesPoint[] = rawSeries.points
+    .filter((point) => point.pnlUsd != null && Number.isFinite(point.pnlUsd))
+    .map((point) => ({
+      asOf: point.asOf,
+      pnlUsd: (point.pnlUsd ?? 0) - baselinePnlUsd,
+    }));
+
+  const syntheticStart =
+    performance?.baselineApprox === true
+      ? performance.startAsOf
+      : windowStart;
+
+  if (syntheticStart) {
+    const firstPoint = points[0] ?? null;
+    if (!firstPoint || firstPoint.asOf.getTime() !== syntheticStart.getTime()) {
+      points.unshift({
+        asOf: syntheticStart,
+        pnlUsd: 0,
+      });
+    }
+  }
+
+  return {
+    rangeHours,
+    mode: "delta_from_start",
+    baselineApprox: performance?.baselineApprox ?? false,
+    performance,
+    points,
   };
 }

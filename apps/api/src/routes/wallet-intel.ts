@@ -32,7 +32,10 @@ import {
   buildEmptyWalletActivitySparkline,
   fetchWalletActivitySparklines,
   fetchWalletPerformanceSeries,
+  fetchWalletPortfolioPnlSeries,
+  loadWalletPortfolioPerformanceMap,
   type WalletActivitySparkline,
+  type WalletPortfolioPerformance,
 } from "../services/wallet-intel-series.js";
 import {
   loadWalletCategoryMix,
@@ -136,6 +139,21 @@ type WalletMetricsRow = {
   resolved_count?: number | null;
 };
 
+type WalletMetricsResponse = {
+  period: string;
+  asOf: Date;
+  tradesCount: number | null;
+  volumeUsd: number | null;
+  pnlUsd: number | null;
+  roi: number | null;
+  winRate: number | null;
+  avgHoldHours: number | null;
+  lastTradeAt: Date | null;
+  winningCount: number | null;
+  losingCount: number | null;
+  resolvedCount: number | null;
+};
+
 type WalletResolvedTradeStats = {
   walletId: string;
   resolvedCount: number;
@@ -143,6 +161,11 @@ type WalletResolvedTradeStats = {
   losingCount: number;
   winRate: number | null;
 };
+
+type SerializedWalletMetricsHolder<T extends { metrics: WalletMetricsRow | null }> =
+  Omit<T, "metrics"> & {
+    metrics: WalletMetricsResponse | null;
+  };
 
 export type WalletTopLabelVariant =
   | "hot-streak"
@@ -253,6 +276,7 @@ type WhaleWalletItem = {
   isFollowed: boolean;
   tags: WalletTagRow[];
   metrics: WalletMetricsRow | null;
+  portfolioPerformance30d: WalletPortfolioPerformance | null;
   lastActivityAt: Date | null;
   activityKind: "mixed" | "trade" | "holder" | null;
   trackedExposureUsd: number | null;
@@ -384,6 +408,7 @@ type WalletActivitySummaryItem = {
   lastSeenAt: Date;
   tags: WalletTagRow[];
   metrics: WalletMetricsRow | null;
+  portfolioPerformance30d: WalletPortfolioPerformance | null;
   inferredWinRate: number | null;
   inferredResolvedCount: number | null;
   profile: unknown | null;
@@ -474,6 +499,7 @@ type WalletAttributionInputSeed = {
   walletId: string;
   tags: WalletTagRow[] | null | undefined;
   metrics: WalletMetricsRow | null | undefined;
+  portfolioPnl30dUsd?: number | null | undefined;
   inferredWinRate: number | null | undefined;
   inferredResolvedCount: number | null | undefined;
   trackedExposureUsd: number | null | undefined;
@@ -1204,6 +1230,7 @@ function mapWhaleRowToItem(
     isFollowed: row.is_followed,
     tags: row.tags ?? [],
     metrics: row.metrics ?? null,
+    portfolioPerformance30d: null,
     lastActivityAt: row.last_activity_at,
     activityKind: (() => {
       const hasTrade = row.has_trade_activity ?? false;
@@ -1356,6 +1383,7 @@ export function buildWalletAttributionInput(
   walletId: string;
   tags: WalletTagRow[];
   metrics: WalletMetricsRow | null;
+  portfolioPnl30dUsd: number | null;
   inferredWinRate: number | null;
   inferredResolvedCount: number | null;
   trackedExposureUsd: number | null;
@@ -1367,6 +1395,7 @@ export function buildWalletAttributionInput(
     walletId: input.walletId,
     tags: input.tags ?? [],
     metrics: input.metrics ?? null,
+    portfolioPnl30dUsd: input.portfolioPnl30dUsd ?? null,
     inferredWinRate: input.inferredWinRate ?? null,
     inferredResolvedCount: input.inferredResolvedCount ?? null,
     trackedExposureUsd: input.trackedExposureUsd ?? null,
@@ -1383,6 +1412,7 @@ export function buildWalletSummaryItem(
     followersCount?: number | null;
     topChanges?: WalletActivityTopChange[] | null;
     openPositionStats?: WalletOpenPositionOverlay | null;
+    portfolioPerformance30d?: WalletPortfolioPerformance | null;
   },
 ): WalletActivitySummaryItem {
   const openPositionStats = options?.openPositionStats ?? null;
@@ -1400,6 +1430,7 @@ export function buildWalletSummaryItem(
     lastSeenAt: row.last_seen_at,
     tags: row.tags ?? [],
     metrics: row.metrics ?? null,
+    portfolioPerformance30d: options?.portfolioPerformance30d ?? null,
     inferredWinRate: null,
     inferredResolvedCount: null,
     profile: row.profile ?? null,
@@ -1769,21 +1800,23 @@ function applyWalletResponsePresentation<
     includeAttributionInResponse: boolean;
     attributionMap: Map<string, WalletAttribution>;
   },
-): T &
-  {
-    attribution?: WalletAttribution;
-    topLabelVariant: WalletTopLabelVariant | null;
-    headlineTag: WalletHeadlineTag | null;
-    primaryLabel: WalletPresentationLabel | null;
-    secondaryLabels: WalletPresentationLabel[];
-    badges: WalletPresentationBadge[];
-    avgTradeSizeUsd: number | null;
-  } {
+): Omit<T, "metrics"> & {
+  attribution?: WalletAttribution;
+  metrics: WalletMetricsResponse | null;
+  topLabelVariant: WalletTopLabelVariant | null;
+  headlineTag: WalletHeadlineTag | null;
+  primaryLabel: WalletPresentationLabel | null;
+  secondaryLabels: WalletPresentationLabel[];
+  badges: WalletPresentationBadge[];
+  avgTradeSizeUsd: number | null;
+} {
   const attribution = options.attributionMap.get(item.walletId);
   const withAttribution = options.includeAttributionInResponse
     ? { ...item, attribution }
     : item;
-  return applyWalletPresentationFields(withAttribution, attribution);
+  return serializeWalletResponseItem(
+    applyWalletPresentationFields(withAttribution, attribution),
+  );
 }
 
 function buildSignalRowLabelKey(input: {
@@ -2610,6 +2643,39 @@ export function applyResolvedTradeStatsToMetrics(
     winning_count: nextWinningCount,
     losing_count: nextLosingCount,
     resolved_count: nextResolvedCount,
+  };
+}
+
+function serializeWalletMetrics(
+  metrics: WalletMetricsRow | null | undefined,
+): WalletMetricsResponse | null {
+  if (!metrics) return null;
+  return {
+    period: metrics.period,
+    asOf: metrics.as_of,
+    tradesCount:
+      metrics.trades_count != null ? Number(metrics.trades_count) : null,
+    volumeUsd: nullableNumber(metrics.volume_usd),
+    pnlUsd: nullableNumber(metrics.pnl_usd),
+    roi: nullableNumber(metrics.roi),
+    winRate: nullableNumber(metrics.win_rate),
+    avgHoldHours: nullableNumber(metrics.avg_hold_hours),
+    lastTradeAt: metrics.last_trade_at ?? null,
+    winningCount:
+      metrics.winning_count != null ? Number(metrics.winning_count) : null,
+    losingCount:
+      metrics.losing_count != null ? Number(metrics.losing_count) : null,
+    resolvedCount:
+      metrics.resolved_count != null ? Number(metrics.resolved_count) : null,
+  };
+}
+
+function serializeWalletResponseItem<T extends { metrics: WalletMetricsRow | null }>(
+  item: T,
+): Omit<T, "metrics"> & { metrics: WalletMetricsResponse | null } {
+  return {
+    ...item,
+    metrics: serializeWalletMetrics(item.metrics),
   };
 }
 
@@ -4053,6 +4119,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           `,
           [user.id, query.limit, query.offset],
         );
+        const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
+          client,
+          rows.rows.map((row) => row.id),
+          { rangeHours: 720 },
+        );
 
         return reply.send({
           ok: true,
@@ -4065,7 +4136,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userLabel: row.user_label ?? null,
             userLabelColor: row.user_label_color ?? null,
             followedAt: row.follow_created_at,
-            metrics: row.metrics ?? null,
+            metrics: serializeWalletMetrics(row.metrics ?? null),
+            portfolioPerformance30d:
+              portfolioPerformanceMap.get(row.id) ?? null,
           })),
         });
       } catch (error) {
@@ -4221,6 +4294,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           `,
           [user.id, query.limit, query.offset],
         );
+        const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
+          client,
+          rows.rows.map((row) => row.id),
+          { rangeHours: 720 },
+        );
         const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
           client,
           rows.rows.map((row) => row.id),
@@ -4239,11 +4317,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             lastSeenAt: row.last_seen_at,
             followedAt: row.follow_created_at,
             tags: row.tags ?? [],
-            metrics: applyResolvedTradeStatsToMetrics(
-              row.metrics ?? null,
-              resolvedTradeStatsMap.get(row.id),
-              row.last_seen_at,
+            metrics: serializeWalletMetrics(
+              applyResolvedTradeStatsToMetrics(
+                row.metrics ?? null,
+                resolvedTradeStatsMap.get(row.id),
+                row.last_seen_at,
+              ),
             ),
+            portfolioPerformance30d:
+              portfolioPerformanceMap.get(row.id) ?? null,
             inferredWinRate:
               row.inferred_total && row.inferred_total > 0 && row.inferred_wins != null
                 ? Number(row.inferred_wins) / Number(row.inferred_total)
@@ -4747,14 +4829,27 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             }
           }
 
-          const [topMarketMap, followerCountsMap, sparklineMap] = await Promise.all([
-            loadWhaleTopMarkets(client, pagedIds, query.marketLimit, query.windowDays),
+          const [
+            topMarketMap,
+            followerCountsMap,
+            sparklineMap,
+            portfolioPerformanceMap,
+          ] = await Promise.all([
+            loadWhaleTopMarkets(
+              client,
+              pagedIds,
+              query.marketLimit,
+              query.windowDays,
+            ),
             loadWalletFollowerCountsMap(client, pagedIds),
             query.includeSparkline
               ? fetchWalletActivitySparklines(client, pagedIds, {
                   windowHours,
                 })
               : Promise.resolve(new Map<string, WalletActivitySparkline>()),
+            loadWalletPortfolioPerformanceMap(client, pagedIds, {
+              rangeHours: 720,
+            }),
           ]);
 
           const pageAttributionMap =
@@ -4766,6 +4861,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       walletId: row.walletId,
                       tags: row.tags,
                       metrics: row.metrics,
+                      portfolioPnl30dUsd:
+                        portfolioPerformanceMap.get(row.walletId)?.pnlUsd ?? null,
                       inferredWinRate: row.inferredWinRate,
                       inferredResolvedCount: row.inferredResolvedCount,
                       trackedExposureUsd: row.trackedExposureUsd,
@@ -4783,6 +4880,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               {
                 ...row,
                 followersCount: followerCountsMap.get(row.walletId) ?? 0,
+                portfolioPerformance30d:
+                  portfolioPerformanceMap.get(row.walletId) ?? null,
               },
               summary,
               query.includeSummary,
@@ -4890,6 +4989,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const [
           followerCountsMap,
           openPositionStatsMap,
+          portfolioPerformanceMap,
           refreshPolicy,
           attributionPolicy,
           signalsPolicy,
@@ -4899,6 +4999,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           await Promise.all([
             loadWalletFollowerCountsMap(client, [walletId]),
             loadWalletOpenPositionStatsMap(client, [walletId]),
+            loadWalletPortfolioPerformanceMap(client, [walletId], {
+              rangeHours: 720,
+            }),
             resolveWalletIntelRefreshPolicy(client),
             resolveWalletIntelAttributionPolicy(client),
             resolveWalletIntelSignalsPolicy(client),
@@ -4952,6 +5055,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 walletId: wallet.id,
                 tags: wallet.tags,
                 metrics: wallet.metrics,
+                portfolioPnl30dUsd:
+                  portfolioPerformanceMap.get(walletId)?.pnlUsd ?? null,
                 inferredWinRate: null,
                 inferredResolvedCount: null,
                 trackedExposureUsd: openPositionStats?.trackedExposureUsd ?? null,
@@ -5016,7 +5121,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
             tags: wallet.tags ?? [],
-            metrics: wallet.metrics ?? null,
+            metrics: serializeWalletMetrics(wallet.metrics ?? null),
+            portfolioPerformance30d:
+              portfolioPerformanceMap.get(walletId) ?? null,
             profile: responseProfile,
             profileUpdatedAt: wallet.profile_updated_at ?? null,
             attribution,
@@ -5070,7 +5177,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const activityWindowHours = query.windowHours ?? 168;
-        const [activityMap, performance] = await Promise.all([
+        const [activityMap, performance, portfolioPnlSeries] = await Promise.all([
           fetchWalletActivitySparklines(client, [walletId], {
             windowHours: activityWindowHours,
             bucketHours: query.bucketHours,
@@ -5080,6 +5187,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             windowHours: query.windowHours,
             bucketHours:
               query.windowHours != null ? query.bucketHours : undefined,
+            limit: query.limit,
+          }),
+          fetchWalletPortfolioPnlSeries(client, walletId, {
+            rangeHours: activityWindowHours,
+            bucketHours: query.bucketHours,
             limit: query.limit,
           }),
         ]);
@@ -5094,6 +5206,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               bucketHours: query.bucketHours,
             }),
           performance,
+          portfolioPerformance: portfolioPnlSeries.performance,
+          portfolioPnlSeries,
         });
       } catch (error) {
         app.log.error(
@@ -5219,7 +5333,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
           }
           if (workingWalletIds.length === 0) {
-            return { ok: true, items: [] as WalletActivitySummaryItem[] };
+            return { ok: true, items: [] };
           }
 
           const summaryOptions = {
@@ -5279,7 +5393,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
             const pagedIds = pagedStats.map((row) => row.walletId);
             if (pagedIds.length === 0) {
-              return { ok: true, items: [] as WalletActivitySummaryItem[] };
+              return { ok: true, items: [] };
             }
             const [
               pageRows,
@@ -5288,6 +5402,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               sparklineMap,
               followerCountsMap,
               openPositionStatsMap,
+              portfolioPerformanceMap,
               resolvedTradeStatsMap,
             ] =
               await Promise.all([
@@ -5303,6 +5418,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 : Promise.resolve(new Map<string, WalletActivitySparkline>()),
               loadWalletFollowerCountsMap(client, pagedIds),
               loadWalletOpenPositionStatsMap(client, pagedIds),
+              loadWalletPortfolioPerformanceMap(client, pagedIds, {
+                rangeHours: 720,
+              }),
               loadWalletResolvedTradeStatsMap(client, pagedIds),
             ]);
             const mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
@@ -5341,6 +5459,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                           walletId,
                           tags: row.tags,
                           metrics: row.metrics,
+                          portfolioPnl30dUsd:
+                            portfolioPerformanceMap.get(walletId)?.pnlUsd ?? null,
                           inferredWinRate: null,
                           inferredResolvedCount: null,
                           trackedExposureUsd:
@@ -5365,7 +5485,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   )
                 : new Map<string, WalletAttribution>();
             const items = pagedStats
-              .map<WalletActivitySummaryItem | null>((summary) => {
+              .map<SerializedWalletMetricsHolder<WalletActivitySummaryItem> | null>((summary) => {
                 const row = rowById.get(summary.walletId);
                 if (!row) return null;
                 const baseItem = buildWalletSummaryItem(row, summary, {
@@ -5380,6 +5500,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       avgOpenEntryPrice: null,
                       avgOpenEntryApprox: null,
                     },
+                  portfolioPerformance30d:
+                    portfolioPerformanceMap.get(row.id) ?? null,
                 });
                 const withSparkline = query.includeSparkline
                   ? {
@@ -5397,7 +5519,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   attributionMap,
                 });
               })
-              .filter((row): row is WalletActivitySummaryItem => Boolean(row));
+              .filter(
+                (
+                  row,
+                ): row is SerializedWalletMetricsHolder<WalletActivitySummaryItem> =>
+                  Boolean(row),
+              );
             return { ok: true, items };
           }
 
@@ -5420,6 +5547,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               return buildWalletSummaryItem(row, summary);
             })
             .filter((row): row is WalletActivitySummaryItem => Boolean(row));
+          const mergedPortfolioPerformanceMap =
+            merged.length > 0
+              ? await loadWalletPortfolioPerformanceMap(
+                  client,
+                  merged.map((row) => row.walletId),
+                  { rangeHours: 720 },
+                )
+              : new Map<string, WalletPortfolioPerformance>();
 
           const resolvedTradeStatsMap =
             merged.length > 0
@@ -5437,6 +5572,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 stats,
                 row.lastSeenAt,
               ),
+              portfolioPerformance30d:
+                mergedPortfolioPerformanceMap.get(row.walletId) ?? null,
               inferredWinRate: row.inferredWinRate ?? stats?.winRate ?? null,
               inferredResolvedCount:
                 row.inferredResolvedCount ?? stats?.resolvedCount ?? null,
@@ -5475,6 +5612,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   walletId: row.walletId,
                   tags: row.tags,
                   metrics: row.metrics,
+                  portfolioPnl30dUsd: row.portfolioPerformance30d?.pnlUsd ?? null,
                   inferredWinRate: row.inferredWinRate,
                   inferredResolvedCount: row.inferredResolvedCount,
                   trackedExposureUsd: null,
@@ -5534,13 +5672,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               pageTopChangesMap.set(walletId, topChanges);
             }
           }
-          const [sparklineMap, followerCountsMap, openPositionStatsMap] =
+          const [
+            sparklineMap,
+            followerCountsMap,
+            openPositionStatsMap,
+            portfolioPerformanceMap,
+          ] =
             await Promise.all([
             query.includeSparkline
               ? fetchWalletActivitySparklines(client, pagedIds, { windowHours })
               : Promise.resolve(new Map<string, WalletActivitySparkline>()),
             loadWalletFollowerCountsMap(client, pagedIds),
             loadWalletOpenPositionStatsMap(client, pagedIds),
+            loadWalletPortfolioPerformanceMap(client, pagedIds, {
+              rangeHours: 720,
+            }),
           ]);
           attributionMap =
             pagedRows.length > 0
@@ -5551,6 +5697,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       walletId: row.walletId,
                       tags: row.tags,
                       metrics: row.metrics,
+                      portfolioPnl30dUsd:
+                        portfolioPerformanceMap.get(row.walletId)?.pnlUsd ??
+                        row.portfolioPerformance30d?.pnlUsd ??
+                        null,
                       inferredWinRate: null,
                       inferredResolvedCount: null,
                       trackedExposureUsd:
@@ -5576,6 +5726,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               ...row,
               followersCount: followerCountsMap.get(row.walletId) ?? 0,
               topChanges: pageTopChangesMap.get(row.walletId) ?? [],
+              portfolioPerformance30d:
+                portfolioPerformanceMap.get(row.walletId) ??
+                row.portfolioPerformance30d ??
+                null,
               trackedExposureUsd:
                 openPositionStats?.trackedExposureUsd ?? null,
               openPositionsCount: openPositionStats?.openPositionsCount ?? 0,
@@ -5869,7 +6023,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (!includeAttributionInResponse) {
               return {
                 ok: true,
-                items,
+                items: items.map((item) => serializeWalletResponseItem(item)),
               };
             }
 
@@ -5883,10 +6037,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
             return {
               ok: true,
-              items: items.map((item) => ({
-                ...item,
-                attribution: attributionMap.get(item.walletId),
-              })),
+              items: items.map((item) =>
+                serializeWalletResponseItem({
+                  ...item,
+                  attribution: attributionMap.get(item.walletId),
+                }),
+              ),
             };
           }
 
@@ -6060,8 +6216,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           }
           const itemsForResponse = pagedRows.map((item) =>
             includeAttributionInResponse
-              ? { ...item, attribution: attributionMap.get(item.walletId) }
-              : item,
+              ? serializeWalletResponseItem({
+                  ...item,
+                  attribution: attributionMap.get(item.walletId),
+                })
+              : serializeWalletResponseItem(item),
           );
           return {
             ok: true,

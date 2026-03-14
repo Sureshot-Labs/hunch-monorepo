@@ -78,6 +78,7 @@ export type WalletAttributionInput = {
   walletId: string;
   tags?: WalletAttributionTag[] | null;
   metrics?: WalletAttributionMetrics | null;
+  portfolioPnl30dUsd?: number | null;
   inferredWinRate?: number | null;
   inferredResolvedCount?: number | null;
   trackedExposureUsd?: number | null;
@@ -840,7 +841,8 @@ async function loadComputedStats(
       winRateFromInput != null
         ? clamp(winRateFromInput, 0, 1)
         : inferred?.winRate ?? null;
-    const pnl30dUsd = toNumber(wallet.metrics?.pnl_usd);
+    const pnl30dUsd =
+      toNumber(wallet.portfolioPnl30dUsd) ?? toNumber(wallet.metrics?.pnl_usd);
     const trades30dTotal = Math.max(
       0,
       Math.trunc(toNumber(wallet.metrics?.trades_count) ?? 0),
