@@ -136,6 +136,10 @@ export const walletResolverParamsSchema = z.object({
   address: z.string().min(4),
 });
 
+export const walletResolverQuerySchema = z.object({
+  chain: zChain.optional(),
+});
+
 export const walletProfileParamsSchema = z.object({
   walletId: z.string().uuid(),
 });

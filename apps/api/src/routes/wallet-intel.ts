@@ -89,6 +89,7 @@ import {
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
   walletResolverParamsSchema,
+  walletResolverQuerySchema,
   walletSeriesQuerySchema,
   walletWhalesQuerySchema,
 } from "../schemas/wallet-intel.js";
@@ -3984,6 +3985,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       preHandler: createAuthMiddleware(),
       schema: {
         params: walletResolverParamsSchema,
+        querystring: walletResolverQuerySchema,
       },
     },
     async (request, reply) => {
@@ -4005,6 +4007,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const client = await pool.connect();
       try {
+        const preferredChain = request.query.chain?.toLowerCase() ?? null;
         const wallets = await findWalletsByAddress(client, address);
         const privateMetaByWallet = await loadWalletPrivateMetaByWalletIds(
           client,
@@ -4025,7 +4028,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           };
         });
         const resolvedWallet =
-          matches.find((wallet) => wallet.followed && Boolean(wallet.walletId)) ??
+          matches.find((wallet) => wallet.chain === preferredChain) ??
           matches.find((wallet) => Boolean(wallet.walletId)) ??
           null;
 
