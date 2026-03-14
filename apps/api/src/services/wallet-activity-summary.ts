@@ -192,6 +192,47 @@ export type WalletActivitySignalPageLabelFlags = {
   category: string | null;
 };
 
+export type WalletActivitySummarySortMode =
+  | "last_activity"
+  | "net_change_usd"
+  | "unusual_score";
+
+export function compareWalletActivitySummaryStats(
+  left: WalletActivitySummaryStats,
+  right: WalletActivitySummaryStats,
+  sortMode: WalletActivitySummarySortMode,
+): number {
+  if (sortMode === "net_change_usd") {
+    const netDelta =
+      Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    if (netDelta !== 0) return netDelta;
+    const rightTime = right.lastActivityAt?.getTime() ?? 0;
+    const leftTime = left.lastActivityAt?.getTime() ?? 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return left.walletId.localeCompare(right.walletId);
+  }
+
+  if (sortMode === "unusual_score") {
+    const leftScore = left.unusualScore ?? 0;
+    const rightScore = right.unusualScore ?? 0;
+    if (rightScore !== leftScore) return rightScore - leftScore;
+    const netDelta =
+      Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    if (netDelta !== 0) return netDelta;
+    const rightTime = right.lastActivityAt?.getTime() ?? 0;
+    const leftTime = left.lastActivityAt?.getTime() ?? 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return left.walletId.localeCompare(right.walletId);
+  }
+
+  const rightTime = right.lastActivityAt?.getTime() ?? 0;
+  const leftTime = left.lastActivityAt?.getTime() ?? 0;
+  if (rightTime !== leftTime) return rightTime - leftTime;
+  const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+  if (netDelta !== 0) return netDelta;
+  return left.walletId.localeCompare(right.walletId);
+}
+
 function mapWalletActivitySignalRow(
   row: WalletActivitySignalRowDbRow,
 ): WalletActivitySignalRow {

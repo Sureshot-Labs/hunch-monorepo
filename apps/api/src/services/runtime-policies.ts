@@ -97,10 +97,15 @@ export type AiWhaleProfilesPolicy = {
   limit: number;
   marketLimit: number;
   windowDays: number;
-  selectionMode: "recent" | "pnl" | "hybrid";
+  selectionMode: "recent" | "pnl" | "hybrid" | "tracker_like";
   selectionRecentLimit: number;
   selectionPnlLimit: number;
+  selectionTrackerRecentLimit: number;
+  selectionTrackerPnlLimit: number;
+  selectionTrackerWinRateLimit: number;
   selectionSignalsLimit: number;
+  selectionTrackerWindowHours: number;
+  selectionTrackerSurfaceLimit: number;
   selectionSignalsWindowHours: number;
   model: string;
   styleGuide: string;
@@ -498,10 +503,15 @@ const aiWhaleProfilesSchema = z
     limit: positiveInt,
     marketLimit: positiveInt,
     windowDays: positiveInt,
-    selectionMode: z.enum(["recent", "pnl", "hybrid"]),
+    selectionMode: z.enum(["recent", "pnl", "hybrid", "tracker_like"]),
     selectionRecentLimit: nonNegativeInt,
     selectionPnlLimit: nonNegativeInt,
+    selectionTrackerRecentLimit: nonNegativeInt,
+    selectionTrackerPnlLimit: nonNegativeInt,
+    selectionTrackerWinRateLimit: nonNegativeInt,
     selectionSignalsLimit: nonNegativeInt,
+    selectionTrackerWindowHours: positiveInt,
+    selectionTrackerSurfaceLimit: positiveInt,
     selectionSignalsWindowHours: positiveInt,
     model: z.string().trim().min(1).max(200),
     styleGuide: z.string().trim().min(1).max(5_000),
@@ -1086,7 +1096,15 @@ function getDefaults(): IntelPolicyMap {
       selectionMode: env.aiWhaleProfileSelectionMode,
       selectionRecentLimit: env.aiWhaleProfileSelectionRecentLimit,
       selectionPnlLimit: env.aiWhaleProfileSelectionPnlLimit,
+      selectionTrackerRecentLimit:
+        env.aiWhaleProfileSelectionTrackerRecentLimit,
+      selectionTrackerPnlLimit: env.aiWhaleProfileSelectionTrackerPnlLimit,
+      selectionTrackerWinRateLimit:
+        env.aiWhaleProfileSelectionTrackerWinRateLimit,
       selectionSignalsLimit: env.aiWhaleProfileSelectionSignalsLimit,
+      selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
+      selectionTrackerSurfaceLimit:
+        env.aiWhaleProfileSelectionTrackerSurfaceLimit,
       selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
       styleGuide: env.aiWhaleProfileStyleGuide,
@@ -1533,7 +1551,29 @@ function normalizeAiWhaleProfilesPolicy(
     selectionMode: policy.selectionMode,
     selectionRecentLimit: Math.max(0, Math.trunc(policy.selectionRecentLimit)),
     selectionPnlLimit: Math.max(0, Math.trunc(policy.selectionPnlLimit)),
+    selectionTrackerRecentLimit: Math.max(
+      0,
+      Math.trunc(policy.selectionTrackerRecentLimit),
+    ),
+    selectionTrackerPnlLimit: Math.max(
+      0,
+      Math.trunc(policy.selectionTrackerPnlLimit),
+    ),
+    selectionTrackerWinRateLimit: Math.max(
+      0,
+      Math.trunc(policy.selectionTrackerWinRateLimit),
+    ),
     selectionSignalsLimit: Math.max(0, Math.trunc(policy.selectionSignalsLimit)),
+    selectionTrackerWindowHours: clamp(
+      Math.trunc(policy.selectionTrackerWindowHours),
+      1,
+      24 * 14,
+    ),
+    selectionTrackerSurfaceLimit: clamp(
+      Math.trunc(policy.selectionTrackerSurfaceLimit),
+      1,
+      1_000,
+    ),
     selectionSignalsWindowHours: clamp(
       Math.trunc(policy.selectionSignalsWindowHours),
       1,

@@ -307,7 +307,7 @@ const aiWhaleProfileWindowDays = optionalPositiveInt(
 );
 const aiWhaleProfileSelectionMode = parseEnum(
   process.env.AI_WHALE_PROFILE_SELECTION_MODE,
-  ["recent", "pnl", "hybrid"] as const,
+  ["recent", "pnl", "hybrid", "tracker_like"] as const,
   "hybrid",
 );
 const aiWhaleProfileSelectionRecentLimit = optionalNonNegativeInt(
@@ -318,9 +318,29 @@ const aiWhaleProfileSelectionPnlLimit = optionalNonNegativeInt(
   "AI_WHALE_PROFILE_SELECTION_PNL_LIMIT",
   15,
 );
+const aiWhaleProfileSelectionTrackerRecentLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_TRACKER_RECENT_LIMIT",
+  15,
+);
+const aiWhaleProfileSelectionTrackerPnlLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_TRACKER_PNL_LIMIT",
+  15,
+);
+const aiWhaleProfileSelectionTrackerWinRateLimit = optionalNonNegativeInt(
+  "AI_WHALE_PROFILE_SELECTION_TRACKER_WIN_RATE_LIMIT",
+  15,
+);
 const aiWhaleProfileSelectionSignalsLimit = optionalNonNegativeInt(
   "AI_WHALE_PROFILE_SELECTION_SIGNALS_LIMIT",
   15,
+);
+const aiWhaleProfileSelectionTrackerWindowHours = optionalPositiveInt(
+  "AI_WHALE_PROFILE_SELECTION_TRACKER_WINDOW_HOURS",
+  24,
+);
+const aiWhaleProfileSelectionTrackerSurfaceLimit = optionalPositiveInt(
+  "AI_WHALE_PROFILE_SELECTION_TRACKER_SURFACE_LIMIT",
+  100,
 );
 const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
   "AI_WHALE_PROFILE_SELECTION_SIGNALS_WINDOW_HOURS",
@@ -654,7 +674,12 @@ export const env = {
   aiWhaleProfileSelectionMode,
   aiWhaleProfileSelectionRecentLimit,
   aiWhaleProfileSelectionPnlLimit,
+  aiWhaleProfileSelectionTrackerRecentLimit,
+  aiWhaleProfileSelectionTrackerPnlLimit,
+  aiWhaleProfileSelectionTrackerWinRateLimit,
   aiWhaleProfileSelectionSignalsLimit,
+  aiWhaleProfileSelectionTrackerWindowHours,
+  aiWhaleProfileSelectionTrackerSurfaceLimit,
   aiWhaleProfileSelectionSignalsWindowHours,
   aiWhaleProfileModel,
   aiClusterAnalysisEnabled:

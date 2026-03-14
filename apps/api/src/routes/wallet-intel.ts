@@ -15,6 +15,7 @@ import {
   inspectSafeWallet,
 } from "../services/polymarket-funder.js";
 import {
+  compareWalletActivitySummaryStats,
   fetchWalletActivitySignalPageLabels,
   fetchWalletActivitySignalSummary,
   fetchWalletActivitySignalRowsFast,
@@ -26,6 +27,7 @@ import {
   type WalletActivitySignalRow,
   type WalletActivitySummary,
   type WalletActivitySummaryStats,
+  type WalletActivitySummarySortMode,
   type WalletActivityTopChange,
 } from "../services/wallet-activity-summary.js";
 import {
@@ -5370,23 +5372,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               workingWalletIds,
               summaryOptions,
             );
-            const sortMode = query.sort;
+            const sortMode = query.sort as WalletActivitySummarySortMode;
             const sortedStats = Array.from(summaryStatsMap.values())
               .filter((row) => Boolean(row.lastActivityAt))
-              .sort((a, b) => {
-                if (sortMode === "net_change_usd") {
-                  return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
-                }
-                if (sortMode === "unusual_score") {
-                  const aScore = a.unusualScore ?? 0;
-                  const bScore = b.unusualScore ?? 0;
-                  if (bScore !== aScore) return bScore - aScore;
-                  return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
-                }
-                const aTime = a.lastActivityAt?.getTime() ?? 0;
-                const bTime = b.lastActivityAt?.getTime() ?? 0;
-                return bTime - aTime;
-              });
+              .sort((a, b) => compareWalletActivitySummaryStats(a, b, sortMode));
             const pagedStats = sortedStats.slice(
               query.offset,
               query.offset + query.limit,
@@ -5641,21 +5630,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
           }
 
-          const sortMode = query.sort;
-          const sorted = filtered.sort((a, b) => {
-            if (sortMode === "net_change_usd") {
-              return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
-            }
-            if (sortMode === "unusual_score") {
-              const aScore = a.unusualScore ?? 0;
-              const bScore = b.unusualScore ?? 0;
-              if (bScore !== aScore) return bScore - aScore;
-              return Math.abs(b.netChangeUsd) - Math.abs(a.netChangeUsd);
-            }
-            const aTime = a.lastActivityAt?.getTime() ?? 0;
-            const bTime = b.lastActivityAt?.getTime() ?? 0;
-            return bTime - aTime;
-          });
+          const sortMode = query.sort as WalletActivitySummarySortMode;
+          const sorted = filtered.sort((a, b) =>
+            compareWalletActivitySummaryStats(a, b, sortMode),
+          );
 
           const start = query.offset;
           const end = start + query.limit;

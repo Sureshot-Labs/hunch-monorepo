@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import type { PoolClient } from "pg";
 import { z } from "zod";
 
 import { pool } from "../db.js";
@@ -7,12 +8,15 @@ import { env } from "../env.js";
 import { normalizeOutcomeSideForApi } from "./wallet-intel-helpers.js";
 import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
+  compareWalletActivitySummaryStats,
   fetchWalletActivitySignalRowsFast,
   fetchWalletActivitySignalSummary,
+  fetchWalletActivitySummaryStats,
   fetchWalletActivitySummaries,
   type WalletActivitySignalRow,
   type WalletActivitySignalSummary,
   type WalletActivitySummary,
+  type WalletActivitySummaryStats,
 } from "./wallet-activity-summary.js";
 import {
   loadWalletCategoryMix,
@@ -20,12 +24,13 @@ import {
   loadWalletPerformance30dSummary,
   loadWalletResolvedPositionSamples,
   type WalletCategoryMixItem,
+  type WalletEntryBracketKey,
   type WalletEntryBracketStat,
   type WalletPerformance30dSummary,
   type WalletResolvedPositionSample,
 } from "./wallet-profile-features.js";
 
-const PROFILE_VERSION = "v10";
+const PROFILE_VERSION = "v11";
 const CATEGORY_VALUES = [
   "politics",
   "crypto",
@@ -70,6 +75,14 @@ type WhaleProfile = {
   confidence?: number;
   evidence?: string[];
   notes?: string;
+  _naming_signature?: string;
+};
+
+type ExistingWhaleProfileState = {
+  featuresHash: string;
+  version: string;
+  profile: WhaleProfile | null;
+  namingSignature: string | null;
 };
 
 type WhaleProfileInput = {
@@ -256,10 +269,28 @@ type WhaleRow = {
   has_holder_activity: boolean | null;
   inferred_wins: number | null;
   inferred_total: number | null;
-  rank_recent: number | null;
-  rank_pnl: number | null;
-  rank_signal: number | null;
+  rank_tracker_recent: number | string | null;
+  rank_tracker_pnl: number | string | null;
+  rank_tracker_win_rate: number | string | null;
+  rank_recent: number | string | null;
+  rank_pnl: number | string | null;
+  rank_signal: number | string | null;
   source_hits: number;
+};
+
+type WhaleProfileSourceKey =
+  | "trackerRecent"
+  | "trackerPnl"
+  | "trackerWinRate"
+  | "recent"
+  | "pnl"
+  | "signals";
+
+type WhaleProfileSourceDef = {
+  key: WhaleProfileSourceKey;
+  targetLimit: number;
+  fetchLimit: number;
+  rankOf: (row: WhaleRow) => number | null;
 };
 
 type WhaleMarketRow = {
@@ -320,6 +351,10 @@ function normalizeText(value: string | null | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function formatShortAddressLike(address: string): string {
@@ -485,6 +520,85 @@ function resolveFallbackProfileLabelShort(
   const noun =
     input.current_portfolio.market_count_total >= 20 ? "Portfolio" : "Trader";
   return truncateText(`${focus} ${stance} ${noun}`.replace(/\s+/g, " ").trim(), 56);
+}
+
+function deriveProfileNamingCategories(input: WhaleProfileInput): string[] {
+  const fromMix = input.category_mix
+    .map((item) => normalizeText(item.category)?.toLowerCase())
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 2);
+  if (fromMix.length > 0) {
+    return Array.from(new Set(fromMix)).sort();
+  }
+  return Object.entries(input.summary.category_counts)
+    .filter(([, count]) => Number.isFinite(count) && count > 0)
+    .sort((left, right) => {
+      if (right[1] !== left[1]) return right[1] - left[1];
+      return left[0].localeCompare(right[0]);
+    })
+    .slice(0, 2)
+    .map(([category]) => category.toLowerCase())
+    .sort();
+}
+
+function resolvePrimaryEntryBracket(
+  input: WhaleProfileInput,
+): WalletEntryBracketKey | "none" {
+  const bracket = [...input.entry_brackets]
+    .sort((left, right) => {
+      if (right.totalStakeUsd !== left.totalStakeUsd) {
+        return right.totalStakeUsd - left.totalStakeUsd;
+      }
+      if (right.tradeCount !== left.tradeCount) {
+        return right.tradeCount - left.tradeCount;
+      }
+      return left.bracket.localeCompare(right.bracket);
+    })
+    .find((entry) => entry.totalStakeUsd > 0 || entry.tradeCount > 0);
+  return bracket?.bracket ?? "none";
+}
+
+function computeProfileNamingSignature(input: WhaleProfileInput): string {
+  return [
+    input.activity.kind,
+    input.exposure.posture,
+    input.summary.side_bias_label,
+    resolvePrimaryEntryBracket(input),
+    deriveProfileNamingCategories(input).join("+") || "none",
+  ].join("|");
+}
+
+function parseStoredWhaleProfileState(
+  row: {
+    features_hash: string;
+    version: string;
+    profile: unknown;
+  },
+): ExistingWhaleProfileState {
+  const profile = normalizeWhaleProfile(row.profile);
+  const namingSignature =
+    isRecord(row.profile) && typeof row.profile._naming_signature === "string"
+      ? normalizeText(row.profile._naming_signature)
+      : null;
+  return {
+    featuresHash: row.features_hash,
+    version: row.version,
+    profile,
+    namingSignature,
+  };
+}
+
+function shouldPreserveExistingProfileLabelShort(
+  existing: ExistingWhaleProfileState | undefined,
+  input: WhaleProfileInput,
+  currentNamingSignature: string,
+): boolean {
+  const existingLabel = normalizeText(existing?.profile?.label_short);
+  if (!existingLabel) return false;
+  if (input.wallet.source_label_quality === "descriptive") return false;
+  if (isGenericProfileLabelShort(existingLabel, input)) return false;
+  if (!existing?.namingSignature) return true;
+  return existing.namingSignature === currentNamingSignature;
 }
 
 const USD_BUCKETS = [
@@ -876,6 +990,136 @@ function hashProfileInput(input: WhaleProfileInput): string {
     .createHash("sha256")
     .update(JSON.stringify(hashInput))
     .digest("hex");
+}
+
+function coerceRank(value: number | string | null | undefined): number | null {
+  if (value == null) return null;
+  const parsed =
+    typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getWhaleProfileSourceRows(
+  rows: WhaleRow[],
+  source: WhaleProfileSourceDef,
+): WhaleRow[] {
+  if (source.fetchLimit <= 0) return [];
+  return rows
+    .filter((row) => {
+      const rank = source.rankOf(row);
+      return rank != null && rank <= source.fetchLimit;
+    })
+    .sort((left, right) => {
+      const leftRank = source.rankOf(left) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = source.rankOf(right) ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      if (left.source_hits !== right.source_hits) {
+        return right.source_hits - left.source_hits;
+      }
+      const leftActivity = left.last_activity_at?.getTime() ?? 0;
+      const rightActivity = right.last_activity_at?.getTime() ?? 0;
+      return rightActivity - leftActivity;
+    });
+}
+
+function selectWhaleProfileRows(
+  rows: WhaleRow[],
+  limit: number,
+  sources: WhaleProfileSourceDef[],
+): {
+  rows: WhaleRow[];
+  pinnedCoverage: Record<WhaleProfileSourceKey, number>;
+} {
+  const selected: WhaleRow[] = [];
+  const seen = new Set<string>();
+  const pinnedCoverage: Record<WhaleProfileSourceKey, number> = {
+    trackerRecent: 0,
+    trackerPnl: 0,
+    trackerWinRate: 0,
+    recent: 0,
+    pnl: 0,
+    signals: 0,
+  };
+
+  for (const source of sources) {
+    if (selected.length >= limit) break;
+    let sourceSelected = 0;
+    for (const row of getWhaleProfileSourceRows(rows, source)) {
+      if (selected.length >= limit || sourceSelected >= source.targetLimit) {
+        break;
+      }
+      if (seen.has(row.id)) continue;
+      selected.push(row);
+      seen.add(row.id);
+      sourceSelected += 1;
+    }
+    pinnedCoverage[source.key] = sourceSelected;
+  }
+
+  if (selected.length < limit) {
+    for (const row of rows) {
+      if (selected.length >= limit) break;
+      if (seen.has(row.id)) continue;
+      selected.push(row);
+      seen.add(row.id);
+    }
+  }
+
+  return { rows: selected, pinnedCoverage };
+}
+
+async function loadTrackerSurfaceIds(
+  client: PoolClient,
+  options: {
+    windowHours: number;
+    limit: number;
+    minActivityUsd: number;
+    minActivityShares: number;
+  },
+): Promise<string[]> {
+  if (options.limit <= 0) return [];
+  const activeRows = await client.query<{ wallet_id: string }>(
+    `
+      select wah.wallet_id
+      from wallet_activity_hourly wah
+      where wah.activity_type in ('delta', 'trade')
+        and wah.hour_bucket >= now() - ($1::text || ' hours')::interval
+      group by wah.wallet_id
+      having (
+        $2::numeric <= 0
+        and $3::numeric <= 0
+      )
+      or coalesce(sum(abs(wah.signed_delta_usd)), 0) >= $2::numeric
+      or coalesce(sum(abs(wah.signed_delta_shares)), 0) >= $3::numeric
+    `,
+    [
+      Math.max(1, Math.trunc(options.windowHours)),
+      options.minActivityUsd,
+      options.minActivityShares,
+    ],
+  );
+  const activeWalletIds = activeRows.rows.map((row) => row.wallet_id);
+  if (activeWalletIds.length === 0) return [];
+
+  const summaryStatsMap = await fetchWalletActivitySummaryStats(
+    client,
+    activeWalletIds,
+    {
+      windowHours: Math.max(1, Math.trunc(options.windowHours)),
+      topChanges: 1,
+      baselineDays: 30,
+    },
+  );
+
+  return Array.from(summaryStatsMap.values())
+    .filter(
+      (row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt),
+    )
+    .sort((left, right) =>
+      compareWalletActivitySummaryStats(left, right, "last_activity"),
+    )
+    .slice(0, Math.max(1, Math.trunc(options.limit)))
+    .map((row) => row.walletId);
 }
 
 export function parseProfileJson(raw: string): unknown | null {
@@ -1479,7 +1723,13 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     selectionMode: env.aiWhaleProfileSelectionMode,
     selectionRecentLimit: env.aiWhaleProfileSelectionRecentLimit,
     selectionPnlLimit: env.aiWhaleProfileSelectionPnlLimit,
+    selectionTrackerRecentLimit: env.aiWhaleProfileSelectionTrackerRecentLimit,
+    selectionTrackerPnlLimit: env.aiWhaleProfileSelectionTrackerPnlLimit,
+    selectionTrackerWinRateLimit:
+      env.aiWhaleProfileSelectionTrackerWinRateLimit,
     selectionSignalsLimit: env.aiWhaleProfileSelectionSignalsLimit,
+    selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
+    selectionTrackerSurfaceLimit: env.aiWhaleProfileSelectionTrackerSurfaceLimit,
     selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
     model: env.aiWhaleProfileModel,
     styleGuide: env.aiWhaleProfileStyleGuide,
@@ -1494,34 +1744,145 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const verbose = Boolean(options.verbose);
   const logEvery = Math.max(1, Math.trunc(options.logEvery ?? 10));
   const effectiveProfileVersion = `${PROFILE_VERSION}:${policy.promptVersion.trim() || "v1"}`;
+  let selectTrackerRecentLimit = Math.max(
+    0,
+    Math.trunc(policy.selectionTrackerRecentLimit),
+  );
+  let selectTrackerPnlLimit =
+    policy.selectionMode === "tracker_like"
+      ? Math.max(0, Math.trunc(policy.selectionTrackerPnlLimit))
+      : 0;
+  let selectTrackerWinRateLimit =
+    policy.selectionMode === "tracker_like"
+      ? Math.max(0, Math.trunc(policy.selectionTrackerWinRateLimit))
+      : 0;
   const signalsWindowHours = Math.max(1, policy.selectionSignalsWindowHours);
+  const trackerWindowHours = Math.max(1, policy.selectionTrackerWindowHours);
+  let trackerSurfaceLimit = Math.max(
+    1,
+    Math.trunc(policy.selectionTrackerSurfaceLimit),
+  );
   let selectRecentLimit = Math.max(0, Math.trunc(policy.selectionRecentLimit));
   let selectPnlLimit = Math.max(0, Math.trunc(policy.selectionPnlLimit));
   let selectSignalsLimit = Math.max(0, Math.trunc(policy.selectionSignalsLimit));
   if (policy.selectionMode === "recent") {
+    selectTrackerRecentLimit = 0;
+    selectTrackerPnlLimit = 0;
+    selectTrackerWinRateLimit = 0;
     selectRecentLimit = limit;
     selectPnlLimit = 0;
     selectSignalsLimit = 0;
   } else if (policy.selectionMode === "pnl") {
+    selectTrackerRecentLimit = 0;
+    selectTrackerPnlLimit = 0;
+    selectTrackerWinRateLimit = 0;
     selectRecentLimit = 0;
     selectPnlLimit = limit;
     selectSignalsLimit = 0;
   }
   if (
+    selectTrackerRecentLimit === 0 &&
+    selectTrackerPnlLimit === 0 &&
+    selectTrackerWinRateLimit === 0
+  ) {
+    trackerSurfaceLimit = 0;
+  } else {
+    trackerSurfaceLimit = Math.max(
+      trackerSurfaceLimit,
+      selectTrackerRecentLimit,
+      selectTrackerPnlLimit,
+      selectTrackerWinRateLimit,
+    );
+  }
+  if (
+    selectTrackerRecentLimit === 0 &&
+    selectTrackerPnlLimit === 0 &&
+    selectTrackerWinRateLimit === 0 &&
     selectRecentLimit === 0 &&
     selectPnlLimit === 0 &&
     selectSignalsLimit === 0
   ) {
     selectRecentLimit = limit;
   }
+  const trackerRecentFetchLimit =
+    selectTrackerRecentLimit > 0
+      ? Math.min(trackerSurfaceLimit, selectTrackerRecentLimit + limit)
+      : 0;
+  const trackerPnlFetchLimit =
+    selectTrackerPnlLimit > 0
+      ? Math.min(trackerSurfaceLimit, selectTrackerPnlLimit + limit)
+      : 0;
+  const trackerWinRateFetchLimit =
+    selectTrackerWinRateLimit > 0
+      ? Math.min(trackerSurfaceLimit, selectTrackerWinRateLimit + limit)
+      : 0;
+  const recentFetchLimit =
+    selectRecentLimit > 0 ? selectRecentLimit + limit : 0;
+  const pnlFetchLimit = selectPnlLimit > 0 ? selectPnlLimit + limit : 0;
+  const signalsFetchLimit =
+    selectSignalsLimit > 0 ? selectSignalsLimit + limit : 0;
+  const sourceDefs: WhaleProfileSourceDef[] = [
+    {
+      key: "trackerRecent" as const,
+      targetLimit: selectTrackerRecentLimit,
+      fetchLimit: trackerRecentFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_recent),
+    },
+    {
+      key: "trackerPnl" as const,
+      targetLimit: selectTrackerPnlLimit,
+      fetchLimit: trackerPnlFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_pnl),
+    },
+    {
+      key: "trackerWinRate" as const,
+      targetLimit: selectTrackerWinRateLimit,
+      fetchLimit: trackerWinRateFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_win_rate),
+    },
+    {
+      key: "recent" as const,
+      targetLimit: selectRecentLimit,
+      fetchLimit: recentFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_recent),
+    },
+    {
+      key: "pnl" as const,
+      targetLimit: selectPnlLimit,
+      fetchLimit: pnlFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_pnl),
+    },
+    {
+      key: "signals" as const,
+      targetLimit: selectSignalsLimit,
+      fetchLimit: signalsFetchLimit,
+      rankOf: (row: WhaleRow) => coerceRank(row.rank_signal),
+    },
+  ].filter((source) => source.targetLimit > 0 && source.fetchLimit > 0);
+  const candidateFetchLimit = Math.max(
+    limit,
+    sourceDefs.reduce((sum, source) => sum + source.fetchLimit, 0),
+  );
   console.log("[whale-profile] selection config", {
     mode: policy.selectionMode,
     limit,
     marketLimit,
     windowDays,
+    selectTrackerRecentLimit,
+    selectTrackerPnlLimit,
+    selectTrackerWinRateLimit,
     selectRecentLimit,
     selectPnlLimit,
     selectSignalsLimit,
+    trackerSurfaceLimit,
+    trackerRecentFetchLimit,
+    trackerPnlFetchLimit,
+    trackerWinRateFetchLimit,
+    recentFetchLimit,
+    pnlFetchLimit,
+    signalsFetchLimit,
+    candidateFetchLimit,
+    trackerWindowHours,
     signalsWindowHours,
     force: Boolean(options.force),
     dryRun: Boolean(options.dryRun),
@@ -1534,15 +1895,99 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const profileSignalsWindowHours = 720;
   const client = await pool.connect();
   try {
+    const trackerSurfaceIds =
+      trackerSurfaceLimit > 0
+        ? await loadTrackerSurfaceIds(client, {
+            windowHours: trackerWindowHours,
+            limit: trackerSurfaceLimit,
+            minActivityUsd: env.walletIntelMinActivityUsd,
+            minActivityShares: env.walletIntelMinActivityShares,
+          })
+        : [];
+    console.log("[whale-profile] tracker surface", {
+      requested: trackerSurfaceLimit,
+      actual: trackerSurfaceIds.length,
+      sample: trackerSurfaceIds.slice(0, 5),
+    });
     const whaleRows = await client.query<WhaleRow>(
       `
-        with whale_base as (
+        with whale_wallets as (
+          select distinct tm.wallet_id
+          from wallet_tag_map tm
+          join wallet_tags t on t.id = tm.tag_id
+          where t.slug = 'whale'
+        ),
+        tracker_selection_config as (
+          select
+            $9::int as tracker_window_hours,
+            $10::numeric as min_activity_usd,
+            $11::numeric as min_activity_shares
+        ),
+        tracker_surface as (
+          select
+            ts.wallet_id as id,
+            ts.ordinality::int as rank_tracker_recent
+          from unnest($13::uuid[]) with ordinality as ts(wallet_id, ordinality)
+        ),
+        tracker_start_snap as (
+          select distinct on (s.wallet_id)
+            s.wallet_id,
+            s.as_of,
+            s.pnl_usd
+          from wallet_metrics_snapshots s
+          join tracker_surface ts on ts.id = s.wallet_id
+          where s.period = 'all'
+            and s.pnl_usd is not null
+            and s.as_of <= now() - interval '720 hours'
+          order by s.wallet_id, s.as_of desc
+        ),
+        tracker_fallback_start as (
+          select distinct on (s.wallet_id)
+            s.wallet_id,
+            s.as_of,
+            s.pnl_usd
+          from wallet_metrics_snapshots s
+          join tracker_surface ts on ts.id = s.wallet_id
+          where s.period = 'all'
+            and s.pnl_usd is not null
+            and s.as_of > now() - interval '720 hours'
+            and s.as_of <= now()
+          order by s.wallet_id, s.as_of asc
+        ),
+        tracker_end_snap as (
+          select distinct on (s.wallet_id)
+            s.wallet_id,
+            s.as_of,
+            s.pnl_usd
+          from wallet_metrics_snapshots s
+          join tracker_surface ts on ts.id = s.wallet_id
+          where s.period = 'all'
+            and s.pnl_usd is not null
+            and s.as_of <= now()
+          order by s.wallet_id, s.as_of desc
+        ),
+        tracker_portfolio_pnl as (
+          select
+            ts.id,
+            case
+              when es.pnl_usd is null then null
+              when coalesce(ss.pnl_usd, fs.pnl_usd) is null then null
+              else es.pnl_usd - coalesce(ss.pnl_usd, fs.pnl_usd)
+            end as tracker_visible_pnl
+          from tracker_surface ts
+          left join tracker_start_snap ss on ss.wallet_id = ts.id
+          left join tracker_fallback_start fs on fs.wallet_id = ts.id
+          left join tracker_end_snap es on es.wallet_id = ts.id
+        ),
+        wallet_base as (
           select
             w.id,
             w.address,
             w.chain,
             w.label,
             w.last_seen_at,
+            (ww.wallet_id is not null) as is_whale_candidate,
+            ts.rank_tracker_recent,
             (w.metadata->>'kind' = 'safe') as is_safe,
             owner.owner_address,
             owner.owner_label,
@@ -1552,6 +1997,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             metrics.metrics_roi,
             metrics.metrics_win_rate,
             metrics.metrics_last_trade_at,
+            coalesce(tpp.tracker_visible_pnl, metrics.metrics_pnl) as tracker_visible_pnl,
             exposure.exposure_usd,
             exposure.hedged_notional_usd,
             exposure.net_imbalance_usd,
@@ -1566,11 +2012,26 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
                 then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
               else coalesce(metrics.metrics_volume, 0)
             end as whale_score,
+            case
+              when resolved_stats.tracker_trade_count > 0
+                then resolved_stats.tracker_resolved_count
+              else coalesce(inferred.total, 0)
+            end as tracker_visible_resolved_count,
+            case
+              when metrics.metrics_win_rate is not null then metrics.metrics_win_rate
+              when coalesce(resolved_stats.tracker_trade_count, 0) > 0
+                and coalesce(resolved_stats.tracker_resolved_count, 0) > 0
+                then resolved_stats.tracker_winning_count::numeric
+                  / resolved_stats.tracker_resolved_count::numeric
+              when inferred.total > 0 then inferred.wins::numeric / inferred.total::numeric
+              else null
+            end as tracker_visible_win_rate,
             inferred.wins as inferred_wins,
             inferred.total as inferred_total
           from wallets w
-          join wallet_tag_map tm on tm.wallet_id = w.id
-          join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
+          left join whale_wallets ww on ww.wallet_id = w.id
+          left join tracker_surface ts on ts.id = w.id
+          left join tracker_portfolio_pnl tpp on tpp.id = w.id
           left join lateral (
             select
               s.volume_usd as metrics_volume,
@@ -1596,11 +2057,29 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           ) activity on true
           left join lateral (
             select
+              count(*)::int as tracker_trade_count,
+              count(*) filter (
+                where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
+                  and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
+              )::int as tracker_resolved_count,
+              count(*) filter (
+                where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
+                  and upper(coalesce(wa.outcome_side, '')) = upper(coalesce(um.resolved_outcome, ''))
+              )::int as tracker_winning_count
+            from wallet_activity_events wa
+            left join unified_markets um on um.id = wa.market_id
+            where wa.wallet_id = w.id
+              and wa.activity_type in ('delta', 'trade')
+              and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+              and wa.occurred_at >= now() - ($1::text || ' days')::interval
+          ) resolved_stats on true
+          left join lateral (
+            select
               max(coalesce(wah.max_abs_delta_usd, 0)) as signal_abs_usd
             from wallet_activity_hourly wah
             where wah.wallet_id = w.id
               and wah.activity_type in ('delta', 'trade')
-              and wah.hour_bucket >= now() - ($6::text || ' hours')::interval
+              and wah.hour_bucket >= now() - ($12::text || ' hours')::interval
           ) signal on true
           left join wallet_position_exposure exposure on exposure.wallet_id = w.id
           left join lateral (
@@ -1658,37 +2137,84 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
               count(*)::int as total
             from eligible
           ) inferred on true
+          where ww.wallet_id is not null
+             or ts.rank_tracker_recent is not null
+        ),
+        tracker_pnl_ranked as (
+          select
+            id,
+            row_number() over (
+              order by
+                tracker_visible_pnl desc nulls last,
+                rank_tracker_recent asc nulls last,
+                id asc
+            ) as rank_tracker_pnl
+          from wallet_base
+          where rank_tracker_recent is not null
+        ),
+        tracker_win_rate_ranked as (
+          select
+            id,
+            row_number() over (
+              order by
+                tracker_visible_win_rate desc nulls last,
+                tracker_visible_resolved_count desc,
+                rank_tracker_recent asc nulls last,
+                id asc
+            ) as rank_tracker_win_rate
+          from wallet_base
+          where rank_tracker_recent is not null
+            and tracker_visible_win_rate is not null
+            and tracker_visible_resolved_count >= 5
         ),
         recent_ranked as (
           select
             id,
             row_number() over (
-              order by last_activity_at desc nulls last, whale_score desc nulls last, last_seen_at desc
+              order by
+                last_activity_at desc nulls last,
+                whale_score desc nulls last,
+                id asc
             ) as rank_recent
-          from whale_base
+          from wallet_base
+          where is_whale_candidate
         ),
         pnl_ranked as (
           select
             id,
             row_number() over (
-              order by metrics_pnl desc nulls last, last_activity_at desc nulls last, last_seen_at desc
+              order by
+                metrics_pnl desc nulls last,
+                last_activity_at desc nulls last,
+                id asc
             ) as rank_pnl
-          from whale_base
+          from wallet_base
+          where is_whale_candidate
         ),
         signal_ranked as (
           select
             id,
             row_number() over (
-              order by signal_abs_usd desc nulls last, last_activity_at desc nulls last, last_seen_at desc
+              order by
+                signal_abs_usd desc nulls last,
+                last_activity_at desc nulls last,
+                id asc
             ) as rank_signal
-          from whale_base
+          from wallet_base
+          where is_whale_candidate
         ),
         candidate_ids as (
-          select id from recent_ranked where rank_recent <= $3
+          select id from tracker_surface where rank_tracker_recent <= $14
           union
-          select id from pnl_ranked where rank_pnl <= $4
+          select id from tracker_pnl_ranked where rank_tracker_pnl <= $15
           union
-          select id from signal_ranked where rank_signal <= $5
+          select id from tracker_win_rate_ranked where rank_tracker_win_rate <= $16
+          union
+          select id from recent_ranked where rank_recent <= $17
+          union
+          select id from pnl_ranked where rank_pnl <= $18
+          union
+          select id from signal_ranked where rank_signal <= $19
         )
         select
           wb.id,
@@ -1716,72 +2242,136 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           wb.has_holder_activity,
           wb.inferred_wins,
           wb.inferred_total,
+          wb.rank_tracker_recent,
+          tp.rank_tracker_pnl,
+          tw.rank_tracker_win_rate,
           r.rank_recent,
           p.rank_pnl,
           s.rank_signal,
           (
-            case when $3 > 0 and r.rank_recent <= $3 then 1 else 0 end +
-            case when $4 > 0 and p.rank_pnl <= $4 then 1 else 0 end +
-            case when $5 > 0 and s.rank_signal <= $5 then 1 else 0 end
+            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
+            case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
+            case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
+            case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
           )::int as source_hits
-        from whale_base wb
+        from wallet_base wb
         join candidate_ids c on c.id = wb.id
+        left join tracker_pnl_ranked tp on tp.id = wb.id
+        left join tracker_win_rate_ranked tw on tw.id = wb.id
         left join recent_ranked r on r.id = wb.id
         left join pnl_ranked p on p.id = wb.id
         left join signal_ranked s on s.id = wb.id
         order by
           (
-            case when $3 > 0 and r.rank_recent <= $3 then 1 else 0 end +
-            case when $4 > 0 and p.rank_pnl <= $4 then 1 else 0 end +
-            case when $5 > 0 and s.rank_signal <= $5 then 1 else 0 end
+            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end
           ) desc,
+          (
+            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
+            case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
+            case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
+            case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
+          ) desc,
+          wb.rank_tracker_recent asc nulls last,
+          tp.rank_tracker_pnl asc nulls last,
+          tw.rank_tracker_win_rate asc nulls last,
           r.rank_recent asc nulls last,
           p.rank_pnl asc nulls last,
           s.rank_signal asc nulls last,
           wb.last_activity_at desc nulls last,
           wb.whale_score desc nulls last,
           wb.last_seen_at desc
-        limit $2
+        limit greatest($2::int, $20::int)
       `,
       [
         windowDays,
         limit,
+        selectTrackerRecentLimit,
+        selectTrackerPnlLimit,
+        selectTrackerWinRateLimit,
         selectRecentLimit,
         selectPnlLimit,
         selectSignalsLimit,
+        trackerWindowHours,
+        env.walletIntelMinActivityUsd,
+        env.walletIntelMinActivityShares,
         signalsWindowHours,
+        trackerSurfaceIds,
+        trackerRecentFetchLimit,
+        trackerPnlFetchLimit,
+        trackerWinRateFetchLimit,
+        recentFetchLimit,
+        pnlFetchLimit,
+        signalsFetchLimit,
+        candidateFetchLimit,
       ],
     );
+    const {
+      rows: selectedWhaleRows,
+      pinnedCoverage,
+    } = selectWhaleProfileRows(whaleRows.rows, limit, sourceDefs);
     const sourceCoverage = {
-      recent: whaleRows.rows.filter(
-        (row) => row.rank_recent != null && row.rank_recent <= selectRecentLimit,
+      trackerRecent: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_tracker_recent) ?? Number.MAX_SAFE_INTEGER) <=
+          selectTrackerRecentLimit,
       ).length,
-      pnl: whaleRows.rows.filter(
-        (row) => row.rank_pnl != null && row.rank_pnl <= selectPnlLimit,
+      trackerPnl: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_tracker_pnl) ?? Number.MAX_SAFE_INTEGER) <=
+          selectTrackerPnlLimit,
       ).length,
-      signals: whaleRows.rows.filter(
-        (row) => row.rank_signal != null && row.rank_signal <= selectSignalsLimit,
+      trackerWinRate: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_tracker_win_rate) ?? Number.MAX_SAFE_INTEGER) <=
+          selectTrackerWinRateLimit,
       ).length,
-      multiSource: whaleRows.rows.filter((row) => row.source_hits >= 2).length,
+      recent: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_recent) ?? Number.MAX_SAFE_INTEGER) <=
+          selectRecentLimit,
+      ).length,
+      pnl: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_pnl) ?? Number.MAX_SAFE_INTEGER) <=
+          selectPnlLimit,
+      ).length,
+      signals: selectedWhaleRows.filter(
+        (row) =>
+          (coerceRank(row.rank_signal) ?? Number.MAX_SAFE_INTEGER) <=
+          selectSignalsLimit,
+      ).length,
+      multiSource: selectedWhaleRows.filter((row) => row.source_hits >= 2)
+        .length,
     };
     console.log("[whale-profile] selected wallets", {
-      count: whaleRows.rows.length,
+      candidates: whaleRows.rows.length,
+      count: selectedWhaleRows.length,
+      pinnedCoverage,
       sourceCoverage,
-      sample: whaleRows.rows.slice(0, 5).map((row) => ({
+      sample: selectedWhaleRows.slice(0, 5).map((row) => ({
         walletId: row.id,
         chain: row.chain,
         sourceHits: row.source_hits,
+        rankTrackerRecent: row.rank_tracker_recent,
+        rankTrackerPnl: row.rank_tracker_pnl,
+        rankTrackerWinRate: row.rank_tracker_win_rate,
         rankRecent: row.rank_recent,
         rankPnl: row.rank_pnl,
         rankSignal: row.rank_signal,
       })),
     });
 
-    if (whaleRows.rows.length === 0) {
+    if (selectedWhaleRows.length === 0) {
       return { processed: 0, updated: 0, skipped: 0, failed: 0 };
     }
 
-    const whaleIds = whaleRows.rows.map((row) => row.id);
+    const whaleIds = selectedWhaleRows.map((row) => row.id);
     let recentSummaryMap = new Map<string, WalletActivitySummary>();
     try {
       recentSummaryMap = await fetchWalletActivitySummaries(
@@ -1966,20 +2556,18 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       wallet_id: string;
       features_hash: string;
       version: string;
+      profile: unknown;
     }>(
       `
-        select wallet_id, features_hash, version
+        select wallet_id, features_hash, version, profile
         from wallet_profiles
         where wallet_id = any($1::uuid[])
       `,
       [whaleIds],
     );
-    const existingMap = new Map<string, { featuresHash: string; version: string }>();
+    const existingMap = new Map<string, ExistingWhaleProfileState>();
     for (const row of existingRows.rows) {
-      existingMap.set(row.wallet_id, {
-        featuresHash: row.features_hash,
-        version: row.version,
-      });
+      existingMap.set(row.wallet_id, parseStoredWhaleProfileState(row));
     }
 
     let processed = 0;
@@ -1987,15 +2575,18 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     let skipped = 0;
     let failed = 0;
 
-    for (const [index, whale] of whaleRows.rows.entries()) {
+    for (const [index, whale] of selectedWhaleRows.entries()) {
       processed += 1;
       if (verbose) {
         console.log("[whale-profile] wallet start", {
           index: index + 1,
-          total: whaleRows.rows.length,
+          total: selectedWhaleRows.length,
           walletId: whale.id,
           chain: whale.chain,
           sourceHits: whale.source_hits,
+          rankTrackerRecent: whale.rank_tracker_recent,
+          rankTrackerPnl: whale.rank_tracker_pnl,
+          rankTrackerWinRate: whale.rank_tracker_win_rate,
           rankRecent: whale.rank_recent,
           rankPnl: whale.rank_pnl,
           rankSignal: whale.rank_signal,
@@ -2037,6 +2628,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       });
       const featuresHash = hashProfileInput(input);
       const existing = existingMap.get(whale.id);
+      const namingSignature = computeProfileNamingSignature(input);
       if (
         !options.force &&
         existing?.featuresHash === featuresHash &&
@@ -2050,7 +2642,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         } else if (processed % logEvery === 0) {
           console.log("[whale-profile] progress", {
             processed,
-            total: whaleRows.rows.length,
+            total: selectedWhaleRows.length,
             updated,
             skipped,
             failed,
@@ -2061,6 +2653,18 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
 
       const system =
         "You are a market analyst writing concise, factual wallet profiles for a trading product. Return strict JSON only.";
+      const namingStabilityHint = existing?.profile?.label_short
+        ? `\nCurrent stored profile hint:
+- previous_label_short: ${JSON.stringify(existing.profile.label_short)}
+- previous_label_long: ${JSON.stringify(existing.profile.label_long ?? null)}
+- previous_naming_signature: ${JSON.stringify(existing.namingSignature)}
+- current_naming_signature: ${JSON.stringify(namingSignature)}
+
+Naming stability rule:
+- If the current naming signature matches the previous naming signature, keep previous_label_short unless wallet.source_label_quality is "descriptive" and the source label should anchor the name.
+- If previous_naming_signature is missing, prefer keeping previous_label_short unless the current behavior clearly no longer fits it.
+- Rename only when the trading pattern materially changed.\n`
+        : "";
       const user = `Create a compact whale profile for a tracker UI.
 Output JSON with:
 - label_short: short display alias (target <= 36 chars, hard max 56).
@@ -2156,6 +2760,7 @@ Rules:
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
 - Never suggest insider information.
+${namingStabilityHint}
 
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
@@ -2182,7 +2787,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
         if (!verbose && processed % logEvery === 0) {
           console.log("[whale-profile] progress", {
             processed,
-            total: whaleRows.rows.length,
+            total: selectedWhaleRows.length,
             updated,
             skipped,
             failed,
@@ -2213,7 +2818,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
           if (!verbose && processed % logEvery === 0) {
             console.log("[whale-profile] progress", {
               processed,
-              total: whaleRows.rows.length,
+              total: selectedWhaleRows.length,
               updated,
               skipped,
               failed,
@@ -2234,7 +2839,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
         if (!verbose && processed % logEvery === 0) {
           console.log("[whale-profile] progress", {
             processed,
-            total: whaleRows.rows.length,
+            total: selectedWhaleRows.length,
             updated,
             skipped,
             failed,
@@ -2247,6 +2852,19 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
         normalized = {
           ...normalized,
           label_short: resolveFallbackProfileLabelShort(input),
+        };
+      }
+
+      if (
+        shouldPreserveExistingProfileLabelShort(
+          existing,
+          input,
+          namingSignature,
+        )
+      ) {
+        normalized = {
+          ...normalized,
+          label_short: normalizeText(existing?.profile?.label_short) ?? normalized.label_short,
         };
       }
 
@@ -2270,7 +2888,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
         } else if (processed % logEvery === 0) {
           console.log("[whale-profile] progress", {
             processed,
-            total: whaleRows.rows.length,
+            total: selectedWhaleRows.length,
             updated,
             skipped,
             failed,
@@ -2299,7 +2917,10 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
         `,
         [
           whale.id,
-          JSON.stringify(normalized),
+          JSON.stringify({
+            ...normalized,
+            _naming_signature: namingSignature,
+          }),
           featuresHash,
           policy.model,
           effectiveProfileVersion,
@@ -2314,7 +2935,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
       } else if (processed % logEvery === 0) {
         console.log("[whale-profile] progress", {
           processed,
-          total: whaleRows.rows.length,
+          total: selectedWhaleRows.length,
           updated,
           skipped,
           failed,

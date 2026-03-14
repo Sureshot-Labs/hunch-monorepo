@@ -49,7 +49,12 @@ async function main() {
     selectionMode: config.selectionMode,
     selectionRecentLimit: config.selectionRecentLimit,
     selectionPnlLimit: config.selectionPnlLimit,
+    selectionTrackerRecentLimit: config.selectionTrackerRecentLimit,
+    selectionTrackerPnlLimit: config.selectionTrackerPnlLimit,
+    selectionTrackerWinRateLimit: config.selectionTrackerWinRateLimit,
     selectionSignalsLimit: config.selectionSignalsLimit,
+    selectionTrackerWindowHours: config.selectionTrackerWindowHours,
+    selectionTrackerSurfaceLimit: config.selectionTrackerSurfaceLimit,
     selectionSignalsWindowHours: config.selectionSignalsWindowHours,
     model: config.model,
   });
