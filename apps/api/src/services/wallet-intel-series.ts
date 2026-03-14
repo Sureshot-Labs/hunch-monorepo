@@ -272,6 +272,7 @@ export async function loadWalletPortfolioPerformanceMap(
         from wallet_metrics_snapshots s
         join wallet_set ws on ws.wallet_id = s.wallet_id
         where s.period = 'all'
+          and s.pnl_usd is not null
           and s.as_of <= $2::timestamptz
         order by s.wallet_id, s.as_of desc
       ),
@@ -283,6 +284,7 @@ export async function loadWalletPortfolioPerformanceMap(
         from wallet_metrics_snapshots s
         join wallet_set ws on ws.wallet_id = s.wallet_id
         where s.period = 'all'
+          and s.pnl_usd is not null
           and s.as_of > $2::timestamptz
           and s.as_of <= $3::timestamptz
         order by s.wallet_id, s.as_of asc
@@ -295,6 +297,7 @@ export async function loadWalletPortfolioPerformanceMap(
         from wallet_metrics_snapshots s
         join wallet_set ws on ws.wallet_id = s.wallet_id
         where s.period = 'all'
+          and s.pnl_usd is not null
           and s.as_of <= $3::timestamptz
         order by s.wallet_id, s.as_of desc
       )
