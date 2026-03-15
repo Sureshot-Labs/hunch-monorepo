@@ -926,22 +926,24 @@ function toPresentationLabel(
   };
 }
 
+function resolveSpecialistPrimaryLabel(
+  attribution: WalletAttribution,
+): WalletPresentationLabel | null {
+  for (const key of SPECIALIST_HEADLINE_TAG_ORDER) {
+    if (
+      (attribution.secondary ?? []).includes(key) ||
+      (attribution.supporting ?? []).includes(key)
+    ) {
+      return toPresentationLabel(key);
+    }
+  }
+  return null;
+}
+
 export function resolveWalletPrimaryLabel(
   attribution: WalletAttribution | null | undefined,
 ): WalletPresentationLabel | null {
   if (!attribution) return null;
-
-  if (attribution.primary === "specialist") {
-    for (const key of SPECIALIST_HEADLINE_TAG_ORDER) {
-      if (
-        (attribution.secondary ?? []).includes(key) ||
-        (attribution.supporting ?? []).includes(key)
-      ) {
-        return toPresentationLabel(key);
-      }
-    }
-    return null;
-  }
 
   if (attribution.primary === "insider") {
     return toPresentationLabel("potential_insider");
@@ -951,7 +953,7 @@ export function resolveWalletPrimaryLabel(
     return toPresentationLabel("bot");
   }
 
-  return null;
+  return resolveSpecialistPrimaryLabel(attribution);
 }
 
 export function resolveWalletSecondaryLabels(

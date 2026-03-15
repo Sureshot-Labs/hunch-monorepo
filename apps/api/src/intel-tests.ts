@@ -480,6 +480,36 @@ const tests: TestCase[] = [
         label: "Mentions Specialist",
       });
 
+      const whaleSpecialistPrimary = resolveWalletPrimaryLabel({
+        primary: "whale",
+        primaryCandidates: [
+          { key: "specialist", score: 1 },
+          { key: "whale", score: 1 },
+        ],
+        secondary: [
+          "macro_specialist",
+          "high_conviction",
+          "market_mover",
+        ],
+        supporting: ["unusual_behavior"],
+        display: {
+          listPrimary: ["whale"],
+          listSecondary: ["macro_specialist", "high_conviction"],
+          detailsSecondary: [
+            "macro_specialist",
+            "high_conviction",
+            "market_mover",
+          ],
+          detailsSupporting: ["unusual_behavior"],
+        },
+        reasons: ["specialist:polymarket:macro", "whale_tag"],
+        version: "v1",
+      });
+      assert.deepEqual(whaleSpecialistPrimary, {
+        key: "macro_specialist",
+        label: "Macro Specialist",
+      });
+
       const secondary = resolveWalletSecondaryLabels(
         {
           primary: "specialist",
