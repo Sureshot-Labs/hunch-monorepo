@@ -470,6 +470,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             error: error.code,
             message: terminalMessage,
+            conflictWalletAddress: error.details?.conflictWalletAddress,
+            conflictWalletAddresses: error.details?.conflictWalletAddresses,
           });
         }
 

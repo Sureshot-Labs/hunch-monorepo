@@ -228,16 +228,20 @@ export async function fetchEvmCode(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   address: string;
+  bypassCache?: boolean;
 }): Promise<string> {
   const address = ethers.getAddress(inputs.address);
   const cacheKey = `${inputs.rpcUrl}:${address}`.toLowerCase();
-  return codeCache.load(cacheKey, () =>
-    ethRpcRequest<string>({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      method: "eth_getCode",
-      params: [address, "latest"],
-    }),
+  return codeCache.load(
+    cacheKey,
+    () =>
+      ethRpcRequest<string>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        method: "eth_getCode",
+        params: [address, "latest"],
+      }),
+    { bypass: inputs.bypassCache },
   );
 }
 

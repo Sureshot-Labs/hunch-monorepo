@@ -1006,11 +1006,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const includeMagicProxy =
         parseOptionalBoolean(query?.includeMagicProxy) ?? false;
+      const refresh = parseOptionalBoolean(query?.refresh) === true;
 
       const result = await derivePolymarketFunders({
         signer,
         storedFunder: credsInfo?.funderAddress ?? null,
         includeMagicProxy,
+        bypassCodeCache: refresh,
       });
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1056,6 +1058,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const includeMagicProxy = Boolean(body.includeMagicProxy);
+      const refresh = body.refresh === true;
 
       const results: Record<string, unknown> = {};
 
@@ -1070,6 +1073,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             signer: wallet,
             storedFunder: credsInfo?.funderAddress ?? null,
             includeMagicProxy,
+            bypassCodeCache: refresh,
           });
           results[wallet] = result;
         } catch {

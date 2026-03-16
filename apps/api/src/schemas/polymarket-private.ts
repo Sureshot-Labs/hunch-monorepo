@@ -107,12 +107,14 @@ export const polymarketOrderParamsQuerySchema = z.object({
 
 export const polymarketFunderDeriveQuerySchema = z.object({
   includeMagicProxy: z.string().optional(),
+  refresh: zOptionalBool.optional(),
   walletAddress: zEthAddress.optional(),
 });
 
 export const polymarketFunderDeriveBatchBodySchema = z.object({
   wallets: z.array(zEthAddress).min(1, "wallets is required"),
   includeMagicProxy: z.boolean().optional(),
+  refresh: z.boolean().optional(),
 });
 
 export const polymarketQuoteBodySchema = z.object({

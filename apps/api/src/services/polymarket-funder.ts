@@ -170,6 +170,7 @@ async function inspectCandidate(inputs: {
   timeoutMs: number;
   funder: string;
   expectedContract: boolean;
+  bypassCodeCache?: boolean;
 }): Promise<{
   deployed: boolean;
   contractKind: ContractKind;
@@ -181,6 +182,7 @@ async function inspectCandidate(inputs: {
       rpcUrl: inputs.rpcUrl,
       timeoutMs: inputs.timeoutMs,
       address: inputs.funder,
+      bypassCache: inputs.bypassCodeCache,
     });
 
     if (isEmptyCode(code)) {
@@ -235,6 +237,7 @@ export async function derivePolymarketFunders(inputs: {
   signer: string;
   storedFunder?: string | null;
   includeMagicProxy?: boolean;
+  bypassCodeCache?: boolean;
 }): Promise<PolymarketFunderDeriveResult> {
   const warnings: string[] = [];
   const candidates: PolymarketFunderCandidate[] = [];
@@ -327,6 +330,7 @@ export async function derivePolymarketFunders(inputs: {
       timeoutMs: env.polygonRpcTimeoutMs,
       funder: candidate.funder,
       expectedContract: candidate.expectedContract,
+      bypassCodeCache: inputs.bypassCodeCache,
     });
     candidate.deployed = inspection.deployed;
     candidate.contractKind = inspection.contractKind;
@@ -397,6 +401,7 @@ export async function validatePolymarketFunderSelection(inputs: {
     signer,
     storedFunder: funderAddress,
     includeMagicProxy: inputs.includeMagicProxy ?? true,
+    bypassCodeCache: true,
   });
   const candidate = findCandidateByAddress(result.candidates, funderAddress);
   if (candidate?.expectedContract && candidate.deployed === false) {

@@ -110,12 +110,23 @@ export type PrivyTerminalAuthErrorCode =
   | "email_conflict"
   | "wallet_conflict";
 
+export type PrivyTerminalAuthErrorDetails = {
+  conflictWalletAddress?: string;
+  conflictWalletAddresses?: string[];
+};
+
 export class PrivyTerminalAuthError extends Error {
   readonly code: PrivyTerminalAuthErrorCode;
+  readonly details?: PrivyTerminalAuthErrorDetails;
 
-  constructor(code: PrivyTerminalAuthErrorCode, message: string) {
+  constructor(
+    code: PrivyTerminalAuthErrorCode,
+    message: string,
+    details?: PrivyTerminalAuthErrorDetails,
+  ) {
     super(message);
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -593,6 +604,7 @@ export class AuthService {
     }
 
     const matchedUserIds = new Set<string>();
+    const matchedWalletAddresses = new Set<string>();
     for (const wallet of privyWallets) {
       const match = ETH_ADDRESS_RE.test(wallet.address)
         ? "lower(wallet_address) = lower($2)"
@@ -608,6 +620,9 @@ export class AuthService {
       );
 
       for (const row of owner.rows) matchedUserIds.add(row.user_id);
+      if (owner.rows.length > 0) {
+        matchedWalletAddresses.add(wallet.address);
+      }
       if (matchedUserIds.size > 1) break;
     }
 
@@ -615,6 +630,9 @@ export class AuthService {
       throw new PrivyTerminalAuthError(
         "account_merge_required",
         "Privy wallets resolve to multiple users; merge users before login",
+        {
+          conflictWalletAddresses: Array.from(matchedWalletAddresses),
+        },
       );
     }
 
@@ -726,6 +744,7 @@ export class AuthService {
           throw new PrivyTerminalAuthError(
             "wallet_conflict",
             "Wallet address already linked to another account",
+            { conflictWalletAddress: wallet.address },
           );
         }
       }

@@ -394,10 +394,15 @@ const tests: TestCase[] = [
             ],
             email: null,
           }),
-        (error: unknown) =>
-          error instanceof PrivyTerminalAuthError &&
-          error.code === "account_merge_required" &&
-          /merge users before login/i.test(error.message),
+        (error: unknown) => {
+          assert.ok(error instanceof PrivyTerminalAuthError);
+          assert.equal(error.code, "account_merge_required");
+          assert.match(error.message, /merge users before login/i);
+          assert.deepEqual(error.details?.conflictWalletAddresses, [
+            "0xabc0000000000000000000000000000000000000",
+          ]);
+          return true;
+        },
       );
     },
   },
@@ -487,10 +492,16 @@ const tests: TestCase[] = [
             privyUser,
             {} as never,
           ),
-        (error: unknown) =>
-          error instanceof PrivyTerminalAuthError &&
-          error.code === "wallet_conflict" &&
-          /wallet address already linked/i.test(error.message),
+        (error: unknown) => {
+          assert.ok(error instanceof PrivyTerminalAuthError);
+          assert.equal(error.code, "wallet_conflict");
+          assert.match(error.message, /wallet address already linked/i);
+          assert.equal(
+            error.details?.conflictWalletAddress,
+            "0xabc0000000000000000000000000000000000000",
+          );
+          return true;
+        },
       );
     },
   },
