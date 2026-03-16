@@ -126,6 +126,112 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "getVenueCredentialsInfo uses case-insensitive lookup for EVM wallets",
+    run: async () => {
+      const poolAny = pool as unknown as {
+        query: (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: Array<Record<string, unknown>> }>;
+      };
+      const originalQuery = poolAny.query;
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      try {
+        poolAny.query = async (sql, params) => {
+          calls.push({ sql, params });
+          return {
+            rows: [
+              {
+                id: "cred-1",
+                user_id: "u-1",
+                wallet_address: "0xabc0000000000000000000000000000000000000",
+                venue: "polymarket",
+                additional_data: { role: "maker" },
+                is_active: true,
+                created_at: new Date("2026-01-01T00:00:00.000Z"),
+                updated_at: new Date("2026-01-02T00:00:00.000Z"),
+                last_used_at: new Date("2026-01-03T00:00:00.000Z"),
+                funder_address: "0xdef0000000000000000000000000000000000000",
+                funder_updated_at: new Date("2026-01-04T00:00:00.000Z"),
+              },
+            ],
+          };
+        };
+
+        const info = await AuthService.getVenueCredentialsInfo(
+          "u-1",
+          "polymarket",
+          "0xAbC0000000000000000000000000000000000000",
+        );
+
+        assert.ok(info);
+        assert.equal(info.walletAddress, "0xabc0000000000000000000000000000000000000");
+        const queryCall = calls.at(-1);
+        assert.ok(queryCall);
+        assert.match(queryCall.sql, /lower\(wallet_address\)\s*=\s*lower\(\$3\)/i);
+        assert.deepEqual(queryCall.params, [
+          "u-1",
+          "polymarket",
+          "0xAbC0000000000000000000000000000000000000",
+        ]);
+      } finally {
+        poolAny.query = originalQuery;
+      }
+    },
+  },
+  {
+    name: "getAllVenueCredentialsInfo uses case-insensitive lookup for EVM wallets",
+    run: async () => {
+      const poolAny = pool as unknown as {
+        query: (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: Array<Record<string, unknown>> }>;
+      };
+      const originalQuery = poolAny.query;
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      try {
+        poolAny.query = async (sql, params) => {
+          calls.push({ sql, params });
+          return {
+            rows: [
+              {
+                id: "cred-1",
+                user_id: "u-1",
+                wallet_address: "0xabc0000000000000000000000000000000000000",
+                venue: "polymarket",
+                additional_data: null,
+                is_active: true,
+                created_at: new Date("2026-01-01T00:00:00.000Z"),
+                updated_at: new Date("2026-01-02T00:00:00.000Z"),
+                last_used_at: new Date("2026-01-03T00:00:00.000Z"),
+                funder_address: null,
+                funder_updated_at: null,
+              },
+            ],
+          };
+        };
+
+        const rows = await AuthService.getAllVenueCredentialsInfo(
+          "u-1",
+          "0xAbC0000000000000000000000000000000000000",
+        );
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]?.walletAddress, "0xabc0000000000000000000000000000000000000");
+        const queryCall = calls.at(-1);
+        assert.ok(queryCall);
+        assert.match(queryCall.sql, /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i);
+        assert.deepEqual(queryCall.params, [
+          "u-1",
+          "0xAbC0000000000000000000000000000000000000",
+        ]);
+      } finally {
+        poolAny.query = originalQuery;
+      }
+    },
+  },
+  {
     name: "parseJwtExpiresInToMs matches configured duration semantics",
     run: () => {
       assert.equal(parseJwtExpiresInToMs("24h"), 24 * 60 * 60 * 1000);

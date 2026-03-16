@@ -1397,11 +1397,11 @@ export class AuthService {
       );
     }
 
-    const normalizedWallet = walletAddress.trim();
-    const isEthWallet = ETH_ADDRESS_RE.test(normalizedWallet);
-    const walletClause = isEthWallet
-      ? "lower(wallet_address) = lower($2)"
-      : "wallet_address = $2";
+    const { normalizedWallet, clause: walletClause } = buildWalletAddressMatch(
+      "wallet_address",
+      2,
+      walletAddress,
+    );
     const funderAddressValue = funderAddress ? funderAddress.trim() : null;
 
     const result = await pool.query<{
@@ -1441,10 +1441,11 @@ export class AuthService {
     venue: "polymarket" | "kalshi" | "limitless",
     walletAddress: string,
   ): Promise<number> {
-    const normalizedWallet = walletAddress.trim();
-    const walletClause = ETH_ADDRESS_RE.test(normalizedWallet)
-      ? "lower(wallet_address) = lower($3)"
-      : "wallet_address = $3";
+    const { normalizedWallet, clause: walletClause } = buildWalletAddressMatch(
+      "wallet_address",
+      3,
+      walletAddress,
+    );
     const result = await pool.query(
       `
         update user_venue_credentials
@@ -1488,10 +1489,11 @@ export class AuthService {
         : []),
     ].join(", ");
 
-    const normalizedWallet = walletAddress.trim();
-    const walletClause = ETH_ADDRESS_RE.test(normalizedWallet)
-      ? "lower(wallet_address) = lower($3)"
-      : "wallet_address = $3";
+    const { normalizedWallet, clause: walletClause } = buildWalletAddressMatch(
+      "wallet_address",
+      3,
+      walletAddress,
+    );
     const result = await pool.query<VenueCredentialsRow>(
       `SELECT ${selectedColumns}
        FROM user_venue_credentials
@@ -1585,15 +1587,20 @@ export class AuthService {
         : []),
     ].join(", ");
 
+    const { normalizedWallet, clause: walletClause } = buildWalletAddressMatch(
+      "wallet_address",
+      3,
+      walletAddress,
+    );
     const result = await pool.query<VenueCredentialsInfoRow>(
       `SELECT ${selectedColumns}
        FROM user_venue_credentials
        WHERE user_id = $1
          AND venue = $2
-         AND wallet_address = $3
+         AND ${walletClause}
          AND is_active = true
        LIMIT 1`,
-      [userId, venue, walletAddress],
+      [userId, venue, normalizedWallet],
     );
 
     const row = result.rows[0];
@@ -1637,14 +1644,19 @@ export class AuthService {
         : []),
     ].join(", ");
 
+    const { normalizedWallet, clause: walletClause } = buildWalletAddressMatch(
+      "wallet_address",
+      2,
+      walletAddress,
+    );
     const result = await pool.query<VenueCredentialsInfoRow>(
       `SELECT ${selectedColumns}
        FROM user_venue_credentials
        WHERE user_id = $1
-         AND wallet_address = $2
+         AND ${walletClause}
          AND is_active = true
        ORDER BY venue, last_used_at DESC NULLS LAST`,
-      [userId, walletAddress],
+      [userId, normalizedWallet],
     );
 
     // Map snake_case to camelCase
@@ -1962,6 +1974,18 @@ function normalizeWalletAddress(input: string): string {
   const trimmed = input.trim();
   if (ETH_ADDRESS_RE.test(trimmed)) return trimmed.toLowerCase();
   return trimmed;
+}
+
+function buildWalletAddressMatch(
+  columnName: string,
+  parameterIndex: number,
+  walletAddress: string,
+): { normalizedWallet: string; clause: string } {
+  const normalizedWallet = walletAddress.trim();
+  const clause = ETH_ADDRESS_RE.test(normalizedWallet)
+    ? `lower(${columnName}) = lower($${parameterIndex})`
+    : `${columnName} = $${parameterIndex}`;
+  return { normalizedWallet, clause };
 }
 
 function readHeaderValue(
