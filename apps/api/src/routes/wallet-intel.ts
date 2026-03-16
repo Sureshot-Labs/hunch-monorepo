@@ -78,6 +78,7 @@ import {
   walletActivityQuerySchema,
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
+  walletActivitySummaryStatsQuerySchema,
   walletFollowBodySchema,
   walletFollowChainQuerySchema,
   walletFollowPatchBodySchema,
@@ -200,6 +201,14 @@ export type WalletPresentationBadgeKey =
 export type WalletPresentationBadge = {
   key: WalletPresentationBadgeKey;
   label: string;
+};
+
+export type WalletActivitySummaryHeroStats = {
+  totalWallets: number;
+  trackedWallets: number;
+  totalPnl30d: number | null;
+  trackedPnl30d: number | null;
+  asOf: Date;
 };
 
 type WhaleMarketRow = {
@@ -1107,7 +1116,11 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 }
 
 function walletIntelCacheKey(
-  routeKey: "wallets-whales" | "wallets-activity-summary" | "wallets-activity-signals",
+  routeKey:
+    | "wallets-whales"
+    | "wallets-activity-summary"
+    | "wallets-activity-summary-stats"
+    | "wallets-activity-signals",
   userId: string,
   query: unknown,
 ): string {
@@ -2330,6 +2343,85 @@ async function loadWalletIdsForSummaryScope(
     }),
   ]);
   return mergeWalletIdsForScope("all", followingIds, activeIds);
+}
+
+export function buildWalletActivitySummaryHeroStats(input: {
+  walletIds: string[];
+  followedWalletIds: string[];
+  portfolioPerformanceMap: Map<string, WalletPortfolioPerformance>;
+  asOfFallback?: Date;
+}): WalletActivitySummaryHeroStats {
+  const uniqueWalletIds = Array.from(new Set(input.walletIds));
+  const uniqueFollowedWalletIds = Array.from(new Set(input.followedWalletIds));
+  const asOfFallback = input.asOfFallback ?? new Date();
+  let totalPnl30d: number | null = null;
+  let trackedPnl30d: number | null = null;
+  let latestAsOfMs = 0;
+
+  for (const walletId of uniqueWalletIds) {
+    const performance = input.portfolioPerformanceMap.get(walletId);
+    if (performance?.endAsOf) {
+      latestAsOfMs = Math.max(latestAsOfMs, performance.endAsOf.getTime());
+    }
+    if (performance?.pnlUsd == null) continue;
+    totalPnl30d = (totalPnl30d ?? 0) + performance.pnlUsd;
+  }
+
+  for (const walletId of uniqueFollowedWalletIds) {
+    const performance = input.portfolioPerformanceMap.get(walletId);
+    if (performance?.endAsOf) {
+      latestAsOfMs = Math.max(latestAsOfMs, performance.endAsOf.getTime());
+    }
+    if (performance?.pnlUsd == null) continue;
+    trackedPnl30d = (trackedPnl30d ?? 0) + performance.pnlUsd;
+  }
+
+  return {
+    totalWallets: uniqueWalletIds.length,
+    trackedWallets: uniqueFollowedWalletIds.length,
+    totalPnl30d,
+    trackedPnl30d,
+    asOf: latestAsOfMs > 0 ? new Date(latestAsOfMs) : asOfFallback,
+  };
+}
+
+async function loadWalletActivitySummaryHeroStats(
+  client: PoolClient,
+  userId: string,
+  input: {
+    windowHours: number;
+    refreshPolicy: Awaited<
+      ReturnType<typeof resolveWalletIntelRefreshPolicy>
+    >["effective"];
+  },
+): Promise<WalletActivitySummaryHeroStats> {
+  const asOf = new Date();
+  const [followedWalletIds, activeWalletIds] = await Promise.all([
+    loadFollowingWalletIds(client, userId),
+    loadActiveWalletIds(client, input.windowHours, {
+      minActivityUsd: input.refreshPolicy.minActivityUsd,
+      minActivityShares: input.refreshPolicy.minActivityShares,
+    }),
+  ]);
+  const walletIds = mergeWalletIdsForScope(
+    "all",
+    followedWalletIds,
+    activeWalletIds,
+  );
+  const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
+    client,
+    walletIds,
+    {
+      rangeHours: 720,
+      asOf,
+    },
+  );
+  return buildWalletActivitySummaryHeroStats({
+    walletIds,
+    followedWalletIds,
+    portfolioPerformanceMap,
+    asOfFallback: asOf,
+  });
 }
 
 async function loadWalletIdsForSignalScope(
@@ -5223,6 +5315,86 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet series" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/activity/summary/stats
+   */
+  z.get(
+    "/wallets/activity/summary/stats",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: walletActivitySummaryStatsQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
+      const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
+      const cacheKey = walletIntelCacheKey(
+        "wallets-activity-summary-stats",
+        user.id,
+        query,
+      );
+      if (cacheClient) {
+        const cachedBody = await cacheClient.get(cacheKey);
+        if (cachedBody) {
+          reply.header("x-cache", "hit");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cachedBody);
+        }
+      }
+
+      const client = await pool.connect();
+      try {
+        const payload = await withJitDisabled(client, async () => {
+          const [refreshPolicy, signalsPolicy] = await Promise.all([
+            resolveWalletIntelRefreshPolicy(client),
+            resolveWalletIntelSignalsPolicy(client),
+          ]);
+          const windowHours = resolveSignalWindowHours(
+            query.windowHours,
+            signalsPolicy.effective,
+          );
+          const stats = await loadWalletActivitySummaryHeroStats(
+            client,
+            user.id,
+            {
+              windowHours,
+              refreshPolicy: refreshPolicy.effective,
+            },
+          );
+
+          return {
+            ok: true as const,
+            stats,
+          };
+        });
+
+        if (cacheClient && cacheTtlSec > 0) {
+          await cacheClient.set(cacheKey, JSON.stringify(payload), {
+            EX: cacheTtlSec,
+          });
+          reply.header("x-cache", "miss");
+        }
+
+        return reply.send(payload);
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, query },
+          "Failed to load wallet activity summary stats",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load wallet activity summary stats" });
       } finally {
         client.release();
       }

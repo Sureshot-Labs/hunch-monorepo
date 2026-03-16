@@ -171,6 +171,10 @@ export const walletActivitySummaryQuerySchema = z.object({
   includeSparkline: queryBooleanSchema.default(false),
 });
 
+export const walletActivitySummaryStatsQuerySchema = z.object({
+  windowHours: z.coerce.number().int().min(1).optional(),
+});
+
 export const walletActivitySignalsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   scope: z.enum(["following", "active", "all"]).default("following"),

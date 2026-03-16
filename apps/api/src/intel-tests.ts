@@ -37,6 +37,7 @@ import {
 import { buildWalletThirtyDayMetricsUpsertRows } from "./services/wallet-metrics-30d.js";
 import {
   applyResolvedTradeStatsToMetrics,
+  buildWalletActivitySummaryHeroStats,
   buildWalletAttributionInputMapFromSignalItems,
   buildWalletSignalItemFromSignalRow,
   buildWalletSignalItemFromTopChange,
@@ -595,6 +596,62 @@ const tests: TestCase[] = [
         }),
         null,
       );
+    },
+  },
+  {
+    name: "activity summary hero stats aggregate union counts and 30d deltas",
+    run: () => {
+      const stats = buildWalletActivitySummaryHeroStats({
+        walletIds: ["wallet-1", "wallet-2", "wallet-3", "wallet-1"],
+        followedWalletIds: ["wallet-2", "wallet-3", "wallet-3"],
+        portfolioPerformanceMap: new Map([
+          [
+            "wallet-1",
+            {
+              rangeHours: 720,
+              startAsOf: new Date("2026-03-01T00:00:00.000Z"),
+              endAsOf: new Date("2026-03-15T12:00:00.000Z"),
+              startPnlUsd: 100,
+              endPnlUsd: 160,
+              pnlUsd: 60,
+              baselineApprox: false,
+            },
+          ],
+          [
+            "wallet-2",
+            {
+              rangeHours: 720,
+              startAsOf: new Date("2026-03-01T00:00:00.000Z"),
+              endAsOf: new Date("2026-03-15T14:00:00.000Z"),
+              startPnlUsd: 0,
+              endPnlUsd: 50,
+              pnlUsd: 50,
+              baselineApprox: false,
+            },
+          ],
+          [
+            "wallet-3",
+            {
+              rangeHours: 720,
+              startAsOf: null,
+              endAsOf: null,
+              startPnlUsd: null,
+              endPnlUsd: null,
+              pnlUsd: null,
+              baselineApprox: false,
+            },
+          ],
+        ]),
+        asOfFallback: new Date("2026-03-15T18:00:00.000Z"),
+      });
+
+      assert.deepEqual(stats, {
+        totalWallets: 3,
+        trackedWallets: 2,
+        totalPnl30d: 110,
+        trackedPnl30d: 50,
+        asOf: new Date("2026-03-15T14:00:00.000Z"),
+      });
     },
   },
   {
