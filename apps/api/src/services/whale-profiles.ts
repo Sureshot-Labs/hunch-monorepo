@@ -30,7 +30,7 @@ import {
   type WalletResolvedPositionSample,
 } from "./wallet-profile-features.js";
 
-const PROFILE_VERSION = "v11";
+const PROFILE_VERSION = "v12";
 const CATEGORY_VALUES = [
   "politics",
   "crypto",
@@ -2652,7 +2652,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       }
 
       const system =
-        "You are a market analyst writing concise, factual wallet profiles for a trading product. Return strict JSON only.";
+        "You write concise, factual wallet profiles for a consumer trading product. Write in plain English for normal users, not traders. Avoid jargon when a simpler phrase works. Return strict JSON only.";
       const namingStabilityHint = existing?.profile?.label_short
         ? `\nCurrent stored profile hint:
 - previous_label_short: ${JSON.stringify(existing.profile.label_short)}
@@ -2673,6 +2673,7 @@ Output JSON with:
   Avoid hype, jokes, mascots, and fantasy nicknames.
 - label_long: exactly 1 short sentence (target <= 140 chars, hard max 200).
   This is the one-line summary shown above the trader bullets.
+  Make it easy for a casual user to understand in one read.
 - archetype: short snake_case tag.
 - categories: array of 1–3 from [politics, crypto, sports, economics, technology, entertainment, weather, health, mentions, other].
 - theme_focus: array of up to 3 lowercase tags.
@@ -2686,17 +2687,22 @@ Output JSON with:
   2. how they usually enter positions
   3. whether they trade early, late, or around events
   4. their general style
-  Keep each bullet short and readable.
+  Keep each bullet short, readable, and friendly to a non-expert user.
   Use numbers only when they clarify the behavior. Do not make the bullets read like a metrics dump.
 
 Rules:
 - Use ONLY provided data. Do NOT mention wallet IDs or addresses.
 - No claims of insider or informed intent.
 - Be factual, pattern-based, and neutral in tone.
-- Write like an analyst, not a marketer.
+- Write for normal users, not traders.
+- Use plain English. If a technical term can be replaced by a simpler phrase, replace it.
+- Do not use desk jargon or compressed analyst language.
+- Avoid phrases like "implied probability band", "cluster", "two-sided hedging", "directional positioning", "notional", "posture", or "80-100 band" unless there is no simpler wording.
+- Prefer phrases like "very likely outcomes", "big positions", "mostly bets one way", "buys both sides to reduce risk", "Fed-related markets", and "often trades near major events".
+- Write like a clear product explainer, not a marketer.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - Stay comfortably below the hard limits; exact character counting is approximate.
-- Prioritize immediate trader understanding over exhaustive detail.
+- Prioritize immediate reader understanding over exhaustive detail.
 - If activity kind is "holder" (no trades), emphasize exposure/holdings vs trade timing.
 - If most top markets are resolved or ended, mention that the pattern is historical.
 - Exposure fields:
@@ -2706,14 +2712,14 @@ Rules:
   - exposure.hedge_ratio is 0..1 and shows how much of gross exposure is hedged.
   - exposure.two_sided_markets counts markets with both sides held.
 - Do not describe a wallet as strongly bullish or bearish from gross exposure alone.
-- If exposure.posture is partially_hedged or heavily_hedged, say that the wallet uses offsetting or two-sided positioning.
-- If net imbalance is much smaller than gross exposure, emphasize balanced or hedged positioning over conviction.
+- If exposure.posture is partially_hedged or heavily_hedged, say that the wallet buys both sides or balances risk. Avoid hedge jargon if a simpler phrase works.
+- If net imbalance is much smaller than gross exposure, emphasize balanced activity over one-way conviction.
 - current_portfolio summarizes the full current tracked portfolio.
   - current_portfolio.market_count_total is the total number of currently held markets.
   - current_portfolio.top_markets_gross_usd is the gross value represented by top_markets.
   - current_portfolio.omitted_market_count and omitted_gross_usd describe the held tail not listed in top_markets.
 - category_mix is the 30d traded-volume mix by canonical category.
-- entry_brackets describes where this wallet tends to enter positions, grouped by implied probability bands.
+- entry_brackets describes where this wallet tends to enter positions, grouped by price/likelihood ranges.
 - performance_30d summarizes the 30d PnL/ROI path.
   - delta_* shows change across the 30d window.
   - min_* and max_* show the range inside the window.
@@ -2751,11 +2757,11 @@ Rules:
   - Do not replace a meaningful existing label with a completely unrelated nickname.
 - Prefer evidence from top_events when available; fall back to top_markets or recent_window.top_changes.
 - Use summary.side_bias_label and summary.concentration_label as hints.
-- If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, mention two-sided or hedged positioning unless one side is clearly negligible.
+- If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, explain it simply as buying both sides or balancing risk unless one side is clearly negligible.
 - If signals.summary or signals.examples indicate late entry, reactivation, or unusual behavior, mention that carefully as observed trading behavior, not intent.
 - Use category_mix plus top_events/top_markets to describe thematic focus.
-- Use entry_brackets and held_odds to describe favored price bands or entry style, but do not overclaim conviction.
-- Prefer simple phrases like "focuses on", "usually enters", "often trades around", and "style is".
+- Use entry_brackets and held_odds to describe entry style in simple language, for example "usually buys when the outcome already looks very likely" or "usually buys lower-probability outcomes".
+- Prefer simple phrases like "focuses on", "usually buys", "often trades around", and "style is".
 - When performance_30d and closed_positions_sample are sparse or mixed, say so.
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
