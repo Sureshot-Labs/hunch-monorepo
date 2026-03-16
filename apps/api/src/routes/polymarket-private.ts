@@ -78,12 +78,14 @@ function buildPolymarketAccountCacheKey(inputs: {
   userId: string;
   signer: string;
   funder: string;
+  credentialsKey: string;
   funderUpdatedAt: string | null;
 }): string {
   return [
     inputs.userId,
     normalizeAddress(inputs.signer),
     normalizeAddress(inputs.funder),
+    inputs.credentialsKey,
     inputs.funderUpdatedAt ?? "none",
   ].join("|");
 }
@@ -1400,6 +1402,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const funder = credsInfo?.funderAddress ?? signer;
       const funderSource = credsInfo?.funderAddress ? "credentials" : "signer";
+      const credentialsUpdatedAtValue =
+        credsInfo?.updatedAt instanceof Date
+          ? credsInfo.updatedAt.toISOString()
+          : credsInfo?.updatedAt ?? null;
+      const credentialsKey = credsInfo
+        ? `${credsInfo.id}|${credentialsUpdatedAtValue ?? "none"}`
+        : "none";
       const funderUpdatedAtValue =
         credsInfo?.funderUpdatedAt instanceof Date
           ? credsInfo.funderUpdatedAt.toISOString()
@@ -1410,6 +1419,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         userId: user.id,
         signer,
         funder,
+        credentialsKey,
         funderUpdatedAt: funderUpdatedAtValue,
       });
 

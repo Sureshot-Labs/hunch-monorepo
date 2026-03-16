@@ -12,6 +12,7 @@ import {
   fetchEvmBalance,
   fetchEvmCode,
 } from "../services/polygon-rpc.js";
+import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
   walletBalancesBatchQuerySchema,
@@ -108,16 +109,19 @@ function getVenueStatusCacheKey(inputs: {
   walletType: string;
   funder?: string | null;
   funderUpdatedAt?: string | null;
+  limitlessUpdatedAt?: string | null;
   relayerEnabled: boolean;
 }) {
   const funderKey = inputs.funder?.toLowerCase() ?? "none";
   const funderUpdatedAt = inputs.funderUpdatedAt ?? "none";
+  const limitlessUpdatedAt = inputs.limitlessUpdatedAt ?? "none";
   return [
     inputs.userId,
     inputs.walletAddress.toLowerCase(),
     inputs.walletType,
     funderKey,
     funderUpdatedAt,
+    limitlessUpdatedAt,
     inputs.relayerEnabled ? "relayer:1" : "relayer:0",
   ].join("|");
 }
@@ -1076,17 +1080,30 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
           if (walletType === "ethereum" || isEvmWalletAddress(walletAddress)) {
             try {
-              const creds = await AuthService.getVenueCredentialsInfo(
-                user.id,
-                "polymarket",
-                walletAddress,
-              );
-              const funder = creds?.funderAddress ?? walletAddress;
-              const funderSource = creds?.funderAddress ? "credentials" : "signer";
+              const [polymarketCreds, limitlessCreds] = await Promise.all([
+                AuthService.getVenueCredentialsInfo(
+                  user.id,
+                  "polymarket",
+                  walletAddress,
+                ),
+                AuthService.getVenueCredentialsInfo(
+                  user.id,
+                  "limitless",
+                  walletAddress,
+                ),
+              ]);
+              const funder = polymarketCreds?.funderAddress ?? walletAddress;
+              const funderSource = polymarketCreds?.funderAddress
+                ? "credentials"
+                : "signer";
               const funderUpdatedAtValue =
-                creds?.funderUpdatedAt instanceof Date
-                  ? creds.funderUpdatedAt.toISOString()
-                  : creds?.funderUpdatedAt ?? null;
+                polymarketCreds?.funderUpdatedAt instanceof Date
+                  ? polymarketCreds.funderUpdatedAt.toISOString()
+                  : polymarketCreds?.funderUpdatedAt ?? null;
+              const limitlessUpdatedAtValue =
+                limitlessCreds?.updatedAt instanceof Date
+                  ? limitlessCreds.updatedAt.toISOString()
+                  : limitlessCreds?.updatedAt ?? null;
               const signerNormalized = walletAddress.toLowerCase();
               const funderNormalized = funder.toLowerCase();
               const signerMatchesFunder = signerNormalized === funderNormalized;
@@ -1102,6 +1119,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 walletType,
                 funder,
                 funderUpdatedAt: funderUpdatedAtValue,
+                limitlessUpdatedAt: limitlessUpdatedAtValue,
                 relayerEnabled,
               });
 
@@ -1118,163 +1136,243 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               }
 
               const computePromise = (async () => {
-                const signerCodePromise = fetchEvmCode({
-                  rpcUrl: env.polygonRpcUrl,
-                  timeoutMs: env.polygonRpcTimeoutMs,
-                  address: walletAddress,
-                });
-                const funderCodePromise = signerMatchesFunder
-                  ? signerCodePromise
-                  : fetchEvmCode({
-                      rpcUrl: env.polygonRpcUrl,
-                      timeoutMs: env.polygonRpcTimeoutMs,
-                      address: funder,
-                    });
+                const [polymarketStatus, limitlessStatus] =
+                  await Promise.allSettled([
+                    (async () => {
+                      const signerCodePromise = fetchEvmCode({
+                        rpcUrl: env.polygonRpcUrl,
+                        timeoutMs: env.polygonRpcTimeoutMs,
+                        address: walletAddress,
+                      });
+                      const funderCodePromise = signerMatchesFunder
+                        ? signerCodePromise
+                        : fetchEvmCode({
+                            rpcUrl: env.polygonRpcUrl,
+                            timeoutMs: env.polygonRpcTimeoutMs,
+                            address: funder,
+                          });
 
-                const [signerCode, funderCode, snapshot] = await Promise.all([
-                  signerCodePromise,
-                  funderCodePromise,
-                  fetchPolymarketOnchainSnapshot({
-                    rpcUrl: env.polygonRpcUrl,
-                    timeoutMs: env.polygonRpcTimeoutMs,
-                    signer: walletAddress,
-                    funder,
-                    includeSignerUsdc: shouldFetchSignerUsdc,
-                    negRiskAdapterAddress,
-                    feeCollectorAddress,
-                  }),
-                ]);
+                      const [signerCode, funderCode, snapshot] =
+                        await Promise.all([
+                          signerCodePromise,
+                          funderCodePromise,
+                          fetchPolymarketOnchainSnapshot({
+                            rpcUrl: env.polygonRpcUrl,
+                            timeoutMs: env.polygonRpcTimeoutMs,
+                            signer: walletAddress,
+                            funder,
+                            includeSignerUsdc: shouldFetchSignerUsdc,
+                            negRiskAdapterAddress,
+                            feeCollectorAddress,
+                          }),
+                        ]);
 
-                const usdcBalance = snapshot.usdcBalance;
-                const signerUsdcBalance = snapshot.signerUsdcBalance;
-                const allowanceExchange = snapshot.allowanceExchange;
-                const allowanceNegRisk = snapshot.allowanceNegRisk;
-                const okExchange = snapshot.okExchange;
-                const okNegRisk = snapshot.okNegRisk;
-                const okNegRiskAdapter = snapshot.okNegRiskAdapter;
-                const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
-                const allowanceFeeCollector = snapshot.allowanceFeeCollector;
+                      const usdcBalance = snapshot.usdcBalance;
+                      const signerUsdcBalance = snapshot.signerUsdcBalance;
+                      const allowanceExchange = snapshot.allowanceExchange;
+                      const allowanceNegRisk = snapshot.allowanceNegRisk;
+                      const okExchange = snapshot.okExchange;
+                      const okNegRisk = snapshot.okNegRisk;
+                      const okNegRiskAdapter = snapshot.okNegRiskAdapter;
+                      const allowanceNegRiskAdapter =
+                        snapshot.allowanceNegRiskAdapter;
+                      const allowanceFeeCollector =
+                        snapshot.allowanceFeeCollector;
 
-                const signerIsContract =
-                  typeof signerCode === "string" && signerCode.length > 2;
-                const funderIsContract =
-                  typeof funderCode === "string" && funderCode.length > 2;
-                const signerUsdcBalanceResolved =
-                  shouldFetchSignerUsdc && signerUsdcBalance != null
-                    ? signerUsdcBalance
-                    : usdcBalance;
+                      const signerIsContract =
+                        typeof signerCode === "string" && signerCode.length > 2;
+                      const funderIsContract =
+                        typeof funderCode === "string" && funderCode.length > 2;
+                      const signerUsdcBalanceResolved =
+                        shouldFetchSignerUsdc && signerUsdcBalance != null
+                          ? signerUsdcBalance
+                          : usdcBalance;
 
-                const reasons: string[] = [];
-                if (!creds) reasons.push("missing_credentials");
-                if (funderIsContract && !relayerEnabled) {
-                  reasons.push("relayer_disabled");
-                }
-                if (usdcBalance <= 0n) reasons.push("insufficient_usdc");
-                if (allowanceExchange <= 0n) reasons.push("allowance_exchange");
-                if (!okExchange) reasons.push("approval_exchange");
+                      const reasons: string[] = [];
+                      if (!polymarketCreds) reasons.push("missing_credentials");
+                      if (funderIsContract && !relayerEnabled) {
+                        reasons.push("relayer_disabled");
+                      }
+                      if (usdcBalance <= 0n) reasons.push("insufficient_usdc");
+                      if (allowanceExchange <= 0n) {
+                        reasons.push("allowance_exchange");
+                      }
+                      if (!okExchange) reasons.push("approval_exchange");
 
-                const negRiskReasons: string[] = [];
-                if (!creds) negRiskReasons.push("missing_credentials");
-                if (funderIsContract && !relayerEnabled) {
-                  negRiskReasons.push("relayer_disabled");
-                }
-                if (allowanceNegRisk <= 0n) {
-                  negRiskReasons.push("allowance_neg_risk");
-                }
-                if (!okNegRisk) negRiskReasons.push("approval_neg_risk");
-                if (negRiskAdapterAddress && !okNegRiskAdapter) {
-                  negRiskReasons.push("approval_neg_risk_adapter");
-                }
-                if (
-                  negRiskAdapterAddress &&
-                  (allowanceNegRiskAdapter ?? 0n) <= 0n
-                ) {
-                  negRiskReasons.push("allowance_neg_risk_adapter");
-                }
+                      const negRiskReasons: string[] = [];
+                      if (!polymarketCreds) {
+                        negRiskReasons.push("missing_credentials");
+                      }
+                      if (funderIsContract && !relayerEnabled) {
+                        negRiskReasons.push("relayer_disabled");
+                      }
+                      if (allowanceNegRisk <= 0n) {
+                        negRiskReasons.push("allowance_neg_risk");
+                      }
+                      if (!okNegRisk) {
+                        negRiskReasons.push("approval_neg_risk");
+                      }
+                      if (negRiskAdapterAddress && !okNegRiskAdapter) {
+                        negRiskReasons.push("approval_neg_risk_adapter");
+                      }
+                      if (
+                        negRiskAdapterAddress &&
+                        (allowanceNegRiskAdapter ?? 0n) <= 0n
+                      ) {
+                        negRiskReasons.push("allowance_neg_risk_adapter");
+                      }
 
-                response.polymarket = {
-                  supported: true,
-                  ready: reasons.length === 0,
-                  readyNegRisk: negRiskReasons.length === 0,
-                  reasons,
-                  negRiskReasons,
-                  hasCredentials: Boolean(creds),
-                  signerIsContract,
-                  funder,
-                  funderSource,
-                  funderIsContract,
-                  relayerEnabled,
-                  usdc: {
-                    tokenAddress: env.polymarketUsdcAddress,
-                    decimals: 6,
-                    balance: ethers.formatUnits(usdcBalance, 6),
-                    balanceRaw: usdcBalance.toString(),
-                    allowance: {
-                      exchange: {
-                        spender: env.polymarketExchangeAddress,
-                        allowance: ethers.formatUnits(allowanceExchange, 6),
-                        allowanceRaw: allowanceExchange.toString(),
-                      },
-                      negRiskExchange: {
-                        spender: env.polymarketNegRiskExchangeAddress,
-                        allowance: ethers.formatUnits(allowanceNegRisk, 6),
-                        allowanceRaw: allowanceNegRisk.toString(),
-                      },
-                      ...(negRiskAdapterAddress
-                        ? {
-                            negRiskAdapter: {
-                              spender: negRiskAdapterAddress,
-                              allowance: ethers.formatUnits(
-                                allowanceNegRiskAdapter ?? 0n,
-                                6,
-                              ),
-                              allowanceRaw: (
-                                allowanceNegRiskAdapter ?? 0n
-                              ).toString(),
-                            },
-                          }
-                        : {}),
-                      ...(feeCollectorAddress
-                        ? {
-                            feeCollector: {
-                              spender: feeCollectorAddress,
-                              allowance: ethers.formatUnits(
-                                allowanceFeeCollector ?? 0n,
-                                6,
-                              ),
-                              allowanceRaw: (
-                                allowanceFeeCollector ?? 0n
-                              ).toString(),
-                            },
-                          }
-                        : {}),
-                    },
-                  },
-                  ...(funderIsContract
-                    ? {
-                        signerUsdc: {
+                      return {
+                        supported: true,
+                        ready: reasons.length === 0,
+                        readyNegRisk: negRiskReasons.length === 0,
+                        reasons,
+                        negRiskReasons,
+                        hasCredentials: Boolean(polymarketCreds),
+                        signerIsContract,
+                        funder,
+                        funderSource,
+                        funderIsContract,
+                        relayerEnabled,
+                        usdc: {
                           tokenAddress: env.polymarketUsdcAddress,
                           decimals: 6,
-                          balance: ethers.formatUnits(
-                            signerUsdcBalanceResolved ?? 0n,
-                            6,
-                          ),
-                          balanceRaw: (
-                            signerUsdcBalanceResolved ?? 0n
-                          ).toString(),
+                          balance: ethers.formatUnits(usdcBalance, 6),
+                          balanceRaw: usdcBalance.toString(),
+                          allowance: {
+                            exchange: {
+                              spender: env.polymarketExchangeAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceExchange,
+                                6,
+                              ),
+                              allowanceRaw: allowanceExchange.toString(),
+                            },
+                            negRiskExchange: {
+                              spender: env.polymarketNegRiskExchangeAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceNegRisk,
+                                6,
+                              ),
+                              allowanceRaw: allowanceNegRisk.toString(),
+                            },
+                            ...(negRiskAdapterAddress
+                              ? {
+                                  negRiskAdapter: {
+                                    spender: negRiskAdapterAddress,
+                                    allowance: ethers.formatUnits(
+                                      allowanceNegRiskAdapter ?? 0n,
+                                      6,
+                                    ),
+                                    allowanceRaw: (
+                                      allowanceNegRiskAdapter ?? 0n
+                                    ).toString(),
+                                  },
+                                }
+                              : {}),
+                            ...(feeCollectorAddress
+                              ? {
+                                  feeCollector: {
+                                    spender: feeCollectorAddress,
+                                    allowance: ethers.formatUnits(
+                                      allowanceFeeCollector ?? 0n,
+                                      6,
+                                    ),
+                                    allowanceRaw: (
+                                      allowanceFeeCollector ?? 0n
+                                    ).toString(),
+                                  },
+                                }
+                              : {}),
+                          },
                         },
+                        ...(funderIsContract
+                          ? {
+                              signerUsdc: {
+                                tokenAddress: env.polymarketUsdcAddress,
+                                decimals: 6,
+                                balance: ethers.formatUnits(
+                                  signerUsdcBalanceResolved ?? 0n,
+                                  6,
+                                ),
+                                balanceRaw: (
+                                  signerUsdcBalanceResolved ?? 0n
+                                ).toString(),
+                              },
+                            }
+                          : {}),
+                        conditionalTokens: {
+                          contractAddress: env.polymarketConditionalTokensAddress,
+                          isApprovedForAll: {
+                            exchange: okExchange,
+                            negRiskExchange: okNegRisk,
+                            ...(negRiskAdapterAddress
+                              ? { negRiskAdapter: okNegRiskAdapter }
+                              : {}),
+                          },
+                        },
+                      };
+                    })(),
+                    (async () => {
+                      const snapshot = await fetchLimitlessOnchainSnapshot({
+                        rpcUrl: env.baseRpcUrl,
+                        timeoutMs: env.baseRpcTimeoutMs,
+                        owner: walletAddress,
+                      });
+                      const reasons: string[] = [];
+                      if (!limitlessCreds) reasons.push("missing_credentials");
+                      if (snapshot.usdcBalance <= 0n) {
+                        reasons.push("insufficient_usdc");
                       }
-                    : {}),
-                  conditionalTokens: {
-                    contractAddress: env.polymarketConditionalTokensAddress,
-                    isApprovedForAll: {
-                      exchange: okExchange,
-                      negRiskExchange: okNegRisk,
-                      ...(negRiskAdapterAddress
-                        ? { negRiskAdapter: okNegRiskAdapter }
-                        : {}),
-                    },
-                  },
+
+                      return {
+                        supported: true,
+                        ready: reasons.length === 0,
+                        reasons,
+                        hasCredentials: Boolean(limitlessCreds),
+                        chainId: 8453,
+                        usdc: {
+                          tokenAddress: env.limitlessUsdcAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(snapshot.usdcBalance, 6),
+                          balanceRaw: snapshot.usdcBalance.toString(),
+                        },
+                      };
+                    })(),
+                  ]);
+
+                if (polymarketStatus.status === "fulfilled") {
+                  response.polymarket = polymarketStatus.value;
+                } else {
+                  app.log.warn(
+                    { error: polymarketStatus.reason, walletAddress },
+                    "Polymarket venue status lookup failed",
+                  );
+                  response.polymarket = {
+                    supported: true,
+                    ready: false,
+                    error: "Polymarket status lookup failed",
+                  };
+                }
+
+                if (limitlessStatus.status === "fulfilled") {
+                  response.limitless = limitlessStatus.value;
+                } else {
+                  app.log.warn(
+                    { error: limitlessStatus.reason, walletAddress },
+                    "Limitless venue status lookup failed",
+                  );
+                  response.limitless = {
+                    supported: true,
+                    ready: false,
+                    error: "Limitless status lookup failed",
+                  };
+                }
+
+                response.kalshi = {
+                  supported: false,
+                  ready: false,
+                  reasons: ["wallet_type_mismatch"],
                 };
 
                 return response as WalletVenueStatus;
@@ -1296,20 +1394,24 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
             } catch (error) {
               app.log.warn(
                 { error, walletAddress },
-                "Polymarket venue status lookup failed",
+                "EVM venue status lookup failed",
               );
               response.polymarket = {
                 supported: true,
                 ready: false,
                 error: "Polymarket status lookup failed",
               };
+              response.limitless = {
+                supported: true,
+                ready: false,
+                error: "Limitless status lookup failed",
+              };
+              response.kalshi = {
+                supported: false,
+                ready: false,
+                reasons: ["wallet_type_mismatch"],
+              };
             }
-
-            response.kalshi = {
-              supported: false,
-              ready: false,
-              reasons: ["wallet_type_mismatch"],
-            };
 
             return response;
           }
@@ -1410,11 +1512,21 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               ready: false,
               reasons: ["wallet_type_mismatch"],
             };
+            response.limitless = {
+              supported: false,
+              ready: false,
+              reasons: ["wallet_type_mismatch"],
+            };
 
             return response;
           }
 
           response.polymarket = {
+            supported: false,
+            ready: false,
+            reasons: ["wallet_type_mismatch"],
+          };
+          response.limitless = {
             supported: false,
             ready: false,
             reasons: ["wallet_type_mismatch"],
