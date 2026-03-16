@@ -42,6 +42,7 @@ import {
   venueCredentialsBodySchema,
 } from "../schemas/auth.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import { validatePolymarketFunderSelection } from "../services/polymarket-funder.js";
 import {
   attachReferralCode,
   attachReferralCodeForExistingUser,
@@ -828,9 +829,18 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const validatedPolymarketFunder = body.funderAddress
+          ? await validatePolymarketFunderSelection({
+              signer: walletAddress,
+              funderAddress: body.funderAddress,
+              includeMagicProxy: true,
+            })
+          : { funderAddress: null };
         const additionalData: Record<string, unknown> = {
           passphrase,
-          ...(body.funderAddress ? { funderAddress: body.funderAddress } : {}),
+          ...(validatedPolymarketFunder.funderAddress
+            ? { funderAddress: validatedPolymarketFunder.funderAddress }
+            : {}),
         };
 
         await AuthService.createOrUpdateVenueCredentials(
@@ -845,6 +855,18 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ ok: true });
       } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Polymarket connect failed";
+        const isValidationError =
+          error instanceof Error &&
+          /not deployed yet|valid EVM address/i.test(error.message);
+        if (isValidationError) {
+          reply.code(400);
+          return reply.send({
+            error: "Polymarket connect failed",
+            message,
+          });
+        }
         app.log.error(
           { error, userId: user.id, walletAddress },
           "Polymarket connect failed",
@@ -883,11 +905,18 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        const validatedPolymarketFunder = await validatePolymarketFunderSelection(
+          {
+            signer: walletAddress,
+            funderAddress: request.body.funderAddress,
+            includeMagicProxy: true,
+          },
+        );
         const updated = await AuthService.updateVenueFunderAddress(
           user.id,
           walletAddress,
           "polymarket",
-          request.body.funderAddress,
+          validatedPolymarketFunder.funderAddress,
         );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -899,6 +928,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           funderUpdatedAt: updated.funderUpdatedAt,
         });
       } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Polymarket funder update failed";
         app.log.error(
           { error, userId: user.id, walletAddress },
           "Polymarket funder update failed",
@@ -906,6 +939,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "Polymarket funder update failed",
+          message,
         });
       }
     },

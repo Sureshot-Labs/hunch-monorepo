@@ -49,6 +49,19 @@ function normalizeHex32(value: string | null | undefined): string | null {
   return trimmed;
 }
 
+function findCandidateByAddress(
+  candidates: PolymarketFunderCandidate[],
+  address: string | null | undefined,
+): PolymarketFunderCandidate | null {
+  const normalized = normalizeEthAddress(address);
+  if (!normalized) return null;
+  return (
+    candidates.find(
+      (candidate) => normalizeEthAddress(candidate.funder) === normalized,
+    ) ?? null
+  );
+}
+
 function isEmptyCode(code: string | null): boolean {
   return !code || code === "0x" || code === "0x0";
 }
@@ -265,8 +278,10 @@ export async function derivePolymarketFunders(inputs: {
     Boolean(storedFunder && magicFunder) && storedFunder === magicFunder;
   const storedMatchesSafe =
     Boolean(storedFunder && safeFunder) && storedFunder === safeFunder;
+  const storedMatchesCanonical =
+    storedMatchesSafe || (Boolean(inputs.includeMagicProxy) && storedMatchesMagic);
 
-  if (storedFunder && storedFunder !== signerAddress) {
+  if (storedFunder && storedFunder !== signerAddress && !storedMatchesCanonical) {
     addCandidate({
       funder: storedFunder,
       signatureType: storedMatchesMagic ? 1 : 2,
@@ -329,6 +344,7 @@ export async function derivePolymarketFunders(inputs: {
   }
 
   const recommended =
+    findCandidateByAddress(candidates, storedFunder) ??
     candidates.find((candidate) => candidate.source === "stored") ??
     candidates.find(
       (candidate) =>
@@ -356,5 +372,39 @@ export async function derivePolymarketFunders(inputs: {
     candidates,
     recommended,
     warnings,
+  };
+}
+
+export async function validatePolymarketFunderSelection(inputs: {
+  signer: string;
+  funderAddress: string | null | undefined;
+  includeMagicProxy?: boolean;
+}): Promise<{
+  funderAddress: string | null;
+  candidate: PolymarketFunderCandidate | null;
+}> {
+  const signer = normalizeEthAddress(inputs.signer);
+  if (!signer) {
+    throw new Error("Signer address is not a valid EVM address.");
+  }
+
+  const funderAddress = normalizeEthAddress(inputs.funderAddress ?? null);
+  if (!funderAddress) {
+    return { funderAddress: null, candidate: null };
+  }
+
+  const result = await derivePolymarketFunders({
+    signer,
+    storedFunder: funderAddress,
+    includeMagicProxy: inputs.includeMagicProxy ?? true,
+  });
+  const candidate = findCandidateByAddress(result.candidates, funderAddress);
+  if (candidate?.expectedContract && candidate.deployed === false) {
+    throw new Error("Polymarket wallet is not deployed yet.");
+  }
+
+  return {
+    funderAddress: candidate?.funder ?? funderAddress,
+    candidate,
   };
 }
