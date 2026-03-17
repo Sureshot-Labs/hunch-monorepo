@@ -39,10 +39,10 @@ async function loadAllowedPolymarketFunderMap(
 }
 
 function loadAllowedDerivedPolymarketWalletMap(
-  walletAddress: string | undefined,
+  linkedWallets: Array<{ walletAddress: string; walletType: string }>,
   requestedWallets: string[],
 ): Map<string, string> {
-  if (!walletAddress || requestedWallets.length === 0) return new Map();
+  if (requestedWallets.length === 0) return new Map();
 
   const normalizedRequested = new Set(
     requestedWallets
@@ -51,13 +51,15 @@ function loadAllowedDerivedPolymarketWalletMap(
   );
   if (normalizedRequested.size === 0) return new Map();
 
-  const derived = derivePolymarketFunderAddresses({
-    signer: walletAddress,
-    includeMagicProxy: true,
-  });
-
   return new Map(
-    derived.candidates
+    linkedWallets
+      .filter((wallet) => wallet.walletType === "ethereum")
+      .flatMap((wallet) =>
+        derivePolymarketFunderAddresses({
+          signer: wallet.walletAddress,
+          includeMagicProxy: true,
+        }).candidates,
+      )
       .filter((address) => normalizedRequested.has(address.toLowerCase()))
       .map((address) => [address.toLowerCase(), address]),
   );
@@ -81,7 +83,7 @@ export async function resolveRequestedWalletAddresses(
       const [funderMap, derivedMap] = await Promise.all([
         loadAllowedPolymarketFunderMap(userId, requestedWallets),
         Promise.resolve(
-          loadAllowedDerivedPolymarketWalletMap(walletAddress, requestedWallets),
+          loadAllowedDerivedPolymarketWalletMap(wallets, requestedWallets),
         ),
       ]);
       for (const [normalized, canonical] of funderMap.entries()) {

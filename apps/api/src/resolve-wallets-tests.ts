@@ -17,7 +17,7 @@ const tests: TestCase[] = [
     run: async () => {
       const authAny = AuthService as unknown as {
         getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string }>
+          Array<{ walletAddress: string; walletType: string }>
         >;
       };
       const poolAny = pool as unknown as {
@@ -30,7 +30,10 @@ const tests: TestCase[] = [
       const originalQuery = poolAny.query;
       try {
         authAny.getUserWallets = async () => [
-          { walletAddress: "0x072c4c45537fdA4Fa9F9DEac3Cf6D667a210ba08" },
+          {
+            walletAddress: "0x072c4c45537fdA4Fa9F9DEac3Cf6D667a210ba08",
+            walletType: "ethereum",
+          },
         ];
         poolAny.query = async () => ({
           rows: [
@@ -58,7 +61,7 @@ const tests: TestCase[] = [
     run: async () => {
       const authAny = AuthService as unknown as {
         getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string }>
+          Array<{ walletAddress: string; walletType: string }>
         >;
       };
       const poolAny = pool as unknown as {
@@ -72,7 +75,10 @@ const tests: TestCase[] = [
       const calls: Array<{ sql: string; params?: unknown[] }> = [];
       try {
         authAny.getUserWallets = async () => [
-          { walletAddress: "0x072c4c45537fdA4Fa9F9DEac3Cf6D667a210ba08" },
+          {
+            walletAddress: "0x072c4c45537fdA4Fa9F9DEac3Cf6D667a210ba08",
+            walletType: "ethereum",
+          },
         ];
         poolAny.query = async (sql, params) => {
           calls.push({ sql, params });
@@ -108,9 +114,10 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "resolveRequestedWalletAddresses accepts derived polymarket safe candidate when opted in",
+    name: "resolveRequestedWalletAddresses accepts derived polymarket safe candidate from any linked signer when opted in",
     run: async () => {
       const signer = "0x072c4c45537fdA4Fa9F9DEac3Cf6D667a210ba08";
+      const currentWallet = "0xD829f31579e3129a551c9AB3980eFA8E5E041131";
       const derived = derivePolymarketFunderAddresses({
         signer,
         includeMagicProxy: true,
@@ -124,7 +131,7 @@ const tests: TestCase[] = [
 
       const authAny = AuthService as unknown as {
         getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string }>
+          Array<{ walletAddress: string; walletType: string }>
         >;
       };
       const poolAny = pool as unknown as {
@@ -137,7 +144,10 @@ const tests: TestCase[] = [
       const originalQuery = poolAny.query;
       const calls: Array<{ sql: string; params?: unknown[] }> = [];
       try {
-        authAny.getUserWallets = async () => [{ walletAddress: signer }];
+        authAny.getUserWallets = async () => [
+          { walletAddress: currentWallet, walletType: "ethereum" },
+          { walletAddress: signer, walletType: "ethereum" },
+        ];
         poolAny.query = async (sql, params) => {
           calls.push({ sql, params });
           return { rows: [] };
@@ -145,7 +155,7 @@ const tests: TestCase[] = [
 
         const resolved = await resolveRequestedWalletAddresses(
           "u-1",
-          signer,
+          currentWallet,
           [safeCandidate],
           { allowPolymarketFunders: true },
         );
