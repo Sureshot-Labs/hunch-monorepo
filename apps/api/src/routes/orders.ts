@@ -105,6 +105,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          { allowPolymarketFunders: true },
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -191,6 +192,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          { allowPolymarketFunders: true },
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
@@ -278,6 +280,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           walletAddress,
           query.wallets,
+          { allowPolymarketFunders: true },
         );
         if (walletAddresses.length === 0) {
           reply.code(400);
