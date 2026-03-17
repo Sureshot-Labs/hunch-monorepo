@@ -20,6 +20,8 @@ export type PrivyWallet = {
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const PRIVY_USER_SYNC_MAX_ATTEMPTS = 6;
+const PRIVY_USER_SYNC_RETRY_DELAY_MS = 250;
 
 function normalizeWalletAddress(walletType: PrivyWalletType, address: string) {
   const trimmed = address.trim();
@@ -27,6 +29,19 @@ function normalizeWalletAddress(walletType: PrivyWalletType, address: string) {
     return trimmed.toLowerCase();
   return trimmed;
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+type VerifyTokenAndGetUserOptions = {
+  expectedAddedWalletAddresses?: string[];
+  expectedRemovedWalletAddresses?: string[];
+  maxSyncAttempts?: number;
+  syncRetryDelayMs?: number;
+};
 
 function isWalletAccount(
   account: LinkedAccountWithMetadata,
@@ -122,18 +137,91 @@ export class PrivyService {
     return wallets[0]?.address ?? null;
   }
 
+  private static normalizeExpectedWalletAddresses(
+    expectedWalletAddresses?: string[],
+  ): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+
+    for (const rawAddress of expectedWalletAddresses ?? []) {
+      const trimmed = rawAddress.trim();
+      if (!trimmed) continue;
+      const walletType: PrivyWalletType = ETH_ADDRESS_RE.test(trimmed)
+        ? "ethereum"
+        : "solana";
+      const normalized = normalizeWalletAddress(walletType, trimmed);
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      out.push(normalized);
+    }
+
+    return out;
+  }
+
+  private static hasExpectedWalletDelta(
+    walletAddresses: string[],
+    options: {
+      expectedAddedWalletAddresses: string[];
+      expectedRemovedWalletAddresses: string[];
+    },
+  ): boolean {
+    const actual = new Set(walletAddresses);
+    for (const address of options.expectedAddedWalletAddresses) {
+      if (!actual.has(address)) return false;
+    }
+    for (const address of options.expectedRemovedWalletAddresses) {
+      if (actual.has(address)) return false;
+    }
+    return true;
+  }
+
   /**
    * Verify Privy token and get user data in one call
    */
-  static async verifyTokenAndGetUser(accessToken: string): Promise<{
+  static async verifyTokenAndGetUser(
+    accessToken: string,
+    options?: VerifyTokenAndGetUserOptions,
+  ): Promise<{
     claims: PrivyClaims;
     user: PrivyUser;
     walletAddresses: string[];
     primaryWalletAddress: string | null;
   }> {
     const claims = await this.verifyAccessToken(accessToken);
-    const user = await this.getUserData(claims);
-    const walletAddresses = this.extractWalletAddresses(user);
+    const expectedAddedWalletAddresses = this.normalizeExpectedWalletAddresses(
+      options?.expectedAddedWalletAddresses,
+    );
+    const expectedRemovedWalletAddresses = this.normalizeExpectedWalletAddresses(
+      options?.expectedRemovedWalletAddresses,
+    );
+    const maxSyncAttempts = Math.max(
+      1,
+      options?.maxSyncAttempts ?? PRIVY_USER_SYNC_MAX_ATTEMPTS,
+    );
+    const syncRetryDelayMs = Math.max(
+      0,
+      options?.syncRetryDelayMs ?? PRIVY_USER_SYNC_RETRY_DELAY_MS,
+    );
+
+    let user = await this.getUserData(claims);
+    let walletAddresses = this.extractWalletAddresses(user);
+
+    for (
+      let attempt = 1;
+      attempt < maxSyncAttempts &&
+      !this.hasExpectedWalletDelta(walletAddresses, {
+        expectedAddedWalletAddresses,
+        expectedRemovedWalletAddresses,
+      });
+      attempt += 1
+    ) {
+      if (syncRetryDelayMs > 0) {
+        await sleep(syncRetryDelayMs);
+      }
+      user = await this.getUserData(claims);
+      walletAddresses = this.extractWalletAddresses(user);
+    }
+
     const primaryWalletAddress = this.getPrimaryWalletAddress(user);
 
     return {

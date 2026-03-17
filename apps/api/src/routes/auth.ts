@@ -279,7 +279,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           user: privyUser,
           walletAddresses,
           primaryWalletAddress: resolvedPrimaryWalletAddress,
-        } = await PrivyService.verifyTokenAndGetUser(body.accessToken);
+        } = await PrivyService.verifyTokenAndGetUser(body.accessToken, {
+          expectedAddedWalletAddresses: body.expectedAddedWalletAddresses,
+          expectedRemovedWalletAddresses: body.expectedRemovedWalletAddresses,
+        });
         primaryWalletAddress = resolvedPrimaryWalletAddress ?? "unknown";
 
         if (!resolvedPrimaryWalletAddress) {

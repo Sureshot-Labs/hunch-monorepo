@@ -64,7 +64,12 @@ function createTimedCache<T>(ttlMs: number) {
     loader: () => Promise<T>,
     options?: { bypass?: boolean },
   ): Promise<T> {
-    if (ttlMs <= 0 || options?.bypass) return loader();
+    if (ttlMs <= 0) return loader();
+    if (options?.bypass) {
+      const value = await loader();
+      set(key, value);
+      return value;
+    }
     const cached = get(key);
     if (cached != null) return cached;
     const pending = inflight.get(key);

@@ -10,7 +10,7 @@ import {
 } from "./auth.js";
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
-import type { PrivyUser } from "./privy-service.js";
+import { PrivyService, type PrivyUser } from "./privy-service.js";
 import { MAX_WALLET_NAME_LENGTH, normalizeWalletNameInput } from "./lib/wallet-name.js";
 
 type TestCase = {
@@ -238,6 +238,128 @@ const tests: TestCase[] = [
       assert.equal(parseJwtExpiresInToMs("30m"), 30 * 60 * 1000);
       assert.equal(parseJwtExpiresInToMs("1500ms"), 1000);
       assert.throws(() => parseJwtExpiresInToMs("120"), /at least 1 second/i);
+    },
+  },
+  {
+    name: "verifyTokenAndGetUser waits for expected added wallets to appear",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        verifyAccessToken: (accessToken: string) => Promise<unknown>;
+        getUserData: (claims: unknown) => Promise<PrivyUser>;
+      };
+      const originalVerifyAccessToken = privyAny.verifyAccessToken;
+      const originalGetUserData = privyAny.getUserData;
+      let getUserDataCalls = 0;
+      try {
+        privyAny.verifyAccessToken = async () => ({ userId: "privy-user-1" });
+        privyAny.getUserData = async () => {
+          getUserDataCalls += 1;
+          if (getUserDataCalls === 1) {
+            return {
+              linkedAccounts: [
+                {
+                  type: "wallet",
+                  address: "0x1111111111111111111111111111111111111111",
+                  chainType: "ethereum",
+                },
+              ],
+            } as unknown as PrivyUser;
+          }
+
+          return {
+            linkedAccounts: [
+              {
+                type: "wallet",
+                address: "0x1111111111111111111111111111111111111111",
+                chainType: "ethereum",
+              },
+              {
+                type: "wallet",
+                address: "0x2222222222222222222222222222222222222222",
+                chainType: "ethereum",
+              },
+            ],
+          } as unknown as PrivyUser;
+        };
+
+        const result = await PrivyService.verifyTokenAndGetUser("token", {
+          expectedAddedWalletAddresses: [
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+          ],
+          maxSyncAttempts: 3,
+          syncRetryDelayMs: 0,
+        });
+
+        assert.equal(getUserDataCalls, 2);
+        assert.deepEqual(result.walletAddresses, [
+          "0x1111111111111111111111111111111111111111",
+          "0x2222222222222222222222222222222222222222",
+        ]);
+      } finally {
+        privyAny.verifyAccessToken = originalVerifyAccessToken;
+        privyAny.getUserData = originalGetUserData;
+      }
+    },
+  },
+  {
+    name: "verifyTokenAndGetUser waits for expected removed wallets to disappear",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        verifyAccessToken: (accessToken: string) => Promise<unknown>;
+        getUserData: (claims: unknown) => Promise<PrivyUser>;
+      };
+      const originalVerifyAccessToken = privyAny.verifyAccessToken;
+      const originalGetUserData = privyAny.getUserData;
+      let getUserDataCalls = 0;
+      try {
+        privyAny.verifyAccessToken = async () => ({ userId: "privy-user-1" });
+        privyAny.getUserData = async () => {
+          getUserDataCalls += 1;
+          if (getUserDataCalls === 1) {
+            return {
+              linkedAccounts: [
+                {
+                  type: "wallet",
+                  address: "0x1111111111111111111111111111111111111111",
+                  chainType: "ethereum",
+                },
+                {
+                  type: "wallet",
+                  address: "0x2222222222222222222222222222222222222222",
+                  chainType: "ethereum",
+                },
+              ],
+            } as unknown as PrivyUser;
+          }
+
+          return {
+            linkedAccounts: [
+              {
+                type: "wallet",
+                address: "0x1111111111111111111111111111111111111111",
+                chainType: "ethereum",
+              },
+            ],
+          } as unknown as PrivyUser;
+        };
+
+        const result = await PrivyService.verifyTokenAndGetUser("token", {
+          expectedRemovedWalletAddresses: [
+            "0x2222222222222222222222222222222222222222",
+          ],
+          maxSyncAttempts: 3,
+          syncRetryDelayMs: 0,
+        });
+
+        assert.equal(getUserDataCalls, 2);
+        assert.deepEqual(result.walletAddresses, [
+          "0x1111111111111111111111111111111111111111",
+        ]);
+      } finally {
+        privyAny.verifyAccessToken = originalVerifyAccessToken;
+        privyAny.getUserData = originalGetUserData;
+      }
     },
   },
   {

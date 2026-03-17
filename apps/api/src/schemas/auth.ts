@@ -5,6 +5,8 @@ export const authPrivyBodySchema = z.object({
   accessToken: zRequiredString("accessToken is required"),
   referralCode: z.string().trim().min(1).max(32).optional(),
   inviteConfirmed: z.boolean().optional(),
+  expectedAddedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
+  expectedRemovedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
 });
 
 export const inviteReasonSchema = z.enum([
