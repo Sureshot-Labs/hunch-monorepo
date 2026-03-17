@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { AuthService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { normalizeLimitlessScopedTokenId } from "./lib/limitless-token.js";
 import { derivePolymarketFunderAddresses } from "./services/polymarket-funder.js";
 
 type TestContext = {
@@ -92,12 +93,57 @@ async function createTestContext(
 }
 
 async function cleanup(context: TestContext): Promise<void> {
+  await pool.query("delete from positions where user_id = $1", [context.userId]);
   await pool.query("delete from user_sessions where user_id = $1", [context.userId]);
   await pool.query("delete from user_venue_credentials where user_id = $1", [
     context.userId,
   ]);
   await pool.query("delete from user_wallets where user_id = $1", [context.userId]);
   await pool.query("delete from users where id = $1", [context.userId]);
+}
+
+async function insertLimitlessPosition(
+  context: TestContext,
+  rawTokenId: string,
+): Promise<void> {
+  const scopedTokenId = normalizeLimitlessScopedTokenId(rawTokenId);
+  assert.ok(scopedTokenId);
+
+  await pool.query(
+    `
+      insert into positions (
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        position_scope,
+        token_id,
+        side,
+        size,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      )
+      values (
+        gen_random_uuid(),
+        $1,
+        $2,
+        'limitless',
+        'own',
+        $3,
+        'LONG',
+        1.00582,
+        0,
+        0,
+        now(),
+        now(),
+        now()
+      )
+    `,
+    [context.userId, context.signerWallet, scopedTokenId],
+  );
 }
 
 async function main() {
@@ -115,8 +161,13 @@ async function main() {
     funderWallet: derivedSafeWallet,
     persistFunderAddress: false,
   });
+  const limitlessContext = await createTestContext();
+  const limitlessRawTokenId =
+    "61711868900925654003691703232709639114710342992998180827784061778851356977594";
 
   try {
+    await insertLimitlessPosition(limitlessContext, limitlessRawTokenId);
+
     const persistedResponse = await app.inject({
       method: "GET",
       url:
@@ -146,9 +197,30 @@ async function main() {
       positions: [],
       venue: "polymarket",
     });
+
+    const limitlessResponse = await app.inject({
+      method: "GET",
+      url:
+        `/positions/by-token?tokenIds=${encodeURIComponent(
+          limitlessRawTokenId,
+        )}&venue=limitless&wallets=${encodeURIComponent(
+          limitlessContext.signerWallet,
+        )}&minSize=0.01`,
+      headers: limitlessContext.authHeaders,
+    });
+
+    assert.equal(limitlessResponse.statusCode, 200);
+    const limitlessPayload = limitlessResponse.json();
+    assert.equal(limitlessPayload.venue, "limitless");
+    assert.equal(limitlessPayload.positions.length, 1);
+    assert.equal(
+      limitlessPayload.positions[0]?.tokenId,
+      normalizeLimitlessScopedTokenId(limitlessRawTokenId),
+    );
   } finally {
     await cleanup(persistedContext);
     await cleanup(derivedContext);
+    await cleanup(limitlessContext);
     await app.close();
   }
 }

@@ -63,6 +63,12 @@ function toChecksumAddress(value: string): string | null {
   }
 }
 
+function mapLimitlessUpstreamStatus(status: number): number {
+  if (status === 401 || status === 403) return 400;
+  if (status >= 400 && status < 500) return status;
+  return 502;
+}
+
 // Legacy Limitless markets sometimes expose only exchange in /markets payload.
 // For these, SELL CT approvals may require a separate operator not returned by API.
 const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> = {
@@ -1817,9 +1823,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
-        reply.code(502);
+        const upstreamMessage =
+          extractLimitlessMessage(upstream.payload) ??
+          (upstream.status === 401 || upstream.status === 403
+            ? "Limitless session expired. Reconnect Limitless."
+            : null);
+        reply.code(mapLimitlessUpstreamStatus(upstream.status));
         return reply.send({
           error: "Limitless order placement failed",
+          ...(upstreamMessage ? { message: upstreamMessage } : {}),
           status: upstream.status,
           payload: upstream.payload,
         });

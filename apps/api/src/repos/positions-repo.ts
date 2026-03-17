@@ -4,6 +4,7 @@ import {
   EFFECTIVE_PNL_SQL,
   UNREALIZED_PNL_COMPONENT_SQL,
 } from "../lib/pnl-sql.js";
+import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import type { Position } from "../order-types.js";
 import type { PgParams } from "../server-types.js";
@@ -55,6 +56,24 @@ function normalizeWalletKey(address: string): string {
   const trimmed = address.trim();
   if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
   return trimmed;
+}
+
+function normalizeTokenIdsForLookup(
+  tokenIds: string[],
+  venueList: string[] | null | undefined,
+): string[] {
+  if (venueList?.length === 1 && venueList[0] === "limitless") {
+    return Array.from(
+      new Map(
+        tokenIds
+          .map((tokenId) => normalizeLimitlessScopedTokenId(tokenId))
+          .filter((tokenId): tokenId is string => Boolean(tokenId))
+          .map((tokenId) => [tokenId, tokenId]),
+      ).values(),
+    );
+  }
+
+  return tokenIds;
 }
 
 async function expandPolymarketWallets(
@@ -374,6 +393,8 @@ export async function fetchPositionsForUserWalletByTokenIds(
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
   const venueList = resolveVenueList(inputs);
+  const tokenIds = normalizeTokenIdsForLookup(inputs.tokenIds, venueList);
+  if (tokenIds.length === 0) return [];
   const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
     ? await expandPolymarketWallets(pool, {
@@ -390,7 +411,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
 
   paramCount += 1;
   whereClause += ` and token_id = any($${paramCount}::text[])`;
-  params.push(inputs.tokenIds);
+  params.push(tokenIds);
 
   if (!inputs.includeHidden) {
     whereClause += " and (is_hidden is null or is_hidden = false)";

@@ -42,8 +42,15 @@ export function extractLimitlessMessage(payload: unknown): string | null {
   if (typeof payload === "string" && payload.trim().length) {
     return payload.trim();
   }
-  if (isRecord(payload) && typeof payload.message === "string") {
-    const message = payload.message.trim();
+  if (isRecord(payload)) {
+    const rawMessage =
+      typeof payload.message === "string"
+        ? payload.message
+        : typeof payload.error === "string"
+          ? payload.error
+          : null;
+    if (!rawMessage) return null;
+    const message = rawMessage.trim();
     return message.length ? message : null;
   }
   return null;
