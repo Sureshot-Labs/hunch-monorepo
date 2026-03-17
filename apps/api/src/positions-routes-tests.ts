@@ -6,12 +6,19 @@ import crypto from "node:crypto";
 import { AuthService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { derivePolymarketFunderAddresses } from "./services/polymarket-funder.js";
 
 type TestContext = {
   userId: string;
   authHeaders: Record<string, string>;
   signerWallet: string;
   funderWallet: string;
+};
+
+type CreateTestContextOptions = {
+  signerWallet?: string;
+  funderWallet?: string;
+  persistFunderAddress?: boolean;
 };
 
 function randomEmail(): string {
@@ -22,9 +29,11 @@ function randomEvmAddress(): string {
   return `0x${crypto.randomBytes(20).toString("hex")}`;
 }
 
-async function createTestContext(): Promise<TestContext> {
-  const signerWallet = randomEvmAddress();
-  const funderWallet = randomEvmAddress();
+async function createTestContext(
+  options: CreateTestContextOptions = {},
+): Promise<TestContext> {
+  const signerWallet = options.signerWallet ?? randomEvmAddress();
+  const funderWallet = options.funderWallet ?? randomEvmAddress();
 
   const insert = await pool.query<{ id: string }>(
     `
@@ -57,7 +66,7 @@ async function createTestContext(): Promise<TestContext> {
     "polymarket",
     `test-key-${crypto.randomUUID()}`,
     `test-secret-${crypto.randomUUID()}`,
-    { funderAddress: funderWallet },
+    options.persistFunderAddress === false ? undefined : { funderAddress: funderWallet },
   );
 
   const token = AuthService.generateToken(userId);
@@ -93,26 +102,53 @@ async function cleanup(context: TestContext): Promise<void> {
 
 async function main() {
   const app = await buildApp();
-  const context = await createTestContext();
+  const persistedContext = await createTestContext();
+  const derivedSignerWallet = randomEvmAddress();
+  const derivedSafeWalletResult = derivePolymarketFunderAddresses({
+    signer: derivedSignerWallet,
+    includeMagicProxy: true,
+  }).safeProxy;
+  assert.ok(derivedSafeWalletResult);
+  const derivedSafeWallet = derivedSafeWalletResult;
+  const derivedContext = await createTestContext({
+    signerWallet: derivedSignerWallet,
+    funderWallet: derivedSafeWallet,
+    persistFunderAddress: false,
+  });
 
   try {
-    const response = await app.inject({
+    const persistedResponse = await app.inject({
       method: "GET",
       url:
         `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
-          context.funderWallet,
+          persistedContext.funderWallet,
         )}&minSize=0.01`,
-      headers: context.authHeaders,
+      headers: persistedContext.authHeaders,
     });
 
-    assert.equal(response.statusCode, 200);
-    const body = response.json();
-    assert.deepEqual(body, {
+    assert.equal(persistedResponse.statusCode, 200);
+    assert.deepEqual(persistedResponse.json(), {
+      positions: [],
+      venue: "polymarket",
+    });
+
+    const derivedResponse = await app.inject({
+      method: "GET",
+      url:
+        `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
+          derivedContext.funderWallet,
+        )}&minSize=0.01`,
+      headers: derivedContext.authHeaders,
+    });
+
+    assert.equal(derivedResponse.statusCode, 200);
+    assert.deepEqual(derivedResponse.json(), {
       positions: [],
       venue: "polymarket",
     });
   } finally {
-    await cleanup(context);
+    await cleanup(persistedContext);
+    await cleanup(derivedContext);
     await app.close();
   }
 }

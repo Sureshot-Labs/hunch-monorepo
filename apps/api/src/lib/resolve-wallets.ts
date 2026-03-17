@@ -1,5 +1,6 @@
 import { AuthService } from "../auth.js";
 import { pool } from "../db.js";
+import { derivePolymarketFunderAddresses } from "../services/polymarket-funder.js";
 
 type ResolveRequestedWalletAddressesOptions = {
   allowPolymarketFunders?: boolean;
@@ -37,6 +38,31 @@ async function loadAllowedPolymarketFunderMap(
   );
 }
 
+function loadAllowedDerivedPolymarketWalletMap(
+  walletAddress: string | undefined,
+  requestedWallets: string[],
+): Map<string, string> {
+  if (!walletAddress || requestedWallets.length === 0) return new Map();
+
+  const normalizedRequested = new Set(
+    requestedWallets
+      .map((address) => address.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (normalizedRequested.size === 0) return new Map();
+
+  const derived = derivePolymarketFunderAddresses({
+    signer: walletAddress,
+    includeMagicProxy: true,
+  });
+
+  return new Map(
+    derived.candidates
+      .filter((address) => normalizedRequested.has(address.toLowerCase()))
+      .map((address) => [address.toLowerCase(), address]),
+  );
+}
+
 export async function resolveRequestedWalletAddresses(
   userId: string,
   walletAddress: string | undefined,
@@ -52,11 +78,18 @@ export async function resolveRequestedWalletAddresses(
       ]),
     );
     if (options.allowPolymarketFunders) {
-      const funderMap = await loadAllowedPolymarketFunderMap(
-        userId,
-        requestedWallets,
-      );
+      const [funderMap, derivedMap] = await Promise.all([
+        loadAllowedPolymarketFunderMap(userId, requestedWallets),
+        Promise.resolve(
+          loadAllowedDerivedPolymarketWalletMap(walletAddress, requestedWallets),
+        ),
+      ]);
       for (const [normalized, canonical] of funderMap.entries()) {
+        if (!walletMap.has(normalized)) {
+          walletMap.set(normalized, canonical);
+        }
+      }
+      for (const [normalized, canonical] of derivedMap.entries()) {
         if (!walletMap.has(normalized)) {
           walletMap.set(normalized, canonical);
         }

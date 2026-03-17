@@ -24,6 +24,14 @@ export type PolymarketFunderDeriveResult = {
   warnings: string[];
 };
 
+export type PolymarketDerivedFunderAddresses = {
+  signer: string;
+  safeProxy: string | null;
+  magicProxy: string | null;
+  candidates: string[];
+  warnings: string[];
+};
+
 const SAFE_READ_IFACE = new Interface([
   "function getOwners() view returns (address[])",
   "function getThreshold() view returns (uint256)",
@@ -233,17 +241,65 @@ export async function inspectSafeWallet(inputs: {
   return inspectSafe({ rpcUrl, timeoutMs, address: normalized });
 }
 
+export function derivePolymarketFunderAddresses(inputs: {
+  signer: string;
+  includeMagicProxy?: boolean;
+}): PolymarketDerivedFunderAddresses {
+  const signerAddress = normalizeEthAddress(inputs.signer);
+  if (!signerAddress) {
+    return {
+      signer: inputs.signer,
+      safeProxy: null,
+      magicProxy: null,
+      candidates: [],
+      warnings: ["Signer address is not a valid EVM address."],
+    };
+  }
+
+  const warnings: string[] = [];
+  const safeProxy = deriveSafeProxyAddress(signerAddress);
+  const magicProxy =
+    inputs.includeMagicProxy ? deriveMagicProxyAddress(signerAddress) : null;
+  const candidates = [signerAddress];
+
+  if (safeProxy) {
+    candidates.push(safeProxy);
+  } else {
+    warnings.push("Safe proxy derivation is not configured.");
+  }
+
+  if (inputs.includeMagicProxy) {
+    if (magicProxy) {
+      candidates.push(magicProxy);
+    } else {
+      warnings.push("Magic proxy derivation is not configured.");
+    }
+  }
+
+  return {
+    signer: signerAddress,
+    safeProxy,
+    magicProxy,
+    candidates,
+    warnings,
+  };
+}
+
 export async function derivePolymarketFunders(inputs: {
   signer: string;
   storedFunder?: string | null;
   includeMagicProxy?: boolean;
   bypassCodeCache?: boolean;
 }): Promise<PolymarketFunderDeriveResult> {
-  const warnings: string[] = [];
+  const derivedAddresses = derivePolymarketFunderAddresses({
+    signer: inputs.signer,
+    includeMagicProxy: inputs.includeMagicProxy,
+  });
+  const warnings = [...derivedAddresses.warnings];
   const candidates: PolymarketFunderCandidate[] = [];
   const candidateKeys = new Set<string>();
 
-  const signerAddress = normalizeEthAddress(inputs.signer);
+  const signerAddress = normalizeEthAddress(derivedAddresses.signer);
   if (!signerAddress) {
     return {
       signer: inputs.signer,
@@ -273,9 +329,8 @@ export async function derivePolymarketFunders(inputs: {
 
   addCandidate(signerCandidate);
 
-  const safeFunder = deriveSafeProxyAddress(signerAddress);
-  const magicFunder =
-    inputs.includeMagicProxy ? deriveMagicProxyAddress(signerAddress) : null;
+  const safeFunder = derivedAddresses.safeProxy;
+  const magicFunder = derivedAddresses.magicProxy;
 
   const storedMatchesMagic =
     Boolean(storedFunder && magicFunder) && storedFunder === magicFunder;
@@ -304,8 +359,6 @@ export async function derivePolymarketFunders(inputs: {
       deployed: false,
       contractKind: "UNKNOWN",
     });
-  } else {
-    warnings.push("Safe proxy derivation is not configured.");
   }
 
   if (inputs.includeMagicProxy) {
@@ -318,8 +371,6 @@ export async function derivePolymarketFunders(inputs: {
         deployed: false,
         contractKind: "UNKNOWN",
       });
-    } else {
-      warnings.push("Magic proxy derivation is not configured.");
     }
   }
 
