@@ -1670,9 +1670,23 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         signer,
       );
       if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
-        reply.code(400);
+        reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          error: "Polymarket credentials not found (connect first)",
+          ok: true,
+          venue: "polymarket",
+          walletAddress: signer,
+          skipped: true,
+          reason: "missing_credentials",
+          changed: false,
+          fetched: 0,
+          storedNew: 0,
+          alreadyKnown: 0,
+          skippedNoId: 0,
+          sampleVenueOrderIds: [],
+          tradeSync: {
+            insertedFillCount: 0,
+            positionsRecomputed: false,
+          },
         });
       }
 
@@ -1763,8 +1777,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         if (result.kind === "exists") alreadyKnown += 1;
       }
 
+      let tradeSync = {
+        insertedFillCount: 0,
+        positionsRecomputed: false,
+      };
       try {
-        await syncPolymarketTradesForSigner(pool, {
+        tradeSync = await syncPolymarketTradesForSigner(pool, {
           userId: user.id,
           signerAddress: signer,
         });
@@ -1780,11 +1798,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         venue: "polymarket",
         walletAddress: signer,
+        changed: storedNew > 0 || tradeSync.insertedFillCount > 0,
         fetched: ordersRaw.length,
         storedNew,
         alreadyKnown,
         skippedNoId,
         sampleVenueOrderIds: orderIds.slice(0, 10),
+        tradeSync,
       });
     },
   );
