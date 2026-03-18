@@ -45,6 +45,8 @@ const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
 const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
 const MARKET_SHARES_MICRO_STEP = 100n; // 4 decimals in 6-decimal share units
 const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
+const LIMIT_USD_MICRO_STEP = 100n; // 4 decimals in 6-decimal USDC
+const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -518,6 +520,20 @@ function roundPriceToTick(price: number, tickSize: number, side: PolymarketSide)
   const ticks = price / tickSize;
   const roundedTicks =
     side === "BUY" ? Math.ceil(ticks - 1e-9) : Math.floor(ticks + 1e-9);
+  return roundedTicks * tickSize;
+}
+
+function roundLimitPriceToTick(
+  price: number,
+  tickSize: number,
+  side: PolymarketSide,
+): number {
+  if (!Number.isFinite(price) || !Number.isFinite(tickSize) || tickSize <= 0) {
+    return price;
+  }
+  const ticks = price / tickSize;
+  const roundedTicks =
+    side === "BUY" ? Math.floor(ticks + 1e-9) : Math.ceil(ticks - 1e-9);
   return roundedTicks * tickSize;
 }
 
@@ -1147,8 +1163,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         const bestBid = findBestBid(orderbook.bids);
         const bestAsk = findBestAsk(orderbook.asks);
         const bestPrice = body.side === "BUY" ? bestAsk : bestBid;
+        const isLimitOrder = orderType === "GTC" || orderType === "GTD";
 
-        if (bestPrice == null || !Number.isFinite(bestPrice)) {
+        if (!isLimitOrder && (bestPrice == null || !Number.isFinite(bestPrice))) {
           reply.code(502);
           return reply.send({ error: "Missing top-of-book price" });
         }
@@ -1158,14 +1175,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Market is not accepting orders" });
         }
 
+        const topPrice = bestPrice ?? NaN;
         const slippageBps = body.slippageBps ?? null;
-        let price = bestPrice;
-        if (slippageBps != null) {
+        let price: number = isLimitOrder ? (body.limitPrice ?? NaN) : topPrice;
+        if (!isLimitOrder && slippageBps != null) {
           const multiplier =
             body.side === "BUY"
               ? 1 + slippageBps / 10_000
               : 1 - slippageBps / 10_000;
-          price = bestPrice * multiplier;
+          price = topPrice * multiplier;
         }
 
         const tickSize =
@@ -1180,7 +1198,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             : null);
 
         if (tickSize != null) {
-          price = roundPriceToTick(price, tickSize, body.side);
+          price = isLimitOrder
+            ? roundLimitPriceToTick(price, tickSize, body.side)
+            : roundPriceToTick(price, tickSize, body.side);
         }
 
         if (!Number.isFinite(price) || price <= 0) {
@@ -1271,34 +1291,50 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             }
           }
         } else {
+          const shareStep = LIMIT_SHARES_MICRO_STEP;
+          const usdcStep = LIMIT_USD_MICRO_STEP;
+          const precisionProduct = usdcStep * USDC_SCALE;
+          const stepForPrice =
+            precisionProduct / gcd(priceMicro, precisionProduct);
+          const step = lcm(stepForPrice, shareStep);
+
           if (amountType === "shares") {
-            reply.code(400);
-            return reply.send({
-              error: "amountType=shares is only supported for market orders",
-            });
-          }
+            if (amountSharesInput == null) {
+              reply.code(400);
+              return reply.send({ error: "amount is required for shares quotes" });
+            }
 
-          if (amountUsdInput == null) {
-            reply.code(400);
-            return reply.send({ error: "amountUsd is required for USD quotes" });
-          }
+            const sizeMicroRaw = BigInt(
+              Math.floor(amountSharesInput * 1_000_000),
+            );
+            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
 
-          const amountUsdMicro = BigInt(
-            Math.floor(amountUsdInput * 1_000_000),
-          );
+            if (sizeMicro <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Amount too small for order" });
+            }
+          } else {
+            if (amountUsdInput == null) {
+              reply.code(400);
+              return reply.send({ error: "amountUsd is required for USD quotes" });
+            }
 
-          if (amountUsdMicro <= 0n) {
-            reply.code(400);
-            return reply.send({ error: "Invalid amount or price" });
-          }
+            const amountUsdMicroRaw = BigInt(
+              Math.floor(amountUsdInput * 1_000_000),
+            );
+            const amountUsdMicro = amountUsdMicroRaw - (amountUsdMicroRaw % usdcStep);
+            if (amountUsdMicro <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Invalid amount or price" });
+            }
 
-          const denom = USDC_SCALE / gcd(priceMicro, USDC_SCALE);
-          const sizeMicroRaw = (amountUsdMicro * USDC_SCALE) / priceMicro;
-          sizeMicro = sizeMicroRaw - (sizeMicroRaw % denom);
+            const sizeMicroRaw = (amountUsdMicro * USDC_SCALE) / priceMicro;
+            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
 
-          if (sizeMicro <= 0n) {
-            reply.code(400);
-            return reply.send({ error: "Amount too small for order" });
+            if (sizeMicro <= 0n) {
+              reply.code(400);
+              return reply.send({ error: "Amount too small for order" });
+            }
           }
 
           makerAmountMicro =
@@ -1312,7 +1348,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const violatesMinOrderSize =
-          minOrderSize != null
+          isLimitOrder && minOrderSize != null
             ? sizeMicro < BigInt(Math.ceil(minOrderSize * 1_000_000))
             : null;
 

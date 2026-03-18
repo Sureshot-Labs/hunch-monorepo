@@ -126,6 +126,7 @@ export const polymarketQuoteBodySchema = z.object({
   amount: z.coerce.number().positive("amount must be > 0").optional(),
   amountType: zAmountType.optional(),
   orderType: zOrderType.optional(),
+  limitPrice: z.coerce.number().positive("limitPrice must be > 0").optional(),
   slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
 }).refine((value) => {
   const amountType = value.amountType ?? "usd";
@@ -135,4 +136,11 @@ export const polymarketQuoteBodySchema = z.object({
   return value.amountUsd != null || value.amount != null;
 }, {
   message: "amountUsd (or amount) is required",
+}).refine((value) => {
+  const orderType =
+    typeof value.orderType === "string" ? value.orderType.toUpperCase() : "FOK";
+  if (orderType === "FOK" || orderType === "FAK") return true;
+  return value.limitPrice != null;
+}, {
+  message: "limitPrice is required for limit orders",
 });
