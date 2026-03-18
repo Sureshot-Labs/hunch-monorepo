@@ -9,6 +9,7 @@ import {
 } from "fastify-type-provider-zod";
 import { ZodError } from "zod";
 import { onReqEnd, onReqStart } from "./metrics.js";
+import { closeRedis } from "./redis.js";
 import { registerRoutes } from "./routes/index.js";
 import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
@@ -52,6 +53,9 @@ export async function buildApp() {
   });
   app.addHook("onResponse", async (req, _reply) => {
     if (req._t0 != null) onReqEnd(req._t0);
+  });
+  app.addHook("onClose", async () => {
+    await closeRedis();
   });
 
   app.addHook("preSerialization", async (_request, reply, payload) => {

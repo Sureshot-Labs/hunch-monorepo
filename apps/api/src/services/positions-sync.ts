@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
 import {
+  expandPolymarketWallets,
   syncWalletPositionsFromTokenBalances,
   type WalletTokenBalance,
 } from "../repos/positions-repo.js";
@@ -756,405 +757,18 @@ async function fetchPolymarketFunderAddress(
   return funder;
 }
 
-async function syncPolymarketTradesForSigner(
-  pool: Pool,
-  inputs: { userId: string; signerAddress: string },
-): Promise<void> {
-  const creds = await AuthService.getVenueCredentials(
-    inputs.userId,
-    "polymarket",
-    inputs.signerAddress,
-  );
-  if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
-    return;
-  }
-
-  const { rows } = await pool.query<{ last_filled_at: Date | null }>(
-    `
-      select max(of.filled_at) as last_filled_at
-      from order_fills of
-      join orders o on o.id = of.order_id
-      where o.user_id = $1
-        and o.venue = 'polymarket'
-        and (lower(o.signer_address) = lower($2) or lower(o.wallet_address) = lower($2))
-    `,
-    [inputs.userId, inputs.signerAddress],
-  );
-  const lastFilledAt = rows[0]?.last_filled_at ?? null;
-  const afterSec =
-    lastFilledAt != null
-      ? Math.max(0, Math.floor(lastFilledAt.getTime() / 1000) - 1)
-      : null;
-
-  const tradesResponse = await fetchPolymarketTrades({
-    baseUrl: env.polymarketClobBase,
-    timeoutMs: 10_000,
-    address: inputs.signerAddress,
-    creds: {
-      apiKey: creds.apiKey,
-      apiSecret: creds.apiSecret,
-      apiPassphrase: creds.apiPassphrase,
-    },
-    query: afterSec != null ? { after: afterSec } : undefined,
-  });
-
-  if (!tradesResponse.ok) {
-    console.error("Polymarket trades sync failed", tradesResponse.payload);
-    return;
-  }
-
-  const trades = tradesResponse.trades;
-  if (!trades.length) return;
-
-  const orderIds = new Set<string>();
-  for (const trade of trades) {
-    if (trade.takerOrderId) orderIds.add(trade.takerOrderId);
-    for (const maker of trade.makerOrders ?? []) {
-      if (maker.orderId) orderIds.add(maker.orderId);
-    }
-  }
-
-  if (!orderIds.size) return;
-
-  const { rows: orderRows } = await pool.query<{
-    id: string;
-    venue_order_id: string;
-  }>(
-    `
-      select id, venue_order_id
-      from orders
-      where user_id = $1
-        and venue = 'polymarket'
-        and venue_order_id = any($2::text[])
-    `,
-    [inputs.userId, Array.from(orderIds)],
-  );
-
-  if (!orderRows.length) return;
-
-  const orderMap = new Map<string, string>();
-  for (const row of orderRows) {
-    if (row.venue_order_id) {
-      orderMap.set(row.venue_order_id, row.id);
-    }
-  }
-
-  const fillKeySet = new Set<string>();
-  const fillOrderIds: string[] = [];
-  const fillVenueIds: string[] = [];
-  const fillSizes: number[] = [];
-  const fillPrices: number[] = [];
-  const fillSides: string[] = [];
-  const fillTimes: Date[] = [];
-  const fillTradeIds: string[] = [];
-  const fillFees: number[] = [];
-  const volumeSourceIds: string[] = [];
-  const volumeNotionals: number[] = [];
-  const volumeTimes: Date[] = [];
-
-  for (const trade of trades) {
-    const tradeId = trade.id;
-    const matchTime = parseNumber(trade.matchTime) ?? parseNumber(trade.lastUpdate);
-    if (!tradeId || matchTime == null) continue;
-    const filledAt = new Date(matchTime * 1000);
-
-    const takerOrderId = trade.takerOrderId;
-    if (takerOrderId && orderMap.has(takerOrderId)) {
-      const side = normalizeFillSide(trade.side);
-      const size = parseNumber(trade.size);
-      const price = parseNumber(trade.price);
-      if (side && size != null && size > 0 && price != null && price > 0) {
-        const internalOrderId = orderMap.get(takerOrderId);
-        if (!internalOrderId) continue;
-        const venueFillId = `${tradeId}:taker`;
-        const key = `${internalOrderId}:${venueFillId}`;
-        if (!fillKeySet.has(key)) {
-          fillKeySet.add(key);
-          fillOrderIds.push(internalOrderId);
-          fillVenueIds.push(venueFillId);
-          fillSizes.push(size);
-          fillPrices.push(price);
-          fillSides.push(side);
-          fillTimes.push(filledAt);
-          fillTradeIds.push(tradeId);
-          fillFees.push(0);
-          volumeSourceIds.push(venueFillId);
-          volumeNotionals.push(size * price);
-          volumeTimes.push(filledAt);
-        }
-      }
-    }
-
-    for (const maker of trade.makerOrders ?? []) {
-      if (!maker.orderId || !orderMap.has(maker.orderId)) continue;
-      const side = normalizeFillSide(maker.side);
-      const size = parseNumber(maker.matchedAmount);
-      const price = parseNumber(maker.price);
-      if (side && size != null && size > 0 && price != null && price > 0) {
-        const internalOrderId = orderMap.get(maker.orderId);
-        if (!internalOrderId) continue;
-        const venueFillId = `${tradeId}:${maker.orderId}`;
-        const key = `${internalOrderId}:${venueFillId}`;
-        if (!fillKeySet.has(key)) {
-          fillKeySet.add(key);
-          fillOrderIds.push(internalOrderId);
-          fillVenueIds.push(venueFillId);
-          fillSizes.push(size);
-          fillPrices.push(price);
-          fillSides.push(side);
-          fillTimes.push(filledAt);
-          fillTradeIds.push(tradeId);
-          fillFees.push(0);
-          volumeSourceIds.push(venueFillId);
-          volumeNotionals.push(size * price);
-          volumeTimes.push(filledAt);
-        }
-      }
-    }
-  }
-
-  if (!fillOrderIds.length) return;
-
-  const { rows: insertedFills } = await pool.query<{
-    order_id: string;
-    fill_size: number;
-    fill_price: number;
-    fill_side: string;
-  }>(
-    `
-      with input as (
-        select *
-        from unnest(
-          $1::uuid[],
-          $2::text[],
-          $3::numeric[],
-          $4::numeric[],
-          $5::text[],
-          $6::timestamptz[],
-          $7::text[],
-          $8::numeric[]
-        ) as t(order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees)
-      )
-      insert into order_fills (
-        order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees
-      )
-      select
-        t.order_id, t.venue_fill_id, t.fill_size, t.fill_price, t.fill_side, t.filled_at, t.venue_trade_id, t.fees
-      from input t
-      where not exists (
-        select 1
-        from order_fills of
-        where of.order_id = t.order_id
-          and of.venue_fill_id = t.venue_fill_id
-      )
-      returning order_id, fill_size, fill_price, fill_side
-    `,
-    [
-      fillOrderIds,
-      fillVenueIds,
-      fillSizes,
-      fillPrices,
-      fillSides,
-      fillTimes,
-      fillTradeIds,
-      fillFees,
-    ],
-  );
-
-  if (volumeSourceIds.length) {
-    await insertVolumeEventsWithMultiplier(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.signerAddress,
-      venue: "polymarket",
-      sourceType: "order",
-      events: volumeSourceIds.map((sourceId, index) => ({
-        sourceId,
-        notionalUsd: volumeNotionals[index] ?? 0,
-        createdAt: volumeTimes[index] ?? new Date(),
-      })),
-    });
-  }
-
-  await pool.query(
-    `
-      with agg as (
-        select order_id,
-               sum(fill_size) as filled_size,
-               case when sum(fill_size) > 0
-                    then sum(fill_size * fill_price) / sum(fill_size)
-                    else null end as average_fill_price,
-               max(filled_at) as filled_at
-        from order_fills
-        where order_id = any($1::uuid[])
-        group by order_id
-      )
-      update orders o
-      set filled_size = agg.filled_size,
-          average_fill_price = agg.average_fill_price,
-          filled_at = agg.filled_at,
-          status = case
-            when o.status in ('cancelled', 'rejected', 'expired') then o.status
-            when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
-              then 'matched'
-            when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
-              then 'filled'
-            when agg.filled_size > 0 then 'partially_filled'
-            else o.status
-          end,
-          last_update = now()
-      from agg
-      where o.id = agg.order_id
-    `,
-    [Array.from(new Set(fillOrderIds))],
-  );
-
-  if (insertedFills.length) {
-    const orderIds = Array.from(
-      new Set(insertedFills.map((row) => row.order_id)),
-    );
-    const { rows: orderRows } = await pool.query<{
-      id: string;
-      venue_order_id: string | null;
-      token_id: string | null;
-      side: string | null;
-      wallet_address: string | null;
-    }>(
-      `
-        select id, venue_order_id, token_id, side, wallet_address
-        from orders
-        where id = any($1::uuid[])
-      `,
-      [orderIds],
-    );
-
-    const fillStats = new Map<
-      string,
-      { size: number; notional: number; fillSide: string | null }
-    >();
-    for (const fill of insertedFills) {
-      const nextSize = Number(fill.fill_size);
-      const nextPrice = Number(fill.fill_price);
-      if (!Number.isFinite(nextSize) || !Number.isFinite(nextPrice)) continue;
-      const stats = fillStats.get(fill.order_id) ?? {
-        size: 0,
-        notional: 0,
-        fillSide: fill.fill_side ?? null,
-      };
-      stats.size += nextSize;
-      stats.notional += nextSize * nextPrice;
-      stats.fillSide = stats.fillSide ?? fill.fill_side ?? null;
-      fillStats.set(fill.order_id, stats);
-    }
-
-    for (const order of orderRows) {
-      const stats = fillStats.get(order.id);
-      if (!stats || stats.size <= 0) continue;
-      const avgPrice = stats.notional > 0 ? stats.notional / stats.size : null;
-      void createNotificationSafe(
-        pool,
-        buildOrderNotification({
-          userId: inputs.userId,
-          venue: "polymarket",
-          status: "matched",
-          side: order.side ?? stats.fillSide,
-          size: stats.size,
-          price: avgPrice,
-          orderId: order.venue_order_id ?? order.id,
-          tokenId: order.token_id ?? null,
-          walletAddress: order.wallet_address ?? inputs.signerAddress,
-        }),
-      );
-    }
-  }
-}
-
-export type PositionsSyncResult = {
-  venue: Position["venue"];
-  walletAddress: string;
-  heldTokens: number;
-  knownTokens: number;
-  upsertedPositions: number;
-  flattenedPositions: number;
+type PolymarketTradeSyncOptions = {
+  syncPositionsOnFill?: boolean;
+  positionScope?: PositionScope;
+  prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
 };
 
-type PositionScope = "own" | "followed";
+type PolymarketTradeSyncResult = {
+  insertedFillCount: number;
+  positionsRecomputed: boolean;
+};
 
-async function syncKalshiPositionsFromSolana(
-  pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    positionScope: PositionScope;
-    prefetchedBalances?: SolanaTokenBalance[] | null;
-  },
-): Promise<PositionsSyncResult> {
-  const balances =
-    inputs.prefetchedBalances ??
-    (await fetchSolanaTokenBalancesByOwner({
-      rpcUrls: env.solanaRpcUrls,
-      timeoutMs: env.solanaRpcTimeoutMs,
-      owner: inputs.walletAddress,
-      includeToken2022: true,
-    }));
-
-  const tokenBalances = balances.map((balance) => ({
-    tokenId: `sol:${balance.mint}`,
-    size: balance.uiAmountString,
-  }));
-
-  if (tokenBalances.length) {
-    void markHotTokens({
-      tokenIds: tokenBalances.map((balance) => balance.tokenId),
-      venue: "dflow",
-    });
-  }
-
-  const result = await syncWalletPositionsFromTokenBalances(pool, {
-    userId: inputs.userId,
-    walletAddress: inputs.walletAddress,
-    venue: "kalshi",
-    positionScope: inputs.positionScope,
-    tokenBalances,
-    tokenIdLike: "sol:%",
-    flattenGraceSec: env.positionsSyncFlattenGraceSec,
-    protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
-  });
-
-  if (inputs.positionScope === "own") {
-    const [kalshiMetrics, kalshiNotifications] = await Promise.allSettled([
-      recomputePositionMetricsForWallet(pool, {
-        userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
-        venue: "kalshi",
-      }),
-      notifyResolvedPositions(pool, {
-        userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
-        venue: "kalshi",
-      }),
-    ]);
-    if (kalshiMetrics.status === "rejected") {
-      console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
-    }
-    if (kalshiNotifications.status === "rejected") {
-      console.error(
-        "Kalshi resolved position notification failed",
-        kalshiNotifications.reason,
-      );
-    }
-  }
-
-  return {
-    venue: "kalshi",
-    walletAddress: inputs.walletAddress,
-    heldTokens: result.heldTokens,
-    knownTokens: result.knownTokens,
-    upsertedPositions: result.upsertedPositions,
-    flattenedPositions: result.flattenedPositions,
-  };
-}
-
-async function syncPolymarketPositionsFromPolygon(
+async function syncPolymarketStoredPositionsFromPolygon(
   pool: Pool,
   inputs: {
     userId: string;
@@ -1163,22 +777,13 @@ async function syncPolymarketPositionsFromPolygon(
     prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
   },
 ): Promise<PositionsSyncResult> {
-  if (inputs.positionScope !== "followed") {
-    try {
-      await syncPolymarketTradesForSigner(pool, {
-        userId: inputs.userId,
-        signerAddress: inputs.walletAddress,
-      });
-    } catch (error) {
-      console.error("Polymarket trade sync failed", error);
-    }
-  }
-
   const prefetched = inputs.prefetchedBalances ?? null;
-  const funder = prefetched?.funderAddress ?? null;
   const owners =
     prefetched?.owners ??
-    resolvePolymarketOwnerAddresses(inputs.walletAddress, funder);
+    (await expandPolymarketWallets(pool, {
+      userId: inputs.userId,
+      walletAddresses: [inputs.walletAddress],
+    }));
   const tokenIds =
     prefetched?.candidateTokenIds ??
     (await fetchPolymarketCandidateTokenIds(pool, {
@@ -1283,7 +888,6 @@ async function syncPolymarketPositionsFromPolygon(
         );
       }
     }
-
   }
 
   if (allHeldTokens.size) {
@@ -1301,6 +905,481 @@ async function syncPolymarketPositionsFromPolygon(
     upsertedPositions,
     flattenedPositions,
   };
+}
+
+export async function syncPolymarketTradesForSigner(
+  pool: Pool,
+  inputs: { userId: string; signerAddress: string },
+  options: PolymarketTradeSyncOptions = {},
+): Promise<PolymarketTradeSyncResult> {
+  const creds = await AuthService.getVenueCredentials(
+    inputs.userId,
+    "polymarket",
+    inputs.signerAddress,
+  );
+  if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const { rows } = await pool.query<{ last_filled_at: Date | null }>(
+    `
+      select max(of.filled_at) as last_filled_at
+      from order_fills of
+      join orders o on o.id = of.order_id
+      where o.user_id = $1
+        and o.venue = 'polymarket'
+        and (lower(o.signer_address) = lower($2) or lower(o.wallet_address) = lower($2))
+    `,
+    [inputs.userId, inputs.signerAddress],
+  );
+  const lastFilledAt = rows[0]?.last_filled_at ?? null;
+  const afterSec =
+    lastFilledAt != null
+      ? Math.max(0, Math.floor(lastFilledAt.getTime() / 1000) - 1)
+      : null;
+
+  const tradesResponse = await fetchPolymarketTrades({
+    baseUrl: env.polymarketClobBase,
+    timeoutMs: 10_000,
+    address: inputs.signerAddress,
+    creds: {
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      apiPassphrase: creds.apiPassphrase,
+    },
+    query: afterSec != null ? { after: afterSec } : undefined,
+  });
+
+  if (!tradesResponse.ok) {
+    console.error("Polymarket trades sync failed", tradesResponse.payload);
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const trades = tradesResponse.trades;
+  if (!trades.length) {
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const orderIds = new Set<string>();
+  for (const trade of trades) {
+    if (trade.takerOrderId) orderIds.add(trade.takerOrderId);
+    for (const maker of trade.makerOrders ?? []) {
+      if (maker.orderId) orderIds.add(maker.orderId);
+    }
+  }
+
+  if (!orderIds.size) {
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const { rows: orderRows } = await pool.query<{
+    id: string;
+    venue_order_id: string;
+  }>(
+    `
+      select id, venue_order_id
+      from orders
+      where user_id = $1
+        and venue = 'polymarket'
+        and venue_order_id = any($2::text[])
+    `,
+    [inputs.userId, Array.from(orderIds)],
+  );
+
+  if (!orderRows.length) {
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const orderMap = new Map<string, string>();
+  for (const row of orderRows) {
+    if (row.venue_order_id) {
+      orderMap.set(row.venue_order_id, row.id);
+    }
+  }
+
+  const fillKeySet = new Set<string>();
+  const fillOrderIds: string[] = [];
+  const fillVenueIds: string[] = [];
+  const fillSizes: number[] = [];
+  const fillPrices: number[] = [];
+  const fillSides: string[] = [];
+  const fillTimes: Date[] = [];
+  const fillTradeIds: string[] = [];
+  const fillFees: number[] = [];
+  const volumeSourceIds: string[] = [];
+  const volumeNotionals: number[] = [];
+  const volumeTimes: Date[] = [];
+
+  for (const trade of trades) {
+    const tradeId = trade.id;
+    const matchTime = parseNumber(trade.matchTime) ?? parseNumber(trade.lastUpdate);
+    if (!tradeId || matchTime == null) continue;
+    const filledAt = new Date(matchTime * 1000);
+
+    const takerOrderId = trade.takerOrderId;
+    if (takerOrderId && orderMap.has(takerOrderId)) {
+      const side = normalizeFillSide(trade.side);
+      const size = parseNumber(trade.size);
+      const price = parseNumber(trade.price);
+      if (side && size != null && size > 0 && price != null && price > 0) {
+        const internalOrderId = orderMap.get(takerOrderId);
+        if (!internalOrderId) continue;
+        const venueFillId = `${tradeId}:taker`;
+        const key = `${internalOrderId}:${venueFillId}`;
+        if (!fillKeySet.has(key)) {
+          fillKeySet.add(key);
+          fillOrderIds.push(internalOrderId);
+          fillVenueIds.push(venueFillId);
+          fillSizes.push(size);
+          fillPrices.push(price);
+          fillSides.push(side);
+          fillTimes.push(filledAt);
+          fillTradeIds.push(tradeId);
+          fillFees.push(0);
+          volumeSourceIds.push(venueFillId);
+          volumeNotionals.push(size * price);
+          volumeTimes.push(filledAt);
+        }
+      }
+    }
+
+    for (const maker of trade.makerOrders ?? []) {
+      if (!maker.orderId || !orderMap.has(maker.orderId)) continue;
+      const side = normalizeFillSide(maker.side);
+      const size = parseNumber(maker.matchedAmount);
+      const price = parseNumber(maker.price);
+      if (side && size != null && size > 0 && price != null && price > 0) {
+        const internalOrderId = orderMap.get(maker.orderId);
+        if (!internalOrderId) continue;
+        const venueFillId = `${tradeId}:${maker.orderId}`;
+        const key = `${internalOrderId}:${venueFillId}`;
+        if (!fillKeySet.has(key)) {
+          fillKeySet.add(key);
+          fillOrderIds.push(internalOrderId);
+          fillVenueIds.push(venueFillId);
+          fillSizes.push(size);
+          fillPrices.push(price);
+          fillSides.push(side);
+          fillTimes.push(filledAt);
+          fillTradeIds.push(tradeId);
+          fillFees.push(0);
+          volumeSourceIds.push(venueFillId);
+          volumeNotionals.push(size * price);
+          volumeTimes.push(filledAt);
+        }
+      }
+    }
+  }
+
+  if (!fillOrderIds.length) {
+    return {
+      insertedFillCount: 0,
+      positionsRecomputed: false,
+    };
+  }
+
+  const { rows: insertedFills } = await pool.query<{
+    order_id: string;
+    fill_size: number;
+    fill_price: number;
+    fill_side: string;
+  }>(
+    `
+      with input as (
+        select *
+        from unnest(
+          $1::uuid[],
+          $2::text[],
+          $3::numeric[],
+          $4::numeric[],
+          $5::text[],
+          $6::timestamptz[],
+          $7::text[],
+          $8::numeric[]
+        ) as t(order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees)
+      )
+      insert into order_fills (
+        order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees
+      )
+      select
+        t.order_id, t.venue_fill_id, t.fill_size, t.fill_price, t.fill_side, t.filled_at, t.venue_trade_id, t.fees
+      from input t
+      where not exists (
+        select 1
+        from order_fills of
+        where of.order_id = t.order_id
+          and of.venue_fill_id = t.venue_fill_id
+      )
+      returning order_id, fill_size, fill_price, fill_side
+    `,
+    [
+      fillOrderIds,
+      fillVenueIds,
+      fillSizes,
+      fillPrices,
+      fillSides,
+      fillTimes,
+      fillTradeIds,
+      fillFees,
+    ],
+  );
+
+  if (volumeSourceIds.length) {
+    await insertVolumeEventsWithMultiplier(pool, {
+      userId: inputs.userId,
+      walletAddress: inputs.signerAddress,
+      venue: "polymarket",
+      sourceType: "order",
+      events: volumeSourceIds.map((sourceId, index) => ({
+        sourceId,
+        notionalUsd: volumeNotionals[index] ?? 0,
+        createdAt: volumeTimes[index] ?? new Date(),
+      })),
+    });
+  }
+
+  await pool.query(
+    `
+      with agg as (
+        select order_id,
+               sum(fill_size) as filled_size,
+               case when sum(fill_size) > 0
+                    then sum(fill_size * fill_price) / sum(fill_size)
+                    else null end as average_fill_price,
+               max(filled_at) as filled_at
+        from order_fills
+        where order_id = any($1::uuid[])
+        group by order_id
+      )
+      update orders o
+      set filled_size = agg.filled_size,
+          average_fill_price = agg.average_fill_price,
+          filled_at = agg.filled_at,
+          status = case
+            when o.status in ('cancelled', 'rejected', 'expired') then o.status
+            when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
+              then 'matched'
+            when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
+              then 'filled'
+            when agg.filled_size > 0 then 'partially_filled'
+            else o.status
+          end,
+          last_update = now()
+      from agg
+      where o.id = agg.order_id
+    `,
+    [Array.from(new Set(fillOrderIds))],
+  );
+
+  let positionsRecomputed = false;
+  if (insertedFills.length && options.syncPositionsOnFill !== false) {
+    try {
+      await syncPolymarketStoredPositionsFromPolygon(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.signerAddress,
+        positionScope: options.positionScope ?? "own",
+        prefetchedBalances: options.prefetchedBalances ?? null,
+      });
+      positionsRecomputed = true;
+    } catch (error) {
+      console.error(
+        "Polymarket position recompute after trade sync failed",
+        error,
+      );
+    }
+  }
+
+  if (insertedFills.length) {
+    const orderIds = Array.from(
+      new Set(insertedFills.map((row) => row.order_id)),
+    );
+    const { rows: orderRows } = await pool.query<{
+      id: string;
+      venue_order_id: string | null;
+      token_id: string | null;
+      side: string | null;
+      wallet_address: string | null;
+    }>(
+      `
+        select id, venue_order_id, token_id, side, wallet_address
+        from orders
+        where id = any($1::uuid[])
+      `,
+      [orderIds],
+    );
+
+    const fillStats = new Map<
+      string,
+      { size: number; notional: number; fillSide: string | null }
+    >();
+    for (const fill of insertedFills) {
+      const nextSize = Number(fill.fill_size);
+      const nextPrice = Number(fill.fill_price);
+      if (!Number.isFinite(nextSize) || !Number.isFinite(nextPrice)) continue;
+      const stats = fillStats.get(fill.order_id) ?? {
+        size: 0,
+        notional: 0,
+        fillSide: fill.fill_side ?? null,
+      };
+      stats.size += nextSize;
+      stats.notional += nextSize * nextPrice;
+      stats.fillSide = stats.fillSide ?? fill.fill_side ?? null;
+      fillStats.set(fill.order_id, stats);
+    }
+
+    for (const order of orderRows) {
+      const stats = fillStats.get(order.id);
+      if (!stats || stats.size <= 0) continue;
+      const avgPrice = stats.notional > 0 ? stats.notional / stats.size : null;
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: inputs.userId,
+          venue: "polymarket",
+          status: "matched",
+          side: order.side ?? stats.fillSide,
+          size: stats.size,
+          price: avgPrice,
+          orderId: order.venue_order_id ?? order.id,
+          tokenId: order.token_id ?? null,
+          walletAddress: order.wallet_address ?? inputs.signerAddress,
+        }),
+      );
+    }
+  }
+
+  return {
+    insertedFillCount: insertedFills.length,
+    positionsRecomputed,
+  };
+}
+
+export type PositionsSyncResult = {
+  venue: Position["venue"];
+  walletAddress: string;
+  heldTokens: number;
+  knownTokens: number;
+  upsertedPositions: number;
+  flattenedPositions: number;
+};
+
+type PositionScope = "own" | "followed";
+
+async function syncKalshiPositionsFromSolana(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+    prefetchedBalances?: SolanaTokenBalance[] | null;
+  },
+): Promise<PositionsSyncResult> {
+  const balances =
+    inputs.prefetchedBalances ??
+    (await fetchSolanaTokenBalancesByOwner({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      owner: inputs.walletAddress,
+      includeToken2022: true,
+    }));
+
+  const tokenBalances = balances.map((balance) => ({
+    tokenId: `sol:${balance.mint}`,
+    size: balance.uiAmountString,
+  }));
+
+  if (tokenBalances.length) {
+    void markHotTokens({
+      tokenIds: tokenBalances.map((balance) => balance.tokenId),
+      venue: "dflow",
+    });
+  }
+
+  const result = await syncWalletPositionsFromTokenBalances(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "kalshi",
+    positionScope: inputs.positionScope,
+    tokenBalances,
+    tokenIdLike: "sol:%",
+    flattenGraceSec: env.positionsSyncFlattenGraceSec,
+    protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
+  });
+
+  if (inputs.positionScope === "own") {
+    const [kalshiMetrics, kalshiNotifications] = await Promise.allSettled([
+      recomputePositionMetricsForWallet(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "kalshi",
+      }),
+      notifyResolvedPositions(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: "kalshi",
+      }),
+    ]);
+    if (kalshiMetrics.status === "rejected") {
+      console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
+    }
+    if (kalshiNotifications.status === "rejected") {
+      console.error(
+        "Kalshi resolved position notification failed",
+        kalshiNotifications.reason,
+      );
+    }
+  }
+
+  return {
+    venue: "kalshi",
+    walletAddress: inputs.walletAddress,
+    heldTokens: result.heldTokens,
+    knownTokens: result.knownTokens,
+    upsertedPositions: result.upsertedPositions,
+    flattenedPositions: result.flattenedPositions,
+  };
+}
+
+async function syncPolymarketPositionsFromPolygon(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+    prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
+  },
+): Promise<PositionsSyncResult> {
+  if (inputs.positionScope !== "followed") {
+    try {
+      await syncPolymarketTradesForSigner(pool, {
+        userId: inputs.userId,
+        signerAddress: inputs.walletAddress,
+      }, {
+        syncPositionsOnFill: false,
+        positionScope: inputs.positionScope,
+        prefetchedBalances: inputs.prefetchedBalances ?? null,
+      });
+    } catch (error) {
+      console.error("Polymarket trade sync failed", error);
+    }
+  }
+
+  return syncPolymarketStoredPositionsFromPolygon(pool, inputs);
 }
 
 async function syncLimitlessPositionsFromPortfolio(

@@ -76,7 +76,7 @@ function normalizeTokenIdsForLookup(
   return tokenIds;
 }
 
-async function expandPolymarketWallets(
+export async function expandPolymarketWallets(
   pool: Pool,
   inputs: { userId: string; walletAddresses: string[] },
 ): Promise<string[]> {

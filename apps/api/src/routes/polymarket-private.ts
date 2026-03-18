@@ -32,10 +32,12 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
+import { syncPolymarketTradesForSigner } from "../services/positions-sync.js";
 import {
   extractOrderArray,
   extractOrderId,
   extractTokenId,
+  normalizeOpenOrder,
   polymarketL2Request,
 } from "../services/polymarket-clob-l2.js";
 
@@ -688,6 +690,34 @@ function derivePriceAndSize(
   const size = Number(sizeMicro) / 10 ** POLY_DECIMALS;
 
   if (!Number.isFinite(price) || !Number.isFinite(size)) {
+    return { price: null, size: null };
+  }
+
+  return { price, size };
+}
+
+function derivePriceAndSizeFromOpenOrder(
+  order: ReturnType<typeof normalizeOpenOrder>,
+  side: PolymarketSide | null,
+): { price: number | null; size: number | null } {
+  if (!order || !side) return { price: null, size: null };
+
+  const price =
+    typeof order.price === "string" && order.price.trim().length > 0
+      ? Number(order.price)
+      : null;
+  const size =
+    typeof order.originalSize === "string" &&
+    order.originalSize.trim().length > 0
+      ? Number(order.originalSize)
+      : null;
+
+  if (
+    price == null ||
+    size == null ||
+    !Number.isFinite(price) ||
+    !Number.isFinite(size)
+  ) {
     return { price: null, size: null };
   }
 
@@ -1689,20 +1719,32 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
         orderIds.push(venueOrderId);
 
-        const tokenId = extractTokenId(o);
+        const normalizedOpenOrder = normalizeOpenOrder(o);
+        const tokenId = normalizedOpenOrder?.assetId ?? extractTokenId(o);
         const record = isRecord(o) ? o : null;
-        const orderType = record ? extractOrderType(record) : null;
+        const orderType =
+          (record ? extractOrderType(record) : null) ??
+          (normalizedOpenOrder?.type
+            ? normalizeOrderType(normalizedOpenOrder.type)
+            : null);
         const sideRaw =
-          typeof record?.side === "string" ? record.side.toUpperCase() : null;
+          normalizedOpenOrder?.side?.toUpperCase() ??
+          (typeof record?.side === "string" ? record.side.toUpperCase() : null);
         const side =
           sideRaw === "BUY" || sideRaw === "SELL" ? sideRaw : null;
-        const { price, size } = side && record
-          ? derivePriceAndSize(record, side)
-          : { price: null, size: null };
+        const derivedAmounts =
+          side && record
+            ? derivePriceAndSize(record, side)
+            : { price: null, size: null };
+        const { price, size } =
+          derivedAmounts.price != null && derivedAmounts.size != null
+            ? derivedAmounts
+            : derivePriceAndSizeFromOpenOrder(normalizedOpenOrder, side);
+        const orderWalletAddress = normalizedOpenOrder?.makerAddress ?? funder;
 
         const result = await storeOrder(pool, {
           userId: user.id,
-          walletAddress: funder,
+          walletAddress: orderWalletAddress,
           signerAddress: signer,
           venue: "polymarket",
           venueOrderId,
@@ -1714,10 +1756,23 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           status: "live",
           errorMessage: null,
           rawError: null,
+          orderPayload: o,
         });
 
         if (result.kind === "stored") storedNew += 1;
         if (result.kind === "exists") alreadyKnown += 1;
+      }
+
+      try {
+        await syncPolymarketTradesForSigner(pool, {
+          userId: user.id,
+          signerAddress: signer,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Polymarket trade sync during orders sync failed",
+        );
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");

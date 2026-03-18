@@ -154,7 +154,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.last_update as updated_at,
     o.filled_at,
     o.cancelled_at,
-    ut.market_id as unified_market_id,
+    o.market_id as unified_market_id,
     null::text as input_mint,
     null::text as output_mint,
     null::text as amount_in,
@@ -162,11 +162,26 @@ const buildOrdersSelect = (whereClause: string): string => `
     null::text as input_decimals,
     null::text as output_decimals,
     null::text as tx_signature
-  from orders o
-  left join unified_tokens ut
-    on ut.token_id = o.token_id
-    and ut.venue = o.venue
-  ${whereClause}
+  from (
+    select
+      o.*,
+      ut.market_id,
+      row_number() over (
+        partition by o.user_id, o.venue, o.venue_order_id
+        order by
+          (o.price is not null)::int desc,
+          (o.size is not null)::int desc,
+          (o.order_payload is not null)::int desc,
+          posted_at desc nulls last,
+          id desc
+      ) as row_rank
+    from orders o
+    left join unified_tokens ut
+      on ut.token_id = o.token_id
+      and ut.venue = o.venue
+    ${whereClause}
+  ) o
+  where o.row_rank = 1
 `;
 
 const buildExecutionsSelect = (whereClause: string): string => `

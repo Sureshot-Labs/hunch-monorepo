@@ -72,3 +72,26 @@ export async function getRedis(): Promise<RedisClient | null> {
   const { redis } = await getRedisStatus();
   return redis;
 }
+
+export async function closeRedis(): Promise<void> {
+  if (!client) {
+    cacheStatus(env.redisUrl ? "loading" : "disabled");
+    return;
+  }
+
+  const redisClient = client;
+  client = null;
+
+  try {
+    await redisClient.quit();
+  } catch (error) {
+    console.warn("[redis] quit failed", String(error));
+    try {
+      await redisClient.disconnect();
+    } catch (disconnectError) {
+      console.warn("[redis] disconnect failed", String(disconnectError));
+    }
+  } finally {
+    cacheStatus(env.redisUrl ? "loading" : "disabled");
+  }
+}

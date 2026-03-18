@@ -411,6 +411,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const venues = query.venues;
       const usingVenueList = Boolean(venues && venues.length);
       const forceSync = query.force === true;
+      const allowPolymarketFunders =
+        query.venue === "polymarket" ||
+        venues?.includes("polymarket") ||
+        (!query.venue && (!venues || venues.length === 0));
 
       try {
         if (!query.wallets || query.wallets.length === 0) {
@@ -436,6 +440,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               user.id,
               walletAddress,
               query.wallets,
+              { allowPolymarketFunders },
             )
           : [walletAddress];
         const expandedWalletAddresses = query.wallets?.length
@@ -443,6 +448,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               user.id,
               walletAddress,
               query.wallets,
+              { allowPolymarketFunders },
             )
           : baseWalletAddresses;
         if (baseWalletAddresses.length === 0) {
@@ -550,6 +556,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 user.id,
                 walletAddress,
                 query.wallets,
+                { allowPolymarketFunders: true },
               )
             : [];
           const kalshiWallets = venuesToSync.includes("kalshi")

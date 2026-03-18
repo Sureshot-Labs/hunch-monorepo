@@ -9,11 +9,15 @@ function extractPayloadAddress(
 ): string | null {
   if (!payload || typeof payload !== "object") return null;
   const record = payload as Record<string, unknown>;
-  const value = record[key];
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!EVM_ADDRESS_RE.test(trimmed)) return null;
-  return trimmed;
+  const candidates =
+    key === "maker" ? [record.maker, record.maker_address] : [record.signer, record.signer_address];
+  for (const value of candidates) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!EVM_ADDRESS_RE.test(trimmed)) continue;
+    return trimmed;
+  }
+  return null;
 }
 
 function normalizeAddress(value: string): string {
@@ -138,18 +142,24 @@ async function storeOrderInTx(
     id: string;
     wallet_address: string | null;
     signer_address: string | null;
+    price: number | null;
+    size: number | null;
+    order_payload: unknown | null;
   }>(
-    `SELECT id, wallet_address, signer_address
+    `SELECT id, wallet_address, signer_address, price, size, order_payload
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
-       AND (wallet_address IS NULL OR wallet_address = $4 OR signer_address = $5 OR wallet_address = $5)
+     ORDER BY
+       (price IS NOT NULL)::int DESC,
+       (size IS NOT NULL)::int DESC,
+       (order_payload IS NOT NULL)::int DESC,
+       posted_at DESC NULLS LAST,
+       id DESC
      LIMIT 1`,
     [
       inputs.venue,
       inputs.venueOrderId,
       inputs.userId,
-      resolvedWalletAddress,
-      resolvedSignerAddress,
     ],
   );
 
@@ -172,6 +182,21 @@ async function storeOrderInTx(
       paramCount += 1;
       updates.push(`signer_address = $${paramCount}`);
       params.push(signerAddress);
+    }
+    if (existing.price == null && inputs.price != null) {
+      paramCount += 1;
+      updates.push(`price = $${paramCount}`);
+      params.push(inputs.price);
+    }
+    if (existing.size == null && inputs.size != null) {
+      paramCount += 1;
+      updates.push(`size = $${paramCount}`);
+      params.push(inputs.size);
+    }
+    if (!existing.order_payload && inputs.orderPayload != null) {
+      paramCount += 1;
+      updates.push(`order_payload = $${paramCount}`);
+      params.push(JSON.stringify(inputs.orderPayload));
     }
     if (updates.length) {
       paramCount += 1;

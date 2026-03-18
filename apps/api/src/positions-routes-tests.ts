@@ -198,6 +198,27 @@ async function main() {
       venue: "polymarket",
     });
 
+    const persistedSyncResponse = await app.inject({
+      method: "POST",
+      url:
+        `/positions/sync?venue=polymarket&wallets=${encodeURIComponent(
+          persistedContext.funderWallet,
+        )}&force=true`,
+      headers: persistedContext.authHeaders,
+    });
+
+    assert.equal(persistedSyncResponse.statusCode, 200);
+    const persistedSyncPayload = persistedSyncResponse.json();
+    assert.equal(persistedSyncPayload.message, "Positions synced");
+    assert.equal(persistedSyncPayload.summary?.synced, 1);
+    assert.equal(persistedSyncPayload.results?.length, 1);
+    assert.equal(
+      persistedSyncPayload.results?.[0]?.walletAddress,
+      persistedContext.funderWallet,
+    );
+    assert.equal(persistedSyncPayload.results?.[0]?.venue, "polymarket");
+    assert.equal(persistedSyncPayload.results?.[0]?.status, "ok");
+
     const limitlessResponse = await app.inject({
       method: "GET",
       url:
