@@ -19,17 +19,23 @@ let hotRefreshing = false;
 let wsRefreshRunning = false;
 
 async function periodicHotRefresh() {
-  if (hotRefreshing || fullBootstrapping) return;
+  if (hotRefreshing) return;
   hotRefreshing = true;
+  const startedAt = Date.now();
   try {
     log.info("Limitless hot refresh started");
-    const result = await syncHotLimitlessMarkets();
-    await backfillHotLimitlessAmmPrices();
-    if (result.processedMarkets > 0) {
+    const marketResult = await syncHotLimitlessMarkets();
+    const ammResult = await backfillHotLimitlessAmmPrices();
+    if (marketResult.processedMarkets > 0) {
       resubscribeMarketWSSubscriptions();
     }
     log.info("Limitless hot refresh finished", {
-      markets: result.processedMarkets,
+      markets: marketResult.processedMarkets,
+      ammDemandedMarkets: ammResult.demandedMarkets,
+      ammScannedMarkets: ammResult.scannedMarkets,
+      ammUpdatedMarkets: ammResult.updatedMarkets,
+      ammSkippedCooldownMarkets: ammResult.skippedCooldownMarkets,
+      durationMs: Date.now() - startedAt,
     });
   } catch (e) {
     if (isPgSetupIssue(e)) {
@@ -44,13 +50,16 @@ async function periodicHotRefresh() {
 }
 
 async function periodicFullBootstrap() {
-  if (fullBootstrapping || hotRefreshing) return;
+  if (fullBootstrapping) return;
   fullBootstrapping = true;
+  const startedAt = Date.now();
   try {
     log.info("Limitless full bootstrap started");
     await bootstrapLimitless();
     resubscribeMarketWSSubscriptions();
-    log.info("Limitless full bootstrap finished");
+    log.info("Limitless full bootstrap finished", {
+      durationMs: Date.now() - startedAt,
+    });
   } catch (e) {
     if (isPgSetupIssue(e)) {
       log.warn(`bootstrap blocked: ${formatPgError(e)}`);
@@ -93,14 +102,6 @@ async function main() {
     addresses: targets.addresses.length,
   });
   startMarketWS(targets);
-  void backfillHotLimitlessAmmPrices().catch((e) => {
-    if (isPgSetupIssue(e)) {
-      log.warn(`amm backfill blocked: ${formatPgError(e)}`);
-      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
-    } else {
-      log.warn("startup amm backfill err", e);
-    }
-  });
   void (async () => {
     log.info("Limitless startup: running initial hot refresh");
     try {
@@ -115,16 +116,7 @@ async function main() {
     }
 
     log.info("Limitless startup: running initial full bootstrap");
-    try {
-      await periodicFullBootstrap();
-    } catch (e) {
-      if (isPgSetupIssue(e)) {
-        log.warn(`bootstrap blocked: ${formatPgError(e)}`);
-        log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
-      } else {
-        log.warn("startup bootstrap err", e);
-      }
-    }
+    void periodicFullBootstrap();
   })();
   // Frequent hot refresh for live markets and stream-marked tokens.
   setInterval(periodicHotRefresh, env.refreshMinutes * 60 * 1000);

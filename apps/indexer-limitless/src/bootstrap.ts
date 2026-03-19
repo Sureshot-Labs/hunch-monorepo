@@ -2,6 +2,13 @@ import { env } from "./env.js";
 import { log } from "./log.js";
 import { fetchLimitlessAmmQuotePair } from "./ammQuote.js";
 import {
+  buildWsTargets,
+  countHotAmmQuoteCandidates,
+  selectHotAmmQuoteCandidates,
+  type HotLimitlessMarketRow,
+  type WsMarketRefRow,
+} from "./hot-targets.js";
+import {
   fetchAllActive,
   fetchActivePage,
   fetchMarket,
@@ -186,18 +193,6 @@ async function applyOrderbookTop(
   }
 }
 
-type HotMarketRefRow = {
-  slug: string | null;
-  address: string | null;
-};
-
-type HotAmmMarketRow = {
-  market_id: string;
-  address: string | null;
-  token_yes: string | null;
-  token_no: string | null;
-};
-
 function clampHotProbeLimit(limit: number): number {
   return Math.max(200, Math.min(2000, Math.trunc(limit)));
 }
@@ -250,51 +245,138 @@ async function fetchHotTokenIds(limit?: number): Promise<string[]> {
   }
 }
 
+async function resolveOrderedHotLimitlessMarketRows(
+  limit?: number,
+): Promise<HotLimitlessMarketRow[]> {
+  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
+  if (!tokenIds.length) return [];
+
+  const params: Array<string[] | number> = [tokenIds];
+  const limitValue =
+    typeof limit === "number" && Number.isFinite(limit)
+      ? Math.max(1, Math.trunc(limit))
+      : null;
+  const limitSql =
+    limitValue != null
+      ? (() => {
+          params.push(limitValue);
+          return `limit $${params.length}`;
+        })()
+      : "";
+
+  const { rows } = await pool.query<HotLimitlessMarketRow>(
+    `
+      with hot_tokens as (
+        select token_id, ord::int as ord
+        from unnest($1::text[]) with ordinality as t(token_id, ord)
+      ),
+      hot_markets as (
+        select
+          m.id as market_id,
+          min(ht.ord)::int as hot_rank,
+          coalesce(e.slug, m.slug) as slug,
+          lower(nullif(m.metadata->>'address', '')) as address,
+          nullif(m.metadata->>'tradeType', '') as trade_type,
+          m.token_yes,
+          m.token_no,
+          m.volume_total,
+          m.liquidity
+        from hot_tokens ht
+        join unified_tokens t on t.token_id = ht.token_id
+        join unified_markets m on m.id = t.market_id
+        left join unified_events e on e.id = m.event_id
+        where m.venue = 'limitless'
+          and m.status = 'ACTIVE'
+        group by
+          m.id,
+          coalesce(e.slug, m.slug),
+          lower(nullif(m.metadata->>'address', '')),
+          nullif(m.metadata->>'tradeType', ''),
+          m.token_yes,
+          m.token_no,
+          m.volume_total,
+          m.liquidity
+      )
+      select
+        market_id,
+        hot_rank,
+        slug,
+        address,
+        trade_type,
+        token_yes,
+        token_no,
+        volume_total,
+        liquidity
+      from hot_markets
+      order by hot_rank asc,
+               volume_total desc nulls last,
+               liquidity desc nulls last
+      ${limitSql}
+    `,
+    params,
+  );
+
+  return rows;
+}
+
 export async function backfillHotLimitlessAmmPrices(): Promise<{
+  demandedMarkets: number;
   scannedMarkets: number;
   updatedMarkets: number;
+  skippedCooldownMarkets: number;
 }> {
   if (!env.limitlessEnabled || env.hotAmmQuoteMaxMarkets <= 0) {
-    return { scannedMarkets: 0, updatedMarkets: 0 };
+    return {
+      demandedMarkets: 0,
+      scannedMarkets: 0,
+      updatedMarkets: 0,
+      skippedCooldownMarkets: 0,
+    };
   }
 
   await ensureRedis();
   await pool.query("select 1");
 
-  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
-  if (!tokenIds.length) return { scannedMarkets: 0, updatedMarkets: 0 };
+  const rows = await resolveOrderedHotLimitlessMarketRows();
+  if (!rows.length) {
+    return {
+      demandedMarkets: 0,
+      scannedMarkets: 0,
+      updatedMarkets: 0,
+      skippedCooldownMarkets: 0,
+    };
+  }
 
-  const { rows } = await pool.query<HotAmmMarketRow>(
-    `
-      select distinct on (m.id)
-        m.id as market_id,
-        lower(nullif(m.metadata->>'address', '')) as address,
-        m.token_yes,
-        m.token_no
-      from unified_tokens t
-      join unified_markets m on m.id = t.market_id
-      where t.token_id = any($1::text[])
-        and m.venue = 'limitless'
-        and m.status = 'ACTIVE'
-        and coalesce(m.metadata->>'tradeType', 'clob') = 'amm'
-        and nullif(m.metadata->>'address', '') is not null
-        and m.token_yes is not null
-        and m.token_no is not null
-      order by m.id, m.volume_total desc nulls last, m.updated_at_db desc
-      limit $2
-    `,
-    [tokenIds, env.hotAmmQuoteMaxMarkets],
-  );
+  const candidates = selectHotAmmQuoteCandidates(rows, env.hotAmmQuoteMaxMarkets);
+  const demandedMarkets = countHotAmmQuoteCandidates(rows);
+  if (!candidates.length) {
+    return {
+      demandedMarkets,
+      scannedMarkets: 0,
+      updatedMarkets: 0,
+      skippedCooldownMarkets: 0,
+    };
+  }
+  if (candidates.length < demandedMarkets) {
+    log.warn("Limitless hot AMM quote backfill capped", {
+      demandedMarkets,
+      maxMarkets: env.hotAmmQuoteMaxMarkets,
+    });
+  }
 
   const ts = new Date();
   let updatedMarkets = 0;
+  let skippedCooldownMarkets = 0;
 
-  for (const row of rows) {
+  for (const row of candidates) {
     const address = row.address?.toLowerCase() ?? null;
     if (!address) continue;
 
     const nextRetryAt = hotAmmQuoteRetryAt.get(address) ?? 0;
-    if (nextRetryAt > Date.now()) continue;
+    if (nextRetryAt > Date.now()) {
+      skippedCooldownMarkets += 1;
+      continue;
+    }
 
     hotAmmQuoteRetryAt.set(address, Date.now() + env.hotAmmQuoteCooldownMs);
 
@@ -327,14 +409,19 @@ export async function backfillHotLimitlessAmmPrices(): Promise<{
     }
   }
 
-  if (updatedMarkets > 0) {
-    log.info("Limitless hot AMM quote backfill complete", {
-      scannedMarkets: rows.length,
-      updatedMarkets,
-    });
-  }
+  log.info("Limitless hot AMM quote backfill complete", {
+    demandedMarkets,
+    scannedMarkets: candidates.length,
+    updatedMarkets,
+    skippedCooldownMarkets,
+  });
 
-  return { scannedMarkets: rows.length, updatedMarkets };
+  return {
+    demandedMarkets,
+    scannedMarkets: candidates.length,
+    updatedMarkets,
+    skippedCooldownMarkets,
+  };
 }
 
 function splitBudget(total: number, hotShare: number): { hotBudget: number } {
@@ -343,25 +430,9 @@ function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   return { hotBudget };
 }
 
-async function resolveHotMarketRefs(
-  tokenIds: string[],
-): Promise<string[]> {
-  if (!tokenIds.length) return [];
-
-  const { rows } = await pool.query<HotMarketRefRow>(
-    `
-      select distinct
-        coalesce(e.slug, m.slug) as slug,
-        nullif(m.metadata->>'address', '') as address
-      from unified_tokens t
-      join unified_markets m on m.id = t.market_id
-      left join unified_events e on e.id = m.event_id
-      where t.token_id = any($1::text[])
-        and m.venue = 'limitless'
-    `,
-    [tokenIds],
-  );
-
+function resolveHotMarketRefs(
+  rows: ReadonlyArray<HotLimitlessMarketRow>,
+): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const row of rows) {
@@ -710,14 +781,12 @@ export async function syncHotLimitlessMarkets(): Promise<{
   await ensureRedis();
   await pool.query("select 1");
 
-  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
-  if (!tokenIds.length) return { processedMarkets: 0 };
-
-  const refs = await resolveHotMarketRefs(tokenIds);
+  const rows = await resolveOrderedHotLimitlessMarketRows();
+  const refs = resolveHotMarketRefs(rows);
   if (!refs.length) return { processedMarkets: 0 };
 
   log.info("Limitless hot status refresh…", {
-    tokens: tokenIds.length,
+    hotMarkets: rows.length,
     refs: refs.length,
   });
 
@@ -747,113 +816,16 @@ export async function syncHotLimitlessMarkets(): Promise<{
   }
 
   log.info("Limitless hot status refresh complete", {
-    tokens: tokenIds.length,
+    hotMarkets: rows.length,
     markets: processedMarkets,
   });
 
   return { processedMarkets };
 }
 
-type WsMarketRefRow = {
-  slug: string | null;
-  address: string | null;
-  trade_type: string | null;
-};
-
-function buildWsTargets(rows: WsMarketRefRow[], limit: number): WsTargets {
-  const normalized = rows.map((row) => ({
-    tradeType: row.trade_type?.trim().toLowerCase() ?? null,
-    slug: row.slug?.trim() ?? null,
-    address: row.address?.trim().toLowerCase() ?? null,
-  }));
-
-  const totalLimit = Math.max(0, Math.trunc(limit));
-  if (totalLimit <= 0) return { slugs: [], addresses: [] };
-
-  const minAddressBudget = Math.min(totalLimit, Math.max(25, Math.round(totalLimit * 0.35)));
-  let addressBudget = minAddressBudget;
-  let slugBudget = Math.max(0, totalLimit - addressBudget);
-
-  const slugs: string[] = [];
-  const addresses: string[] = [];
-  const seenSlugs = new Set<string>();
-  const seenAddresses = new Set<string>();
-
-  const tryAddRow = (
-    row: (typeof normalized)[number],
-    budgets: { slugs: number; addresses: number },
-  ): boolean => {
-    if (row.tradeType === "amm") {
-      if (!row.address || seenAddresses.has(row.address)) return false;
-      if (addresses.length >= budgets.addresses) return false;
-      seenAddresses.add(row.address);
-      addresses.push(row.address);
-      return true;
-    }
-
-    if (!row.slug || seenSlugs.has(row.slug)) return false;
-    if (slugs.length >= budgets.slugs) return false;
-    seenSlugs.add(row.slug);
-    slugs.push(row.slug);
-    return true;
-  };
-
-  for (const row of normalized) {
-    if (slugs.length + addresses.length >= totalLimit) break;
-    tryAddRow(row, { slugs: slugBudget, addresses: addressBudget });
-  }
-
-  if (slugs.length < slugBudget) {
-    addressBudget = Math.min(totalLimit - slugs.length, totalLimit);
-    slugBudget = totalLimit - addressBudget;
-  } else if (addresses.length < addressBudget) {
-    slugBudget = Math.min(totalLimit - addresses.length, totalLimit);
-    addressBudget = totalLimit - slugBudget;
-  }
-
-  for (const row of normalized) {
-    if (slugs.length + addresses.length >= totalLimit) break;
-    tryAddRow(row, { slugs: slugBudget, addresses: addressBudget });
-  }
-
-  if (slugs.length + addresses.length < totalLimit) {
-    for (const row of normalized) {
-      if (slugs.length + addresses.length >= totalLimit) break;
-      if (row.tradeType === "amm") {
-        if (!row.address || seenAddresses.has(row.address)) continue;
-        seenAddresses.add(row.address);
-        addresses.push(row.address);
-      } else {
-        if (!row.slug || seenSlugs.has(row.slug)) continue;
-        seenSlugs.add(row.slug);
-        slugs.push(row.slug);
-      }
-    }
-  }
-
-  return {
-    slugs: slugs.slice(0, totalLimit),
-    addresses: addresses.slice(0, totalLimit),
-  };
-}
-
 export async function resolveHotWsTargets(): Promise<WsTargets> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
-  const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
-  const { rows: hotRows } = await pool.query<WsMarketRefRow>(
-    `
-      select distinct
-        coalesce(e.slug, m.slug) as slug,
-        nullif(m.metadata->>'address', '') as address,
-        nullif(m.metadata->>'tradeType', '') as trade_type
-      from unified_tokens t
-      join unified_markets m on m.id = t.market_id
-      left join unified_events e on e.id = m.event_id
-      where t.token_id = any($1::text[])
-        and m.venue = 'limitless'
-    `,
-    [hotTokenIds],
-  );
+  const hotRows = await resolveOrderedHotLimitlessMarketRows();
   const hotTargets = buildWsTargets(hotRows, hotBudget);
 
   const remaining = Math.max(

@@ -69,6 +69,7 @@ let redisBound = false;
 let shutdownBound = false;
 const currentSockets: SocketMap = { clob: null, amm: null };
 let desiredTargets: WsTargets = EMPTY_WS_TARGETS;
+const expectedDisconnectKinds = new Set<WsSocketKind>();
 
 const addressTokens = new Map<string, TokenPair>();
 const marketIdTokens = new Map<string, TokenPair>();
@@ -316,6 +317,22 @@ function arraysEqual(left: string[], right: string[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
+function hasRemovedTargets(currentValues: string[], nextValues: string[]): boolean {
+  const nextSet = new Set(nextValues);
+  return currentValues.some((value) => !nextSet.has(value));
+}
+
+function restartSocket(kind: WsSocketKind, reason: string): void {
+  const current = currentSockets[kind];
+  if (current) {
+    expectedDisconnectKinds.add(kind);
+    current.disconnect();
+  }
+  state[kind] = [];
+  currentSockets[kind] = createSocket(kind);
+  log.info("Limitless WS restart", { kind, reason });
+}
+
 function syncSubscriptions(
   kind: WsSocketKind,
   socket: Socket,
@@ -487,6 +504,10 @@ function createSocket(kind: WsSocketKind): Socket {
   }
 
   socket.on("disconnect", (reason) => {
+    if (expectedDisconnectKinds.delete(kind)) {
+      log.info("Limitless WS disconnected for restart", { kind, label, reason });
+      return;
+    }
     log.warn("Limitless WS disconnected", { kind, label, reason });
   });
 
@@ -527,11 +548,21 @@ export function startMarketWS(initialTargets: WsTargets): void {
 export function updateMarketWSSubscriptions(nextTargets: WsTargets): void {
   desiredTargets = normalizeTargets(nextTargets);
   const clobSocket = currentSockets.clob;
-  if (clobSocket?.connected) {
+  if (
+    clobSocket?.connected &&
+    hasRemovedTargets(state.clob, desiredTargets.slugs)
+  ) {
+    restartSocket("clob", "target_shrink");
+  } else if (clobSocket?.connected) {
     syncSubscriptions("clob", clobSocket, desiredTargets);
   }
   const ammSocket = currentSockets.amm;
-  if (ammSocket?.connected) {
+  if (
+    ammSocket?.connected &&
+    hasRemovedTargets(state.amm, desiredTargets.addresses)
+  ) {
+    restartSocket("amm", "target_shrink");
+  } else if (ammSocket?.connected) {
     syncSubscriptions("amm", ammSocket, desiredTargets);
   }
 }
