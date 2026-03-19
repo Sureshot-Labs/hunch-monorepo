@@ -275,7 +275,7 @@ function buildDflowFill(row: {
   };
 }
 
-function buildLimitlessFill(row: {
+export function buildLimitlessFill(row: {
   token_id: string | null;
   side: string | null;
   status: string | null;
@@ -292,9 +292,9 @@ function buildLimitlessFill(row: {
   if (!side) return null;
 
   const status = row.status?.toLowerCase() ?? "";
-  const hasFill =
-    (parseNumber(row.size) ?? 0) > 0 && (parseNumber(row.price) ?? 0) > 0;
-  if (!hasFill && !EXECUTED_STATUSES.has(status) && status !== "filled") {
+  const isExecuted =
+    row.filled_at != null || EXECUTED_STATUSES.has(status) || status === "filled";
+  if (!isExecuted) {
     return null;
   }
 

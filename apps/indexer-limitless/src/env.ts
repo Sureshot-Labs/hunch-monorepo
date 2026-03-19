@@ -85,17 +85,33 @@ const bootstrapMaxPages = Math.max(
   Number.isFinite(maxPagesRaw) ? maxPagesRaw : 10,
 );
 
-const refreshMinutesRaw = Number(process.env.LIMITLESS_REFRESH_MIN ?? "5");
+const refreshMinutesRaw = Number(process.env.LIMITLESS_REFRESH_MIN ?? "1");
 const refreshMinutes = Math.max(
   1,
   Number.isFinite(refreshMinutesRaw) ? refreshMinutesRaw : 5,
+);
+const fullRefreshMinutesRaw = Number(
+  process.env.LIMITLESS_FULL_REFRESH_MIN ?? String(Math.max(refreshMinutes * 6, 30)),
+);
+const fullRefreshMinutes = Math.max(
+  refreshMinutes,
+  Number.isFinite(fullRefreshMinutesRaw)
+    ? fullRefreshMinutesRaw
+    : Math.max(refreshMinutes * 6, 30),
+);
+const startupSeedPagesRaw = Number(
+  process.env.LIMITLESS_STARTUP_SEED_PAGES ?? "2",
+);
+const startupSeedPages = Math.max(
+  0,
+  Math.min(5, Number.isFinite(startupSeedPagesRaw) ? startupSeedPagesRaw : 2),
 );
 
 const wsRefreshSec = clampInt(
   parseOptionalInt(
     process.env.LIMITLESS_WS_REFRESH_SEC ?? process.env.INDEXER_WS_REFRESH_SEC,
   ),
-  { min: 10, max: 3600, fallback: 60 },
+  { min: 10, max: 3600, fallback: 10 },
 );
 
 const httpDelayRaw = Number(process.env.LIMITLESS_HTTP_MIN_DELAY_MS ?? "500");
@@ -114,6 +130,11 @@ const httpBackoffRaw = Number(process.env.LIMITLESS_HTTP_BACKOFF_MS ?? "750");
 const limitlessHttpBackoffMs = Math.max(
   0,
   Number.isFinite(httpBackoffRaw) ? httpBackoffRaw : 750,
+);
+const httpTimeoutRaw = Number(process.env.LIMITLESS_HTTP_TIMEOUT_MS ?? "10000");
+const limitlessHttpTimeoutMs = Math.max(
+  1_000,
+  Number.isFinite(httpTimeoutRaw) ? httpTimeoutRaw : 10_000,
 );
 
 const hotTokensTtlSec = clampInt(
@@ -147,9 +168,26 @@ const wsHotShare = clampFloat(wsHotShareRaw, {
   fallback: 0.5,
 });
 
+const baseRpcTimeoutMs = clampInt(
+  parseOptionalInt(process.env.BASE_RPC_TIMEOUT_MS),
+  { min: 1_000, max: 60_000, fallback: 10_000 },
+);
+
+const hotAmmQuoteCooldownMs = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_AMM_QUOTE_COOLDOWN_MS),
+  { min: 1_000, max: 10 * 60 * 1000, fallback: 15_000 },
+);
+
+const hotAmmQuoteMaxMarkets = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_AMM_QUOTE_MAX_MARKETS),
+  { min: 1, max: 500, fallback: 64 },
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
+  baseRpcUrl: process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
+  baseRpcTimeoutMs,
 
   limitlessEnabledSetting,
   limitlessEnabled: limitlessEnabledSetting ?? true,
@@ -163,15 +201,20 @@ export const env = {
   bootstrapMaxPages,
   // minutes between refreshes
   refreshMinutes,
+  fullRefreshMinutes,
+  startupSeedPages,
   wsRefreshSec,
 
   limitlessHttpMinDelayMs,
   limitlessHttpMaxRetries,
   limitlessHttpBackoffMs,
+  limitlessHttpTimeoutMs,
   hotTokensTtlSec,
   hotTokensMax,
   hotStreamTokensTtlSec,
   hotStreamTokensMax,
+  hotAmmQuoteCooldownMs,
+  hotAmmQuoteMaxMarkets,
 
   // AMM prices are % (0..100) in /markets/active; CLOB prices are 0..1.
   writePriceSnapshots: (process.env.LIMITLESS_SNAPSHOTS ?? "true") === "true",

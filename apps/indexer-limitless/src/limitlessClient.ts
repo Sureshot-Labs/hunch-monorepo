@@ -28,29 +28,60 @@ async function getJson(url: string) {
   return requestQueue.add(async () => {
     let attempt = 0;
     while (true) {
-      const r = await fetch(url, { headers: defaultHeaders });
-      if (r.ok) {
-        return r.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        env.limitlessHttpTimeoutMs,
+      );
+      try {
+        const r = await fetch(url, {
+          headers: defaultHeaders,
+          signal: controller.signal,
+        });
+        if (r.ok) {
+          return r.json();
+        }
+
+        const body = await r.text().catch(() => "");
+        const snippet = body.trim();
+        const details =
+          snippet.length > 0
+            ? `: ${snippet.slice(0, 800)}${snippet.length > 800 ? "…" : ""}`
+            : "";
+        const message = `Limitless ${r.status} ${url}${details}`;
+
+        if (shouldRetry(r.status) && attempt < env.limitlessHttpMaxRetries) {
+          const backoff =
+            env.limitlessHttpBackoffMs * 2 ** attempt +
+            Math.floor(Math.random() * 250);
+          attempt += 1;
+          if (backoff > 0) await sleep(backoff);
+          continue;
+        }
+
+        throw new Error(message);
+      } catch (error) {
+        const isTimeout =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            /aborted|timeout/i.test(error.message));
+        if (isTimeout && attempt < env.limitlessHttpMaxRetries) {
+          const backoff =
+            env.limitlessHttpBackoffMs * 2 ** attempt +
+            Math.floor(Math.random() * 250);
+          attempt += 1;
+          if (backoff > 0) await sleep(backoff);
+          continue;
+        }
+        if (isTimeout) {
+          throw new Error(
+            `Limitless timeout ${env.limitlessHttpTimeoutMs}ms ${url}`,
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
       }
-
-      const body = await r.text().catch(() => "");
-      const snippet = body.trim();
-      const details =
-        snippet.length > 0
-          ? `: ${snippet.slice(0, 800)}${snippet.length > 800 ? "…" : ""}`
-          : "";
-      const message = `Limitless ${r.status} ${url}${details}`;
-
-      if (shouldRetry(r.status) && attempt < env.limitlessHttpMaxRetries) {
-        const backoff =
-          env.limitlessHttpBackoffMs * 2 ** attempt +
-          Math.floor(Math.random() * 250);
-        attempt += 1;
-        if (backoff > 0) await sleep(backoff);
-        continue;
-      }
-
-      throw new Error(message);
     }
   });
 }
@@ -64,26 +95,42 @@ export async function fetchActivePage(
   const url = `${base}/markets/active?page=${page}&limit=${limit}&sortBy=${encodeURIComponent(
     sortBy,
   )}`;
-  console.log("Fetching Limitless active page", page, limit, sortBy, url);
   const j = await getJson(url);
   const parsed = LimitlessActiveResponse.parse(j);
   return parsed;
 }
 
-export async function fetchAllActive(maxPages: number, pageSize: number) {
+export async function fetchAllActive(
+  maxPages: number,
+  pageSize: number,
+  options?: {
+    onPage?: (info: {
+      page: number;
+      totalPages: number | null;
+      pageMarkets: number;
+      fetchedMarkets: number;
+    }) => void;
+  },
+) {
   const out: TLimitlessMarket[] = [];
   for (let p = 1; p <= maxPages; p++) {
     const res = await fetchActivePage(p, pageSize, "newest");
     if (!res.data.length) break;
     out.push(...res.data);
-    // cheap throttling
-    await sleep(150);
     const totalCount = res.totalMarketsCount;
     const totalPages =
       res.totalPages ??
       (typeof totalCount === "number" && Number.isFinite(totalCount)
         ? Math.ceil(totalCount / pageSize)
         : undefined);
+    options?.onPage?.({
+      page: p,
+      totalPages: totalPages ?? null,
+      pageMarkets: res.data.length,
+      fetchedMarkets: out.length,
+    });
+    // cheap throttling
+    await sleep(150);
     if (totalPages && p >= totalPages) break;
   }
   return out;

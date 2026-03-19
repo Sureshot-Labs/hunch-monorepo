@@ -5,6 +5,7 @@ import type {
   LimitlessMarketRow,
 } from "./limitless-repo.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import { normalizeLimitlessPricePair } from "./price-normalization.js";
 
 export type LimitlessCategory =
   | "politics"
@@ -391,21 +392,11 @@ export function resolveLimitlessCategory({
   );
 }
 
-function normalizePriceValue(
-  value: number | undefined,
-  tradeType?: string | null,
-): number | undefined {
-  if (value == null || Number.isNaN(value)) return undefined;
-  const shouldScale =
-    tradeType?.toLowerCase() === "amm" || (!tradeType && value > 1);
-  return shouldScale ? value / 100 : value;
-}
-
 function normalizePrices(
   prices: Array<number | undefined>,
   tradeType?: string | null,
 ): Array<number | undefined> {
-  return prices.map((value) => normalizePriceValue(value, tradeType));
+  return normalizeLimitlessPricePair(prices, tradeType);
 }
 
 function pickImage(input: {

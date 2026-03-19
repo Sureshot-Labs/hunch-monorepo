@@ -33,6 +33,23 @@ export type FavoriteFeedEventPage = {
   totalMarkets: number;
 };
 
+const LIMITLESS_AMM_STALE_FALLBACK_INTERVAL = "interval '15 minutes'";
+
+function buildLimitlessAmmFallbackAllowedExpr(
+  nowParam: string,
+  yesAlias: string,
+  noAlias: string,
+): string {
+  return `
+    not (
+      m.venue = 'limitless'
+      and coalesce(m.metadata->>'tradeType', 'clob') = 'amm'
+      and coalesce(${yesAlias}.best_bid, ${yesAlias}.best_ask, ${noAlias}.best_bid, ${noAlias}.best_ask) is null
+      and (m.updated_at is null or m.updated_at <= (${nowParam}::timestamptz - ${LIMITLESS_AMM_STALE_FALLBACK_INTERVAL}))
+    )
+  `;
+}
+
 function createParamBuilder() {
   const params: PgParams = [];
   const add = (value: PgParams[number]): string => {
@@ -700,6 +717,14 @@ export async function fetchFeedMarkets(
     inputs.sort === "change24h"
       ? "left join market_change mc on mc.market_id = m.id"
       : "";
+  const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
+    nowParam,
+    "yes_top",
+    "no_top",
+  );
+  const marketBestBidExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_bid else null end`;
+  const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
+  const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`event_order as (${eventOrderSql})`);
@@ -738,13 +763,13 @@ export async function fetchFeedMarkets(
       m.open_interest,
       m.liquidity,
       (${marketLiquidityDisplayExpr}) as liquidity_display,
-      m.best_bid,
-      m.best_ask,
+      ${marketBestBidExpr} as best_bid,
+      ${marketBestAskExpr} as best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
-      m.last_price,
+      ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
       (${change24hExpr}) as change_24h,
@@ -1105,6 +1130,14 @@ export async function fetchFeedMarketsDirect(
     inputs.sort === "change24h"
       ? "left join market_change mc on mc.market_id = m.id"
       : "";
+  const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
+    nowParam,
+    "yes_top",
+    "no_top",
+  );
+  const marketBestBidExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_bid else null end`;
+  const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
+  const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
   if (searchCte) withParts.push(searchCte);
   if (needsMarketCount || inputs.eventScope) {
@@ -1148,13 +1181,13 @@ export async function fetchFeedMarketsDirect(
       m.open_interest,
       m.liquidity,
       (${marketLiquidityDisplayExpr}) as liquidity_display,
-      m.best_bid,
-      m.best_ask,
+      ${marketBestBidExpr} as best_bid,
+      ${marketBestAskExpr} as best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
-      m.last_price,
+      ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
       (${change24hExpr}) as change_24h,

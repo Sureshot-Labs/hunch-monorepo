@@ -7,6 +7,7 @@ import { env } from "./env.js";
 import { log } from "./log.js";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
+import { normalizeLimitlessPricePair } from "./price-normalization.js";
 
 type OrderbookEntry = {
   price?: string | number | null;
@@ -28,11 +29,13 @@ type NewPriceEntry = {
   marketAddress?: string;
   yesPrice?: number | string | null;
   noPrice?: number | string | null;
+  yes?: number | string | null;
+  no?: number | string | null;
 };
 
 type NewPriceData = {
   marketAddress?: string;
-  updatedPrices?: NewPriceEntry[];
+  updatedPrices?: NewPriceEntry | NewPriceEntry[];
   timestamp?: number | string;
 };
 
@@ -41,21 +44,37 @@ type TokenPair = {
   noTokenId: string;
 };
 
-type SubState = {
-  subscribed: Set<string>;
+export type WsTargets = {
+  slugs: string[];
+  addresses: string[];
 };
 
-const state: SubState = { subscribed: new Set() };
+type WsSocketKind = "clob" | "amm";
+
+type SocketState = {
+  clob: string[];
+  amm: string[];
+};
+
+type SocketMap = {
+  clob: Socket | null;
+  amm: Socket | null;
+};
+
+const EMPTY_WS_TARGETS: WsTargets = { slugs: [], addresses: [] };
+const EMPTY_SOCKET_STATE: SocketState = { clob: [], amm: [] };
+const state: SocketState = { ...EMPTY_SOCKET_STATE };
 const mq = new PQueue({ concurrency: Number(env.wsConcurrency || 8) });
 let redisBound = false;
 let shutdownBound = false;
-let currentSocket: Socket | null = null;
-let desiredSlugs: string[] = [];
+const currentSockets: SocketMap = { clob: null, amm: null };
+let desiredTargets: WsTargets = EMPTY_WS_TARGETS;
 
 const addressTokens = new Map<string, TokenPair>();
 const marketIdTokens = new Map<string, TokenPair>();
-const missingAddresses = new Set<string>();
-const missingMarketIds = new Set<string>();
+const missingAddressRetryAt = new Map<string, number>();
+const missingMarketIdRetryAt = new Map<string, number>();
+const MISSING_TOKEN_RETRY_MS = 10_000;
 
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
@@ -81,6 +100,16 @@ function normalizeSlug(value: string): string {
 function uniqueSlugs(values: string[]): string[] {
   return Array.from(
     new Set(values.map(normalizeSlug).filter((v) => v.length > 0)),
+  );
+}
+
+function normalizeAddress(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function uniqueAddresses(values: string[]): string[] {
+  return Array.from(
+    new Set(values.map(normalizeAddress).filter((v) => v.length > 0)),
   );
 }
 
@@ -242,13 +271,14 @@ async function ensureTokensForAddress(
   const key = address.toLowerCase();
   const existing = addressTokens.get(key);
   if (existing) return existing;
-  if (missingAddresses.has(key)) return null;
-  missingAddresses.add(key);
+  const nextRetryAt = missingAddressRetryAt.get(key) ?? 0;
+  if (nextRetryAt > Date.now()) return null;
+  missingAddressRetryAt.set(key, Date.now() + MISSING_TOKEN_RETRY_MS);
   const map = await fetchTokensForAddresses([key]);
   const tokens = map.get(key) ?? null;
   if (tokens) {
     addressTokens.set(key, tokens);
-    missingAddresses.delete(key);
+    missingAddressRetryAt.delete(key);
   } else {
     log.warn("WS AMM token mapping missing", { address: key });
   }
@@ -261,63 +291,60 @@ async function ensureTokensForMarketId(
   const key = marketId;
   const existing = marketIdTokens.get(key);
   if (existing) return existing;
-  if (missingMarketIds.has(key)) return null;
-  missingMarketIds.add(key);
+  const nextRetryAt = missingMarketIdRetryAt.get(key) ?? 0;
+  if (nextRetryAt > Date.now()) return null;
+  missingMarketIdRetryAt.set(key, Date.now() + MISSING_TOKEN_RETRY_MS);
   const map = await fetchTokensForMarketIds([key]);
   const tokens = map.get(key) ?? null;
   if (tokens) {
     marketIdTokens.set(key, tokens);
-    missingMarketIds.delete(key);
+    missingMarketIdRetryAt.delete(key);
   } else {
     log.warn("WS AMM token mapping missing", { marketId: key });
   }
   return tokens;
 }
 
-function diffSets(current: Set<string>, desired: Iterable<string>) {
-  const next = new Set(desired);
-  const toSub: string[] = [];
-  const toUnsub: string[] = [];
-  next.forEach((id) => {
-    if (!current.has(id)) toSub.push(id);
+function normalizeTargets(targets: WsTargets): WsTargets {
+  const slugs = uniqueSlugs(targets.slugs).slice(0, env.wsSubset);
+  const addresses = uniqueAddresses(targets.addresses).slice(0, env.wsSubset);
+  return { slugs, addresses };
+}
+
+function arraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function syncSubscriptions(
+  kind: WsSocketKind,
+  socket: Socket,
+  targets: WsTargets,
+  options?: { force?: boolean },
+) {
+  if (kind === "amm" && options?.force) {
+    missingAddressRetryAt.clear();
+    missingMarketIdRetryAt.clear();
+  }
+  const next = normalizeTargets(targets);
+  const nextValues = kind === "clob" ? next.slugs : next.addresses;
+  const currentValues = state[kind];
+  if (!options?.force && arraysEqual(currentValues, nextValues)) return;
+  socket.emit("subscribe_market_prices", {
+    marketSlugs: kind === "clob" ? nextValues : [],
+    marketAddresses: kind === "amm" ? nextValues : [],
   });
-  current.forEach((id) => {
-    if (!next.has(id)) toUnsub.push(id);
-  });
-  return { toSub, toUnsub, next };
-}
-
-function sendSubscribe(socket: Socket, slugs: string[]) {
-  if (!slugs.length) return;
-  socket.emit("subscribe_market_prices", { marketSlugs: slugs });
-}
-
-function sendUnsubscribe(socket: Socket, slugs: string[]) {
-  if (!slugs.length) return;
-  socket.emit("unsubscribe", { channel: "subscribe_market_prices", marketSlugs: slugs });
-}
-
-function syncSubscriptions(socket: Socket, slugs: string[]) {
-  const ids = uniqueSlugs(slugs).slice(0, env.wsSubset);
-  const { toSub, toUnsub, next } = diffSets(state.subscribed, ids);
-
-  sendUnsubscribe(socket, toUnsub);
-  sendSubscribe(socket, toSub);
-
-  state.subscribed = next;
-  log.info("WS sync", {
-    add: toSub.length,
-    remove: toUnsub.length,
-    total: next.size,
+  state[kind] = nextValues;
+  log.info(options?.force ? "WS resubscribe" : "WS sync", {
+    kind,
+    slugs: kind === "clob" ? nextValues.length : 0,
+    addresses: kind === "amm" ? nextValues.length : 0,
+    total: nextValues.length,
   });
 }
 
-export function startMarketWS(
-  initialSlugs: string[],
-  attempt = 0,
-): Socket {
-  desiredSlugs = uniqueSlugs(initialSlugs).slice(0, env.wsSubset);
-  state.subscribed = new Set();
+function createSocket(kind: WsSocketKind): Socket {
+  const label = kind === "clob" ? "CLOB" : "AMM";
 
   const wsUrl = env.limitlessWsUrl.endsWith("/markets")
     ? env.limitlessWsUrl
@@ -336,140 +363,186 @@ export function startMarketWS(
     timeout: 10000,
   });
 
-  currentSocket = socket;
+  currentSockets[kind] = socket;
 
   if (!shutdownBound) {
     shutdownBound = true;
     const shutdown = () => {
       try {
-        socket.disconnect();
-      } catch {
-        // ignore
+        currentSockets.clob?.disconnect();
+      } catch (error) {
+        log.warn("Limitless WS shutdown disconnect failed", {
+          kind: "clob",
+          error: String(error),
+        });
       }
-      redis.quit().catch(() => redis.disconnect());
+      try {
+        currentSockets.amm?.disconnect();
+      } catch (error) {
+        log.warn("Limitless WS shutdown disconnect failed", {
+          kind: "amm",
+          error: String(error),
+        });
+      }
+      void redis.quit().catch(() => redis.disconnect());
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
   }
 
   socket.on("connect", async () => {
-    log.info("Limitless WS connected", { url: wsUrl });
+    log.info("Limitless WS connected", { kind, label, url: wsUrl });
     bindRedisErrorOnce();
     await ensureRedis();
-    syncSubscriptions(socket, desiredSlugs);
+    syncSubscriptions(kind, socket, desiredTargets);
   });
 
-  socket.on("orderbookUpdate", (payload: OrderbookUpdate) => {
-    void mq
-      .add(async () => {
-        const orderbook = payload?.orderbook;
-        const rawTokenId = orderbook?.tokenId;
-        const tokenId = prefixLimitlessToken(rawTokenId);
-        if (!tokenId) return;
+  if (kind === "clob") {
+    socket.on("orderbookUpdate", (payload: OrderbookUpdate) => {
+      void mq
+        .add(async () => {
+          const orderbook = payload?.orderbook;
+          const rawTokenId = orderbook?.tokenId;
+          const tokenId = prefixLimitlessToken(rawTokenId);
+          if (!tokenId) return;
 
-        const bids = orderbook?.bids ?? [];
-        const asks = orderbook?.asks ?? [];
-        const bb = bestBid(bids);
-        const ba = bestAsk(asks);
+          const bids = orderbook?.bids ?? [];
+          const asks = orderbook?.asks ?? [];
+          const bb = bestBid(bids);
+          const ba = bestAsk(asks);
 
-        if (bb == null && ba == null) return;
-        const tsRaw = payload.timestamp;
-        const tsNum =
-          typeof tsRaw === "number"
-            ? tsRaw
-            : typeof tsRaw === "string"
-              ? Number(tsRaw)
-              : Date.now();
-        const ts = new Date(Number.isFinite(tsNum) ? tsNum : Date.now());
+          if (bb == null && ba == null) return;
+          const tsRaw = payload.timestamp;
+          const tsNum =
+            typeof tsRaw === "number"
+              ? tsRaw
+              : typeof tsRaw === "string"
+                ? Number(tsRaw)
+                : Date.now();
+          const ts = new Date(Number.isFinite(tsNum) ? tsNum : Date.now());
 
-        await publishTokenTop(tokenId, bb, ba, ts, {
-          token_id: tokenId,
-          bids,
-          asks,
-          timestamp: ts.getTime().toString(),
-        });
-      })
-      .catch((err) => log.warn("WS orderbook handler error", err));
-  });
+          await publishTokenTop(tokenId, bb, ba, ts, {
+            token_id: tokenId,
+            bids,
+            asks,
+            timestamp: ts.getTime().toString(),
+          });
+        })
+        .catch((err) => log.warn("WS orderbook handler error", { kind, err }));
+    });
+  } else {
+    socket.on("newPriceData", (payload: NewPriceData) => {
+      void mq
+        .add(async () => {
+          const updatedPrices = payload?.updatedPrices;
+          const entries = Array.isArray(updatedPrices)
+            ? updatedPrices
+            : updatedPrices
+              ? [updatedPrices]
+              : [];
+          if (!entries.length) return;
+          const tsRaw = payload.timestamp;
+          const tsNum =
+            typeof tsRaw === "number"
+              ? tsRaw
+              : typeof tsRaw === "string"
+                ? Number(tsRaw)
+                : Date.now();
+          const ts = new Date(Number.isFinite(tsNum) ? tsNum : Date.now());
 
-  socket.on("newPriceData", (payload: NewPriceData) => {
-    void mq
-      .add(async () => {
-        const entries = payload?.updatedPrices ?? [];
-        if (!entries.length) return;
-        const tsRaw = payload.timestamp;
-        const tsNum =
-          typeof tsRaw === "number"
-            ? tsRaw
-            : typeof tsRaw === "string"
-              ? Number(tsRaw)
-              : Date.now();
-        const ts = new Date(Number.isFinite(tsNum) ? tsNum : Date.now());
+          for (const entry of entries) {
+            const marketId =
+              entry.marketId != null ? String(entry.marketId) : null;
+            const address =
+              (entry.marketAddress ?? payload.marketAddress)?.toLowerCase() ??
+              null;
 
-        for (const entry of entries) {
-          const marketId =
-            entry.marketId != null ? String(entry.marketId) : null;
-          const address =
-            (entry.marketAddress ?? payload.marketAddress)?.toLowerCase() ??
-            null;
+            let tokens: TokenPair | null = null;
+            if (address) tokens = await ensureTokensForAddress(address);
+            if (!tokens && marketId) {
+              tokens = await ensureTokensForMarketId(marketId);
+            }
+            if (!tokens) {
+              continue;
+            }
 
-          let tokens: TokenPair | null = null;
-          if (address) tokens = await ensureTokensForAddress(address);
-          if (!tokens && marketId) {
-            tokens = await ensureTokensForMarketId(marketId);
+            const [yesPrice, noPrice] = normalizeLimitlessPricePair(
+              [
+                entry.yesPrice ?? entry.yes,
+                entry.noPrice ?? entry.no,
+              ],
+              "amm",
+            );
+
+            if (yesPrice != null) {
+              await publishTokenTop(tokens.yesTokenId, yesPrice, yesPrice, ts);
+            }
+            if (noPrice != null) {
+              await publishTokenTop(tokens.noTokenId, noPrice, noPrice, ts);
+            }
           }
-          if (!tokens) {
-            continue;
-          }
-
-          const yesPrice = parsePrice(entry.yesPrice);
-          const noPrice = parsePrice(entry.noPrice);
-
-          if (yesPrice != null) {
-            await publishTokenTop(tokens.yesTokenId, yesPrice, yesPrice, ts);
-          }
-          if (noPrice != null) {
-            await publishTokenTop(tokens.noTokenId, noPrice, noPrice, ts);
-          }
-        }
-      })
-      .catch((err) => log.warn("WS price handler error", err));
-  });
+        })
+        .catch((err) => log.warn("WS price handler error", { kind, err }));
+    });
+  }
 
   socket.on("disconnect", (reason) => {
-    log.warn("Limitless WS disconnected", { reason });
+    log.warn("Limitless WS disconnected", { kind, label, reason });
   });
 
   socket.on("connect_error", (err) => {
-    log.warn("Limitless WS connect error", err);
+    log.warn("Limitless WS connect error", { kind, label, err });
   });
 
   socket.io.on("reconnect_attempt", (attemptNo) => {
-    log.info("Limitless WS reconnecting", { attempt: attemptNo });
+    log.info("Limitless WS reconnecting", { kind, label, attempt: attemptNo });
   });
 
   socket.io.on("reconnect", () => {
-    syncSubscriptions(socket, desiredSlugs);
+    syncSubscriptions(kind, socket, desiredTargets);
   });
 
   socket.io.on("reconnect_error", (err) => {
-    log.warn("Limitless WS reconnect error", err);
+    log.warn("Limitless WS reconnect error", { kind, label, err });
   });
 
   socket.io.on("reconnect_failed", () => {
-    log.warn("Limitless WS reconnect failed");
-    const max = 30_000;
-    const base = 1000 * 2 ** Math.min(attempt, 5);
-    const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
-    setTimeout(() => startMarketWS(desiredSlugs, attempt + 1), delay);
+    log.warn("Limitless WS reconnect failed", { kind, label });
   });
 
   return socket;
 }
 
-export function updateMarketWSSubscriptions(nextSlugs: string[]): void {
-  desiredSlugs = uniqueSlugs(nextSlugs).slice(0, env.wsSubset);
-  const socket = currentSocket;
-  if (!socket || !socket.connected) return;
-  syncSubscriptions(socket, desiredSlugs);
+export function startMarketWS(initialTargets: WsTargets): void {
+  desiredTargets = normalizeTargets(initialTargets);
+  state.clob = [];
+  state.amm = [];
+
+  currentSockets.clob?.disconnect();
+  currentSockets.amm?.disconnect();
+  currentSockets.clob = createSocket("clob");
+  currentSockets.amm = createSocket("amm");
+}
+
+export function updateMarketWSSubscriptions(nextTargets: WsTargets): void {
+  desiredTargets = normalizeTargets(nextTargets);
+  const clobSocket = currentSockets.clob;
+  if (clobSocket?.connected) {
+    syncSubscriptions("clob", clobSocket, desiredTargets);
+  }
+  const ammSocket = currentSockets.amm;
+  if (ammSocket?.connected) {
+    syncSubscriptions("amm", ammSocket, desiredTargets);
+  }
+}
+
+export function resubscribeMarketWSSubscriptions(): void {
+  const clobSocket = currentSockets.clob;
+  if (clobSocket?.connected) {
+    syncSubscriptions("clob", clobSocket, desiredTargets, { force: true });
+  }
+  const ammSocket = currentSockets.amm;
+  if (ammSocket?.connected) {
+    syncSubscriptions("amm", ammSocket, desiredTargets, { force: true });
+  }
 }

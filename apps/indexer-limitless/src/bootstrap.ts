@@ -1,7 +1,9 @@
 import { env } from "./env.js";
 import { log } from "./log.js";
+import { fetchLimitlessAmmQuotePair } from "./ammQuote.js";
 import {
   fetchAllActive,
+  fetchActivePage,
   fetchMarket,
   fetchOrderbook,
 } from "./limitlessClient.js";
@@ -31,8 +33,10 @@ import {
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
+import type { WsTargets } from "./wsMarket.js";
 
 const detailCache = new Map<string, TLimitlessMarket>();
+const hotAmmQuoteRetryAt = new Map<string, number>();
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
     void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
@@ -172,6 +176,12 @@ async function applyOrderbookTop(
       });
     }
   } catch (error) {
+    if (
+      error instanceof Error &&
+      /market is not active/i.test(error.message)
+    ) {
+      return;
+    }
     log.warn("Limitless orderbook fetch failed", { slug, error });
   }
 }
@@ -179,6 +189,13 @@ async function applyOrderbookTop(
 type HotMarketRefRow = {
   slug: string | null;
   address: string | null;
+};
+
+type HotAmmMarketRow = {
+  market_id: string;
+  address: string | null;
+  token_yes: string | null;
+  token_no: string | null;
 };
 
 function clampHotProbeLimit(limit: number): number {
@@ -233,6 +250,93 @@ async function fetchHotTokenIds(limit?: number): Promise<string[]> {
   }
 }
 
+export async function backfillHotLimitlessAmmPrices(): Promise<{
+  scannedMarkets: number;
+  updatedMarkets: number;
+}> {
+  if (!env.limitlessEnabled || env.hotAmmQuoteMaxMarkets <= 0) {
+    return { scannedMarkets: 0, updatedMarkets: 0 };
+  }
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
+  if (!tokenIds.length) return { scannedMarkets: 0, updatedMarkets: 0 };
+
+  const { rows } = await pool.query<HotAmmMarketRow>(
+    `
+      select distinct on (m.id)
+        m.id as market_id,
+        lower(nullif(m.metadata->>'address', '')) as address,
+        m.token_yes,
+        m.token_no
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      where t.token_id = any($1::text[])
+        and m.venue = 'limitless'
+        and m.status = 'ACTIVE'
+        and coalesce(m.metadata->>'tradeType', 'clob') = 'amm'
+        and nullif(m.metadata->>'address', '') is not null
+        and m.token_yes is not null
+        and m.token_no is not null
+      order by m.id, m.volume_total desc nulls last, m.updated_at_db desc
+      limit $2
+    `,
+    [tokenIds, env.hotAmmQuoteMaxMarkets],
+  );
+
+  const ts = new Date();
+  let updatedMarkets = 0;
+
+  for (const row of rows) {
+    const address = row.address?.toLowerCase() ?? null;
+    if (!address) continue;
+
+    const nextRetryAt = hotAmmQuoteRetryAt.get(address) ?? 0;
+    if (nextRetryAt > Date.now()) continue;
+
+    hotAmmQuoteRetryAt.set(address, Date.now() + env.hotAmmQuoteCooldownMs);
+
+    try {
+      const quote = await fetchLimitlessAmmQuotePair({
+        rpcUrl: env.baseRpcUrl,
+        timeoutMs: env.baseRpcTimeoutMs,
+        marketAddress: address,
+      });
+
+      const yesToken = prefixLimitlessToken(row.token_yes);
+      const noToken = prefixLimitlessToken(row.token_no);
+
+      if (yesToken && quote.yesPrice != null) {
+        await publishTokenTop(yesToken, quote.yesPrice, quote.yesPrice, ts);
+      }
+      if (noToken && quote.noPrice != null) {
+        await publishTokenTop(noToken, quote.noPrice, quote.noPrice, ts);
+      }
+
+      if (quote.yesPrice != null || quote.noPrice != null) {
+        updatedMarkets += 1;
+      }
+    } catch (error) {
+      log.warn("Limitless hot AMM quote backfill failed", {
+        marketId: row.market_id,
+        address,
+        error: String(error),
+      });
+    }
+  }
+
+  if (updatedMarkets > 0) {
+    log.info("Limitless hot AMM quote backfill complete", {
+      scannedMarkets: rows.length,
+      updatedMarkets,
+    });
+  }
+
+  return { scannedMarkets: rows.length, updatedMarkets };
+}
+
 function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   const clampedShare = Math.max(0, Math.min(1, hotShare));
   const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
@@ -268,35 +372,6 @@ async function resolveHotMarketRefs(
     if (seen.has(ref)) continue;
     seen.add(ref);
     out.push(ref);
-  }
-  return out;
-}
-
-async function resolveHotMarketSlugs(
-  tokenIds: string[],
-): Promise<string[]> {
-  if (!tokenIds.length) return [];
-
-  const { rows } = await pool.query<{ slug: string | null }>(
-    `
-      select distinct coalesce(e.slug, m.slug) as slug
-      from unified_tokens t
-      join unified_markets m on m.id = t.market_id
-      left join unified_events e on e.id = m.event_id
-      where t.token_id = any($1::text[])
-        and m.venue = 'limitless'
-        and coalesce(e.slug, m.slug) is not null
-    `,
-    [tokenIds],
-  );
-
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const row of rows) {
-    const slug = row.slug?.trim();
-    if (!slug || seen.has(slug)) continue;
-    seen.add(slug);
-    out.push(slug);
   }
   return out;
 }
@@ -484,20 +559,18 @@ async function processLimitlessMarket(
   return { eventId, marketCount };
 }
 
-export async function bootstrapLimitless() {
-  log.info("Bootstrapping Limitless…");
-
-  // Fail fast on DB/auth/migrations issues (otherwise we spam per-market failures).
-  await pool.query("select 1");
-  await ensureRedis();
-
-  const markets = await fetchAllActive(
-    env.bootstrapMaxPages,
-    env.bootstrapPageSize,
-  );
-
+async function processFetchedMarkets(
+  markets: TLimitlessMarket[],
+  opts: {
+    logEach: boolean;
+    progressEvery?: number;
+    progressLabel?: string;
+  },
+): Promise<{ eventCount: number; marketCount: number }> {
   let eventCount = 0;
   let marketCount = 0;
+  let failedEvents = 0;
+  const progressEvery = Math.max(0, opts.progressEvery ?? 0);
 
   for (const lm of markets) {
     try {
@@ -521,21 +594,110 @@ export async function bootstrapLimitless() {
       eventCount += 1;
       marketCount += processedMarkets;
 
-      log.info(`Processed ${mergedTop.marketType} market: ${mergedTop.title}`, {
-        eventId,
-        marketCount: processedMarkets,
-      });
+      if (opts.logEach) {
+        log.info(`Processed ${mergedTop.marketType} market: ${mergedTop.title}`, {
+          eventId,
+          marketCount: processedMarkets,
+        });
+      }
     } catch (error) {
       if (isPgSetupIssue(error)) throw error;
+      failedEvents += 1;
       log.err(`Failed to process market ${lm.id}: ${lm.title}`, {
         error,
         market: lm,
       });
-      // Continue processing other markets
+    } finally {
+      if (
+        !opts.logEach &&
+        progressEvery > 0 &&
+        (eventCount + failedEvents) % progressEvery === 0
+      ) {
+        log.info(opts.progressLabel ?? "Limitless process progress", {
+          completedEvents: eventCount + failedEvents,
+          totalEvents: markets.length,
+          processedMarkets: marketCount,
+          failedEvents,
+        });
+      }
     }
   }
 
+  return { eventCount, marketCount };
+}
+
+export async function bootstrapLimitless() {
+  log.info("Bootstrapping Limitless…");
+
+  // Fail fast on DB/auth/migrations issues (otherwise we spam per-market failures).
+  await pool.query("select 1");
+  await ensureRedis();
+
+  const markets = await fetchAllActive(
+    env.bootstrapMaxPages,
+    env.bootstrapPageSize,
+    {
+      onPage: ({ page, totalPages, pageMarkets, fetchedMarkets }) => {
+        log.info("Limitless full bootstrap fetch progress", {
+          page,
+          totalPages,
+          pageMarkets,
+          fetchedMarkets,
+        });
+      },
+    },
+  );
+  const { eventCount, marketCount } = await processFetchedMarkets(markets, {
+    logEach: false,
+    progressEvery: 25,
+    progressLabel: "Limitless full bootstrap progress",
+  });
+
   log.info(`Bootstrap complete: events=${eventCount} markets=${marketCount}`);
+}
+
+export async function ensureStartupWsTargets(): Promise<WsTargets> {
+  await pool.query("select 1");
+  await ensureRedis();
+
+  let targets = await resolveHotWsTargets();
+  if (targets.slugs.length + targets.addresses.length > 0) {
+    return targets;
+  }
+
+  if (env.startupSeedPages <= 0) {
+    return targets;
+  }
+
+  log.info("Seeding Limitless markets for WS startup", {
+    pages: env.startupSeedPages,
+    pageSize: env.bootstrapPageSize,
+  });
+
+  const seededMarkets: TLimitlessMarket[] = [];
+  for (let page = 1; page <= env.startupSeedPages; page += 1) {
+    const result = await fetchActivePage(page, env.bootstrapPageSize, "newest");
+    if (!result.data.length) break;
+    seededMarkets.push(...result.data);
+    const totalPages =
+      result.totalPages ??
+      (typeof result.totalMarketsCount === "number" &&
+      Number.isFinite(result.totalMarketsCount)
+        ? Math.ceil(result.totalMarketsCount / env.bootstrapPageSize)
+        : undefined);
+    if (totalPages && page >= totalPages) break;
+  }
+
+  if (seededMarkets.length > 0) {
+    const seeded = await processFetchedMarkets(seededMarkets, {
+      logEach: false,
+      progressEvery: 0,
+    });
+    log.info("Limitless startup seed complete", seeded);
+  }
+
+  targets = await resolveHotWsTargets();
+  return targets;
 }
 
 export async function syncHotLimitlessMarkets(): Promise<{
@@ -554,7 +716,14 @@ export async function syncHotLimitlessMarkets(): Promise<{
   const refs = await resolveHotMarketRefs(tokenIds);
   if (!refs.length) return { processedMarkets: 0 };
 
+  log.info("Limitless hot status refresh…", {
+    tokens: tokenIds.length,
+    refs: refs.length,
+  });
+
   let processedMarkets = 0;
+  let completedRefs = 0;
+  let failedRefs = 0;
   for (const ref of refs) {
     try {
       const detail = await fetchMarket(ref);
@@ -562,7 +731,18 @@ export async function syncHotLimitlessMarkets(): Promise<{
       const result = await processLimitlessMarket(mergedTop);
       processedMarkets += result.marketCount;
     } catch (error) {
+      failedRefs += 1;
       log.warn("Limitless hot market fetch failed", { ref, error });
+    } finally {
+      completedRefs += 1;
+      if (completedRefs % 10 === 0 || completedRefs === refs.length) {
+        log.info("Limitless hot status refresh progress", {
+          completedRefs,
+          totalRefs: refs.length,
+          processedMarkets,
+          failedRefs,
+        });
+      }
     }
   }
 
@@ -574,20 +754,125 @@ export async function syncHotLimitlessMarkets(): Promise<{
   return { processedMarkets };
 }
 
-export async function resolveHotSlugsForWs(): Promise<string[]> {
+type WsMarketRefRow = {
+  slug: string | null;
+  address: string | null;
+  trade_type: string | null;
+};
+
+function buildWsTargets(rows: WsMarketRefRow[], limit: number): WsTargets {
+  const normalized = rows.map((row) => ({
+    tradeType: row.trade_type?.trim().toLowerCase() ?? null,
+    slug: row.slug?.trim() ?? null,
+    address: row.address?.trim().toLowerCase() ?? null,
+  }));
+
+  const totalLimit = Math.max(0, Math.trunc(limit));
+  if (totalLimit <= 0) return { slugs: [], addresses: [] };
+
+  const minAddressBudget = Math.min(totalLimit, Math.max(25, Math.round(totalLimit * 0.35)));
+  let addressBudget = minAddressBudget;
+  let slugBudget = Math.max(0, totalLimit - addressBudget);
+
+  const slugs: string[] = [];
+  const addresses: string[] = [];
+  const seenSlugs = new Set<string>();
+  const seenAddresses = new Set<string>();
+
+  const tryAddRow = (
+    row: (typeof normalized)[number],
+    budgets: { slugs: number; addresses: number },
+  ): boolean => {
+    if (row.tradeType === "amm") {
+      if (!row.address || seenAddresses.has(row.address)) return false;
+      if (addresses.length >= budgets.addresses) return false;
+      seenAddresses.add(row.address);
+      addresses.push(row.address);
+      return true;
+    }
+
+    if (!row.slug || seenSlugs.has(row.slug)) return false;
+    if (slugs.length >= budgets.slugs) return false;
+    seenSlugs.add(row.slug);
+    slugs.push(row.slug);
+    return true;
+  };
+
+  for (const row of normalized) {
+    if (slugs.length + addresses.length >= totalLimit) break;
+    tryAddRow(row, { slugs: slugBudget, addresses: addressBudget });
+  }
+
+  if (slugs.length < slugBudget) {
+    addressBudget = Math.min(totalLimit - slugs.length, totalLimit);
+    slugBudget = totalLimit - addressBudget;
+  } else if (addresses.length < addressBudget) {
+    slugBudget = Math.min(totalLimit - addresses.length, totalLimit);
+    addressBudget = totalLimit - slugBudget;
+  }
+
+  for (const row of normalized) {
+    if (slugs.length + addresses.length >= totalLimit) break;
+    tryAddRow(row, { slugs: slugBudget, addresses: addressBudget });
+  }
+
+  if (slugs.length + addresses.length < totalLimit) {
+    for (const row of normalized) {
+      if (slugs.length + addresses.length >= totalLimit) break;
+      if (row.tradeType === "amm") {
+        if (!row.address || seenAddresses.has(row.address)) continue;
+        seenAddresses.add(row.address);
+        addresses.push(row.address);
+      } else {
+        if (!row.slug || seenSlugs.has(row.slug)) continue;
+        seenSlugs.add(row.slug);
+        slugs.push(row.slug);
+      }
+    }
+  }
+
+  return {
+    slugs: slugs.slice(0, totalLimit),
+    addresses: addresses.slice(0, totalLimit),
+  };
+}
+
+export async function resolveHotWsTargets(): Promise<WsTargets> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
   const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
-  const hotSlugsAll = await resolveHotMarketSlugs(hotTokenIds);
-  const hotSlugs = hotSlugsAll.slice(0, hotBudget);
-
-  const remaining = Math.max(0, env.wsSubset - hotSlugs.length);
-  const { rows } = await pool.query<{ slug: string | null }>(
+  const { rows: hotRows } = await pool.query<WsMarketRefRow>(
     `
-      select m.slug
+      select distinct
+        coalesce(e.slug, m.slug) as slug,
+        nullif(m.metadata->>'address', '') as address,
+        nullif(m.metadata->>'tradeType', '') as trade_type
+      from unified_tokens t
+      join unified_markets m on m.id = t.market_id
+      left join unified_events e on e.id = m.event_id
+      where t.token_id = any($1::text[])
+        and m.venue = 'limitless'
+    `,
+    [hotTokenIds],
+  );
+  const hotTargets = buildWsTargets(hotRows, hotBudget);
+
+  const remaining = Math.max(
+    0,
+    env.wsSubset - hotTargets.slugs.length - hotTargets.addresses.length,
+  );
+  const { rows } = await pool.query<WsMarketRefRow>(
+    `
+      select
+        m.slug,
+        nullif(m.metadata->>'address', '') as address,
+        nullif(m.metadata->>'tradeType', '') as trade_type
       from unified_markets m
       where m.venue = 'limitless'
         and m.status = 'ACTIVE'
-        and m.slug is not null
+        and (
+          (coalesce(m.metadata->>'tradeType', 'clob') = 'amm' and nullif(m.metadata->>'address', '') is not null)
+          or (coalesce(m.metadata->>'tradeType', 'clob') <> 'amm' and m.slug is not null)
+        )
       order by m.volume_total desc nulls last,
                m.liquidity desc nulls last,
                m.updated_at_db desc
@@ -596,25 +881,5 @@ export async function resolveHotSlugsForWs(): Promise<string[]> {
     [Math.max(100, remaining * 2)],
   );
 
-  const seen = new Set<string>(hotSlugs);
-  const topSlugs: string[] = [];
-  for (const row of rows) {
-    const slug = row.slug?.trim();
-    if (!slug || seen.has(slug)) continue;
-    seen.add(slug);
-    topSlugs.push(slug);
-    if (topSlugs.length >= remaining) break;
-  }
-
-  const out = [...hotSlugs, ...topSlugs];
-  if (out.length < env.wsSubset) {
-    for (const slug of hotSlugsAll) {
-      if (seen.has(slug)) continue;
-      seen.add(slug);
-      out.push(slug);
-      if (out.length >= env.wsSubset) break;
-    }
-  }
-
-  return out;
+  return buildWsTargets([...hotRows, ...rows], env.wsSubset);
 }

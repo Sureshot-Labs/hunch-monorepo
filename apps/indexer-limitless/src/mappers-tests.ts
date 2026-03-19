@@ -4,6 +4,7 @@ import {
   mapToUnifiedMarket,
   resolveLimitlessCategory,
 } from "./mappers.js";
+import { normalizeLimitlessPricePair } from "./price-normalization.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 
 function test(name: string, fn: () => void) {
@@ -190,4 +191,25 @@ test("mapToUnifiedMarket falls back to event signals when market categories are 
   });
   const unified = mapToUnifiedMarket(market, String(event.id), event);
   assert.equal(unified.category, "politics");
+});
+
+test("normalizeLimitlessPricePair scales percent-style AMM prices", () => {
+  const even = normalizeLimitlessPricePair([50, 50], "amm");
+  assert.equal(even[0], 0.5);
+  assert.equal(even[1], 0.5);
+
+  const skewed = normalizeLimitlessPricePair([0.6, 99.4], "amm");
+  const yesPrice = skewed[0];
+  const noPrice = skewed[1];
+  assert.ok(yesPrice != null);
+  assert.ok(noPrice != null);
+  assert.ok(Math.abs(yesPrice - 0.006) < 1e-12);
+  assert.ok(Math.abs(noPrice - 0.994) < 1e-12);
+});
+
+test("normalizeLimitlessPricePair preserves decimal-style AMM prices", () => {
+  assert.deepEqual(normalizeLimitlessPricePair([0.65, 0.35], "amm"), [
+    0.65,
+    0.35,
+  ]);
 });
