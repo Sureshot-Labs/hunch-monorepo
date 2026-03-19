@@ -1130,6 +1130,82 @@ function walletIntelCacheKey(
   return `wallet-intel:v1:${routeKey}:${userId}:${digest}`;
 }
 
+type WalletIntelCacheClient = NonNullable<Awaited<ReturnType<typeof getRedis>>>;
+type WalletIntelCacheLayer = "local" | "redis";
+type WalletIntelLocalCacheEntry = {
+  body: string;
+  expiresAt: number;
+};
+
+const walletIntelLocalCache = new Map<string, WalletIntelLocalCacheEntry>();
+let walletIntelLocalCachePruneAt = 0;
+
+function pruneWalletIntelLocalCache(now = Date.now()) {
+  if (walletIntelLocalCachePruneAt > now) return;
+  walletIntelLocalCachePruneAt = now + 30_000;
+  for (const [key, entry] of walletIntelLocalCache.entries()) {
+    if (entry.expiresAt <= now) walletIntelLocalCache.delete(key);
+  }
+}
+
+function readWalletIntelLocalCache(cacheKey: string): string | null {
+  const now = Date.now();
+  pruneWalletIntelLocalCache(now);
+  const entry = walletIntelLocalCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= now) {
+    walletIntelLocalCache.delete(cacheKey);
+    return null;
+  }
+  return entry.body;
+}
+
+function writeWalletIntelLocalCache(
+  cacheKey: string,
+  body: string,
+  ttlSec: number,
+) {
+  if (ttlSec <= 0) {
+    walletIntelLocalCache.delete(cacheKey);
+    return;
+  }
+  walletIntelLocalCache.set(cacheKey, {
+    body,
+    expiresAt: Date.now() + ttlSec * 1000,
+  });
+  pruneWalletIntelLocalCache();
+}
+
+async function readWalletIntelCachedBody(
+  cacheClient: WalletIntelCacheClient | null,
+  cacheKey: string,
+  ttlSec: number,
+): Promise<{ body: string; layer: WalletIntelCacheLayer } | null> {
+  const localBody = readWalletIntelLocalCache(cacheKey);
+  if (localBody) return { body: localBody, layer: "local" };
+  if (!cacheClient) return null;
+  const redisBody = await cacheClient.get(cacheKey);
+  if (!redisBody) return null;
+  writeWalletIntelLocalCache(cacheKey, redisBody, ttlSec);
+  return { body: redisBody, layer: "redis" };
+}
+
+async function writeWalletIntelCachedBody(
+  cacheClient: WalletIntelCacheClient | null,
+  cacheKey: string,
+  body: string,
+  ttlSec: number,
+) {
+  if (ttlSec <= 0) return;
+  writeWalletIntelLocalCache(cacheKey, body, ttlSec);
+  if (!cacheClient) return;
+  try {
+    await cacheClient.set(cacheKey, body, { EX: ttlSec });
+  } catch (error) {
+    console.warn("[wallet-intel-cache] Redis write failed", String(error));
+  }
+}
+
 function buildSlimWhaleSelectorSql(
   orderBy: string,
   includeInferred: boolean,
@@ -2659,13 +2735,13 @@ async function loadWalletResolvedTradeStatsMap(
       with resolved_rows as (
         select
           wa.wallet_id,
-          upper(coalesce(wa.outcome_side, '')) as outcome_side,
-          upper(coalesce(um.resolved_outcome, '')) as resolved_outcome
+          wa.outcome_side,
+          um.resolved_outcome
         from wallet_activity_events wa
         left join unified_markets um on um.id = wa.market_id
         where wa.wallet_id = any($1::uuid[])
           and wa.activity_type in ('delta', 'trade')
-          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+          and wa.action in ('OPENED', 'INCREASED', 'BUY', 'SELL')
           and wa.occurred_at >= now() - ($2::text || ' days')::interval
       )
       select
@@ -2676,7 +2752,7 @@ async function loadWalletResolvedTradeStatsMap(
         )::int as resolved_count,
         count(*) filter (
           where resolved_outcome in ('YES', 'NO')
-            and outcome_side = resolved_outcome
+          and outcome_side = resolved_outcome
         )::int as winning_count
       from resolved_rows
       group by wallet_id
@@ -4490,13 +4566,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey("wallets-whales", user.id, query);
-      if (cacheClient) {
-        const cachedBody = await cacheClient.get(cacheKey);
-        if (cachedBody) {
-          reply.header("x-cache", "hit");
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send(cachedBody);
-        }
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        reply.header("x-cache", "hit");
+        reply.header("x-cache-layer", cached.layer);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
@@ -5030,8 +5109,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const body = JSON.stringify(result.payload);
-        if (cacheClient) {
-          await cacheClient.set(cacheKey, body, { EX: cacheTtlSec });
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
           reply.header("x-cache", "miss");
         }
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -5345,13 +5429,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         user.id,
         query,
       );
-      if (cacheClient) {
-        const cachedBody = await cacheClient.get(cacheKey);
-        if (cachedBody) {
-          reply.header("x-cache", "hit");
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send(cachedBody);
-        }
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        reply.header("x-cache", "hit");
+        reply.header("x-cache-layer", cached.layer);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
       }
 
       const client = await pool.connect();
@@ -5380,10 +5467,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           };
         });
 
-        if (cacheClient && cacheTtlSec > 0) {
-          await cacheClient.set(cacheKey, JSON.stringify(payload), {
-            EX: cacheTtlSec,
-          });
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            JSON.stringify(payload),
+            cacheTtlSec,
+          );
           reply.header("x-cache", "miss");
         }
 
@@ -5446,13 +5536,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         user.id,
         query,
       );
-      if (cacheClient) {
-        const cachedBody = await cacheClient.get(cacheKey);
-        if (cachedBody) {
-          reply.header("x-cache", "hit");
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send(cachedBody);
-        }
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        reply.header("x-cache", "hit");
+        reply.header("x-cache-layer", cached.layer);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
@@ -5919,8 +6012,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
 
         const body = JSON.stringify(payload);
-        if (cacheClient) {
-          await cacheClient.set(cacheKey, body, { EX: cacheTtlSec });
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
           reply.header("x-cache", "miss");
         }
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -5987,13 +6085,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         user.id,
         query,
       );
-      if (cacheClient) {
-        const cachedBody = await cacheClient.get(cacheKey);
-        if (cachedBody) {
-          reply.header("x-cache", "hit");
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send(cachedBody);
-        }
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        reply.header("x-cache", "hit");
+        reply.header("x-cache-layer", cached.layer);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
@@ -6383,8 +6484,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           };
         });
         const body = JSON.stringify(payload);
-        if (cacheClient) {
-          await cacheClient.set(cacheKey, body, { EX: cacheTtlSec });
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
           reply.header("x-cache", "miss");
         }
         reply.header("Content-Type", "application/json; charset=utf-8");

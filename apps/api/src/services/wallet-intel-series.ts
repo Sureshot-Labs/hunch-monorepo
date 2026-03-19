@@ -263,43 +263,6 @@ export async function loadWalletPortfolioPerformanceMap(
     `
       with wallet_set as (
         select unnest($1::uuid[]) as wallet_id
-      ),
-      start_snap as (
-        select distinct on (s.wallet_id)
-          s.wallet_id,
-          s.as_of,
-          s.pnl_usd
-        from wallet_metrics_snapshots s
-        join wallet_set ws on ws.wallet_id = s.wallet_id
-        where s.period = 'all'
-          and s.pnl_usd is not null
-          and s.as_of <= $2::timestamptz
-        order by s.wallet_id, s.as_of desc
-      ),
-      fallback_start as (
-        select distinct on (s.wallet_id)
-          s.wallet_id,
-          s.as_of,
-          s.pnl_usd
-        from wallet_metrics_snapshots s
-        join wallet_set ws on ws.wallet_id = s.wallet_id
-        where s.period = 'all'
-          and s.pnl_usd is not null
-          and s.as_of > $2::timestamptz
-          and s.as_of <= $3::timestamptz
-        order by s.wallet_id, s.as_of asc
-      ),
-      end_snap as (
-        select distinct on (s.wallet_id)
-          s.wallet_id,
-          s.as_of,
-          s.pnl_usd
-        from wallet_metrics_snapshots s
-        join wallet_set ws on ws.wallet_id = s.wallet_id
-        where s.period = 'all'
-          and s.pnl_usd is not null
-          and s.as_of <= $3::timestamptz
-        order by s.wallet_id, s.as_of desc
       )
       select
         ws.wallet_id,
@@ -309,9 +272,44 @@ export async function loadWalletPortfolioPerformanceMap(
         es.pnl_usd::text as end_pnl_usd,
         (ss.as_of is null and fs.as_of is not null) as baseline_approx
       from wallet_set ws
-      left join start_snap ss on ss.wallet_id = ws.wallet_id
-      left join fallback_start fs on fs.wallet_id = ws.wallet_id
-      left join end_snap es on es.wallet_id = ws.wallet_id
+      left join lateral (
+        select
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        where s.wallet_id = ws.wallet_id
+          and s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of <= $2::timestamptz
+        order by s.as_of desc
+        limit 1
+      ) ss on true
+      left join lateral (
+        select
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        where ss.as_of is null
+          and s.wallet_id = ws.wallet_id
+          and s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of > $2::timestamptz
+          and s.as_of <= $3::timestamptz
+        order by s.as_of asc
+        limit 1
+      ) fs on true
+      left join lateral (
+        select
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        where s.wallet_id = ws.wallet_id
+          and s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of <= $3::timestamptz
+        order by s.as_of desc
+        limit 1
+      ) es on true
     `,
     [walletIds, rangeStart, asOf],
   );

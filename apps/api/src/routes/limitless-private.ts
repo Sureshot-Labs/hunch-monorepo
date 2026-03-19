@@ -940,6 +940,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         method: "POST",
         requestPath: "/auth/login",
         headers: {
+          ...(env.limitlessApiKey
+            ? { "X-API-Key": env.limitlessApiKey }
+            : {}),
           "x-account": checksumAccount,
           "x-signing-message": signingMessage,
           "x-signature": signature,
@@ -953,7 +956,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
-        reply.code(502);
+        reply.code(
+          upstream.status >= 400 && upstream.status < 500
+            ? upstream.status
+            : 502,
+        );
         return reply.send({
           error: "Limitless login failed",
           status: upstream.status,
