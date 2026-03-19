@@ -238,6 +238,23 @@ async function main() {
       limitlessPayload.positions[0]?.tokenId,
       normalizeLimitlessScopedTokenId(limitlessRawTokenId),
     );
+
+    const limitlessSyncSkipResponse = await app.inject({
+      method: "POST",
+      url: "/positions/sync?venue=limitless&force=true",
+      headers: limitlessContext.authHeaders,
+    });
+
+    assert.equal(limitlessSyncSkipResponse.statusCode, 200);
+    const limitlessSyncSkipPayload = limitlessSyncSkipResponse.json();
+    assert.equal(limitlessSyncSkipPayload.message, "Positions synced");
+    assert.equal(
+      limitlessSyncSkipPayload.walletAddress,
+      limitlessContext.signerWallet,
+    );
+    assert.equal(limitlessSyncSkipPayload.venue, "limitless");
+    assert.equal(limitlessSyncSkipPayload.status, "skipped");
+    assert.equal(limitlessSyncSkipPayload.skippedReason, "connect_first");
   } finally {
     await cleanup(persistedContext);
     await cleanup(derivedContext);

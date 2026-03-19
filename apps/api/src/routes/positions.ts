@@ -32,6 +32,15 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
   type AllowedVenue = "polymarket" | "kalshi" | "limitless";
   const isAllowedVenue = (venue: string | undefined): venue is AllowedVenue =>
     Boolean(venue && allowedVenues.has(venue as AllowedVenue));
+  const isSkippableSyncMessage = (message: string): boolean => {
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes("connect first") ||
+      normalized.includes("session not found") ||
+      normalized.includes("credentials not found") ||
+      normalized.includes("ownerid not available")
+    );
+  };
 
   const runWithConcurrency = async <T, R>(
     items: T[],
@@ -421,16 +430,34 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           if (usingVenueList) {
             // Fall through to multi-venue sync below.
           } else {
-            const result = await syncPositionsForUserWallet(pool, {
-              userId: user.id,
-              walletAddress,
-              venue: query.venue,
-            });
+            let result:
+              | Awaited<ReturnType<typeof syncPositionsForUserWallet>>
+              | null = null;
+            let skippedReason: string | undefined;
+            try {
+              result = await syncPositionsForUserWallet(pool, {
+                userId: user.id,
+                walletAddress,
+                venue: query.venue,
+              });
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "Unknown error";
+              if (!isSkippableSyncMessage(message)) {
+                throw error;
+              }
+              skippedReason = "connect_first";
+            }
 
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               message: "Positions synced",
-              ...result,
+              ...(result ?? {
+                walletAddress,
+                venue: query.venue ?? null,
+                status: "skipped" as const,
+                skippedReason,
+              }),
             });
           }
         }
@@ -517,6 +544,14 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           } catch (error) {
             const message =
               error instanceof Error ? error.message : "Unknown error";
+            if (isSkippableSyncMessage(message)) {
+              return {
+                walletAddress: task.walletAddress,
+                venue: task.venue ?? null,
+                status: "skipped" as const,
+                skippedReason: "connect_first",
+              };
+            }
             return {
               walletAddress: task.walletAddress,
               venue: task.venue ?? null,
