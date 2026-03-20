@@ -55,6 +55,7 @@ const limitlessOrderSchema = z
   .passthrough();
 
 export const limitlessAuthLoginBodySchema = z.object({
+  apiKey: z.string().trim().min(1).optional(),
   client: zClientType.optional(),
   smartWallet: zEthAddress.optional(),
   referralCode: z.string().optional(),

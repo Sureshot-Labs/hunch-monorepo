@@ -1027,7 +1027,6 @@ export const env = {
     "https://data-api.polymarket.com",
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
-  limitlessApiKey: process.env.LIMITLESS_API_KEY?.trim() || "",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",
   limitlessApiTimeoutMs: optionalPositiveInt("LIMITLESS_API_TIMEOUT_MS", 15_000),
   limitlessReferralCode: process.env.LIMITLESS_REFERRAL_CODE?.trim() || "",

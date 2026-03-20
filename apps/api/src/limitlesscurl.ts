@@ -24,14 +24,15 @@ function usage(): never {
     [
       "Usage:",
       "  pnpm -C hunch-monorepo/apps/api limitlesscurl <address?> <path>",
-      "  --use-db will load Limitless session from user_venue_credentials",
+      "  --use-db will load Limitless auth from user_venue_credentials",
       "",
       "Examples:",
+      "  LIMITLESS_API_KEY=lmts_... pnpm -C hunch-monorepo/apps/api limitlesscurl /portfolio/positions",
       "  LIMITLESS_SESSION=... pnpm -C hunch-monorepo/apps/api limitlesscurl /portfolio/positions",
       "  pnpm -C hunch-monorepo/apps/api limitlesscurl --use-db 0x... /portfolio/positions",
       "",
       "Optional flags:",
-      "  --use-db (read session cookie from DB; requires DATABASE_URL + CREDENTIALS_ENCRYPTION_KEY)",
+      "  --use-db (read Limitless auth from DB; requires DATABASE_URL + CREDENTIALS_ENCRYPTION_KEY)",
       "  --user-id <uuid> (when multiple users share the wallet)",
       "  --method GET|POST|DELETE",
       "  --body '<json>' or --body @/path/to/file.json",
@@ -109,16 +110,18 @@ async function resolveBody(): Promise<unknown> {
 }
 
 const sessionFromEnv = process.env.LIMITLESS_SESSION?.trim();
+const apiKeyFromEnv = process.env.LIMITLESS_API_KEY?.trim();
 const resolvedAddress =
   address ?? process.env.LIMITLESS_WALLET_ADDRESS?.trim();
 
-type ResolvedSession = {
-  sessionCookie: string;
+type ResolvedAuth = {
+  apiKey?: string;
+  sessionCookie?: string;
   source: "env" | "db";
   userId?: string;
 };
 
-async function resolveDbSession(): Promise<ResolvedSession | null> {
+async function resolveDbAuth(): Promise<ResolvedAuth | null> {
   if (!resolvedAddress) return null;
   if (!process.env.DATABASE_URL) return null;
   const encryptionKey = getCredentialsEncryptionKey();
@@ -222,12 +225,16 @@ async function resolveDbSession(): Promise<ResolvedSession | null> {
       resolvedRow.api_secret ??
       null;
     if (!secretRaw) return null;
-    const sessionCookie = resolvedRow.api_secret_enc
+    const secret = resolvedRow.api_secret_enc
       ? decryptCredentialsString(secretRaw, encryptionKey)
       : secretRaw;
+    const auth =
+      secret.trim().toLowerCase().startsWith("lmts_")
+        ? { apiKey: secret }
+        : { sessionCookie: secret };
 
     return {
-      sessionCookie,
+      ...auth,
       source: "db",
       userId: resolvedRow.user_id,
     };
@@ -237,12 +244,13 @@ async function resolveDbSession(): Promise<ResolvedSession | null> {
 }
 
 const resolvedBody = await resolveBody();
-const session =
+const auth =
+  (apiKeyFromEnv && { apiKey: apiKeyFromEnv, source: "env" as const }) ||
   (sessionFromEnv && { sessionCookie: sessionFromEnv, source: "env" as const }) ||
-  (useDb ? await resolveDbSession() : null);
+  (useDb ? await resolveDbAuth() : null);
 
-if (!session?.sessionCookie) {
-  console.error("[limitlesscurl] No session cookie resolved.");
+if (!auth?.sessionCookie && !auth?.apiKey) {
+  console.error("[limitlesscurl] No Limitless auth resolved.");
   usage();
 }
 
@@ -253,7 +261,8 @@ const requestPathNormalized = requestPath.startsWith("/")
 const result = await limitlessRequest({
   method: method as "GET" | "POST" | "DELETE",
   requestPath: requestPathNormalized,
-  sessionCookie: session.sessionCookie,
+  ...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
+  ...(auth.sessionCookie ? { sessionCookie: auth.sessionCookie } : {}),
   body: resolvedBody,
   baseUrl: baseUrl?.trim() || undefined,
 });

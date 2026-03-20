@@ -12,6 +12,10 @@ import {
   fetchEvmBalance,
   fetchEvmCode,
 } from "../services/polygon-rpc.js";
+import {
+  resolveLimitlessAuthContext,
+  verifyLimitlessAuthContext,
+} from "../services/limitless-auth.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
@@ -1314,13 +1318,28 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                       };
                     })(),
                     (async () => {
+                      const authContext = limitlessCreds
+                        ? await resolveLimitlessAuthContext(user.id, walletAddress)
+                        : null;
                       const snapshot = await fetchLimitlessOnchainSnapshot({
                         rpcUrl: env.baseRpcUrl,
                         timeoutMs: env.baseRpcTimeoutMs,
                         owner: walletAddress,
                       });
                       const reasons: string[] = [];
-                      if (!limitlessCreds) reasons.push("missing_credentials");
+                      let hasCredentials = false;
+                      if (!limitlessCreds || !authContext) {
+                        reasons.push("missing_credentials");
+                      } else {
+                        const verification = await verifyLimitlessAuthContext({
+                          authContext,
+                          walletAddress,
+                        });
+                        hasCredentials = verification.ok;
+                        if (!verification.ok) {
+                          reasons.push("invalid_credentials");
+                        }
+                      }
                       if (snapshot.usdcBalance <= 0n) {
                         reasons.push("insufficient_usdc");
                       }
@@ -1329,7 +1348,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         supported: true,
                         ready: reasons.length === 0,
                         reasons,
-                        hasCredentials: Boolean(limitlessCreds),
+                        hasCredentials,
                         chainId: 8453,
                         usdc: {
                           tokenAddress: env.limitlessUsdcAddress,

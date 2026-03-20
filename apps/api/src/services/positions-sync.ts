@@ -28,6 +28,10 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./limitless-client.js";
+import {
+  buildLimitlessRequestAuthInputs,
+  resolveLimitlessAuthContext,
+} from "./limitless-auth.js";
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -1391,15 +1395,18 @@ async function syncLimitlessPositionsFromPortfolio(
     "limitless",
     inputs.walletAddress,
   );
-  const sessionCookie = creds?.apiSecret?.trim();
-  if (!sessionCookie) {
-    throw new Error("Limitless session not found (connect first).");
+  const authContext = await resolveLimitlessAuthContext(
+    inputs.userId,
+    inputs.walletAddress,
+  );
+  if (!authContext || !creds) {
+    throw new Error("Limitless credentials not found (connect first).");
   }
 
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: "/portfolio/positions",
-    sessionCookie,
+    ...buildLimitlessRequestAuthInputs(authContext),
   });
 
   if (!upstream.ok) {
@@ -1415,7 +1422,7 @@ async function syncLimitlessPositionsFromPortfolio(
     await syncLimitlessHistoryForWallet(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
-      sessionCookie,
+      authContext,
       page: 1,
       limit: 50,
     });

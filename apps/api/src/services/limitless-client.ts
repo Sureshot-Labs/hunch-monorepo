@@ -60,6 +60,7 @@ export async function limitlessRequest(inputs: {
   method: "GET" | "POST" | "DELETE";
   requestPath: string;
   sessionCookie?: string | null;
+  apiKey?: string | null;
   headers?: Record<string, string>;
   body?: unknown;
   captureSessionCookie?: boolean;
@@ -83,6 +84,10 @@ export async function limitlessRequest(inputs: {
 
   if (env.limitlessApiVersion) {
     headers.set("X-API-Version", env.limitlessApiVersion);
+  }
+
+  if (inputs.apiKey) {
+    headers.set("X-API-Key", inputs.apiKey);
   }
 
   if (inputs.sessionCookie) {
@@ -125,3 +130,8 @@ export async function limitlessRequest(inputs: {
     ...(sessionCookie ? { sessionCookie } : {}),
   };
 }
+
+export type LimitlessRequestAuthInputs =
+  | { apiKey: string; sessionCookie?: never }
+  | { sessionCookie: string; apiKey?: never }
+  | { apiKey?: undefined; sessionCookie?: undefined };

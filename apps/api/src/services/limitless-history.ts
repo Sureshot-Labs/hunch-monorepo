@@ -15,6 +15,10 @@ import {
   limitlessRequest,
 } from "./limitless-client.js";
 import {
+  buildLimitlessRequestAuthInputs,
+  type LimitlessAuthContext,
+} from "./limitless-auth.js";
+import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
@@ -239,14 +243,14 @@ function mergeLimitlessTokenPair(
 
 async function fetchLimitlessTokenPairBySlug(inputs: {
   slug: string;
-  sessionCookie: string;
+  authContext: LimitlessAuthContext;
 }): Promise<LimitlessTokenPair | null> {
   const slug = inputs.slug.trim();
   if (!slug) return null;
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/markets/${encodeURIComponent(slug)}`,
-    sessionCookie: inputs.sessionCookie,
+    ...buildLimitlessRequestAuthInputs(inputs.authContext),
   });
   if (!upstream.ok) return null;
   const payload = upstream.payload;
@@ -284,7 +288,7 @@ export async function syncLimitlessHistoryForWallet(
   inputs: {
     userId: string;
     walletAddress: string;
-    sessionCookie: string;
+    authContext: LimitlessAuthContext;
     page: number;
     limit: number;
     from?: string;
@@ -301,7 +305,7 @@ export async function syncLimitlessHistoryForWallet(
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/portfolio/history?${params.toString()}`,
-    sessionCookie: inputs.sessionCookie,
+    ...buildLimitlessRequestAuthInputs(inputs.authContext),
   });
 
   if (!upstream.ok) {
@@ -413,7 +417,7 @@ export async function syncLimitlessHistoryForWallet(
           marketSlug,
           await fetchLimitlessTokenPairBySlug({
             slug: marketSlug,
-            sessionCookie: inputs.sessionCookie,
+            authContext: inputs.authContext,
           }),
         );
       }
