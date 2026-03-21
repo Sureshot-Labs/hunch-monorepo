@@ -70,14 +70,23 @@ export async function loadWalletOpenPositionStatsMap(
 
   const { rows } = await client.query<OpenPositionSnapshotRow>(
     `
-      with latest as (
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      latest as (
         select
-          ws.wallet_id,
-          ws.venue,
-          max(ws.snapshot_at) as snapshot_at
-        from wallet_position_snapshots ws
-        where ws.wallet_id = any($1::uuid[])
-        group by ws.wallet_id, ws.venue
+          wallet_set.wallet_id,
+          latest_venue_snapshot.venue,
+          latest_venue_snapshot.snapshot_at
+        from wallet_set
+        join lateral (
+          select distinct on (ws.venue)
+            ws.venue,
+            ws.snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = wallet_set.wallet_id
+          order by ws.venue, ws.snapshot_at desc
+        ) latest_venue_snapshot on true
       ),
       latest_rows as (
         select
@@ -112,7 +121,6 @@ export async function loadWalletOpenPositionStatsMap(
          and l.venue = ws.venue
          and l.snapshot_at = ws.snapshot_at
         left join unified_markets um on um.id = ws.market_id
-        where ws.wallet_id = any($1::uuid[])
       )
       select
         wallet_id,
