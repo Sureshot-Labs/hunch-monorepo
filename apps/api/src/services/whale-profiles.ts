@@ -2735,13 +2735,14 @@ Rules:
 - top_markets are the largest current held positions, ordered by current gross value.
 - top_events are rolled up from current held positions, not from recent traded volume.
 - Price fields:
-  - top_markets.last_yes_price is the YES price from the market.
+  - top_markets.last_yes_price is the latest tracked YES-side market price field.
+    Treat it as the current market price field, not necessarily the last executed trade.
   - top_markets.held_odds is the side-aware price (YES/NO) for the held position.
     It is null when top_markets.position_side is BOTH.
   - top_changes.odds is also side-aware for the change row.
 - Recent activity fields:
-  - top_markets.recent_activity.last_activity_at is the latest recent activity timestamp for that held market.
-  - top_markets.recent_activity.volume_usd and top_markets.recent_activity.activity_count describe recent activity on that held market.
+  - top_markets.recent_activity.last_activity_at is the latest recent wallet activity timestamp for that held market.
+  - top_markets.recent_activity.volume_usd and top_markets.recent_activity.activity_count describe recent wallet activity on that held market.
 - Position fields:
   - top_markets.position_side can be YES, NO, or BOTH.
   - BOTH means the wallet currently holds both YES and NO in that market.

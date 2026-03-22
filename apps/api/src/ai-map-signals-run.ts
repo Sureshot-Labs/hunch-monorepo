@@ -32,6 +32,7 @@ import {
 import {
   isMarketMapUsable,
 } from "./services/market-map-quality.js";
+import { normalizeAiMarketMetrics } from "./services/market-ai-metrics.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 
@@ -195,10 +196,10 @@ type MarketCandidate = {
   eventTitle: string;
   marketTitle: string | null;
   venue: string;
-  volume24h: number;
-  liquidity: number;
-  openInterest: number;
-  score: number;
+  activityVolume: number;
+  depthProxy: number;
+  openInterest: number | null;
+  eventScore: number;
   affinityScore: number;
   affinityRank: number;
 };
@@ -208,6 +209,7 @@ type EventTopMarket = {
   marketTitle: string | null;
   venue: string | null;
   volume24h: number;
+  volumeTotal: number;
   liquidity: number;
   openInterest: number;
   rank: number;
@@ -1137,16 +1139,23 @@ async function toMarketCandidates(
       const marketId = market.marketId;
       if (seen.has(marketId)) continue;
       seen.add(marketId);
+      const metrics = normalizeAiMarketMetrics({
+        venue: market.venue ?? event.venue,
+        volume24h: market.volume24h,
+        volumeTotal: market.volumeTotal,
+        liquidity: market.liquidity,
+        openInterest: market.openInterest,
+      });
       candidates.push({
         marketId,
         eventId: event.eventId,
         eventTitle: event.title,
         marketTitle: market.marketTitle ?? null,
         venue: market.venue ?? event.venue,
-        volume24h: market.volume24h,
-        liquidity: market.liquidity,
-        openInterest: market.openInterest,
-        score: numericOrZero(event.score),
+        activityVolume: metrics.activityVolume,
+        depthProxy: metrics.depthProxy,
+        openInterest: metrics.openInterest,
+        eventScore: numericOrZero(event.score),
         affinityScore: 0,
         affinityRank: 0,
       });
@@ -1199,10 +1208,10 @@ async function toMarketCandidates(
   out.sort(
     (a, b) =>
       b.affinityScore - a.affinityScore ||
-      b.liquidity - a.liquidity ||
-      b.openInterest - a.openInterest ||
-      b.volume24h - a.volume24h ||
-      b.score - a.score ||
+      b.depthProxy - a.depthProxy ||
+      numericOrZero(b.openInterest) - numericOrZero(a.openInterest) ||
+      b.activityVolume - a.activityVolume ||
+      b.eventScore - a.eventScore ||
       a.marketId.localeCompare(b.marketId),
   );
 
@@ -2042,6 +2051,7 @@ export async function runMapSignals(
             marketTitle: row.marketTitle,
             venue,
             volume24h: row.volume24h,
+            volumeTotal: row.volumeTotal,
             liquidity: row.liquidity,
             openInterest: row.openInterest,
             rank: row.rank,

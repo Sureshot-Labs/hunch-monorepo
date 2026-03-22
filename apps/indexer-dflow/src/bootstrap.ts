@@ -36,10 +36,13 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   type DflowMarketSnapshot,
+  type DflowMappedMarket,
 } from "./mappers.js";
 import type { TDflowEvent, TDflowMarket } from "./types.js";
 import { ensureRedis, redis } from "./redis.js";
 import { getSeriesLookup, type DflowSeriesInfo } from "./seriesClient.js";
+import { fetchKalshiPublicEvents } from "./kalshiPublicClient.js";
+import { applyKalshiPublicEventToMappedMarkets } from "./kalshiPublicEnrichment.js";
 
 type SyncCounters = {
   processedEvents: number;
@@ -48,6 +51,16 @@ type SyncCounters = {
   publishedMarkets?: number;
   publishedHotTokens?: number;
   statusMarkets?: number;
+};
+
+type ProcessEventsOptions = {
+  enrichKalshiPublic?: boolean;
+  enrichmentContext?: string;
+};
+
+type MappedMarketGroup = {
+  eventTicker: string | null;
+  mappedMarkets: DflowMappedMarket[];
 };
 
 const STATUS_BATCH_LIMIT = 100;
@@ -150,6 +163,123 @@ async function reconcileKalshiEventStatuses(
     ? await pool.query(byIdsSql, [uniqueEventIds])
     : await pool.query(allSql);
   return result.rowCount ?? 0;
+}
+
+function pickDflowEventTicker(event: TDflowEvent): string | null {
+  const candidates = [event.event_ticker, event.eventTicker, event.ticker, event.id];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed.length) return trimmed;
+  }
+  return null;
+}
+
+function pickDflowMarketEventTicker(
+  market: TDflowMarket,
+  fallbackEventId?: string,
+): string | null {
+  const raw = market as Record<string, unknown>;
+  const candidates = [raw.eventTicker, raw.event_ticker, fallbackEventId];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (!trimmed.length) continue;
+    if (trimmed.startsWith("kalshi:")) return trimmed.slice("kalshi:".length);
+    return trimmed;
+  }
+  return null;
+}
+
+async function maybeEnrichKalshiMappedMarketGroups(
+  groups: MappedMarketGroup[],
+  context: string,
+): Promise<Set<string>> {
+  const enrichedEventTickers = new Set<string>();
+  if (!env.kalshiPublicEnrichEnabled || !groups.length) {
+    return enrichedEventTickers;
+  }
+
+  const orderedEventTickers: string[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    if (!group.eventTicker || seen.has(group.eventTicker)) continue;
+    seen.add(group.eventTicker);
+    orderedEventTickers.push(group.eventTicker);
+  }
+  if (!orderedEventTickers.length) return enrichedEventTickers;
+
+  const fetchResult = await fetchKalshiPublicEvents(orderedEventTickers);
+  let matchedEvents = 0;
+  let matchedMarkets = 0;
+  let updatedMarkets = 0;
+  let filledBestBid = 0;
+  let filledBestAsk = 0;
+  let filledLastPrice = 0;
+  let updatedVolumeTotal = 0;
+  let updatedVolume24h = 0;
+  let updatedOpenInterest = 0;
+  let updatedLiquidity = 0;
+
+  for (const group of groups) {
+    if (!group.eventTicker) continue;
+    const publicEvent = fetchResult.eventsByTicker.get(group.eventTicker);
+    if (!publicEvent) continue;
+    matchedEvents += 1;
+    const enriched = applyKalshiPublicEventToMappedMarkets(
+      group.mappedMarkets,
+      publicEvent,
+    );
+    group.mappedMarkets = enriched.mappedMarkets;
+    if (group.eventTicker && enriched.matchedMarkets > 0) {
+      enrichedEventTickers.add(group.eventTicker);
+    }
+    matchedMarkets += enriched.matchedMarkets;
+    updatedMarkets += enriched.updatedMarkets;
+    filledBestBid += enriched.filledBestBid;
+    filledBestAsk += enriched.filledBestAsk;
+    filledLastPrice += enriched.filledLastPrice;
+    updatedVolumeTotal += enriched.updatedVolumeTotal;
+    updatedVolume24h += enriched.updatedVolume24h;
+    updatedOpenInterest += enriched.updatedOpenInterest;
+    updatedLiquidity += enriched.updatedLiquidity;
+  }
+
+  if (fetchResult.failedEvents > 0) {
+    log.warn("DFlow Kalshi public enrichment partial failure", {
+      context,
+      failedEvents: fetchResult.failedEvents,
+      sampleErrors: fetchResult.errors,
+    });
+  }
+
+  if (
+    fetchResult.attemptedEvents > 0 ||
+    matchedMarkets > 0 ||
+    fetchResult.failedEvents > 0
+  ) {
+    log.info("DFlow Kalshi public enrichment complete", {
+      context,
+      attemptedEvents: fetchResult.attemptedEvents,
+      fetchedEvents: fetchResult.fetchedEvents,
+      cachedEvents: fetchResult.cachedEvents,
+      resolvedEvents: fetchResult.resolvedEvents,
+      skippedEvents: fetchResult.skippedEvents,
+      failedEvents: fetchResult.failedEvents,
+      matchedEvents,
+      matchedMarkets,
+      updatedMarkets,
+      filledBestBid,
+      filledBestAsk,
+      filledLastPrice,
+      updatedVolumeTotal,
+      updatedVolume24h,
+      updatedOpenInterest,
+      updatedLiquidity,
+    });
+  }
+
+  return enrichedEventTickers;
 }
 
 function byHotness(a: DflowMarketSnapshot, b: DflowMarketSnapshot): number {
@@ -799,8 +929,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
         .filter((ticker): ticker is string => Boolean(ticker));
       const eventInfoByTicker = await fetchMarketEventInfoByTickers(tickers);
 
-      const unifiedMarketRows: UnifiedMarketRow[] = [];
-      const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
+      const mappedGroupsByEvent = new Map<string, MappedMarketGroup>();
 
       for (const market of markets) {
         const eventInfo = eventInfoByTicker.get(market.ticker);
@@ -814,9 +943,33 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
           env.requireInitialized,
         );
         if (!mapped) continue;
-        unifiedMarketRows.push(mapped.marketRow);
-        tokenRows.push(...mapped.tokenRows);
+        const eventTicker = pickDflowMarketEventTicker(market, eventInfo.eventId);
+        const groupKey = eventTicker ?? `__missing__:${eventInfo.eventId}`;
+        const existing = mappedGroupsByEvent.get(groupKey);
+        if (existing) {
+          existing.mappedMarkets.push(mapped);
+        } else {
+          mappedGroupsByEvent.set(groupKey, {
+            eventTicker,
+            mappedMarkets: [mapped],
+          });
+        }
         processedMarkets += 1;
+      }
+
+      const mappedGroups = Array.from(mappedGroupsByEvent.values());
+      await maybeEnrichKalshiMappedMarketGroups(
+        mappedGroups,
+        "hot-status",
+      );
+
+      const unifiedMarketRows: UnifiedMarketRow[] = [];
+      const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
+      for (const group of mappedGroups) {
+        for (const mapped of group.mappedMarkets) {
+          unifiedMarketRows.push(mapped.marketRow);
+          tokenRows.push(...mapped.tokenRows);
+        }
       }
 
       if (unifiedMarketRows.length) {
@@ -878,6 +1031,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
 async function processEvents(
   events: TDflowEvent[],
   seriesLookup?: Map<string, DflowSeriesInfo>,
+  options: ProcessEventsOptions = {},
 ): Promise<{
   processedEvents: number;
   processedMarkets: number;
@@ -895,19 +1049,17 @@ async function processEvents(
   let processedEvents = 0;
   let processedMarkets = 0;
 
+  const bundles: Array<{
+    eventTicker: string | null;
+    unifiedEvent: UnifiedEventRow;
+    mappedMarkets: DflowMappedMarket[];
+    usedPublicEnrichment: boolean;
+  }> = [];
+
   for (const e of events) {
     const unifiedEvent = mapToUnifiedEvent(e, seriesLookup);
     if (!unifiedEvent) continue;
-
-    let volumeTotalSum = 0;
-    let volume24hSum = 0;
-    let liquiditySum = 0;
-    let openInterestSum = 0;
-    let hasVolumeTotal = false;
-    let hasVolume24h = false;
-    let hasLiquidity = false;
-    let hasOpenInterest = false;
-
+    const mappedMarkets: DflowMappedMarket[] = [];
     const markets = e.markets ?? [];
     for (const m of markets) {
       const mapped = mapToUnifiedMarket(
@@ -919,11 +1071,55 @@ async function processEvents(
         env.requireInitialized,
       );
       if (!mapped) continue;
+      mappedMarkets.push(mapped);
+      processedMarkets += 1;
+    }
+    bundles.push({
+      eventTicker: pickDflowEventTicker(e),
+      unifiedEvent,
+      mappedMarkets,
+      usedPublicEnrichment: false,
+    });
+    processedEvents += 1;
+  }
 
+  if (options.enrichKalshiPublic) {
+    const groups = bundles.map((bundle) => ({
+      eventTicker: bundle.eventTicker,
+      mappedMarkets: bundle.mappedMarkets,
+    }));
+    const enrichedEventTickers = await maybeEnrichKalshiMappedMarketGroups(
+      groups,
+      options.enrichmentContext ?? "hot-window",
+    );
+    for (let index = 0; index < bundles.length; index += 1) {
+      const group = groups[index];
+      if (!group) continue;
+      const before = bundles[index];
+      bundles[index] = {
+        ...before,
+        mappedMarkets: group.mappedMarkets,
+        usedPublicEnrichment:
+          Boolean(group.eventTicker) &&
+          enrichedEventTickers.has(group.eventTicker as string),
+      };
+    }
+  }
+
+  for (const bundle of bundles) {
+    let volumeTotalSum = 0;
+    let volume24hSum = 0;
+    let liquiditySum = 0;
+    let openInterestSum = 0;
+    let hasVolumeTotal = false;
+    let hasVolume24h = false;
+    let hasLiquidity = false;
+    let hasOpenInterest = false;
+
+    for (const mapped of bundle.mappedMarkets) {
       unifiedMarketRows.push(mapped.marketRow);
       tokenRows.push(...mapped.tokenRows);
       if (mapped.snapshot) snapshots.push(mapped.snapshot);
-      processedMarkets += 1;
 
       const row = mapped.marketRow;
       if (row.volume_total != null) {
@@ -944,17 +1140,24 @@ async function processEvents(
       }
     }
 
-    if (unifiedEvent.volume_total == null && hasVolumeTotal)
-      unifiedEvent.volume_total = volumeTotalSum;
-    if (unifiedEvent.volume_24h == null && hasVolume24h)
-      unifiedEvent.volume_24h = volume24hSum;
-    if (unifiedEvent.liquidity == null && hasLiquidity)
-      unifiedEvent.liquidity = liquiditySum;
-    if (unifiedEvent.open_interest == null && hasOpenInterest)
-      unifiedEvent.open_interest = openInterestSum;
+    const unifiedEvent = bundle.unifiedEvent;
+    if (bundle.usedPublicEnrichment) {
+      if (hasVolumeTotal) unifiedEvent.volume_total = volumeTotalSum;
+      if (hasVolume24h) unifiedEvent.volume_24h = volume24hSum;
+      if (hasLiquidity) unifiedEvent.liquidity = liquiditySum;
+      if (hasOpenInterest) unifiedEvent.open_interest = openInterestSum;
+    } else {
+      if (unifiedEvent.volume_total == null && hasVolumeTotal)
+        unifiedEvent.volume_total = volumeTotalSum;
+      if (unifiedEvent.volume_24h == null && hasVolume24h)
+        unifiedEvent.volume_24h = volume24hSum;
+      if (unifiedEvent.liquidity == null && hasLiquidity)
+        unifiedEvent.liquidity = liquiditySum;
+      if (unifiedEvent.open_interest == null && hasOpenInterest)
+        unifiedEvent.open_interest = openInterestSum;
+    }
 
     unifiedEventRows.push(unifiedEvent);
-    processedEvents += 1;
   }
 
   if (unifiedEventRows.length) {
@@ -1070,7 +1273,10 @@ export async function syncHotWindow(): Promise<SyncCounters> {
     maxPages: env.hotMaxPages,
   })) {
     totals.pages += 1;
-    const r = await processEvents(events, seriesLookup);
+    const r = await processEvents(events, seriesLookup, {
+      enrichKalshiPublic: env.kalshiPublicEnrichEnabled,
+      enrichmentContext: "hot-window",
+    });
     totals.processedEvents += r.processedEvents;
     totals.processedMarkets += r.processedMarkets;
     for (const snap of r.snapshots) snapshotByMarketId.set(snap.marketId, snap);

@@ -22,6 +22,7 @@ type SelectionRow = {
   resolved_outcome_pct: unknown;
   yes_probability: unknown;
   market_volume_24h: unknown;
+  market_volume_total: unknown;
   market_liquidity: unknown;
   market_open_interest: unknown;
   preferred_market_id: string | null;
@@ -56,6 +57,7 @@ export type RankedRepresentativeMarket = {
   resolvedOutcomePct: number | null;
   yesProbability: number | null;
   volume24h: number;
+  volumeTotal: number;
   liquidity: number;
   openInterest: number;
   preferredMarketId: string | null;
@@ -151,6 +153,7 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
     resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
     yesProbability: toNumber(row.yes_probability),
     volume24h: toNumberOrZero(row.market_volume_24h),
+    volumeTotal: toNumberOrZero(row.market_volume_total),
     liquidity: toNumberOrZero(row.market_liquidity),
     openInterest: toNumberOrZero(row.market_open_interest),
     preferredMarketId: row.preferred_market_id ?? null,
@@ -265,6 +268,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.resolved_outcome_pct,
         odds.yes_probability,
         m.volume_24h as market_volume_24h,
+        m.volume_total as market_volume_total,
         m.liquidity as market_liquidity,
         coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) as market_open_interest,
         m.input_preferred_market_id as preferred_market_id,

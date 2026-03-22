@@ -67,6 +67,25 @@ function parseEmbeddingBuffer(buffer: Buffer): Float32Array | null {
   return new Float32Array(aligned);
 }
 
+function resolveMinTotalVolumeFilter(query: {
+  min_total_volume?: number;
+  min_volume24hr?: number;
+}): number {
+  if (
+    typeof query.min_total_volume === "number" &&
+    Number.isFinite(query.min_total_volume)
+  ) {
+    return query.min_total_volume;
+  }
+  if (
+    typeof query.min_volume24hr === "number" &&
+    Number.isFinite(query.min_volume24hr)
+  ) {
+    return query.min_volume24hr;
+  }
+  return 1e-9;
+}
+
 function normalizeVector(vec: Float32Array): Float32Array {
   let sumSq = 0;
   for (let i = 0; i < vec.length; i += 1) sumSq += vec[i] * vec[i];
@@ -231,7 +250,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
    * Query:
    *  - limit?: number (default env.defaultLimit, max env.maxLimit)
    *  - offset?: number (default 0)
-   *  - min_volume24hr?: number (default > 0)
+   *  - min_total_volume?: number (preferred, default > 0)
+   *  - min_volume24hr?: number (legacy alias for min_total_volume)
    *  - venue?: string | string[] ("polymarket" | "kalshi" | "limitless", supports CSV)
    *  - category?: string (exact match)
    *  - sort?: string ("trending" | "trending_v2" | "totalvol" | "liquidity", default: "trending")
@@ -253,7 +273,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       const limit = q.limit;
       const offset = q.offset;
-      const minVol = q.min_volume24hr;
+      const minVol = resolveMinTotalVolumeFilter(q);
       const minLiquidity = q.min_liquidity;
       const search = q.q;
       const view: "events" | "markets" =
@@ -541,7 +561,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const q = req.query;
       const limit = q.limit;
       const offset = q.offset;
-      const minVol = q.min_volume24hr;
+      const minVol = resolveMinTotalVolumeFilter(q);
       const minLiquidity = q.min_liquidity;
       const search = q.q;
       const view: "events" | "markets" =
@@ -843,7 +863,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const limit = query.limit;
       const offset = query.offset;
       const nowMs = Date.now();
-      const minVol = query.min_volume24hr;
+      const minVol = resolveMinTotalVolumeFilter(query);
       const minLiquidity = query.min_liquidity;
       const venues = query.venue;
       const categories = query.categories;
@@ -1041,7 +1061,6 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         "case when e.liquidity >= 9e16 then null else e.liquidity end";
       const eventVolumeDisplayExpr = `
         case
-          when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
           when e.volume_total is not null and e.volume_total > 0 then e.volume_total
           else null
         end

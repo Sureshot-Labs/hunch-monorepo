@@ -142,10 +142,9 @@ export type MapSignalsPromptInput = {
     eventTitle: string;
     marketTitle: string | null;
     venue: string;
-    volume24h: number;
-    liquidity: number;
-    openInterest: number;
-    score: number;
+    activityVolume: number;
+    depthProxy: number;
+    openInterest: number | null;
     affinityScore: number;
     affinityRank: number;
   }>;
@@ -183,10 +182,9 @@ function formatMarketList(
           `  venue: ${item.venue}`,
           `  event_title: ${item.eventTitle}`,
           `  market_title: ${item.marketTitle ?? "-"}`,
-          `  volume_24h: ${item.volume24h.toFixed(2)}`,
-          `  liquidity: ${item.liquidity.toFixed(2)}`,
-          `  open_interest: ${item.openInterest.toFixed(2)}`,
-          `  score: ${item.score.toFixed(6)}`,
+          `  activity_volume: ${item.activityVolume.toFixed(2)}`,
+          `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
+          `  open_interest: ${item.openInterest == null ? "-" : item.openInterest.toFixed(2)}`,
           `  affinity_score: ${item.affinityScore.toFixed(6)}`,
           `  affinity_rank: ${item.affinityRank}`,
         ].join("\n"),
@@ -215,6 +213,8 @@ export function buildMapSignalsSystemPromptV2(): string {
     "- PUBLISH: specific market-level implication with enough confidence and evidence quality.",
     "- CONTEXT: useful context but no single high-confidence market target.",
     "- SKIP: low-quality/noise/insufficient evidence.",
+    "- activity_volume is the best recent-activity metric available for this market; for Limitless it may use total volume because the venue does not expose a true 24h volume field.",
+    "- depth_proxy is the best available market depth proxy, preferring liquidity and falling back to open interest when liquidity is unavailable.",
     "Output schema:",
     JSON.stringify(MAP_SIGNALS_AGENT_OUTPUT_V2_JSON_SCHEMA, null, 2),
   ].join("\n");
@@ -240,7 +240,7 @@ export function buildMapSignalsUserPromptV2(input: MapSignalsPromptInput): strin
     "Instructions:",
     "- Prefer recent, corroborated evidence.",
     "- Prefer market targets with clear linkage to selected evidence.",
-    "- Consider affinity_score/affinity_rank strongly; when close, prefer higher liquidity/open_interest markets.",
+    "- Consider affinity_score/affinity_rank strongly; when close, prefer higher depth_proxy/open_interest markets.",
     "- If target is unclear or evidence weak, return CONTEXT or SKIP.",
     "- Keep headline concise and concrete.",
     "- Keep rationale short and explicit.",

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
-import { AuthService } from "./auth.js";
+import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { normalizeLimitlessScopedTokenId } from "./lib/limitless-token.js";
@@ -147,6 +147,7 @@ async function insertLimitlessPosition(
 }
 
 async function main() {
+  resetAuthDbFeatureCachesForTests();
   const app = await buildApp();
   const persistedContext = await createTestContext();
   const derivedSignerWallet = randomEvmAddress();
