@@ -314,6 +314,29 @@ const seriesMaxPages = clampInt(
   { min: 0, max: 100_000, fallback: 0 },
 );
 
+const kalshiPublicEnrichEnabledSetting = parseOptionalBool(
+  process.env.KALSHI_PUBLIC_ENRICH_ENABLED,
+);
+const kalshiPublicEnrichEnabled = kalshiPublicEnrichEnabledSetting ?? true;
+const kalshiPublicApiBase =
+  opt("KALSHI_PUBLIC_API_BASE") ?? "https://api.elections.kalshi.com";
+const kalshiPublicTimeoutMs = clampInt(
+  parseOptionalInt(process.env.KALSHI_PUBLIC_TIMEOUT_MS),
+  { min: 250, max: 60_000, fallback: 5_000 },
+);
+const kalshiPublicConcurrency = clampInt(
+  parseOptionalInt(process.env.KALSHI_PUBLIC_CONCURRENCY),
+  { min: 1, max: 20, fallback: 4 },
+);
+const kalshiPublicMaxEventsPerCycle = clampInt(
+  parseOptionalInt(process.env.KALSHI_PUBLIC_MAX_EVENTS_PER_CYCLE),
+  { min: 1, max: 500, fallback: 25 },
+);
+const kalshiPublicCacheTtlSec = clampInt(
+  parseOptionalInt(process.env.KALSHI_PUBLIC_CACHE_TTL_SEC),
+  { min: 1, max: 3600, fallback: 120 },
+);
+
 export const env = {
   dbUrl: req("DATABASE_URL"),
   redisUrl: req("REDIS_URL"),
@@ -367,6 +390,13 @@ export const env = {
   seriesRefreshHours,
   seriesPageSize,
   seriesMaxPages,
+  kalshiPublicEnrichEnabledSetting,
+  kalshiPublicEnrichEnabled,
+  kalshiPublicApiBase,
+  kalshiPublicTimeoutMs,
+  kalshiPublicConcurrency,
+  kalshiPublicMaxEventsPerCycle,
+  kalshiPublicCacheTtlSec,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",

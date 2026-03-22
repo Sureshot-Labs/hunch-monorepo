@@ -252,6 +252,11 @@ type VenueCredentialsDbFeatures = {
 let venueCredentialsDbFeaturesPromise: Promise<VenueCredentialsDbFeatures> | null =
   null;
 
+export function resetAuthDbFeatureCachesForTests(): void {
+  venueCredentialsDbFeaturesPromise = null;
+  sessionDbFeaturesPromise = null;
+}
+
 async function getVenueCredentialsDbFeatures(): Promise<VenueCredentialsDbFeatures> {
   if (venueCredentialsDbFeaturesPromise)
     return venueCredentialsDbFeaturesPromise;

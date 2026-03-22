@@ -99,14 +99,12 @@ export async function fetchFeedEventIds(
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
   const eventVolumeDisplayExpr = `
     case
-      when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
       when e.volume_total is not null and e.volume_total > 0 then e.volume_total
       else null
     end
   `;
   const marketVolumeDisplayExpr = `
     case
-      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
       when m.volume_total is not null and m.volume_total > 0 then m.volume_total
       else null
     end
@@ -538,14 +536,12 @@ export async function fetchFeedMarkets(
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
   const eventVolumeDisplayExpr = `
     case
-      when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
       when e.volume_total is not null and e.volume_total > 0 then e.volume_total
       else null
     end
   `;
   const marketVolumeDisplayExpr = `
     case
-      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
       when m.volume_total is not null and m.volume_total > 0 then m.volume_total
       else null
     end
@@ -820,14 +816,12 @@ export async function fetchFeedMarketsDirect(
     "case when e.liquidity >= 9e16 then null else e.liquidity end";
   const eventVolumeDisplayExpr = `
     case
-      when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
       when e.volume_total is not null and e.volume_total > 0 then e.volume_total
       else null
     end
   `;
   const marketVolumeDisplayExpr = `
     case
-      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
       when m.volume_total is not null and m.volume_total > 0 then m.volume_total
       else null
     end
@@ -1299,7 +1293,6 @@ export async function fetchFavoriteFeedEventPage(
   `;
   const marketVolumeDisplayExpr = `
     case
-      when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
       when m.volume_total is not null and m.volume_total > 0 then m.volume_total
       else null
     end

@@ -45,6 +45,23 @@ const DEFAULT_AI_LABEL_TIMEOUT_MS = 8_000;
 const DEFAULT_AI_LABEL_CONCURRENCY = 4;
 const DEFAULT_LABEL_PRICE_INPUT_PER_M = 0.05;
 const DEFAULT_LABEL_PRICE_OUTPUT_PER_M = 0.4;
+function buildMarketMapActivityVolumeSql(alias: "e" | "m"): string {
+  // Limitless does not expose a true 24h volume metric on the public markets API.
+  // Keep strict 24h semantics where venues provide it, and only fall back to total
+  // volume for Limitless so the venue does not collapse to a uniform zero surface.
+  return `
+    case
+      when ${alias}.volume_24h is not null and ${alias}.volume_24h > 0 then ${alias}.volume_24h
+      when ${alias}.venue = 'limitless'
+        and ${alias}.volume_total is not null
+        and ${alias}.volume_total > 0 then ${alias}.volume_total
+      else 0
+    end
+  `;
+}
+
+const MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL = buildMarketMapActivityVolumeSql("e");
+const MARKET_MAP_MARKET_ACTIVITY_VOLUME_SQL = buildMarketMapActivityVolumeSql("m");
 
 type EventCandidateRow = {
   event_id: string;
@@ -1778,13 +1795,7 @@ async function fetchVenueCandidates(
           e.title,
           e.image as event_image,
           e.icon as event_icon,
-          (
-            case
-              when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
-              when e.volume_total is not null and e.volume_total > 0 then e.volume_total
-              else 0
-            end
-          )::double precision as volume24h,
+          (${MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL})::double precision as volume24h,
           coalesce(
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
             nullif(
@@ -1810,13 +1821,7 @@ async function fetchVenueCandidates(
           and e.venue = $1
           and (e.end_date is null or e.end_date > $2)
           and (
-            (
-              case
-                when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
-                when e.volume_total is not null and e.volume_total > 0 then e.volume_total
-                else 0
-              end
-            ) >= $3
+            (${MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL}) >= $3
             or (
               coalesce(
                 nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
@@ -1835,14 +1840,7 @@ async function fetchVenueCandidates(
           )
         order by
           (
-            coalesce(
-              case
-                when e.volume_24h is not null and e.volume_24h > 0 then e.volume_24h
-                when e.volume_total is not null and e.volume_total > 0 then e.volume_total
-                else 0
-              end,
-              0
-            ) * 0.4
+            coalesce((${MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL}), 0) * 0.4
             +
             coalesce(
               coalesce(
@@ -1876,11 +1874,7 @@ async function fetchVenueCandidates(
           m.image as representative_market_image,
           m.icon as representative_market_icon,
           (
-            (case
-              when m.volume_24h is not null and m.volume_24h > 0 then m.volume_24h
-              when m.volume_total is not null and m.volume_total > 0 then m.volume_total
-              else 0
-            end) * 2 +
+            (${MARKET_MAP_MARKET_ACTIVITY_VOLUME_SQL}) * 2 +
             coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0), 0) +
             coalesce(m.open_interest, 0) +
             coalesce(m.volume_total, 0) * 0.2

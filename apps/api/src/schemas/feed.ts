@@ -69,6 +69,7 @@ export const feedQuerySchema = z.object({
     .int()
     .catch(0)
     .transform((n) => Math.max(n, 0)),
+  min_total_volume: z.coerce.number().optional(),
   min_volume24hr: z.coerce.number().catch(1e-9),
   min_liquidity: z.coerce.number().catch(0),
   q: z

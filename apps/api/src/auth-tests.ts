@@ -7,6 +7,7 @@ import {
   PrivyAccountRecoveryRequiredError,
   PrivyTerminalAuthError,
   WalletNotFoundError,
+  resetAuthDbFeatureCachesForTests,
 } from "./auth.js";
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
@@ -99,6 +100,7 @@ const tests: TestCase[] = [
         ]);
       } finally {
         poolAny.query = originalQuery;
+        resetAuthDbFeatureCachesForTests();
       }
     },
   },
@@ -122,6 +124,7 @@ const tests: TestCase[] = [
         );
       } finally {
         poolAny.query = originalQuery;
+        resetAuthDbFeatureCachesForTests();
       }
     },
   },
