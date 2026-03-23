@@ -1059,6 +1059,7 @@ const FAST_SIGNAL_REASON_FILTERS = new Set([
   "high_notional",
   "high_risk_longshot",
   "late_entry",
+  "low_odds",
   "longshot_odds",
   "narrow_history",
   "reactivated_after_idle",
@@ -1619,6 +1620,17 @@ function buildSignalItemLabels(
   ];
 }
 
+function buildAugmentedSignalItemLabels(
+  baseLabels: string[],
+  walletTags: WalletTagRow[] | null | undefined,
+): string[] {
+  const labels = new Set(baseLabels);
+  if ((walletTags ?? []).some((tag) => tag.slug === "fresh")) {
+    labels.add("fresh_wallet");
+  }
+  return Array.from(labels);
+}
+
 export function buildWalletSignalItemFromSignalRow(input: {
   candidate: CandidateWalletRow;
   signalRow: WalletActivitySignalRow;
@@ -1628,7 +1640,10 @@ export function buildWalletSignalItemFromSignalRow(input: {
     ReturnType<typeof resolveWalletIntelAttributionPolicy>
   >["effective"];
 }): WalletActivitySignalItem {
-  const labels = buildSignalItemLabels(input.pageLabels);
+  const labels = buildAugmentedSignalItemLabels(
+    buildSignalItemLabels(input.pageLabels),
+    input.candidate.tags,
+  );
   const signalPresentation = buildSignalPresentation({
     signalLabels: input.signalRow.reasonCodes,
     labels,
@@ -1697,7 +1712,10 @@ export function buildWalletSignalItemFromTopChange(input: {
     ReturnType<typeof resolveWalletIntelAttributionPolicy>
   >["effective"];
 }): WalletActivitySignalItem {
-  const labels = input.change.labels ?? [];
+  const labels = buildAugmentedSignalItemLabels(
+    input.change.labels ?? [],
+    input.candidate.tags,
+  );
   const signalLabels = input.change.signalLabels ?? [];
   const signalPresentation = buildSignalPresentation({
     signalLabels,

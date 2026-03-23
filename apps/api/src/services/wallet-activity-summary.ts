@@ -919,7 +919,12 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
           'signalType', cc.signal_type,
           'lateBucket', cc.late_bucket,
           'signalLabels', array_remove(array[
-            case when cc.odds is not null and cc.odds <= $5::numeric then 'longshot_odds' end,
+            case
+              when cc.odds is not null and cc.odds <= least($5::numeric, 0.10::numeric)
+                then 'longshot_odds'
+              when cc.odds is not null and cc.odds <= $5::numeric
+                then 'low_odds'
+            end,
             case when coalesce(cc.stake_usd, 0) >= $6::numeric then 'high_notional' end,
             case when coalesce(cc.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
             case when coalesce(cc.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
@@ -935,7 +940,12 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
                and cc.category is not null
                 then 'out_of_pattern'
             end,
-            case when cc.odds is not null and cc.odds <= $5::numeric then 'longshot_odds' end,
+            case
+              when cc.odds is not null and cc.odds <= least($5::numeric, 0.10::numeric)
+                then 'longshot_odds'
+              when cc.odds is not null and cc.odds <= $5::numeric
+                then 'low_odds'
+            end,
             case when coalesce(cc.stake_usd, 0) >= $6::numeric then 'high_notional' end,
             case when coalesce(cc.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
             case when coalesce(cc.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
@@ -1166,7 +1176,12 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       sc.late_bucket,
       sc.occurred_at,
       array_remove(array[
-        case when sc.odds is not null and sc.odds <= $5::numeric then 'longshot_odds' end,
+        case
+          when sc.odds is not null and sc.odds <= least($5::numeric, 0.10::numeric)
+            then 'longshot_odds'
+          when sc.odds is not null and sc.odds <= $5::numeric
+            then 'low_odds'
+        end,
         case when coalesce(sc.stake_usd, 0) >= $6::numeric then 'high_notional' end,
         case when coalesce(sc.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
         case when coalesce(sc.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
@@ -1530,7 +1545,12 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.late_bucket,
       sr.occurred_at,
       array_remove(array[
-        case when sr.odds is not null and sr.odds <= $5::numeric then 'longshot_odds' end,
+        case
+          when sr.odds is not null and sr.odds <= least($5::numeric, 0.10::numeric)
+            then 'longshot_odds'
+          when sr.odds is not null and sr.odds <= $5::numeric
+            then 'low_odds'
+        end,
         case when coalesce(sr.stake_usd, 0) >= $6::numeric then 'high_notional' end,
         case when coalesce(sr.idle_days, 0) >= $12::numeric then 'reactivated_after_idle' end,
         case when coalesce(sr.prior_distinct_markets, 0) <= $8::int then 'narrow_history' end,
