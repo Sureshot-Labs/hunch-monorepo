@@ -11,6 +11,7 @@ export const marketMapQuerySchema = z.object({
   childrenPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
   includeEventsPreview: z.coerce.boolean().optional(),
   eventsPreviewLimit: z.coerce.number().int().min(1).max(24).optional(),
+  marketsPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
   // Backward-compat aliases.
   includeLeafEventsPreview: z.coerce.boolean().optional(),
   leafEventsPreviewLimit: z.coerce.number().int().min(1).max(24).optional(),
@@ -24,6 +25,7 @@ export const marketMapNodeEventsQuerySchema = z.object({
   venues: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
+  marketsPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
 });
 
 export type MarketMapQuery = z.infer<typeof marketMapQuerySchema>;

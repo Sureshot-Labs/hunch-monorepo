@@ -315,9 +315,18 @@ const REASON_PRIORITY: Record<string, number> = {
   unusual_size: 3,
   entered_late: 4,
   out_of_pattern: 5,
-  longshot_odds: 6,
-  high_notional: 7,
+  on_pattern: 6,
+  fresh_wallet: 7,
+  longshot_odds: 8,
+  low_odds: 9,
+  high_notional: 10,
 };
+
+const SIGNAL_TRIGGER_REASONS = new Set([
+  "longshot_odds",
+  "low_odds",
+  "high_notional",
+]);
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -483,12 +492,35 @@ function buildDisplayReasons(
   const hideGateReasons =
     policy.signalsDisplay.hideRedundantReasonsWhenGateImplies &&
     sorted.some(
-      (reason) => reason !== "longshot_odds" && reason !== "high_notional",
+      (reason) => !SIGNAL_TRIGGER_REASONS.has(reason),
     );
-  const filtered = hideGateReasons
-    ? sorted.filter((reason) => reason !== "longshot_odds" && reason !== "high_notional")
-    : sorted;
-  return filtered.slice(0, policy.signalsDisplay.maxDisplayReasons);
+  if (!hideGateReasons) {
+    return sorted.slice(0, policy.signalsDisplay.maxDisplayReasons);
+  }
+
+  const triggerReasons = sorted.filter((reason) => SIGNAL_TRIGGER_REASONS.has(reason));
+  const contextReasons = sorted.filter((reason) => !SIGNAL_TRIGGER_REASONS.has(reason));
+  const selected: string[] = [];
+
+  if (contextReasons.length > 0) {
+    selected.push(contextReasons[0]);
+  }
+
+  if (triggerReasons.length > 0) {
+    selected.push(triggerReasons[0]);
+  }
+
+  for (const reason of contextReasons.slice(1)) {
+    if (selected.includes(reason)) continue;
+    selected.push(reason);
+  }
+
+  for (const reason of triggerReasons.slice(1)) {
+    if (selected.includes(reason)) continue;
+    selected.push(reason);
+  }
+
+  return selected.slice(0, policy.signalsDisplay.maxDisplayReasons);
 }
 
 function resolveSignalSeverity(

@@ -104,10 +104,41 @@ export type MarketMapNode = {
   updatedAt: string;
 };
 
+export type MarketMapEventMarketPreview = {
+  marketId: string;
+  marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
+  tradeType: string | null;
+  marketAddress: string | null;
+  closeTime: string | null;
+  marketStatus: string | null;
+  marketBestBid: number | null;
+  marketBestAsk: number | null;
+  lastPrice: number | null;
+  change24h: number | null;
+  tokenYes: string | null;
+  tokenNo: string | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  acceptingOrders: boolean | null;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: number | null;
+  volume24h: number;
+  volumeTotal: number;
+  liquidity: number;
+  openInterest: number;
+};
+
 export type MarketMapEventSummary = {
   eventId: string;
   title: string;
   venue: MarketMapVenue;
+  startTime?: string | null;
+  endTime?: string | null;
+  closeTime?: string | null;
   representativeMarketId: string | null;
   representativeMarketTitle?: string | null;
   oddsSource?: "representative" | "fallback" | null;
@@ -120,12 +151,16 @@ export type MarketMapEventSummary = {
   marketBestBid?: number | null;
   marketBestAsk?: number | null;
   lastPrice?: number | null;
+  change24h?: number | null;
+  tradeType?: string | null;
+  marketAddress?: string | null;
   marketStatus?: string | null;
   acceptingOrders?: boolean | null;
   resolvedOutcome?: string | null;
   resolvedOutcomePct?: number | null;
   image?: string | null;
   icon?: string | null;
+  marketsPreview?: MarketMapEventMarketPreview[];
   signalCount?: number;
   topSignal?: {
     title: string;
