@@ -23,6 +23,7 @@ import {
 import {
   fetchEvmCode,
   fetchPolymarketOrderHash,
+  fetchPolymarketOrderStatus,
 } from "../services/polygon-rpc.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
@@ -32,6 +33,12 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
+import {
+  POLYMARKET_UNCONFIRMED_STATUS,
+  isPolymarketUnconfirmedStatus,
+  resolvePolymarketUnconfirmedStatus,
+  summarizePolymarketOnchainOrderExecution,
+} from "../services/polymarket-order-execution.js";
 import { syncPolymarketTradesForSigner } from "../services/positions-sync.js";
 import {
   extractOrderArray,
@@ -49,6 +56,9 @@ const MARKET_SHARES_MICRO_STEP = 100n; // 4 decimals in 6-decimal share units
 const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
 const LIMIT_USD_MICRO_STEP = 100n; // 4 decimals in 6-decimal USDC
 const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
+const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
+const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
+const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -71,6 +81,17 @@ type OrderbookSummary = {
   minOrderSize: number | null;
   negRisk: boolean | null;
 };
+
+type PolymarketUnconfirmedRow = {
+  id: string;
+  token_id: string | null;
+  order_hash: string | null;
+  order_payload: unknown | null;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const USDC_SCALE = 1_000_000n;
 
@@ -558,6 +579,182 @@ function lcm(a: bigint, b: bigint): bigint {
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
   if (negRisk == null) return null;
   return negRisk ? env.polymarketNegRiskExchangeAddress : env.polymarketExchangeAddress;
+}
+
+function parseBigIntValue(
+  value: string | number | bigint | null | undefined,
+): bigint | null {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
+  if (!isRecord(orderPayload)) return null;
+  const makerAmount = (orderPayload as Record<string, unknown>).makerAmount;
+  if (
+    makerAmount == null ||
+    typeof makerAmount === "string" ||
+    typeof makerAmount === "number" ||
+    typeof makerAmount === "bigint"
+  ) {
+    return parseBigIntValue(makerAmount);
+  }
+  return null;
+}
+
+async function resolvePolymarketOrderExchangeAddress(inputs: {
+  tokenId?: string | null;
+  explicitExchangeAddress?: string | null;
+}): Promise<string> {
+  const explicit = inputs.explicitExchangeAddress?.trim();
+  if (explicit) return explicit;
+
+  const tokenId = inputs.tokenId?.trim();
+  if (tokenId) {
+    const marketInfo = await fetchPolymarketMarketInfo(pool, { tokenId });
+    const marketExchangeAddress = exchangeAddressForNegRisk(
+      marketInfo?.neg_risk ?? null,
+    );
+    if (marketExchangeAddress) return marketExchangeAddress;
+  }
+
+  return env.polymarketExchangeAddress;
+}
+
+async function fetchPolymarketExecutionSummary(inputs: {
+  exchangeAddress: string;
+  orderHash: string;
+  makerAmount: bigint;
+}) {
+  const onchainStatus = await fetchPolymarketOrderStatus({
+    rpcUrl: env.polygonRpcUrl,
+    timeoutMs: env.polygonRpcTimeoutMs,
+    exchangeAddress: inputs.exchangeAddress,
+    orderHash: inputs.orderHash,
+  });
+  return summarizePolymarketOnchainOrderExecution({
+    makerAmount: inputs.makerAmount,
+    remaining: onchainStatus.remaining,
+    isFilledOrCancelled: onchainStatus.isFilledOrCancelled,
+  });
+}
+
+async function waitForPolymarketExecutionConfirmation(inputs: {
+  exchangeAddress: string;
+  orderHash: string;
+  makerAmount: bigint;
+}) {
+  for (let attempt = 0; attempt < POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS; attempt += 1) {
+    const summary = await fetchPolymarketExecutionSummary(inputs);
+    if (summary.hasExecution) return summary;
+    if (attempt < POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS - 1) {
+      await sleep(POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS);
+    }
+  }
+  return null;
+}
+
+async function reconcileUnconfirmedOrders(inputs: {
+  userId: string;
+  signerAddress: string;
+  log: { warn: (payload: unknown, message: string) => void };
+}) {
+  const { rows } = await pool.query<PolymarketUnconfirmedRow>(
+    `
+      select id, token_id, order_hash, order_payload
+      from orders
+      where user_id = $1
+        and venue = 'polymarket'
+        and status = $3
+        and order_hash is not null
+        and (
+          lower(coalesce(signer_address, '')) = lower($2)
+          or lower(coalesce(wallet_address, '')) = lower($2)
+        )
+      order by posted_at desc nulls last
+      limit $4
+    `,
+    [
+      inputs.userId,
+      inputs.signerAddress,
+      POLYMARKET_UNCONFIRMED_STATUS,
+      POLYMARKET_UNCONFIRMED_LIMIT,
+    ],
+  );
+
+  if (!rows.length) {
+    return { checked: 0, confirmedCount: 0, unmatchedCount: 0 };
+  }
+
+  let confirmedCount = 0;
+  let unmatchedCount = 0;
+  const exchangeAddressByTokenId = new Map<string, string>();
+
+  for (const row of rows) {
+    const orderHash = row.order_hash?.trim();
+    const makerAmount = readMakerAmountFromOrderPayload(row.order_payload);
+    if (!orderHash || makerAmount == null || makerAmount <= 0n) continue;
+
+    const tokenId = row.token_id?.trim() || null;
+    let exchangeAddress =
+      tokenId != null ? exchangeAddressByTokenId.get(tokenId) ?? null : null;
+    if (!exchangeAddress) {
+      exchangeAddress = await resolvePolymarketOrderExchangeAddress({
+        tokenId,
+      });
+      if (tokenId) {
+        exchangeAddressByTokenId.set(tokenId, exchangeAddress);
+      }
+    }
+
+    try {
+      const summary = await fetchPolymarketExecutionSummary({
+        exchangeAddress,
+        orderHash,
+        makerAmount,
+      });
+      const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
+      if (!isPolymarketUnconfirmedStatus(nextStatus)) {
+        await pool.query(
+          `
+            update orders
+            set status = $2,
+                last_update = now()
+            where id = $1
+              and status = $3
+          `,
+          [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
+        );
+        if (nextStatus === "matched") confirmedCount += 1;
+        if (nextStatus === "unmatched") unmatchedCount += 1;
+      }
+    } catch (error) {
+      inputs.log.warn(
+        {
+          error,
+          userId: inputs.userId,
+          signerAddress: inputs.signerAddress,
+          orderId: row.id,
+          orderHash,
+        },
+        "Polymarket unconfirmed order reconcile failed",
+      );
+    }
+  }
+
+  return { checked: rows.length, confirmedCount, unmatchedCount };
 }
 
 function generatePolymarketNonce(): string {
@@ -1793,18 +1990,41 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         );
       }
 
+      let settlementSync = {
+        checked: 0,
+        confirmedCount: 0,
+        unmatchedCount: 0,
+      };
+      try {
+        settlementSync = await reconcileUnconfirmedOrders({
+          userId: user.id,
+          signerAddress: signer,
+          log: app.log,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Polymarket unconfirmed order reconcile during orders sync failed",
+        );
+      }
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
         venue: "polymarket",
         walletAddress: signer,
-        changed: storedNew > 0 || tradeSync.insertedFillCount > 0,
+        changed:
+          storedNew > 0 ||
+          tradeSync.insertedFillCount > 0 ||
+          settlementSync.confirmedCount > 0 ||
+          settlementSync.unmatchedCount > 0,
         fetched: ordersRaw.length,
         storedNew,
         alreadyKnown,
         skippedNoId,
         sampleVenueOrderIds: orderIds.slice(0, 10),
         tradeSync,
+        settlementSync,
       });
     },
   );
@@ -1961,8 +2181,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const orderType = normalizeOrderTypeForClob(body.orderType);
       const orderTokenId = extractTokenId(order);
+      let marketInfo = null;
       if (orderTokenId) {
-        const marketInfo = await fetchPolymarketMarketInfo(pool, {
+        marketInfo = await fetchPolymarketMarketInfo(pool, {
           tokenId: orderTokenId,
         });
         const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
@@ -1998,19 +2219,33 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const feeAuthSig =
         typeof body.feeAuthSig === "string" ? body.feeAuthSig.trim() : "";
       const exchangeAddress =
-        (typeof body.exchangeAddress === "string" && body.exchangeAddress) ||
-        exchangeAddressForNegRisk(body.negRisk ?? null) ||
-        "";
+        (typeof body.exchangeAddress === "string" && body.exchangeAddress.trim()) ||
+        exchangeAddressForNegRisk(body.negRisk ?? marketInfo?.neg_risk ?? null) ||
+        env.polymarketExchangeAddress;
       const feeCollectorAddress =
         (typeof body.feeCollectorAddress === "string" &&
           body.feeCollectorAddress.trim()) ||
         env.feeCollectorAddress?.trim() ||
         "";
 
-      let orderHash: string | null = null;
+      let orderHash = "";
       let feeBps: number | null = null;
       let feeDeadline: number | null = null;
       let feeAuthStored: Record<string, unknown> | null = null;
+
+      if (!normalizedForHash) {
+        reply.code(400);
+        return reply.send({
+          error: "Order payload is missing required hash fields",
+        });
+      }
+
+      orderHash = await fetchPolymarketOrderHash({
+        rpcUrl: env.polygonRpcUrl,
+        timeoutMs: env.polygonRpcTimeoutMs,
+        exchangeAddress,
+        order: normalizedForHash,
+      });
 
       if (feeAuth || feeAuthSig) {
         if (!feeAuth || !feeAuthSig) {
@@ -2037,27 +2272,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             error: "Fee collector address does not match configured policy",
           });
         }
-
-        if (!exchangeAddress) {
-          reply.code(400);
-          return reply.send({
-            error: "exchangeAddress (or negRisk) is required to hash the order",
-          });
-        }
-
-        if (!normalizedForHash) {
-          reply.code(400);
-          return reply.send({
-            error: "Order payload is missing required hash fields",
-          });
-        }
-
-        const computedOrderHash = await fetchPolymarketOrderHash({
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          exchangeAddress,
-          order: normalizedForHash,
-        });
 
         const feeAuthSigner =
           typeof feeAuth.signer === "string" ? feeAuth.signer : "";
@@ -2087,7 +2301,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             error: "feeAuth.exchange must match the order exchange",
           });
         }
-        if (normalizeHex(feeAuthOrderHash) !== normalizeHex(computedOrderHash)) {
+        if (normalizeHex(feeAuthOrderHash) !== normalizeHex(orderHash)) {
           reply.code(400);
           return reply.send({
             error: "feeAuth.orderHash does not match the computed order hash",
@@ -2099,12 +2313,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         const deadlineRaw = parseNumberish(feeAuth.deadline);
         feeDeadline = deadlineRaw != null ? Math.trunc(deadlineRaw) : null;
 
-        orderHash = computedOrderHash;
         feeAuthStored = {
           signer: feeAuthSigner,
           vault: feeAuthVault,
           exchange: feeAuthExchange,
-          orderHash: computedOrderHash,
+          orderHash,
           feeBps: normalizeNumberishString(feeAuth.feeBps) ?? feeAuth.feeBps,
           nonce: normalizeNumberishString(feeAuth.nonce) ?? feeAuth.nonce,
           deadline: normalizeNumberishString(feeAuth.deadline) ?? feeAuth.deadline,
@@ -2183,6 +2396,48 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const tokenId = extractTokenId(order);
       const { price, size } = derivePriceAndSize(order, side);
       const statusRaw = extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
+      const immediateFill = extractPolymarketImmediateFill({
+        payload: upstream.payload,
+        side,
+        status: statusRaw,
+        fallbackPrice: price,
+        fallbackSize: size,
+      });
+      const shouldConfirmImmediateExecution =
+        orderType === "FOK" &&
+        (isImmediateExecutionStatus(statusRaw) || immediateFill?.fromPayload === true);
+
+      let status = statusRaw;
+      if (shouldConfirmImmediateExecution) {
+        const makerAmount = parseBigIntValue(normalizedForHash.makerAmount);
+        if (makerAmount != null && makerAmount > 0n) {
+          try {
+            const execution = await waitForPolymarketExecutionConfirmation({
+              exchangeAddress,
+              orderHash,
+              makerAmount,
+            });
+            status = execution?.hasExecution
+              ? "matched"
+              : POLYMARKET_UNCONFIRMED_STATUS;
+          } catch (error) {
+            request.log.warn(
+              {
+                error,
+                userId: user.id,
+                signer,
+                funder,
+                tokenId,
+                orderHash,
+              },
+              "Polymarket submit-time on-chain confirmation failed",
+            );
+            status = POLYMARKET_UNCONFIRMED_STATUS;
+          }
+        } else {
+          status = POLYMARKET_UNCONFIRMED_STATUS;
+        }
+      }
 
       const stored = await storeOrder(pool, {
         userId: user.id,
@@ -2195,7 +2450,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderType,
         price,
         size,
-        status: statusRaw,
+        status,
         errorMessage: null,
         rawError: null,
         orderPayload,
@@ -2207,40 +2462,33 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         feeDeadline,
       });
 
-      if (stored.kind === "stored" && orderType === "FOK" && tokenId) {
-        const immediateFill = extractPolymarketImmediateFill({
-          payload: upstream.payload,
-          side,
-          status: statusRaw,
-          fallbackPrice: price,
-          fallbackSize: size,
-        });
-        const canApplyOptimistic =
-          immediateFill != null &&
-          (isImmediateExecutionStatus(statusRaw) || immediateFill.fromPayload);
-        if (canApplyOptimistic && immediateFill) {
-          try {
-            await applyOptimisticPositionTrade(pool, {
+      if (
+        stored.kind === "stored" &&
+        status === "matched" &&
+        tokenId &&
+        immediateFill
+      ) {
+        try {
+          await applyOptimisticPositionTrade(pool, {
+            userId: user.id,
+            walletAddress: funder,
+            venue: "polymarket",
+            tokenId,
+            side,
+            shares: immediateFill.shares,
+            notionalUsd: immediateFill.notionalUsd,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
               userId: user.id,
               walletAddress: funder,
-              venue: "polymarket",
               tokenId,
               side,
-              shares: immediateFill.shares,
-              notionalUsd: immediateFill.notionalUsd,
-            });
-          } catch (error) {
-            app.log.warn(
-              {
-                error,
-                userId: user.id,
-                walletAddress: funder,
-                tokenId,
-                side,
-              },
-              "Polymarket optimistic position update failed",
-            );
-          }
+            },
+            "Polymarket optimistic position update failed",
+          );
         }
       }
 
@@ -2249,7 +2497,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         buildOrderNotification({
           userId: user.id,
           venue: "polymarket",
-          status: statusRaw,
+          status,
           side,
           size,
           price,
@@ -2266,6 +2514,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         venue: "polymarket",
         orderId: venueOrderId,
         orderHash,
+        status,
         stored: stored.kind,
         payload: upstream.payload,
       });
