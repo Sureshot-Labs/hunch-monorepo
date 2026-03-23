@@ -382,6 +382,57 @@ export async function fetchPolymarketOrderHash(inputs: {
   return value;
 }
 
+export async function fetchPolymarketOrderStatus(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  exchangeAddress: string;
+  orderHash: string;
+}): Promise<{ isFilledOrCancelled: boolean; remaining: bigint }> {
+  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
+  const data = polymarketExchangeIface.encodeFunctionData("getOrderStatus", [
+    inputs.orderHash,
+  ]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: exchangeAddress, data }, "latest"],
+  });
+  const decoded = polymarketExchangeIface.decodeFunctionResult(
+    "getOrderStatus",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  const record =
+    value && typeof value === "object"
+      ? (value as {
+          0?: boolean;
+          1?: bigint;
+          isFilledOrCancelled?: boolean;
+          remaining?: bigint;
+        })
+      : null;
+  const isFilledOrCancelled =
+    typeof record?.isFilledOrCancelled === "boolean"
+      ? record.isFilledOrCancelled
+      : typeof record?.[0] === "boolean"
+        ? record[0]
+        : null;
+  const remaining =
+    typeof record?.remaining === "bigint"
+      ? record.remaining
+      : typeof record?.[1] === "bigint"
+        ? record[1]
+        : null;
+  if (isFilledOrCancelled == null || remaining == null) {
+    throw new Error("Polygon RPC: invalid getOrderStatus result");
+  }
+  return {
+    isFilledOrCancelled,
+    remaining,
+  };
+}
+
 export async function fetchFeeCollectorNonce(inputs: {
   rpcUrl: string;
   timeoutMs: number;

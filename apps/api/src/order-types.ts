@@ -86,6 +86,7 @@ export type OrderStatus =
   | "pending"
   | "submitted"
   | "live"
+  | "unconfirmed"
   | "matched"
   | "partially_filled"
   | "filled"
@@ -208,7 +209,12 @@ export interface PolymarketOrderResponse {
 
 export interface PolymarketOrderStatus {
   orderId: string;
-  status: "matched" | "live" | "delayed" | "unmatched";
+  status:
+    | "matched"
+    | "live"
+    | "delayed"
+    | "unconfirmed"
+    | "unmatched";
   filledSize?: number;
   averageFillPrice?: number;
 }

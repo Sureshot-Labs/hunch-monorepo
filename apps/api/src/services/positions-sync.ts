@@ -1176,6 +1176,7 @@ export async function syncPolymarketTradesForSigner(
           filled_at = agg.filled_at,
           status = case
             when o.status in ('cancelled', 'rejected', 'expired') then o.status
+            when o.status = 'unconfirmed' then o.status
             when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
               then 'matched'
             when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
