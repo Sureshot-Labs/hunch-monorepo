@@ -315,9 +315,11 @@ const REASON_PRIORITY: Record<string, number> = {
   unusual_size: 3,
   entered_late: 4,
   out_of_pattern: 5,
-  longshot_odds: 6,
-  low_odds: 7,
-  high_notional: 8,
+  on_pattern: 6,
+  fresh_wallet: 7,
+  longshot_odds: 8,
+  low_odds: 9,
+  high_notional: 10,
 };
 
 const SIGNAL_TRIGGER_REASONS = new Set([
