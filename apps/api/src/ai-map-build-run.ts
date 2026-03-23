@@ -69,6 +69,8 @@ type EventCandidateRow = {
   title: string | null;
   event_image: string | null;
   event_icon: string | null;
+  start_time: Date | string | null;
+  end_time: Date | string | null;
   volume24h: unknown;
   liquidity: unknown;
   open_interest: unknown;
@@ -81,6 +83,9 @@ type EventCandidateRow = {
 
 type EnrichedEventCandidateRow = EventCandidateRow & {
   odds_source: "representative" | "fallback" | null;
+  trade_type: string | null;
+  market_address: string | null;
+  close_time: string | null;
   token_yes: string | null;
   token_no: string | null;
   yes_bid: number | null;
@@ -90,6 +95,7 @@ type EnrichedEventCandidateRow = EventCandidateRow & {
   market_best_bid: number | null;
   market_best_ask: number | null;
   last_price: number | null;
+  change_24h: number | null;
   market_status: string | null;
   accepting_orders: boolean | null;
   resolved_outcome: string | null;
@@ -108,6 +114,9 @@ type EventPoint = {
   eventId: string;
   venue: MarketMapVenue;
   title: string;
+  startTime: string | null;
+  endTime: string | null;
+  closeTime: string | null;
   representativeMarketId: string | null;
   representativeMarketTitle: string | null;
   image: string | null;
@@ -126,6 +135,9 @@ type EventPoint = {
   marketBestBid: number | null;
   marketBestAsk: number | null;
   lastPrice: number | null;
+  change24h: number | null;
+  tradeType: string | null;
+  marketAddress: string | null;
   marketStatus: string | null;
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
@@ -327,6 +339,12 @@ function normalizeOptionalUrl(value: unknown): string | null {
   return trimmed;
 }
 
+function toIsoStringOrNull(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 function emptyDropReasonCounts(): Record<MarketMapDropReason, number> {
   return {
     missing_token_pair: 0,
@@ -439,6 +457,9 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     eventId: point.eventId,
     title: point.title,
     venue: point.venue,
+    startTime: point.startTime,
+    endTime: point.endTime,
+    closeTime: point.closeTime,
     representativeMarketId: point.representativeMarketId,
     representativeMarketTitle: point.representativeMarketTitle,
     image: point.image,
@@ -456,6 +477,9 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     marketBestBid: point.marketBestBid,
     marketBestAsk: point.marketBestAsk,
     lastPrice: point.lastPrice,
+    change24h: point.change24h,
+    tradeType: point.tradeType,
+    marketAddress: point.marketAddress,
     marketStatus: point.marketStatus,
     acceptingOrders: point.acceptingOrders,
     resolvedOutcome: point.resolvedOutcome,
@@ -1795,6 +1819,8 @@ async function fetchVenueCandidates(
           e.title,
           e.image as event_image,
           e.icon as event_icon,
+          e.start_date as start_time,
+          e.end_date as end_time,
           (${MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL})::double precision as volume24h,
           coalesce(
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
@@ -1896,6 +1922,8 @@ async function fetchVenueCandidates(
         em.title,
         em.event_image,
         em.event_icon,
+        em.start_time,
+        em.end_time,
         em.volume24h,
         em.liquidity,
         em.open_interest,
@@ -1947,6 +1975,9 @@ function applyRepresentativeToCandidate(
     representative_market_icon:
       normalizeOptionalUrl(selected?.marketIcon) ?? row.representative_market_icon,
     odds_source: oddsSource,
+    trade_type: selected?.tradeType ?? null,
+    market_address: selected?.marketAddress ?? null,
+    close_time: selected?.closeTime ?? null,
     token_yes: selected?.tokenYes ?? null,
     token_no: selected?.tokenNo ?? null,
     yes_bid: selected?.yesBid ?? null,
@@ -1956,6 +1987,7 @@ function applyRepresentativeToCandidate(
     market_best_bid: selected?.marketBestBid ?? null,
     market_best_ask: selected?.marketBestAsk ?? null,
     last_price: selected?.lastPrice ?? null,
+    change_24h: selected?.change24h ?? null,
     market_status: selected?.marketStatus ?? null,
     accepting_orders: selected?.acceptingOrders ?? null,
     resolved_outcome: selected?.resolvedOutcome ?? null,
@@ -2279,6 +2311,9 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           eventId: row.event_id,
           venue: row.venue,
           title: row.title?.trim() || row.event_id,
+          startTime: toIsoStringOrNull(row.start_time),
+          endTime: toIsoStringOrNull(row.end_time),
+          closeTime: row.close_time ?? null,
           representativeMarketId: row.representative_market_id ?? null,
           representativeMarketTitle: row.representative_market_title?.trim() || null,
           image:
@@ -2301,6 +2336,9 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           marketBestBid: row.market_best_bid,
           marketBestAsk: row.market_best_ask,
           lastPrice: row.last_price,
+          change24h: row.change_24h,
+          tradeType: row.trade_type,
+          marketAddress: row.market_address,
           marketStatus: row.market_status,
           acceptingOrders: row.accepting_orders,
           resolvedOutcome: row.resolved_outcome,

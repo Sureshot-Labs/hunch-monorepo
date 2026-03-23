@@ -11,6 +11,7 @@ import {
 } from "../schemas/market-map.js";
 import {
   applyVenueFilterToNode,
+  type MarketMapEventMarketPreview,
   type MarketMapEventSummary,
   type MarketMapMeta,
   type MarketMapNode,
@@ -72,10 +73,14 @@ type MarketMapLiveMarketData = {
   marketTitle: string | null;
   marketImage: string | null;
   marketIcon: string | null;
+  tradeType: string | null;
+  marketAddress: string | null;
+  closeTime: string | null;
   marketStatus: string | null;
   marketBestBid: number | null;
   marketBestAsk: number | null;
   lastPrice: number | null;
+  change24h: number | null;
   tokenYes: string | null;
   tokenNo: string | null;
   yesBid: number | null;
@@ -89,6 +94,11 @@ type MarketMapLiveMarketData = {
   liquidity: number;
   openInterest: number;
   oddsSource: "representative" | "fallback";
+};
+
+type MarketMapLiveMarketBundle = {
+  primaryByEventVenue: Map<string, MarketMapLiveMarketData>;
+  marketsByEventVenue: Map<string, MarketMapEventMarketPreview[]>;
 };
 
 type MarketMapSignalType = "catalyst" | "risk" | "update";
@@ -153,10 +163,14 @@ function normalizeLiveRow(
     marketTitle: row.marketTitle,
     marketImage: row.marketImage,
     marketIcon: row.marketIcon,
+    tradeType: row.tradeType,
+    marketAddress: row.marketAddress,
+    closeTime: row.closeTime,
     marketStatus: row.marketStatus,
     marketBestBid: row.marketBestBid,
     marketBestAsk: row.marketBestAsk,
     lastPrice: row.lastPrice,
+    change24h: row.change24h,
     tokenYes: row.tokenYes,
     tokenNo: row.tokenNo,
     yesBid: row.yesBid,
@@ -170,6 +184,38 @@ function normalizeLiveRow(
     liquidity: row.liquidity,
     openInterest: row.openInterest,
     oddsSource,
+  };
+}
+
+function normalizePreviewMarketRow(
+  row: RankedRepresentativeMarket,
+): MarketMapEventMarketPreview {
+  return {
+    marketId: row.marketId,
+    marketTitle: row.marketTitle,
+    marketImage: row.marketImage,
+    marketIcon: row.marketIcon,
+    tradeType: row.tradeType,
+    marketAddress: row.marketAddress,
+    closeTime: row.closeTime,
+    marketStatus: row.marketStatus,
+    marketBestBid: row.marketBestBid,
+    marketBestAsk: row.marketBestAsk,
+    lastPrice: row.lastPrice,
+    change24h: row.change24h,
+    tokenYes: row.tokenYes,
+    tokenNo: row.tokenNo,
+    yesBid: row.yesBid,
+    yesAsk: row.yesAsk,
+    noBid: row.noBid,
+    noAsk: row.noAsk,
+    acceptingOrders: row.acceptingOrders,
+    resolvedOutcome: row.resolvedOutcome,
+    resolvedOutcomePct: row.resolvedOutcomePct,
+    volume24h: row.volume24h,
+    volumeTotal: row.volumeTotal,
+    liquidity: row.liquidity,
+    openInterest: row.openInterest,
   };
 }
 
@@ -562,10 +608,12 @@ function applySignalSummaryToEvents(
 
 async function loadLiveMarketDataForEvents(
   events: MarketMapEventSummary[],
-): Promise<Map<string, MarketMapLiveMarketData>> {
-  const byEventVenue = new Map<string, MarketMapLiveMarketData>();
+  perEventLimit = 1,
+): Promise<MarketMapLiveMarketBundle> {
+  const primaryByEventVenue = new Map<string, MarketMapLiveMarketData>();
+  const marketsByEventVenue = new Map<string, MarketMapEventMarketPreview[]>();
   if (events.length === 0) {
-    return byEventVenue;
+    return { primaryByEventVenue, marketsByEventVenue };
   }
 
   const preferredByEventVenue = new Map<string, string | null>();
@@ -583,29 +631,36 @@ async function loadLiveMarketDataForEvents(
   const ranked = await selectRankedRepresentativeMarketsForEvents(
     pool,
     inputs,
-    1,
+    Math.max(1, Math.trunc(perEventLimit)),
   );
 
   for (const row of ranked) {
     const key = eventVenueKey(row.eventId, row.venue);
-    if (byEventVenue.has(key)) continue;
+    const existingMarkets = marketsByEventVenue.get(key) ?? [];
+    existingMarkets.push(normalizePreviewMarketRow(row));
+    marketsByEventVenue.set(key, existingMarkets);
+    if (primaryByEventVenue.has(key)) continue;
     const preferredMarketId = preferredByEventVenue.get(key) ?? null;
     const oddsSource =
       preferredMarketId != null && row.marketId === preferredMarketId
         ? "representative"
         : "fallback";
-    byEventVenue.set(key, normalizeLiveRow(row, oddsSource));
+    primaryByEventVenue.set(key, normalizeLiveRow(row, oddsSource));
   }
 
-  return byEventVenue;
+  return { primaryByEventVenue, marketsByEventVenue };
 }
 
 function applyLiveMarketDataToEvents(
   events: MarketMapEventSummary[],
-  byEventVenue: ReadonlyMap<string, MarketMapLiveMarketData>,
+  primaryByEventVenue: ReadonlyMap<string, MarketMapLiveMarketData>,
+  marketsByEventVenue: ReadonlyMap<string, MarketMapEventMarketPreview[]>,
 ): MarketMapEventSummary[] {
   return events.map((event) => {
-    const live = byEventVenue.get(eventVenueKey(event.eventId, event.venue));
+    const key = eventVenueKey(event.eventId, event.venue);
+    const live = primaryByEventVenue.get(key);
+    const marketsPreview =
+      marketsByEventVenue.get(key) ?? event.marketsPreview ?? [];
     if (!live) return event;
     const liquidityFallback =
       event.liquidity > 0
@@ -627,7 +682,9 @@ function applyLiveMarketDataToEvents(
       representativeMarketTitle: live.marketTitle ?? event.representativeMarketTitle ?? null,
       image: event.image ?? live.marketImage,
       icon: event.icon ?? live.marketIcon,
+      marketsPreview,
       oddsSource: live.oddsSource,
+      closeTime: live.closeTime ?? event.closeTime ?? null,
       liquidity: liquidityFallback,
       openInterest: openInterestFallback,
       tokenYes: live.tokenYes,
@@ -639,6 +696,9 @@ function applyLiveMarketDataToEvents(
       marketBestBid: live.marketBestBid,
       marketBestAsk: live.marketBestAsk,
       lastPrice: live.lastPrice,
+      change24h: live.change24h,
+      tradeType: live.tradeType,
+      marketAddress: live.marketAddress,
       marketStatus: live.marketStatus,
       acceptingOrders: live.acceptingOrders,
       resolvedOutcome: live.resolvedOutcome,
@@ -720,6 +780,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         false;
       const eventsPreviewLimit =
         query.eventsPreviewLimit ?? query.leafEventsPreviewLimit ?? 10;
+      const marketsPreviewLimit = query.marketsPreviewLimit ?? 8;
       const cacheEnabled = env.marketMapTtlSec > 0;
       const cacheTtl = cacheEnabled ? env.marketMapTtlSec : 0;
       const policyCacheVersion = [
@@ -773,6 +834,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(childrenPreviewLimit),
         includeEventsPreview ? "1" : "0",
         String(eventsPreviewLimit),
+        String(marketsPreviewLimit),
         venues.slice().sort().join(","),
       ].join(":");
       let skipCacheWrite = false;
@@ -998,10 +1060,13 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
               );
 
               const previewEvents = eventsByNodeWithSignals.flat();
-              let liveByEventId: Map<string, MarketMapLiveMarketData> | null = null;
+              let liveBundle: MarketMapLiveMarketBundle | null = null;
               if (previewEvents.length > 0) {
                 try {
-                  liveByEventId = await loadLiveMarketDataForEvents(previewEvents);
+                  liveBundle = await loadLiveMarketDataForEvents(
+                    previewEvents,
+                    marketsPreviewLimit,
+                  );
                 } catch (error) {
                   skipCacheWrite = true;
                   request.log.warn(
@@ -1021,13 +1086,14 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
               const droppedReasons = emptyDropReasonCounts();
               const previewItems = itemsWithPreviewSignals.map((node, index) => {
                 const withLive =
-                  liveByEventId == null
+                  liveBundle == null
                     ? eventsByNodeWithSignals[index]
                     : applyLiveMarketDataToEvents(
                         eventsByNodeWithSignals[index],
-                        liveByEventId,
+                        liveBundle.primaryByEventVenue,
+                        liveBundle.marketsByEventVenue,
                       );
-                if (liveByEventId == null) {
+                if (liveBundle == null) {
                   return {
                     ...node,
                     eventsPreview: withLive,
@@ -1045,7 +1111,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                   eventsPreview: filtered.items,
                 };
               });
-              if (liveByEventId != null && droppedPreviewEvents > 0) {
+              if (liveBundle != null && droppedPreviewEvents > 0) {
                 request.log.info(
                   {
                     level,
@@ -1177,6 +1243,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const selectedVenueSet = new Set<MarketMapVenue>(selectedVenues);
       const offset = request.query.offset ?? 0;
       const limit = request.query.limit ?? 100;
+      const marketsPreviewLimit = request.query.marketsPreviewLimit ?? 8;
       const cacheEnabled = env.marketMapTtlSec > 0;
       const cacheTtl = cacheEnabled ? env.marketMapTtlSec : 0;
       const policyCacheVersion = [
@@ -1192,6 +1259,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         selectedVenues.slice().sort().join(","),
         String(offset),
         String(limit),
+        String(marketsPreviewLimit),
       ].join(":");
       let skipCacheWrite = false;
       if (cacheEnabled) {
@@ -1238,10 +1306,14 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       let qualityGateApplied = false;
       if (items.length > 0) {
         try {
-          const liveByEventId = await loadLiveMarketDataForEvents(itemsWithLiveMarket);
+          const liveBundle = await loadLiveMarketDataForEvents(
+            itemsWithLiveMarket,
+            marketsPreviewLimit,
+          );
           itemsWithLiveMarket = applyLiveMarketDataToEvents(
             itemsWithLiveMarket,
-            liveByEventId,
+            liveBundle.primaryByEventVenue,
+            liveBundle.marketsByEventVenue,
           );
           qualityGateApplied = true;
         } catch (error) {

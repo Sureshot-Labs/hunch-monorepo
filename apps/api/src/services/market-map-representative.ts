@@ -7,10 +7,14 @@ type SelectionRow = {
   market_title: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_trade_type: string | null;
+  market_address: string | null;
+  market_close_time: Date | string | null;
   market_status: string | null;
   market_best_bid: unknown;
   market_best_ask: unknown;
   last_price: unknown;
+  market_change_24h: unknown;
   token_yes: string | null;
   token_no: string | null;
   yes_top_bid: unknown;
@@ -42,10 +46,14 @@ export type RankedRepresentativeMarket = {
   marketTitle: string | null;
   marketImage: string | null;
   marketIcon: string | null;
+  tradeType: string | null;
+  marketAddress: string | null;
+  closeTime: string | null;
   marketStatus: string | null;
   marketBestBid: number | null;
   marketBestAsk: number | null;
   lastPrice: number | null;
+  change24h: number | null;
   tokenYes: string | null;
   tokenNo: string | null;
   yesBid: number | null;
@@ -138,10 +146,17 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
     marketTitle: row.market_title?.trim() || null,
     marketImage: row.market_image ?? null,
     marketIcon: row.market_icon ?? null,
+    tradeType: row.market_trade_type ?? null,
+    marketAddress: row.market_address ?? null,
+    closeTime:
+      row.market_close_time == null
+        ? null
+        : new Date(row.market_close_time).toISOString(),
     marketStatus: row.market_status ?? null,
     marketBestBid: toNumber(row.market_best_bid),
     marketBestAsk: toNumber(row.market_best_ask),
     lastPrice: toNumber(row.last_price),
+    change24h: toNumber(row.market_change_24h),
     tokenYes: row.token_yes ?? null,
     tokenNo: row.token_no ?? null,
     yesBid: toNumber(row.yes_top_bid),
@@ -250,10 +265,14 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.title as market_title,
         m.image as market_image,
         m.icon as market_icon,
+        m.metadata->>'tradeType' as market_trade_type,
+        m.metadata->>'address' as market_address,
+        m.close_time as market_close_time,
         m.status::text as market_status,
         coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
         coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
         coalesce(m.last_price, km.last_price_dollars) as last_price,
+        mc.change_24h as market_change_24h,
         mt.token_yes,
         mt.token_no,
         coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
@@ -453,6 +472,8 @@ export async function selectRankedRepresentativeMarketsForEvents(
         on m.venue = 'polymarket' and pm.id = m.venue_market_id
       left join kalshi_markets km
         on m.venue = 'kalshi' and km.id = m.venue_market_id
+      left join unified_market_change_24h mc
+        on mc.market_id = m.id
       cross join lateral (
         select
           case
@@ -528,10 +549,14 @@ export async function selectRankedRepresentativeMarketsForEvents(
       market_title,
       market_image,
       market_icon,
+      market_trade_type,
+      market_address,
+      market_close_time,
       market_status,
       market_best_bid,
       market_best_ask,
       last_price,
+      market_change_24h,
       token_yes,
       token_no,
       yes_top_bid,
@@ -543,6 +568,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
       resolved_outcome_pct,
       yes_probability,
       market_volume_24h,
+      market_volume_total,
       market_liquidity,
       market_open_interest,
       preferred_market_id,
