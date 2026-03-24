@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import type { QueryResultRow } from "pg";
+import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
 
 export type FeedInputs = {
@@ -119,6 +120,7 @@ export async function fetchFeedEventIds(
     coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
   `;
   const supportedLimitlessMarketExpr = "true";
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const eventVolumeSortExpr = `
     coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
   `;
@@ -162,6 +164,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and ${renderableMarketExpr}
           and (
           m.title ilike ${searchParam} or
           m.description ilike ${searchParam} or
@@ -243,6 +246,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${renderableMarketExpr}
         group by m.event_id
       )
     `);
@@ -277,6 +281,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${renderableMarketExpr}
       )`,
     );
     if (inputs.minVol > 1e-9) {
@@ -351,6 +356,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${renderableMarketExpr}
           ${eventWhere.length ? `and ${eventWhere.join(" and ")}` : ""}
       )
     `);
@@ -449,6 +455,7 @@ export async function fetchFeedEventIds(
       and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
       and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
+      and ${renderableMarketExpr}
     ${marketChangeJoin}
     ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
@@ -553,6 +560,7 @@ export async function fetchFeedMarkets(
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
   const supportedLimitlessMarketExpr = "true";
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const eventVolumeWindowExpr = `
     coalesce(
       ${eventVolumeDisplayExpr},
@@ -593,6 +601,7 @@ export async function fetchFeedMarkets(
     `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    renderableMarketExpr,
   ];
   if (marketIdsParam) {
     marketWhere.push(`m.id = ANY(${marketIdsParam}::text[])`);
@@ -850,6 +859,7 @@ export async function fetchFeedMarketsDirect(
     )
   `;
   const supportedLimitlessMarketExpr = "true";
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const marketIdsParam = inputs.marketIds?.length
     ? add(inputs.marketIds)
@@ -880,6 +890,7 @@ export async function fetchFeedMarketsDirect(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
           and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and ${renderableMarketExpr}
           and (
           m.title ilike ${searchParam} or
           m.description ilike ${searchParam} or
@@ -908,6 +919,7 @@ export async function fetchFeedMarketsDirect(
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${renderableMarketExpr}
       group by m.event_id
     )
   `;
@@ -935,6 +947,7 @@ export async function fetchFeedMarketsDirect(
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    renderableMarketExpr,
   ];
   if (marketIdsParam) {
     where.push(`m.id = ANY(${marketIdsParam}::text[])`);
@@ -1232,6 +1245,7 @@ export async function fetchFavoriteFeedEventPage(
 
   const { params, add } = createParamBuilder();
   const supportedLimitlessMarketExpr = "true";
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const marketIdsParam = add(inputs.marketIds);
   const nowParam = add(inputs.nowParam);
@@ -1260,6 +1274,7 @@ export async function fetchFavoriteFeedEventPage(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
           and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and ${renderableMarketExpr}
           and (
             m.title ilike ${searchParam} or
             m.description ilike ${searchParam} or
@@ -1288,6 +1303,7 @@ export async function fetchFavoriteFeedEventPage(
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${renderableMarketExpr}
       group by m.event_id
     )
   `;
@@ -1323,6 +1339,7 @@ export async function fetchFavoriteFeedEventPage(
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    renderableMarketExpr,
   ];
 
   if (inputs.venues?.length) {

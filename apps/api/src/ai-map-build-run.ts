@@ -10,6 +10,7 @@ import {
   getOpenRouterModelPricingPerM,
 } from "./lib/ai-pricing.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
+import { buildRenderableMarketSql } from "./lib/market-renderability.js";
 import {
   buildMarketMapNodeId,
   type MarketMapEventSummary,
@@ -1799,6 +1800,7 @@ async function fetchVenueCandidates(
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const queryLimit = Math.max(config.maxEventsPerVenue, config.maxEventsPerVenue * 2);
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const { rows } = await pool.query<EventCandidateRow>(
     `
       with active_market_oi as (
@@ -1810,6 +1812,7 @@ async function fetchVenueCandidates(
           and m.venue = $1
           and (m.expiration_time is null or m.expiration_time > $2)
           and (m.close_time is null or m.close_time > $2)
+          and ${renderableMarketExpr}
         group by m.event_id
       ),
       candidate_events as (
@@ -1911,6 +1914,7 @@ async function fetchVenueCandidates(
           and m.venue = $1
           and (m.expiration_time is null or m.expiration_time > $2)
           and (m.close_time is null or m.close_time > $2)
+          and ${renderableMarketExpr}
         order by
           m.event_id,
           (case when m.best_bid is not null or m.best_ask is not null or m.last_price is not null then 1 else 0 end) desc,

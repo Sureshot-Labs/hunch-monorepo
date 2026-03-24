@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 
 type SelectionRow = {
   event_id: string;
@@ -190,6 +191,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
   // Keep expensive top-of-book lookups bounded to a small candidate set.
   const prefilterLimit = Math.max(limit, 10);
   const nowParam = new Date().toISOString();
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const eventIds = normalized.map((input) => input.eventId);
   const venues = normalized.map((input) => input.venue);
   const preferredMarketIds = normalized.map((input) => input.preferredMarketId);
@@ -245,6 +247,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
       where m.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
         and (m.close_time is null or m.close_time > $5::timestamptz)
+        and ${renderableMarketExpr}
     ),
     market_base as (
       select
