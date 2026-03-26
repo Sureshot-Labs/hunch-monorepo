@@ -9,7 +9,7 @@ import { getRedis } from "../redis.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
-import { feedQuerySchema } from "../schemas/feed.js";
+import { feedQuerySchema, resolveMinTotalVolumeFilter } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
   fetchFavoriteFeedEventPage,
@@ -65,25 +65,6 @@ function parseEmbeddingBuffer(buffer: Buffer): Float32Array | null {
   const aligned = new ArrayBuffer(buffer.byteLength);
   new Uint8Array(aligned).set(buffer);
   return new Float32Array(aligned);
-}
-
-function resolveMinTotalVolumeFilter(query: {
-  min_total_volume?: number;
-  min_volume24hr?: number;
-}): number {
-  if (
-    typeof query.min_total_volume === "number" &&
-    Number.isFinite(query.min_total_volume)
-  ) {
-    return query.min_total_volume;
-  }
-  if (
-    typeof query.min_volume24hr === "number" &&
-    Number.isFinite(query.min_volume24hr)
-  ) {
-    return query.min_volume24hr;
-  }
-  return 1e-9;
 }
 
 function normalizeVector(vec: Float32Array): Float32Array {

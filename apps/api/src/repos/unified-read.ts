@@ -28,6 +28,17 @@ export type FeedInputs = {
   sevenDaysFromNow: string;
 };
 
+export type FeedFacetInputs = Omit<
+  FeedInputs,
+  "limit" | "offset" | "sort" | "sortDir" | "category" | "categories"
+>;
+
+export type FeedCategoryFacetRow = {
+  venue: string;
+  category: string;
+  events: number;
+};
+
 export type FavoriteFeedEventPage = {
   eventIds: string[];
   totalEvents: number;
@@ -60,6 +71,383 @@ function createParamBuilder() {
   return { params, add };
 }
 
+type PgParamAdder = ReturnType<typeof createParamBuilder>["add"];
+
+type FeedSqlExpressions = {
+  safeEventLiquidityExpr: string;
+  eventVolumeDisplayExpr: string;
+  marketVolumeDisplayExpr: string;
+  eventLiquidityDisplayExpr: string;
+  marketLiquidityDisplayExpr: string;
+  eventOpenInterestExpr: string;
+  eventVolumeSortExpr: string;
+  supportedLimitlessMarketExpr: string;
+  renderableMarketExpr: string;
+  yesMidExpr: string;
+};
+
+type FeedSearchContext = {
+  hasSearch: boolean;
+  searchCte: string;
+  searchEventJoin: string;
+  searchMarketJoin: string;
+};
+
+type FeedEventFilterInputs = Pick<
+  FeedInputs,
+  | "venues"
+  | "category"
+  | "categories"
+  | "filter"
+  | "endWithin"
+  | "ageSince"
+  | "sevenDaysAgo"
+  | "sevenDaysFromNow"
+>;
+
+function buildFeedSqlExpressions(): FeedSqlExpressions {
+  const safeEventLiquidityExpr =
+    "case when e.liquidity >= 9e16 then null else e.liquidity end";
+  const eventVolumeDisplayExpr = `
+    case
+      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
+      else null
+    end
+  `;
+  const marketVolumeDisplayExpr = `
+    case
+      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
+      else null
+    end
+  `;
+  const eventLiquidityDisplayExpr = `
+    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
+  `;
+  const marketLiquidityDisplayExpr = `
+    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
+  `;
+  const eventOpenInterestExpr = `
+    coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
+  `;
+  const eventVolumeSortExpr = `
+    coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
+  `;
+  const supportedLimitlessMarketExpr = "true";
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
+  const yesMidExpr = `
+    case
+      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
+      else coalesce(m.best_bid, m.best_ask)
+    end
+  `;
+
+  return {
+    safeEventLiquidityExpr,
+    eventVolumeDisplayExpr,
+    marketVolumeDisplayExpr,
+    eventLiquidityDisplayExpr,
+    marketLiquidityDisplayExpr,
+    eventOpenInterestExpr,
+    eventVolumeSortExpr,
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+    yesMidExpr,
+  };
+}
+
+function buildFeedSearchContext(args: {
+  add: PgParamAdder;
+  q?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  renderableMarketExpr: string;
+}): FeedSearchContext {
+  const { add, q, nowParam, nowCloseParam = nowParam, renderableMarketExpr } =
+    args;
+  const hasSearch = Boolean(q);
+  const searchParam = hasSearch ? add(`%${q}%`) : null;
+  const searchCte = hasSearch
+    ? `
+      search_events as materialized (
+        select e.id
+        from unified_events e
+        where e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and (
+            e.title ilike ${searchParam} or
+            e.description ilike ${searchParam} or
+            e.category ilike ${searchParam} or
+            e.slug ilike ${searchParam}
+          )
+        union
+        select m.event_id as id
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          and ${renderableMarketExpr}
+          and (
+            m.title ilike ${searchParam} or
+            m.description ilike ${searchParam} or
+            m.category ilike ${searchParam} or
+            m.slug ilike ${searchParam}
+          )
+      )
+    `
+    : "";
+
+  return {
+    hasSearch,
+    searchCte,
+    searchEventJoin: hasSearch ? "join search_events se on se.id = e.id" : "",
+    searchMarketJoin: hasSearch ? "join search_events se on se.id = m.event_id" : "",
+  };
+}
+
+function buildFeedEventWhere(args: {
+  add: PgParamAdder;
+  inputs: FeedEventFilterInputs;
+  nowParam: string;
+  hasSearch: boolean;
+  requireNamedCategory?: boolean;
+}): string[] {
+  const { add, inputs, nowParam, hasSearch, requireNamedCategory = false } =
+    args;
+  const where: string[] = [
+    "e.status = 'ACTIVE'",
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
+  ];
+
+  if (requireNamedCategory) {
+    where.push("e.category is not null", "btrim(e.category) <> ''");
+  }
+  if (inputs.venues?.length) {
+    where.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
+  }
+  if (inputs.categories?.length) {
+    where.push(`lower(e.category) = ANY(${add(inputs.categories)}::text[])`);
+  } else if (inputs.category) {
+    where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
+  }
+  if (hasSearch) {
+    where.push("e.id in (select id from search_events)");
+  }
+  if (inputs.filter === "newest") {
+    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
+  } else if (inputs.filter === "endingsoon") {
+    where.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`);
+  }
+  if (inputs.endWithin) {
+    where.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
+    );
+  }
+  if (inputs.ageSince) {
+    where.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
+    );
+  }
+
+  return where;
+}
+
+function requiresFeedEventMarketJoin(
+  inputs: Pick<FeedInputs, "minProb" | "maxProb" | "maxSpread" | "eventScope">,
+): boolean {
+  return (
+    inputs.minProb != null ||
+    inputs.maxProb != null ||
+    inputs.maxSpread != null ||
+    inputs.eventScope != null
+  );
+}
+
+function buildFeedEventJoinHaving(args: {
+  add: PgParamAdder;
+  inputs: Pick<
+    FeedInputs,
+    "minVol" | "minLiquidity" | "minProb" | "maxProb" | "maxSpread" | "eventScope"
+  >;
+  eventVolumeSortExpr: string;
+  marketLiquidityDisplayExpr: string;
+  yesMidExpr: string;
+}) {
+  const {
+    add,
+    inputs,
+    eventVolumeSortExpr,
+    marketLiquidityDisplayExpr,
+    yesMidExpr,
+  } = args;
+  const marketQual: string[] = [];
+
+  if (inputs.minLiquidity > 0) {
+    marketQual.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
+  }
+  if (inputs.minProb != null) {
+    marketQual.push(`(${yesMidExpr}) >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    marketQual.push(`(${yesMidExpr}) <= ${add(inputs.maxProb)}`);
+  }
+  if (inputs.maxSpread != null) {
+    marketQual.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
+  const marketQualSql = marketQual.length
+    ? marketQual.map((clause) => `(${clause})`).join(" and ")
+    : "true";
+
+  const having: string[] = [];
+  if (inputs.minVol > 1e-9) {
+    having.push(`${eventVolumeSortExpr} >= ${add(inputs.minVol)}`);
+  }
+  having.push(`bool_or(${marketQualSql})`);
+  if (inputs.eventScope === "grouped") {
+    having.push("count(m.id) > 1");
+  } else if (inputs.eventScope === "single") {
+    having.push("count(m.id) = 1");
+  }
+
+  return having;
+}
+
+function buildFeedMarketViewContext(args: {
+  add: PgParamAdder;
+  inputs: FeedEventFilterInputs &
+    Pick<
+      FeedInputs,
+      | "marketIds"
+      | "minVol"
+      | "minLiquidity"
+      | "minProb"
+      | "maxProb"
+      | "maxSpread"
+      | "eventScope"
+      | "q"
+    >;
+  nowParam: string;
+  nowCloseParam: string;
+  expressions: FeedSqlExpressions;
+  requireNamedCategory?: boolean;
+}) {
+  const {
+    add,
+    inputs,
+    nowParam,
+    nowCloseParam,
+    expressions,
+    requireNamedCategory = false,
+  } = args;
+  const {
+    marketVolumeDisplayExpr,
+    marketLiquidityDisplayExpr,
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+    yesMidExpr,
+  } = expressions;
+  const marketIdsParam = inputs.marketIds?.length ? add(inputs.marketIds) : null;
+  const search = buildFeedSearchContext({
+    add,
+    q: inputs.q,
+    nowParam,
+    nowCloseParam,
+    renderableMarketExpr,
+  });
+  const needsMarketCount =
+    inputs.eventScope === "grouped" || inputs.eventScope === "single";
+  const marketCountCte = `
+    market_count as (
+      select m.event_id, count(*) as market_count
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      ${search.searchMarketJoin}
+      where m.status = 'ACTIVE'
+        ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
+        and e.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and ${supportedLimitlessMarketExpr}
+        and ${renderableMarketExpr}
+      group by m.event_id
+    )
+  `;
+  const where: string[] = [
+    "m.status = 'ACTIVE'",
+    "e.status = 'ACTIVE'",
+    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
+    `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
+    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+  ];
+
+  if (requireNamedCategory) {
+    where.push("e.category is not null", "btrim(e.category) <> ''");
+  }
+  if (marketIdsParam) {
+    where.push(`m.id = ANY(${marketIdsParam}::text[])`);
+  }
+  if (inputs.venues?.length) {
+    where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
+  }
+  if (inputs.categories?.length) {
+    where.push(`lower(e.category) = ANY(${add(inputs.categories)}::text[])`);
+  } else if (inputs.category) {
+    where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
+  }
+  if (inputs.filter === "newest") {
+    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
+  } else if (inputs.filter === "endingsoon") {
+    where.push(`e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`);
+  }
+  if (inputs.endWithin) {
+    where.push(
+      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
+    );
+  }
+  if (inputs.ageSince) {
+    where.push(
+      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
+    );
+  }
+  if (inputs.minLiquidity > 0) {
+    where.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
+  }
+  if (inputs.minVol > 1e-9) {
+    where.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
+  }
+  if (inputs.minProb != null) {
+    where.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    where.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
+  }
+  if (inputs.maxSpread != null) {
+    where.push(
+      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
+    );
+  }
+  if (inputs.eventScope === "grouped") {
+    where.push("emc.market_count > 1");
+  } else if (inputs.eventScope === "single") {
+    where.push("emc.market_count = 1");
+  }
+
+  return {
+    marketIdsParam,
+    needsMarketCount,
+    marketCountCte,
+    where,
+    ...search,
+  };
+}
+
 async function queryRowsWithSearchHint<T extends QueryResultRow>(
   pool: Pool,
   sql: string,
@@ -90,127 +478,212 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   }
 }
 
+export async function fetchFeedCategoryFacetRows(
+  pool: Pool,
+  inputs: FeedFacetInputs,
+): Promise<FeedCategoryFacetRow[]> {
+  const view: "events" | "markets" =
+    inputs.view === "markets" ? "markets" : "events";
+  const expressions = buildFeedSqlExpressions();
+
+  if (view === "markets") {
+    const { params, add } = createParamBuilder();
+    const nowParam = add(inputs.nowParam);
+    const nowCloseParam = add(inputs.nowParam);
+    const marketContext = buildFeedMarketViewContext({
+      add,
+      inputs,
+      nowParam,
+      nowCloseParam,
+      expressions,
+      requireNamedCategory: true,
+    });
+
+    const withParts: string[] = [];
+    if (marketContext.searchCte) withParts.push(marketContext.searchCte);
+    if (marketContext.needsMarketCount) withParts.push(marketContext.marketCountCte);
+    const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
+    const marketCountJoin = marketContext.needsMarketCount
+      ? "join market_count emc on emc.event_id = m.event_id"
+      : "";
+
+    const sql = `
+      ${withClause}
+      select
+        m.venue as venue,
+        lower(e.category) as category,
+        count(distinct m.event_id)::int as events
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      ${marketContext.searchEventJoin}
+      ${marketCountJoin}
+      where ${marketContext.where.join(" and ")}
+      group by m.venue, lower(e.category)
+    `;
+
+    return await queryRowsWithSearchHint<FeedCategoryFacetRow>(
+      pool,
+      sql,
+      params,
+      marketContext.hasSearch,
+    );
+  }
+
+  const { params, add } = createParamBuilder();
+  const {
+    eventVolumeDisplayExpr,
+    eventLiquidityDisplayExpr,
+    marketLiquidityDisplayExpr,
+    eventVolumeSortExpr,
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+    yesMidExpr,
+  } = expressions;
+  const nowParam = add(inputs.nowParam);
+  const search = buildFeedSearchContext({
+    add,
+    q: inputs.q,
+    nowParam,
+    renderableMarketExpr,
+  });
+  const eventWhere = buildFeedEventWhere({
+    add,
+    inputs,
+    nowParam,
+    hasSearch: search.hasSearch,
+    requireNamedCategory: true,
+  });
+  const requiresMarketJoin = requiresFeedEventMarketJoin(inputs);
+
+  if (!requiresMarketJoin) {
+    const eventOnlyWhere = [...eventWhere];
+    eventOnlyWhere.push(
+      `exists (
+        select 1
+        from unified_markets m
+        where m.event_id = e.id
+          and m.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+          and ${supportedLimitlessMarketExpr}
+          and ${renderableMarketExpr}
+      )`,
+    );
+    if (inputs.minVol > 1e-9) {
+      eventOnlyWhere.push(
+        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
+      );
+    }
+    if (inputs.minLiquidity > 0) {
+      eventOnlyWhere.push(
+        `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+      );
+    }
+
+    const sql = `
+      ${search.searchCte ? `with ${search.searchCte}` : ""}
+      select
+        e.venue as venue,
+        lower(e.category) as category,
+        count(*)::int as events
+      from unified_events e
+      where ${eventOnlyWhere.join(" and ")}
+      group by e.venue, lower(e.category)
+    `;
+
+    return await queryRowsWithSearchHint<FeedCategoryFacetRow>(
+      pool,
+      sql,
+      params,
+      search.hasSearch,
+    );
+  }
+
+  const having = buildFeedEventJoinHaving({
+    add,
+    inputs,
+    eventVolumeSortExpr,
+    marketLiquidityDisplayExpr,
+    yesMidExpr,
+  });
+  const withParts: string[] = [];
+  if (search.searchCte) withParts.push(search.searchCte);
+  withParts.push(`
+    filtered_events as (
+      select
+        e.id,
+        e.venue,
+        lower(e.category) as category
+      from unified_events e
+      join unified_markets m on m.event_id = e.id
+        and m.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+        and ${supportedLimitlessMarketExpr}
+        and ${renderableMarketExpr}
+      where ${eventWhere.join(" and ")}
+      group by
+        e.id,
+        e.venue,
+        lower(e.category),
+        e.volume_total,
+        e.liquidity,
+        e.open_interest
+      having ${having.map((clause) => `(${clause})`).join(" and ")}
+    )
+  `);
+  const withClause = `with ${withParts.join(",\n")}`;
+  const sql = `
+    ${withClause}
+    select
+      venue,
+      category,
+      count(*)::int as events
+    from filtered_events
+    group by venue, category
+  `;
+
+  return await queryRowsWithSearchHint<FeedCategoryFacetRow>(
+    pool,
+    sql,
+    params,
+    search.hasSearch,
+  );
+}
+
 export async function fetchFeedEventIds(
   pool: Pool,
   inputs: FeedInputs,
 ): Promise<Array<{ id: string }>> {
   const { params, add } = createParamBuilder();
-  const eventWhere: string[] = [];
-  const safeEventLiquidityExpr =
-    "case when e.liquidity >= 9e16 then null else e.liquidity end";
-  const eventVolumeDisplayExpr = `
-    case
-      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
-      else null
-    end
-  `;
-  const marketVolumeDisplayExpr = `
-    case
-      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
-      else null
-    end
-  `;
-  const eventLiquidityDisplayExpr = `
-    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
-  `;
-  const marketLiquidityDisplayExpr = `
-    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
-  `;
-  const eventOpenInterestExpr = `
-    coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
-  `;
-  const supportedLimitlessMarketExpr = "true";
-  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
-  const eventVolumeSortExpr = `
-    coalesce(${eventVolumeDisplayExpr}, sum(coalesce(${marketVolumeDisplayExpr}, 0)))
-  `;
+  const expressions = buildFeedSqlExpressions();
+  const {
+    eventVolumeDisplayExpr,
+    eventLiquidityDisplayExpr,
+    marketLiquidityDisplayExpr,
+    eventOpenInterestExpr,
+    eventVolumeSortExpr,
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+    yesMidExpr,
+  } = expressions;
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
-
-  const venuesParam = inputs.venues?.length ? add(inputs.venues) : null;
-  if (venuesParam) {
-    eventWhere.push(`e.venue = ANY(${venuesParam}::text[])`);
-  }
-  if (inputs.categories?.length) {
-    eventWhere.push(
-      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
-  } else if (inputs.category) {
-    eventWhere.push(
-      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
-    );
-  }
   const nowParam = add(inputs.nowParam);
-  const hasSearch = Boolean(inputs.q);
-  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
-  const searchCte = hasSearch
-    ? `
-      search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-          e.title ilike ${searchParam} or
-          e.description ilike ${searchParam} or
-          e.category ilike ${searchParam} or
-          e.slug ilike ${searchParam}
-        )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-          m.title ilike ${searchParam} or
-          m.description ilike ${searchParam} or
-          m.category ilike ${searchParam} or
-          m.slug ilike ${searchParam}
-        )
-      )
-    `
-    : "";
-  if (hasSearch) {
-    eventWhere.push("e.id in (select id from search_events)");
-  }
-
-  if (inputs.filter === "newest") {
-    eventWhere.push(
-      `e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`,
-    );
-  } else if (inputs.filter === "endingsoon") {
-    eventWhere.push(
-      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
-    );
-  }
-
-  eventWhere.push("e.status = 'ACTIVE'");
-
-  eventWhere.push(
-    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
-  );
-
-  if (inputs.endWithin) {
-    eventWhere.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
-    );
-  }
-  if (inputs.ageSince) {
-    eventWhere.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
-    );
-  }
-
+  const search = buildFeedSearchContext({
+    add,
+    q: inputs.q,
+    nowParam,
+    renderableMarketExpr,
+  });
+  const eventWhere = buildFeedEventWhere({
+    add,
+    inputs,
+    nowParam,
+    hasSearch: search.hasSearch,
+  });
+  const filterRequiresMarketJoin = requiresFeedEventMarketJoin(inputs);
   const requiresMarketJoin =
-    inputs.minProb != null ||
-    inputs.maxProb != null ||
-    inputs.maxSpread != null ||
-    inputs.eventScope != null ||
-    inputs.sort === "trending_v2";
+    filterRequiresMarketJoin || inputs.sort === "trending_v2";
 
   if (inputs.sort === "change24h" && !requiresMarketJoin) {
     const eventChangeWhere = [...eventWhere];
@@ -226,7 +699,7 @@ export async function fetchFeedEventIds(
     }
 
     const change24hParts: string[] = [];
-    if (searchCte) change24hParts.push(searchCte);
+    if (search.searchCte) change24hParts.push(search.searchCte);
     change24hParts.push(`
       filtered_events as (
         select e.id
@@ -266,7 +739,7 @@ export async function fetchFeedEventIds(
       pool,
       eventChangeSql,
       params,
-      hasSearch,
+      search.hasSearch,
     );
   }
 
@@ -323,7 +796,7 @@ export async function fetchFeedEventIds(
     } else eventOnlyOrder = "e.start_date desc nulls last, e.id";
 
     const eventOnlySql = `
-      ${searchCte ? `with ${searchCte}` : ""}
+      ${search.searchCte ? `with ${search.searchCte}` : ""}
       select
         e.id
       from unified_events e
@@ -335,13 +808,13 @@ export async function fetchFeedEventIds(
     const { rows } = await pool.query<{ id: string }>(eventOnlySql, params);
     return rows;
   }
-
-  const yesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
-    end
-  `;
+  const having = buildFeedEventJoinHaving({
+    add,
+    inputs,
+    eventVolumeSortExpr,
+    marketLiquidityDisplayExpr,
+    yesMidExpr,
+  });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
@@ -366,44 +839,10 @@ export async function fetchFeedEventIds(
       ? "left join market_change mc on mc.market_id = m.id"
       : "";
   const change24hExpr = inputs.sort === "change24h" ? "mc.change_24h" : "null";
-
-  const marketQual: string[] = [];
-  if (inputs.minLiquidity > 0) {
-    marketQual.push(
-      `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
-    );
-  }
-  if (inputs.minProb != null) {
-    marketQual.push(`(${yesMidExpr}) >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    marketQual.push(`(${yesMidExpr}) <= ${add(inputs.maxProb)}`);
-  }
-  if (inputs.maxSpread != null) {
-    marketQual.push(
-      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
-    );
-  }
-  const marketQualSql = marketQual.length
-    ? marketQual.map((clause) => `(${clause})`).join(" and ")
-    : "true";
   const tradeJoin =
     inputs.sort === "trending_v2"
       ? "left join unified_event_trade_24h et on et.event_id = e.id"
       : "";
-
-  const having: string[] = [];
-  if (inputs.minVol > 1e-9) {
-    having.push(
-      `${eventVolumeSortExpr} >= ${add(inputs.minVol)}`,
-    );
-  }
-  having.push(`bool_or(${marketQualSql})`);
-  if (inputs.eventScope === "grouped") {
-    having.push("count(m.id) > 1");
-  } else if (inputs.eventScope === "single") {
-    having.push("count(m.id) = 1");
-  }
 
   let eventOrder = "";
   if (inputs.sort === "totalvol")
@@ -441,7 +880,7 @@ export async function fetchFeedEventIds(
   } else eventOrder = "e.start_date desc nulls last, e.id";
 
   const withParts: string[] = [];
-  if (searchCte) withParts.push(searchCte);
+  if (search.searchCte) withParts.push(search.searchCte);
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
 
@@ -469,7 +908,7 @@ export async function fetchFeedEventIds(
     pool,
     eventSql,
     params,
-    hasSearch,
+    search.hasSearch,
   );
 }
 
@@ -821,26 +1260,14 @@ export async function fetchFeedMarketsDirect(
   inputs: FeedInputs,
 ): Promise<FeedMarketRow[]> {
   const { params, add } = createParamBuilder();
-  const safeEventLiquidityExpr =
-    "case when e.liquidity >= 9e16 then null else e.liquidity end";
-  const eventVolumeDisplayExpr = `
-    case
-      when e.volume_total is not null and e.volume_total > 0 then e.volume_total
-      else null
-    end
-  `;
-  const marketVolumeDisplayExpr = `
-    case
-      when m.volume_total is not null and m.volume_total > 0 then m.volume_total
-      else null
-    end
-  `;
-  const eventLiquidityDisplayExpr = `
-    coalesce(nullif(${safeEventLiquidityExpr}, 0), nullif(e.open_interest, 0))
-  `;
-  const marketLiquidityDisplayExpr = `
-    coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
-  `;
+  const expressions = buildFeedSqlExpressions();
+  const {
+    safeEventLiquidityExpr,
+    eventVolumeDisplayExpr,
+    marketVolumeDisplayExpr,
+    eventLiquidityDisplayExpr,
+    marketLiquidityDisplayExpr,
+  } = expressions;
   const eventVolumeWindowExpr = `
     coalesce(
       ${eventVolumeDisplayExpr},
@@ -858,77 +1285,16 @@ export async function fetchFeedMarketsDirect(
       )
     )
   `;
-  const supportedLimitlessMarketExpr = "true";
-  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
-  const marketIdsParam = inputs.marketIds?.length
-    ? add(inputs.marketIds)
-    : null;
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
-  const hasSearch = Boolean(inputs.q);
-  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
-  const searchCte = hasSearch
-    ? `
-      search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-          e.title ilike ${searchParam} or
-          e.description ilike ${searchParam} or
-          e.category ilike ${searchParam} or
-          e.slug ilike ${searchParam}
-        )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-          m.title ilike ${searchParam} or
-          m.description ilike ${searchParam} or
-          m.category ilike ${searchParam} or
-          m.slug ilike ${searchParam}
-        )
-      )
-    `
-    : "";
-  const searchEventJoin = hasSearch
-    ? "join search_events se on se.id = e.id"
-    : "";
-  const searchMarketJoin = hasSearch
-    ? "join search_events se on se.id = m.event_id"
-    : "";
-  const marketCountCte = `
-    market_count as (
-      select m.event_id, count(*) as market_count
-      from unified_markets m
-      join unified_events e on e.id = m.event_id
-      ${searchMarketJoin}
-      where m.status = 'ACTIVE'
-        ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
-        and e.status = 'ACTIVE'
-        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-        and ${supportedLimitlessMarketExpr}
-        and ${renderableMarketExpr}
-      group by m.event_id
-    )
-  `;
-  const yesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
-    end
-  `;
+  const marketContext = buildFeedMarketViewContext({
+    add,
+    inputs,
+    nowParam,
+    nowCloseParam,
+    expressions,
+  });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
     change24hCteParts.push(`
@@ -940,73 +1306,7 @@ export async function fetchFeedMarketsDirect(
       )
     `);
   }
-  const where: string[] = [
-    "m.status = 'ACTIVE'",
-    "e.status = 'ACTIVE'",
-    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
-    `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
-    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
-    supportedLimitlessMarketExpr,
-    renderableMarketExpr,
-  ];
-  if (marketIdsParam) {
-    where.push(`m.id = ANY(${marketIdsParam}::text[])`);
-  }
-
-  if (inputs.venues?.length) {
-    where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
-  }
-  if (inputs.categories?.length) {
-    where.push(
-      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
-  } else if (inputs.category) {
-    where.push(
-      `lower(e.category) = ${add(inputs.category.toLowerCase())}`,
-    );
-  }
-
-  if (inputs.filter === "newest") {
-    where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
-  } else if (inputs.filter === "endingsoon") {
-    where.push(
-      `e.end_date <= ${add(inputs.sevenDaysFromNow)}::timestamptz`,
-    );
-  }
-
-  if (inputs.endWithin) {
-    where.push(
-      `e.end_date is not null and e.end_date <= ${add(inputs.endWithin)}::timestamptz`,
-    );
-  }
-  if (inputs.ageSince) {
-    where.push(
-      `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
-    );
-  }
-
-  if (inputs.minLiquidity > 0) {
-    where.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
-  }
-  if (inputs.minVol > 1e-9) {
-    where.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
-  }
-  if (inputs.minProb != null) {
-    where.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    where.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
-  }
-  if (inputs.maxSpread != null) {
-    where.push(
-      `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
-    );
-  }
-  if (inputs.eventScope === "grouped") {
-    where.push("emc.market_count > 1");
-  } else if (inputs.eventScope === "single") {
-    where.push("emc.market_count = 1");
-  }
+  const where = marketContext.where;
 
   let marketOrder = "";
   if (inputs.sort === "totalvol")
@@ -1044,9 +1344,7 @@ export async function fetchFeedMarketsDirect(
 
   const limitParam = add(inputs.limit);
   const offsetParam = add(inputs.offset);
-  const needsMarketCount =
-    inputs.eventScope === "grouped" || inputs.eventScope === "single";
-  const marketCountJoin = needsMarketCount
+  const marketCountJoin = marketContext.needsMarketCount
     ? "join market_count emc on emc.event_id = m.event_id"
     : "";
   const change24hCandidateJoin =
@@ -1074,7 +1372,7 @@ export async function fetchFeedMarketsDirect(
       , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
-    ${searchEventJoin}
+    ${marketContext.searchEventJoin}
     ${marketCountJoin}
     ${change24hCandidateJoin}
     ${tradeJoin}
@@ -1146,9 +1444,9 @@ export async function fetchFeedMarketsDirect(
   const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
-  if (searchCte) withParts.push(searchCte);
-  if (needsMarketCount || inputs.eventScope) {
-    withParts.push(marketCountCte);
+  if (marketContext.searchCte) withParts.push(marketContext.searchCte);
+  if (marketContext.needsMarketCount) {
+    withParts.push(marketContext.marketCountCte);
   }
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);

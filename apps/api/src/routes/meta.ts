@@ -2,7 +2,13 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { pool } from "../db.js";
+import { env } from "../env.js";
+import { fetchFeedCategoryFacetRows } from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
+import {
+  feedFacetQuerySchema,
+  resolveMinTotalVolumeFilter,
+} from "../schemas/feed.js";
 
 type CategoryRow = {
   venue: string;
@@ -99,6 +105,154 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     );
     return reply.send(body);
   });
+
+  z.get(
+    "/meta/categories/facets",
+    {
+      schema: {
+        querystring: feedFacetQuerySchema,
+      },
+    },
+    async (req, reply) => {
+      const q = req.query;
+      const minVol = resolveMinTotalVolumeFilter(q);
+      const minLiquidity = q.min_liquidity;
+      const search = q.q;
+      const view: "events" | "markets" =
+        q.view === "markets" ? "markets" : "events";
+      const eventScope: "grouped" | "single" | undefined =
+        q.event_scope === "grouped"
+          ? "grouped"
+          : q.event_scope === "single"
+            ? "single"
+            : undefined;
+      const venues = q.venue;
+      const filter = q.filter;
+      const minProb = q.min_prob;
+      const maxProb = q.max_prob;
+      const maxSpread = q.max_spread;
+      const endWithinHours = q.end_within_hours;
+      const ageWithinHours = q.age_within_hours;
+
+      const venueKey = venues?.length ? venues.join(",") : "";
+      const cacheKey = `meta:categories:facets:v1:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const r = await getRedis();
+      const cacheTtl = Math.max(1, env.feedTtlSec);
+      const cacheEnabled = env.feedTtlSec > 0;
+
+      if (cacheEnabled && r) {
+        const cached = await r.get(cacheKey);
+        if (cached) {
+          reply.header("x-cache", "hit");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
+          );
+          return reply.send(cached);
+        }
+      }
+
+      const nowTs = new Date();
+      const nowParam = nowTs.toISOString();
+      const sevenDaysAgo = new Date(
+        nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const sevenDaysFromNow = new Date(
+        nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+
+      const endWithin =
+        endWithinHours != null
+          ? new Date(
+              nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+      const ageSince =
+        ageWithinHours != null
+          ? new Date(
+              nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
+            ).toISOString()
+          : undefined;
+
+      const [facetRowsResult, universeRowsResult] = await Promise.all([
+        fetchFeedCategoryFacetRows(pool, {
+          minVol,
+          minLiquidity,
+          q: search,
+          view,
+          eventScope,
+          venues,
+          filter,
+          minProb,
+          maxProb,
+          maxSpread,
+          endWithin,
+          ageSince,
+          nowParam,
+          sevenDaysAgo,
+          sevenDaysFromNow,
+        }),
+        pool.query<{ category: string }>(`
+          select distinct lower(category) as category
+          from unified_events
+          where status = 'ACTIVE'
+            and category is not null
+            and btrim(category) <> ''
+          order by lower(category) asc
+        `),
+      ]);
+
+      const categoriesMap = new Map<
+        string,
+        { category: string; events: number; venues: Record<string, number> }
+      >();
+
+      for (const row of universeRowsResult.rows) {
+        const category = row.category;
+        categoriesMap.set(category, {
+          category,
+          events: 0,
+          venues: {},
+        });
+      }
+
+      for (const row of facetRowsResult) {
+        const entry = categoriesMap.get(row.category) ?? {
+          category: row.category,
+          events: 0,
+          venues: {},
+        };
+        entry.events += Number(row.events) || 0;
+        entry.venues[row.venue] = (entry.venues[row.venue] ?? 0) + (row.events || 0);
+        categoriesMap.set(row.category, entry);
+      }
+
+      const categories = Array.from(categoriesMap.values()).sort((a, b) => {
+        if (b.events !== a.events) return b.events - a.events;
+        return a.category.localeCompare(b.category);
+      });
+
+      const payload = {
+        total: categories.length,
+        generatedAt: nowTs.toISOString(),
+        categories,
+      };
+      const body = JSON.stringify(payload);
+
+      if (cacheEnabled && r) {
+        await r.set(cacheKey, body, { EX: cacheTtl });
+        reply.header("x-cache", "miss");
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      reply.header(
+        "Cache-Control",
+        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
+      );
+      return reply.send(body);
+    },
+  );
 
   z.get("/meta/venues", async (_req, reply) => {
     const cacheKey = "meta:venues:v1";

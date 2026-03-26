@@ -2652,7 +2652,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       }
 
       const system =
-        "You write concise, factual wallet profiles for a consumer trading product. Write in plain English for normal users, not traders. Avoid jargon when a simpler phrase works. Return strict JSON only.";
+        "You write short, factual trader archetype profiles for a prediction market product. The output should read like a clean intelligence brief: concise, analytical, human-readable, and fast to scan. Use simple English, avoid hype and filler, and return strict JSON only.";
       const namingStabilityHint = existing?.profile?.label_short
         ? `\nCurrent stored profile hint:
 - previous_label_short: ${JSON.stringify(existing.profile.label_short)}
@@ -2667,13 +2667,18 @@ Naming stability rule:
         : "";
       const user = `Create a compact whale profile for a tracker UI.
 Output JSON with:
-- label_short: short display alias (target <= 36 chars, hard max 56).
+- label_short: short trader archetype title (target <= 36 chars, hard max 56).
+  Prefer 2 to 4 words.
+  It should sound like a clean product label, not a robotic taxonomy label.
   If wallet.source_label_quality is "descriptive" and wallet.source_label exists, keep label_short close to that source label instead of inventing a persona name.
   If wallet.source_label_quality is "generic" or "missing", create a concise descriptive alias from the trading pattern.
-  Avoid hype, jokes, mascots, and fantasy nicknames.
+  Avoid awkward words like accumulator, scalper, bettor, mixed buyer, and diversified unless truly necessary.
+  Avoid hype, jokes, mascots, fantasy nicknames, and robotic wording.
+  Good styles: "Late Sports Trader", "Concentrated NO Trader", "Headline Politics Trader".
 - label_long: exactly 1 short sentence (target <= 140 chars, hard max 200).
-  This is the one-line summary shown above the trader bullets.
-  Make it easy for a casual user to understand in one read.
+  This is the lead sentence shown above the trader bullets.
+  It should explain what kind of trader this is in plain language.
+  Keep it compact, direct, and useful in one read.
 - archetype: short snake_case tag.
 - categories: array of 1–3 from [politics, crypto, sports, economics, technology, entertainment, weather, health, mentions, other].
 - theme_focus: array of up to 3 lowercase tags.
@@ -2683,23 +2688,30 @@ Output JSON with:
 - notes: multiline string with exactly 4 bullet lines for the detail view.
   Each line must start with "- ".
   The 4 bullets must answer, in order:
-  1. what markets the trader focuses on
-  2. how they usually enter positions
-  3. whether they trade early, late, or around events
-  4. their general style
-  Keep each bullet short, readable, and friendly to a non-expert user.
-  Use numbers only when they clarify the behavior. Do not make the bullets read like a metrics dump.
+  1. market focus
+  2. entry style or timing
+  3. positioning style
+  4. notable recurring pattern, if relevant
+  Keep each bullet short, distinct, and easy to scan.
+  Do not repeat the same idea across bullets.
+  Do not use numbering inside the bullets.
+  Do not use parentheses unless truly necessary.
+  Avoid percentages, exact metrics, and stat-heavy phrasing unless essential.
+  Do not make the bullets read like a metrics dump or a blockchain explorer.
 
 Rules:
 - Use ONLY provided data. Do NOT mention wallet IDs or addresses.
 - No claims of insider or informed intent.
 - Be factual, pattern-based, and neutral in tone.
-- Write for normal users, not traders.
+- Write for a trader-facing product UI, not a blockchain explorer.
 - Use plain English. If a technical term can be replaced by a simpler phrase, replace it.
 - Do not use desk jargon or compressed analyst language.
 - Avoid phrases like "implied probability band", "cluster", "two-sided hedging", "directional positioning", "notional", "posture", or "80-100 band" unless there is no simpler wording.
 - Prefer phrases like "very likely outcomes", "big positions", "mostly bets one way", "buys both sides to reduce risk", "Fed-related markets", and "often trades near major events".
-- Write like a clear product explainer, not a marketer.
+- Write like a clear product intelligence brief, not a marketer.
+- Avoid clutter like "(often near 99%)", long qualifiers, or stacked caveats.
+- Avoid vague filler like "mixed activity", "shows some exposure", or "participates across markets" unless it adds real meaning.
+- Make the wording feel natural when rendered as one short sentence plus 4 bullets in a UI card.
 - If data is limited or mixed, keep confidence <= 0.55 and mention uncertainty.
 - Stay comfortably below the hard limits; exact character counting is approximate.
 - Prioritize immediate reader understanding over exhaustive detail.
@@ -2764,6 +2776,14 @@ Rules:
 - Use entry_brackets and held_odds to describe entry style in simple language, for example "usually buys when the outcome already looks very likely" or "usually buys lower-probability outcomes".
 - Prefer simple phrases like "focuses on", "usually buys", "often trades around", and "style is".
 - When performance_30d and closed_positions_sample are sparse or mixed, say so.
+- Target style example:
+  - label_short: "Late Sports Trader"
+  - label_long: "Large sports-focused trader who usually enters very late when outcomes already look highly likely."
+  - notes:
+    - Focuses mostly on sports markets, especially single-game lines and totals.
+    - Usually enters late, close to game time or around key moments.
+    - Mostly takes one-way positions rather than balancing both sides.
+    - Tends to trade in concentrated size when conviction is high.
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
 - Never suggest insider information.
@@ -2772,7 +2792,7 @@ ${namingStabilityHint}
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines.`;
+Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, label_long is exactly one sentence, each bullet covers a different angle, and the wording avoids numeric clutter unless essential.`;
 
       let profileRaw = "";
       try {
