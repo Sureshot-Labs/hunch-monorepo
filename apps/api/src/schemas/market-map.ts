@@ -25,6 +25,8 @@ export const marketMapNodeEventsQuerySchema = z.object({
   venues: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
+  sort_by: z.enum(["volume24h", "liquidity", "openInterest"]).optional(),
+  sort_dir: z.enum(["asc", "desc"]).optional(),
   marketsPreviewLimit: z.coerce.number().int().min(1).max(12).optional(),
 });
 

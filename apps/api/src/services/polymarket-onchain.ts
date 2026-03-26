@@ -18,10 +18,14 @@ const feeCollectorIface = new Interface([
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
+export const POLYGON_NATIVE_USDC_ADDRESS =
+  "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
 
 type Snapshot = {
   usdcBalance: bigint;
+  oldUsdcBalance: bigint;
   signerUsdcBalance: bigint | null;
+  signerOldUsdcBalance: bigint | null;
   allowanceExchange: bigint;
   allowanceNegRisk: bigint;
   allowanceNegRiskAdapter: bigint | null;
@@ -89,10 +93,22 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
     fallback: 0n,
   });
+  entries.push({
+    target: POLYGON_NATIVE_USDC_ADDRESS,
+    callData: erc20Iface.encodeFunctionData("balanceOf", [funder]),
+    decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
+    fallback: 0n,
+  });
 
   if (inputs.includeSignerUsdc) {
     entries.push({
       target: env.polymarketUsdcAddress,
+      callData: erc20Iface.encodeFunctionData("balanceOf", [signer]),
+      decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
+      fallback: 0n,
+    });
+    entries.push({
+      target: POLYGON_NATIVE_USDC_ADDRESS,
       callData: erc20Iface.encodeFunctionData("balanceOf", [signer]),
       decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
       fallback: 0n,
@@ -205,7 +221,11 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
 
   let cursor = 0;
   const usdcBalance = decoded[cursor++] as bigint;
+  const oldUsdcBalance = decoded[cursor++] as bigint;
   const signerUsdcBalance = inputs.includeSignerUsdc
+    ? (decoded[cursor++] as bigint)
+    : null;
+  const signerOldUsdcBalance = inputs.includeSignerUsdc
     ? (decoded[cursor++] as bigint)
     : null;
   const allowanceExchange = decoded[cursor++] as bigint;
@@ -228,7 +248,9 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
 
   return {
     usdcBalance,
+    oldUsdcBalance,
     signerUsdcBalance,
+    signerOldUsdcBalance,
     allowanceExchange,
     allowanceNegRisk,
     allowanceNegRiskAdapter,

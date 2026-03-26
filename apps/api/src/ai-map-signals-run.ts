@@ -33,6 +33,10 @@ import {
   isMarketMapUsable,
 } from "./services/market-map-quality.js";
 import { normalizeAiMarketMetrics } from "./services/market-ai-metrics.js";
+import {
+  scoreSignalMarketContractMatch,
+  scoreSignalTargetAnchorAlignment,
+} from "./services/map-signal-market-match.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 
@@ -47,6 +51,8 @@ const DEFAULT_RUN_CONTEXT: MapSignalsRunContext = {
   scriptTag: "ai-map-signals-run",
   qaScriptName: "ai-map-signals-run",
 };
+
+const FINAL_PROMPT_MARKETS_PER_EVENT = 2;
 
 let activeRunContext: MapSignalsRunContext = DEFAULT_RUN_CONTEXT;
 
@@ -195,18 +201,22 @@ type MarketCandidate = {
   eventId: string;
   eventTitle: string;
   marketTitle: string | null;
+  closeTime: string | null;
   venue: string;
   activityVolume: number;
   depthProxy: number;
   openInterest: number | null;
   eventScore: number;
   affinityScore: number;
+  contractMatchScore: number;
+  selectionScore: number;
   affinityRank: number;
 };
 
 type EventTopMarket = {
   marketId: string;
   marketTitle: string | null;
+  closeTime: string | null;
   venue: string | null;
   volume24h: number;
   volumeTotal: number;
@@ -403,7 +413,7 @@ function preview(value: string, maxChars: number): string {
 }
 
 function resolveArgs(argv: string[]): Args {
-  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.2";
+  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.4";
   const embedModel =
     parseFlag(argv, "--embed-model") ??
     process.env.OPENROUTER_EMBED_MODEL ??
@@ -422,7 +432,7 @@ function resolveArgs(argv: string[]): Args {
     embedModel,
     maxNodes: parsePositiveInt(parseFlag(argv, "--max-nodes"), 20),
     maxEvidencePerNode: parsePositiveInt(parseFlag(argv, "--max-evidence-per-node"), 12),
-    topMarketsPerEvent: parsePositiveInt(parseFlag(argv, "--top-markets-per-event"), 3),
+    topMarketsPerEvent: parsePositiveInt(parseFlag(argv, "--top-markets-per-event"), 5),
     maxMarketsPerNode: parsePositiveInt(parseFlag(argv, "--max-markets-per-node"), 12),
     minEvidence: parsePositiveInt(parseFlag(argv, "--min-evidence"), 1),
     minConfirmed: parsePositiveInt(parseFlag(argv, "--min-confirmed"), 1),
@@ -471,7 +481,7 @@ Input:
   --report-out <path>            Output markdown summary path
 
 Model:
-  --model <id>                   OpenRouter model (default: openai/gpt-5.2)
+  --model <id>                   OpenRouter model (default: openai/gpt-5.4)
   --embed-model <id>             OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
   --max-output-tokens <n>        Max output tokens per node call (default: 900)
   --timeout-sec <n>              Request timeout seconds (default: 90)
@@ -1131,6 +1141,7 @@ async function toMarketCandidates(
   const candidates: MarketCandidate[] = [];
   const seen = new Set<string>();
   const marketRows: MarketEmbeddingInput[] = [];
+  const evidenceText = evidence.map(item => `${item.headline} ${item.summary}`).join(" ").trim();
 
   for (const event of events) {
     const topMarkets =
@@ -1151,12 +1162,15 @@ async function toMarketCandidates(
         eventId: event.eventId,
         eventTitle: event.title,
         marketTitle: market.marketTitle ?? null,
+        closeTime: market.closeTime ?? null,
         venue: market.venue ?? event.venue,
         activityVolume: metrics.activityVolume,
         depthProxy: metrics.depthProxy,
         openInterest: metrics.openInterest,
         eventScore: numericOrZero(event.score),
         affinityScore: 0,
+        contractMatchScore: 0,
+        selectionScore: 0,
         affinityRank: 0,
       });
     }
@@ -1201,13 +1215,28 @@ async function toMarketCandidates(
     out.push({
       ...candidate,
       affinityScore,
+      contractMatchScore: scoreSignalMarketContractMatch({
+        evidenceText,
+        eventTitle: candidate.eventTitle,
+        marketTitle: candidate.marketTitle,
+        closeTime: candidate.closeTime,
+      }),
+      selectionScore: 0,
       affinityRank: 0,
     });
   }
 
+  for (const candidate of out) {
+    candidate.selectionScore = Number(
+      (0.8 * candidate.affinityScore + 0.2 * candidate.contractMatchScore).toFixed(6),
+    );
+  }
+
   out.sort(
     (a, b) =>
+      b.selectionScore - a.selectionScore ||
       b.affinityScore - a.affinityScore ||
+      b.contractMatchScore - a.contractMatchScore ||
       b.depthProxy - a.depthProxy ||
       numericOrZero(b.openInterest) - numericOrZero(a.openInterest) ||
       b.activityVolume - a.activityVolume ||
@@ -1215,7 +1244,15 @@ async function toMarketCandidates(
       a.marketId.localeCompare(b.marketId),
   );
 
-  const sliced = out.slice(0, Math.max(maxItems, 1));
+  const sliced: MarketCandidate[] = [];
+  const perEventCounts = new Map<string, number>();
+  for (const candidate of out) {
+    const count = perEventCounts.get(candidate.eventId) ?? 0;
+    if (count >= FINAL_PROMPT_MARKETS_PER_EVENT) continue;
+    sliced.push(candidate);
+    perEventCounts.set(candidate.eventId, count + 1);
+    if (sliced.length >= Math.max(maxItems, 1)) break;
+  }
   for (let i = 0; i < sliced.length; i += 1) {
     sliced[i].affinityRank = i + 1;
   }
@@ -1636,6 +1673,21 @@ async function evaluateNodeWithModel(params: {
       decision = "context_only";
       pushUniqueReason(modelReasonCodes, "TARGET_INTENT_MISMATCH");
     }
+    const targetAnchorAlignment = scoreSignalTargetAnchorAlignment({
+      evidenceText: selectedEvidence
+        .map(item => `${item.headline} ${item.summary}`)
+        .join(" ")
+        .trim(),
+      eventTitle: selectedMarket?.eventTitle ?? null,
+      marketTitle: selectedMarket?.marketTitle ?? null,
+    });
+    if (
+      targetAnchorAlignment.hasStrongEvidenceAnchors &&
+      targetAnchorAlignment.overlap.length === 0
+    ) {
+      decision = "context_only";
+      pushUniqueReason(modelReasonCodes, "WEAK_TARGET_ALIGNMENT");
+    }
     if (
       isCircularSourceEvidence(
         selectedEvidence,
@@ -2049,6 +2101,7 @@ export async function runMapSignals(
           const parsed: EventTopMarket = {
             marketId: row.marketId,
             marketTitle: row.marketTitle,
+            closeTime: row.closeTime,
             venue,
             volume24h: row.volume24h,
             volumeTotal: row.volumeTotal,

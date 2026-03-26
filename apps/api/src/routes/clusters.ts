@@ -37,6 +37,8 @@ type ClusterHash = {
   analysis_confidence: string;
   analysis_model: string;
   quality_score: string;
+  match_details: string;
+  match_diagnostics: string;
   market_ids: string;
   markets_preview: string;
   updated_at: string;
@@ -52,7 +54,7 @@ type ClusterAnalysis = {
   query?: string | null;
   sources?: Array<{ title: string; url: string; snippet?: string | null }> | null;
   model?: string | null;
-  stage?: "fast" | "final";
+  stage?: "fast" | "smart";
 };
 
 function parseNumber(value: string | undefined): number | null {
@@ -90,6 +92,10 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
     [],
   );
   const analysis = normalizeAnalysis(hash.analysis);
+  const matchDiagnostics = parseJson<Record<string, unknown> | null>(
+    hash.match_diagnostics,
+    null,
+  );
 
   return {
     id,
@@ -111,6 +117,7 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
       parseNumber(hash.analysis_confidence) ?? analysis?.confidence ?? null,
     analysisModel: hash.analysis_model || analysis?.model || null,
     qualityScore: parseNumber(hash.quality_score),
+    matchDiagnostics,
     markets: marketsPreview,
     updatedAt: hash.updated_at || null,
     version: hash.version || null,
@@ -177,6 +184,8 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         "analysis_confidence",
         "analysis_model",
         "quality_score",
+        "match_details",
+        "match_diagnostics",
         "market_ids",
         "markets_preview",
         "updated_at",
@@ -204,6 +213,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         .filter((cluster) => cluster.marketCount > 0);
 
       let filtered = summaries;
+      if (query.minAnalysisConfidence == null) {
+        filtered = filtered.filter(
+          (cluster) => cluster.analysisStatus == null || cluster.analysisStatus === "ready",
+        );
+      }
       const minLiquidity = query.minLiquidity;
       if (minLiquidity != null) {
         filtered = filtered.filter(
@@ -236,7 +250,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       }
       const minAnalysisConfidence =
         query.minAnalysisConfidence ?? defaults.minAnalysisConfidence;
-      if (minAnalysisConfidence != null) {
+      if (minAnalysisConfidence != null && minAnalysisConfidence > 0) {
         filtered = filtered.filter(
           (cluster) =>
             cluster.analysis != null &&
@@ -247,7 +261,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         query.maxOutlierRatio ?? defaults.maxOutlierRatio;
       if (maxOutlierRatio != null) {
         filtered = filtered.filter((cluster) => {
-          if (!cluster.analysis) return false;
+          if (!cluster.analysis) return true;
           const outliers = cluster.analysis.outliers ?? [];
           if (cluster.marketCount <= 0) return false;
           return outliers.length / cluster.marketCount <= maxOutlierRatio;
@@ -294,6 +308,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         event_id: string;
         venue: string;
         title: string | null;
+        slug: string | null;
+        image: string | null;
+        icon: string | null;
         market_type: string | null;
         best_bid: unknown;
         best_ask: unknown;
@@ -305,6 +322,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         close_time: unknown;
         expiration_time: unknown;
         event_title: string | null;
+        event_slug: string | null;
+        event_image: string | null;
+        event_icon: string | null;
       }>(
         `
           select
@@ -312,6 +332,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             m.event_id,
             m.venue,
             m.title,
+            m.slug,
+            m.image,
+            m.icon,
             m.market_type,
             m.best_bid,
             m.best_ask,
@@ -323,6 +346,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             m.close_time,
             m.expiration_time,
             e.title as event_title,
+            e.slug as event_slug,
+            e.image as event_image,
+            e.icon as event_icon,
             m.description,
             e.description as event_description
           from unified_markets m
@@ -343,7 +369,13 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         .map((marketId) => byId.get(marketId))
         .filter((row): row is ClusterMarketSummary => Boolean(row));
 
-      return { cluster, markets: ordered };
+      const outlierSet = new Set(cluster.analysis?.outliers ?? []);
+      const visibleMarkets =
+        outlierSet.size > 0
+          ? ordered.filter((market) => !outlierSet.has(market.marketId))
+          : ordered;
+
+      return { cluster, markets: visibleMarkets };
     },
   );
 };

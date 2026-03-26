@@ -22,6 +22,21 @@ const OPENROUTER_MODEL_PRICING_PER_M: Record<string, OpenRouterModelPricingPerM>
     outputPerM: 0.4,
     webSearchPerCallUsd: 0.01,
   },
+  "openai/gpt-5.4": {
+    inputPerM: 2.5,
+    outputPerM: 15,
+    webSearchPerCallUsd: 0.01,
+  },
+  "openai/gpt-5.4-mini": {
+    inputPerM: 0.75,
+    outputPerM: 4.5,
+    webSearchPerCallUsd: 0.01,
+  },
+  "openai/gpt-5.4-nano": {
+    inputPerM: 0.2,
+    outputPerM: 1.25,
+    webSearchPerCallUsd: 0.01,
+  },
 };
 
 // Verified from live usage.cost probe for openai/text-embedding-3-small.
@@ -54,4 +69,3 @@ export function getOpenRouterEmbeddingPricingPerM(
   if (!normalized) return null;
   return OPENROUTER_EMBEDDING_PRICING_PER_M[normalized] ?? null;
 }
-

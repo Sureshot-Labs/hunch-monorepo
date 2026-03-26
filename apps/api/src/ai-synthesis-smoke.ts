@@ -330,7 +330,7 @@ function parseArgs(argv: string[]): Args {
     model:
       parseFlag(argv, "--model") ??
       env.aiClusterModelFinal ??
-      "openai/gpt-5.2",
+      "openai/gpt-5.4",
     maxTopics: parsePositiveInt(parseFlag(argv, "--max-topics"), 3),
     maxContextMarkets: Math.min(
       10,
@@ -365,7 +365,7 @@ Optional:
   --max-topics <n>               Max topics to synthesize (default: 3)
   --max-context-markets <n>      Max market snapshots per event context (default: 5, max: 10)
   --max-sample-market-age-hours <n>  Skip topics whose sample market is older than N hours (default: 24, 0 disables)
-  --model <id>                   OpenRouter model (default: openai/gpt-5.2)
+  --model <id>                   OpenRouter model (default: openai/gpt-5.4)
   --concurrency <n>              Parallel synthesis calls (default: 2)
   --max-output-tokens <n>        Max completion tokens (default: 1200)
   --timeout-sec <n>              HTTP timeout per call (default: 120)
@@ -1021,7 +1021,7 @@ function buildSynthesisInput(
       run_id: `syn-${runHash(context.topicKey)}`,
       generated_at: new Date().toISOString(),
       stage: "SynthesisLite",
-      model: env.aiClusterModelFinal || "openai/gpt-5.2",
+      model: env.aiClusterModelFinal || "openai/gpt-5.4",
       prompt_version: "v1",
     },
     topic: {

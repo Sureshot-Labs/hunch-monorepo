@@ -1276,7 +1276,7 @@ function getDefaults(): IntelPolicyMap {
       artifactTtlSec: 60 * 60 * 24 * 3,
       statusTtlSec: 60 * 60 * 24 * 7,
       inputDigestEnabled: true,
-      model: "openai/gpt-5.2",
+      model: "openai/gpt-5.4",
       embedModel:
         process.env.OPENROUTER_EMBED_MODEL ||
         process.env.AI_EMBED_MODEL ||
@@ -1284,7 +1284,7 @@ function getDefaults(): IntelPolicyMap {
       maxNodes: 20,
       maxSignals: 20,
       maxEvidencePerNode: 12,
-      topMarketsPerEvent: 3,
+      topMarketsPerEvent: 5,
       maxMarketsPerNode: 12,
       minEvidence: 1,
       minConfirmed: 1,
@@ -1304,7 +1304,7 @@ function getDefaults(): IntelPolicyMap {
     arbitrage_defaults: {
       limit: 24,
       minVenueCount: 2,
-      minSpread: 0.05,
+      minSpread: 0.03,
       minQualityScore: 0.6,
     },
   };

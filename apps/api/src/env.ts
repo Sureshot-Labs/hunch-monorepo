@@ -347,7 +347,7 @@ const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
   24,
 );
 const aiWhaleProfileModel =
-  process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.2";
+  process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.4";
 const aiMapSearchEnabled =
   parseOptionalBool(process.env.AI_MAP_SEARCH_ENABLED) ?? false;
 const aiMapSignalsEnabled =
@@ -685,9 +685,9 @@ export const env = {
   aiClusterAnalysisEnabled:
     parseOptionalBool(process.env.AI_CLUSTER_ANALYSIS_ENABLED) ?? false,
   aiClusterModelFast:
-    process.env.AI_CLUSTER_MODEL_FAST?.trim() || "openai/gpt-5-nano",
+    process.env.AI_CLUSTER_MODEL_FAST?.trim() || "openai/gpt-5.4-nano",
   aiClusterModelFinal:
-    process.env.AI_CLUSTER_MODEL_FINAL?.trim() || "openai/gpt-5.2",
+    process.env.AI_CLUSTER_MODEL_FINAL?.trim() || "openai/gpt-5.4",
   aiClusterModelFallback:
     process.env.AI_CLUSTER_MODEL_FALLBACK?.trim() || "openai/gpt-4o-mini",
   aiClusterMaxStageB: optionalNonNegativeInt("AI_CLUSTER_MAX_STAGE_B", 50),
