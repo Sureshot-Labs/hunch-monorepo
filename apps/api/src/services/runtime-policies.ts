@@ -1284,7 +1284,7 @@ function getDefaults(): IntelPolicyMap {
       maxNodes: 20,
       maxSignals: 20,
       maxEvidencePerNode: 12,
-      topMarketsPerEvent: 3,
+      topMarketsPerEvent: 5,
       maxMarketsPerNode: 12,
       minEvidence: 1,
       minConfirmed: 1,

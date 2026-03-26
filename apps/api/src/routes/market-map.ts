@@ -15,6 +15,7 @@ import {
   type MarketMapEventSummary,
   type MarketMapMeta,
   type MarketMapNode,
+  type MarketMapSignalSummary,
   type MarketMapVenue,
   marketMapActiveKey,
   marketMapRunMetaKey,
@@ -137,15 +138,6 @@ type MarketMapLiveMarketBundle = {
 type MarketMapSignalType = "catalyst" | "risk" | "update";
 type MarketMapSignalDirection = "up" | "down" | "mixed";
 
-type MarketMapSignalSummary = {
-  title: string;
-  description: string | null;
-  signalType: MarketMapSignalType | null;
-  direction: MarketMapSignalDirection | null;
-  confidence: number | null;
-  createdAt: string;
-};
-
 type MarketMapNodeSignalRow = {
   node_id: string;
   direct_count: unknown;
@@ -155,6 +147,11 @@ type MarketMapNodeSignalRow = {
   direction: MarketMapSignalDirection | null;
   confidence: unknown;
   created_at: Date | string;
+  target_market_id: string | null;
+  target_market_title: string | null;
+  target_event_id: string | null;
+  target_event_title: string | null;
+  target_venue: string | null;
 };
 
 type MarketMapEventSignalRow = {
@@ -166,6 +163,11 @@ type MarketMapEventSignalRow = {
   direction: MarketMapSignalDirection | null;
   confidence: unknown;
   created_at: Date | string;
+  target_market_id: string | null;
+  target_market_title: string | null;
+  target_event_id: string | null;
+  target_event_title: string | null;
+  target_venue: string | null;
 };
 
 type MarketMapDropReasonCounts = Record<MarketMapDropReason, number>;
@@ -317,8 +319,9 @@ async function loadNodeSignalSummaryByNodeId(params: {
 
   const { rows } = await pool.query<MarketMapNodeSignalRow>(
     `
-    with ranked as (
+    with candidates as (
       select
+        n.id as note_id,
         t.target_id as node_id,
         count(*) over (partition by t.target_id) as direct_count,
         n.title,
@@ -326,11 +329,7 @@ async function loadNodeSignalSummaryByNodeId(params: {
         n.signal_type,
         n.direction,
         n.confidence,
-        n.created_at,
-        row_number() over (
-          partition by t.target_id
-          order by n.created_at desc, n.id desc
-        ) as rn
+        n.created_at
       from ai_note_targets t
       join ai_notes n
         on n.id = t.note_id
@@ -340,6 +339,85 @@ async function loadNodeSignalSummaryByNodeId(params: {
         and n.producer_type = 'map_signals'
         and n.status = 'active'
         and coalesce(n.lineage->>'map_run_id', '') = $2
+    ),
+    dedup as (
+      select
+        c.note_id,
+        c.node_id,
+        c.direct_count,
+        c.title,
+        c.description,
+        c.signal_type,
+        c.direction,
+        c.confidence,
+        c.created_at,
+        max(t.target_id) filter (
+          where t.target_kind = 'market' and coalesce(t.is_primary, false)
+        ) as target_market_id,
+        max(coalesce(t.target_meta->>'target_market_title', m.title)) filter (
+          where t.target_kind = 'market' and coalesce(t.is_primary, false)
+        ) as target_market_title,
+        max(coalesce(t.target_meta->>'target_venue', m.venue)) filter (
+          where t.target_kind = 'market' and coalesce(t.is_primary, false)
+        ) as target_venue,
+        coalesce(
+          max(t.target_id) filter (where t.target_kind = 'event'),
+          max(m.event_id) filter (
+            where t.target_kind = 'market' and coalesce(t.is_primary, false)
+          )
+        ) as target_event_id,
+        coalesce(
+          max(coalesce(t.target_meta->>'target_event_title', e.title)) filter (
+            where t.target_kind = 'event'
+          ),
+          max(coalesce(t.target_meta->>'target_event_title', me.title)) filter (
+            where t.target_kind = 'market' and coalesce(t.is_primary, false)
+          )
+        ) as target_event_title
+      from candidates c
+      left join ai_note_targets t
+        on t.note_id = c.note_id
+       and t.target_kind in ('market', 'event')
+      left join unified_markets m
+        on t.target_kind = 'market'
+       and m.id = t.target_id
+      left join unified_events me
+        on t.target_kind = 'market'
+       and me.id = m.event_id
+      left join unified_events e
+        on t.target_kind = 'event'
+       and e.id = t.target_id
+      group by
+        c.note_id,
+        c.node_id,
+        c.direct_count,
+        c.title,
+        c.description,
+        c.signal_type,
+        c.direction,
+        c.confidence,
+        c.created_at
+    ),
+    ranked as (
+      select
+        node_id,
+        direct_count,
+        title,
+        description,
+        signal_type,
+        direction,
+        confidence,
+        created_at,
+        target_market_id,
+        target_market_title,
+        target_event_id,
+        target_event_title,
+        target_venue,
+        row_number() over (
+          partition by node_id
+          order by created_at desc, note_id desc
+        ) as rn
+      from dedup
     )
     select
       node_id,
@@ -349,7 +427,12 @@ async function loadNodeSignalSummaryByNodeId(params: {
       signal_type,
       direction,
       confidence,
-      created_at
+      created_at,
+      target_market_id,
+      target_market_title,
+      target_event_id,
+      target_event_title,
+      target_venue
     from ranked
     where rn = 1
     `,
@@ -366,6 +449,11 @@ async function loadNodeSignalSummaryByNodeId(params: {
       direction: row.direction ?? null,
       confidence: toNumber(row.confidence),
       createdAt: toIsoString(row.created_at),
+      targetMarketId: row.target_market_id ?? null,
+      targetMarketTitle: row.target_market_title?.trim() || null,
+      targetEventId: row.target_event_id ?? null,
+      targetEventTitle: row.target_event_title?.trim() || null,
+      targetVenue: row.target_venue?.trim() || null,
     });
   }
 
@@ -466,7 +554,13 @@ async function loadEventSignalSummaryByEventId(params: {
         n.direction,
         n.confidence,
         n.created_at,
-        case when t.target_kind = 'event' then 0 else 1 end as target_priority
+        t.target_kind,
+        t.target_id,
+        coalesce(t.is_primary, false) as is_primary,
+        t.target_rank,
+        t.target_meta,
+        m.title as market_target_title,
+        m.venue as market_target_venue
       from ai_note_targets t
       join ai_notes n
         on n.id = t.note_id
@@ -492,12 +586,32 @@ async function loadEventSignalSummaryByEventId(params: {
         direction,
         confidence,
         created_at,
-        row_number() over (
-          partition by event_id, note_id
-          order by target_priority asc
-        ) as rn_note
+        max(target_id) filter (
+          where target_kind = 'market' and is_primary
+        ) as target_market_id,
+        max(coalesce(target_meta->>'target_market_title', market_target_title)) filter (
+          where target_kind = 'market' and is_primary
+        ) as target_market_title,
+        max(coalesce(target_meta->>'target_venue', market_target_venue)) filter (
+          where target_kind = 'market' and is_primary
+        ) as target_venue,
+        max(target_id) filter (
+          where target_kind = 'event'
+        ) as target_event_id,
+        max(target_meta->>'target_event_title') filter (
+          where target_kind = 'event'
+        ) as target_event_title
       from candidates
       where event_id is not null
+      group by
+        note_id,
+        event_id,
+        title,
+        description,
+        signal_type,
+        direction,
+        confidence,
+        created_at
     ),
     ranked as (
       select
@@ -509,12 +623,16 @@ async function loadEventSignalSummaryByEventId(params: {
         direction,
         confidence,
         created_at,
+        target_market_id,
+        target_market_title,
+        coalesce(target_event_id, event_id) as target_event_id,
+        target_event_title,
+        target_venue,
         row_number() over (
           partition by event_id
           order by created_at desc, note_id desc
         ) as rn
       from dedup
-      where rn_note = 1
     )
     select
       event_id,
@@ -524,7 +642,12 @@ async function loadEventSignalSummaryByEventId(params: {
       signal_type,
       direction,
       confidence,
-      created_at
+      created_at,
+      target_market_id,
+      target_market_title,
+      target_event_id,
+      target_event_title,
+      target_venue
     from ranked
     where rn = 1
     `,
@@ -541,6 +664,11 @@ async function loadEventSignalSummaryByEventId(params: {
         direction: row.direction ?? null,
         confidence: toNumber(row.confidence),
         createdAt: toIsoString(row.created_at),
+        targetMarketId: row.target_market_id ?? null,
+        targetMarketTitle: row.target_market_title?.trim() || null,
+        targetEventId: row.target_event_id ?? null,
+        targetEventTitle: row.target_event_title?.trim() || null,
+        targetVenue: row.target_venue?.trim() || null,
       },
     });
   }

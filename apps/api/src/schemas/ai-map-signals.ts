@@ -141,11 +141,13 @@ export type MapSignalsPromptInput = {
     eventId: string;
     eventTitle: string;
     marketTitle: string | null;
+    closeTime: string | null;
     venue: string;
     activityVolume: number;
     depthProxy: number;
     openInterest: number | null;
     affinityScore: number;
+    contractMatchScore: number;
     affinityRank: number;
   }>;
 };
@@ -182,10 +184,12 @@ function formatMarketList(
           `  venue: ${item.venue}`,
           `  event_title: ${item.eventTitle}`,
           `  market_title: ${item.marketTitle ?? "-"}`,
+          `  close_time: ${item.closeTime ?? "-"}`,
           `  activity_volume: ${item.activityVolume.toFixed(2)}`,
           `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
           `  open_interest: ${item.openInterest == null ? "-" : item.openInterest.toFixed(2)}`,
           `  affinity_score: ${item.affinityScore.toFixed(6)}`,
+          `  contract_match: ${item.contractMatchScore.toFixed(6)}`,
           `  affinity_rank: ${item.affinityRank}`,
         ].join("\n"),
     )
@@ -194,10 +198,11 @@ function formatMarketList(
 
 export function buildMapSignalsSystemPromptV2(): string {
   return [
-    "You are a market-signal routing agent.",
+    "You are a market-signal routing agent for a prediction market product.",
     "Return exactly one JSON object and nothing else.",
     "Do not output markdown, code fences, comments, or additional prose.",
     "Goal: convert node evidence into one actionable market signal candidate.",
+    "Write like a concise trader-facing product card: factual, sharp, plain-English, and fast to scan.",
     "Hard constraints:",
     "- If status=PUBLISH then target_market_id must be one of provided candidate market IDs.",
     "- Never invent market IDs, event IDs, evidence IDs, or URLs.",
@@ -215,6 +220,40 @@ export function buildMapSignalsSystemPromptV2(): string {
     "- SKIP: low-quality/noise/insufficient evidence.",
     "- activity_volume is the best recent-activity metric available for this market; for Limitless it may use total volume because the venue does not expose a true 24h volume field.",
     "- depth_proxy is the best available market depth proxy, preferring liquidity and falling back to open interest when liquidity is unavailable.",
+    "Writing contract:",
+    "- headline: 4-10 words when possible. It should read like a sharp signal headline, not a taxonomy label, tag list, or internal note.",
+    "- summary: exactly 1-2 short sentences in plain English. Explain what changed and why it matters to this market.",
+    "- rationale: exactly 1 short sentence. Explain why this target market is the best fit versus the other candidates.",
+    "- Keep the language trader-useful, human-readable, and natural in a small UI card.",
+    "- Make the trigger concrete. If the evidence includes a named company, team, player, official event, result, or explicit update, use at least one of those in the headline or first summary sentence when relevant.",
+    "- Prefer this structure: sentence 1 says what happened; sentence 2 says why this exact contract is affected.",
+    "- If the evidence is mainly a price check, scoreboard result, standings update, or odds/state snapshot, describe the underlying state directly instead of presenting the publisher or source check as the cause.",
+    '- For example, prefer "Bitcoin traded around $68.5k" over "CoinDesk reported Bitcoin at $68.5k" unless the report itself is the news.',
+    "- Do not use internal pipeline terms in user-facing copy.",
+    '- Avoid phrases like "affinity score", "affinity rank", "depth proxy", "candidate market", "node evidence", or "market-level implication".',
+    "- Do not cite source domains or publication names in headline/summary unless the source itself is central to the event.",
+    "- If you need to mention tradability, say things like 'more liquid', 'deeper market', or 'easier to trade' instead of raw field names.",
+    "- Avoid compressed analyst shorthand, newsroom-style hedging, academic phrasing, and generic filler.",
+    '- Avoid vague market-commentary phrasing like "moves into focus", "gets a boost", "at risk", "momentum builds", or "back in play" unless it is immediately tied to a concrete fact.',
+    "Good style example:",
+    '- headline: "Fed cut odds firm after soft CPI"',
+    "- summary: \"A softer inflation read strengthens the case for easier policy and gives next-meeting cut markets a clearer catalyst. This market is the closest direct read-through from that update.\"",
+    '- rationale: "This market maps most directly to the confirmed evidence and is easier to trade than close alternatives."',
+    "More good style examples:",
+    '- headline: "MARA sale pressures $68.7K line"',
+    '- summary: "MARA said it sold $1.1B in Bitcoin for a debt buyback and BTC slid back into the high-$68Ks. That puts the $68,700 by 5pm EDT contract under pressure into the close."',
+    '- headline: "BTC tests $68.45K close line"',
+    '- summary: "Bitcoin traded around the mid-$68Ks in the latest confirmed checks. That makes the $68,450 by 5pm EDT contract the closest direct read on spot into the close."',
+    '- headline: "Miami win lifts rematch odds"',
+    '- summary: "Miami beat Cleveland 120-103 in the latest head-to-head result. That gives this rematch market a fresh, direct catalyst in Miami\'s favor."',
+    "Bad style examples:",
+    '- headline: "Macro catalyst for April Fed node"',
+    '- summary: "Corroborated evidence indicates a market-level implication for rate-cut probabilities."',
+    '- rationale: "Highest-affinity candidate with sufficient depth_proxy."',
+    '- summary: "Bitcoin was reported at $68,899 on CoinGecko and $68,450 on CoinDesk."',
+    '- headline: "Sinner and Tiafoe move into focus"',
+    '- summary: "This market becomes more live and gains momentum."',
+    "Before returning JSON, verify that headline sounds natural, summary is plain English, rationale is explicit and readable, and none of the user-facing fields sound like internal routing metadata.",
     "Output schema:",
     JSON.stringify(MAP_SIGNALS_AGENT_OUTPUT_V2_JSON_SCHEMA, null, 2),
   ].join("\n");
@@ -241,8 +280,18 @@ export function buildMapSignalsUserPromptV2(input: MapSignalsPromptInput): strin
     "- Prefer recent, corroborated evidence.",
     "- Prefer market targets with clear linkage to selected evidence.",
     "- Consider affinity_score/affinity_rank strongly; when close, prefer higher depth_proxy/open_interest markets.",
+    "- Consider contract_match strongly when several candidates belong to the same event.",
+    "- When several candidates belong to the same event, prefer the contract whose wording, numbers, and timing best match the evidence instead of defaulting to the broadest or deepest sibling market.",
+    "- Use close_time to distinguish today/this week/this month or date-window contracts when the titles are otherwise similar.",
     "- If target is unclear or evidence weak, return CONTEXT or SKIP.",
     "- Keep headline concise and concrete.",
+    "- Keep summary and rationale in plain English.",
+    "- In the headline or first summary sentence, name the concrete trigger when possible: company, team, player, official result, report, or event.",
+    "- If the evidence is just a current price, score, standings line, or status check, describe that state directly instead of saying a site 'reported' it.",
+    "- Prefer 'X happened, so this contract moves' over generic market color.",
     "- Keep rationale short and explicit.",
+    "- Do not mention internal field names like affinity_score, affinity_rank, depth_proxy, candidate market, or confirmation labels in headline, summary, or rationale.",
+    "- If comparing tradability, use plain phrases like 'more liquid' or 'easier to trade'.",
+    "- Avoid tag-list headlines, compressed analyst shorthand, generic filler, and vague cliche phrasing like 'moves into focus' unless tied to a specific fact.",
   ].join("\n");
 }

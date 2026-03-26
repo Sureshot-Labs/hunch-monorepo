@@ -26,6 +26,20 @@ export type MarketMapNodeVenueMetrics = {
   sumOpenInterest: number;
 };
 
+export type MarketMapSignalSummary = {
+  title: string;
+  description: string | null;
+  signalType: "catalyst" | "risk" | "update" | null;
+  direction: "up" | "down" | "mixed" | null;
+  confidence: number | null;
+  createdAt: string;
+  targetMarketId?: string | null;
+  targetMarketTitle?: string | null;
+  targetEventId?: string | null;
+  targetEventTitle?: string | null;
+  targetVenue?: string | null;
+};
+
 export type MarketMapNodePreview = {
   id: string;
   venue: MarketMapVenue;
@@ -53,14 +67,7 @@ export type MarketMapNodePreview = {
   heroIcon?: string | null;
   signalCountDirect?: number;
   signalCountSubtree?: number;
-  topSignal?: {
-    title: string;
-    description: string | null;
-    signalType: "catalyst" | "risk" | "update" | null;
-    direction: "up" | "down" | "mixed" | null;
-    confidence: number | null;
-    createdAt: string;
-  } | null;
+  topSignal?: MarketMapSignalSummary | null;
   updatedAt: string;
 };
 
@@ -91,14 +98,7 @@ export type MarketMapNode = {
   heroIcon?: string | null;
   signalCountDirect?: number;
   signalCountSubtree?: number;
-  topSignal?: {
-    title: string;
-    description: string | null;
-    signalType: "catalyst" | "risk" | "update" | null;
-    direction: "up" | "down" | "mixed" | null;
-    confidence: number | null;
-    createdAt: string;
-  } | null;
+  topSignal?: MarketMapSignalSummary | null;
   eventsPreview?: MarketMapEventSummary[];
   childrenPreview?: MarketMapNodePreview[];
   updatedAt: string;
@@ -162,14 +162,7 @@ export type MarketMapEventSummary = {
   icon?: string | null;
   marketsPreview?: MarketMapEventMarketPreview[];
   signalCount?: number;
-  topSignal?: {
-    title: string;
-    description: string | null;
-    signalType: "catalyst" | "risk" | "update" | null;
-    direction: "up" | "down" | "mixed" | null;
-    confidence: number | null;
-    createdAt: string;
-  } | null;
+  topSignal?: MarketMapSignalSummary | null;
   volume24h: number;
   liquidity: number;
   openInterest: number;
