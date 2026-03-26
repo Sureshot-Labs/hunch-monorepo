@@ -154,3 +154,40 @@ export const feedQuerySchema = z.object({
     .optional()
     .transform((v) => (v == null ? undefined : Math.min(24 * 365 * 5, v))),
 });
+
+export const feedFacetQuerySchema = feedQuerySchema.pick({
+  min_total_volume: true,
+  min_volume24hr: true,
+  min_liquidity: true,
+  q: true,
+  view: true,
+  event_scope: true,
+  venue: true,
+  category: true,
+  categories: true,
+  filter: true,
+  min_prob: true,
+  max_prob: true,
+  max_spread: true,
+  end_within_hours: true,
+  age_within_hours: true,
+});
+
+export function resolveMinTotalVolumeFilter(query: {
+  min_total_volume?: number;
+  min_volume24hr?: number;
+}): number {
+  if (
+    typeof query.min_total_volume === "number" &&
+    Number.isFinite(query.min_total_volume)
+  ) {
+    return query.min_total_volume;
+  }
+  if (
+    typeof query.min_volume24hr === "number" &&
+    Number.isFinite(query.min_volume24hr)
+  ) {
+    return query.min_volume24hr;
+  }
+  return 1e-9;
+}
