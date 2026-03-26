@@ -25,7 +25,10 @@ import {
   fetchPolymarketOrderHash,
   fetchPolymarketOrderStatus,
 } from "../services/polygon-rpc.js";
-import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
+import {
+  fetchPolymarketOnchainSnapshot,
+  POLYGON_NATIVE_USDC_ADDRESS,
+} from "../services/polymarket-onchain.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import {
@@ -1727,6 +1730,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ]);
 
           const usdcBalance = snapshot.usdcBalance;
+          const oldUsdcBalance = snapshot.oldUsdcBalance;
           const allowanceExchange = snapshot.allowanceExchange;
           const allowanceNegRisk = snapshot.allowanceNegRisk;
           const okExchange = snapshot.okExchange;
@@ -1790,6 +1794,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                     }
                   : {}),
               },
+            },
+            nativeUsdc: {
+              tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+              decimals: 6,
+              balance: ethers.formatUnits(oldUsdcBalance, 6),
+              balanceRaw: oldUsdcBalance.toString(),
             },
             conditionalTokens: {
               contractAddress: env.polymarketConditionalTokensAddress,

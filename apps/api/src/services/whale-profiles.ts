@@ -2669,12 +2669,17 @@ Naming stability rule:
 Output JSON with:
 - label_short: short trader archetype title (target <= 36 chars, hard max 56).
   Prefer 2 to 4 words.
-  It should sound like a clean product label, not a robotic taxonomy label.
+  It should sound like a human trader archetype or desk nickname, not a robotic taxonomy label.
+  It must read like one clean name, not a list of traits.
+  Do not write comma-separated labels or stacked descriptors.
+  Bad example: "NBA whale, often late, mixed sides".
   If wallet.source_label_quality is "descriptive" and wallet.source_label exists, keep label_short close to that source label instead of inventing a persona name.
   If wallet.source_label_quality is "generic" or "missing", create a concise descriptive alias from the trading pattern.
-  Avoid awkward words like accumulator, scalper, bettor, mixed buyer, and diversified unless truly necessary.
-  Avoid hype, jokes, mascots, fantasy nicknames, and robotic wording.
-  Good styles: "Late Sports Trader", "Concentrated NO Trader", "Headline Politics Trader".
+  Avoid awkward words like accumulator, scalper, bettor, mixed buyer, participant, and diversified unless truly necessary.
+  Slight edge, mild slang, or light irony is allowed if it still feels clean and readable.
+  Avoid hype, memes, jokes, mascots, fantasy nicknames, and robotic wording.
+  Good styles: "Late Sports Trader", "Fed Fade Trader", "NO Side Sniper", "Headline Politics Trader", "Conviction News Buyer".
+  Bad styles: "High-odds NO accumulator (diversified)", "Sports markets trader with late entries", "Mixed-sided high-frequency participant".
 - label_long: exactly 1 short sentence (target <= 140 chars, hard max 200).
   This is the lead sentence shown above the trader bullets.
   It should explain what kind of trader this is in plain language.
@@ -2768,6 +2773,7 @@ Rules:
 - Naming:
   - If wallet.source_label_quality is "descriptive", preserve the semantics of wallet.source_label.
   - Do not replace a meaningful existing label with a completely unrelated nickname.
+  - If label_short sounds like metadata tags, analyst shorthand, or a list of traits instead of a natural archetype name, rewrite it.
 - Prefer evidence from top_events when available; fall back to top_markets or recent_window.top_changes.
 - Use summary.side_bias_label and summary.concentration_label as hints.
 - If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, explain it simply as buying both sides or balancing risk unless one side is clearly negligible.
@@ -2792,7 +2798,7 @@ ${namingStabilityHint}
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, label_long is exactly one sentence, each bullet covers a different angle, and the wording avoids numeric clutter unless essential.`;
+Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, not a comma-separated trait list, metadata tags, or analyst shorthand; label_long is exactly one sentence; each bullet covers a different angle; and the wording avoids numeric clutter unless essential.`;
 
       let profileRaw = "";
       try {

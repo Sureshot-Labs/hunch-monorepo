@@ -68,6 +68,39 @@ function metricForEvent(
   }
 }
 
+type MarketMapNodeEventsSortBy = "volume24h" | "liquidity" | "openInterest";
+type MarketMapNodeEventsSortDir = "asc" | "desc";
+
+function compareNodeEventsBySort(params: {
+  left: MarketMapEventSummary;
+  right: MarketMapEventSummary;
+  sortBy: MarketMapNodeEventsSortBy;
+  sortDir: MarketMapNodeEventsSortDir;
+}): number {
+  const { left, right, sortBy, sortDir } = params;
+  const leftMetric = metricForEvent(left, sortBy);
+  const rightMetric = metricForEvent(right, sortBy);
+  if (leftMetric !== rightMetric) {
+    return sortDir === "asc" ? leftMetric - rightMetric : rightMetric - leftMetric;
+  }
+  if (right.score !== left.score) return right.score - left.score;
+  return left.eventId.localeCompare(right.eventId);
+}
+
+function sortNodeEvents(params: {
+  events: MarketMapEventSummary[];
+  sortBy: MarketMapNodeEventsSortBy | null;
+  sortDir: MarketMapNodeEventsSortDir;
+}): MarketMapEventSummary[] {
+  const { events, sortBy, sortDir } = params;
+  if (!sortBy) return events;
+  return events
+    .slice()
+    .sort((left, right) =>
+      compareNodeEventsBySort({ left, right, sortBy, sortDir }),
+    );
+}
+
 type MarketMapLiveMarketData = {
   marketId: string;
   marketTitle: string | null;
@@ -1243,6 +1276,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const selectedVenueSet = new Set<MarketMapVenue>(selectedVenues);
       const offset = request.query.offset ?? 0;
       const limit = request.query.limit ?? 100;
+      const sortBy = request.query.sort_by ?? null;
+      const sortDir = request.query.sort_dir ?? "desc";
       const marketsPreviewLimit = request.query.marketsPreviewLimit ?? 8;
       const cacheEnabled = env.marketMapTtlSec > 0;
       const cacheTtl = cacheEnabled ? env.marketMapTtlSec : 0;
@@ -1259,6 +1294,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         selectedVenues.slice().sort().join(","),
         String(offset),
         String(limit),
+        sortBy ?? "default",
+        sortDir,
         String(marketsPreviewLimit),
       ].join(":");
       let skipCacheWrite = false;
@@ -1291,7 +1328,12 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         (event) =>
           selectedVenueSet.size === 0 ? true : selectedVenueSet.has(event.venue),
       );
-      const items = events.slice(offset, offset + limit);
+      const sortedEvents = sortNodeEvents({
+        events,
+        sortBy,
+        sortDir,
+      });
+      const items = sortedEvents.slice(offset, offset + limit);
       const eventSignalSummaryByEventId =
         items.length > 0
           ? await loadEventSignalSummaryByEventId({

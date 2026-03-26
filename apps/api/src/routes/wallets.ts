@@ -17,7 +17,10 @@ import {
   verifyLimitlessAuthContext,
 } from "../services/limitless-auth.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
-import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
+import {
+  fetchPolymarketOnchainSnapshot,
+  POLYGON_NATIVE_USDC_ADDRESS,
+} from "../services/polymarket-onchain.js";
 import {
   walletBalancesBatchQuerySchema,
   walletBalancesQuerySchema,
@@ -1172,7 +1175,9 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         ]);
 
                       const usdcBalance = snapshot.usdcBalance;
+                      const oldUsdcBalance = snapshot.oldUsdcBalance;
                       const signerUsdcBalance = snapshot.signerUsdcBalance;
+                      const signerOldUsdcBalance = snapshot.signerOldUsdcBalance;
                       const allowanceExchange = snapshot.allowanceExchange;
                       const allowanceNegRisk = snapshot.allowanceNegRisk;
                       const okExchange = snapshot.okExchange;
@@ -1191,6 +1196,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         shouldFetchSignerUsdc && signerUsdcBalance != null
                           ? signerUsdcBalance
                           : usdcBalance;
+                      const signerOldUsdcBalanceResolved =
+                        shouldFetchSignerUsdc && signerOldUsdcBalance != null
+                          ? signerOldUsdcBalance
+                          : oldUsdcBalance;
 
                       const reasons: string[] = [];
                       if (!polymarketCreds) reasons.push("missing_credentials");
@@ -1290,6 +1299,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                               : {}),
                           },
                         },
+                        nativeUsdc: {
+                          tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+                          decimals: 6,
+                          balance: ethers.formatUnits(oldUsdcBalance, 6),
+                          balanceRaw: oldUsdcBalance.toString(),
+                        },
                         ...(funderIsContract
                           ? {
                               signerUsdc: {
@@ -1301,6 +1316,18 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                                 ),
                                 balanceRaw: (
                                   signerUsdcBalanceResolved ?? 0n
+                                ).toString(),
+                              },
+                              signerNativeUsdc: {
+                                tokenAddress:
+                                  POLYGON_NATIVE_USDC_ADDRESS,
+                                decimals: 6,
+                                balance: ethers.formatUnits(
+                                  signerOldUsdcBalanceResolved ?? 0n,
+                                  6,
+                                ),
+                                balanceRaw: (
+                                  signerOldUsdcBalanceResolved ?? 0n
                                 ).toString(),
                               },
                             }

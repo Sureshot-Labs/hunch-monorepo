@@ -4,6 +4,9 @@ type ClusterMarketRow = {
   venue: string;
   title: string | null;
   description?: string | null;
+  slug?: string | null;
+  image?: string | null;
+  icon?: string | null;
   market_type: string | null;
   best_bid: unknown;
   best_ask: unknown;
@@ -16,12 +19,23 @@ type ClusterMarketRow = {
   expiration_time: unknown;
   event_title: string | null;
   event_description?: string | null;
+  event_slug?: string | null;
+  event_image?: string | null;
+  event_icon?: string | null;
 };
 
 export type ClusterMarketSummary = {
   marketId: string;
   eventId: string;
   venue: string;
+  marketSlug: string | null;
+  eventSlug: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
+  image: string | null;
+  icon: string | null;
   marketTitle: string | null;
   marketDescription: string | null;
   eventTitle: string | null;
@@ -59,6 +73,131 @@ function parseDate(value: unknown): Date | null {
   if (value instanceof Date) return value;
   const parsed = new Date(String(value));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+type ParticipantGroup = {
+  tokens: Set<string>;
+};
+
+function normalizeComparableText(value: string | null | undefined): string {
+  return (value ?? "").toLowerCase().replace(/['’]/g, "").trim();
+}
+
+function tokenizeComparableText(value: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  const matches = normalizeComparableText(value).match(/[a-z0-9]+/g) ?? [];
+  for (const token of matches) {
+    if (token.length < 2) continue;
+    if (
+      token === "vs" ||
+      token === "versus" ||
+      token === "match" ||
+      token === "winner" ||
+      token === "miami" ||
+      token === "open"
+    ) {
+      continue;
+    }
+    tokens.add(token);
+  }
+  return tokens;
+}
+
+function extractMatchParticipantGroups(
+  value: string | null | undefined
+): ParticipantGroup[] {
+  if (!value) return [];
+  const parts = value
+    .replace(/[–—]/g, " vs ")
+    .split(/\b(?:vs\.?|versus)\b/i)
+    .map(part => part.trim())
+    .filter(part => part.length > 0);
+  if (parts.length !== 2) return [];
+  return parts
+    .map(part => ({ tokens: tokenizeComparableText(part) }))
+    .filter(group => group.tokens.size > 0);
+}
+
+function intersectionSize(a: Set<string>, b: Set<string>): number {
+  let count = 0;
+  for (const token of a) {
+    if (b.has(token)) count += 1;
+  }
+  return count;
+}
+
+function inferSelectedParticipant(
+  market: ClusterMarketSummary
+): ParticipantGroup | null {
+  const participants = extractMatchParticipantGroups(
+    market.eventTitle ?? market.marketTitle
+  );
+  if (participants.length !== 2) return null;
+
+  const titleTokens = tokenizeComparableText(market.marketTitle);
+  if (titleTokens.size > 0) {
+    const leftOverlap = intersectionSize(titleTokens, participants[0].tokens);
+    const rightOverlap = intersectionSize(titleTokens, participants[1].tokens);
+    if (leftOverlap > 0 && rightOverlap === 0) return participants[0];
+    if (rightOverlap > 0 && leftOverlap === 0) return participants[1];
+  }
+
+  const normalizedTitle = normalizeComparableText(market.marketTitle);
+  const normalizedEvent = normalizeComparableText(market.eventTitle);
+  if (
+    normalizedTitle.length > 0 &&
+    normalizedTitle === normalizedEvent
+  ) {
+    return participants[0];
+  }
+
+  return null;
+}
+
+function resolveComparablePrice(
+  market: ClusterMarketSummary,
+  canonicalSelection: ParticipantGroup | null
+): number | null {
+  if (market.yesMid == null) return null;
+  if (!canonicalSelection) return market.yesMid;
+
+  const selected = inferSelectedParticipant(market);
+  if (!selected) return market.yesMid;
+  if (intersectionSize(selected.tokens, canonicalSelection.tokens) > 0) {
+    return market.yesMid;
+  }
+  return market.noMid ?? market.yesMid;
+}
+
+function resolveCanonicalSelection(
+  markets: ClusterMarketSummary[]
+): ParticipantGroup | null {
+  const inferred = markets
+    .map(inferSelectedParticipant)
+    .filter((value): value is ParticipantGroup => value != null);
+  if (inferred.length < 2) return null;
+
+  const canonical = inferred[0];
+  const hasOpposite = inferred.some(
+    selection => intersectionSize(selection.tokens, canonical.tokens) === 0
+  );
+  return hasOpposite ? canonical : null;
+}
+
+export function resolveLiquidityDisplay(row: {
+  liquidity: unknown;
+  open_interest?: unknown;
+  openInterest?: unknown;
+}): number | null {
+  const liquidity = toNumber(row.liquidity);
+  if (liquidity != null && liquidity > 0) return liquidity;
+
+  const openInterest = toNumber(
+    row.openInterest ?? row.open_interest ?? null
+  );
+  if (openInterest != null && openInterest > 0) return openInterest;
+
+  return null;
 }
 
 export function resolveYesMid(row: Pick<ClusterMarketRow, "best_bid" | "best_ask" | "last_price">): number | null {
@@ -104,6 +243,14 @@ export function buildMarketSummary(row: ClusterMarketRow): ClusterMarketSummary 
     marketId: row.id,
     eventId: row.event_id,
     venue: row.venue,
+    marketSlug: row.slug ?? null,
+    eventSlug: row.event_slug ?? null,
+    marketImage: row.image ?? null,
+    marketIcon: row.icon ?? null,
+    eventImage: row.event_image ?? null,
+    eventIcon: row.event_icon ?? null,
+    image: row.image ?? row.event_image ?? null,
+    icon: row.icon ?? row.event_icon ?? null,
     marketTitle: row.title,
     marketDescription: row.description ?? null,
     eventTitle: row.event_title,
@@ -129,16 +276,21 @@ export function computeClusterMetrics(
   let totalLiquidity = 0;
   let volume24h = 0;
   let expiresAt: string | null = null;
-  const yesPrices: number[] = [];
+  const comparablePrices: number[] = [];
+  const canonicalSelection = resolveCanonicalSelection(markets);
 
   for (const market of markets) {
     const venue = market.venue;
     venueCounts[venue] = (venueCounts[venue] ?? 0) + 1;
 
-    if (market.liquidity != null) {
-      totalLiquidity += market.liquidity;
-      if (minLiquidity == null || market.liquidity < minLiquidity) {
-        minLiquidity = market.liquidity;
+    const liquidityDisplay = resolveLiquidityDisplay({
+      liquidity: market.liquidity,
+      openInterest: market.openInterest,
+    });
+    if (liquidityDisplay != null) {
+      totalLiquidity += liquidityDisplay;
+      if (minLiquidity == null || liquidityDisplay < minLiquidity) {
+        minLiquidity = liquidityDisplay;
       }
     }
 
@@ -146,7 +298,8 @@ export function computeClusterMetrics(
       volume24h += market.volume24h;
     }
 
-    if (market.yesMid != null) yesPrices.push(market.yesMid);
+    const comparablePrice = resolveComparablePrice(market, canonicalSelection);
+    if (comparablePrice != null) comparablePrices.push(comparablePrice);
 
     if (market.expiresAt) {
       if (!expiresAt || market.expiresAt < expiresAt) {
@@ -157,8 +310,8 @@ export function computeClusterMetrics(
 
   const venueCount = Object.keys(venueCounts).length;
   const priceSpread =
-    yesPrices.length >= 2
-      ? Math.max(...yesPrices) - Math.min(...yesPrices)
+    comparablePrices.length >= 2
+      ? Math.max(...comparablePrices) - Math.min(...comparablePrices)
       : null;
 
   return {

@@ -403,7 +403,7 @@ function preview(value: string, maxChars: number): string {
 }
 
 function resolveArgs(argv: string[]): Args {
-  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.2";
+  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.4";
   const embedModel =
     parseFlag(argv, "--embed-model") ??
     process.env.OPENROUTER_EMBED_MODEL ??
@@ -471,7 +471,7 @@ Input:
   --report-out <path>            Output markdown summary path
 
 Model:
-  --model <id>                   OpenRouter model (default: openai/gpt-5.2)
+  --model <id>                   OpenRouter model (default: openai/gpt-5.4)
   --embed-model <id>             OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
   --max-output-tokens <n>        Max output tokens per node call (default: 900)
   --timeout-sec <n>              Request timeout seconds (default: 90)
