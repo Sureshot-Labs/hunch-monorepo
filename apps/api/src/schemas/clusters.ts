@@ -8,6 +8,8 @@ export const clustersQuerySchema = z.object({
   minQualityScore: z.coerce.number().min(0).max(1).optional(),
   minAnalysisConfidence: z.coerce.number().min(0).max(1).optional(),
   maxOutlierRatio: z.coerce.number().min(0).max(1).optional(),
+  sort_by: z.enum(["volume24h"]).optional(),
+  sort_dir: z.enum(["asc", "desc"]).optional(),
 });
 
 export const clusterParamsSchema = z.object({

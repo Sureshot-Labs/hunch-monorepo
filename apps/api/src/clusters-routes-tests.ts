@@ -15,6 +15,8 @@ const CLUSTER_KEY_PREFIX = "ai:cluster:";
 type ClusterListPayload = {
   items: Array<{
     id: string;
+    score?: number;
+    volume24h?: number | null;
     matchDiagnostics?: {
       exactMatchRatio?: number | null;
       matchTierCounts?: Record<string, number>;
@@ -166,6 +168,9 @@ async function main() {
 
   const suiteId = crypto.randomUUID().slice(0, 8);
   const clusterId = `test-cluster-${suiteId}`;
+  const clusterHighScore = `test-cluster-high-${suiteId}`;
+  const clusterAlphaTie = `test-cluster-alpha-${suiteId}`;
+  const clusterLowVolume = `test-cluster-low-${suiteId}`;
   const eventA = makeId("cluster:event");
   const eventB = makeId("cluster:event");
   const marketA = makeId("cluster:market");
@@ -239,10 +244,13 @@ async function main() {
     },
   ];
 
-  await redis.set(INDEX_KEY, JSON.stringify([clusterId]));
+  await redis.set(
+    INDEX_KEY,
+    JSON.stringify([clusterLowVolume, clusterAlphaTie, clusterHighScore, clusterId]),
+  );
   await redis.hSet(META_KEY, {
     generated_at: new Date().toISOString(),
-    count: "1",
+    count: "4",
     version: "v2",
   });
   await redis.hSet(`${CLUSTER_KEY_PREFIX}${clusterId}`, {
@@ -293,6 +301,81 @@ async function main() {
     updated_at: new Date().toISOString(),
     version: "v2",
   });
+  await redis.hSet(`${CLUSTER_KEY_PREFIX}${clusterHighScore}`, {
+    label: `Cluster route volume high ${suiteId}`,
+    score: "200",
+    seed_market_id: marketA,
+    market_count: "2",
+    venue_count: "2",
+    venue_counts: JSON.stringify({ polymarket: 1, kalshi: 1 }),
+    price_spread: "0.10",
+    min_liquidity: "100",
+    total_liquidity: "250",
+    volume_24h: "120",
+    expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+    analysis: "",
+    analysis_status: "",
+    analysis_updated_at: "",
+    analysis_confidence: "",
+    analysis_model: "",
+    quality_score: "0.70",
+    match_details: JSON.stringify([]),
+    match_diagnostics: JSON.stringify(null),
+    market_ids: JSON.stringify([marketA, marketB]),
+    markets_preview: JSON.stringify(preview),
+    updated_at: new Date().toISOString(),
+    version: "v2",
+  });
+  await redis.hSet(`${CLUSTER_KEY_PREFIX}${clusterAlphaTie}`, {
+    label: `Cluster route volume alpha ${suiteId}`,
+    score: "200",
+    seed_market_id: marketA,
+    market_count: "2",
+    venue_count: "2",
+    venue_counts: JSON.stringify({ polymarket: 1, kalshi: 1 }),
+    price_spread: "0.10",
+    min_liquidity: "100",
+    total_liquidity: "250",
+    volume_24h: "120",
+    expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+    analysis: "",
+    analysis_status: "",
+    analysis_updated_at: "",
+    analysis_confidence: "",
+    analysis_model: "",
+    quality_score: "0.70",
+    match_details: JSON.stringify([]),
+    match_diagnostics: JSON.stringify(null),
+    market_ids: JSON.stringify([marketA, marketB]),
+    markets_preview: JSON.stringify(preview),
+    updated_at: new Date().toISOString(),
+    version: "v2",
+  });
+  await redis.hSet(`${CLUSTER_KEY_PREFIX}${clusterLowVolume}`, {
+    label: `Cluster route volume low ${suiteId}`,
+    score: "999",
+    seed_market_id: marketA,
+    market_count: "2",
+    venue_count: "2",
+    venue_counts: JSON.stringify({ polymarket: 1, kalshi: 1 }),
+    price_spread: "0.10",
+    min_liquidity: "100",
+    total_liquidity: "250",
+    volume_24h: "5",
+    expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+    analysis: "",
+    analysis_status: "",
+    analysis_updated_at: "",
+    analysis_confidence: "",
+    analysis_model: "",
+    quality_score: "0.70",
+    match_details: JSON.stringify([]),
+    match_diagnostics: JSON.stringify(null),
+    market_ids: JSON.stringify([marketA, marketB]),
+    markets_preview: JSON.stringify(preview),
+    updated_at: new Date().toISOString(),
+    version: "v2",
+  });
 
   try {
     const listResponse = await app.inject({
@@ -305,6 +388,30 @@ async function main() {
     assert.ok(summary, "expected seeded cluster in list response");
     assert.equal(summary.matchDiagnostics?.exactMatchRatio, 1);
     assert.equal(summary.markets[0]?.marketImage, `https://example.com/market-alpha-${suiteId}.png`);
+
+    const sortedDescResponse = await app.inject({
+      method: "GET",
+      url: "/clusters?minQualityScore=0&minAnalysisConfidence=0&maxOutlierRatio=1&minSpread=0&minVenueCount=1&limit=2&sort_by=volume24h&sort_dir=desc",
+    });
+    assert.equal(sortedDescResponse.statusCode, 200, sortedDescResponse.body);
+    const sortedDescPayload = sortedDescResponse.json<ClusterListPayload>();
+    assert.deepEqual(
+      sortedDescPayload.items.map((item) => item.id),
+      [clusterAlphaTie, clusterHighScore],
+      "expected clusters to be sorted by volume desc, then score desc, then id asc before limit",
+    );
+
+    const sortedAscResponse = await app.inject({
+      method: "GET",
+      url: "/clusters?minQualityScore=0&minAnalysisConfidence=0&maxOutlierRatio=1&minSpread=0&minVenueCount=1&limit=4&sort_by=volume24h&sort_dir=asc",
+    });
+    assert.equal(sortedAscResponse.statusCode, 200, sortedAscResponse.body);
+    const sortedAscPayload = sortedAscResponse.json<ClusterListPayload>();
+    assert.deepEqual(
+      sortedAscPayload.items.map((item) => item.id),
+      [clusterLowVolume, clusterId, clusterAlphaTie, clusterHighScore],
+      "expected asc ordering with score and id tie-breakers",
+    );
 
     const detailResponse = await app.inject({
       method: "GET",
@@ -339,6 +446,9 @@ async function main() {
 
     const cleanup = redis.multi();
     cleanup.del(`${CLUSTER_KEY_PREFIX}${clusterId}`);
+    cleanup.del(`${CLUSTER_KEY_PREFIX}${clusterHighScore}`);
+    cleanup.del(`${CLUSTER_KEY_PREFIX}${clusterAlphaTie}`);
+    cleanup.del(`${CLUSTER_KEY_PREFIX}${clusterLowVolume}`);
     cleanup.del(INDEX_KEY);
     cleanup.del(META_KEY);
     if (previousIndex) cleanup.set(INDEX_KEY, previousIndex);

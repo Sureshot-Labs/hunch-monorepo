@@ -124,6 +124,29 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
   };
 }
 
+function compareClustersBySort(
+  left: ReturnType<typeof formatClusterSummary>,
+  right: ReturnType<typeof formatClusterSummary>,
+  sortBy: "volume24h",
+  sortDir: "asc" | "desc",
+): number {
+  const leftValue = left.volume24h;
+  const rightValue = right.volume24h;
+
+  const leftMissing = leftValue == null || !Number.isFinite(leftValue);
+  const rightMissing = rightValue == null || !Number.isFinite(rightValue);
+  if (leftMissing !== rightMissing) {
+    return leftMissing ? 1 : -1;
+  }
+
+  if (!leftMissing && !rightMissing && leftValue !== rightValue) {
+    return sortDir === "asc" ? leftValue - rightValue : rightValue - leftValue;
+  }
+
+  if (left.score !== right.score) return right.score - left.score;
+  return left.id.localeCompare(right.id);
+}
+
 export const clustersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -266,6 +289,16 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           if (cluster.marketCount <= 0) return false;
           return outliers.length / cluster.marketCount <= maxOutlierRatio;
         });
+      }
+
+      const sortBy = query.sort_by;
+      if (sortBy) {
+        const sortDir = query.sort_dir ?? "desc";
+        filtered = filtered
+          .slice()
+          .sort((left, right) =>
+            compareClustersBySort(left, right, sortBy, sortDir),
+          );
       }
 
       const limit = query.limit ?? defaults.limit;
