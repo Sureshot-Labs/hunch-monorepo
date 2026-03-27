@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { env } from "../env.js";
+import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
 type WalletActivitySummaryDbRow = {
   wallet_id: string;
@@ -54,6 +55,7 @@ type WalletActivitySignalRowDbRow = {
   close_time: Date | null;
   expiration_time: Date | null;
   resolved_outcome: string | null;
+  outcomes: string | null;
   category: string | null;
   change_action: WalletActivityTopChange["action"];
   outcome_side: string | null;
@@ -103,6 +105,7 @@ export type WalletActivityTopChange = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  outcomes: string[] | null;
   category: string | null;
   action: "OPENED" | "CLOSED" | "INCREASED" | "REDUCED" | null;
   positionSide: string | null;
@@ -168,6 +171,7 @@ export type WalletActivitySignalRow = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  outcomes: string[] | null;
   category: string | null;
   action: WalletActivityTopChange["action"];
   positionSide: string | null;
@@ -251,6 +255,7 @@ function mapWalletActivitySignalRow(
     closeTime: row.close_time,
     expirationTime: row.expiration_time,
     resolvedOutcome: row.resolved_outcome,
+    outcomes: parseMarketOutcomes(row.outcomes),
     category: row.category,
     action: row.change_action,
     positionSide: row.outcome_side,
@@ -453,6 +458,7 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
           : new Date(String(record.expirationTime)),
       resolvedOutcome:
         record.resolvedOutcome == null ? null : String(record.resolvedOutcome),
+      outcomes: parseMarketOutcomes(record.outcomes),
       category: record.category == null ? null : String(record.category),
       action:
         record.action == null
@@ -693,6 +699,7 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.best_bid,
       um.best_ask,
@@ -754,6 +761,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       cr.close_time,
       cr.expiration_time,
       cr.resolved_outcome,
+      cr.outcomes,
       cr.category,
       cr.signed_delta_shares,
       cr.signed_delta_usd,
@@ -904,6 +912,7 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
           'closeTime', cc.close_time,
           'expirationTime', cc.expiration_time,
           'resolvedOutcome', cc.resolved_outcome,
+          'outcomes', case when cc.outcomes is not null then cc.outcomes::jsonb else null end,
           'category', cc.category,
           'action', cc.change_action,
           'positionSide', cc.outcome_side,
@@ -1161,6 +1170,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       sc.close_time,
       sc.expiration_time,
       sc.resolved_outcome,
+      sc.outcomes,
       sc.category,
       sc.change_action,
       sc.outcome_side,
@@ -1230,6 +1240,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
     sr.close_time,
     sr.expiration_time,
     sr.resolved_outcome,
+    sr.outcomes,
     sr.category,
     sr.change_action,
     sr.outcome_side,
@@ -1334,6 +1345,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.last_price as market_last_price
     from events_window ew
@@ -1357,6 +1369,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       e.close_time,
       e.expiration_time,
       e.resolved_outcome,
+      e.outcomes,
       e.category,
       e.change_action,
       e.outcome_side,
@@ -1518,6 +1531,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.close_time,
       sr.expiration_time,
       sr.resolved_outcome,
+      sr.outcomes,
       sr.category,
       sr.change_action,
       sr.outcome_side,

@@ -175,6 +175,7 @@ function createTestSignalRow(
     walletId: "wallet-1",
     marketId: "market-1",
     marketTitle: "Market",
+    outcomes: null,
     marketImage: null,
     marketIcon: null,
     eventId: "event-1",

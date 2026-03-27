@@ -5,7 +5,11 @@ import { z } from "zod";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { normalizeOutcomeSideForApi } from "./wallet-intel-helpers.js";
+import {
+  normalizeOutcomeSideForApi,
+  outcomeLabelOrSide,
+  parseMarketOutcomes,
+} from "./wallet-intel-helpers.js";
 import type { AiWhaleProfilesPolicy } from "./runtime-policies.js";
 import {
   compareWalletActivitySummaryStats,
@@ -154,6 +158,7 @@ type WhaleProfileInput = {
     summary: WalletActivitySignalSummary | null;
     examples: Array<{
       market_title: string | null;
+      outcomes: string[] | null;
       event_title: string | null;
       venue: string;
       category: string | null;
@@ -161,6 +166,7 @@ type WhaleProfileInput = {
       resolved_outcome: string | null;
       action: string | null;
       position_side: string | null;
+      position_label: string | null;
       delta_usd: number | null;
       stake_usd: number | null;
       odds: number | null;
@@ -192,6 +198,7 @@ type WhaleProfileInput = {
     unusual_score: number | null;
     top_changes: Array<{
       market_title: string | null;
+      outcomes: string[] | null;
       event_title: string | null;
       venue: string;
       category: string | null;
@@ -199,6 +206,7 @@ type WhaleProfileInput = {
       resolved_outcome: string | null;
       action: string | null;
       position_side: string | null;
+      position_label: string | null;
       delta_usd: number | null;
       odds: number | null;
       labels: string[];
@@ -209,6 +217,7 @@ type WhaleProfileInput = {
   top_markets: Array<{
     market_id: string;
     market_title: string | null;
+    outcomes: string[] | null;
     event_id: string | null;
     event_title: string | null;
     venue: string;
@@ -230,6 +239,9 @@ type WhaleProfileInput = {
     last_yes_price: number | null;
     held_odds: number | null;
     position_side: string | null;
+    position_label: string | null;
+    yes_label: string | null;
+    no_label: string | null;
     is_two_sided: boolean;
     position_shares: number | null;
     position_value_usd: number | null;
@@ -312,6 +324,7 @@ type WhaleMarketRow = {
   market_id: string;
   event_id: string | null;
   market_title: string | null;
+  outcomes: string | null;
   event_title: string | null;
   venue: string;
   category: string | null;
@@ -933,6 +946,7 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
     top_changes: [
       {
         market_title: null,
+        outcomes: null,
         event_title: null,
         venue: "summary",
         category: null,
@@ -940,6 +954,7 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
         resolved_outcome: null,
         action: null,
         position_side: null,
+        position_label: null,
         delta_usd: bucketCount(recent.top_changes.length),
         odds: null,
         labels: [],
@@ -1829,10 +1844,18 @@ export function mapWhaleMarketToProfileMarket(
   const noPositionValueUsd = parseNumber(market.no_position_value_usd);
   const noPositionPrice = parseNumber(market.no_position_price);
   const lastYesPrice = parseNumber(market.last_price);
+  const outcomes = parseMarketOutcomes(market.outcomes);
+  const yesLabel = outcomeLabelOrSide(outcomes, "YES");
+  const noLabel = outcomeLabelOrSide(outcomes, "NO");
+  const positionLabel =
+    positionSide === "YES" || positionSide === "NO"
+      ? outcomeLabelOrSide(outcomes, positionSide)
+      : null;
 
   return {
     market_id: market.market_id,
     market_title: market.market_title,
+    outcomes,
     event_id: market.event_id,
     event_title: market.event_title,
     venue: market.venue,
@@ -1860,6 +1883,9 @@ export function mapWhaleMarketToProfileMarket(
       lastYesPrice,
     ),
     position_side: positionSide,
+    position_label: positionLabel,
+    yes_label: yesLabel,
+    no_label: noLabel,
     is_two_sided: hasYesPosition && hasNoPosition,
     position_shares: parseNumber(market.position_shares),
     position_value_usd: parseNumber(market.position_value_usd),
@@ -1968,15 +1994,21 @@ function toActivityKind(
 function mapSignalRowToProfileSignalExample(
   row: WalletActivitySignalRow,
 ): WhaleProfileInput["signals"]["examples"][number] {
+  const positionSide = row.positionSide ?? null;
   return {
     market_title: row.marketTitle ?? null,
+    outcomes: row.outcomes ?? null,
     event_title: row.eventTitle ?? null,
     venue: row.venue,
     category: row.category ?? null,
     market_status: row.marketStatus ?? null,
     resolved_outcome: row.resolvedOutcome ?? null,
     action: row.action ?? null,
-    position_side: row.positionSide ?? null,
+    position_side: positionSide,
+    position_label:
+      positionSide === "YES" || positionSide === "NO"
+        ? outcomeLabelOrSide(row.outcomes, positionSide)
+        : null,
     delta_usd: row.deltaUsd ?? null,
     stake_usd: row.stakeUsd ?? null,
     odds: row.odds ?? null,
@@ -2041,20 +2073,28 @@ function buildProfileInput(
   const recentSummary = context.recentSummary;
   const recentTopChanges = (recentSummary?.topChanges ?? [])
     .slice(0, context.recentTopChanges)
-    .map((change) => ({
-      market_title: change.marketTitle ?? null,
-      event_title: change.eventTitle ?? null,
-      venue: change.venue,
-      category: change.category ?? null,
-      market_status: change.marketStatus ?? null,
-      resolved_outcome: change.resolvedOutcome ?? null,
-      action: change.action ?? null,
-      position_side: change.positionSide ?? null,
-      delta_usd: change.deltaUsd ?? null,
-      odds: change.odds ?? null,
-      labels: change.labels ?? [],
-      occurred_at: change.occurredAt ? change.occurredAt.toISOString() : null,
-    }));
+    .map((change) => {
+      const positionSide = normalizeOutcomeSideForApi(change.positionSide);
+      return {
+        market_title: change.marketTitle ?? null,
+        event_title: change.eventTitle ?? null,
+        venue: change.venue,
+        category: change.category ?? null,
+        market_status: change.marketStatus ?? null,
+        resolved_outcome: change.resolvedOutcome ?? null,
+        action: change.action ?? null,
+        position_side: positionSide,
+        outcomes: change.outcomes ?? null,
+        position_label:
+          positionSide != null
+            ? outcomeLabelOrSide(change.outcomes, positionSide)
+            : null,
+        delta_usd: change.deltaUsd ?? null,
+        odds: change.odds ?? null,
+        labels: change.labels ?? [],
+        occurred_at: change.occurredAt ? change.occurredAt.toISOString() : null,
+      };
+    });
   const recentWindow: WhaleProfileInput["recent_window"] = {
     window_hours: context.recentWindowHours,
     last_activity_at: recentSummary?.lastActivityAt
@@ -2598,6 +2638,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           cr.market_id,
           um.event_id,
           um.title as market_title,
+          um.outcomes,
           ue.title as event_title,
           cr.venue,
           um.category,
@@ -2651,6 +2692,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           cr.market_id,
           um.event_id,
           um.title,
+          um.outcomes,
           ue.title,
           cr.venue,
           um.category,
@@ -2889,6 +2931,10 @@ Rules:
 - recent_window.top_changes are already aggregated per market/outcome;
   avoid repeating identical markets.
 - top_markets are the largest current held positions, ordered by current gross value.
+- Use real outcome labels whenever they are provided:
+  - top_markets.position_label, top_markets.yes_label, and top_markets.no_label map YES/NO to the actual market labels.
+  - signals.examples.position_label and recent_window.top_changes.position_label do the same for recent activity.
+  - Prefer those labels over raw YES/NO when they are present and not generic placeholders.
 - top_events are rolled up from current held positions, not from recent traded volume.
 - Price fields:
   - top_markets.last_yes_price is the latest tracked YES-side market price field.

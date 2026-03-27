@@ -54,7 +54,10 @@ import {
   evaluateSignalMarketWindow,
   mergeWalletIdsForScope,
 } from "../services/wallet-intel-filters.js";
-import { normalizeOutcomeSideForApi } from "../services/wallet-intel-helpers.js";
+import {
+  normalizeOutcomeSideForApi,
+  parseMarketOutcomes,
+} from "../services/wallet-intel-helpers.js";
 import { loadWalletOpenPositionStatsMap } from "../services/wallet-open-position-stats.js";
 import { loadWalletPositionApproxMetrics } from "../services/wallet-position-approx.js";
 import {
@@ -215,6 +218,7 @@ type WhaleMarketRow = {
   wallet_id: string;
   market_id: string;
   market_title: string | null;
+  outcomes: string | null;
   event_id: string | null;
   event_title: string | null;
   venue: string;
@@ -246,6 +250,7 @@ type WhaleMarketRow = {
 type WhaleMarketItem = {
   marketId: string;
   marketTitle: string | null;
+  outcomes: string[] | null;
   eventId: string | null;
   eventTitle: string | null;
   venue: string;
@@ -473,6 +478,7 @@ type WalletActivitySignalItem = {
   profileUpdatedAt: Date | null;
   marketId: string;
   marketTitle: string | null;
+  outcomes: string[] | null;
   marketImage: string | null;
   marketIcon: string | null;
   eventId: string | null;
@@ -1670,6 +1676,7 @@ export function buildWalletSignalItemFromSignalRow(input: {
     profileUpdatedAt: input.candidate.profile_updated_at ?? null,
     marketId: input.signalRow.marketId,
     marketTitle: input.signalRow.marketTitle,
+    outcomes: input.signalRow.outcomes,
     marketImage: input.signalRow.marketImage,
     marketIcon: input.signalRow.marketIcon,
     eventId: input.signalRow.eventId,
@@ -1743,6 +1750,7 @@ export function buildWalletSignalItemFromTopChange(input: {
     profileUpdatedAt: input.candidate.profile_updated_at ?? null,
     marketId: input.change.marketId,
     marketTitle: input.change.marketTitle ?? null,
+    outcomes: input.change.outcomes ?? null,
     marketImage: input.change.marketImage ?? null,
     marketIcon: input.change.marketIcon ?? null,
     eventId: input.change.eventId ?? null,
@@ -1794,6 +1802,7 @@ export function signalItemToTopChange(
     closeTime: item.closeTime,
     expirationTime: item.expirationTime,
     resolvedOutcome: item.resolvedOutcome,
+    outcomes: item.outcomes,
     category: item.category,
     action: item.action,
     positionSide: item.positionSide,
@@ -2992,6 +3001,7 @@ async function loadWhaleTopMarkets(
           wah.wallet_id,
           wah.market_id,
           um.title as market_title,
+          um.outcomes,
           um.event_id,
           ue.title as event_title,
           wah.venue,
@@ -3022,6 +3032,7 @@ async function loadWhaleTopMarkets(
           wah.wallet_id,
           wah.market_id,
           um.title,
+          um.outcomes,
           um.event_id,
           ue.title,
           wah.venue,
@@ -3125,6 +3136,7 @@ async function loadWhaleTopMarkets(
         ranked.wallet_id,
         ranked.market_id,
         ranked.market_title,
+        ranked.outcomes,
         ranked.event_id,
         ranked.event_title,
         ranked.venue,
@@ -3162,6 +3174,7 @@ async function loadWhaleTopMarkets(
     list.push({
       marketId: market.market_id,
       marketTitle: market.market_title,
+      outcomes: parseMarketOutcomes(market.outcomes),
       eventId: market.event_id,
       eventTitle: market.event_title,
       venue: market.venue,
@@ -6583,6 +6596,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: string;
           market_id: string;
           market_title: string | null;
+          outcomes: string | null;
           market_image: string | null;
           market_icon: string | null;
           event_id: string | null;
@@ -6619,6 +6633,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               wa.venue,
               wa.market_id,
               um.title as market_title,
+              um.outcomes,
               um.image as market_image,
               um.icon as market_icon,
               um.event_id as event_id,
@@ -6676,6 +6691,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
+          outcomes: parseMarketOutcomes(row.outcomes),
           marketImage: row.market_image,
           marketIcon: row.market_icon,
           eventId: row.event_id,
@@ -6823,6 +6839,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
+                um.outcomes,
                 um.image as market_image,
                 um.icon as market_icon,
                 um.event_id as event_id,
@@ -6880,6 +6897,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.venue,
                 ws.market_id,
                 um.title as market_title,
+                um.outcomes,
                 um.image as market_image,
                 um.icon as market_icon,
                 um.event_id as event_id,
@@ -6934,6 +6952,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: string;
           market_id: string;
           market_title: string | null;
+          outcomes: string | null;
           market_image: string | null;
           market_icon: string | null;
           event_id: string | null;
@@ -6971,6 +6990,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           venue: row.venue,
           marketId: row.market_id,
           marketTitle: row.market_title,
+          outcomes: parseMarketOutcomes(row.outcomes),
           marketImage: row.market_image,
           marketIcon: row.market_icon,
           eventId: row.event_id,
