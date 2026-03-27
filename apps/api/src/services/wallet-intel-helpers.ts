@@ -20,6 +20,53 @@ export function normalizeOutcomeSideForApi(
   return normalized === WALLET_INTEL_EMPTY_OUTCOME_SIDE ? null : normalized;
 }
 
+function normalizeOutcomeLabel(label: string): string {
+  return label.trim().toLowerCase();
+}
+
+function coerceOutcomeList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const outcomes = value.map((entry) =>
+    typeof entry === "string" ? entry.trim() : "",
+  );
+  return outcomes.some((entry) => entry.length > 0) ? outcomes : null;
+}
+
+export function parseMarketOutcomes(value: unknown): string[] | null {
+  if (value == null) return null;
+  if (Array.isArray(value)) return coerceOutcomeList(value);
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    return coerceOutcomeList(JSON.parse(trimmed) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+export function outcomeLabelForSide(
+  outcomes: unknown,
+  side: "YES" | "NO",
+): string | null {
+  const parsed = parseMarketOutcomes(outcomes);
+  if (!parsed) return null;
+  const raw = parsed[side === "YES" ? 0 : 1];
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const normalized = normalizeOutcomeLabel(trimmed);
+  if (normalized === "yes" || normalized === "no") return null;
+  return trimmed;
+}
+
+export function outcomeLabelOrSide(
+  outcomes: unknown,
+  side: "YES" | "NO",
+): string {
+  return outcomeLabelForSide(outcomes, side) ?? side;
+}
+
 export function shouldSuppressLegacySideTransitionDelta(inputs: {
   currentRows: OutcomeSideLike[];
   previousRows: OutcomeSideLike[];
