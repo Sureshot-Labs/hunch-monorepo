@@ -278,6 +278,20 @@ type WhaleRow = {
   source_hits: number;
 };
 
+type WhaleSelectableRow = {
+  id: string;
+  last_activity_at: Date | null;
+  rank_tracker_recent: number | string | null;
+  rank_tracker_pnl: number | string | null;
+  rank_tracker_win_rate: number | string | null;
+  rank_recent: number | string | null;
+  rank_pnl: number | string | null;
+  rank_signal: number | string | null;
+  source_hits: number;
+};
+
+type WhaleSelectionRow = WhaleSelectableRow;
+
 type WhaleProfileSourceKey =
   | "trackerRecent"
   | "trackerPnl"
@@ -290,7 +304,7 @@ type WhaleProfileSourceDef = {
   key: WhaleProfileSourceKey;
   targetLimit: number;
   fetchLimit: number;
-  rankOf: (row: WhaleRow) => number | null;
+  rankOf: (row: WhaleSelectableRow) => number | null;
 };
 
 type WhaleMarketRow = {
@@ -381,6 +395,11 @@ const GENERIC_WALLET_LABEL_PATTERNS = [
   /^portfolio$/i,
 ];
 
+const BANNED_LABEL_SHORT_PATTERNS = [
+  /\s*\([^)]*\)\s*/g,
+  /\b(?:safe|gnosis|multisig)\b/gi,
+];
+
 function isGenericWalletLabel(
   label: string | null | undefined,
   address: string | null | undefined,
@@ -412,6 +431,20 @@ function resolveWalletLabelQuality(
   const normalized = normalizeText(label);
   if (!normalized) return "missing";
   return isGenericWalletLabel(normalized, address) ? "generic" : "descriptive";
+}
+
+function sanitizeProfileLabelShort(
+  label: string | null | undefined,
+): string | null {
+  const normalized = normalizeText(label);
+  if (!normalized) return null;
+  const stripped = BANNED_LABEL_SHORT_PATTERNS.reduce(
+    (value, pattern) => value.replace(pattern, " "),
+    normalized,
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped.length > 0 ? stripped : null;
 }
 
 function titleCaseToken(token: string): string {
@@ -478,7 +511,7 @@ function isGenericProfileLabelShort(
   label: string | null | undefined,
   input: WhaleProfileInput,
 ): boolean {
-  const normalized = normalizeText(label);
+  const normalized = sanitizeProfileLabelShort(label);
   if (!normalized) return true;
   if (isGenericWalletLabel(normalized, null)) return true;
   if (
@@ -999,10 +1032,10 @@ function coerceRank(value: number | string | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function getWhaleProfileSourceRows(
-  rows: WhaleRow[],
+function getWhaleProfileSourceRows<T extends WhaleSelectableRow>(
+  rows: T[],
   source: WhaleProfileSourceDef,
-): WhaleRow[] {
+): T[] {
   if (source.fetchLimit <= 0) return [];
   return rows
     .filter((row) => {
@@ -1022,15 +1055,15 @@ function getWhaleProfileSourceRows(
     });
 }
 
-function selectWhaleProfileRows(
-  rows: WhaleRow[],
+function selectWhaleProfileRows<T extends WhaleSelectableRow>(
+  rows: T[],
   limit: number,
   sources: WhaleProfileSourceDef[],
 ): {
-  rows: WhaleRow[];
+  rows: T[];
   pinnedCoverage: Record<WhaleProfileSourceKey, number>;
 } {
-  const selected: WhaleRow[] = [];
+  const selected: T[] = [];
   const seen = new Set<string>();
   const pinnedCoverage: Record<WhaleProfileSourceKey, number> = {
     trackerRecent: 0,
@@ -1122,6 +1155,466 @@ async function loadTrackerSurfaceIds(
     .map((row) => row.walletId);
 }
 
+async function loadWhaleSelectionRows(
+  client: PoolClient,
+  params: {
+    windowDays: number;
+    limit: number;
+    trackerWindowHours: number;
+    signalsWindowHours: number;
+    trackerSurfaceIds: string[];
+    selectTrackerRecentLimit: number;
+    selectTrackerPnlLimit: number;
+    selectTrackerWinRateLimit: number;
+    selectRecentLimit: number;
+    selectPnlLimit: number;
+    selectSignalsLimit: number;
+    trackerRecentFetchLimit: number;
+    trackerPnlFetchLimit: number;
+    trackerWinRateFetchLimit: number;
+    recentFetchLimit: number;
+    pnlFetchLimit: number;
+    signalsFetchLimit: number;
+    candidateFetchLimit: number;
+  },
+): Promise<WhaleSelectionRow[]> {
+  const result = await client.query<WhaleSelectionRow>(
+    `
+      with whale_wallets as (
+        select distinct tm.wallet_id
+        from wallet_tag_map tm
+        join wallet_tags t on t.id = tm.tag_id
+        where t.slug = 'whale'
+      ),
+      tracker_surface as (
+        select
+          ts.wallet_id as id,
+          ts.ordinality::int as rank_tracker_recent
+        from unnest($10::uuid[]) with ordinality as ts(wallet_id, ordinality)
+      ),
+      selection_wallets as (
+        select wallet_id as id from whale_wallets
+        union
+        select id from tracker_surface
+      ),
+      tracker_start_snap as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join tracker_surface ts on ts.id = s.wallet_id
+        where s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of <= now() - interval '720 hours'
+        order by s.wallet_id, s.as_of desc
+      ),
+      tracker_fallback_start as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join tracker_surface ts on ts.id = s.wallet_id
+        where s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of > now() - interval '720 hours'
+          and s.as_of <= now()
+        order by s.wallet_id, s.as_of asc
+      ),
+      tracker_end_snap as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd
+        from wallet_metrics_snapshots s
+        join tracker_surface ts on ts.id = s.wallet_id
+        where s.period = 'all'
+          and s.pnl_usd is not null
+          and s.as_of <= now()
+        order by s.wallet_id, s.as_of desc
+      ),
+      tracker_portfolio_pnl as (
+        select
+          ts.id,
+          case
+            when es.pnl_usd is null then null
+            when coalesce(ss.pnl_usd, fs.pnl_usd) is null then null
+            else es.pnl_usd - coalesce(ss.pnl_usd, fs.pnl_usd)
+          end as tracker_visible_pnl
+        from tracker_surface ts
+        left join tracker_start_snap ss on ss.wallet_id = ts.id
+        left join tracker_fallback_start fs on fs.wallet_id = ts.id
+        left join tracker_end_snap es on es.wallet_id = ts.id
+      ),
+      latest_metrics as (
+        select distinct on (s.wallet_id)
+          s.wallet_id,
+          s.volume_usd as metrics_volume,
+          s.pnl_usd as metrics_pnl,
+          s.trades_count as metrics_trades,
+          s.win_rate as metrics_win_rate,
+          s.last_trade_at as metrics_last_trade_at
+        from wallet_metrics_snapshots s
+        join selection_wallets sw on sw.id = s.wallet_id
+        where s.period = '30d'
+        order by s.wallet_id, s.as_of desc
+      ),
+      activity as (
+        select
+          wah.wallet_id,
+          max(wah.hour_bucket) as last_activity_at,
+          bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+          bool_or(wah.activity_type = 'holder') as has_holder_activity,
+          max(coalesce(wah.max_abs_delta_usd, 0)) filter (
+            where wah.activity_type in ('delta', 'trade')
+              and wah.hour_bucket >= now() - ($9::text || ' hours')::interval
+          ) as signal_abs_usd
+        from wallet_activity_hourly wah
+        join selection_wallets sw on sw.id = wah.wallet_id
+        where wah.activity_type in ('delta', 'trade', 'holder')
+          and wah.hour_bucket >= now() - ($1::text || ' days')::interval
+        group by wah.wallet_id
+      ),
+      wallet_base as (
+        select
+          w.id,
+          coalesce(
+            activity.last_activity_at,
+            metrics.metrics_last_trade_at,
+            w.last_seen_at
+          ) as last_activity_at,
+          ts.rank_tracker_recent,
+          coalesce(tpp.tracker_visible_pnl, metrics.metrics_pnl) as tracker_visible_pnl,
+          metrics.metrics_pnl,
+          metrics.metrics_win_rate,
+          metrics.metrics_trades,
+          coalesce(activity.signal_abs_usd, 0) as signal_abs_usd,
+          case
+            when w.chain = 'solana'
+              then coalesce(
+                nullif(metrics.metrics_volume, 0),
+                exposure.exposure_usd,
+                0
+              )
+            else coalesce(metrics.metrics_volume, 0)
+          end as whale_score,
+          (ww.wallet_id is not null) as is_whale_candidate
+        from selection_wallets sw
+        join wallets w on w.id = sw.id
+        left join whale_wallets ww on ww.wallet_id = w.id
+        left join tracker_surface ts on ts.id = w.id
+        left join tracker_portfolio_pnl tpp on tpp.id = w.id
+        left join latest_metrics metrics on metrics.wallet_id = w.id
+        left join activity on activity.wallet_id = w.id
+        left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+      ),
+      tracker_pnl_ranked as (
+        select
+          id,
+          row_number() over (
+            order by
+              tracker_visible_pnl desc nulls last,
+              rank_tracker_recent asc nulls last,
+              id asc
+          ) as rank_tracker_pnl
+        from wallet_base
+        where rank_tracker_recent is not null
+      ),
+      tracker_win_rate_ranked as (
+        select
+          id,
+          row_number() over (
+            order by
+              metrics_win_rate desc nulls last,
+              metrics_trades desc nulls last,
+              rank_tracker_recent asc nulls last,
+              id asc
+          ) as rank_tracker_win_rate
+        from wallet_base
+        where rank_tracker_recent is not null
+          and metrics_win_rate is not null
+          and coalesce(metrics_trades, 0) >= 5
+      ),
+      recent_ranked as (
+        select
+          id,
+          row_number() over (
+            order by
+              last_activity_at desc nulls last,
+              whale_score desc nulls last,
+              id asc
+          ) as rank_recent
+        from wallet_base
+        where is_whale_candidate
+      ),
+      pnl_ranked as (
+        select
+          id,
+          row_number() over (
+            order by
+              metrics_pnl desc nulls last,
+              last_activity_at desc nulls last,
+              id asc
+          ) as rank_pnl
+        from wallet_base
+        where is_whale_candidate
+      ),
+      signal_ranked as (
+        select
+          id,
+          row_number() over (
+            order by
+              signal_abs_usd desc nulls last,
+              last_activity_at desc nulls last,
+              id asc
+          ) as rank_signal
+        from wallet_base
+        where is_whale_candidate
+      ),
+      candidate_ids as (
+        select id from tracker_surface where rank_tracker_recent <= $11
+        union
+        select id from tracker_pnl_ranked where rank_tracker_pnl <= $12
+        union
+        select id from tracker_win_rate_ranked where rank_tracker_win_rate <= $13
+        union
+        select id from recent_ranked where rank_recent <= $14
+        union
+        select id from pnl_ranked where rank_pnl <= $15
+        union
+        select id from signal_ranked where rank_signal <= $16
+      )
+      select
+        wb.id,
+        wb.last_activity_at,
+        wb.rank_tracker_recent,
+        tp.rank_tracker_pnl,
+        tw.rank_tracker_win_rate,
+        r.rank_recent,
+        p.rank_pnl,
+        s.rank_signal,
+        (
+          case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+          case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+          case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
+          case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
+          case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
+          case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
+        )::int as source_hits
+      from wallet_base wb
+      join candidate_ids c on c.id = wb.id
+      left join tracker_pnl_ranked tp on tp.id = wb.id
+      left join tracker_win_rate_ranked tw on tw.id = wb.id
+      left join recent_ranked r on r.id = wb.id
+      left join pnl_ranked p on p.id = wb.id
+      left join signal_ranked s on s.id = wb.id
+      order by
+        (
+          case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+          case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+          case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end
+        ) desc,
+        (
+          case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
+          case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
+          case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
+          case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
+          case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
+          case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
+        ) desc,
+        wb.rank_tracker_recent asc nulls last,
+        tp.rank_tracker_pnl asc nulls last,
+        tw.rank_tracker_win_rate asc nulls last,
+        r.rank_recent asc nulls last,
+        p.rank_pnl asc nulls last,
+        s.rank_signal asc nulls last,
+        wb.last_activity_at desc nulls last,
+        wb.id asc
+      limit greatest($2::int, $17::int)
+    `,
+    [
+      params.windowDays,
+      params.limit,
+      params.selectTrackerRecentLimit,
+      params.selectTrackerPnlLimit,
+      params.selectTrackerWinRateLimit,
+      params.selectRecentLimit,
+      params.selectPnlLimit,
+      params.selectSignalsLimit,
+      params.signalsWindowHours,
+      params.trackerSurfaceIds,
+      params.trackerRecentFetchLimit,
+      params.trackerPnlFetchLimit,
+      params.trackerWinRateFetchLimit,
+      params.recentFetchLimit,
+      params.pnlFetchLimit,
+      params.signalsFetchLimit,
+      params.candidateFetchLimit,
+    ],
+  );
+  return result.rows;
+}
+
+async function loadWhaleRowsByIds(
+  client: PoolClient,
+  params: {
+    walletIds: string[];
+    windowDays: number;
+    signalsWindowHours: number;
+  },
+): Promise<Map<string, Omit<WhaleRow, keyof WhaleSelectableRow>>> {
+  if (params.walletIds.length === 0) return new Map();
+  const result = await client.query<
+    Omit<WhaleRow, keyof WhaleSelectableRow> & {
+      id: string;
+      last_activity_at: Date | null;
+    }
+  >(
+    `
+      with selected_wallets as (
+        select
+          ws.wallet_id as id,
+          ws.ordinality::int as ordinality
+        from unnest($1::uuid[]) with ordinality as ws(wallet_id, ordinality)
+      )
+      select
+        w.id,
+        w.address,
+        w.chain,
+        w.label,
+        (w.metadata->>'kind' = 'safe') as is_safe,
+        owner.owner_address,
+        owner.owner_label,
+        metrics.metrics_volume,
+        metrics.metrics_pnl,
+        metrics.metrics_trades,
+        metrics.metrics_roi,
+        metrics.metrics_win_rate,
+        metrics.metrics_last_trade_at,
+        exposure.exposure_usd,
+        exposure.hedged_notional_usd,
+        exposure.net_imbalance_usd,
+        exposure.hedge_ratio,
+        exposure.two_sided_markets,
+        coalesce(activity.last_activity_at, metrics.metrics_last_trade_at, w.last_seen_at) as last_activity_at,
+        activity.has_trade_activity,
+        activity.has_holder_activity,
+        signal.signal_abs_usd,
+        case
+          when w.chain = 'solana'
+            then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
+          else coalesce(metrics.metrics_volume, 0)
+        end as whale_score,
+        inferred.wins as inferred_wins,
+        inferred.total as inferred_total
+      from selected_wallets sw
+      join wallets w on w.id = sw.id
+      left join lateral (
+        select
+          s.volume_usd as metrics_volume,
+          s.pnl_usd as metrics_pnl,
+          s.trades_count as metrics_trades,
+          s.roi as metrics_roi,
+          s.win_rate as metrics_win_rate,
+          s.last_trade_at as metrics_last_trade_at
+        from wallet_metrics_snapshots s
+        where s.wallet_id = w.id and s.period = '30d'
+        order by s.as_of desc
+        limit 1
+      ) metrics on true
+      left join lateral (
+        select
+          max(wa.occurred_at) as last_activity_at,
+          bool_or(wa.activity_type in ('delta', 'trade')) as has_trade_activity,
+          bool_or(wa.activity_type = 'holder') as has_holder_activity
+        from wallet_activity_events wa
+        where wa.wallet_id = w.id
+          and wa.activity_type in ('delta', 'trade', 'holder')
+          and wa.occurred_at >= now() - ($2::text || ' days')::interval
+      ) activity on true
+      left join lateral (
+        select
+          max(coalesce(wah.max_abs_delta_usd, 0)) as signal_abs_usd
+        from wallet_activity_hourly wah
+        where wah.wallet_id = w.id
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - ($3::text || ' hours')::interval
+      ) signal on true
+      left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+      left join lateral (
+        select
+          w2.address as owner_address,
+          w2.label as owner_label
+        from wallets w2
+        where w.metadata->>'kind' = 'safe'
+          and w2.metadata->>'kind' = 'safe_owner'
+          and w2.metadata->>'derivedFrom' = w.address
+          and w2.chain = w.chain
+        limit 1
+      ) owner on true
+      left join lateral (
+        with latest as (
+          select distinct on (ws.market_id, ws.outcome_side)
+            ws.market_id,
+            ws.outcome_side,
+            ws.shares
+          from wallet_position_snapshots ws
+          where ws.wallet_id = w.id
+            and ws.shares > 0
+          order by ws.market_id, ws.outcome_side, ws.snapshot_at desc
+        ),
+        agg as (
+          select
+            market_id,
+            sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
+            sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
+          from latest
+          group by market_id
+        ),
+        resolved as (
+          select
+            agg.market_id,
+            agg.yes_shares,
+            agg.no_shares,
+            upper(m.resolved_outcome) as resolved_outcome
+          from agg
+          join unified_markets m on m.id = agg.market_id
+          where m.resolved_outcome is not null
+            and upper(m.resolved_outcome) in ('YES', 'NO')
+        ),
+        eligible as (
+          select *
+          from resolved
+          where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
+             or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
+        )
+        select
+          count(*) filter (
+            where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
+               or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
+          ) as wins,
+          count(*)::int as total
+        from eligible
+      ) inferred on true
+      order by sw.ordinality asc
+    `,
+    [
+      params.walletIds,
+      params.windowDays,
+      params.signalsWindowHours,
+    ],
+  );
+
+  const byId = new Map<string, Omit<WhaleRow, keyof WhaleSelectableRow>>();
+  for (const row of result.rows) {
+    const { id, last_activity_at, ...rest } = row;
+    void last_activity_at;
+    byId.set(id, rest);
+  }
+  return byId;
+}
+
 export function parseProfileJson(raw: string): unknown | null {
   if (!raw) return null;
   try {
@@ -1166,9 +1659,13 @@ export function normalizeWhaleProfile(raw: unknown): WhaleProfile | null {
     .slice(0, 4)
     .map((entry) => truncateText(entry, 160));
   const notes = normalizeBulletNotes(parsed.data.notes);
-  const labelShort = truncateText(parsed.data.label_short.trim(), 56);
+  const labelShort = truncateText(
+    sanitizeProfileLabelShort(parsed.data.label_short.trim()) ?? "",
+    56,
+  );
   const labelLong = parsed.data.label_long.trim();
   const riskStyle = truncateText(parsed.data.risk_style.trim(), 96);
+  if (!labelShort) return null;
 
   return {
     label_short: labelShort,
@@ -1826,37 +2323,37 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       key: "trackerRecent" as const,
       targetLimit: selectTrackerRecentLimit,
       fetchLimit: trackerRecentFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_recent),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_tracker_recent),
     },
     {
       key: "trackerPnl" as const,
       targetLimit: selectTrackerPnlLimit,
       fetchLimit: trackerPnlFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_pnl),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_tracker_pnl),
     },
     {
       key: "trackerWinRate" as const,
       targetLimit: selectTrackerWinRateLimit,
       fetchLimit: trackerWinRateFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_tracker_win_rate),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_tracker_win_rate),
     },
     {
       key: "recent" as const,
       targetLimit: selectRecentLimit,
       fetchLimit: recentFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_recent),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_recent),
     },
     {
       key: "pnl" as const,
       targetLimit: selectPnlLimit,
       fetchLimit: pnlFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_pnl),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_pnl),
     },
     {
       key: "signals" as const,
       targetLimit: selectSignalsLimit,
       fetchLimit: signalsFetchLimit,
-      rankOf: (row: WhaleRow) => coerceRank(row.rank_signal),
+      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_signal),
     },
   ].filter((source) => source.targetLimit > 0 && source.fetchLimit > 0);
   const candidateFetchLimit = Math.max(
@@ -1895,6 +2392,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const profileSignalsWindowHours = 720;
   const client = await pool.connect();
   try {
+    await client.query("SET statement_timeout = '120s'");
     const trackerSurfaceIds =
       trackerSurfaceLimit > 0
         ? await loadTrackerSurfaceIds(client, {
@@ -1909,454 +2407,71 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       actual: trackerSurfaceIds.length,
       sample: trackerSurfaceIds.slice(0, 5),
     });
-    const whaleRows = await client.query<WhaleRow>(
-      `
-        with whale_wallets as (
-          select distinct tm.wallet_id
-          from wallet_tag_map tm
-          join wallet_tags t on t.id = tm.tag_id
-          where t.slug = 'whale'
-        ),
-        tracker_selection_config as (
-          select
-            $9::int as tracker_window_hours,
-            $10::numeric as min_activity_usd,
-            $11::numeric as min_activity_shares
-        ),
-        tracker_surface as (
-          select
-            ts.wallet_id as id,
-            ts.ordinality::int as rank_tracker_recent
-          from unnest($13::uuid[]) with ordinality as ts(wallet_id, ordinality)
-        ),
-        tracker_start_snap as (
-          select distinct on (s.wallet_id)
-            s.wallet_id,
-            s.as_of,
-            s.pnl_usd
-          from wallet_metrics_snapshots s
-          join tracker_surface ts on ts.id = s.wallet_id
-          where s.period = 'all'
-            and s.pnl_usd is not null
-            and s.as_of <= now() - interval '720 hours'
-          order by s.wallet_id, s.as_of desc
-        ),
-        tracker_fallback_start as (
-          select distinct on (s.wallet_id)
-            s.wallet_id,
-            s.as_of,
-            s.pnl_usd
-          from wallet_metrics_snapshots s
-          join tracker_surface ts on ts.id = s.wallet_id
-          where s.period = 'all'
-            and s.pnl_usd is not null
-            and s.as_of > now() - interval '720 hours'
-            and s.as_of <= now()
-          order by s.wallet_id, s.as_of asc
-        ),
-        tracker_end_snap as (
-          select distinct on (s.wallet_id)
-            s.wallet_id,
-            s.as_of,
-            s.pnl_usd
-          from wallet_metrics_snapshots s
-          join tracker_surface ts on ts.id = s.wallet_id
-          where s.period = 'all'
-            and s.pnl_usd is not null
-            and s.as_of <= now()
-          order by s.wallet_id, s.as_of desc
-        ),
-        tracker_portfolio_pnl as (
-          select
-            ts.id,
-            case
-              when es.pnl_usd is null then null
-              when coalesce(ss.pnl_usd, fs.pnl_usd) is null then null
-              else es.pnl_usd - coalesce(ss.pnl_usd, fs.pnl_usd)
-            end as tracker_visible_pnl
-          from tracker_surface ts
-          left join tracker_start_snap ss on ss.wallet_id = ts.id
-          left join tracker_fallback_start fs on fs.wallet_id = ts.id
-          left join tracker_end_snap es on es.wallet_id = ts.id
-        ),
-        wallet_base as (
-          select
-            w.id,
-            w.address,
-            w.chain,
-            w.label,
-            w.last_seen_at,
-            (ww.wallet_id is not null) as is_whale_candidate,
-            ts.rank_tracker_recent,
-            (w.metadata->>'kind' = 'safe') as is_safe,
-            owner.owner_address,
-            owner.owner_label,
-            metrics.metrics_volume,
-            metrics.metrics_pnl,
-            metrics.metrics_trades,
-            metrics.metrics_roi,
-            metrics.metrics_win_rate,
-            metrics.metrics_last_trade_at,
-            coalesce(tpp.tracker_visible_pnl, metrics.metrics_pnl) as tracker_visible_pnl,
-            exposure.exposure_usd,
-            exposure.hedged_notional_usd,
-            exposure.net_imbalance_usd,
-            exposure.hedge_ratio,
-            exposure.two_sided_markets,
-            activity.last_activity_at,
-            activity.has_trade_activity,
-            activity.has_holder_activity,
-            signal.signal_abs_usd,
-            case
-              when w.chain = 'solana'
-                then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
-              else coalesce(metrics.metrics_volume, 0)
-            end as whale_score,
-            case
-              when resolved_stats.tracker_trade_count > 0
-                then resolved_stats.tracker_resolved_count
-              else coalesce(inferred.total, 0)
-            end as tracker_visible_resolved_count,
-            case
-              when metrics.metrics_win_rate is not null then metrics.metrics_win_rate
-              when coalesce(resolved_stats.tracker_trade_count, 0) > 0
-                and coalesce(resolved_stats.tracker_resolved_count, 0) > 0
-                then resolved_stats.tracker_winning_count::numeric
-                  / resolved_stats.tracker_resolved_count::numeric
-              when inferred.total > 0 then inferred.wins::numeric / inferred.total::numeric
-              else null
-            end as tracker_visible_win_rate,
-            inferred.wins as inferred_wins,
-            inferred.total as inferred_total
-          from wallets w
-          left join whale_wallets ww on ww.wallet_id = w.id
-          left join tracker_surface ts on ts.id = w.id
-          left join tracker_portfolio_pnl tpp on tpp.id = w.id
-          left join lateral (
-            select
-              s.volume_usd as metrics_volume,
-              s.pnl_usd as metrics_pnl,
-              s.trades_count as metrics_trades,
-              s.roi as metrics_roi,
-              s.win_rate as metrics_win_rate,
-              s.last_trade_at as metrics_last_trade_at
-            from wallet_metrics_snapshots s
-            where s.wallet_id = w.id and s.period = '30d'
-            order by s.as_of desc
-            limit 1
-          ) metrics on true
-          left join lateral (
-            select
-              max(wa.occurred_at) as last_activity_at,
-              bool_or(wa.activity_type in ('delta', 'trade')) as has_trade_activity,
-              bool_or(wa.activity_type = 'holder') as has_holder_activity
-            from wallet_activity_events wa
-            where wa.wallet_id = w.id
-              and wa.activity_type in ('delta', 'trade', 'holder')
-              and wa.occurred_at >= now() - ($1::text || ' days')::interval
-          ) activity on true
-          left join lateral (
-            select
-              count(*)::int as tracker_trade_count,
-              count(*) filter (
-                where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
-                  and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
-              )::int as tracker_resolved_count,
-              count(*) filter (
-                where upper(coalesce(um.resolved_outcome, '')) in ('YES', 'NO')
-                  and upper(coalesce(wa.outcome_side, '')) = upper(coalesce(um.resolved_outcome, ''))
-              )::int as tracker_winning_count
-            from wallet_activity_events wa
-            left join unified_markets um on um.id = wa.market_id
-            where wa.wallet_id = w.id
-              and wa.activity_type in ('delta', 'trade')
-              and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
-              and wa.occurred_at >= now() - ($1::text || ' days')::interval
-          ) resolved_stats on true
-          left join lateral (
-            select
-              max(coalesce(wah.max_abs_delta_usd, 0)) as signal_abs_usd
-            from wallet_activity_hourly wah
-            where wah.wallet_id = w.id
-              and wah.activity_type in ('delta', 'trade')
-              and wah.hour_bucket >= now() - ($12::text || ' hours')::interval
-          ) signal on true
-          left join wallet_position_exposure exposure on exposure.wallet_id = w.id
-          left join lateral (
-            select
-              w2.address as owner_address,
-              w2.label as owner_label
-            from wallets w2
-            where w.metadata->>'kind' = 'safe'
-              and w2.metadata->>'kind' = 'safe_owner'
-              and w2.metadata->>'derivedFrom' = w.address
-              and w2.chain = w.chain
-            limit 1
-          ) owner on true
-          left join lateral (
-            with latest as (
-              select distinct on (ws.market_id, ws.outcome_side)
-                ws.market_id,
-                ws.outcome_side,
-                ws.shares
-              from wallet_position_snapshots ws
-              where ws.wallet_id = w.id
-                and ws.shares > 0
-              order by ws.market_id, ws.outcome_side, ws.snapshot_at desc
-            ),
-            agg as (
-              select
-                market_id,
-                sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
-                sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
-              from latest
-              group by market_id
-            ),
-            resolved as (
-              select
-                agg.market_id,
-                agg.yes_shares,
-                agg.no_shares,
-                upper(m.resolved_outcome) as resolved_outcome
-              from agg
-              join unified_markets m on m.id = agg.market_id
-              where m.resolved_outcome is not null
-                and upper(m.resolved_outcome) in ('YES', 'NO')
-            ),
-            eligible as (
-              select *
-              from resolved
-              where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
-                 or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
-            )
-            select
-              count(*) filter (
-                where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
-                   or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
-              ) as wins,
-              count(*)::int as total
-            from eligible
-          ) inferred on true
-          where ww.wallet_id is not null
-             or ts.rank_tracker_recent is not null
-        ),
-        tracker_pnl_ranked as (
-          select
-            id,
-            row_number() over (
-              order by
-                tracker_visible_pnl desc nulls last,
-                rank_tracker_recent asc nulls last,
-                id asc
-            ) as rank_tracker_pnl
-          from wallet_base
-          where rank_tracker_recent is not null
-        ),
-        tracker_win_rate_ranked as (
-          select
-            id,
-            row_number() over (
-              order by
-                tracker_visible_win_rate desc nulls last,
-                tracker_visible_resolved_count desc,
-                rank_tracker_recent asc nulls last,
-                id asc
-            ) as rank_tracker_win_rate
-          from wallet_base
-          where rank_tracker_recent is not null
-            and tracker_visible_win_rate is not null
-            and tracker_visible_resolved_count >= 5
-        ),
-        recent_ranked as (
-          select
-            id,
-            row_number() over (
-              order by
-                last_activity_at desc nulls last,
-                whale_score desc nulls last,
-                id asc
-            ) as rank_recent
-          from wallet_base
-          where is_whale_candidate
-        ),
-        pnl_ranked as (
-          select
-            id,
-            row_number() over (
-              order by
-                metrics_pnl desc nulls last,
-                last_activity_at desc nulls last,
-                id asc
-            ) as rank_pnl
-          from wallet_base
-          where is_whale_candidate
-        ),
-        signal_ranked as (
-          select
-            id,
-            row_number() over (
-              order by
-                signal_abs_usd desc nulls last,
-                last_activity_at desc nulls last,
-                id asc
-            ) as rank_signal
-          from wallet_base
-          where is_whale_candidate
-        ),
-        candidate_ids as (
-          select id from tracker_surface where rank_tracker_recent <= $14
-          union
-          select id from tracker_pnl_ranked where rank_tracker_pnl <= $15
-          union
-          select id from tracker_win_rate_ranked where rank_tracker_win_rate <= $16
-          union
-          select id from recent_ranked where rank_recent <= $17
-          union
-          select id from pnl_ranked where rank_pnl <= $18
-          union
-          select id from signal_ranked where rank_signal <= $19
-        )
-        select
-          wb.id,
-          wb.address,
-          wb.chain,
-          wb.label,
-          wb.is_safe,
-          wb.owner_address,
-          wb.owner_label,
-          wb.metrics_volume,
-          wb.metrics_pnl,
-          wb.metrics_trades,
-          wb.metrics_roi,
-          wb.metrics_win_rate,
-          wb.metrics_last_trade_at,
-          wb.exposure_usd,
-          wb.hedged_notional_usd,
-          wb.net_imbalance_usd,
-          wb.hedge_ratio,
-          wb.two_sided_markets,
-          wb.whale_score,
-          wb.signal_abs_usd,
-          wb.last_activity_at,
-          wb.has_trade_activity,
-          wb.has_holder_activity,
-          wb.inferred_wins,
-          wb.inferred_total,
-          wb.rank_tracker_recent,
-          tp.rank_tracker_pnl,
-          tw.rank_tracker_win_rate,
-          r.rank_recent,
-          p.rank_pnl,
-          s.rank_signal,
-          (
-            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
-            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
-            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
-            case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
-            case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
-            case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
-          )::int as source_hits
-        from wallet_base wb
-        join candidate_ids c on c.id = wb.id
-        left join tracker_pnl_ranked tp on tp.id = wb.id
-        left join tracker_win_rate_ranked tw on tw.id = wb.id
-        left join recent_ranked r on r.id = wb.id
-        left join pnl_ranked p on p.id = wb.id
-        left join signal_ranked s on s.id = wb.id
-        order by
-          (
-            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
-            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
-            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end
-          ) desc,
-          (
-            case when $3 > 0 and wb.rank_tracker_recent <= $3 then 1 else 0 end +
-            case when $4 > 0 and tp.rank_tracker_pnl <= $4 then 1 else 0 end +
-            case when $5 > 0 and tw.rank_tracker_win_rate <= $5 then 1 else 0 end +
-            case when $6 > 0 and r.rank_recent <= $6 then 1 else 0 end +
-            case when $7 > 0 and p.rank_pnl <= $7 then 1 else 0 end +
-            case when $8 > 0 and s.rank_signal <= $8 then 1 else 0 end
-          ) desc,
-          wb.rank_tracker_recent asc nulls last,
-          tp.rank_tracker_pnl asc nulls last,
-          tw.rank_tracker_win_rate asc nulls last,
-          r.rank_recent asc nulls last,
-          p.rank_pnl asc nulls last,
-          s.rank_signal asc nulls last,
-          wb.last_activity_at desc nulls last,
-          wb.whale_score desc nulls last,
-          wb.last_seen_at desc
-        limit greatest($2::int, $20::int)
-      `,
-      [
-        windowDays,
-        limit,
-        selectTrackerRecentLimit,
-        selectTrackerPnlLimit,
-        selectTrackerWinRateLimit,
-        selectRecentLimit,
-        selectPnlLimit,
-        selectSignalsLimit,
-        trackerWindowHours,
-        env.walletIntelMinActivityUsd,
-        env.walletIntelMinActivityShares,
-        signalsWindowHours,
-        trackerSurfaceIds,
-        trackerRecentFetchLimit,
-        trackerPnlFetchLimit,
-        trackerWinRateFetchLimit,
-        recentFetchLimit,
-        pnlFetchLimit,
-        signalsFetchLimit,
-        candidateFetchLimit,
-      ],
-    );
+    const whaleSelectionRows = await loadWhaleSelectionRows(client, {
+      windowDays,
+      limit,
+      trackerWindowHours,
+      signalsWindowHours,
+      trackerSurfaceIds,
+      selectTrackerRecentLimit,
+      selectTrackerPnlLimit,
+      selectTrackerWinRateLimit,
+      selectRecentLimit,
+      selectPnlLimit,
+      selectSignalsLimit,
+      trackerRecentFetchLimit,
+      trackerPnlFetchLimit,
+      trackerWinRateFetchLimit,
+      recentFetchLimit,
+      pnlFetchLimit,
+      signalsFetchLimit,
+      candidateFetchLimit,
+    });
     const {
-      rows: selectedWhaleRows,
+      rows: selectedWhaleSelectionRows,
       pinnedCoverage,
-    } = selectWhaleProfileRows(whaleRows.rows, limit, sourceDefs);
+    } = selectWhaleProfileRows(whaleSelectionRows, limit, sourceDefs);
     const sourceCoverage = {
-      trackerRecent: selectedWhaleRows.filter(
+      trackerRecent: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_tracker_recent) ?? Number.MAX_SAFE_INTEGER) <=
           selectTrackerRecentLimit,
       ).length,
-      trackerPnl: selectedWhaleRows.filter(
+      trackerPnl: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_tracker_pnl) ?? Number.MAX_SAFE_INTEGER) <=
           selectTrackerPnlLimit,
       ).length,
-      trackerWinRate: selectedWhaleRows.filter(
+      trackerWinRate: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_tracker_win_rate) ?? Number.MAX_SAFE_INTEGER) <=
           selectTrackerWinRateLimit,
       ).length,
-      recent: selectedWhaleRows.filter(
+      recent: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_recent) ?? Number.MAX_SAFE_INTEGER) <=
           selectRecentLimit,
       ).length,
-      pnl: selectedWhaleRows.filter(
+      pnl: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_pnl) ?? Number.MAX_SAFE_INTEGER) <=
           selectPnlLimit,
       ).length,
-      signals: selectedWhaleRows.filter(
+      signals: selectedWhaleSelectionRows.filter(
         (row) =>
           (coerceRank(row.rank_signal) ?? Number.MAX_SAFE_INTEGER) <=
           selectSignalsLimit,
       ).length,
-      multiSource: selectedWhaleRows.filter((row) => row.source_hits >= 2)
+      multiSource: selectedWhaleSelectionRows.filter((row) => row.source_hits >= 2)
         .length,
     };
     console.log("[whale-profile] selected wallets", {
-      candidates: whaleRows.rows.length,
-      count: selectedWhaleRows.length,
+      candidates: whaleSelectionRows.length,
+      count: selectedWhaleSelectionRows.length,
       pinnedCoverage,
       sourceCoverage,
-      sample: selectedWhaleRows.slice(0, 5).map((row) => ({
+      sample: selectedWhaleSelectionRows.slice(0, 5).map((row) => ({
         walletId: row.id,
-        chain: row.chain,
         sourceHits: row.source_hits,
         rankTrackerRecent: row.rank_tracker_recent,
         rankTrackerPnl: row.rank_tracker_pnl,
@@ -2366,6 +2481,26 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
         rankSignal: row.rank_signal,
       })),
     });
+
+    if (selectedWhaleSelectionRows.length === 0) {
+      return { processed: 0, updated: 0, skipped: 0, failed: 0 };
+    }
+
+    const whaleHydrationMap = await loadWhaleRowsByIds(client, {
+      walletIds: selectedWhaleSelectionRows.map((row) => row.id),
+      windowDays,
+      signalsWindowHours,
+    });
+    const selectedWhaleRows: WhaleRow[] = selectedWhaleSelectionRows
+      .map((row) => {
+        const hydration = whaleHydrationMap.get(row.id);
+        if (!hydration) return null;
+        return {
+          ...hydration,
+          ...row,
+        };
+      })
+      .filter((row): row is WhaleRow => row != null);
 
     if (selectedWhaleRows.length === 0) {
       return { processed: 0, updated: 0, skipped: 0, failed: 0 };
@@ -2672,14 +2807,18 @@ Output JSON with:
   It should sound like a human trader archetype or desk nickname, not a robotic taxonomy label.
   It must read like one clean name, not a list of traits.
   Do not write comma-separated labels or stacked descriptors.
+  Never use parentheses in label_short.
+  Never mention wallet structure or custody words in label_short, including Safe, Gnosis, multisig, wallet, signer, owner, EOA, contract, or chain labels.
   Bad example: "NBA whale, often late, mixed sides".
   If wallet.source_label_quality is "descriptive" and wallet.source_label exists, keep label_short close to that source label instead of inventing a persona name.
   If wallet.source_label_quality is "generic" or "missing", create a concise descriptive alias from the trading pattern.
   Avoid awkward words like accumulator, scalper, bettor, mixed buyer, participant, and diversified unless truly necessary.
+  Avoid broad template names that many unrelated wallets could share, like "Late Sports Trader", "Politics NO Trader", or "Crypto Whale".
+  If a draft name feels generic, add one concrete hook from the actual behavior: theme, timing, side, market type, or recurring setup.
   Slight edge, mild slang, or light irony is allowed if it still feels clean and readable.
   Avoid hype, memes, jokes, mascots, fantasy nicknames, and robotic wording.
-  Good styles: "Late Sports Trader", "Fed Fade Trader", "NO Side Sniper", "Headline Politics Trader", "Conviction News Buyer".
-  Bad styles: "High-odds NO accumulator (diversified)", "Sports markets trader with late entries", "Mixed-sided high-frequency participant".
+  Good styles: "Fed Fade Trader", "Iran Deadline NO", "Late Tennis Fade", "Tariff Headline Buyer", "Oil Spike Chaser".
+  Bad styles: "High-odds NO accumulator (diversified)", "Late Sports Trader", "Politics NO Trader", "Crypto Whale", "Sports markets trader with late entries", "Mixed-sided high-frequency participant".
 - label_long: exactly 1 short sentence (target <= 140 chars, hard max 200).
   This is the lead sentence shown above the trader bullets.
   It should explain what kind of trader this is in plain language.
@@ -2770,10 +2909,12 @@ Rules:
   - wallet.kind: "eoa" (normal), "safe" (Gnosis Safe multisig), "contract" (other contract), or "unknown".
   - wallet.role: "trading_wallet" for the wallet holding positions.
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
+  - These fields are context only. Never put Safe, Gnosis, multisig, signer, owner, or wallet-type terms into label_short.
 - Naming:
   - If wallet.source_label_quality is "descriptive", preserve the semantics of wallet.source_label.
   - Do not replace a meaningful existing label with a completely unrelated nickname.
-  - If label_short sounds like metadata tags, analyst shorthand, or a list of traits instead of a natural archetype name, rewrite it.
+  - If label_short sounds like metadata tags, analyst shorthand, a broad template, or a list of traits instead of a natural archetype name, rewrite it.
+  - If another unrelated wallet could easily end up with the same label_short, rewrite it to be more specific.
 - Prefer evidence from top_events when available; fall back to top_markets or recent_window.top_changes.
 - Use summary.side_bias_label and summary.concentration_label as hints.
 - If exposure.two_sided_markets > 0 or any top market has position_side = BOTH, explain it simply as buying both sides or balancing risk unless one side is clearly negligible.
@@ -2783,13 +2924,13 @@ Rules:
 - Prefer simple phrases like "focuses on", "usually buys", "often trades around", and "style is".
 - When performance_30d and closed_positions_sample are sparse or mixed, say so.
 - Target style example:
-  - label_short: "Late Sports Trader"
-  - label_long: "Large sports-focused trader who usually enters very late when outcomes already look highly likely."
+  - label_short: "Fed Fade Trader"
+  - label_long: "Macro-focused trader who often leans against consensus in Fed-related markets."
   - notes:
-    - Focuses mostly on sports markets, especially single-game lines and totals.
-    - Usually enters late, close to game time or around key moments.
-    - Mostly takes one-way positions rather than balancing both sides.
-    - Tends to trade in concentrated size when conviction is high.
+    - Focuses mostly on Fed and rate-related markets.
+    - Often enters around major macro headlines or meeting windows.
+    - Usually takes one-way positions rather than balancing both sides.
+    - Tends to repeat the same macro setup across related contracts.
 - Style guide: ${policy.styleGuide}
 - Profile revision: ${effectiveProfileVersion}
 - Never suggest insider information.
@@ -2798,7 +2939,7 @@ ${namingStabilityHint}
 Whale data (JSON):\n${JSON.stringify(input)}`;
       const compactUser = `${user}
 
-Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, not a comma-separated trait list, metadata tags, or analyst shorthand; label_long is exactly one sentence; each bullet covers a different angle; and the wording avoids numeric clutter unless essential.`;
+Extra constraint: Keep label_short and label_long compact. Keep notes to exactly 4 concise bullet lines. Before returning JSON, verify that label_short sounds like a natural trader archetype, not a comma-separated trait list, metadata tags, analyst shorthand, or a broad template; label_short contains no parentheses and no Safe/Gnosis/multisig wording; label_long is exactly one sentence; each bullet covers a different angle; and the wording avoids numeric clutter unless essential.`;
 
       let profileRaw = "";
       try {
