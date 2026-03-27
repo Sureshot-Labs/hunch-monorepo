@@ -5,6 +5,7 @@ import {
   type User,
   type WalletWithMetadata,
 } from "@privy-io/server-auth";
+import bs58 from "bs58";
 import { env } from "./env.js";
 
 // Initialize Privy client
@@ -23,11 +24,34 @@ const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const PRIVY_USER_SYNC_MAX_ATTEMPTS = 6;
 const PRIVY_USER_SYNC_RETRY_DELAY_MS = 250;
 
+type CrossAppWalletRef = {
+  address?: string | null;
+};
+
+type CrossAppAccount = LinkedAccountWithMetadata & {
+  type: "cross_app";
+  embeddedWallets?: CrossAppWalletRef[] | null;
+  smartWallets?: CrossAppWalletRef[] | null;
+};
+
 function normalizeWalletAddress(walletType: PrivyWalletType, address: string) {
   const trimmed = address.trim();
   if (walletType === "ethereum" && ETH_ADDRESS_RE.test(trimmed))
     return trimmed.toLowerCase();
   return trimmed;
+}
+
+function inferWalletTypeFromAddress(address: string): PrivyWalletType | null {
+  const trimmed = address.trim();
+  if (!trimmed) return null;
+  if (ETH_ADDRESS_RE.test(trimmed)) return "ethereum";
+  try {
+    const decoded = bs58.decode(trimmed);
+    if (decoded.length === 32) return "solana";
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -47,6 +71,31 @@ function isWalletAccount(
   account: LinkedAccountWithMetadata,
 ): account is WalletWithMetadata {
   return account.type === "wallet";
+}
+
+function isCrossAppAccount(
+  account: LinkedAccountWithMetadata,
+): account is CrossAppAccount {
+  return account.type === "cross_app";
+}
+
+function addWallet(
+  out: PrivyWallet[],
+  seen: Set<string>,
+  walletType: PrivyWalletType,
+  address: string,
+  options?: { prepend?: boolean },
+) {
+  const normalized = normalizeWalletAddress(walletType, address);
+  const key = `${walletType}:${normalized}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  const wallet = { address: normalized, walletType };
+  if (options?.prepend) {
+    out.unshift(wallet);
+    return;
+  }
+  out.push(wallet);
 }
 
 export class PrivyAccessTokenError extends Error {
@@ -93,15 +142,28 @@ export class PrivyService {
     const seen = new Set<string>();
 
     for (const account of privyUser.linkedAccounts) {
-      if (!isWalletAccount(account)) continue;
-      const chainType = account.chainType;
-      if (chainType !== "ethereum" && chainType !== "solana") continue;
+      if (isWalletAccount(account)) {
+        const chainType = account.chainType;
+        if (chainType !== "ethereum" && chainType !== "solana") continue;
+        addWallet(out, seen, chainType, account.address);
+        continue;
+      }
 
-      const normalized = normalizeWalletAddress(chainType, account.address);
-      const key = `${chainType}:${normalized}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ address: normalized, walletType: chainType });
+      if (!isCrossAppAccount(account)) continue;
+
+      for (const wallet of account.embeddedWallets ?? []) {
+        if (typeof wallet.address !== "string") continue;
+        const walletType = inferWalletTypeFromAddress(wallet.address);
+        if (!walletType) continue;
+        addWallet(out, seen, walletType, wallet.address);
+      }
+
+      for (const wallet of account.smartWallets ?? []) {
+        if (typeof wallet.address !== "string") continue;
+        const walletType = inferWalletTypeFromAddress(wallet.address);
+        if (!walletType) continue;
+        addWallet(out, seen, walletType, wallet.address);
+      }
     }
 
     // Some Privy accounts expose a `user.wallet` (most recently linked wallet) which may not
@@ -110,12 +172,7 @@ export class PrivyService {
     if (primary?.address && primary.chainType) {
       const chainType = primary.chainType;
       if (chainType === "ethereum" || chainType === "solana") {
-        const normalized = normalizeWalletAddress(chainType, primary.address);
-        const key = `${chainType}:${normalized}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          out.unshift({ address: normalized, walletType: chainType });
-        }
+        addWallet(out, seen, chainType, primary.address, { prepend: true });
       }
     }
 
@@ -175,6 +232,17 @@ export class PrivyService {
     return true;
   }
 
+  private static shouldRetryWalletSync(
+    walletAddresses: string[],
+    options: {
+      expectedAddedWalletAddresses: string[];
+      expectedRemovedWalletAddresses: string[];
+    },
+  ): boolean {
+    if (walletAddresses.length === 0) return true;
+    return !this.hasExpectedWalletDelta(walletAddresses, options);
+  }
+
   /**
    * Verify Privy token and get user data in one call
    */
@@ -209,7 +277,7 @@ export class PrivyService {
     for (
       let attempt = 1;
       attempt < maxSyncAttempts &&
-      !this.hasExpectedWalletDelta(walletAddresses, {
+      this.shouldRetryWalletSync(walletAddresses, {
         expectedAddedWalletAddresses,
         expectedRemovedWalletAddresses,
       });
