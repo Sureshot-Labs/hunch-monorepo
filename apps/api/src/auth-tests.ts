@@ -244,6 +244,47 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "extractWallets includes supported cross_app embedded and smart wallets",
+    run: () => {
+      const user = {
+        linkedAccounts: [
+          {
+            type: "wallet",
+            address: "0x1111111111111111111111111111111111111111",
+            chainType: "ethereum",
+          },
+          {
+            type: "cross_app",
+            subject: "cross-app-user-1",
+            providerApp: { id: "provider-app-1" },
+            embeddedWallets: [
+              { address: "0x1111111111111111111111111111111111111111" },
+              { address: "So11111111111111111111111111111111111111112" },
+            ],
+            smartWallets: [
+              { address: "0x2222222222222222222222222222222222222222" },
+            ],
+          },
+        ],
+      } as unknown as PrivyUser;
+
+      assert.deepEqual(PrivyService.extractWallets(user), [
+        {
+          address: "0x1111111111111111111111111111111111111111",
+          walletType: "ethereum",
+        },
+        {
+          address: "So11111111111111111111111111111111111111112",
+          walletType: "solana",
+        },
+        {
+          address: "0x2222222222222222222222222222222222222222",
+          walletType: "ethereum",
+        },
+      ]);
+    },
+  },
+  {
     name: "verifyTokenAndGetUser waits for expected added wallets to appear",
     run: async () => {
       const privyAny = PrivyService as unknown as {
