@@ -94,6 +94,7 @@ import {
   walletPrivateMetaPatchBodySchema,
   walletPrivateNoteBodySchema,
   walletPrivateNoteParamsSchema,
+  walletPositionHistoryQuerySchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
   walletResolverParamsSchema,
@@ -216,6 +217,76 @@ export type WalletActivitySummaryHeroStats = {
   totalPnl30d: number | null;
   trackedPnl30d: number | null;
   asOf: Date;
+};
+
+type WalletPositionRouteRow = {
+  wallet_id: string;
+  address: string;
+  chain: string;
+  label: string | null;
+  user_name: string | null;
+  user_label: string | null;
+  user_label_color: WalletLabelColor | null;
+  profile_label: string | null;
+  venue: string;
+  market_id: string;
+  market_title: string | null;
+  outcomes: string | null;
+  market_image: string | null;
+  market_icon: string | null;
+  event_id: string | null;
+  event_title: string | null;
+  event_image: string | null;
+  event_icon: string | null;
+  market_status: string | null;
+  close_time: Date | null;
+  expiration_time: Date | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | null;
+  best_bid: string | null;
+  best_ask: string | null;
+  last_price: string | null;
+  outcome_side: string | null;
+  shares: string | null;
+  size_usd: string | null;
+  price: string | null;
+  snapshot_at: Date;
+  metadata: unknown;
+};
+
+type WalletPositionBaseRouteItem = {
+  walletId: string;
+  address: string;
+  chain: string;
+  label: string | null;
+  userName: string | null;
+  userLabel: string | null;
+  userLabelColor: WalletLabelColor | null;
+  profileLabel: string | null;
+  venue: string;
+  marketId: string;
+  marketTitle: string | null;
+  outcomes: string[] | null;
+  marketImage: string | null;
+  marketIcon: string | null;
+  eventId: string | null;
+  eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  lastPrice: number | null;
+  marketStatus: string | null;
+  closeTime: string | null;
+  expirationTime: string | null;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: number | null;
+  outcomeSide: string | null;
+  shares: number | null;
+  sizeUsd: number | null;
+  price: number | null;
+  snapshotAt: Date;
+  metadata: unknown;
 };
 
 type WhaleMarketRow = {
@@ -518,6 +589,9 @@ type WalletActivitySignalItem = {
     approxEntryPrice: number | null;
     observedPrice: number | null;
     currentPrice: number | null;
+    openPnlUsd: number | null;
+    realizedPnlUsd: number | null;
+    totalPnlUsd: number | null;
     approxPnlUsd: number | null;
     approxReliable: boolean;
     approxPnlSource: "activity" | "snapshot" | null;
@@ -768,12 +842,44 @@ function normalizeStringArray(values: string[] | undefined): string[] {
   );
 }
 
-function nullableNumber(
-  value: string | number | null | undefined,
-): number | null {
+function nullableNumber(value: unknown): number | null {
   if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+type WalletActivityChangeAction =
+  | "OPENED"
+  | "INCREASED"
+  | "REDUCED"
+  | "CLOSED";
+
+function resolveWalletActivityChangeAction(input: {
+  action: string | null;
+  source: string | null;
+  metadata: unknown;
+}): WalletActivityChangeAction | null {
+  const normalizedSource = input.source?.trim().toLowerCase() ?? null;
+  const normalizedAction = input.action?.trim().toUpperCase() ?? null;
+
+  if (normalizedSource === "snapshot_delta") {
+    const metadata = isRecord(input.metadata) ? input.metadata : null;
+    const prevShares = nullableNumber(metadata?.prevShares);
+    const currShares = nullableNumber(metadata?.currShares);
+    const prev = prevShares != null && prevShares > 1e-9 ? prevShares : 0;
+    const curr = currShares != null && currShares > 1e-9 ? currShares : 0;
+
+    if (prev <= 0 && curr > 0) return "OPENED";
+    if (prev > 0 && curr <= 0) return "CLOSED";
+    if (curr > prev) return "INCREASED";
+    if (curr < prev) return "REDUCED";
+
+    if (normalizedAction === "BUY") return "INCREASED";
+    if (normalizedAction === "SELL") return "REDUCED";
+    return null;
+  }
+
+  return null;
 }
 
 const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
@@ -2921,6 +3027,74 @@ function serializeWalletResponseItem<T extends { metrics: WalletMetricsRow | nul
     ...item,
     metrics: serializeWalletMetrics(item.metrics),
   };
+}
+
+function mapWalletPositionBaseItems(
+  rows: WalletPositionRouteRow[],
+): WalletPositionBaseRouteItem[] {
+  return rows.map((row) => ({
+    walletId: row.wallet_id,
+    address: row.address,
+    chain: row.chain,
+    label: row.label,
+    userName: row.user_name ?? null,
+    userLabel: row.user_label ?? null,
+    userLabelColor: row.user_label_color ?? null,
+    profileLabel: row.profile_label,
+    venue: row.venue,
+    marketId: row.market_id,
+    marketTitle: row.market_title,
+    outcomes: parseMarketOutcomes(row.outcomes),
+    marketImage: row.market_image,
+    marketIcon: row.market_icon,
+    eventId: row.event_id,
+    eventTitle: row.event_title,
+    eventImage: row.event_image,
+    eventIcon: row.event_icon,
+    bestBid: row.best_bid ? Number(row.best_bid) : null,
+    bestAsk: row.best_ask ? Number(row.best_ask) : null,
+    lastPrice: row.last_price ? Number(row.last_price) : null,
+    marketStatus: row.market_status,
+    closeTime: row.close_time ? row.close_time.toISOString() : null,
+    expirationTime: row.expiration_time
+      ? row.expiration_time.toISOString()
+      : null,
+    resolvedOutcome: row.resolved_outcome,
+    resolvedOutcomePct: row.resolved_outcome_pct
+      ? Number(row.resolved_outcome_pct)
+      : null,
+    outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
+    shares: row.shares ? Number(row.shares) : null,
+    sizeUsd: row.size_usd ? Number(row.size_usd) : null,
+    price: row.price ? Number(row.price) : null,
+    snapshotAt: row.snapshot_at,
+    metadata: row.metadata ?? null,
+  }));
+}
+
+async function buildWalletPositionRouteItems(
+  client: PoolClient,
+  rows: WalletPositionRouteRow[],
+) {
+  const baseItems = mapWalletPositionBaseItems(rows);
+  const approxMetrics = await loadWalletPositionApproxMetrics(client, baseItems);
+
+  return baseItems.map((item) => {
+    const metrics = approxMetrics.get(
+      `${item.walletId}::${item.marketId}::${item.outcomeSide ?? ""}`,
+    );
+    const { resolvedOutcomePct: _resolvedOutcomePct, ...rest } = item;
+    return {
+      ...rest,
+      openPnlUsd: metrics?.openPnlUsd ?? null,
+      realizedPnlUsd: metrics?.realizedPnlUsd ?? null,
+      totalPnlUsd: metrics?.totalPnlUsd ?? null,
+      approxEntryPrice: metrics?.approxEntryPrice ?? null,
+      approxPnlUsd: metrics?.approxPnlUsd ?? null,
+      approxReliable: metrics?.approxReliable ?? false,
+      approxPnlSource: metrics?.approxPnlSource ?? null,
+    };
+  });
 }
 
 function applyWalletPresentationFields<T extends {
@@ -6767,6 +6941,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           price: row.price ? Number(row.price) : null,
           activityType: row.activity_type,
           source: row.source,
+          changeAction: resolveWalletActivityChangeAction({
+            action: row.action,
+            source: row.source,
+            metadata: row.metadata,
+          }),
+          quoteTiming: "current" as const,
           occurredAt: row.occurred_at,
           metadata: row.metadata ?? null,
         }));
@@ -6993,101 +7173,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               offset $${offsetParam}
             `;
 
-        const rows = await client.query<{
-          wallet_id: string;
-          address: string;
-          chain: string;
-          label: string | null;
-          user_name: string | null;
-          user_label: string | null;
-          user_label_color: WalletLabelColor | null;
-          profile_label: string | null;
-          venue: string;
-          market_id: string;
-          market_title: string | null;
-          outcomes: string | null;
-          market_image: string | null;
-          market_icon: string | null;
-          event_id: string | null;
-          event_title: string | null;
-          event_image: string | null;
-          event_icon: string | null;
-          market_status: string | null;
-          close_time: Date | null;
-          expiration_time: Date | null;
-          resolved_outcome: string | null;
-          resolved_outcome_pct: string | null;
-          best_bid: string | null;
-          best_ask: string | null;
-          last_price: string | null;
-          outcome_side: string | null;
-          shares: string | null;
-          size_usd: string | null;
-          price: string | null;
-          snapshot_at: Date;
-          metadata: unknown;
-        }>(sql, params);
+        const rows = await client.query<WalletPositionRouteRow>(sql, params);
 
         const hasMore = rows.rows.length > query.limit;
         const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
-
-        const baseItems = pageRows.map((row) => ({
-          walletId: row.wallet_id,
-          address: row.address,
-          chain: row.chain,
-          label: row.label,
-          userName: row.user_name ?? null,
-          userLabel: row.user_label ?? null,
-          userLabelColor: row.user_label_color ?? null,
-          profileLabel: row.profile_label,
-          venue: row.venue,
-          marketId: row.market_id,
-          marketTitle: row.market_title,
-          outcomes: parseMarketOutcomes(row.outcomes),
-          marketImage: row.market_image,
-          marketIcon: row.market_icon,
-          eventId: row.event_id,
-          eventTitle: row.event_title,
-          eventImage: row.event_image,
-          eventIcon: row.event_icon,
-          bestBid: row.best_bid ? Number(row.best_bid) : null,
-          bestAsk: row.best_ask ? Number(row.best_ask) : null,
-          lastPrice: row.last_price ? Number(row.last_price) : null,
-          marketStatus: row.market_status,
-          closeTime: row.close_time ? row.close_time.toISOString() : null,
-          expirationTime: row.expiration_time
-            ? row.expiration_time.toISOString()
-            : null,
-          resolvedOutcome: row.resolved_outcome,
-          resolvedOutcomePct: row.resolved_outcome_pct
-            ? Number(row.resolved_outcome_pct)
-            : null,
-          outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
-          shares: row.shares ? Number(row.shares) : null,
-          sizeUsd: row.size_usd ? Number(row.size_usd) : null,
-          price: row.price ? Number(row.price) : null,
-          snapshotAt: row.snapshot_at,
-          metadata: row.metadata ?? null,
-        }));
-
-        const approxMetrics = await loadWalletPositionApproxMetrics(
-          client,
-          baseItems,
-        );
-
-        const items = baseItems.map((item) => {
-          const metrics = approxMetrics.get(
-            `${item.walletId}::${item.marketId}::${item.outcomeSide ?? ""}`,
-          );
-          const { resolvedOutcomePct: _resolvedOutcomePct, ...rest } = item;
-          return {
-            ...rest,
-            approxEntryPrice: metrics?.approxEntryPrice ?? null,
-            approxPnlUsd: metrics?.approxPnlUsd ?? null,
-            approxReliable: metrics?.approxReliable ?? false,
-            approxPnlSource: metrics?.approxPnlSource ?? null,
-          };
-        });
+        const items = await buildWalletPositionRouteItems(client, pageRows);
 
         return reply.send({
           ok: true,
@@ -7101,6 +7191,211 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet positions" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  z.get(
+    "/wallets/positions/history",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: walletPositionHistoryQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const params: Array<string | number | null> = [user.id, query.walletId];
+      let idx = 3;
+      const userParam = 1;
+      const walletParam = 2;
+
+      let historyWhere = `ws.wallet_id = $${walletParam}`;
+      if (query.venue) {
+        historyWhere += ` and ws.venue = $${idx++}`;
+        params.push(query.venue);
+      }
+
+      const historyPositionFilterSql = query.includeSmall
+        ? "true"
+        : (() => {
+            const minUsdParam = idx++;
+            params.push(env.walletIntelMinPositionUsd);
+            const minSharesParam = idx++;
+            params.push(env.walletIntelMinPositionShares);
+            return `
+              (
+                case
+                  when tr.size_usd is not null then tr.size_usd >= $${minUsdParam}
+                  when tr.shares is not null then tr.shares >= $${minSharesParam}
+                  else true
+                end
+              )
+            `;
+          })();
+
+      let outerWhere = `where ${historyPositionFilterSql}`;
+      if (query.since) {
+        outerWhere += ` and tr.snapshot_at >= $${idx++}`;
+        params.push(query.since);
+      }
+
+      params.push(query.limit + 1, query.offset);
+      const limitParam = idx++;
+      const offsetParam = idx++;
+
+      const client = await pool.connect();
+      try {
+        const rows = await client.query<WalletPositionRouteRow>(
+          `
+            with candidate_rows as (
+              select
+                ws.wallet_id,
+                w.address,
+                w.chain,
+                w.label,
+                wn.name as user_name,
+                wl.label as user_label,
+                wl.color as user_label_color,
+                wp.profile->>'label_short' as profile_label,
+                ws.venue,
+                ws.market_id,
+                um.title as market_title,
+                um.outcomes,
+                um.image as market_image,
+                um.icon as market_icon,
+                um.event_id as event_id,
+                ue.title as event_title,
+                ue.image as event_image,
+                ue.icon as event_icon,
+                um.status as market_status,
+                um.close_time,
+                um.expiration_time,
+                um.resolved_outcome,
+                um.resolved_outcome_pct::text as resolved_outcome_pct,
+                um.best_bid,
+                um.best_ask,
+                um.last_price,
+                case
+                  when upper(coalesce(ws.outcome_side::text, '')) in ('YES', 'NO')
+                    then upper(coalesce(ws.outcome_side::text, ''))
+                  else null
+                end as outcome_side,
+                ws.shares,
+                ws.size_usd,
+                ws.price,
+                ws.snapshot_at,
+                ws.metadata
+              from wallet_position_snapshots ws
+              join wallets w on w.id = ws.wallet_id
+              left join wallet_user_labels wl
+                on wl.wallet_id = w.id
+               and wl.user_id = $${userParam}
+              left join wallet_user_names wn
+                on wn.wallet_id = w.id
+               and wn.user_id = $${userParam}
+              left join wallet_profiles wp on wp.wallet_id = w.id
+              left join unified_markets um on um.id = ws.market_id
+              left join unified_events ue on ue.id = um.event_id
+              where ${historyWhere}
+                and (
+                  coalesce(ws.shares, 0) > 0
+                  or greatest(
+                    coalesce(ws.size_usd, 0),
+                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+                  ) > 0
+                )
+                and (
+                  um.resolved_outcome is not null
+                  or upper(coalesce(um.status::text, '')) in ('CLOSED', 'SETTLED', 'ARCHIVED')
+                  or (
+                    coalesce(um.close_time, um.expiration_time) is not null
+                    and coalesce(um.close_time, um.expiration_time) < now()
+                  )
+                )
+            ),
+            terminal_rows as (
+              select distinct on (
+                candidate_rows.venue,
+                candidate_rows.market_id,
+                coalesce(candidate_rows.outcome_side, '')
+              )
+                *
+              from candidate_rows
+              order by
+                candidate_rows.venue,
+                candidate_rows.market_id,
+                coalesce(candidate_rows.outcome_side, ''),
+                candidate_rows.snapshot_at desc
+            )
+            select
+              tr.wallet_id,
+              tr.address,
+              tr.chain,
+              tr.label,
+              tr.user_name,
+              tr.user_label,
+              tr.user_label_color,
+              tr.profile_label,
+              tr.venue,
+              tr.market_id,
+              tr.market_title,
+              tr.outcomes,
+              tr.market_image,
+              tr.market_icon,
+              tr.event_id,
+              tr.event_title,
+              tr.event_image,
+              tr.event_icon,
+              tr.market_status,
+              tr.close_time,
+              tr.expiration_time,
+              tr.resolved_outcome,
+              tr.resolved_outcome_pct,
+              tr.best_bid,
+              tr.best_ask,
+              tr.last_price,
+              tr.outcome_side,
+              tr.shares,
+              tr.size_usd,
+              tr.price,
+              tr.snapshot_at,
+              tr.metadata
+            from terminal_rows tr
+            ${outerWhere}
+            order by
+              tr.snapshot_at desc,
+              tr.size_usd desc nulls last,
+              tr.shares desc nulls last,
+              coalesce(tr.market_title, tr.market_id) asc
+            limit $${limitParam}
+            offset $${offsetParam}
+          `,
+          params,
+        );
+
+        const hasMore = rows.rows.length > query.limit;
+        const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
+        const items = await buildWalletPositionRouteItems(client, pageRows);
+
+        return reply.send({
+          ok: true,
+          items,
+          hasMore,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, query },
+          "Failed to load wallet position history",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load wallet position history" });
       } finally {
         client.release();
       }

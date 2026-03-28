@@ -35,6 +35,9 @@ export type WalletPositionApproxMetrics = {
   approxEntryPrice: number | null;
   currentPrice: number | null;
   observedPrice: number | null;
+  openPnlUsd: number | null;
+  realizedPnlUsd: number | null;
+  totalPnlUsd: number | null;
   approxPnlUsd: number | null;
   approxReliable: boolean;
   approxPnlSource: "activity" | "snapshot" | null;
@@ -82,6 +85,26 @@ function resolveCurrentPrice(input: WalletPositionApproxInput): number | null {
   return null;
 }
 
+function combineTotalPnlUsd(input: {
+  openPnlUsd: number | null;
+  realizedPnlUsd: number | null;
+}): number | null {
+  const openPnlUsd =
+    input.openPnlUsd != null && Number.isFinite(input.openPnlUsd)
+      ? input.openPnlUsd
+      : null;
+  const realizedPnlUsd =
+    input.realizedPnlUsd != null && Number.isFinite(input.realizedPnlUsd)
+      ? input.realizedPnlUsd
+      : null;
+  if (openPnlUsd != null && realizedPnlUsd != null) {
+    return openPnlUsd + realizedPnlUsd;
+  }
+  if (openPnlUsd != null) return openPnlUsd;
+  if (realizedPnlUsd != null) return realizedPnlUsd;
+  return null;
+}
+
 function extractFallbackShares(
   input: WalletPositionApproxInput,
 ): number | null {
@@ -114,6 +137,9 @@ function buildSnapshotFallback(
       approxEntryPrice: null,
       currentPrice: resolveCurrentPrice(input),
       observedPrice: startPrice,
+      openPnlUsd: null,
+      realizedPnlUsd: null,
+      totalPnlUsd: null,
       approxPnlUsd: null,
       approxReliable: false,
       approxPnlSource: null,
@@ -132,17 +158,25 @@ function buildSnapshotFallback(
       approxEntryPrice: null,
       currentPrice: resolveCurrentPrice(input),
       observedPrice: startPrice,
+      openPnlUsd: null,
+      realizedPnlUsd: null,
+      totalPnlUsd: null,
       approxPnlUsd: null,
       approxReliable: false,
       approxPnlSource: null,
     };
   }
 
+  const openPnlUsd = (effectiveMark - startPrice) * shares;
+
   return {
     approxEntryPrice: null,
     currentPrice: effectiveMark,
     observedPrice: startPrice,
-    approxPnlUsd: (effectiveMark - startPrice) * shares,
+    openPnlUsd,
+    realizedPnlUsd: null,
+    totalPnlUsd: openPnlUsd,
+    approxPnlUsd: openPnlUsd,
     approxReliable: false,
     approxPnlSource: "snapshot",
   };
@@ -181,7 +215,7 @@ function buildApproxFromLedger(
   }
   const approxEntryPrice = openEntry.source === "activity" ? openEntry.entryPrice : null;
 
-  const openLegPnlUsd =
+  const openPnlUsd =
     ledger.remainingShares > NET_SHARES_EPSILON
       ? computeApproxLegPnlUsd({
           outcomeSide: side,
@@ -191,14 +225,17 @@ function buildApproxFromLedger(
           markPrice,
         })
       : 0;
-  const approxPnlUsd =
-    openLegPnlUsd == null
+  const totalPnlUsd =
+    openPnlUsd == null
       ? ledger.remainingShares > NET_SHARES_EPSILON
-        ? buildSnapshotFallback(input, markPrice).approxPnlUsd
+        ? buildSnapshotFallback(input, markPrice).totalPnlUsd
         : ledger.realizedPnlUsd
-      : ledger.realizedPnlUsd + openLegPnlUsd;
+      : combineTotalPnlUsd({
+          openPnlUsd,
+          realizedPnlUsd: ledger.realizedPnlUsd,
+        });
 
-  if (approxPnlUsd == null && openEntry.entryPrice == null) {
+  if (totalPnlUsd == null && openEntry.entryPrice == null) {
     return buildSnapshotFallback(input, markPrice);
   }
 
@@ -209,7 +246,10 @@ function buildApproxFromLedger(
     approxEntryPrice,
     currentPrice: resolveCurrentPrice(input),
     observedPrice: parseNumber(input.price),
-    approxPnlUsd,
+    openPnlUsd,
+    realizedPnlUsd: ledger.realizedPnlUsd,
+    totalPnlUsd,
+    approxPnlUsd: totalPnlUsd,
     approxReliable,
     approxPnlSource: "activity",
   };
@@ -403,6 +443,9 @@ export async function loadLatestWalletPositionNowMap(
       approxEntryPrice: metrics?.approxEntryPrice ?? null,
       currentPrice: metrics?.currentPrice ?? null,
       observedPrice: metrics?.observedPrice ?? parseNumber(row.price),
+      openPnlUsd: metrics?.openPnlUsd ?? null,
+      realizedPnlUsd: metrics?.realizedPnlUsd ?? null,
+      totalPnlUsd: metrics?.totalPnlUsd ?? null,
       approxPnlUsd: metrics?.approxPnlUsd ?? null,
       approxReliable: metrics?.approxReliable ?? false,
       approxPnlSource: metrics?.approxPnlSource ?? null,

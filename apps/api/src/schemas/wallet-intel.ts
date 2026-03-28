@@ -226,6 +226,15 @@ export const walletPositionsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+export const walletPositionHistoryQuerySchema = z.object({
+  walletId: z.string().uuid(),
+  venue: zVenue.optional(),
+  since: z.string().datetime().optional(),
+  includeSmall: queryBooleanSchema.default(false),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
 export const walletWhalesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
