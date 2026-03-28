@@ -59,7 +59,11 @@ import {
   parseMarketOutcomes,
 } from "../services/wallet-intel-helpers.js";
 import { loadWalletOpenPositionStatsMap } from "../services/wallet-open-position-stats.js";
-import { loadWalletPositionApproxMetrics } from "../services/wallet-position-approx.js";
+import {
+  loadLatestWalletPositionNowMap,
+  loadWalletPositionApproxMetrics,
+} from "../services/wallet-position-approx.js";
+import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
 import {
   buildWalletMmDiagnostics,
   MM_HEDGE_RATIO_MIN,
@@ -510,6 +514,17 @@ type WalletActivitySignalItem = {
   severity: WalletSignalSeverity;
   mmDiagnostics: WalletMmDiagnostics | null;
   occurredAt: Date;
+  positionNow?: {
+    approxEntryPrice: number | null;
+    observedPrice: number | null;
+    currentPrice: number | null;
+    approxPnlUsd: number | null;
+    approxReliable: boolean;
+    approxPnlSource: "activity" | "snapshot" | null;
+    positionShares: number | null;
+    positionSizeUsd: number | null;
+    snapshotAt: Date | null;
+  } | null;
   attribution?: WalletAttribution;
 };
 
@@ -1783,6 +1798,35 @@ export function buildWalletSignalItemFromTopChange(input: {
     mmDiagnostics: input.mmDiagnostics,
     occurredAt: input.change.occurredAt,
   };
+}
+
+async function enrichWalletSignalItemsWithPositionNow(
+  client: PoolClient,
+  items: WalletActivitySignalItem[],
+): Promise<WalletActivitySignalItem[]> {
+  if (items.length === 0) return items;
+
+  const positionNowByKey = await loadLatestWalletPositionNowMap(
+    client,
+    items.map((item) => ({
+      walletId: item.walletId,
+      venue: item.venue,
+      marketId: item.marketId,
+      outcomeSide: item.positionSide,
+    })),
+  );
+
+  return items.map((item) => ({
+    ...item,
+    positionNow:
+      positionNowByKey.get(
+        makeWalletPositionLedgerKey(
+          item.walletId,
+          item.marketId,
+          item.positionSide,
+        ),
+      ) ?? null,
+  }));
 }
 
 export function signalItemToTopChange(
@@ -6306,16 +6350,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 });
               })
               .filter((item): item is WalletActivitySignalItem => Boolean(item));
+            const enrichedItems = await enrichWalletSignalItemsWithPositionNow(
+              client,
+              items,
+            );
 
             if (!includeAttributionInResponse) {
               return {
                 ok: true,
-                items: items.map((item) => serializeWalletResponseItem(item)),
+                items: enrichedItems.map((item) =>
+                  serializeWalletResponseItem(item),
+                ),
               };
             }
 
             const attributionInputsByWallet =
-              buildWalletAttributionInputMapFromSignalItems(items);
+              buildWalletAttributionInputMapFromSignalItems(enrichedItems);
             const attributionMap = await buildWalletAttributionMap(
               client,
               Array.from(attributionInputsByWallet.values()),
@@ -6324,7 +6374,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
             return {
               ok: true,
-              items: items.map((item) =>
+              items: enrichedItems.map((item) =>
                 serializeWalletResponseItem({
                   ...item,
                   attribution: attributionMap.get(item.walletId),
@@ -6487,7 +6537,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (scoreDelta !== 0) return scoreDelta;
             return b.occurredAt.getTime() - a.occurredAt.getTime();
           });
-          const pagedRows = sorted.slice(query.offset, query.offset + query.limit);
+          const pagedRows = await enrichWalletSignalItemsWithPositionNow(
+            client,
+            sorted.slice(query.offset, query.offset + query.limit),
+          );
           if (includeAttributionInResponse) {
             const byWallet = new Map<string, (typeof attributionInputs)[number]>();
             for (const item of pagedRows) {

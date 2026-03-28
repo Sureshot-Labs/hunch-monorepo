@@ -33,9 +33,24 @@ type WalletPositionApproxInput = {
 
 export type WalletPositionApproxMetrics = {
   approxEntryPrice: number | null;
+  currentPrice: number | null;
+  observedPrice: number | null;
   approxPnlUsd: number | null;
   approxReliable: boolean;
   approxPnlSource: "activity" | "snapshot" | null;
+};
+
+export type WalletPositionNowKeyInput = {
+  walletId: string;
+  venue: string;
+  marketId: string;
+  outcomeSide: string | null;
+};
+
+export type WalletPositionNow = WalletPositionApproxMetrics & {
+  positionShares: number | null;
+  positionSizeUsd: number | null;
+  snapshotAt: Date | null;
 };
 
 function parseNumber(value: unknown): number | null {
@@ -56,6 +71,15 @@ function resolveMarkPrice(input: WalletPositionApproxInput): number | null {
     resolvedOutcomePct: parseNumber(input.resolvedOutcomePct),
     markPrice: input.bestAsk ?? input.bestBid ?? input.lastPrice,
   });
+}
+
+function resolveCurrentPrice(input: WalletPositionApproxInput): number | null {
+  const side = normalizeOutcomeSideForStorage(input.outcomeSide);
+  const yesMarkPrice = resolveMarkPrice(input);
+  if (yesMarkPrice == null) return null;
+  if (side === "YES") return yesMarkPrice;
+  if (side === "NO") return 1 - yesMarkPrice;
+  return null;
 }
 
 function extractFallbackShares(
@@ -88,6 +112,8 @@ function buildSnapshotFallback(
   ) {
     return {
       approxEntryPrice: null,
+      currentPrice: resolveCurrentPrice(input),
+      observedPrice: startPrice,
       approxPnlUsd: null,
       approxReliable: false,
       approxPnlSource: null,
@@ -104,6 +130,8 @@ function buildSnapshotFallback(
   if (effectiveMark == null) {
     return {
       approxEntryPrice: null,
+      currentPrice: resolveCurrentPrice(input),
+      observedPrice: startPrice,
       approxPnlUsd: null,
       approxReliable: false,
       approxPnlSource: null,
@@ -112,6 +140,8 @@ function buildSnapshotFallback(
 
   return {
     approxEntryPrice: null,
+    currentPrice: effectiveMark,
+    observedPrice: startPrice,
     approxPnlUsd: (effectiveMark - startPrice) * shares,
     approxReliable: false,
     approxPnlSource: "snapshot",
@@ -177,6 +207,8 @@ function buildApproxFromLedger(
 
   return {
     approxEntryPrice,
+    currentPrice: resolveCurrentPrice(input),
+    observedPrice: parseNumber(input.price),
     approxPnlUsd,
     approxReliable,
     approxPnlSource: "activity",
@@ -217,4 +249,168 @@ export async function loadWalletPositionApproxMetrics(
   }
 
   return metricsByKey;
+}
+
+type LatestWalletPositionSnapshotRow = {
+  wallet_id: string;
+  venue: string;
+  market_id: string;
+  outcome_side: string | null;
+  shares: string | null;
+  size_usd: string | null;
+  price: string | null;
+  snapshot_at: Date | null;
+  metadata: unknown;
+  best_bid: string | null;
+  best_ask: string | null;
+  last_price: string | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | null;
+};
+
+export async function loadLatestWalletPositionNowMap(
+  client: Queryable,
+  inputs: WalletPositionNowKeyInput[],
+): Promise<Map<string, WalletPositionNow>> {
+  const byKey = new Map<string, WalletPositionNow>();
+  if (inputs.length === 0) return byKey;
+
+  const dedupedInputs = Array.from(
+    new Map(
+      inputs.map((input) => {
+        const outcomeSide = normalizeOutcomeSideForStorage(input.outcomeSide);
+        return [
+          `${input.walletId}::${input.venue}::${input.marketId}::${outcomeSide}`,
+          {
+            walletId: input.walletId,
+            venue: input.venue,
+            marketId: input.marketId,
+            outcomeSide,
+          },
+        ] as const;
+      }),
+    ).values(),
+  );
+  if (dedupedInputs.length === 0) return byKey;
+
+  const payload = dedupedInputs.map((input) => ({
+    wallet_id: input.walletId,
+    venue: input.venue,
+    market_id: input.marketId,
+    outcome_side: input.outcomeSide,
+  }));
+
+  const { rows } = await client.query<LatestWalletPositionSnapshotRow>(
+    `
+      with input_keys as (
+        select distinct
+          wallet_id::uuid as wallet_id,
+          venue::text as venue,
+          market_id::text as market_id,
+          case
+            when upper(coalesce(outcome_side, '')) in ('YES', 'NO')
+              then upper(coalesce(outcome_side, ''))
+            else null
+          end as outcome_side
+        from jsonb_to_recordset($1::jsonb) as x(
+          wallet_id text,
+          venue text,
+          market_id text,
+          outcome_side text
+        )
+      ),
+      latest as (
+        select distinct on (ws.wallet_id, ws.venue)
+          ws.wallet_id,
+          ws.venue,
+          ws.snapshot_at
+        from wallet_position_snapshots ws
+        join (
+          select distinct wallet_id, venue
+          from input_keys
+        ) input_wallets
+          on input_wallets.wallet_id = ws.wallet_id
+         and input_wallets.venue = ws.venue
+        order by ws.wallet_id, ws.venue, ws.snapshot_at desc
+      )
+      select
+        ik.wallet_id,
+        ik.venue,
+        ik.market_id,
+        ik.outcome_side,
+        ws.shares::text as shares,
+        ws.size_usd::text as size_usd,
+        ws.price::text as price,
+        ws.snapshot_at,
+        ws.metadata,
+        um.best_bid::text as best_bid,
+        um.best_ask::text as best_ask,
+        um.last_price::text as last_price,
+        um.resolved_outcome,
+        um.resolved_outcome_pct::text as resolved_outcome_pct
+      from input_keys ik
+      join latest l
+        on l.wallet_id = ik.wallet_id
+       and l.venue = ik.venue
+      left join wallet_position_snapshots ws
+        on ws.wallet_id = ik.wallet_id
+       and ws.venue = ik.venue
+       and ws.snapshot_at = l.snapshot_at
+       and ws.market_id = ik.market_id
+       and (
+         case
+           when upper(coalesce(ws.outcome_side, '')) in ('YES', 'NO')
+             then upper(coalesce(ws.outcome_side, ''))
+           else null
+         end
+       ) is not distinct from ik.outcome_side
+      left join unified_markets um on um.id = ik.market_id
+    `,
+    [JSON.stringify(payload)],
+  );
+
+  const approxInputs = rows
+    .filter((row) => row.snapshot_at != null)
+    .map<WalletPositionApproxInput>((row) => ({
+      walletId: row.wallet_id,
+      marketId: row.market_id,
+      outcomeSide: row.outcome_side,
+      shares: parseNumber(row.shares),
+      price: parseNumber(row.price),
+      bestBid: parseNumber(row.best_bid),
+      bestAsk: parseNumber(row.best_ask),
+      lastPrice: parseNumber(row.last_price),
+      resolvedOutcome: row.resolved_outcome,
+      resolvedOutcomePct: parseNumber(row.resolved_outcome_pct),
+      metadata: row.metadata,
+    }));
+  const approxMetricsByKey = await loadWalletPositionApproxMetrics(
+    client,
+    approxInputs,
+  );
+
+  for (const row of rows) {
+    if (row.snapshot_at == null) continue;
+
+    const key = makeWalletPositionLedgerKey(
+      row.wallet_id,
+      row.market_id,
+      row.outcome_side,
+    );
+    const metrics = approxMetricsByKey.get(key);
+
+    byKey.set(key, {
+      approxEntryPrice: metrics?.approxEntryPrice ?? null,
+      currentPrice: metrics?.currentPrice ?? null,
+      observedPrice: metrics?.observedPrice ?? parseNumber(row.price),
+      approxPnlUsd: metrics?.approxPnlUsd ?? null,
+      approxReliable: metrics?.approxReliable ?? false,
+      approxPnlSource: metrics?.approxPnlSource ?? null,
+      positionShares: parseNumber(row.shares),
+      positionSizeUsd: parseNumber(row.size_usd),
+      snapshotAt: row.snapshot_at,
+    });
+  }
+
+  return byKey;
 }
