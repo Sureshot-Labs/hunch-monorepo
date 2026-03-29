@@ -38,6 +38,22 @@ export type MarketMapSignalSummary = {
   targetEventId?: string | null;
   targetEventTitle?: string | null;
   targetVenue?: string | null;
+  targetMarket?: MarketMapSignalTargetMarket | null;
+};
+
+export type MarketMapSignalTargetMarket = {
+  marketId: string;
+  marketStatus: string | null;
+  marketBestBid: number | null;
+  marketBestAsk: number | null;
+  lastPrice: number | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  acceptingOrders: boolean | null;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: number | null;
 };
 
 export type MarketMapNodePreview = {

@@ -3,7 +3,9 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { getRedisStatus } from "../redis.js";
+import { fetchMarketSignalPricingByIds } from "../repos/unified-read.js";
 import {
   marketMapNodeEventsQuerySchema,
   marketMapNodeParamsSchema,
@@ -16,6 +18,7 @@ import {
   type MarketMapMeta,
   type MarketMapNode,
   type MarketMapSignalSummary,
+  type MarketMapSignalTargetMarket,
   type MarketMapVenue,
   marketMapActiveKey,
   marketMapRunMetaKey,
@@ -187,6 +190,102 @@ function toIsoString(value: Date | string): string {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return new Date().toISOString();
   return new Date(parsed).toISOString();
+}
+
+function normalizeSignalTargetMarket(params: {
+  marketId: string;
+  marketStatus: string | null;
+  pmAcceptingOrders: boolean | null;
+  closeTime: unknown;
+  expirationTime: unknown;
+  bestBid: unknown;
+  bestAsk: unknown;
+  bestBidYes: unknown;
+  bestAskYes: unknown;
+  bestBidNo: unknown;
+  bestAskNo: unknown;
+  lastPrice: unknown;
+  resolvedOutcome: string | null;
+  resolvedOutcomePct: unknown;
+}): MarketMapSignalTargetMarket {
+  const yesBid = toNumber(params.bestBidYes) ?? toNumber(params.bestBid);
+  const yesAsk = toNumber(params.bestAskYes) ?? toNumber(params.bestAsk);
+  const noBid =
+    toNumber(params.bestBidNo) ??
+    (yesBid == null ? null : Math.max(0, Math.min(1, 1 - yesBid)));
+  const noAsk =
+    toNumber(params.bestAskNo) ??
+    (yesAsk == null ? null : Math.max(0, Math.min(1, 1 - yesAsk)));
+
+  return {
+    marketId: params.marketId,
+    marketStatus: params.marketStatus,
+    marketBestBid: toNumber(params.bestBid),
+    marketBestAsk: toNumber(params.bestAsk),
+    lastPrice: toNumber(params.lastPrice),
+    yesBid,
+    yesAsk,
+    noBid,
+    noAsk,
+    acceptingOrders: computeAcceptingOrders({
+      status: params.marketStatus,
+      closeTime: params.closeTime,
+      expirationTime: params.expirationTime,
+      pmAcceptingOrders: params.pmAcceptingOrders,
+    }),
+    resolvedOutcome: params.resolvedOutcome,
+    resolvedOutcomePct: toNumber(params.resolvedOutcomePct),
+  };
+}
+
+async function enrichSignalSummaryTargetMarkets(
+  signals: Iterable<MarketMapSignalSummary>,
+): Promise<void> {
+  const signalList = Array.from(signals);
+  if (signalList.length === 0) return;
+
+  const marketIds = Array.from(
+    new Set(
+      signalList
+        .map((signal) => signal.targetMarketId?.trim() || null)
+        .filter((marketId): marketId is string => Boolean(marketId)),
+    ),
+  );
+  if (marketIds.length === 0) {
+    for (const signal of signalList) {
+      signal.targetMarket = null;
+    }
+    return;
+  }
+
+  const rows = await fetchMarketSignalPricingByIds(pool, marketIds);
+  const byMarketId = new Map<string, MarketMapSignalTargetMarket>();
+  for (const row of rows) {
+    byMarketId.set(
+      row.market_id,
+      normalizeSignalTargetMarket({
+        marketId: row.market_id,
+        marketStatus: row.market_status ?? null,
+        pmAcceptingOrders: row.pm_accepting_orders ?? null,
+        closeTime: row.close_time,
+        expirationTime: row.expiration_time,
+        bestBid: row.best_bid,
+        bestAsk: row.best_ask,
+        bestBidYes: row.best_bid_yes,
+        bestAskYes: row.best_ask_yes,
+        bestBidNo: row.best_bid_no,
+        bestAskNo: row.best_ask_no,
+        lastPrice: row.last_price,
+        resolvedOutcome: row.resolved_outcome ?? null,
+        resolvedOutcomePct: row.resolved_outcome_pct,
+      }),
+    );
+  }
+
+  for (const signal of signalList) {
+    const marketId = signal.targetMarketId?.trim() || null;
+    signal.targetMarket = marketId ? (byMarketId.get(marketId) ?? null) : null;
+  }
 }
 
 function normalizeLiveRow(
@@ -457,6 +556,7 @@ async function loadNodeSignalSummaryByNodeId(params: {
     });
   }
 
+  await enrichSignalSummaryTargetMarkets(topSignalByNodeId.values());
   return { directCountByNodeId, topSignalByNodeId };
 }
 
@@ -672,6 +772,9 @@ async function loadEventSignalSummaryByEventId(params: {
       },
     });
   }
+  await enrichSignalSummaryTargetMarkets(
+    Array.from(byEventId.values(), (summary) => summary.topSignal),
+  );
   return byEventId;
 }
 
