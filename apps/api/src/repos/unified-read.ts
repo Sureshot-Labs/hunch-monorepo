@@ -2034,6 +2034,23 @@ export type EventDetailsRow = {
   market_updated_at: unknown;
 };
 
+export type MarketSignalPricingRow = {
+  market_id: string;
+  market_status: string | null;
+  pm_accepting_orders: boolean | null;
+  close_time: unknown;
+  expiration_time: unknown;
+  best_bid: unknown;
+  best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
+  last_price: unknown;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: unknown;
+};
+
 export async function fetchEventDetails(
   pool: Pool,
   eventId: string,
@@ -2141,6 +2158,68 @@ export async function fetchEventDetails(
   `;
 
   const { rows } = await pool.query<EventDetailsRow>(eventSql, [eventId]);
+  return rows;
+}
+
+export async function fetchMarketSignalPricingByIds(
+  pool: Pool,
+  marketIds: string[],
+): Promise<MarketSignalPricingRow[]> {
+  const uniqueIds = Array.from(
+    new Set(marketIds.map((marketId) => marketId.trim()).filter(Boolean)),
+  );
+  if (uniqueIds.length === 0) return [];
+
+  const sql = `
+    SELECT
+      m.id as market_id,
+      m.status as market_status,
+      pm.accepting_orders as pm_accepting_orders,
+      m.close_time,
+      m.expiration_time,
+      m.best_bid,
+      m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
+      m.last_price,
+      m.resolved_outcome,
+      m.resolved_outcome_pct
+    FROM unified_markets m
+    LEFT JOIN LATERAL (
+      select
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>0)
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null
+            then (m.clob_token_ids::jsonb->>1)
+          else m.token_no
+        end as token_no
+    ) mt on true
+    LEFT JOIN LATERAL (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_yes
+      order by ts desc
+      limit 1
+    ) yes_top on true
+    LEFT JOIN LATERAL (
+      select best_bid, best_ask
+      from unified_book_top
+      where token_id = mt.token_no
+      order by ts desc
+      limit 1
+    ) no_top on true
+    LEFT JOIN polymarket_markets pm
+      ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
+    WHERE m.id = any($1::text[])
+  `;
+
+  const { rows } = await pool.query<MarketSignalPricingRow>(sql, [uniqueIds]);
   return rows;
 }
 

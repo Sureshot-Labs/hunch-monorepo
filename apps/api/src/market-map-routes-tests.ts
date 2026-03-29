@@ -36,6 +36,15 @@ type NodeEventsPayload = {
       targetMarketId?: string | null;
       targetMarketTitle?: string | null;
       targetEventId?: string | null;
+      targetMarket?: {
+        marketId: string;
+        marketBestBid: number | null;
+        marketBestAsk: number | null;
+        yesBid: number | null;
+        yesAsk: number | null;
+        noBid: number | null;
+        noAsk: number | null;
+      } | null;
     } | null;
   }>;
 };
@@ -50,6 +59,15 @@ type MarketMapPayload = {
         targetMarketId?: string | null;
         targetMarketTitle?: string | null;
         targetEventId?: string | null;
+        targetMarket?: {
+          marketId: string;
+          marketBestBid: number | null;
+          marketBestAsk: number | null;
+          yesBid: number | null;
+          yesAsk: number | null;
+          noBid: number | null;
+          noAsk: number | null;
+        } | null;
       } | null;
     }>;
   }>;
@@ -679,6 +697,19 @@ async function main() {
       signaledEvent?.topSignal?.targetEventId,
       `event-a-${suiteId}`,
     );
+    assert.equal(signaledEvent?.topSignal?.targetMarket?.marketId, signalMarketId);
+    assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestBid, 0.45);
+    assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(signaledEvent?.topSignal?.targetMarket?.yesBid, 0.45);
+    assert.equal(signaledEvent?.topSignal?.targetMarket?.yesAsk, 0.55);
+    assert.ok(
+      Math.abs((signaledEvent?.topSignal?.targetMarket?.noBid ?? 0) - 0.55) <
+        1e-9,
+    );
+    assert.ok(
+      Math.abs((signaledEvent?.topSignal?.targetMarket?.noAsk ?? 0) - 0.45) <
+        1e-9,
+    );
 
     const marketMap = await requestMarketMap({
       app,
@@ -696,6 +727,9 @@ async function main() {
     assert.equal(previewSignal?.targetMarketId, signalMarketId);
     assert.equal(previewSignal?.targetMarketTitle, "Alpha alternate line");
     assert.equal(previewSignal?.targetEventId, `event-a-${suiteId}`);
+    assert.equal(previewSignal?.targetMarket?.marketId, signalMarketId);
+    assert.equal(previewSignal?.targetMarket?.marketBestBid, 0.45);
+    assert.equal(previewSignal?.targetMarket?.marketBestAsk, 0.55);
 
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
