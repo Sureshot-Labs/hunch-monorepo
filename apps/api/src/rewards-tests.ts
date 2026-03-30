@@ -493,6 +493,36 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "set referral code rejects values outside 3-10 chars after normalization",
+    run: async () => {
+      const db = createReferralDb([{ id: "user-a", referral_code: null }]);
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-a",
+            referralCode: "ab",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "statusCode" in error &&
+          (error as Error & { statusCode?: number }).statusCode === 400,
+      );
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-a",
+            referralCode: "ABCDEFGHIJK",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "statusCode" in error &&
+          (error as Error & { statusCode?: number }).statusCode === 400,
+      );
+    },
+  },
+  {
     name: "set referral code rejects conflicts without force transfer",
     run: async () => {
       const db = createReferralDb([
@@ -634,6 +664,26 @@ const tests: TestCase[] = [
         referralCode: "missing",
       });
       assert.equal(missing.status, "not_found");
+    },
+  },
+  {
+    name: "attach referral rejects values outside 3-10 chars after normalization",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [{ id: "user-a", referral_code: null }],
+      });
+
+      const tooShort = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "ab",
+      });
+      assert.equal(tooShort.status, "invalid_code");
+
+      const tooLong = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "ABCDEFGHIJK",
+      });
+      assert.equal(tooLong.status, "invalid_code");
     },
   },
   {

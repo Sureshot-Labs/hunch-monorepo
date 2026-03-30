@@ -3,7 +3,7 @@ import { zEthAddress, zRequiredString, zVenue } from "./common.js";
 
 export const authPrivyBodySchema = z.object({
   accessToken: zRequiredString("accessToken is required"),
-  referralCode: z.string().trim().min(1).max(32).optional(),
+  referralCode: z.string().trim().min(3).max(10).optional(),
   inviteConfirmed: z.boolean().optional(),
   expectedAddedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
   expectedRemovedWalletAddresses: z.array(z.string().trim().min(1)).optional(),

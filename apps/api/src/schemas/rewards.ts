@@ -7,11 +7,11 @@ export const rewardsReferralsQuerySchema = z.object({
 });
 
 export const rewardsReferralCodeUpdateBodySchema = z.object({
-  code: z.string().trim().min(1).max(32),
+  code: z.string().trim().min(3).max(10),
 });
 
 export const rewardsReferralAttachBodySchema = z.object({
-  code: z.string().trim().min(1).max(32),
+  code: z.string().trim().min(3).max(10),
 });
 
 const rewardsChainIdSchema = z

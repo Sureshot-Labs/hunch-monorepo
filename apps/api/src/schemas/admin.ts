@@ -180,7 +180,7 @@ export const adminUserKalshiProofBypassSchema = z.object({
 });
 
 export const adminUserReferralCodeSchema = z.object({
-  code: z.string().trim().min(1).max(32),
+  code: z.string().trim().min(3).max(10),
   forceTransfer: z.coerce.boolean().optional(),
 });
 

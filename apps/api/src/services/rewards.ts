@@ -37,6 +37,8 @@ import {
   type RewardsMultiplierSource,
 } from "./rewards-multiplier.js";
 
+const REFERRAL_CODE_MIN_LENGTH = 3;
+const REFERRAL_CODE_MAX_LENGTH = 10;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -256,8 +258,13 @@ function normalizeReferralCode(value: string): string | null {
   if (!trimmed) return null;
   const upper = trimmed.toUpperCase();
   const sanitized = upper.replace(/[^A-Z0-9]/g, "");
-  if (!sanitized) return null;
-  return sanitized.slice(0, 32);
+  if (
+    sanitized.length < REFERRAL_CODE_MIN_LENGTH ||
+    sanitized.length > REFERRAL_CODE_MAX_LENGTH
+  ) {
+    return null;
+  }
+  return sanitized;
 }
 
 function emptyReferralAttachmentState(): ReferralAttachmentState {
@@ -364,7 +371,7 @@ export async function getOrCreateReferralCode(
   }
 
   const fallback = `${generateReferralCode()}${Math.floor(Date.now() / 1000)}`;
-  const truncated = fallback.slice(0, 32);
+  const truncated = fallback.slice(0, REFERRAL_CODE_MAX_LENGTH);
   await setUserReferralCode(pool, userId, truncated);
   return truncated;
 }
