@@ -251,6 +251,195 @@ async function main() {
 
     {
       const response = await app.inject({
+        method: "GET",
+        url: `/wallets/resolve/${labeledAddress}?chain=polygon`,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.wallet?.walletId, labeledWalletId);
+      assert.equal(body.wallet?.followed, false);
+      assert.equal(body.wallet?.userName, null);
+      assert.equal(body.wallet?.userLabel, null);
+      assert.equal(body.wallet?.userLabelColor, null);
+      assert.equal(body.matches.length, 1);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/${labeledWalletId}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.wallet.walletId, labeledWalletId);
+      assert.equal(body.wallet.userName, null);
+      assert.equal(body.wallet.userLabel, null);
+      assert.equal(body.wallet.userLabelColor, null);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/${labeledWalletId}/series`,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.walletId, labeledWalletId);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary/stats",
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.stats.trackedWallets, null);
+      assert.equal(body.stats.trackedPnl30d, null);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary/stats",
+        headers: authHeaders,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.stats.trackedWallets, 0);
+      assert.equal(body.stats.trackedPnl30d, null);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary/stats",
+        headers: {
+          authorization: "Bearer invalid-token",
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.stats.trackedWallets, null);
+      assert.equal(body.stats.trackedPnl30d, null);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/whales?limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/whales?limit=5&offset=0",
+        headers: {
+          authorization: "Bearer invalid-token",
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary?scope=whales&limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary?scope=following&limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 401);
+      assert.match(response.body, /Authentication required for following scope/);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/activity/signals?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/signals?limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 401);
+      assert.match(response.body, /Authentication required for following scope/);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/activity?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity?limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 401);
+      assert.match(
+        response.body,
+        /Authentication required when walletId is omitted/,
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/positions?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/positions?limit=5&offset=0",
+      });
+      assert.equal(response.statusCode, 401);
+      assert.match(
+        response.body,
+        /Authentication required when walletId is omitted/,
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/wallets/positions/history?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().ok, true);
+    }
+
+    {
+      const response = await app.inject({
         method: "PATCH",
         url: `/wallets/private/${labeledAddress}?chain=polygon`,
         headers: {

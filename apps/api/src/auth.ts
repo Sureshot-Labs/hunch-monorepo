@@ -1989,6 +1989,7 @@ export class AuthService {
 
 // Authentication middleware for Fastify
 type AuthMiddlewareOptions = {
+  optional?: boolean;
   requireWallet?: boolean;
 };
 
@@ -2044,8 +2045,12 @@ function requiresCsrf(method: string): boolean {
 export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const authHeader = request.headers.authorization;
+    const allowAnonymous = options.optional;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      if (allowAnonymous) {
+        return;
+      }
       reply.code(401);
       return reply.send({ error: "Missing or invalid authorization header" });
     }
@@ -2054,6 +2059,10 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     const decoded = AuthService.verifyToken(token);
 
     if (!decoded) {
+      if (allowAnonymous) {
+        request.log.debug("Ignoring invalid bearer token for optional auth route");
+        return;
+      }
       reply.code(401);
       return reply.send({ error: "Invalid or expired token" });
     }
@@ -2061,6 +2070,10 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     // Validate session
     const session = await AuthService.validateSession(token);
     if (!session) {
+      if (allowAnonymous) {
+        request.log.debug("Ignoring expired session for optional auth route");
+        return;
+      }
       reply.code(401);
       return reply.send({ error: "Invalid or expired session" });
     }
@@ -2084,6 +2097,10 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     // Get user data
     const user = await AuthService.getUserById(decoded.userId);
     if (!user || !user.isActive) {
+      if (allowAnonymous) {
+        request.log.debug("Ignoring inactive user for optional auth route");
+        return;
+      }
       reply.code(401);
       return reply.send({ error: "User not found or inactive" });
     }

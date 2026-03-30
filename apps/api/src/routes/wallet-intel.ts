@@ -213,7 +213,7 @@ export type WalletPresentationBadge = {
 
 export type WalletActivitySummaryHeroStats = {
   totalWallets: number;
-  trackedWallets: number;
+  trackedWallets: number | null;
   totalPnl30d: number | null;
   trackedPnl30d: number | null;
   asOf: Date;
@@ -774,7 +774,7 @@ async function loadWalletPrivateMeta(
 
 async function loadWalletPrivateMetaByWalletIds(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   walletIds: string[],
 ): Promise<Map<string, WalletPrivateMetaRow>> {
   const byWallet = new Map<string, WalletPrivateMetaRow>();
@@ -2118,8 +2118,9 @@ export function shouldReturnFilterTooBroad(input: {
 
 async function loadFollowingWalletIds(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
 ): Promise<string[]> {
+  if (!userId) return [];
   const rows = await client.query<{ wallet_id: string }>(
     `select wallet_id from wallet_follows where user_id = $1`,
     [userId],
@@ -2572,7 +2573,7 @@ async function filterWalletIdsByAttribution(
 
 async function loadWalletIdsForSummaryScope(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   scope: "following" | "whales" | "all",
   options?: {
     windowHours?: number;
@@ -2603,10 +2604,12 @@ export function buildWalletActivitySummaryHeroStats(input: {
   followedWalletIds: string[];
   portfolioPerformanceMap: Map<string, WalletPortfolioPerformance>;
   asOfFallback?: Date;
+  includeTrackedStats?: boolean;
 }): WalletActivitySummaryHeroStats {
   const uniqueWalletIds = Array.from(new Set(input.walletIds));
   const uniqueFollowedWalletIds = Array.from(new Set(input.followedWalletIds));
   const asOfFallback = input.asOfFallback ?? new Date();
+  const includeTrackedStats = input.includeTrackedStats ?? true;
   let totalPnl30d: number | null = null;
   let trackedPnl30d: number | null = null;
   let latestAsOfMs = 0;
@@ -2620,27 +2623,29 @@ export function buildWalletActivitySummaryHeroStats(input: {
     totalPnl30d = (totalPnl30d ?? 0) + performance.pnlUsd;
   }
 
-  for (const walletId of uniqueFollowedWalletIds) {
-    const performance = input.portfolioPerformanceMap.get(walletId);
-    if (performance?.endAsOf) {
-      latestAsOfMs = Math.max(latestAsOfMs, performance.endAsOf.getTime());
+  if (includeTrackedStats) {
+    for (const walletId of uniqueFollowedWalletIds) {
+      const performance = input.portfolioPerformanceMap.get(walletId);
+      if (performance?.endAsOf) {
+        latestAsOfMs = Math.max(latestAsOfMs, performance.endAsOf.getTime());
+      }
+      if (performance?.pnlUsd == null) continue;
+      trackedPnl30d = (trackedPnl30d ?? 0) + performance.pnlUsd;
     }
-    if (performance?.pnlUsd == null) continue;
-    trackedPnl30d = (trackedPnl30d ?? 0) + performance.pnlUsd;
   }
 
   return {
     totalWallets: uniqueWalletIds.length,
-    trackedWallets: uniqueFollowedWalletIds.length,
+    trackedWallets: includeTrackedStats ? uniqueFollowedWalletIds.length : null,
     totalPnl30d,
-    trackedPnl30d,
+    trackedPnl30d: includeTrackedStats ? trackedPnl30d : null,
     asOf: latestAsOfMs > 0 ? new Date(latestAsOfMs) : asOfFallback,
   };
 }
 
 async function loadWalletActivitySummaryHeroStats(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   input: {
     windowHours: number;
     refreshPolicy: Awaited<
@@ -2674,12 +2679,13 @@ async function loadWalletActivitySummaryHeroStats(
     followedWalletIds,
     portfolioPerformanceMap,
     asOfFallback: asOf,
+    includeTrackedStats: userId != null,
   });
 }
 
 async function loadWalletIdsForSignalScope(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   scope: "following" | "active" | "all",
   windowHours: number,
   activityThresholds?: {
@@ -2699,7 +2705,7 @@ async function loadWalletIdsForSignalScope(
 
 async function loadWalletRowsByIds(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   walletIds: string[],
   categories: string[] | null,
 ): Promise<CandidateWalletRow[]> {
@@ -2776,7 +2782,7 @@ async function loadWalletRowsByIds(
 
 async function loadWalletPageStateByIds(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   walletIds: string[],
 ): Promise<
   Map<
@@ -2845,7 +2851,7 @@ async function loadWalletPageStateByIds(
 
 async function loadWhalePageMetadataByIds(
   client: PoolClient,
-  userId: string,
+  userId: string | null,
   walletIds: string[],
 ): Promise<Map<string, WhalePageMetadataRow>> {
   const byId = new Map<string, WhalePageMetadataRow>();
@@ -4401,18 +4407,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/resolve/:address",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: {
         params: walletResolverParamsSchema,
         querystring: walletResolverQuerySchema,
       },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const rawAddress = request.params.address.trim();
       const address = normalizeAddress(rawAddress);
@@ -4430,7 +4432,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const wallets = await findWalletsByAddress(client, address);
         const privateMetaByWallet = await loadWalletPrivateMetaByWalletIds(
           client,
-          user.id,
+          userId,
           wallets.map((wallet) => wallet.id),
         );
         const matches = wallets.map((wallet) => {
@@ -4458,7 +4460,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, address },
+          { error, userId, address },
           "Failed to resolve wallet by address",
         );
         reply.code(500);
@@ -4780,15 +4782,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/whales",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletWhalesQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
       const categoryFilterRaw = Array.isArray(query.categories)
@@ -4814,7 +4812,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       );
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
-      const cacheKey = walletIntelCacheKey("wallets-whales", user.id, query);
+      const cacheKey = walletIntelCacheKey(
+        "wallets-whales",
+        userId ?? "anon",
+        query,
+      );
       const cached = await readWalletIntelCachedBody(
         cacheClient,
         cacheKey,
@@ -4996,7 +4998,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   limit $2
                 `,
                 [
-                  user.id,
+                  userId,
                   maxScanCandidates + 1,
                   query.windowDays,
                   categoryFilter.length > 0 ? categoryFilter : null,
@@ -5198,7 +5200,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           if (useSlimWhaleSelector && pagedIds.length > 0) {
             const pageMetadataMap = await loadWhalePageMetadataByIds(
               client,
-              user.id,
+              userId,
               pagedIds,
             );
             pagedRows = pagedRows.map((row) =>
@@ -5371,7 +5373,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(body);
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load whale wallets",
         );
         reply.code(500);
@@ -5388,21 +5390,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/:walletId",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { params: walletProfileParamsSchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const walletId = request.params.walletId;
       const client = await pool.connect();
       try {
         const wallet = (
-          await loadWalletRowsByIds(client, user.id, [walletId], null)
+          await loadWalletRowsByIds(client, userId, [walletId], null)
         ).find(candidate => candidate.id === walletId) ?? null;
         if (!wallet) {
           reply.code(404);
@@ -5565,7 +5563,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, walletId, userId: user.id },
+          { error, walletId, userId },
           "Failed to load wallet",
         );
         reply.code(500);
@@ -5582,18 +5580,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/:walletId/series",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: {
         params: walletProfileParamsSchema,
         querystring: walletSeriesQuerySchema,
       },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const walletId = request.params.walletId;
       const query = request.query;
@@ -5643,7 +5637,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, walletId, userId: user.id, query },
+          { error, walletId, userId, query },
           "Failed to load wallet series",
         );
         reply.code(500);
@@ -5660,22 +5654,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/activity/summary/stats",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletActivitySummaryStatsQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-summary-stats",
-        user.id,
+        userId ?? "anon",
         query,
       );
       const cached = await readWalletIntelCachedBody(
@@ -5703,7 +5693,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           );
           const stats = await loadWalletActivitySummaryHeroStats(
             client,
-            user.id,
+            userId,
             {
               windowHours,
               refreshPolicy: refreshPolicy.effective,
@@ -5729,7 +5719,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(payload);
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet activity summary stats",
         );
         reply.code(500);
@@ -5746,17 +5736,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/activity/summary",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletActivitySummaryQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
+      if (!userId && query.scope === "following") {
+        reply.code(401);
+        return reply.send({ error: "Authentication required for following scope" });
+      }
       const categoryFilterRaw = Array.isArray(query.categories)
         ? query.categories
         : query.categories
@@ -5782,7 +5772,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-summary",
-        user.id,
+        userId ?? "anon",
         query,
       );
       const cached = await readWalletIntelCachedBody(
@@ -5817,7 +5807,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           );
           const candidateWalletIds = await loadWalletIdsForSummaryScope(
             client,
-            user.id,
+            userId,
             query.scope,
             {
               windowHours,
@@ -5914,7 +5904,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               resolvedTradeStatsMap,
             ] =
               await Promise.all([
-              loadWalletRowsByIds(client, user.id, pagedIds, null),
+              loadWalletRowsByIds(client, userId, pagedIds, null),
               fetchWalletActivityTopChanges(client, pagedIds, summaryOptions),
               fetchWalletActivitySignalSummary(
                 client,
@@ -6038,7 +6028,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
           const candidates = await loadWalletRowsByIds(
             client,
-            user.id,
+            userId,
             filteredWalletIds,
             null,
           );
@@ -6274,7 +6264,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(body);
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet activity summaries",
         );
         reply.code(500);
@@ -6291,15 +6281,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/activity/signals",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletActivitySignalsQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
       const categoryFilterRaw = Array.isArray(query.categories)
@@ -6327,11 +6313,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         (query.severity as string[] | undefined) ?? [],
       );
       const displayReasonFilter = normalizeStringArray(query.displayReasons);
+      if (!userId && !query.walletId && query.scope === "following") {
+        reply.code(401);
+        return reply.send({ error: "Authentication required for following scope" });
+      }
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
       const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-signals",
-        user.id,
+        userId ?? "anon",
         query,
       );
       const cached = await readWalletIntelCachedBody(
@@ -6376,7 +6366,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? [query.walletId]
             : await loadWalletIdsForSignalScope(
                 client,
-                user.id,
+                userId,
                 query.scope,
                 windowHours,
                 {
@@ -6477,7 +6467,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               new Set(signalRows.map((row) => row.walletId)),
             );
             const [pageCandidates, signalPageLabelsMap] = await Promise.all([
-              loadWalletRowsByIds(client, user.id, pageWalletIds, null),
+              loadWalletRowsByIds(client, userId, pageWalletIds, null),
               fetchWalletActivitySignalPageLabels(
                 client,
                 signalRows.map((row) => ({
@@ -6559,7 +6549,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
           const candidates = await loadWalletRowsByIds(
             client,
-            user.id,
+            userId,
             workingWalletIds,
             null,
           );
@@ -6643,7 +6633,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           if (activeWithInvalidClose > 0) {
             app.log.warn(
               {
-                userId: user.id,
+                userId,
                 activeWithInvalidClose,
                 samples: activeInvalidSamples,
               },
@@ -6755,7 +6745,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(body);
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet activity signals",
         );
         reply.code(500);
@@ -6772,18 +6762,20 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/activity",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletActivityQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
-      const params: Array<string | number | null> = [user.id];
+      if (!userId && !query.walletId) {
+        reply.code(401);
+        return reply.send({
+          error: "Authentication required when walletId is omitted",
+        });
+      }
+      const params: Array<string | number | null> = [userId];
       let where = "";
       let idx = 2;
       const userParam = 1;
@@ -6974,7 +6966,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet activity",
         );
         reply.code(500);
@@ -6991,18 +6983,20 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/positions",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletPositionsQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
-      const params: Array<string | number | null> = [user.id];
+      if (!userId && !query.walletId) {
+        reply.code(401);
+        return reply.send({
+          error: "Authentication required when walletId is omitted",
+        });
+      }
+      const params: Array<string | number | null> = [userId];
       let where = "";
       let idx = 2;
       const userParam = 1;
@@ -7186,7 +7180,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet positions",
         );
         reply.code(500);
@@ -7200,18 +7194,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/wallets/positions/history",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: createAuthMiddleware({ optional: true }),
       schema: { querystring: walletPositionHistoryQuerySchema },
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401);
-        return reply.send({ error: "Unauthorized" });
-      }
+      const userId = request.user?.id ?? null;
 
       const query = request.query;
-      const params: Array<string | number | null> = [user.id, query.walletId];
+      const params: Array<string | number | null> = [userId, query.walletId];
       let idx = 3;
       const userParam = 1;
       const walletParam = 2;
@@ -7391,7 +7381,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, query },
+          { error, userId, query },
           "Failed to load wallet position history",
         );
         reply.code(500);
