@@ -1352,6 +1352,7 @@ export class AuthService {
          api_secret_enc = $5,
          api_passphrase_enc = $6,
          additional_data = $7,
+         is_active = true,
          funder_address = CASE WHEN $8::text IS NULL THEN user_venue_credentials.funder_address ELSE $8::text END,
          funder_updated_at = CASE WHEN $8::text IS NULL THEN user_venue_credentials.funder_updated_at ELSE now() END,
          updated_at = now(),
