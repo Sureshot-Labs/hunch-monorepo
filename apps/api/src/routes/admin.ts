@@ -17,9 +17,11 @@ import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debrid
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
+  deleteAdminManualVolumeEvent,
   deleteRewardsMultiplierOverride,
   fetchActiveRewardsMultiplierPolicy,
   fetchActiveRewardsPolicy,
+  fetchAdminManualVolumeEvents,
   insertRewardsMultiplierPolicy,
   listRewardsMultiplierOverrides,
   upsertRewardsMultiplierOverride,
@@ -52,6 +54,8 @@ import {
   adminIntelPolicyBodySchema,
   adminIntelPolicyParamsSchema,
   adminDebridgeConfigSchema,
+  adminManualPointsParamsSchema,
+  adminManualPointsQuerySchema,
   adminPointsSchema,
   adminRewardsMultiplierOverrideParamsSchema,
   adminRewardsMultiplierOverrideSchema,
@@ -2594,6 +2598,73 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           sourceType,
           sourceId,
           amount: body.amount,
+        },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/points/manual-events",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { querystring: adminManualPointsQuerySchema },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      const result = await fetchAdminManualVolumeEvents(pool, {
+        userId: query.userId ?? null,
+        walletAddress: query.walletAddress?.trim() ?? null,
+        limit: query.limit ?? 25,
+        offset: query.offset ?? 0,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items.map((item) => ({
+          id: item.id,
+          userId: item.user_id,
+          walletAddress: item.wallet_address ?? null,
+          venue: item.venue,
+          sourceType: item.source_type,
+          sourceId: item.source_id,
+          amount: Number(item.notional_usd ?? 0),
+          pointsAwarded: Number(item.points_awarded ?? 0),
+          createdAt: item.created_at,
+        })),
+        total: result.total,
+        limit: query.limit ?? 25,
+        offset: query.offset ?? 0,
+      });
+    },
+  );
+
+  z.delete(
+    "/admin/points/manual-events/:id",
+    {
+      preHandler: createAdminMiddleware(),
+      schema: { params: adminManualPointsParamsSchema },
+    },
+    async (request, reply) => {
+      const deleted = await deleteAdminManualVolumeEvent(pool, request.params.id);
+      if (!deleted) {
+        reply.code(404);
+        return reply.send({ error: "Manual admin points event not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        event: {
+          id: deleted.id,
+          userId: deleted.user_id,
+          walletAddress: deleted.wallet_address ?? null,
+          venue: deleted.venue,
+          sourceType: deleted.source_type,
+          sourceId: deleted.source_id,
+          amount: Number(deleted.notional_usd ?? 0),
+          pointsAwarded: Number(deleted.points_awarded ?? 0),
+          createdAt: deleted.created_at,
         },
       });
     },

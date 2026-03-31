@@ -18,6 +18,7 @@ import {
   findUserByReferralCode,
   insertReferral,
   insertRewardClaim,
+  type RewardsManualFilterMode,
   type RewardsLeaderboardInterval,
   type RewardsLeaderboardMetric,
   type RewardsLeaderboardRow,
@@ -823,11 +824,15 @@ export async function getRewardsLeaderboard(
     interval: RewardsLeaderboardInterval;
     limit: number;
     offset: number;
+    excludeManual: boolean;
   },
 ): Promise<RewardsLeaderboard> {
   const intervalApplied =
     inputs.metric === "pnl" ? "alltime" : inputs.interval;
   const startAt = resolveLeaderboardStart(intervalApplied);
+  const manualMode: RewardsManualFilterMode = inputs.excludeManual
+    ? "exclude_all"
+    : "include_all";
 
   const [rows, me] = await Promise.all([
     fetchRewardsLeaderboardRows(pool, {
@@ -835,11 +840,13 @@ export async function getRewardsLeaderboard(
       startAt,
       limit: inputs.limit,
       offset: inputs.offset,
+      manualMode,
     }),
     fetchRewardsLeaderboardMe(pool, {
       userId: inputs.userId,
       metric: inputs.metric,
       startAt,
+      manualMode,
     }),
   ]);
 

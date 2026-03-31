@@ -252,6 +252,26 @@ export const adminPointsSchema = z
     }
   });
 
+export const adminManualPointsQuerySchema = z
+  .object({
+    userId: z.string().uuid().optional(),
+    walletAddress: z.string().min(1).optional(),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    offset: z.coerce.number().int().min(0).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.userId && !value.walletAddress) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide userId or walletAddress",
+      });
+    }
+  });
+
+export const adminManualPointsParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
 export const adminRewardsTreasuryQuerySchema = z.object({
   chainId: z.string().trim().min(1).optional(),
 });

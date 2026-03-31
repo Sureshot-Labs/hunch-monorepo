@@ -76,7 +76,57 @@ export type RewardsLeaderboardRow = {
   walletAddress: string | null;
 };
 
+export type RewardsManualFilterMode =
+  | "include_all"
+  | "exclude_volume_only"
+  | "exclude_all";
+
+export type AdminManualVolumeEvent = {
+  id: string;
+  user_id: string;
+  wallet_address: string | null;
+  venue: string;
+  source_type: string;
+  source_id: string;
+  notional_usd: string | null;
+  points_awarded: string | null;
+  created_at: Date;
+};
+
 const USDC_MICRO_FACTOR = 1_000_000n;
+
+function buildManualAdminVolumeEventPredicate(alias: string): string {
+  return `${alias}.source_id like 'manual:%'`;
+}
+
+function buildVolumeEventsCreatedAtClause(
+  alias: string,
+  createdAtParamIdx: number | null,
+  prefix: "where" | "and" = "where",
+): string {
+  if (createdAtParamIdx == null) return "";
+  return `${prefix} ${alias}.created_at >= $${createdAtParamIdx}`;
+}
+
+function buildVolumeContributionSql(
+  alias: string,
+  manualMode: RewardsManualFilterMode,
+): string {
+  if (manualMode === "include_all") {
+    return `${alias}.notional_usd`;
+  }
+  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.notional_usd else 0 end`;
+}
+
+function buildPointsContributionSql(
+  alias: string,
+  manualMode: RewardsManualFilterMode,
+): string {
+  if (manualMode !== "exclude_all") {
+    return `${alias}.points_awarded`;
+  }
+  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
+}
 
 function decimalToMicroFloor(value: string | null | undefined): bigint {
   const raw = value?.trim() ?? "0";
@@ -469,7 +519,12 @@ export async function fetchUserVolume(
   userId: string,
 ): Promise<number> {
   const { rows } = await pool.query<{ total: string | null }>(
-    `select coalesce(sum(notional_usd), 0)::text as total from volume_events where user_id = $1`,
+    `
+      select coalesce(sum(notional_usd), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+        and not (${buildManualAdminVolumeEventPredicate("ve")})
+    `,
     [userId],
   );
   return Number(rows[0]?.total ?? 0);
@@ -811,6 +866,96 @@ export async function fetchReferralsForUser(
   }));
 }
 
+export async function fetchAdminManualVolumeEvents(
+  pool: DbQuery,
+  inputs: {
+    userId?: string | null;
+    walletAddress?: string | null;
+    limit: number;
+    offset: number;
+  },
+): Promise<{ total: number; items: AdminManualVolumeEvent[] }> {
+  const params: PgParams = [];
+  const whereParts = [buildManualAdminVolumeEventPredicate("ve")];
+
+  if (inputs.userId?.trim()) {
+    params.push(inputs.userId.trim());
+    whereParts.push(`ve.user_id = $${params.length}`);
+  }
+
+  if (inputs.walletAddress?.trim()) {
+    params.push(inputs.walletAddress.trim());
+    whereParts.push(`ve.wallet_address = $${params.length}`);
+  }
+
+  const whereSql = `where ${whereParts.join(" and ")}`;
+
+  const countResult = await pool.query<{ total: string | null }>(
+    `
+      select count(*)::text as total
+      from volume_events ve
+      ${whereSql}
+    `,
+    params,
+  );
+
+  params.push(inputs.limit);
+  const limitIdx = params.length;
+  params.push(inputs.offset);
+  const offsetIdx = params.length;
+
+  const { rows } = await pool.query<AdminManualVolumeEvent>(
+    `
+      select
+        ve.id,
+        ve.user_id,
+        ve.wallet_address,
+        ve.venue,
+        ve.source_type,
+        ve.source_id,
+        ve.notional_usd::text as notional_usd,
+        ve.points_awarded::text as points_awarded,
+        ve.created_at
+      from volume_events ve
+      ${whereSql}
+      order by ve.created_at desc, ve.id desc
+      limit $${limitIdx} offset $${offsetIdx}
+    `,
+    params,
+  );
+
+  return {
+    total: Number(countResult.rows[0]?.total ?? 0),
+    items: rows,
+  };
+}
+
+export async function deleteAdminManualVolumeEvent(
+  pool: DbQuery,
+  id: string,
+): Promise<AdminManualVolumeEvent | null> {
+  const { rows } = await pool.query<AdminManualVolumeEvent>(
+    `
+      delete from volume_events ve
+      where ve.id = $1
+        and ${buildManualAdminVolumeEventPredicate("ve")}
+      returning
+        ve.id,
+        ve.user_id,
+        ve.wallet_address,
+        ve.venue,
+        ve.source_type,
+        ve.source_id,
+        ve.notional_usd::text as notional_usd,
+        ve.points_awarded::text as points_awarded,
+        ve.created_at
+    `,
+    [id],
+  );
+
+  return rows[0] ?? null;
+}
+
 export async function markQualifiedReferralsForUser(
   pool: DbQuery,
   inputs: { userId: string; threshold: number },
@@ -983,21 +1128,28 @@ function buildPnlCteSql(userIdPlaceholder?: string): string {
 
 async function fetchVolumeRank(
   pool: DbQuery,
-  inputs: { value: number; startAt: Date | null },
+  inputs: {
+    value: number;
+    startAt: Date | null;
+    manualMode: RewardsManualFilterMode;
+  },
 ): Promise<number> {
   const params: PgParams = [inputs.value];
-  const whereClause = inputs.startAt ? "where created_at >= $2" : "";
   if (inputs.startAt) {
     params.push(inputs.startAt);
   }
+  const createdAtParamIdx = inputs.startAt ? params.length : null;
+  const whereClause = buildVolumeEventsCreatedAtClause("ve", createdAtParamIdx);
 
   const { rows } = await pool.query<{ higher: string | null }>(
     `
       with totals as (
-        select user_id, coalesce(sum(notional_usd), 0)::numeric as volume_usd
-        from volume_events
+        select
+          ve.user_id,
+          coalesce(sum(${buildVolumeContributionSql("ve", inputs.manualMode)}), 0)::numeric as volume_usd
+        from volume_events ve
         ${whereClause}
-        group by user_id
+        group by ve.user_id
       )
       select count(*)::text as higher
       from totals
@@ -1011,21 +1163,28 @@ async function fetchVolumeRank(
 
 async function fetchPointsRank(
   pool: DbQuery,
-  inputs: { value: number; startAt: Date | null },
+  inputs: {
+    value: number;
+    startAt: Date | null;
+    manualMode: RewardsManualFilterMode;
+  },
 ): Promise<number> {
   const params: PgParams = [inputs.value];
-  const whereClause = inputs.startAt ? "where created_at >= $2" : "";
   if (inputs.startAt) {
     params.push(inputs.startAt);
   }
+  const createdAtParamIdx = inputs.startAt ? params.length : null;
+  const whereClause = buildVolumeEventsCreatedAtClause("ve", createdAtParamIdx);
 
   const { rows } = await pool.query<{ higher: string | null }>(
     `
       with totals as (
-        select user_id, coalesce(sum(points_awarded), 0)::numeric as points
-        from volume_events
+        select
+          ve.user_id,
+          coalesce(sum(${buildPointsContributionSql("ve", inputs.manualMode)}), 0)::numeric as points
+        from volume_events ve
         ${whereClause}
-        group by user_id
+        group by ve.user_id
       )
       select count(*)::text as higher
       from totals
@@ -1067,6 +1226,7 @@ export async function fetchRewardsLeaderboardRows(
     startAt: Date | null;
     limit: number;
     offset: number;
+    manualMode: RewardsManualFilterMode;
   },
 ): Promise<RewardsLeaderboardRow[]> {
   if (inputs.metric === "pnl") {
@@ -1079,9 +1239,9 @@ export async function fetchRewardsLeaderboardRows(
         with ${buildPnlCteSql()},
         totals as (
           select user_id,
-                 coalesce(sum(notional_usd), 0)::numeric as volume_usd,
-                 coalesce(sum(points_awarded), 0)::numeric as points
-          from volume_events
+                 coalesce(sum(${buildVolumeContributionSql("ve", inputs.manualMode)}), 0)::numeric as volume_usd,
+                 coalesce(sum(${buildPointsContributionSql("ve", inputs.manualMode)}), 0)::numeric as points
+          from volume_events ve
           group by user_id
         ),
         ranked as (
@@ -1120,10 +1280,11 @@ export async function fetchRewardsLeaderboardRows(
 
   const metricColumn = inputs.metric === "points" ? "points" : "volume_usd";
   const params: PgParams = [];
-  const whereClause = inputs.startAt ? "where created_at >= $1" : "";
   if (inputs.startAt) {
     params.push(inputs.startAt);
   }
+  const createdAtParamIdx = inputs.startAt ? params.length : null;
+  const whereClause = buildVolumeEventsCreatedAtClause("ve", createdAtParamIdx);
   params.push(inputs.limit);
   const limitIdx = params.length;
   params.push(inputs.offset);
@@ -1132,12 +1293,12 @@ export async function fetchRewardsLeaderboardRows(
   const { rows } = await pool.query<RewardsLeaderboardRowDb>(
     `
       with totals as (
-        select user_id,
-               coalesce(sum(notional_usd), 0)::numeric as volume_usd,
-               coalesce(sum(points_awarded), 0)::numeric as points
-        from volume_events
+        select ve.user_id,
+               coalesce(sum(${buildVolumeContributionSql("ve", inputs.manualMode)}), 0)::numeric as volume_usd,
+               coalesce(sum(${buildPointsContributionSql("ve", inputs.manualMode)}), 0)::numeric as points
+        from volume_events ve
         ${whereClause}
-        group by user_id
+        group by ve.user_id
       ),
       ${buildPnlCteSql()},
       ranked as (
@@ -1181,24 +1342,30 @@ export async function fetchRewardsLeaderboardMe(
     userId: string;
     metric: RewardsLeaderboardMetric;
     startAt: Date | null;
+    manualMode: RewardsManualFilterMode;
   },
 ): Promise<RewardsLeaderboardRow | null> {
   const params: PgParams = [inputs.userId];
-  const totalsWhereClause = inputs.startAt ? "and created_at >= $2" : "";
   if (inputs.startAt) {
     params.push(inputs.startAt);
   }
+  const createdAtParamIdx = inputs.startAt ? params.length : null;
+  const totalsWhereClause = buildVolumeEventsCreatedAtClause(
+    "ve",
+    createdAtParamIdx,
+    "and",
+  );
 
   const { rows } = await pool.query<RewardsLeaderboardRowDb>(
     `
       with totals as (
-        select user_id,
-               coalesce(sum(notional_usd), 0)::numeric as volume_usd,
-               coalesce(sum(points_awarded), 0)::numeric as points
-        from volume_events
-        where user_id = $1
+        select ve.user_id,
+               coalesce(sum(${buildVolumeContributionSql("ve", inputs.manualMode)}), 0)::numeric as volume_usd,
+               coalesce(sum(${buildPointsContributionSql("ve", inputs.manualMode)}), 0)::numeric as points
+        from volume_events ve
+        where ve.user_id = $1
         ${totalsWhereClause}
-        group by user_id
+        group by ve.user_id
       ),
       ${buildPnlCteSql("$1")}
       select
@@ -1238,11 +1405,13 @@ export async function fetchRewardsLeaderboardMe(
       return fetchPointsRank(pool, {
         value: mapped.points,
         startAt: inputs.startAt,
+        manualMode: inputs.manualMode,
       });
     }
     return fetchVolumeRank(pool, {
       value: mapped.volumeUsd,
       startAt: inputs.startAt,
+      manualMode: inputs.manualMode,
     });
   })();
 

@@ -210,6 +210,7 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
         interval: query.interval,
         limit: query.limit,
         offset: query.offset,
+        excludeManual: query.excludeManual,
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, leaderboard });
