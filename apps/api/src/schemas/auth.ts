@@ -108,6 +108,13 @@ export const polymarketConnectBodySchema = z.object({
   funderAddress: zEthAddress.optional(),
 });
 
+export const polymarketEmbeddedConnectBodySchema = z.object({
+  funderAddress: zEthAddress.optional(),
+  authorizationSignature: zRequiredString(
+    "authorizationSignature is required",
+  ),
+});
+
 export const polymarketFunderBodySchema = z.object({
   funderAddress: zEthAddress.nullable(),
 });

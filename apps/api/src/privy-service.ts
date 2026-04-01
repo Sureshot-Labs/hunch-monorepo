@@ -13,11 +13,18 @@ const privyClient = new PrivyClient(env.privyAppId, env.privyAppSecret);
 
 export type PrivyUser = User;
 export type PrivyClaims = AuthTokenClaims;
+export type PrivyTokenKind = "access" | "identity";
 
 export type PrivyWalletType = "ethereum" | "solana";
 export type PrivyWallet = {
   address: string;
   walletType: PrivyWalletType;
+};
+export type PrivyWalletSource = "embedded" | "smart" | "external" | "unknown";
+export type PrivyWalletProfile = PrivyWallet & {
+  source: PrivyWalletSource;
+  isInternalWallet: boolean;
+  walletId?: string | null;
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -98,6 +105,36 @@ function addWallet(
   out.push(wallet);
 }
 
+function addWalletProfile(
+  out: PrivyWalletProfile[],
+  seen: Set<string>,
+  input: {
+    address: string;
+    walletType: PrivyWalletType;
+    source: PrivyWalletSource;
+    walletId?: string | null;
+    prepend?: boolean;
+  },
+) {
+  const normalized = normalizeWalletAddress(input.walletType, input.address);
+  const key = `${input.walletType}:${normalized}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  const wallet: PrivyWalletProfile = {
+    address: normalized,
+    walletType: input.walletType,
+    source: input.source,
+    isInternalWallet:
+      input.source === "embedded" || input.source === "smart",
+    walletId: input.walletId ?? undefined,
+  };
+  if (input.prepend) {
+    out.unshift(wallet);
+    return;
+  }
+  out.push(wallet);
+}
+
 export class PrivyAccessTokenError extends Error {
   constructor(message = "Invalid Privy access token") {
     super(message);
@@ -111,6 +148,18 @@ export class PrivyUpstreamError extends Error {
 }
 
 export class PrivyService {
+  static createClient(options?: { walletAuthorizationKey?: string }) {
+    return new PrivyClient(env.privyAppId, env.privyAppSecret, {
+      ...(options?.walletAuthorizationKey
+        ? {
+            walletApi: {
+              authorizationPrivateKey: options.walletAuthorizationKey,
+            },
+          }
+        : {}),
+    });
+  }
+
   /**
    * Verify a Privy access token and return the user claims
    */
@@ -133,6 +182,16 @@ export class PrivyService {
     } catch (error) {
       throw new PrivyUpstreamError(
         `Failed to fetch user data from Privy: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  static async getUserById(privyUserId: string): Promise<PrivyUser> {
+    try {
+      return await privyClient.getUser(privyUserId);
+    } catch (error) {
+      throw new PrivyUpstreamError(
+        `Failed to fetch Privy user by id: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
   }
@@ -184,6 +243,70 @@ export class PrivyService {
    */
   static extractWalletAddresses(privyUser: PrivyUser): string[] {
     return this.extractWallets(privyUser).map((w) => w.address);
+  }
+
+  static classifyWallets(privyUser: PrivyUser): PrivyWalletProfile[] {
+    const out: PrivyWalletProfile[] = [];
+    const seen = new Set<string>();
+
+    for (const account of privyUser.linkedAccounts) {
+      if (isWalletAccount(account)) {
+        const chainType = account.chainType;
+        if (chainType !== "ethereum" && chainType !== "solana") continue;
+        const source: PrivyWalletSource =
+          account.walletClientType === "privy" &&
+          account.connectorType === "embedded" &&
+          account.imported !== true
+            ? "embedded"
+            : "external";
+        addWalletProfile(out, seen, {
+          address: account.address,
+          walletType: chainType,
+          source,
+          walletId: account.id ?? undefined,
+        });
+        continue;
+      }
+
+      if (!isCrossAppAccount(account)) continue;
+
+      for (const wallet of account.embeddedWallets ?? []) {
+        if (typeof wallet.address !== "string") continue;
+        const walletType = inferWalletTypeFromAddress(wallet.address);
+        if (!walletType) continue;
+        addWalletProfile(out, seen, {
+          address: wallet.address,
+          walletType,
+          source: "embedded",
+        });
+      }
+
+      for (const wallet of account.smartWallets ?? []) {
+        if (typeof wallet.address !== "string") continue;
+        const walletType = inferWalletTypeFromAddress(wallet.address);
+        if (!walletType) continue;
+        addWalletProfile(out, seen, {
+          address: wallet.address,
+          walletType,
+          source: "smart",
+        });
+      }
+    }
+
+    const primary = privyUser.wallet;
+    if (primary?.address && primary.chainType) {
+      const chainType = primary.chainType;
+      if (chainType === "ethereum" || chainType === "solana") {
+        addWalletProfile(out, seen, {
+          address: primary.address,
+          walletType: chainType,
+          source: "unknown",
+          prepend: true,
+        });
+      }
+    }
+
+    return out;
   }
 
   /**
@@ -308,5 +431,112 @@ export class PrivyService {
         `Failed to delete Privy user: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
+  }
+
+  static async createUserWalletClient(accessToken: string): Promise<{
+    claims: PrivyClaims;
+    user: PrivyUser;
+    walletProfiles: PrivyWalletProfile[];
+    walletClient: PrivyClient;
+    authorizationKey: string;
+    authorizationExpiresAt: number;
+  }> {
+    const claims = await this.verifyAccessToken(accessToken);
+    const user = await this.getUserData(claims);
+    const userSigner = await privyClient.walletApi.generateUserSigner({
+      userJwt: accessToken,
+    });
+    const walletClient = this.createClient({
+      walletAuthorizationKey: userSigner.authorizationKey,
+    });
+
+    return {
+      claims,
+      user,
+      walletProfiles: this.classifyWallets(user),
+      walletClient,
+      authorizationKey: userSigner.authorizationKey,
+      authorizationExpiresAt:
+        userSigner.expiresAt instanceof Date
+          ? userSigner.expiresAt.getTime()
+          : userSigner.expiresAt,
+    };
+  }
+
+  static async createUserWalletClientWithFallback(tokens: {
+    accessToken?: string | null;
+    identityToken?: string | null;
+  }): Promise<{
+    claims: PrivyClaims | null;
+    user: PrivyUser;
+    walletProfiles: PrivyWalletProfile[];
+    walletClient: PrivyClient;
+    authorizationKey: string;
+    authorizationExpiresAt: number;
+    authUserId: string;
+    tokenKind: PrivyTokenKind;
+  }> {
+    const candidates: Array<{
+      token: string;
+      kind: PrivyTokenKind;
+    }> = [];
+    const seen = new Set<string>();
+
+    const pushCandidate = (
+      kind: PrivyTokenKind,
+      token: string | null | undefined,
+    ) => {
+      const trimmed = token?.trim() ?? "";
+      if (!trimmed || seen.has(trimmed)) return;
+      seen.add(trimmed);
+      candidates.push({ token: trimmed, kind });
+    };
+
+    pushCandidate("access", tokens.accessToken);
+    pushCandidate("identity", tokens.identityToken);
+
+    let lastError: unknown = null;
+    for (const candidate of candidates) {
+      try {
+        if (candidate.kind === "access") {
+          const result = await this.createUserWalletClient(candidate.token);
+          return {
+            ...result,
+            claims: result.claims,
+            authUserId: result.claims.userId,
+            tokenKind: "access",
+          };
+        }
+
+        const user = await privyClient.getUser({ idToken: candidate.token });
+        const userSigner = await privyClient.walletApi.generateUserSigner({
+          userJwt: candidate.token,
+        });
+        const walletClient = this.createClient({
+          walletAuthorizationKey: userSigner.authorizationKey,
+        });
+
+        return {
+          claims: null,
+          user,
+          walletProfiles: this.classifyWallets(user),
+          walletClient,
+          authorizationKey: userSigner.authorizationKey,
+          authorizationExpiresAt:
+            userSigner.expiresAt instanceof Date
+              ? userSigner.expiresAt.getTime()
+              : userSigner.expiresAt,
+          authUserId: user.id,
+          tokenKind: "identity",
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+    throw new Error("Missing Privy user authorization token.");
   }
 }

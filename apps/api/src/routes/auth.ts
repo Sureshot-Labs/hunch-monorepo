@@ -33,6 +33,7 @@ import {
   authPrivyTerminalErrorResponseSchema,
   walletNonceBodySchema,
   polymarketConnectBodySchema,
+  polymarketEmbeddedConnectBodySchema,
   polymarketCredentialsBodySchema,
   polymarketFunderBodySchema,
   polymarketRelayerStatusResponseSchema,
@@ -43,6 +44,12 @@ import {
 } from "../schemas/auth.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import { validatePolymarketFunderSelection } from "../services/polymarket-funder.js";
+import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
+import {
+  buildEmbeddedPolymarketConnectRequest,
+  executeEmbeddedPolymarketConnectRequest,
+  resolveEmbeddedPolymarketWalletContext,
+} from "../services/polymarket-embedded.js";
 import {
   attachReferralCode,
   attachReferralCodeForExistingUser,
@@ -77,6 +84,51 @@ function readRequestUserAgent(headers: Record<string, unknown>): string {
     readRequestHeaderValue(headers, "user-agent") ??
     "unknown"
   );
+}
+
+function getPolymarketConnectFailureResponse(error: unknown): {
+  status: number;
+  body: { error: string; message?: string };
+} {
+  const message =
+    error instanceof Error ? error.message : "Polymarket connect failed";
+  const status =
+    error instanceof Error && "status" in error && typeof error.status === "number"
+      ? error.status
+      : null;
+
+  if (/not deployed yet|valid EVM address/i.test(message)) {
+    return {
+      status: 400,
+      body: { error: "Polymarket connect failed", message },
+    };
+  }
+
+  if (status === 401) {
+    return {
+      status: 400,
+      body: { error: "Polymarket auth failed", message },
+    };
+  }
+
+  if (status != null && status >= 400 && status < 500) {
+    return {
+      status,
+      body: { error: "Polymarket auth failed", message },
+    };
+  }
+
+  if (status != null) {
+    return {
+      status: 502,
+      body: { error: "Polymarket auth failed", message },
+    };
+  }
+
+  return {
+    status: 500,
+    body: { error: "Polymarket connect failed", message },
+  };
 }
 
 function getPrivyAuthFailureResponse(error: unknown): {
@@ -770,69 +822,14 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
 
-      const clobBase =
-        process.env.POLYMARKET_CLOB_BASE?.trim() ||
-        "https://clob.polymarket.com";
-
       try {
-        const upstream = await fetch(`${clobBase}/auth/api-key`, {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            "content-type": "application/json; charset=utf-8",
-            "user-agent": "Hunch-API/1.0",
-            POLY_ADDRESS: walletAddress,
-            POLY_SIGNATURE: body.signature,
-            POLY_TIMESTAMP: body.timestamp,
-            POLY_NONCE: body.nonce.toString(),
-          },
-          body: JSON.stringify({}),
-        });
-
-        if (!upstream.ok) {
-          const text = await upstream.text().catch(() => "");
-          const message = text.trim().length
-            ? text
-            : `${upstream.status} ${upstream.statusText}`;
-          reply.code(upstream.status === 401 ? 400 : 502);
-          return reply.send({
-            error: "Polymarket auth failed",
-            message,
+        const { apiKey, apiSecret, passphrase } =
+          await requestPolymarketCredentials({
+            walletAddress,
+            signature: body.signature,
+            timestamp: body.timestamp,
+            nonce: body.nonce,
           });
-        }
-
-        const payload = (await upstream.json()) as unknown;
-        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-          reply.code(502);
-          return reply.send({
-            error: "Polymarket auth failed",
-            message: "Unexpected response from Polymarket",
-          });
-        }
-
-        const record = payload as Record<string, unknown>;
-        const apiKeyRaw =
-          record.apiKey ??
-          record.api_key ??
-          record.key ??
-          record.apiKeyId ??
-          record.api_key_id;
-        const secretRaw =
-          record.secret ?? record.apiSecret ?? record.api_secret;
-        const passphraseRaw = record.passphrase ?? record.apiPassphrase;
-
-        const apiKey = typeof apiKeyRaw === "string" ? apiKeyRaw.trim() : "";
-        const apiSecret = typeof secretRaw === "string" ? secretRaw.trim() : "";
-        const passphrase =
-          typeof passphraseRaw === "string" ? passphraseRaw.trim() : "";
-
-        if (!apiKey || !apiSecret || !passphrase) {
-          reply.code(502);
-          return reply.send({
-            error: "Polymarket auth failed",
-            message: "Polymarket did not return apiKey/secret/passphrase",
-          });
-        }
 
         const validatedPolymarketFunder = body.funderAddress
           ? await validatePolymarketFunderSelection({
@@ -860,26 +857,108 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ ok: true });
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Polymarket connect failed";
-        const isValidationError =
-          error instanceof Error &&
-          /not deployed yet|valid EVM address/i.test(error.message);
-        if (isValidationError) {
-          reply.code(400);
-          return reply.send({
-            error: "Polymarket connect failed",
-            message,
-          });
+        const failure = getPolymarketConnectFailureResponse(error);
+        if (failure.status < 500) {
+          reply.code(failure.status);
+          return reply.send(failure.body);
         }
         app.log.error(
           { error, userId: user.id, walletAddress },
           "Polymarket connect failed",
         );
-        reply.code(500);
+        reply.code(failure.status);
+        return reply.send(failure.body);
+      }
+    },
+  );
+
+  z.post(
+    "/auth/polymarket/connect-embedded",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedConnectBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!walletAddress.startsWith("0x")) {
+        reply.code(400);
         return reply.send({
-          error: "Polymarket connect failed",
+          error: "Polymarket connect requires an EVM wallet address",
         });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer: walletAddress,
+        });
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const nonce = crypto.randomInt(1_000_000_000);
+        const connectRequest = buildEmbeddedPolymarketConnectRequest({
+          context,
+          timestamp,
+          nonce,
+        });
+        const signature = await executeEmbeddedPolymarketConnectRequest({
+          request: connectRequest,
+          authorizationSignature: request.body.authorizationSignature,
+        });
+        const { apiKey, apiSecret, passphrase } =
+          await requestPolymarketCredentials({
+            walletAddress,
+            signature,
+            timestamp,
+            nonce,
+          });
+
+        const validatedPolymarketFunder = request.body.funderAddress
+          ? await validatePolymarketFunderSelection({
+              signer: walletAddress,
+              funderAddress: request.body.funderAddress,
+              includeMagicProxy: true,
+            })
+          : { funderAddress: null };
+        const additionalData: Record<string, unknown> = {
+          passphrase,
+          ...(validatedPolymarketFunder.funderAddress
+            ? { funderAddress: validatedPolymarketFunder.funderAddress }
+            : {}),
+        };
+
+        await AuthService.createOrUpdateVenueCredentials(
+          user.id,
+          walletAddress,
+          "polymarket",
+          apiKey,
+          apiSecret,
+          additionalData,
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          timestamp,
+          nonce,
+          funderAddress: validatedPolymarketFunder.funderAddress,
+        });
+      } catch (error) {
+        const failure = getPolymarketConnectFailureResponse(error);
+        if (failure.status < 500) {
+          reply.code(failure.status);
+          return reply.send(failure.body);
+        }
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Embedded Polymarket connect failed",
+        );
+        reply.code(failure.status);
+        return reply.send(failure.body);
       }
     },
   );

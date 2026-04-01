@@ -32,6 +32,23 @@ const polymarketOrderSchema = z
   })
   .passthrough();
 
+const polymarketUnsignedOrderSchema = z
+  .object({
+    salt: zNumberish,
+    maker: zEthAddressRequired,
+    signer: zEthAddressRequired,
+    taker: zEthAddress.optional(),
+    tokenId: zNumberish,
+    makerAmount: zNumberish,
+    takerAmount: zNumberish,
+    expiration: zNumberish,
+    nonce: zNumberish,
+    feeRateBps: zNumberish,
+    side: zNumberish,
+    signatureType: zNumberish,
+  })
+  .passthrough();
+
 const polymarketFeeAuthSchema = z.object({
   signer: zEthAddressRequired,
   vault: zEthAddressRequired,
@@ -143,4 +160,38 @@ export const polymarketQuoteBodySchema = z.object({
   return value.limitPrice != null;
 }, {
   message: "limitPrice is required for limit orders",
+});
+
+export const polymarketEmbeddedEnsureReadyBodySchema = z.object({
+  funderAddress: zEthAddress.optional(),
+});
+
+const embeddedAuthorizationRequestSignatureSchema = z.object({
+  id: zRequiredString("id is required"),
+  signature: zRequiredString("signature is required"),
+});
+
+export const polymarketEmbeddedEnsureReadyExecuteBodySchema = z.object({
+  funderAddress: zEthAddress.optional(),
+  connectTimestamp: z.string().trim().min(1).optional(),
+  connectNonce: z.number().int().nonnegative().optional(),
+  signedRequests: z
+    .array(embeddedAuthorizationRequestSignatureSchema)
+    .default([]),
+});
+
+export const polymarketEmbeddedSignOrderBodySchema = z.object({
+  order: polymarketUnsignedOrderSchema,
+  exchangeAddress: zEthAddressRequired,
+  authorizationSignature: zRequiredString(
+    "authorizationSignature is required",
+  ),
+});
+
+export const polymarketEmbeddedSignFeeAuthBodySchema = z.object({
+  feeAuth: polymarketFeeAuthSchema,
+  feeCollectorAddress: zEthAddressRequired,
+  authorizationSignature: zRequiredString(
+    "authorizationSignature is required",
+  ),
 });

@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import crypto from "node:crypto";
 import { ethers } from "ethers";
-import { AuthService, createAuthMiddleware } from "../auth.js";
+import { AuthService, createAuthMiddleware, type User } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
@@ -12,6 +13,10 @@ import {
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveBatchBodySchema,
   polymarketAccountQuerySchema,
+  polymarketEmbeddedEnsureReadyBodySchema,
+  polymarketEmbeddedEnsureReadyExecuteBodySchema,
+  polymarketEmbeddedSignFeeAuthBodySchema,
+  polymarketEmbeddedSignOrderBodySchema,
   polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
   polymarketOrderHashBodySchema,
@@ -30,7 +35,19 @@ import {
   POLYGON_NATIVE_USDC_ADDRESS,
 } from "../services/polymarket-onchain.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
+import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
 import { polymarketClient } from "../services/polymarket-client.js";
+import {
+  buildEmbeddedPolymarketFeeAuthRequest,
+  buildEmbeddedPolymarketOrderRequest,
+  buildEmbeddedPolymarketConnectRequest,
+  executeEmbeddedPolymarketConnectRequest,
+  executeEmbeddedPolymarketFeeAuthRequest,
+  executeEmbeddedPolymarketOrderRequest,
+  executeEmbeddedSignerApprovalRequests,
+  prepareEmbeddedPolymarketSignerApprovalRequests,
+  resolveEmbeddedPolymarketWalletContext,
+} from "../services/polymarket-embedded.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
@@ -62,6 +79,7 @@ const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
+const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -98,8 +116,8 @@ function sleep(ms: number): Promise<void> {
 
 const USDC_SCALE = 1_000_000n;
 
-function normalizeAddress(value: string): string {
-  return value.trim().toLowerCase();
+function normalizeAddress(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
 }
 
 function buildPolymarketAccountCacheKey(inputs: {
@@ -167,6 +185,164 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function approvalSatisfiesEmbeddedAutomation(
+  value: bigint | null | undefined,
+): boolean {
+  return Boolean(value != null && value >= EMBEDDED_APPROVAL_THRESHOLD);
+}
+
+function normalizeEvmAddress(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return ethers.getAddress(value);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveEmbeddedEnsureReadyState(inputs: {
+  user: User;
+  signer: string;
+  requestedFunder?: string | null;
+}) {
+  const context = await resolveEmbeddedPolymarketWalletContext({
+    user: inputs.user,
+    signer: inputs.signer,
+  });
+  let credsInfo = await AuthService.getVenueCredentialsInfo(
+    inputs.user.id,
+    "polymarket",
+    inputs.signer,
+  );
+  const storedFunder = credsInfo?.funderAddress ?? null;
+  const funderDerivation = await derivePolymarketFunders({
+    signer: inputs.signer,
+    storedFunder: inputs.requestedFunder ?? storedFunder,
+    includeMagicProxy: true,
+    bypassCodeCache: true,
+  });
+  const signerNormalized = normalizeEvmAddress(inputs.signer);
+  const findCandidate = (address: string | null | undefined) => {
+    const normalized = normalizeEvmAddress(address);
+    if (!normalized) return null;
+    return (
+      funderDerivation.candidates.find(
+        (candidate) => normalizeEvmAddress(candidate.funder) === normalized,
+      ) ?? null
+    );
+  };
+  const requestedCandidate = findCandidate(inputs.requestedFunder ?? null);
+  const storedCandidate =
+    requestedCandidate &&
+    storedFunder &&
+    normalizeEvmAddress(storedFunder) ===
+      normalizeEvmAddress(requestedCandidate.funder)
+      ? requestedCandidate
+      : findCandidate(storedFunder);
+  const desiredDistinctCandidate =
+    (requestedCandidate &&
+    normalizeEvmAddress(requestedCandidate.funder) !== signerNormalized
+      ? requestedCandidate
+      : null) ??
+    (storedCandidate &&
+    normalizeEvmAddress(storedCandidate.funder) !== signerNormalized
+      ? storedCandidate
+      : null);
+  const canPreserveDistinctCandidate = Boolean(
+    desiredDistinctCandidate?.deployed &&
+      (desiredDistinctCandidate.signatureType === 1 ||
+        desiredDistinctCandidate.signatureType === 2 ||
+        desiredDistinctCandidate.contractKind === "SAFE_LIKE"),
+  );
+  const effectiveDistinctFunder = canPreserveDistinctCandidate
+    ? desiredDistinctCandidate?.funder ?? null
+    : null;
+  const effectiveFunder = effectiveDistinctFunder ?? inputs.signer;
+  const shouldClearStoredFunder = Boolean(
+    storedFunder &&
+      normalizeEvmAddress(storedFunder) !== signerNormalized &&
+      !effectiveDistinctFunder,
+  );
+  const shouldUpdateStoredFunder = Boolean(
+    credsInfo &&
+      effectiveDistinctFunder &&
+      normalizeEvmAddress(credsInfo?.funderAddress ?? null) !==
+        normalizeEvmAddress(effectiveDistinctFunder),
+  );
+
+  if (shouldClearStoredFunder) {
+    await AuthService.updateVenueFunderAddress(
+      inputs.user.id,
+      inputs.signer,
+      "polymarket",
+      null,
+    );
+    credsInfo = await AuthService.getVenueCredentialsInfo(
+      inputs.user.id,
+      "polymarket",
+      inputs.signer,
+    );
+  } else if (shouldUpdateStoredFunder && effectiveDistinctFunder) {
+    await AuthService.updateVenueFunderAddress(
+      inputs.user.id,
+      inputs.signer,
+      "polymarket",
+      effectiveDistinctFunder,
+    );
+    credsInfo = await AuthService.getVenueCredentialsInfo(
+      inputs.user.id,
+      "polymarket",
+      inputs.signer,
+    );
+  }
+
+  const snapshot = await fetchPolymarketOnchainSnapshot({
+    rpcUrl: env.polygonRpcUrl,
+    timeoutMs: env.polygonRpcTimeoutMs,
+    signer: inputs.signer,
+    funder: effectiveFunder,
+    includeFeeCollectorNonce: true,
+    negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress,
+    feeCollectorAddress: env.feeCollectorAddress,
+  });
+
+  const approvalRequests = prepareEmbeddedPolymarketSignerApprovalRequests({
+    context,
+    funder: effectiveFunder,
+    currentApprovals: {
+      exchangeApproved: snapshot.okExchange,
+      negRiskExchangeApproved: snapshot.okNegRisk,
+      negRiskAdapterApproved: env.polymarketNegRiskAdapterAddress
+        ? (snapshot.okNegRiskAdapter ?? false)
+        : true,
+      feeCollectorApproved: true,
+      exchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
+        snapshot.allowanceExchange,
+      ),
+      negRiskExchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
+        snapshot.allowanceNegRisk,
+      ),
+      negRiskAdapterAllowanceOk: env.polymarketNegRiskAdapterAddress
+        ? approvalSatisfiesEmbeddedAutomation(
+            snapshot.allowanceNegRiskAdapter ?? null,
+          )
+        : true,
+      feeCollectorAllowanceOk: env.feeCollectorAddress
+        ? approvalSatisfiesEmbeddedAutomation(snapshot.allowanceFeeCollector ?? null)
+        : true,
+    },
+  });
+
+  return {
+    context,
+    credsInfo,
+    effectiveFunder,
+    effectiveDistinctFunder,
+    approvalRequests,
+    clearedStoredFunder: shouldClearStoredFunder,
+  };
 }
 
 function extractPolymarketUpstreamMessage(payload: unknown): string | null {
@@ -1844,6 +2020,362 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Polymarket account snapshot",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/ensure-ready/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedEnsureReadyBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Polymarket automation requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const state = await resolveEmbeddedEnsureReadyState({
+          user,
+          signer,
+          requestedFunder: request.body.funderAddress ?? null,
+        });
+
+        const requests = [...state.approvalRequests];
+        if (!state.credsInfo) {
+          const timestamp = Math.floor(Date.now() / 1000).toString();
+          const nonce = crypto.randomInt(1_000_000_000);
+          requests.unshift(
+            buildEmbeddedPolymarketConnectRequest({
+              context: state.context,
+              timestamp,
+              nonce,
+            }),
+          );
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            signer,
+            funder: state.effectiveFunder,
+            funderSource: state.effectiveDistinctFunder ? "stored" : "signer",
+            clearedStoredFunder: state.clearedStoredFunder,
+            connectTimestamp: timestamp,
+            connectNonce: nonce,
+            requests,
+          });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          signer,
+          funder: state.effectiveFunder,
+          funderSource: state.effectiveDistinctFunder ? "stored" : "signer",
+          clearedStoredFunder: state.clearedStoredFunder,
+          requests,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to prepare embedded Polymarket readiness",
+        );
+        reply.code(500);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Embedded setup preparation failed",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/ensure-ready/execute",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedEnsureReadyExecuteBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Polymarket automation requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const state = await resolveEmbeddedEnsureReadyState({
+          user,
+          signer,
+          requestedFunder: request.body.funderAddress ?? null,
+        });
+
+        let connected = false;
+        if (!state.credsInfo) {
+          const connectRequest = request.body.signedRequests.find(
+            (entry) => entry.id === "polymarket-connect",
+          );
+          if (!connectRequest?.signature?.trim()) {
+            reply.code(400);
+            return reply.send({
+              error: "Missing Privy authorization signature for Polymarket connect",
+            });
+          }
+          const connectTimestamp = request.body.connectTimestamp?.trim() ?? "";
+          const connectNonce = request.body.connectNonce;
+          if (!connectTimestamp || connectNonce == null) {
+            reply.code(400);
+            return reply.send({
+              error:
+                "Embedded Polymarket connect requires the prepared timestamp and nonce.",
+            });
+          }
+          const preparedConnectRequest = buildEmbeddedPolymarketConnectRequest({
+            context: state.context,
+            timestamp: connectTimestamp,
+            nonce: connectNonce,
+          });
+          const connectSignature = await executeEmbeddedPolymarketConnectRequest({
+            request: preparedConnectRequest,
+            authorizationSignature: connectRequest.signature,
+          });
+          const { apiKey, apiSecret, passphrase } =
+            await requestPolymarketCredentials({
+              walletAddress: signer,
+              signature: connectSignature,
+              timestamp: connectTimestamp,
+              nonce: connectNonce,
+            });
+          const additionalData: Record<string, unknown> = {
+            passphrase,
+            ...(state.effectiveDistinctFunder
+              ? { funderAddress: state.effectiveDistinctFunder }
+              : {}),
+          };
+          await AuthService.createOrUpdateVenueCredentials(
+            user.id,
+            signer,
+            "polymarket",
+            apiKey,
+            apiSecret,
+            additionalData,
+          );
+          connected = true;
+        }
+
+        const approvalRequests = state.approvalRequests;
+        const approvalSignatures = request.body.signedRequests.filter((entry) =>
+          entry.id.startsWith("approval-"),
+        );
+        const txHashes = await executeEmbeddedSignerApprovalRequests({
+          requests: approvalRequests,
+          signatures: approvalSignatures,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          signer,
+          funder: state.effectiveFunder,
+          funderSource: state.effectiveDistinctFunder ? "stored" : "signer",
+          connected,
+          clearedStoredFunder: state.clearedStoredFunder,
+          approvalsApplied: txHashes.length > 0,
+          approvalExecution:
+            txHashes.length > 0
+              ? {
+                  signer,
+                  funder: state.effectiveFunder,
+                  funderKind: "signer",
+                  transactionHashes: txHashes,
+                }
+              : null,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to execute embedded Polymarket readiness",
+        );
+        reply.code(500);
+        return reply.send({
+          error:
+            error instanceof Error ? error.message : "Embedded setup failed",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-order/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedSignOrderBodySchema.omit({ authorizationSignature: true }) },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketOrderRequest({
+          context,
+          payload: request.body.order,
+          exchangeAddress: request.body.exchangeAddress,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, request: authorizationRequest });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare order signature",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-order",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedSignOrderBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketOrderRequest({
+          context,
+          payload: request.body.order,
+          exchangeAddress: request.body.exchangeAddress,
+        });
+        const signature = await executeEmbeddedPolymarketOrderRequest({
+          request: authorizationRequest,
+          authorizationSignature: request.body.authorizationSignature,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, signature });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error ? error.message : "Failed to sign order",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-fee-auth/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedSignFeeAuthBodySchema.omit({ authorizationSignature: true }) },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketFeeAuthRequest({
+          context,
+          payload: request.body.feeAuth,
+          feeCollectorAddress: request.body.feeCollectorAddress,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, request: authorizationRequest });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare fee authorization",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-fee-auth",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedSignFeeAuthBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketFeeAuthRequest({
+          context,
+          payload: request.body.feeAuth,
+          feeCollectorAddress: request.body.feeCollectorAddress,
+        });
+        const signature = await executeEmbeddedPolymarketFeeAuthRequest({
+          request: authorizationRequest,
+          authorizationSignature: request.body.authorizationSignature,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, signature });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to sign fee authorization",
         });
       }
     },
