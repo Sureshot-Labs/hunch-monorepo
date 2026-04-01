@@ -1098,7 +1098,7 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
   requests: EmbeddedPrivyAuthorizationRequest[];
   signatures: EmbeddedPrivyAuthorizationSignature[];
 }): Promise<string[]> {
-  const pendingExecutions: Array<Promise<string>> = [];
+  const transactionHashes: string[] = [];
   for (const request of inputs.requests) {
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
@@ -1110,27 +1110,25 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
     );
     const { hash, transactionId, userOperationHash } =
       parsePrivyRpcTransactionHashResponse(payload);
-    pendingExecutions.push(
-      (async () => {
-        const resolvedHash =
-          hash ??
-          (transactionId
-            ? await waitForPrivyTransaction(transactionId, request.label)
-            : null);
-        if (resolvedHash) {
-          await waitForPolygonTransaction(resolvedHash, request.label);
-          return resolvedHash;
-        }
-        if (userOperationHash) {
-          return userOperationHash;
-        }
-        throw new Error(
-          `${request.label} did not produce a transaction hash after Privy sponsorship.`,
-        );
-      })(),
+    const resolvedHash =
+      hash ??
+      (transactionId
+        ? await waitForPrivyTransaction(transactionId, request.label)
+        : null);
+    if (resolvedHash) {
+      await waitForPolygonTransaction(resolvedHash, request.label);
+      transactionHashes.push(resolvedHash);
+      continue;
+    }
+    if (userOperationHash) {
+      transactionHashes.push(userOperationHash);
+      continue;
+    }
+    throw new Error(
+      `${request.label} did not produce a transaction hash after Privy sponsorship.`,
     );
   }
-  return Promise.all(pendingExecutions);
+  return transactionHashes;
 }
 
 async function executeSafeApprovalTasks(inputs: {

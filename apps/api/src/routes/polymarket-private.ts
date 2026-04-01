@@ -78,6 +78,10 @@ const LIMIT_USD_MICRO_STEP = 100n; // 4 decimals in 6-decimal USDC
 const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
+const embeddedEnsureReadyExecuteInFlight = new Map<
+  string,
+  Promise<Record<string, unknown>>
+>();
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 
@@ -342,6 +346,32 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
     effectiveDistinctFunder,
     approvalRequests,
     clearedStoredFunder: shouldClearStoredFunder,
+  };
+}
+
+function buildEmbeddedEnsureReadyResponse(args: {
+  signer: string;
+  effectiveFunder: string;
+  effectiveDistinctFunder: string | null;
+  clearedStoredFunder: boolean;
+  connected?: boolean;
+  approvalsApplied?: boolean;
+  approvalExecution?: {
+    signer: string;
+    funder: string;
+    funderKind: "signer" | "safe" | "magic";
+    transactionHashes: string[];
+  } | null;
+}) {
+  return {
+    ok: true,
+    signer: args.signer,
+    funder: args.effectiveFunder,
+    funderSource: args.effectiveDistinctFunder ? "stored" : "signer",
+    connected: args.connected ?? false,
+    clearedStoredFunder: args.clearedStoredFunder,
+    approvalsApplied: args.approvalsApplied ?? false,
+    approvalExecution: args.approvalExecution ?? null,
   };
 }
 
@@ -2046,6 +2076,29 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        const lockKey = normalizeEvmAddress(signer) ?? signer.toLowerCase();
+        const existingExecution =
+          embeddedEnsureReadyExecuteInFlight.get(lockKey);
+        if (existingExecution) {
+          await existingExecution;
+          const settledState = await resolveEmbeddedEnsureReadyState({
+            user,
+            signer,
+            requestedFunder: request.body.funderAddress ?? null,
+          });
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            signer,
+            funder: settledState.effectiveFunder,
+            funderSource: settledState.effectiveDistinctFunder
+              ? "stored"
+              : "signer",
+            clearedStoredFunder: settledState.clearedStoredFunder,
+            requests: [],
+          });
+        }
+
         const state = await resolveEmbeddedEnsureReadyState({
           user,
           signer,
@@ -2122,93 +2175,110 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const state = await resolveEmbeddedEnsureReadyState({
-          user,
-          signer,
-          requestedFunder: request.body.funderAddress ?? null,
-        });
+        const lockKey = normalizeEvmAddress(signer) ?? signer.toLowerCase();
+        const existingExecution =
+          embeddedEnsureReadyExecuteInFlight.get(lockKey);
+        if (existingExecution) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(await existingExecution);
+        }
 
-        let connected = false;
-        if (!state.credsInfo) {
-          const connectRequest = request.body.signedRequests.find(
-            (entry) => entry.id === "polymarket-connect",
-          );
-          if (!connectRequest?.signature?.trim()) {
-            reply.code(400);
-            return reply.send({
-              error: "Missing Privy authorization signature for Polymarket connect",
-            });
-          }
-          const connectTimestamp = request.body.connectTimestamp?.trim() ?? "";
-          const connectNonce = request.body.connectNonce;
-          if (!connectTimestamp || connectNonce == null) {
-            reply.code(400);
-            return reply.send({
-              error:
+        const executionPromise = (async () => {
+          const state = await resolveEmbeddedEnsureReadyState({
+            user,
+            signer,
+            requestedFunder: request.body.funderAddress ?? null,
+          });
+
+          let connected = false;
+          if (!state.credsInfo) {
+            const connectRequest = request.body.signedRequests.find(
+              (entry) => entry.id === "polymarket-connect",
+            );
+            if (!connectRequest?.signature?.trim()) {
+              throw new Error(
+                "Missing Privy authorization signature for Polymarket connect",
+              );
+            }
+            const connectTimestamp = request.body.connectTimestamp?.trim() ?? "";
+            const connectNonce = request.body.connectNonce;
+            if (!connectTimestamp || connectNonce == null) {
+              throw new Error(
                 "Embedded Polymarket connect requires the prepared timestamp and nonce.",
-            });
-          }
-          const preparedConnectRequest = buildEmbeddedPolymarketConnectRequest({
-            context: state.context,
-            timestamp: connectTimestamp,
-            nonce: connectNonce,
-          });
-          const connectSignature = await executeEmbeddedPolymarketConnectRequest({
-            request: preparedConnectRequest,
-            authorizationSignature: connectRequest.signature,
-          });
-          const { apiKey, apiSecret, passphrase } =
-            await requestPolymarketCredentials({
-              walletAddress: signer,
-              signature: connectSignature,
+              );
+            }
+            const preparedConnectRequest = buildEmbeddedPolymarketConnectRequest({
+              context: state.context,
               timestamp: connectTimestamp,
               nonce: connectNonce,
             });
-          const additionalData: Record<string, unknown> = {
-            passphrase,
-            ...(state.effectiveDistinctFunder
-              ? { funderAddress: state.effectiveDistinctFunder }
-              : {}),
-          };
-          await AuthService.createOrUpdateVenueCredentials(
-            user.id,
-            signer,
-            "polymarket",
-            apiKey,
-            apiSecret,
-            additionalData,
+            const connectSignature =
+              await executeEmbeddedPolymarketConnectRequest({
+                request: preparedConnectRequest,
+                authorizationSignature: connectRequest.signature,
+              });
+            const { apiKey, apiSecret, passphrase } =
+              await requestPolymarketCredentials({
+                walletAddress: signer,
+                signature: connectSignature,
+                timestamp: connectTimestamp,
+                nonce: connectNonce,
+              });
+            const additionalData: Record<string, unknown> = {
+              passphrase,
+              ...(state.effectiveDistinctFunder
+                ? { funderAddress: state.effectiveDistinctFunder }
+                : {}),
+            };
+            await AuthService.createOrUpdateVenueCredentials(
+              user.id,
+              signer,
+              "polymarket",
+              apiKey,
+              apiSecret,
+              additionalData,
+            );
+            connected = true;
+          }
+
+          const approvalRequests = state.approvalRequests;
+          const approvalSignatures = request.body.signedRequests.filter((entry) =>
+            entry.id.startsWith("approval-"),
           );
-          connected = true;
+          const txHashes = await executeEmbeddedSignerApprovalRequests({
+            requests: approvalRequests,
+            signatures: approvalSignatures,
+          });
+
+          return buildEmbeddedEnsureReadyResponse({
+            signer,
+            effectiveFunder: state.effectiveFunder,
+            effectiveDistinctFunder: state.effectiveDistinctFunder,
+            clearedStoredFunder: state.clearedStoredFunder,
+            connected,
+            approvalsApplied: txHashes.length > 0,
+            approvalExecution:
+              txHashes.length > 0
+                ? {
+                    signer,
+                    funder: state.effectiveFunder,
+                    funderKind: "signer",
+                    transactionHashes: txHashes,
+                  }
+                : null,
+          });
+        })();
+
+        embeddedEnsureReadyExecuteInFlight.set(lockKey, executionPromise);
+        try {
+          const result = await executionPromise;
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(result);
+        } finally {
+          if (embeddedEnsureReadyExecuteInFlight.get(lockKey) === executionPromise) {
+            embeddedEnsureReadyExecuteInFlight.delete(lockKey);
+          }
         }
-
-        const approvalRequests = state.approvalRequests;
-        const approvalSignatures = request.body.signedRequests.filter((entry) =>
-          entry.id.startsWith("approval-"),
-        );
-        const txHashes = await executeEmbeddedSignerApprovalRequests({
-          requests: approvalRequests,
-          signatures: approvalSignatures,
-        });
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          signer,
-          funder: state.effectiveFunder,
-          funderSource: state.effectiveDistinctFunder ? "stored" : "signer",
-          connected,
-          clearedStoredFunder: state.clearedStoredFunder,
-          approvalsApplied: txHashes.length > 0,
-          approvalExecution:
-            txHashes.length > 0
-              ? {
-                  signer,
-                  funder: state.effectiveFunder,
-                  funderKind: "signer",
-                  transactionHashes: txHashes,
-                }
-              : null,
-        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, signer },
