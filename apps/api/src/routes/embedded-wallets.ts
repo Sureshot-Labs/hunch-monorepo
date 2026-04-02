@@ -173,6 +173,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         });
         const requests = prepareEmbeddedSolanaTransactionRequests({
           context,
+          executionKey: request.body.executionKey ?? null,
           transactions: request.body.transactions,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -230,6 +231,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           run: async () => {
             const requests = prepareEmbeddedSolanaTransactionRequests({
               context,
+              executionKey: request.body.executionKey,
               transactions: request.body.transactions,
             });
             const signatures = await executeEmbeddedSolanaTransactionRequests({
@@ -250,6 +252,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           {
             error,
             userId: user.id,
+            executionKey: request.body.executionKey,
             signer,
           },
           "Failed to execute embedded Solana transactions",

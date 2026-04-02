@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type WalletApiRequestSignatureInput } from "@privy-io/server-auth";
 import bs58 from "bs58";
 
@@ -10,6 +11,50 @@ import {
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+
+function buildPrivyIdempotencyKey(inputs: {
+  executionKey: string;
+  requestId: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(`embedded-solana:${inputs.executionKey}:${inputs.requestId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `hunch-sol-${digest}`;
+}
+
+function isKalshiReduceOrderEscrowInitializationMessage(
+  message: string,
+): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    (normalized.includes("invalidaccountowner") &&
+      (normalized.includes("inituserreduceorderescrow") ||
+        normalized.includes("user_outcome_vault check failed"))) ||
+    ((normalized.includes("invalid account owner") ||
+      normalized.includes("invalidaccountowner")) &&
+      normalized.includes("predictmksnpfkfiz33ndsdbe2dy43kypg4u2dbvhvb"))
+  );
+}
+
+function isKalshiInsufficientTradeFundsMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("predictmksnpfkfiz33ndsdbe2dy43kypg4u2dbvhvb") &&
+    normalized.includes("instruction: transferchecked") &&
+    normalized.includes("error: insufficient funds")
+  );
+}
+
+function normalizeEmbeddedSolanaRpcErrorMessage(message: string): string {
+  if (isKalshiReduceOrderEscrowInitializationMessage(message)) {
+    return "Trade could not be prepared yet. Retry the sell in a moment.";
+  }
+  if (isKalshiInsufficientTradeFundsMessage(message)) {
+    return "Selected wallet no longer has enough balance for this trade. Refresh balances or reduce the order size.";
+  }
+  return message;
+}
 
 export type EmbeddedPrivyAuthorizationRequest = {
   id: string;
@@ -86,6 +131,7 @@ function createPrivyWalletRpcRequest(args: {
   label: string;
   walletId: string;
   body: Record<string, unknown>;
+  idempotencyKey?: string | null;
 }): EmbeddedPrivyAuthorizationRequest {
   return {
     id: args.id,
@@ -97,6 +143,9 @@ function createPrivyWalletRpcRequest(args: {
       body: args.body,
       headers: {
         "privy-app-id": env.privyAppId,
+        ...(args.idempotencyKey
+          ? { "privy-idempotency-key": args.idempotencyKey }
+          : {}),
       },
     },
   };
@@ -115,7 +164,7 @@ async function executePreparedPrivyAuthorizationRequest(
     | Record<string, unknown>
     | null;
   if (!response.ok) {
-    const message =
+    const rawMessage =
       (payload &&
         typeof payload.error === "string" &&
         payload.error.trim().length > 0 &&
@@ -125,7 +174,7 @@ async function executePreparedPrivyAuthorizationRequest(
         payload.message.trim().length > 0 &&
         payload.message) ||
       `Privy wallet request failed (${response.status})`;
-    throw new Error(message);
+    throw new Error(normalizeEmbeddedSolanaRpcErrorMessage(rawMessage));
   }
   return payload ?? {};
 }
@@ -204,6 +253,7 @@ export async function resolveEmbeddedSolanaWalletContext(inputs: {
 export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
   context: EmbeddedSolanaWalletContext;
   transaction: EmbeddedSolanaTransactionSpec;
+  executionKey?: string | null;
 }): EmbeddedPrivyAuthorizationRequest {
   const transaction = inputs.transaction.transaction.trim();
   if (!transaction) {
@@ -216,6 +266,12 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     id: inputs.transaction.id,
     label: inputs.transaction.label,
     walletId: inputs.context.walletId,
+    idempotencyKey: inputs.executionKey
+      ? buildPrivyIdempotencyKey({
+          executionKey: inputs.executionKey,
+          requestId: inputs.transaction.id,
+        })
+      : null,
     body: {
       chain_type: "solana",
       method: "signAndSendTransaction",
@@ -232,11 +288,13 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
 export function prepareEmbeddedSolanaTransactionRequests(inputs: {
   context: EmbeddedSolanaWalletContext;
   transactions: EmbeddedSolanaTransactionSpec[];
+  executionKey?: string | null;
 }): EmbeddedPrivyAuthorizationRequest[] {
   return inputs.transactions.map((transaction) =>
     buildEmbeddedSolanaSignAndSendRequest({
       context: inputs.context,
       transaction,
+      executionKey: inputs.executionKey,
     }),
   );
 }

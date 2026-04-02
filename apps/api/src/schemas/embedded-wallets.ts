@@ -44,6 +44,7 @@ export const embeddedSolanaTransactionSchema = z.object({
 });
 
 export const embeddedSolanaPrepareBodySchema = z.object({
+  executionKey: embeddedExecutionKeySchema.optional(),
   transactions: z.array(embeddedSolanaTransactionSchema).min(1).max(8),
 });
 
