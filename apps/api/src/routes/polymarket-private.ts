@@ -49,6 +49,11 @@ import {
   resolveEmbeddedPolymarketWalletContext,
 } from "../services/polymarket-embedded.js";
 import {
+  buildEmbeddedExecutionSingleFlightKey,
+  getEmbeddedExecutionSingleFlightPromise,
+  runEmbeddedExecutionSingleFlight,
+} from "../services/embedded-execution-singleflight.js";
+import {
   buildOrderNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
@@ -78,10 +83,6 @@ const LIMIT_USD_MICRO_STEP = 100n; // 4 decimals in 6-decimal USDC
 const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
-const embeddedEnsureReadyExecuteInFlight = new Map<
-  string,
-  Promise<Record<string, unknown>>
->();
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 
@@ -2078,7 +2079,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       try {
         const lockKey = normalizeEvmAddress(signer) ?? signer.toLowerCase();
         const existingExecution =
-          embeddedEnsureReadyExecuteInFlight.get(lockKey);
+          getEmbeddedExecutionSingleFlightPromise<Record<string, unknown>>(
+            buildEmbeddedExecutionSingleFlightKey(
+              "polymarket-private",
+              "embedded-ensure-ready",
+              lockKey,
+            ),
+          );
         if (existingExecution) {
           await existingExecution;
           const settledState = await resolveEmbeddedEnsureReadyState({
@@ -2176,14 +2183,23 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const lockKey = normalizeEvmAddress(signer) ?? signer.toLowerCase();
+        const singleFlightKey = buildEmbeddedExecutionSingleFlightKey(
+          "polymarket-private",
+          "embedded-ensure-ready",
+          lockKey,
+        );
         const existingExecution =
-          embeddedEnsureReadyExecuteInFlight.get(lockKey);
+          getEmbeddedExecutionSingleFlightPromise<Record<string, unknown>>(
+            singleFlightKey,
+          );
         if (existingExecution) {
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send(await existingExecution);
         }
 
-        const executionPromise = (async () => {
+        const result = await runEmbeddedExecutionSingleFlight({
+          key: singleFlightKey,
+          run: async () => {
           const state = await resolveEmbeddedEnsureReadyState({
             user,
             signer,
@@ -2267,18 +2283,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                   }
                 : null,
           });
-        })();
-
-        embeddedEnsureReadyExecuteInFlight.set(lockKey, executionPromise);
-        try {
-          const result = await executionPromise;
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send(result);
-        } finally {
-          if (embeddedEnsureReadyExecuteInFlight.get(lockKey) === executionPromise) {
-            embeddedEnsureReadyExecuteInFlight.delete(lockKey);
-          }
-        }
+          },
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
       } catch (error) {
         app.log.error(
           { error, userId: user.id, signer },

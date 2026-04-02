@@ -18,12 +18,15 @@ export const embeddedPrivyAuthorizationSignatureSchema = z.object({
   signature: z.string().trim().min(1),
 });
 
+const embeddedExecutionKeySchema = z.string().trim().min(1).max(160);
+
 export const embeddedEvmPrepareBodySchema = z.object({
   chainId: z.number().int().positive(),
   transactions: z.array(embeddedEvmTransactionSchema).min(1).max(8),
 });
 
 export const embeddedEvmExecuteBodySchema = embeddedEvmPrepareBodySchema.extend({
+  executionKey: embeddedExecutionKeySchema,
   signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
 });
 
@@ -46,5 +49,6 @@ export const embeddedSolanaPrepareBodySchema = z.object({
 
 export const embeddedSolanaExecuteBodySchema =
   embeddedSolanaPrepareBodySchema.extend({
+    executionKey: embeddedExecutionKeySchema,
     signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
   });

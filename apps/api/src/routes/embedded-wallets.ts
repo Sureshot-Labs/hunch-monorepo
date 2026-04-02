@@ -14,6 +14,10 @@ import {
   resolveEmbeddedEthereumWalletContext,
 } from "../services/embedded-ethereum.js";
 import {
+  buildEmbeddedExecutionSingleFlightKey,
+  runEmbeddedExecutionSingleFlight,
+} from "../services/embedded-execution-singleflight.js";
+import {
   executeEmbeddedSolanaTransactionRequests,
   prepareEmbeddedSolanaTransactionRequests,
   resolveEmbeddedSolanaWalletContext,
@@ -98,25 +102,36 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
-        const requests = prepareEmbeddedEthereumTransactionRequests({
-          context,
-          chainId: request.body.chainId,
-          transactions: request.body.transactions,
-        });
-        const transactionHashes = await executeEmbeddedEthereumTransactionRequests(
-          {
-            chainId: request.body.chainId,
-            requests,
-            signatures: request.body.signedRequests,
+        const result = await runEmbeddedExecutionSingleFlight({
+          key: buildEmbeddedExecutionSingleFlightKey(
+            "embedded-wallets",
+            "ethereum",
+            context.signer,
+            request.body.chainId,
+            request.body.executionKey,
+          ),
+          run: async () => {
+            const requests = prepareEmbeddedEthereumTransactionRequests({
+              context,
+              chainId: request.body.chainId,
+              transactions: request.body.transactions,
+            });
+            const transactionHashes =
+              await executeEmbeddedEthereumTransactionRequests({
+                chainId: request.body.chainId,
+                requests,
+                signatures: request.body.signedRequests,
+              });
+            return {
+              ok: true,
+              signer: context.signer,
+              chainId: request.body.chainId,
+              transactionHashes,
+            };
           },
-        );
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          signer: context.signer,
-          chainId: request.body.chainId,
-          transactionHashes,
         });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
       } catch (error) {
         app.log.error(
           {
@@ -205,20 +220,31 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
-        const requests = prepareEmbeddedSolanaTransactionRequests({
-          context,
-          transactions: request.body.transactions,
-        });
-        const signatures = await executeEmbeddedSolanaTransactionRequests({
-          requests,
-          signatures: request.body.signedRequests,
+        const result = await runEmbeddedExecutionSingleFlight({
+          key: buildEmbeddedExecutionSingleFlightKey(
+            "embedded-wallets",
+            "solana",
+            context.signer,
+            request.body.executionKey,
+          ),
+          run: async () => {
+            const requests = prepareEmbeddedSolanaTransactionRequests({
+              context,
+              transactions: request.body.transactions,
+            });
+            const signatures = await executeEmbeddedSolanaTransactionRequests({
+              requests,
+              signatures: request.body.signedRequests,
+            });
+            return {
+              ok: true,
+              signer: context.signer,
+              signatures,
+            };
+          },
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          signer: context.signer,
-          signatures,
-        });
+        return reply.send(result);
       } catch (error) {
         app.log.error(
           {
