@@ -26,3 +26,25 @@ export const embeddedEvmPrepareBodySchema = z.object({
 export const embeddedEvmExecuteBodySchema = embeddedEvmPrepareBodySchema.extend({
   signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
 });
+
+export const embeddedSolanaTransactionSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  label: z.string().trim().min(1).max(120),
+  transaction: z.string().trim().min(1),
+  encoding: z.enum(["base64"]).default("base64"),
+  sponsor: z.boolean().optional(),
+  caip2: z
+    .string()
+    .trim()
+    .regex(/^solana:[1-9A-HJ-NP-Za-km-z]{32}$/)
+    .optional(),
+});
+
+export const embeddedSolanaPrepareBodySchema = z.object({
+  transactions: z.array(embeddedSolanaTransactionSchema).min(1).max(8),
+});
+
+export const embeddedSolanaExecuteBodySchema =
+  embeddedSolanaPrepareBodySchema.extend({
+    signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
+  });
