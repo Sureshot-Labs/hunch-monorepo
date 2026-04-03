@@ -107,9 +107,11 @@ const buildWhereClause = (
   includeSigner: boolean,
   columns: { market?: string; token?: string } = {},
 ): string => {
+  const normalizedWalletExpr = `case when ${alias}.wallet_address like '0x%' then lower(${alias}.wallet_address) else ${alias}.wallet_address end`;
+  const normalizedSignerExpr = `case when ${alias}.signer_address like '0x%' then lower(${alias}.signer_address) else ${alias}.signer_address end`;
   const walletClause = includeSigner
-    ? `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2) or ${alias}.signer_address = ANY($2))`
-    : `(${alias}.wallet_address is null or ${alias}.wallet_address = ANY($2))`;
+    ? `((${alias}.wallet_address is not null and ${normalizedWalletExpr} = ANY($2::text[])) or (${alias}.wallet_address is null and ${normalizedSignerExpr} = ANY($2::text[])))`
+    : `(${alias}.wallet_address is null or ${normalizedWalletExpr} = ANY($2::text[]))`;
   const conditions = [`${alias}.user_id = $1`, walletClause];
 
   if (filterParams.venueIndex) {
@@ -234,7 +236,7 @@ export async function fetchUnifiedOrders(
     token: "o.token_id",
   });
   const orderWhere = inputs.openOnly
-    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size)`
+    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and coalesce(o.order_type, '') not in ('FOK', 'FAK')`
     : baseOrderWhere;
   const execWhere = buildWhereClause("e", filterParams, false, {
     market: "e.unified_market_id",
