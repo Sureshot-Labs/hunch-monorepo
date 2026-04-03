@@ -322,6 +322,20 @@ function findAuthorizationSignature(
   return trimmed;
 }
 
+function isPrivyInflightAuthorizationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("inflight eip-7702 authorization") ||
+    message.includes("aa10 sender already constructed")
+  );
+}
+
+async function waitForInflightAuthorizationRetry(attempt: number) {
+  const delayMs = 1_250 * (attempt + 1);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function parsePrivyRpcSignatureResponse(payload: Record<string, unknown>): string {
   const data =
     payload &&
@@ -1098,37 +1112,79 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
   requests: EmbeddedPrivyAuthorizationRequest[];
   signatures: EmbeddedPrivyAuthorizationSignature[];
 }): Promise<string[]> {
-  const transactionHashes: string[] = [];
+  const pendingTransactions: Array<{
+    request: EmbeddedPrivyAuthorizationRequest;
+    hash: string | null;
+    transactionId: string | null;
+    userOperationHash: string | null;
+  }> = [];
   for (const request of inputs.requests) {
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
       request.id,
     );
-    const payload = await executePreparedPrivyAuthorizationRequest(
-      request,
-      authorizationSignature,
-    );
+    let payload: Record<string, unknown> | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        payload = await executePreparedPrivyAuthorizationRequest(
+          request,
+          authorizationSignature,
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+        if (
+          !isPrivyInflightAuthorizationError(error) ||
+          attempt === 2
+        ) {
+          throw error;
+        }
+        await waitForInflightAuthorizationRetry(attempt);
+      }
+    }
+
+    if (!payload) {
+      throw (
+        lastError ??
+        new Error(
+          `${request.label} did not produce a Privy wallet response.`,
+        )
+      );
+    }
+
     const { hash, transactionId, userOperationHash } =
       parsePrivyRpcTransactionHashResponse(payload);
-    const resolvedHash =
-      hash ??
-      (transactionId
-        ? await waitForPrivyTransaction(transactionId, request.label)
-        : null);
-    if (resolvedHash) {
-      await waitForPolygonTransaction(resolvedHash, request.label);
-      transactionHashes.push(resolvedHash);
-      continue;
-    }
-    if (userOperationHash) {
-      transactionHashes.push(userOperationHash);
-      continue;
-    }
-    throw new Error(
-      `${request.label} did not produce a transaction hash after Privy sponsorship.`,
-    );
+    pendingTransactions.push({
+      request,
+      hash,
+      transactionId,
+      userOperationHash,
+    });
   }
-  return transactionHashes;
+
+  return Promise.all(
+    pendingTransactions.map(async (pending) => {
+      const resolvedHash =
+        pending.hash ??
+        (pending.transactionId
+          ? await waitForPrivyTransaction(
+              pending.transactionId,
+              pending.request.label,
+            )
+          : null);
+      if (resolvedHash) {
+        await waitForPolygonTransaction(resolvedHash, pending.request.label);
+        return resolvedHash;
+      }
+      if (pending.userOperationHash) {
+        return pending.userOperationHash;
+      }
+      throw new Error(
+        `${pending.request.label} did not produce a transaction hash after Privy sponsorship.`,
+      );
+    }),
+  );
 }
 
 async function executeSafeApprovalTasks(inputs: {
