@@ -1,6 +1,7 @@
 import {
   runFeesCollectJob,
   runFeesReconcileJob,
+  runKalshiExecutionReconcileJob,
   runRewardsPayoutJob,
   runTreasurySweepJob,
 } from "./finance-jobs.js";
@@ -59,6 +60,21 @@ function buildJobs(): ScheduledJob[] {
           dryRun: env.feesReconcileDryRun || !allowExecute,
           limit: 25,
           minAgeSec: 60,
+        }),
+    },
+    {
+      name: "kalshi_execution_reconcile",
+      enabled: env.kalshiExecutionReconcileEnabled,
+      intervalSec: env.kalshiExecutionReconcileIntervalSec,
+      timeoutSec: env.jobTimeoutSec,
+      maxRetries: env.maxRetries,
+      retryBackoffSec: env.retryBackoffSec,
+      jitterSec: env.jitterSec,
+      run: () =>
+        runKalshiExecutionReconcileJob({
+          dryRun: env.kalshiExecutionReconcileDryRun || !allowExecute,
+          limit: env.kalshiExecutionReconcileLimit,
+          minAgeSec: env.kalshiExecutionReconcileMinAgeSec,
         }),
     },
     {

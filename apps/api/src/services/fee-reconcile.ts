@@ -1,9 +1,16 @@
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
-import { fetchSolanaSignatureStatus } from "./solana-rpc.js";
+import {
+  fetchSolanaSignatureStatus,
+  fetchSolanaTokenAccountNetDelta,
+  formatUiAmount,
+} from "./solana-rpc.js";
 
 type FeeEventRow = {
   id: string;
+  venue: string;
+  source_type: string;
+  fee_amount: string;
   tx_hash: string;
   collected_at: Date | null;
   updated_at: Date | null;
@@ -44,12 +51,48 @@ function buildPendingFeeQuery(inputs: FeeReconcileOptions) {
   return {
     text: `
       select id, tx_hash, collected_at, updated_at
+           , venue, source_type, fee_amount
       from fee_events
       ${whereClause}
       order by updated_at asc
       limit $${params.length}
     `,
     params,
+  };
+}
+
+function amountsMatch(a: string, b: string): boolean {
+  const left = Number(a);
+  const right = Number(b);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  return Math.abs(left - right) < 0.0000005;
+}
+
+async function verifyKalshiFeeEventAmount(row: FeeEventRow): Promise<{
+  verified: boolean;
+  matches: boolean;
+}> {
+  const feeAccount = env.dflowFeeAccount?.trim();
+  if (!feeAccount || !row.tx_hash) {
+    return { verified: false, matches: false };
+  }
+  const delta = await fetchSolanaTokenAccountNetDelta({
+    rpcUrls: env.solanaRpcUrls,
+    signature: row.tx_hash.trim(),
+    tokenAccount: feeAccount,
+    expectedMint: env.solanaUsdcMint,
+    timeoutMs: env.solanaRpcTimeoutMs,
+  });
+  if (delta.status !== "verified") {
+    return { verified: false, matches: false };
+  }
+  if (delta.deltaRaw <= 0n) {
+    return { verified: true, matches: false };
+  }
+  const actual = formatUiAmount(delta.deltaRaw, delta.decimals);
+  return {
+    verified: true,
+    matches: amountsMatch(actual, row.fee_amount),
   };
 }
 
@@ -116,6 +159,13 @@ export async function reconcileSolanaFeeEvents(
       }
 
       if (status.status === "fulfilled") {
+        if (row.venue === "kalshi" && row.source_type === "execution") {
+          const verification = await verifyKalshiFeeEventAmount(row);
+          if (!verification.verified || !verification.matches) {
+            result.skipped += 1;
+            continue;
+          }
+        }
         await updateFeeEventStatus(pool, { id: row.id, status: "collected" });
         result.collected += 1;
       } else if (status.status === "failed") {

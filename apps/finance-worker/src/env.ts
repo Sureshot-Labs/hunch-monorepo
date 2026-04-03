@@ -74,6 +74,27 @@ export const env = {
     false,
   ),
 
+  kalshiExecutionReconcileEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_ENABLED"),
+    true,
+  ),
+  kalshiExecutionReconcileIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_INTERVAL_SEC"),
+    60,
+  ),
+  kalshiExecutionReconcileDryRun: parseBool(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_DRY_RUN"),
+    false,
+  ),
+  kalshiExecutionReconcileLimit: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_LIMIT"),
+    50,
+  ),
+  kalshiExecutionReconcileMinAgeSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_KALSHI_EXECUTIONS_MIN_AGE_SEC"),
+    15,
+  ),
+
   treasurySweepEnabled: parseBool(readEnv("HUNCH_FINANCE_SWEEP_ENABLED"), false),
   treasurySweepIntervalSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_SWEEP_INTERVAL_SEC"),

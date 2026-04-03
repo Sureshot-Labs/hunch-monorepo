@@ -581,6 +581,46 @@ async function backfillPolymarketUnifiedTokens(
   );
 }
 
+async function backfillKalshiUnifiedTokens(
+  pool: Pool,
+  tokenIds: string[],
+): Promise<void> {
+  if (tokenIds.length === 0) return;
+
+  await pool.query(
+    `
+      with wanted as (
+        select unnest($1::text[]) as token_id
+      ),
+      matched_yes as (
+        select m.id as market_id, w.token_id, 'YES'::text as side
+        from unified_markets m
+        join wanted w on w.token_id = m.token_yes
+        where m.venue = 'kalshi'
+      ),
+      matched_no as (
+        select m.id as market_id, w.token_id, 'NO'::text as side
+        from unified_markets m
+        join wanted w on w.token_id = m.token_no
+        where m.venue = 'kalshi'
+      ),
+      to_insert as (
+        select * from matched_yes
+        union all
+        select * from matched_no
+      )
+      insert into unified_tokens(token_id, venue, market_id, side)
+      select token_id, 'kalshi', market_id, side
+      from to_insert
+      on conflict (market_id, side) do update
+        set token_id = excluded.token_id,
+            venue = excluded.venue,
+            updated_at = now()
+    `,
+    [tokenIds],
+  );
+}
+
 async function fetchPolymarketCandidateTokenIds(
   pool: Pool,
   inputs: { userId: string; walletAddresses: string[]; limit: number },
@@ -1284,6 +1324,7 @@ export type PositionsSyncResult = {
 };
 
 type PositionScope = "own" | "followed";
+const KALSHI_POSITIONS_SYNC_GRACE_SEC = 0;
 
 async function syncKalshiPositionsFromSolana(
   pool: Pool,
@@ -1308,6 +1349,13 @@ async function syncKalshiPositionsFromSolana(
     size: balance.uiAmountString,
   }));
 
+  if (tokenBalances.length > 0) {
+    await backfillKalshiUnifiedTokens(
+      pool,
+      tokenBalances.map((balance) => balance.tokenId),
+    );
+  }
+
   if (tokenBalances.length) {
     void markHotTokens({
       tokenIds: tokenBalances.map((balance) => balance.tokenId),
@@ -1322,8 +1370,8 @@ async function syncKalshiPositionsFromSolana(
     positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "sol:%",
-    flattenGraceSec: env.positionsSyncFlattenGraceSec,
-    protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
+    flattenGraceSec: KALSHI_POSITIONS_SYNC_GRACE_SEC,
+    protectRecentFlatsSec: KALSHI_POSITIONS_SYNC_GRACE_SEC,
   });
 
   if (inputs.positionScope === "own") {

@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { tx } from "@hunch/infra";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -16,14 +15,13 @@ import {
   extractDflowErrorMessage,
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
-import { verifyProofAddress } from "../services/proof-client.js";
 import {
-  buildTradeNotification,
-  createNotificationSafe,
-} from "../services/notifications.js";
-import { resolveFeeEventSnapshotAtWrite } from "../services/rewards-fee-snapshot.js";
-import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
-import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
+  fetchKalshiNormalizedOrderStatus,
+  finalizeKalshiExecutionEffects,
+  mergeKalshiExecutionRaw,
+  normalizeKalshiExecutionStatus,
+} from "../services/kalshi-executions.js";
+import { verifyProofAddress } from "../services/proof-client.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
@@ -34,18 +32,14 @@ import {
 import {
   dflowExecutionBodySchema,
   dflowOrderQuerySchema,
+  dflowOrderStatusQuerySchema,
   dflowQuoteQuerySchema,
   dflowSubmitBodySchema,
   dflowSwapBodySchema,
 } from "../schemas/dflow.js";
+import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 
 const SOL_DECIMALS = 9;
-const DEFAULT_USDC_DECIMALS = 6;
-
-type FeeExtractionResult = {
-  amountRaw: string;
-  feeAccount?: string | null;
-};
 
 type MintPair = {
   inputMint: string;
@@ -62,114 +56,6 @@ function ensureDflowReady(reply: { code: (status: number) => void; send: (payloa
   reply.code(400);
   reply.send({ error: "Missing DFLOW_API_KEY" });
   return false;
-}
-
-function parseNumberish(value: unknown): string | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.trunc(value).toString();
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    return trimmed;
-  }
-  return null;
-}
-
-function normalizeRawAmountToUi(
-  value: string | number | null | undefined,
-  decimals: number,
-): number | null {
-  if (value == null) return null;
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return null;
-  return numeric / Math.pow(10, decimals);
-}
-
-function parseBigInt(value: string): bigint | null {
-  try {
-    if (!/^\d+$/.test(value)) return null;
-    return BigInt(value);
-  } catch {
-    return null;
-  }
-}
-
-function extractFeeFromObject(value: unknown): FeeExtractionResult | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  const amountKeys = [
-    "platformFeeAmount",
-    "platform_fee_amount",
-    "feeAmount",
-    "fee_amount",
-  ];
-
-  for (const key of amountKeys) {
-    const raw = record[key];
-    const amount = parseNumberish(raw);
-    if (amount) return { amountRaw: amount, feeAccount: null };
-  }
-
-  const objectKeys = ["platformFee", "platform_fee", "fee"];
-  for (const key of objectKeys) {
-    const raw = record[key];
-    if (!raw || typeof raw !== "object") continue;
-    const nested = raw as Record<string, unknown>;
-    const nestedAmount =
-      parseNumberish(nested.amount) ??
-      parseNumberish(nested.feeAmount) ??
-      parseNumberish(nested.platformFeeAmount);
-    if (nestedAmount) {
-      const feeAccount =
-        (typeof nested.feeAccount === "string" && nested.feeAccount.trim()) ||
-        (typeof nested.fee_account === "string" && nested.fee_account.trim()) ||
-        null;
-      return { amountRaw: nestedAmount, feeAccount };
-    }
-  }
-
-  const nestedKeys = [
-    "data",
-    "quote",
-    "order",
-    "result",
-    "swap",
-    "route",
-  ];
-  for (const key of nestedKeys) {
-    const nested = record[key];
-    const result = extractFeeFromObject(nested);
-    if (result) return result;
-  }
-
-  return null;
-}
-
-function extractDflowFeeAmount(raw: unknown): FeeExtractionResult | null {
-  if (!raw || typeof raw !== "object") return null;
-  const record = raw as Record<string, unknown>;
-  const order = record.order ?? record.quote ?? record;
-  return extractFeeFromObject(order);
-}
-
-function computeFeeFromBps(inputs: {
-  amountRaw: string;
-  decimals: number;
-  feeBps: number;
-}): string | null {
-  if (!inputs.amountRaw) return null;
-  if (!Number.isFinite(inputs.feeBps) || inputs.feeBps <= 0) return null;
-  const amountBig = parseBigInt(inputs.amountRaw);
-  if (amountBig != null) {
-    const feeRaw = (amountBig * BigInt(inputs.feeBps)) / 10_000n;
-    return formatUiAmount(feeRaw, inputs.decimals);
-  }
-
-  const amountNum = Number(inputs.amountRaw);
-  if (!Number.isFinite(amountNum)) return null;
-  const feeNum = (amountNum * inputs.feeBps) / 10_000;
-  return (feeNum / Math.pow(10, inputs.decimals)).toString();
 }
 
 function isBuyIntent(inputMint: string | null | undefined): boolean {
@@ -511,6 +397,75 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.get(
+    "/order-status",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: dflowOrderStatusQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!ensureDflowReady(reply)) return;
+      try {
+        const orderStatus = await fetchKalshiNormalizedOrderStatus({
+          signature: request.query.signature,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(orderStatus.raw);
+      } catch (error) {
+        app.log.error(
+          { error, signature: request.query.signature },
+          "Failed to fetch DFlow order status",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "DFlow order status failed",
+        });
+      }
+    },
+  );
+
+  z.get(
+    "/tx-status",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: dflowOrderStatusQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const status = await fetchSolanaSignatureStatus({
+          rpcUrls: env.solanaRpcUrls,
+          signature: request.query.signature,
+          timeoutMs: env.solanaRpcTimeoutMs,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          status: status?.status ?? "submitted",
+        });
+      } catch (error) {
+        app.log.error(
+          { error, signature: request.query.signature },
+          "Failed to fetch Kalshi tx status",
+        );
+        reply.code(502);
+        return reply.send({ error: "Failed to fetch Kalshi tx status" });
+      }
+    },
+  );
+
   /**
    * GET /quote
    * Proxy quote requests to DFlow (no signing).
@@ -746,24 +701,35 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
-      if (!user || !walletAddress) {
+      if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
 
-      if (!isSolanaWallet(walletAddress)) {
+      const body = request.body;
+      const requestedWalletAddress = body.walletAddress?.trim() || walletAddress;
+      const resolvedWalletAddresses = await resolveRequestedWalletAddresses(
+        user.id,
+        walletAddress,
+        requestedWalletAddress ? [requestedWalletAddress] : undefined,
+      );
+      const executionWalletAddress = resolvedWalletAddresses[0] ?? null;
+      if (!executionWalletAddress || !isSolanaWallet(executionWalletAddress)) {
         reply.code(400);
         return reply.send({
-          error: "DFlow execution tracking requires a Solana wallet address",
+          error: "DFlow execution tracking requires a linked Solana wallet address",
         });
       }
-
-      const body = request.body;
+      const executionStatus = normalizeKalshiExecutionStatus(body.status);
+      const executionPurpose = body.purpose ?? "trade";
+      const executionRaw = mergeKalshiExecutionRaw(body.raw, {
+        purpose: executionPurpose,
+      });
 
       try {
         const execution = await storeExecution(pool, {
           userId: user.id,
-          walletAddress,
+          walletAddress: executionWalletAddress,
           venue: "kalshi",
           unifiedMarketId: body.marketId ?? null,
           side: body.side ?? null,
@@ -774,263 +740,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           inputDecimals: body.inputDecimals ?? null,
           outputDecimals: body.outputDecimals ?? null,
           quoteId: body.quoteId ?? null,
+          venueOrderId: body.venueOrderId ?? null,
           txSignature: body.txSignature ?? null,
-          status: body.status ?? null,
-          raw: body.raw ?? null,
+          status: executionStatus ?? null,
+          raw: executionRaw,
         });
-
-        const usdcMint = env.solanaUsdcMint;
-        let notionalUsd: number | null = null;
-        let volumeInserted = false;
-        if (body.inputMint === usdcMint && body.amountIn != null) {
-          const decimals = body.inputDecimals ?? 6;
-          notionalUsd = Number(body.amountIn) / Math.pow(10, decimals);
-        } else if (body.outputMint === usdcMint && body.amountOut != null) {
-          const decimals = body.outputDecimals ?? 6;
-          notionalUsd = Number(body.amountOut) / Math.pow(10, decimals);
-        }
-
-        if (notionalUsd != null && Number.isFinite(notionalUsd) && notionalUsd > 0) {
-          const volumeResult = await insertVolumeEventsWithMultiplier(pool, {
-            userId: user.id,
-            walletAddress,
-            venue: "kalshi",
-            sourceType: "execution",
-            events: [
-              {
-                sourceId: execution.id,
-                notionalUsd,
-                createdAt: new Date(),
-              },
-            ],
-          });
-          volumeInserted = volumeResult.inserted > 0;
-        }
-
-        const inputDecimals = body.inputDecimals ?? DEFAULT_USDC_DECIMALS;
-        const outputDecimals = body.outputDecimals ?? DEFAULT_USDC_DECIMALS;
-        const inputAmountUi = normalizeRawAmountToUi(body.amountIn ?? null, inputDecimals);
-        const outputAmountUi = normalizeRawAmountToUi(
-          body.amountOut ?? null,
-          outputDecimals,
-        );
-
-        if (
-          body.side &&
-          volumeInserted &&
-          notionalUsd != null &&
-          Number.isFinite(notionalUsd) &&
-          notionalUsd > 0
-        ) {
-          const tokenMint =
-            body.side === "BUY" ? body.outputMint ?? null : body.inputMint ?? null;
-          const shares =
-            body.side === "BUY" ? outputAmountUi ?? null : inputAmountUi ?? null;
-          if (
-            tokenMint &&
-            tokenMint !== usdcMint &&
-            shares != null &&
-            Number.isFinite(shares) &&
-            shares > 0
-          ) {
-            try {
-              await applyOptimisticPositionTrade(pool, {
-                userId: user.id,
-                walletAddress,
-                venue: "kalshi",
-                tokenId: `sol:${tokenMint}`,
-                side: body.side,
-                shares,
-                notionalUsd,
-              });
-            } catch (error) {
-              app.log.warn(
-                {
-                  error,
-                  userId: user.id,
-                  walletAddress,
-                  tokenMint,
-                  side: body.side,
-                },
-                "DFlow optimistic position update failed",
-              );
-            }
-          }
-        }
-
-        if (body.purpose !== "redeem") {
-          void createNotificationSafe(
-            pool,
-            buildTradeNotification({
-              userId: user.id,
-              venue: "kalshi",
-              side: body.side ?? null,
-              amountUsd: notionalUsd,
-              marketId: body.marketId ?? null,
-              txHash: body.txSignature ?? null,
-              walletAddress,
-            }),
-            app.log,
-          );
-        }
-
-        const feeAccount = env.dflowFeeAccount?.trim() || null;
-        const feeBps = env.feeBpsKalshi;
-        const feeScale = env.feeScaleKalshi;
-        const hasFeeBps = Number.isFinite(feeBps) && feeBps > 0;
-        const hasFeeScale = Number.isFinite(feeScale) && feeScale > 0;
-        const feeConfigActive = Boolean(feeAccount) && (hasFeeBps || hasFeeScale);
-
-        if (feeConfigActive) {
-          const rawFee = extractDflowFeeAmount(body.raw);
-          const rawFeeAccount = rawFee?.feeAccount ?? null;
-          if (rawFeeAccount && feeAccount && rawFeeAccount !== feeAccount) {
-            app.log.warn(
-              { rawFeeAccount, feeAccount, userId: user.id },
-              "Skipping DFlow fee event (fee account mismatch)",
-            );
-          } else {
-            const inputDecimals = body.inputDecimals ?? DEFAULT_USDC_DECIMALS;
-            const outputDecimals = body.outputDecimals ?? inputDecimals;
-            const isInputUsdc = body.inputMint === env.solanaUsdcMint;
-            const isOutputUsdc = body.outputMint === env.solanaUsdcMint;
-            const feeDecimals = isInputUsdc
-              ? inputDecimals
-              : isOutputUsdc
-                ? outputDecimals
-                : DEFAULT_USDC_DECIMALS;
-            let feeAmountUi: string | null = null;
-
-            if (rawFee?.amountRaw) {
-              const trimmed = rawFee.amountRaw.trim();
-              if (trimmed.includes(".")) {
-                feeAmountUi = trimmed;
-              } else {
-                const feeBig = parseBigInt(trimmed);
-                if (feeBig != null) {
-                  feeAmountUi = formatUiAmount(feeBig, feeDecimals);
-                } else {
-                  const feeNum = Number(trimmed);
-                  if (Number.isFinite(feeNum)) {
-                    feeAmountUi = (
-                      feeNum / Math.pow(10, feeDecimals)
-                    ).toString();
-                  }
-                }
-              }
-            }
-
-            if (!feeAmountUi && hasFeeBps && !hasFeeScale) {
-              const baseAmountRaw = isInputUsdc
-                ? parseNumberish(body.amountIn)
-                : isOutputUsdc
-                  ? parseNumberish(body.amountOut)
-                  : null;
-              if (baseAmountRaw) {
-                feeAmountUi = computeFeeFromBps({
-                  amountRaw: baseAmountRaw,
-                  decimals: feeDecimals,
-                  feeBps,
-                });
-              }
-            }
-
-            const feeAmountNumber =
-              feeAmountUi != null ? Number(feeAmountUi) : NaN;
-            if (Number.isFinite(feeAmountNumber) && feeAmountNumber > 0) {
-              const feeAmountUsd = feeAmountUi;
-              if (!feeAmountUsd) {
-                throw new Error("Missing fee amount for frozen liability snapshot");
-              }
-              const signature = body.txSignature?.trim() || "";
-              const statusResult = signature
-                ? await fetchSolanaSignatureStatus({
-                    rpcUrls: env.solanaRpcUrls,
-                    signature,
-                    timeoutMs: env.solanaRpcTimeoutMs,
-                  })
-                : null;
-              const status =
-                statusResult?.status === "fulfilled"
-                  ? "collected"
-                  : statusResult?.status === "failed"
-                    ? "failed"
-                    : "pending";
-              const collectedAt = status === "collected" ? new Date() : null;
-              await tx(pool, async (client) => {
-                const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
-                  userId: user.id,
-                  eventTime: new Date(),
-                  feeUsd: feeAmountUsd,
-                });
-                const result = await client.query<{ id: string }>(
-                  `
-                    insert into fee_events (
-                      id,
-                      user_id,
-                      wallet_address,
-                      venue,
-                      chain_id,
-                      source_type,
-                      source_id,
-                      fee_amount,
-                      fee_asset,
-                      fee_usd,
-                      cashback_bps_applied,
-                      referral_bps_applied,
-                      cashback_earned_usdc,
-                      referral_earned_usdc,
-                      liability_snapshot_source,
-                      tx_hash,
-                      collected_at,
-                      status,
-                      created_at,
-                      updated_at
-                    )
-                    values (
-                      gen_random_uuid(),
-                      $1, $2, 'kalshi', 'solana', 'execution', $3,
-                      $4, 'USDC', $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
-                    )
-                    on conflict (user_id, source_type, source_id)
-                    do update set
-                      tx_hash = excluded.tx_hash,
-                      collected_at = excluded.collected_at,
-                      status = excluded.status,
-                      updated_at = now()
-                    where fee_events.fee_amount = excluded.fee_amount
-                      and fee_events.fee_usd = excluded.fee_usd
-                      and fee_events.cashback_bps_applied = excluded.cashback_bps_applied
-                      and fee_events.referral_bps_applied = excluded.referral_bps_applied
-                      and fee_events.cashback_earned_usdc = excluded.cashback_earned_usdc
-                      and fee_events.referral_earned_usdc = excluded.referral_earned_usdc
-                      and fee_events.liability_snapshot_source = excluded.liability_snapshot_source
-                    returning id
-                  `,
-                  [
-                    user.id,
-                    walletAddress,
-                    execution.id,
-                    feeAmountUsd,
-                    snapshot.cashbackBpsApplied,
-                    snapshot.referralBpsApplied,
-                    snapshot.cashbackEarnedUsdc,
-                    snapshot.referralEarnedUsdc,
-                    snapshot.liabilitySnapshotSource,
-                    signature || null,
-                    collectedAt,
-                    status,
-                  ],
-                );
-                if (!result.rows.length) {
-                  throw new Error(
-                    `fee_events immutable economic mismatch for source_id=${execution.id}`,
-                  );
-                }
-              });
-            }
-          }
-        }
+        await finalizeKalshiExecutionEffects(pool, {
+          execution,
+          purpose: executionPurpose,
+          logger: app.log,
+        });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({

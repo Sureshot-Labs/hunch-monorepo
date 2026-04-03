@@ -298,12 +298,15 @@ export async function createNotificationSafe(
   db: DbQuery,
   input: NotificationInput,
   logger?: Logger,
+  options: { publish?: boolean } = {},
 ): Promise<NotificationPayload | null> {
   try {
     const row = await insertNotification(db, input);
     if (!row) return null;
     const payload = buildPayload(row);
-    await publishNotification(row.user_id, payload);
+    if (options.publish !== false) {
+      await publishNotification(row.user_id, payload);
+    }
     return payload;
   } catch (error) {
     if (logger?.warn) {

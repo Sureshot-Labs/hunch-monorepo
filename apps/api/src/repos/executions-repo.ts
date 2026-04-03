@@ -24,6 +24,36 @@ export type ExecutionRow = {
   updated_at: Date;
 };
 
+function buildExecutionStatusUpdateSql(): string {
+  return `
+    case
+      when executions.status in ('fulfilled', 'no_fill', 'failed') then executions.status
+      when excluded.status is null then executions.status
+      when excluded.status in ('fulfilled', 'no_fill', 'failed') then excluded.status
+      when executions.status = 'pending_close' and excluded.status in ('submitted', 'open') then executions.status
+      when executions.status = 'open' and excluded.status = 'submitted' then executions.status
+      else excluded.status
+    end
+  `;
+}
+
+const EXECUTION_STATUS_UPDATE_SQL = buildExecutionStatusUpdateSql();
+
+function buildExecutionRawUpdateSql(): string {
+  return `
+    case
+      when executions.status in ('fulfilled', 'no_fill', 'failed')
+        and (
+          excluded.status is null or excluded.status not in ('fulfilled', 'no_fill', 'failed')
+        )
+        then coalesce(executions.raw, excluded.raw)
+      else coalesce(excluded.raw, executions.raw)
+    end
+  `;
+}
+
+const EXECUTION_RAW_UPDATE_SQL = buildExecutionRawUpdateSql();
+
 export async function storeExecution(
   pool: Pool,
   inputs: {
@@ -94,8 +124,8 @@ export async function storeExecution(
         output_decimals = coalesce(excluded.output_decimals, executions.output_decimals),
         quote_id = coalesce(excluded.quote_id, executions.quote_id),
         venue_order_id = coalesce(excluded.venue_order_id, executions.venue_order_id),
-        status = coalesce(excluded.status, executions.status),
-        raw = coalesce(excluded.raw, executions.raw),
+        status = ${EXECUTION_STATUS_UPDATE_SQL},
+        raw = ${EXECUTION_RAW_UPDATE_SQL},
         updated_at = now()
       returning
         id,
@@ -145,6 +175,106 @@ export async function storeExecution(
   }
 
   return rows[0];
+}
+
+export async function fetchPendingKalshiExecutions(
+  pool: Pool,
+  inputs: {
+    limit: number;
+    minAgeSec: number;
+  },
+): Promise<ExecutionRow[]> {
+  const limit = Math.max(1, Math.trunc(inputs.limit));
+  const minAgeSec = Math.max(0, Math.trunc(inputs.minAgeSec));
+  const { rows } = await pool.query<ExecutionRow>(
+    `
+      select
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        unified_market_id,
+        side,
+        outcome,
+        input_mint,
+        output_mint,
+        amount_in,
+        amount_out,
+        input_decimals,
+        output_decimals,
+        quote_id,
+        tx_signature,
+        venue_order_id,
+        status,
+        raw,
+        created_at,
+        updated_at
+      from executions
+      where venue = 'kalshi'
+        and wallet_address is not null
+        and tx_signature is not null
+        and coalesce(status, 'submitted') in ('submitted', 'open', 'pending_close')
+        and created_at <= now() - ($1::int * interval '1 second')
+      order by created_at asc
+      limit $2
+    `,
+    [minAgeSec, limit],
+  );
+
+  return rows;
+}
+
+export async function fetchFulfilledKalshiTradeExecutionsMissingFeeEvent(
+  pool: Pool,
+  inputs: {
+    limit: number;
+    minAgeSec: number;
+  },
+): Promise<ExecutionRow[]> {
+  const limit = Math.max(1, Math.trunc(inputs.limit));
+  const minAgeSec = Math.max(0, Math.trunc(inputs.minAgeSec));
+  const { rows } = await pool.query<ExecutionRow>(
+    `
+      select
+        e.id,
+        e.user_id,
+        e.wallet_address,
+        e.venue,
+        e.unified_market_id,
+        e.side,
+        e.outcome,
+        e.input_mint,
+        e.output_mint,
+        e.amount_in,
+        e.amount_out,
+        e.input_decimals,
+        e.output_decimals,
+        e.quote_id,
+        e.tx_signature,
+        e.venue_order_id,
+        e.status,
+        e.raw,
+        e.created_at,
+        e.updated_at
+      from executions e
+      left join fee_events fe
+        on fe.user_id = e.user_id
+       and fe.source_type = 'execution'
+       and fe.source_id = e.id::text
+      where e.venue = 'kalshi'
+        and e.wallet_address is not null
+        and e.tx_signature is not null
+        and e.status = 'fulfilled'
+        and coalesce(e.raw->>'purpose', 'trade') = 'trade'
+        and fe.id is null
+        and e.created_at <= now() - ($1::int * interval '1 second')
+      order by e.created_at asc
+      limit $2
+    `,
+    [minAgeSec, limit],
+  );
+
+  return rows;
 }
 
 export async function fetchExecutionsForUserWallet(

@@ -10,6 +10,11 @@ import {
   type ReconcileFeesOptions,
 } from "../reconcile-fees.js";
 import {
+  parseReconcileKalshiExecutionsArgs,
+  runReconcileKalshiExecutions,
+  type ReconcileKalshiExecutionsOptions,
+} from "../reconcile-kalshi-executions.js";
+import {
   parseRewardsPayoutArgs,
   runRewardsPayout,
   type RewardsPayoutOptions,
@@ -44,6 +49,13 @@ export async function runFeesReconcileJob(
   return runReconcileFees(mergeOptions(defaults, overrides));
 }
 
+export async function runKalshiExecutionReconcileJob(
+  overrides?: Partial<ReconcileKalshiExecutionsOptions>,
+) {
+  const defaults = parseReconcileKalshiExecutionsArgs([]);
+  return runReconcileKalshiExecutions(mergeOptions(defaults, overrides));
+}
+
 export async function runRewardsPayoutJob(
   overrides?: Partial<RewardsPayoutOptions>,
 ) {
@@ -61,6 +73,7 @@ export async function runTreasurySweepJob(
 export type {
   CollectFeesOptions,
   CollectFeesRunResult,
+  ReconcileKalshiExecutionsOptions,
   ReconcileFeesOptions,
   RewardsPayoutOptions,
   RewardsTreasurySweepOptions,

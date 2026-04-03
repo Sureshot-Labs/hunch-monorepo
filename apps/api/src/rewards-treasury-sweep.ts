@@ -17,6 +17,7 @@ import {
   capTreasurySweepAmountMicro,
   getRewardsTreasuryReport,
 } from "./services/rewards-treasury.js";
+import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
 
 export type RewardsTreasurySweepOptions = {
   execute: boolean;
@@ -155,6 +156,31 @@ type SolanaSweepConfig = {
 };
 
 type SweepConfig = EvmSweepConfig | SolanaSweepConfig;
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const message = error.message?.trim();
+    const name = error.name?.trim();
+    if (message && name && message !== name) return `${name}: ${message}`;
+    if (message) return message;
+    if (name) return name;
+  }
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error.trim();
+  }
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== "{}") return serialized;
+  } catch {
+    // ignore
+  }
+  return String(error);
+}
+
+function wrapSweepStage(stage: string, error: unknown): Error {
+  const message = describeError(error);
+  return new Error(`solana_${stage}: ${message}`);
+}
 
 function loadSolanaKeypair(secret: string): Keypair {
   const trimmed = secret.trim();
@@ -363,58 +389,101 @@ async function executeSolanaSweep(
   const mint = new PublicKey(config.usdcMint);
   const coldOwner = new PublicKey(config.coldAddress);
 
-  const sourceAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    keypair,
-    mint,
-    keypair.publicKey,
-  );
-  const destinationAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    keypair,
-    mint,
-    coldOwner,
-  );
+  let sourceAccount;
+  try {
+    sourceAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      keypair,
+      mint,
+      keypair.publicKey,
+    );
+  } catch (error) {
+    throw wrapSweepStage("source_ata", error);
+  }
 
-  const preHotBalance = BigInt(
-    (await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")).value
-      .amount,
-  );
-  const preColdBalance = BigInt(
-    (
-      await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
-    ).value.amount,
-  );
+  let destinationAccount;
+  try {
+    destinationAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      keypair,
+      mint,
+      coldOwner,
+    );
+  } catch (error) {
+    throw wrapSweepStage("destination_ata", error);
+  }
+
+  let preHotBalance: bigint;
+  let preColdBalance: bigint;
+  try {
+    preHotBalance = BigInt(
+      (
+        await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")
+      ).value.amount,
+    );
+    preColdBalance = BigInt(
+      (
+        await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
+      ).value.amount,
+    );
+  } catch (error) {
+    throw wrapSweepStage("pre_balance", error);
+  }
   if (preHotBalance < amountMicro) {
     throw new Error(
       `insufficient hot balance: have=${usdcMicroToDecimalString(preHotBalance)} need=${usdcMicroToDecimalString(amountMicro)}`,
     );
   }
 
-  const signature = await transferChecked(
-    connection,
-    keypair,
-    sourceAccount.address,
-    mint,
-    destinationAccount.address,
-    keypair.publicKey,
-    amountMicro,
-    USDC_DECIMALS,
-  );
-  const confirmation = await connection.confirmTransaction(signature, "confirmed");
-  if (confirmation.value.err) {
-    throw new Error(`transfer failed: ${JSON.stringify(confirmation.value.err)}`);
+  let signature: string;
+  try {
+    signature = await transferChecked(
+      connection,
+      keypair,
+      sourceAccount.address,
+      mint,
+      destinationAccount.address,
+      keypair.publicKey,
+      amountMicro,
+      USDC_DECIMALS,
+    );
+  } catch (error) {
+    throw wrapSweepStage("transfer", error);
   }
 
-  const postHotBalance = BigInt(
-    (await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")).value
-      .amount,
-  );
-  const postColdBalance = BigInt(
-    (
-      await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
-    ).value.amount,
-  );
+  try {
+    const confirmation = await waitForSolanaSignatureConfirmation({
+      rpcUrls: env.solanaRpcUrls,
+      signature,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      commitment: "confirmed",
+    });
+    if (confirmation.status === "failed") {
+      throw new Error("transfer failed");
+    }
+    if (confirmation.status !== "fulfilled") {
+      throw new Error("transfer confirmation timed out");
+    }
+  } catch (error) {
+    throw wrapSweepStage("confirm", error);
+  }
+
+  let postHotBalance: bigint;
+  let postColdBalance: bigint;
+  try {
+    postHotBalance = BigInt(
+      (
+        await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")
+      ).value.amount,
+    );
+    postColdBalance = BigInt(
+      (
+        await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
+      ).value.amount,
+    );
+  } catch (error) {
+    throw wrapSweepStage("post_balance", error);
+  }
   if (preHotBalance - postHotBalance < amountMicro) {
     throw new Error("post-check failed: hot balance did not decrease by amount");
   }
@@ -543,7 +612,7 @@ export async function runRewardsTreasurySweep(
           action.preColdBalance = usdcMicroToDecimalString(result.preColdBalance);
           action.postColdBalance = usdcMicroToDecimalString(result.postColdBalance);
         } catch (error) {
-          action.error = error instanceof Error ? error.message : String(error);
+          action.error = describeError(error);
         }
       }
     }

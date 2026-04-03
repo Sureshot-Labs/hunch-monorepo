@@ -511,6 +511,238 @@ export async function fetchSolanaSignatureStatus(inputs: {
   return { status: "submitted" };
 }
 
+export async function waitForSolanaSignatureConfirmation(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  timeoutMs: number;
+  pollIntervalMs?: number;
+  commitment?: "confirmed" | "finalized";
+}): Promise<{ status: "fulfilled" | "failed" | "submitted" }> {
+  const deadline = Date.now() + Math.max(1_000, inputs.timeoutMs);
+  const pollIntervalMs = Math.max(250, inputs.pollIntervalMs ?? 1_000);
+  const commitment = inputs.commitment ?? "finalized";
+  let lastStatus: "fulfilled" | "failed" | "submitted" = "submitted";
+
+  while (Date.now() < deadline) {
+    const result = await solanaRpcRequest<{
+      value?: Array<
+        | {
+            confirmationStatus?: string | null;
+            confirmations?: number | null;
+            err?: unknown;
+          }
+        | null
+      >;
+    }>({
+      rpcUrls: inputs.rpcUrls,
+      timeoutMs: inputs.timeoutMs,
+      method: "getSignatureStatuses",
+      params: [[inputs.signature], { searchTransactionHistory: true }],
+    });
+
+    const entry = Array.isArray(result?.value) ? result.value[0] : null;
+    if (entry?.err) {
+      return { status: "failed" };
+    }
+
+    const confirmationStatus = entry?.confirmationStatus ?? null;
+    const isConfirmed =
+      confirmationStatus === "confirmed" || confirmationStatus === "finalized";
+    const isFinalized = confirmationStatus === "finalized";
+    if (
+      (commitment === "confirmed" && isConfirmed) ||
+      (commitment === "finalized" && isFinalized)
+    ) {
+      return { status: "fulfilled" };
+    }
+
+    if (entry) {
+      lastStatus = "submitted";
+    }
+
+    await sleep(pollIntervalMs);
+  }
+
+  return { status: lastStatus };
+}
+
+type ParsedTransactionAccountKey = {
+  pubkey: string;
+};
+
+type ParsedTransactionTokenBalance = {
+  accountIndex: number;
+  mint: string;
+  amount: bigint;
+  decimals: number;
+};
+
+function parseTransactionAccountKey(value: unknown): ParsedTransactionAccountKey | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return { pubkey: value };
+  }
+  if (!isRecord(value)) return null;
+  const pubkey = value.pubkey;
+  if (typeof pubkey !== "string" || pubkey.trim().length === 0) return null;
+  return { pubkey };
+}
+
+function parseTransactionTokenBalance(
+  value: unknown,
+): ParsedTransactionTokenBalance | null {
+  if (!isRecord(value)) return null;
+  const accountIndexRaw = value.accountIndex;
+  if (
+    typeof accountIndexRaw !== "number" ||
+    !Number.isFinite(accountIndexRaw) ||
+    accountIndexRaw < 0
+  ) {
+    return null;
+  }
+
+  const mint = value.mint;
+  if (typeof mint !== "string" || mint.trim().length === 0) return null;
+
+  const uiTokenAmount = value.uiTokenAmount;
+  if (!isRecord(uiTokenAmount)) return null;
+  const amountRaw = uiTokenAmount.amount;
+  const decimalsRaw = uiTokenAmount.decimals;
+  if (typeof amountRaw !== "string" || amountRaw.trim().length === 0) return null;
+  if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw)) return null;
+
+  try {
+    return {
+      accountIndex: Math.trunc(accountIndexRaw),
+      mint,
+      amount: BigInt(amountRaw),
+      decimals: Math.max(0, Math.trunc(decimalsRaw)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findTokenBalanceForAccount(inputs: {
+  entries: unknown;
+  accountKeys: Array<ParsedTransactionAccountKey | null>;
+  tokenAccount: string;
+}): ParsedTransactionTokenBalance | null {
+  if (!Array.isArray(inputs.entries)) return null;
+  for (const entry of inputs.entries) {
+    const parsed = parseTransactionTokenBalance(entry);
+    if (!parsed) continue;
+    const accountKey = inputs.accountKeys[parsed.accountIndex];
+    if (!accountKey) continue;
+    if (accountKey.pubkey !== inputs.tokenAccount) continue;
+    return parsed;
+  }
+  return null;
+}
+
+export type SolanaTokenAccountNetDeltaResult =
+  | {
+      status: "verified";
+      mint: string;
+      decimals: number;
+      deltaRaw: bigint;
+    }
+  | {
+      status: "not_found" | "missing_account" | "mint_mismatch";
+      mint?: string | null;
+      decimals?: number | null;
+      deltaRaw?: bigint | null;
+    };
+
+export async function fetchSolanaTokenAccountNetDelta(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  tokenAccount: string;
+  expectedMint?: string | null;
+  timeoutMs: number;
+}): Promise<SolanaTokenAccountNetDeltaResult> {
+  const result = await solanaRpcRequest<{
+    meta?: unknown;
+    transaction?: unknown;
+  } | null>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTransaction",
+    params: [
+      inputs.signature,
+      {
+        encoding: "jsonParsed",
+        commitment: "finalized",
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+
+  if (!result || !isRecord(result)) {
+    return { status: "not_found" };
+  }
+
+  const transaction = result.transaction;
+  const meta = result.meta;
+  if (!isRecord(transaction) || !isRecord(meta)) {
+    return { status: "not_found" };
+  }
+
+  const message = transaction.message;
+  if (!isRecord(message)) {
+    return { status: "not_found" };
+  }
+
+  const accountKeysRaw = message.accountKeys;
+  if (!Array.isArray(accountKeysRaw)) {
+    return { status: "not_found" };
+  }
+
+  const accountKeys = accountKeysRaw.map((entry) =>
+    parseTransactionAccountKey(entry),
+  );
+
+  const pre = findTokenBalanceForAccount({
+    entries: meta.preTokenBalances,
+    accountKeys,
+    tokenAccount: inputs.tokenAccount,
+  });
+  const post = findTokenBalanceForAccount({
+    entries: meta.postTokenBalances,
+    accountKeys,
+    tokenAccount: inputs.tokenAccount,
+  });
+
+  if (!pre && !post) {
+    return { status: "missing_account" };
+  }
+
+  const mint = post?.mint ?? pre?.mint ?? null;
+  if (
+    inputs.expectedMint &&
+    mint &&
+    inputs.expectedMint.trim().length > 0 &&
+    mint !== inputs.expectedMint
+  ) {
+    return {
+      status: "mint_mismatch",
+      mint,
+      decimals: post?.decimals ?? pre?.decimals ?? null,
+      deltaRaw: null,
+    };
+  }
+
+  const decimals = post?.decimals ?? pre?.decimals ?? 0;
+  const preAmount = pre?.amount ?? 0n;
+  const postAmount = post?.amount ?? 0n;
+
+  return {
+    status: "verified",
+    mint: mint ?? inputs.expectedMint ?? "",
+    decimals,
+    deltaRaw: postAmount - preAmount,
+  };
+}
+
 type LargestTokenAccount = {
   address: string;
   amount: bigint;

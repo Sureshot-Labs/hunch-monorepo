@@ -19,6 +19,12 @@ type ReconcileFeesOptions = {
   minAgeSec?: number;
 };
 
+type ReconcileKalshiExecutionsOptions = {
+  dryRun?: boolean;
+  limit?: number;
+  minAgeSec?: number;
+};
+
 type RewardsPayoutOptions = {
   dryRun?: boolean;
   confirmOnly?: boolean;
@@ -42,6 +48,9 @@ type FinanceJobsModule = {
   runFeesReconcileJob: (
     overrides?: Partial<ReconcileFeesOptions>,
   ) => Promise<unknown>;
+  runKalshiExecutionReconcileJob: (
+    overrides?: Partial<ReconcileKalshiExecutionsOptions>,
+  ) => Promise<unknown>;
   runRewardsPayoutJob: (
     overrides?: Partial<RewardsPayoutOptions>,
   ) => Promise<unknown>;
@@ -53,7 +62,13 @@ type FinanceJobsModule = {
 let modulePromise: Promise<FinanceJobsModule> | null = null;
 
 async function loadFinanceJobsModule(): Promise<FinanceJobsModule> {
-  const moduleId = "api/jobs/finance-jobs";
+  const isTsxRuntime = import.meta.url.endsWith(".ts");
+  if (isTsxRuntime) {
+    const sourceUrl = new URL("../../api/src/jobs/finance-jobs.ts", import.meta.url);
+    return (await import(sourceUrl.href)) as FinanceJobsModule;
+  }
+
+  const moduleId: string = "api/jobs/finance-jobs";
   return (await import(moduleId)) as FinanceJobsModule;
 }
 
@@ -76,6 +91,13 @@ export async function runFeesReconcileJob(
 ): Promise<unknown> {
   const jobs = await getFinanceJobsModule();
   return jobs.runFeesReconcileJob(overrides);
+}
+
+export async function runKalshiExecutionReconcileJob(
+  overrides?: Partial<ReconcileKalshiExecutionsOptions>,
+): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runKalshiExecutionReconcileJob(overrides);
 }
 
 export async function runRewardsPayoutJob(

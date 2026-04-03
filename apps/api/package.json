@@ -18,6 +18,7 @@
     "admin:wallets:duplicates": "tsx src/admin-wallet-duplicates.ts",
     "fees:collect": "tsx src/collect-fees.ts",
     "fees:reconcile": "tsx src/reconcile-fees.ts",
+    "kalshi:reconcile-executions": "tsx src/reconcile-kalshi-executions.ts",
     "rewards:payout": "tsx src/rewards-payout.ts",
     "rewards:treasury:sweep": "tsx src/rewards-treasury-sweep.ts",
     "rewards:wallets:generate": "tsx src/rewards-wallets-generate.ts",

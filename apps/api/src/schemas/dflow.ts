@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { zRequiredString } from "./common.js";
 
+export const dflowExecutionStatusSchema = z.enum([
+  "submitted",
+  "open",
+  "pending_close",
+  "fulfilled",
+  "no_fill",
+  "failed",
+]);
+
 export const dflowQuoteQuerySchema = z.object({
   inputMint: zRequiredString("inputMint is required"),
   outputMint: zRequiredString("outputMint is required"),
@@ -24,6 +33,10 @@ export const dflowOrderQuerySchema = z.object({
   feeAccount: z.string().optional(),
 });
 
+export const dflowOrderStatusQuerySchema = z.object({
+  signature: zRequiredString("signature is required"),
+});
+
 export const dflowSwapBodySchema = z.object({
   userPublicKey: zRequiredString("userPublicKey is required"),
   quoteResponse: z.unknown(),
@@ -42,6 +55,7 @@ const zNumberish = z.union([z.string(), z.number()]);
 export const dflowExecutionBodySchema = z.object({
   marketId: z.string().optional(),
   purpose: z.enum(["trade", "redeem"]).optional(),
+  walletAddress: z.string().optional(),
   inputMint: zRequiredString("inputMint is required"),
   outputMint: zRequiredString("outputMint is required"),
   amountIn: zNumberish.optional(),
@@ -49,8 +63,9 @@ export const dflowExecutionBodySchema = z.object({
   inputDecimals: z.coerce.number().int().min(0).max(18).optional(),
   outputDecimals: z.coerce.number().int().min(0).max(18).optional(),
   quoteId: z.string().optional(),
+  venueOrderId: z.string().optional(),
   txSignature: zRequiredString("txSignature is required"),
-  status: z.string().optional(),
+  status: dflowExecutionStatusSchema.optional(),
   side: z.enum(["BUY", "SELL"]).optional(),
   raw: z.unknown().optional(),
 });

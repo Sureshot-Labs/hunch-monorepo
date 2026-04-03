@@ -14,6 +14,7 @@ import {
   buildRewardNotification,
   createNotificationSafe,
 } from "./services/notifications.js";
+import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
 
 type ClaimRow = {
   id: string;
@@ -503,12 +504,16 @@ async function sendSolanaClaim(
     status: "submitted",
     txHash: signature,
   });
-  const confirmation = await connection.confirmTransaction(
+  const confirmation = await waitForSolanaSignatureConfirmation({
+    rpcUrls: env.solanaRpcUrls,
     signature,
-    "confirmed",
-  );
-  if (confirmation.value.err) {
+    timeoutMs: env.solanaRpcTimeoutMs,
+    commitment: "confirmed",
+  });
+  if (confirmation.status === "failed") {
     await markClaimStatus({ id: claim.id, status: "failed" });
+  } else if (confirmation.status !== "fulfilled") {
+    await markClaimStatus({ id: claim.id, status: "submitted" });
   } else {
     await markClaimStatus({ id: claim.id, status: "confirmed" });
   }
