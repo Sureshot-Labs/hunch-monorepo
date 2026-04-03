@@ -84,6 +84,7 @@ export type MarketMapNodePreview = {
   signalCountDirect?: number;
   signalCountSubtree?: number;
   topSignal?: MarketMapSignalSummary | null;
+  signalsPreview?: MarketMapSignalSummary[];
   updatedAt: string;
 };
 
@@ -115,6 +116,7 @@ export type MarketMapNode = {
   signalCountDirect?: number;
   signalCountSubtree?: number;
   topSignal?: MarketMapSignalSummary | null;
+  signalsPreview?: MarketMapSignalSummary[];
   eventsPreview?: MarketMapEventSummary[];
   childrenPreview?: MarketMapNodePreview[];
   updatedAt: string;

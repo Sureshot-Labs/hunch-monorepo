@@ -69,6 +69,12 @@ type MarketMapPayload = {
           noAsk: number | null;
         } | null;
       } | null;
+      signalsPreview?: Array<{
+        title: string;
+        createdAt: string;
+        targetEventId?: string | null;
+        targetMarketId?: string | null;
+      }>;
     }>;
   }>;
 };
@@ -339,6 +345,7 @@ async function insertEventSignalNote(params: {
   marketId: string;
   marketTitle: string;
   venue: MarketMapVenue;
+  createdAt?: string;
 }): Promise<void> {
   await pool.query(
     `
@@ -360,10 +367,13 @@ async function insertEventSignalNote(params: {
         confidence,
         reason_codes,
         metrics,
-        model_meta
+        model_meta,
+        created_at,
+        updated_at
       ) values (
         $1, $2, 'signal', 'active', $3, $4, null, 'node', $5, 'map_signals', $6,
-        $7::jsonb, 'update', 'up', 0.8, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb
+        $7::jsonb, 'update', 'up', 0.8, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        $8::timestamptz, $8::timestamptz
       )
     `,
     [
@@ -374,6 +384,7 @@ async function insertEventSignalNote(params: {
       params.nodeId,
       `runner-${params.runId}`,
       JSON.stringify({ map_run_id: params.runId }),
+      params.createdAt ?? new Date().toISOString(),
     ],
   );
 
@@ -425,6 +436,8 @@ async function main() {
   const signalMarketId = `market-signal-${suiteId}`;
   const signalNoteId = crypto.randomUUID();
   const signalNoteKey = `note-signal-${suiteId}`;
+  const signalNoteIdTwo = crypto.randomUUID();
+  const signalNoteKeyTwo = `note-signal-two-${suiteId}`;
   const previousActiveRunId = await redis.get(marketMapActiveKey());
   const policy = await insertRuntimePolicy(pool, {
     policyKey: "market_map",
@@ -549,6 +562,21 @@ async function main() {
       marketId: signalMarketId,
       marketTitle: "Alpha alternate line",
       venue: "polymarket",
+      createdAt: "2026-04-02T19:00:00.000Z",
+    });
+    await insertEventSignalNote({
+      noteId: signalNoteIdTwo,
+      noteKey: signalNoteKeyTwo,
+      nodeId,
+      runId,
+      title: "Alpha follow-up signal",
+      description: "Second signal for the same discovery segment.",
+      eventId: `event-a-${suiteId}`,
+      eventTitle: "Alpha event",
+      marketId: signalMarketId,
+      marketTitle: "Alpha alternate line",
+      venue: "polymarket",
+      createdAt: "2026-04-02T19:05:00.000Z",
     });
 
     const volumeDesc = await requestNodeEvents({
@@ -722,21 +750,29 @@ async function main() {
     const previewSignal = marketMap.items
       .find((item) => item.id === rootNodeId)
       ?.childrenPreview?.find((item) => item.id === nodeId)?.topSignal;
+    const previewSignals = marketMap.items
+      .find((item) => item.id === rootNodeId)
+      ?.childrenPreview?.find((item) => item.id === nodeId)?.signalsPreview;
     assert.ok(previewSignal, "expected topSignal on child preview");
-    assert.equal(previewSignal?.title, "Alpha signal");
+    assert.equal(previewSignal?.title, "Alpha follow-up signal");
     assert.equal(previewSignal?.targetMarketId, signalMarketId);
     assert.equal(previewSignal?.targetMarketTitle, "Alpha alternate line");
     assert.equal(previewSignal?.targetEventId, `event-a-${suiteId}`);
     assert.equal(previewSignal?.targetMarket?.marketId, signalMarketId);
     assert.equal(previewSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(previewSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(previewSignals?.length, 2);
+    assert.equal(previewSignals?.[0]?.title, "Alpha follow-up signal");
+    assert.equal(previewSignals?.[1]?.title, "Alpha signal");
 
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
-    await pool.query("delete from ai_note_targets where note_id = $1", [
-      signalNoteId,
+    await pool.query("delete from ai_note_targets where note_id = any($1::uuid[])", [
+      [signalNoteId, signalNoteIdTwo],
     ]);
-    await pool.query("delete from ai_notes where id = $1", [signalNoteId]);
+    await pool.query("delete from ai_notes where id = any($1::uuid[])", [
+      [signalNoteId, signalNoteIdTwo],
+    ]);
     await pool.query("delete from unified_markets where id = $1", [signalMarketId]);
     await pool.query("delete from unified_events where id = $1", [
       `event-a-${suiteId}`,
