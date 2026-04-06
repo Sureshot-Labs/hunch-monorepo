@@ -51,11 +51,13 @@ import {
   resolveEmbeddedPolymarketWalletContext,
 } from "../services/polymarket-embedded.js";
 import {
-  attachReferralCode,
   attachReferralCodeForExistingUser,
   getReferralAttachmentStatus,
   type ReferralAttachmentStatus,
 } from "../services/rewards.js";
+import {
+  buildReferralSignupAttributionPayload,
+} from "../services/analytics-referrals.js";
 import {
   DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
   getPrivyTerminalAuthMessage,
@@ -354,6 +356,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         let user: Awaited<ReturnType<typeof AuthService.createOrUpdateUserFromPrivy>>;
         let invitePrompt = false;
         let inviteReason: InviteReason | null = null;
+        let referralSignupAttribution:
+          | ReturnType<typeof buildReferralSignupAttributionPayload>
+          | null = null;
         let effectiveAccessState = accessPolicyResolved.effective
           .state as AuthAccessState;
 
@@ -395,6 +400,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
                 inviteReason = mapAttachStatusToInviteReason(attached.status);
                 if (inviteReason == null) {
                   hasReferrer = true;
+                  if (
+                    attached.status === "attached" &&
+                    attached.referral.code != null
+                  ) {
+                    referralSignupAttribution =
+                      buildReferralSignupAttributionPayload({
+                        userId: user.id,
+                        referralCode: attached.referral.code,
+                      });
+                  }
                 }
               }
             }
@@ -417,10 +432,17 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           } else {
             if (hasReferralCode) {
               try {
-                await attachReferralCode(client, {
+                const attached = await attachReferralCodeForExistingUser(client, {
                   userId: user.id,
                   referralCode,
                 });
+                if (attached.status === "attached" && attached.referral.code != null) {
+                  referralSignupAttribution =
+                    buildReferralSignupAttributionPayload({
+                      userId: user.id,
+                      referralCode: attached.referral.code,
+                    });
+                }
               } catch (error) {
                 app.log.warn(
                   { error, userId: user.id },
@@ -472,7 +494,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           clientIp,
           userAgent,
         );
-
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           user: {
@@ -501,6 +522,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             invitePrompt && effectiveAccessState === "prompt"
               ? policyVersion
               : undefined,
+          referralSignupAttribution: referralSignupAttribution ?? undefined,
         });
       } catch (error) {
         const authFailureMessage =

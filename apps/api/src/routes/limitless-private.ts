@@ -35,6 +35,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { tryRecordReferralFirstTradeConversion } from "../services/analytics-referrals.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import {
@@ -230,6 +231,10 @@ function extractLimitlessImmediateFill(
 
   if (notionalUsd == null) return null;
   return { shares, notionalUsd };
+}
+
+function isLimitlessTerminalFillStatus(status: string): boolean {
+  return status === "filled" || status === "matched";
 }
 
 function normalizeOrderSide(value: unknown): "BUY" | "SELL" | null {
@@ -1790,6 +1795,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderPayload,
       });
 
+      let referralFirstTrade = null;
       if (
         stored.kind === "stored" &&
         request.body.orderType === "FOK" &&
@@ -1799,6 +1805,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           price,
           size,
         });
+        if (immediateFill && isLimitlessTerminalFillStatus(status)) {
+          referralFirstTrade = await tryRecordReferralFirstTradeConversion(pool, {
+            userId: user.id,
+            venue: "limitless",
+            status,
+            sourceType: "order",
+            sourceId: venueOrderId,
+            txHash: null,
+            logger: app.log,
+          });
+        }
         let optimisticApplied = false;
         if (immediateFill) {
           try {
@@ -1860,6 +1877,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         ok: true,
         orderId: venueOrderId,
         status,
+        referralFirstTrade: referralFirstTrade ?? undefined,
         payload: upstream.payload,
       });
     },
@@ -1936,6 +1954,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         filledAt: now,
       });
 
+      const referralFirstTrade =
+        stored.kind === "stored"
+          ? await tryRecordReferralFirstTradeConversion(pool, {
+              userId: user.id,
+              venue: "limitless",
+              status: "filled",
+              sourceType: "amm",
+              sourceId: venueOrderId,
+              txHash,
+              logger: app.log,
+            })
+          : null;
+
       const fallbackNotional =
         amountUsd != null && Number.isFinite(amountUsd) && amountUsd > 0
           ? amountUsd
@@ -1984,7 +2015,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       );
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ ok: true, orderId: venueOrderId });
+      return reply.send({
+        ok: true,
+        orderId: venueOrderId,
+        referralFirstTrade: referralFirstTrade ?? undefined,
+      });
     },
   );
 

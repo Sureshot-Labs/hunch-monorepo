@@ -474,3 +474,38 @@ export async function fetchOrdersForUser(
     client.release();
   }
 }
+
+export async function fetchStoredOrderWalletContext(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    venue: string;
+    venueOrderId: string;
+  },
+): Promise<{ walletAddress: string | null; signerAddress: string | null } | null> {
+  const { rows } = await pool.query<{
+    wallet_address: string | null;
+    signer_address: string | null;
+  }>(
+    `
+      select wallet_address, signer_address
+      from orders
+      where user_id = $1
+        and venue = $2
+        and venue_order_id = $3
+      order by
+        (signer_address is not null)::int desc,
+        (wallet_address is not null)::int desc,
+        posted_at desc nulls last,
+        id desc
+      limit 1
+    `,
+    [inputs.userId, inputs.venue, inputs.venueOrderId],
+  );
+
+  if (rows.length === 0) return null;
+  return {
+    walletAddress: rows[0].wallet_address,
+    signerAddress: rows[0].signer_address,
+  };
+}

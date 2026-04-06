@@ -66,6 +66,14 @@ export const authPrivySuccessResponseSchema = z.object({
   invitePrompt: z.boolean().optional(),
   inviteReason: inviteReasonSchema.optional(),
   invitePolicyVersion: z.string().optional(),
+  referralSignupAttribution: z
+    .object({
+      referralCode: z.string(),
+      referredUserKey: z.string(),
+      source: z.literal("auth_privy"),
+      status: z.literal("attached"),
+    })
+    .optional(),
 });
 
 export const venueCredentialsBodySchema = z.object({

@@ -745,7 +745,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           status: executionStatus ?? null,
           raw: executionRaw,
         });
-        await finalizeKalshiExecutionEffects(pool, {
+        const effects = await finalizeKalshiExecutionEffects(pool, {
           execution,
           purpose: executionPurpose,
           logger: app.log,
@@ -754,6 +754,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
+          referralFirstTrade: effects.referralFirstTrade ?? undefined,
           execution: {
             id: execution.id,
             venue: execution.venue,

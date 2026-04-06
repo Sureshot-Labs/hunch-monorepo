@@ -110,7 +110,7 @@ const buildWhereClause = (
   const normalizedWalletExpr = `case when ${alias}.wallet_address like '0x%' then lower(${alias}.wallet_address) else ${alias}.wallet_address end`;
   const normalizedSignerExpr = `case when ${alias}.signer_address like '0x%' then lower(${alias}.signer_address) else ${alias}.signer_address end`;
   const walletClause = includeSigner
-    ? `((${alias}.wallet_address is not null and ${normalizedWalletExpr} = ANY($2::text[])) or (${alias}.wallet_address is null and ${normalizedSignerExpr} = ANY($2::text[])))`
+    ? `((${alias}.wallet_address is not null and ${normalizedWalletExpr} = ANY($2::text[])) or (${alias}.signer_address is not null and ${normalizedSignerExpr} = ANY($2::text[])))`
     : `(${alias}.wallet_address is null or ${normalizedWalletExpr} = ANY($2::text[]))`;
   const conditions = [`${alias}.user_id = $1`, walletClause];
 

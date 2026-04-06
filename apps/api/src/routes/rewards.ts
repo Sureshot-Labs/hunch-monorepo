@@ -33,6 +33,23 @@ import {
   buildRewardNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
+import { collectAnalyticsEvent } from "../services/analytics-forwarding.js";
+
+function buildRewardsClaimCollectorPayload(inputs: {
+  attemptId: string;
+  chainId: string;
+  status: "claim_error" | "claim_success";
+  errorMessage?: string;
+}) {
+  return {
+    page: "rewards",
+    source: "earnings_dialog",
+    status: inputs.status,
+    event_slug: inputs.chainId,
+    attempt_id: inputs.attemptId,
+    ...(inputs.errorMessage ? { error_message: inputs.errorMessage } : {}),
+  };
+}
 
 export const rewardsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -328,6 +345,29 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
           request.log,
         );
 
+        if (body.analyticsAttemptId) {
+          void collectAnalyticsEvent(pool, {
+            event: "hf_rewards_claim_action",
+            origin: "backend",
+            userId: user.id,
+            payload: buildRewardsClaimCollectorPayload({
+              attemptId: body.analyticsAttemptId,
+              chainId,
+              status: "claim_success",
+            }),
+          }).catch((error) => {
+            request.log.warn(
+              {
+                error,
+                attemptId: body.analyticsAttemptId,
+                chainId,
+                userId: user.id,
+              },
+              "Failed to collect reward claim success analytics event",
+            );
+          });
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
@@ -338,6 +378,33 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
           },
         });
       } catch (error) {
+        if (body.analyticsAttemptId) {
+          const errorMessage =
+            error instanceof Error && error.message
+              ? error.message
+              : "Failed to create claim";
+          void collectAnalyticsEvent(pool, {
+            event: "hf_rewards_claim_action",
+            origin: "backend",
+            userId: user.id,
+            payload: buildRewardsClaimCollectorPayload({
+              attemptId: body.analyticsAttemptId,
+              chainId,
+              status: "claim_error",
+              errorMessage,
+            }),
+          }).catch((analyticsError) => {
+            request.log.warn(
+              {
+                error: analyticsError,
+                attemptId: body.analyticsAttemptId,
+                chainId,
+                userId: user.id,
+              },
+              "Failed to collect reward claim error analytics event",
+            );
+          });
+        }
         const statusCode =
           typeof error === "object" && error && "statusCode" in error
             ? Number((error as { statusCode?: number }).statusCode ?? 500)

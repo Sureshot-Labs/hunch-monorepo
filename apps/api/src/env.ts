@@ -616,6 +616,13 @@ if (rewardsTreasuryMinSweepMicro == null) {
 const rewardsTreasuryMinSweepUsd = Number(
   usdcMicroToDecimalString(rewardsTreasuryMinSweepMicro),
 );
+const analyticsServerForwardingEnabled =
+  parseOptionalBool(process.env.ANALYTICS_SERVER_FORWARDING_ENABLED) ?? false;
+const analyticsServerForwardingMode = parseEnum(
+  process.env.ANALYTICS_SERVER_FORWARDING_MODE,
+  ["database", "off"] as const,
+  analyticsServerForwardingEnabled ? "database" : "off",
+);
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -1102,6 +1109,8 @@ export const env = {
   rewardsTreasuryMinSweepUsdRaw,
   rewardsTreasuryMinSweepUsd,
   rewardsTreasuryMinSweepMicro,
+  analyticsServerForwardingEnabled,
+  analyticsServerForwardingMode,
   rewardsTreasuryColdAddressPolygon:
     process.env.HUNCH_REWARDS_TREASURY_COLD_ADDRESS_POLYGON?.trim() || "",
   rewardsTreasuryColdAddressBase:

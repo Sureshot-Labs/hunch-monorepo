@@ -32,6 +32,7 @@ const rewardsChainIdSchema = z
 
 export const rewardsClaimBodySchema = z.object({
   chainId: rewardsChainIdSchema,
+  analyticsAttemptId: z.string().trim().min(1).optional(),
   walletAddress: z.string().trim().min(1).optional(),
   amount: z
     .string()

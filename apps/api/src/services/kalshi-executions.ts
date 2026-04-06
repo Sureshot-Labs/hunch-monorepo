@@ -3,6 +3,10 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { env } from "../env.js";
 import type { ExecutionRow } from "../repos/executions-repo.js";
 import {
+  tryRecordReferralFirstTradeConversion,
+  type ReferralFirstTradePayload,
+} from "./analytics-referrals.js";
+import {
   buildRedemptionNotification,
   buildTradeNotification,
   createNotificationSafe,
@@ -400,10 +404,17 @@ export async function finalizeKalshiExecutionEffects(
     publishNotifications?: boolean;
     warnOnFeeVerificationDeferral?: boolean;
   },
-): Promise<{ feeEventStored: boolean }> {
-  if (inputs.execution.status !== "fulfilled") return { feeEventStored: false };
+): Promise<{
+  feeEventStored: boolean;
+  referralFirstTrade: ReferralFirstTradePayload | null;
+}> {
+  if (inputs.execution.status !== "fulfilled") {
+    return { feeEventStored: false, referralFirstTrade: null };
+  }
   const walletAddress = inputs.execution.wallet_address;
-  if (!walletAddress) return { feeEventStored: false };
+  if (!walletAddress) {
+    return { feeEventStored: false, referralFirstTrade: null };
+  }
   const notificationLogger = inputs.logger?.warn
     ? { warn: inputs.logger.warn }
     : undefined;
@@ -455,6 +466,24 @@ export async function finalizeKalshiExecutionEffects(
     });
   }
 
+  let referralFirstTrade: ReferralFirstTradePayload | null = null;
+  if (
+    inputs.purpose === "trade" &&
+    notionalUsd != null &&
+    Number.isFinite(notionalUsd) &&
+    notionalUsd > 0
+  ) {
+    referralFirstTrade = await tryRecordReferralFirstTradeConversion(pool, {
+      userId: inputs.execution.user_id,
+      venue: "kalshi",
+      status: "fulfilled",
+      sourceType: "execution",
+      sourceId: inputs.execution.id,
+      txHash: inputs.execution.tx_signature ?? null,
+      logger: inputs.logger ?? null,
+    });
+  }
+
   if (inputs.purpose === "trade") {
     void createNotificationSafe(
       pool,
@@ -501,7 +530,7 @@ export async function finalizeKalshiExecutionEffects(
   const hasFeeScale = Number.isFinite(feeScale) && feeScale > 0;
   const feeConfigActive = Boolean(feeAccount) && (hasFeeBps || hasFeeScale);
   if (inputs.purpose !== "trade" || !feeConfigActive) {
-    return { feeEventStored: false };
+    return { feeEventStored: false, referralFirstTrade };
   }
 
   const rawFee = extractDflowFeeAmount(inputs.execution.raw);
@@ -511,7 +540,7 @@ export async function finalizeKalshiExecutionEffects(
       { rawFeeAccount, feeAccount, userId: inputs.execution.user_id },
       "Skipping DFlow fee event (fee account mismatch)",
     );
-    return { feeEventStored: false };
+    return { feeEventStored: false, referralFirstTrade };
   }
 
   const isInputUsdc = inputs.execution.input_mint === env.solanaUsdcMint;
@@ -583,7 +612,7 @@ export async function finalizeKalshiExecutionEffects(
         "Deferring Kalshi fee event until source transaction is finalized",
       );
     }
-    return { feeEventStored: false };
+    return { feeEventStored: false, referralFirstTrade };
   }
   if (
     verificationSignature &&
@@ -610,7 +639,7 @@ export async function finalizeKalshiExecutionEffects(
             "Skipping Kalshi fee event (non-positive verified fee delta)",
           );
         }
-        return { feeEventStored: false };
+        return { feeEventStored: false, referralFirstTrade };
       }
       verifiedFeeAmountUi = formatUiAmount(delta.deltaRaw, delta.decimals);
     } else {
@@ -625,14 +654,14 @@ export async function finalizeKalshiExecutionEffects(
             "Deferring Kalshi fee event until fee-account delta is verifiable",
         );
       }
-      return { feeEventStored: false };
+      return { feeEventStored: false, referralFirstTrade };
     }
   }
 
   const feeAmountUsd = verifiedFeeAmountUi ?? feeAmountUi;
   const feeAmountNumber = feeAmountUsd != null ? Number(feeAmountUsd) : NaN;
   if (!Number.isFinite(feeAmountNumber) || feeAmountNumber <= 0 || !feeAmountUsd) {
-    return { feeEventStored: false };
+    return { feeEventStored: false, referralFirstTrade };
   }
 
   const status =
@@ -654,7 +683,7 @@ export async function finalizeKalshiExecutionEffects(
         status,
         collectedAt,
       });
-      return { feeEventStored: stored };
+      return { feeEventStored: stored, referralFirstTrade };
     } catch (error) {
       if (error instanceof KalshiFeeEventImmutableMismatchError) {
         inputs.logger?.warn?.(
@@ -665,7 +694,7 @@ export async function finalizeKalshiExecutionEffects(
           },
           "Keeping existing immutable Kalshi fee event",
         );
-        return { feeEventStored: false };
+        return { feeEventStored: false, referralFirstTrade };
       }
       throw error;
     }
