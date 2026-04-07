@@ -147,6 +147,15 @@ export const env = {
     25,
   ),
 
+  apiCacheWarmEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_API_CACHE_WARM_ENABLED"),
+    false,
+  ),
+  apiCacheWarmIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_API_CACHE_WARM_INTERVAL_SEC"),
+    30,
+  ),
+
   jobTimeoutSec: parsePositiveInt(process.env.HUNCH_FINANCE_JOB_TIMEOUT_SEC, 300),
   maxRetries: parsePositiveInt(process.env.HUNCH_FINANCE_MAX_RETRIES, 1),
   retryBackoffSec: parsePositiveInt(process.env.HUNCH_FINANCE_RETRY_BACKOFF_SEC, 5),

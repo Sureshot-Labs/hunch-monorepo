@@ -14,6 +14,7 @@ export const INTEL_POLICY_KEYS = [
   "wallet_intel_signals",
   "wallet_intel_refresh",
   "wallet_intel_attribution",
+  "api_cache_warm",
   "ai_whale_profiles",
   "ai_clusters",
   "market_map",
@@ -138,6 +139,14 @@ export type ArbitrageDefaultsPolicy = {
   minVenueCount: number;
   minSpread: number;
   minQualityScore: number;
+};
+
+export type ApiCacheWarmPolicy = {
+  enabled: boolean;
+  pollIntervalSec: number;
+  requestTimeoutMs: number;
+  warmFeed: boolean;
+  warmWalletIntel: boolean;
 };
 
 export type MarketMapPolicy = {
@@ -396,6 +405,7 @@ type IntelPolicyMap = {
   wallet_intel_signals: WalletIntelSignalsPolicy;
   wallet_intel_refresh: WalletIntelRefreshPolicy;
   wallet_intel_attribution: WalletIntelAttributionPolicy;
+  api_cache_warm: ApiCacheWarmPolicy;
   ai_whale_profiles: AiWhaleProfilesPolicy;
   ai_clusters: AiClustersPolicy;
   market_map: MarketMapPolicy;
@@ -740,6 +750,17 @@ const arbitrageDefaultsSchema = z
   .strict()
   .partial();
 
+const apiCacheWarmSchema = z
+  .object({
+    enabled: strictBoolean,
+    pollIntervalSec: positiveInt.max(60 * 60 * 24),
+    requestTimeoutMs: positiveInt.max(60_000),
+    warmFeed: strictBoolean,
+    warmWalletIntel: strictBoolean,
+  })
+  .strict()
+  .partial();
+
 const attributionPrimaryKeySchema = z.enum([
   "whale",
   "specialist",
@@ -894,6 +915,7 @@ const policySchemas = {
   wallet_intel_signals: walletIntelSignalsSchema,
   wallet_intel_refresh: walletIntelRefreshSchema,
   wallet_intel_attribution: walletIntelAttributionSchema,
+  api_cache_warm: apiCacheWarmSchema,
   ai_whale_profiles: aiWhaleProfilesSchema,
   ai_clusters: aiClustersSchema,
   market_map: marketMapSchema,
@@ -1088,6 +1110,13 @@ function getDefaults(): IntelPolicyMap {
       whaleUsdSolana: env.walletIntelWhaleUsdSolana,
     },
     wallet_intel_attribution: getWalletIntelAttributionDefaults(),
+    api_cache_warm: {
+      enabled: false,
+      pollIntervalSec: 30,
+      requestTimeoutMs: 10_000,
+      warmFeed: true,
+      warmWalletIntel: true,
+    },
     ai_whale_profiles: {
       autoRun: env.aiWhaleProfileAutoRun,
       limit: env.aiWhaleProfileLimit,
@@ -1590,6 +1619,18 @@ function normalizeAiWhaleProfilesPolicy(
   };
 }
 
+function normalizeApiCacheWarmPolicy(
+  policy: ApiCacheWarmPolicy,
+): ApiCacheWarmPolicy {
+  return {
+    enabled: Boolean(policy.enabled),
+    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 15, 60 * 60 * 24),
+    requestTimeoutMs: clamp(Math.trunc(policy.requestTimeoutMs), 250, 60_000),
+    warmFeed: Boolean(policy.warmFeed),
+    warmWalletIntel: Boolean(policy.warmWalletIntel),
+  };
+}
+
 function normalizeAiClustersPolicy(policy: AiClustersPolicy): AiClustersPolicy {
   return {
     ...policy,
@@ -1943,6 +1984,10 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeAttributionPolicy(
         merged as WalletIntelAttributionPolicy,
       ) as IntelPolicyMap[K];
+    case "api_cache_warm":
+      return normalizeApiCacheWarmPolicy(
+        merged as ApiCacheWarmPolicy,
+      ) as IntelPolicyMap[K];
     case "ai_whale_profiles":
       return normalizeAiWhaleProfilesPolicy(merged as AiWhaleProfilesPolicy) as IntelPolicyMap[K];
     case "ai_clusters":
@@ -1984,6 +2029,9 @@ function sanitizeOverridePayload(
     case "wallet_intel_attribution": {
       // Backward compatibility: older overrides may still include llmOverlay.
       delete record.llmOverlay;
+      return record;
+    }
+    case "api_cache_warm": {
       return record;
     }
     case "ai_clusters": {
@@ -2124,6 +2172,10 @@ export async function resolveAllIntelPolicies(
       "wallet_intel_attribution",
       byKey.get("wallet_intel_attribution") ?? null,
     ),
+    api_cache_warm: resolveFromRow(
+      "api_cache_warm",
+      byKey.get("api_cache_warm") ?? null,
+    ),
     ai_whale_profiles: resolveFromRow(
       "ai_whale_profiles",
       byKey.get("ai_whale_profiles") ?? null,
@@ -2161,6 +2213,10 @@ export async function resolveWalletIntelRefreshPolicy(pool: DbQuery) {
 
 export async function resolveWalletIntelAttributionPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "wallet_intel_attribution");
+}
+
+export async function resolveApiCacheWarmPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "api_cache_warm");
 }
 
 export async function resolveAiWhaleProfilesPolicy(pool: DbQuery) {

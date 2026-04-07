@@ -33,10 +33,12 @@ import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import {
   getIntelPolicySchema,
   INTEL_POLICY_KEYS,
+  resolveApiCacheWarmPolicy,
   resolveAllIntelPolicies,
   resolveIntelPolicy,
   type IntelPolicyKey,
 } from "../services/runtime-policies.js";
+import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import {
@@ -909,6 +911,59 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           source: debridgeConfig.source,
         },
         rewardsHotWallets,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/api-cache-warm/status",
+    { preHandler: createAdminMiddleware() },
+    async (_request, reply) => {
+      const policy = await resolveApiCacheWarmPolicy(pool);
+      const { redis, status, error } = await getRedisStatus();
+      let runner = {
+        lastRunAt: null as string | null,
+        lastCompletedAt: null as string | null,
+        lastResult: null as string | null,
+        durationMs: null as number | null,
+        targetsAttempted: 0,
+        targetsSucceeded: 0,
+        targetsFailed: 0,
+        baseUrl: null as string | null,
+        error: null as string | null,
+      };
+      let targets: Awaited<ReturnType<typeof readApiCacheWarmStatus>>["targets"] = [];
+      let redisError = redis ? null : error ?? null;
+
+      if (redis) {
+        try {
+          const snapshot = await readApiCacheWarmStatus(redis);
+          runner = snapshot.runner;
+          targets = snapshot.targets;
+        } catch (readError) {
+          redisError =
+            readError instanceof Error
+              ? readError.message
+              : "Failed to load API cache warm status";
+        }
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        policy: {
+          source: policy.source,
+          effectiveAt: policy.effectiveAt,
+          createdAt: policy.createdAt,
+          effective: policy.effective,
+        },
+        redis: {
+          available: Boolean(redis),
+          status,
+          error: redisError,
+        },
+        runner,
+        targets,
       });
     },
   );

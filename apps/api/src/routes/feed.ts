@@ -1,11 +1,11 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { RESP_TYPES } from "redis";
 import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { pool } from "../db.js";
-import { getRedis } from "../redis.js";
+import { getRedis, getRedisStatus } from "../redis.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
@@ -26,6 +26,16 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
+
+function applyFeedCacheHeaders(input: {
+  reply: FastifyReply;
+  hit: boolean;
+  cacheStatus: "disabled" | "ready" | "loading" | "error";
+}) {
+  input.reply.header("x-cache", input.hit ? "hit" : "miss");
+  input.reply.header("x-cache-layer", input.hit ? "redis" : "none");
+  input.reply.header("x-cache-status", input.cacheStatus);
+}
 
 type ForYouInteractionRow = {
   market_id: string;
@@ -291,7 +301,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
       const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
-      const r = await getRedis();
+      const redisContext = await getRedisStatus();
+      const r = redisContext.redis;
+      const redisStatus = redisContext.status;
 
       // serve from cache if present, with proper ETag/304 handling
       if (cacheEnabled && r) {
@@ -302,11 +314,20 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             .update(cachedBody)
             .digest("hex")}"`;
           if (req.headers["if-none-match"] === etag) {
+            applyFeedCacheHeaders({
+              reply,
+              hit: true,
+              cacheStatus: redisStatus,
+            });
             reply.header("ETag", etag);
             reply.code(304);
             return reply.send();
           }
-          reply.header("x-cache", "hit");
+          applyFeedCacheHeaders({
+            reply,
+            hit: true,
+            cacheStatus: redisStatus,
+          });
           reply.header("ETag", etag);
           reply.header(
             "Cache-Control",
@@ -386,6 +407,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         };
         const body = JSON.stringify(payload);
         const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+        applyFeedCacheHeaders({
+          reply,
+          hit: false,
+          cacheStatus: redisStatus,
+        });
         reply.header("ETag", etag);
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(body);
@@ -504,8 +530,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       if (cacheEnabled && r) {
         // Use longer cache TTL for better performance
         await r.set(cacheKey, body, { EX: cacheTtl });
-        reply.header("x-cache", "miss");
       }
+      applyFeedCacheHeaders({
+        reply,
+        hit: false,
+        cacheStatus: redisStatus,
+      });
 
       reply.header("ETag", etag);
       reply.header(

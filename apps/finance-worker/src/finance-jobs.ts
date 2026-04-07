@@ -41,6 +41,10 @@ type RewardsTreasurySweepOptions = {
   maxUsd?: string;
 };
 
+type ApiCacheWarmJobOptions = {
+  force?: boolean;
+};
+
 type FinanceJobsModule = {
   runFeesCollectJob: (
     overrides?: Partial<CollectFeesOptions>,
@@ -56,6 +60,9 @@ type FinanceJobsModule = {
   ) => Promise<unknown>;
   runTreasurySweepJob: (
     overrides?: Partial<RewardsTreasurySweepOptions>,
+  ) => Promise<unknown>;
+  runApiCacheWarmJob: (
+    overrides?: Partial<ApiCacheWarmJobOptions>,
   ) => Promise<unknown>;
 };
 
@@ -112,4 +119,11 @@ export async function runTreasurySweepJob(
 ): Promise<unknown> {
   const jobs = await getFinanceJobsModule();
   return jobs.runTreasurySweepJob(overrides);
+}
+
+export async function runApiCacheWarmJob(
+  overrides?: Partial<ApiCacheWarmJobOptions>,
+): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runApiCacheWarmJob(overrides);
 }

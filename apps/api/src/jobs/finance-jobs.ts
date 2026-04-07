@@ -24,6 +24,7 @@ import {
   runRewardsTreasurySweep,
   type RewardsTreasurySweepOptions,
 } from "../rewards-treasury-sweep.js";
+import { runApiCacheWarm, type ApiCacheWarmJobOptions } from "../api-cache-warm-runner.js";
 
 function mergeOptions<T extends object>(base: T, overrides?: Partial<T>): T {
   if (!overrides) return base;
@@ -70,7 +71,14 @@ export async function runTreasurySweepJob(
   return runRewardsTreasurySweep(mergeOptions(defaults, overrides));
 }
 
+export async function runApiCacheWarmJob(
+  overrides?: Partial<ApiCacheWarmJobOptions>,
+) {
+  return runApiCacheWarm(overrides);
+}
+
 export type {
+  ApiCacheWarmJobOptions,
   CollectFeesOptions,
   CollectFeesRunResult,
   ReconcileKalshiExecutionsOptions,

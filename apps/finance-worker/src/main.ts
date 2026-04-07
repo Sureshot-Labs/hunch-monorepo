@@ -1,4 +1,5 @@
 import {
+  runApiCacheWarmJob,
   runFeesCollectJob,
   runFeesReconcileJob,
   runKalshiExecutionReconcileJob,
@@ -32,6 +33,19 @@ function resolveFundsLockKey(chainId?: string): string {
 function buildJobs(): ScheduledJob[] {
   const allowExecute = env.executeEnabled;
   return [
+    {
+      name: "api_cache_warm",
+      enabled: env.apiCacheWarmEnabled,
+      intervalSec: env.apiCacheWarmIntervalSec,
+      timeoutSec: env.jobTimeoutSec,
+      maxRetries: env.maxRetries,
+      retryBackoffSec: env.retryBackoffSec,
+      jitterSec: env.jitterSec,
+      run: () =>
+        runApiCacheWarmJob({
+          force: false,
+        }),
+    },
     {
       name: "fees_collect",
       enabled: env.feesCollectEnabled,
