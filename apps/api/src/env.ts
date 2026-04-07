@@ -642,7 +642,7 @@ export const env = {
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   authAccessState,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
-  walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 10),
+  walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),
   holdersTtlSecPolymarket: Number(
     process.env.API_HOLDERS_TTL_SEC_POLYMARKET ?? "60",

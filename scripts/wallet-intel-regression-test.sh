@@ -15,10 +15,10 @@ set -euo pipefail
 #   ./scripts/wallet-intel-regression-test.sh
 #
 # Notes:
-# - /wallets/whales, /wallets/activity/summary, and /wallets/activity/signals
-#   are auth-protected.
-# - Provide COOKIE / COOKIE_FILE and/or AUTH_HEADER if the target requires auth.
-#   Example: AUTH_HEADER="Authorization: Bearer <token>"
+# - Public tracker/signal cases can run without auth.
+# - User-context scopes like `following` still require auth.
+# - Provide COOKIE / COOKIE_FILE and/or AUTH_HEADER to exercise auth-bound
+#   scopes. Example: AUTH_HEADER="Authorization: Bearer <token>"
 
 BASE_URL="${BASE_URL:-http://localhost:3001}"
 WHALES_URL="${WHALES_URL:-${BASE_URL%/}/wallets/whales}"
@@ -60,6 +60,20 @@ if [[ -z "$COOKIE" && -n "$COOKIE_FILE" ]]; then
   COOKIE="$(tr -d '\r\n' < "$COOKIE_FILE")"
 fi
 
+HAS_AUTH=0
+if [[ -n "$COOKIE" || -n "$AUTH_HEADER" ]]; then
+  HAS_AUTH=1
+fi
+
+if [[ "$HAS_AUTH" != "1" ]]; then
+  if [[ -z "${SUMMARY_SCOPES_SET}" ]]; then
+    SUMMARY_SCOPES="all whales"
+  fi
+  if [[ -z "${SIGNAL_SCOPES_SET}" ]]; then
+    SIGNAL_SCOPES="all active"
+  fi
+fi
+
 FULL=0
 if [[ "${1-}" == "--full" ]]; then
   FULL=1
@@ -73,15 +87,30 @@ if [[ "$FULL" == "1" ]]; then
     WHALES_SORTS="last_activity pnl_30d volume_30d exposure_usd trades_30d winrate"
   fi
   if [[ -z "${SUMMARY_SCOPES_SET}" ]]; then
-    SUMMARY_SCOPES="all whales following"
+    SUMMARY_SCOPES="$([[ "$HAS_AUTH" == "1" ]] && echo "all whales following" || echo "all whales")"
   fi
   if [[ -z "${SUMMARY_SORTS_SET}" ]]; then
     SUMMARY_SORTS="last_activity net_change_usd unusual_score"
   fi
   if [[ -z "${SIGNAL_SCOPES_SET}" ]]; then
-    SIGNAL_SCOPES="all active following"
+    SIGNAL_SCOPES="$([[ "$HAS_AUTH" == "1" ]] && echo "all active following" || echo "all active")"
   fi
 fi
+
+scope_requires_auth() {
+  local scope="$1"
+  [[ "$scope" == "following" ]]
+}
+
+emit_skip() {
+  local endpoint="$1"
+  local label="$2"
+  local scope="$3"
+  local sort="$4"
+  local offset="$5"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$endpoint" "$label" "$scope" "$sort" "$offset" "SKIP:no_auth" "0"
+}
 
 whales_case_labels=()
 whales_case_queries=()
@@ -221,6 +250,7 @@ printf "include_sparkline\t%s\n" "$INCLUDE_SPARKLINE"
 printf "auth_cookie\t%s\n" "$([[ -n "$COOKIE" ]] && echo "set" || echo "unset")"
 printf "auth_cookie_file\t%s\n" "$([[ -n "$COOKIE_FILE" ]] && echo "$COOKIE_FILE" || echo "unset")"
 printf "auth_header\t%s\n" "$([[ -n "$AUTH_HEADER" ]] && echo "set" || echo "unset")"
+printf "auth_enabled\t%s\n" "$([[ "$HAS_AUTH" == "1" ]] && echo "yes" || echo "no")"
 printf "hunch_wallet\t%s\n" "$([[ -n "$HUNCH_WALLET" ]] && echo "set" || echo "unset")"
 printf "endpoint\tcase\tscope\tsort\toffset\tstatus\tms\n"
 
@@ -249,6 +279,17 @@ for sort in $WHALES_SORTS; do
 done
 
 for scope in $SUMMARY_SCOPES; do
+  if scope_requires_auth "$scope" && [[ "$HAS_AUTH" != "1" ]]; then
+    for sort in $SUMMARY_SORTS; do
+      for offset in $OFFSETS; do
+        for idx in "${!summary_case_labels[@]}"; do
+          label="${summary_case_labels[$idx]}"
+          emit_skip "wallets/activity/summary" "$label" "$scope" "$sort" "$offset"
+        done
+      done
+    done
+    continue
+  fi
   for sort in $SUMMARY_SORTS; do
     for offset in $OFFSETS; do
       for idx in "${!summary_case_labels[@]}"; do
@@ -269,6 +310,15 @@ for scope in $SUMMARY_SCOPES; do
 done
 
 for scope in $SIGNAL_SCOPES; do
+  if scope_requires_auth "$scope" && [[ "$HAS_AUTH" != "1" ]]; then
+    for offset in $OFFSETS; do
+      for idx in "${!signals_case_labels[@]}"; do
+        label="${signals_case_labels[$idx]}"
+        emit_skip "wallets/activity/signals" "$label" "$scope" "-" "$offset"
+      done
+    done
+    continue
+  fi
   for offset in $OFFSETS; do
     for idx in "${!signals_case_labels[@]}"; do
       label="${signals_case_labels[$idx]}"

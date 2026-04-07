@@ -1334,6 +1334,39 @@ async function writeWalletIntelCachedBody(
   }
 }
 
+function buildWalletIntelSelectorMetricsJsonSql(alias: string): string {
+  return `
+    case
+      when ${alias}.metrics_as_of is not null
+        or ${alias}.metrics_volume_30d is not null
+        or ${alias}.metrics_pnl_30d is not null
+        or ${alias}.metrics_trades_30d is not null
+      then jsonb_build_object(
+        'period', '30d',
+        'as_of', ${alias}.metrics_as_of,
+        'trades_count', ${alias}.metrics_trades_30d,
+        'volume_usd', ${alias}.metrics_volume_30d,
+        'pnl_usd', ${alias}.metrics_pnl_30d,
+        'roi', ${alias}.metrics_roi_30d,
+        'win_rate', ${alias}.metrics_win_rate_30d,
+        'avg_hold_hours', ${alias}.metrics_avg_hold_hours_30d,
+        'last_trade_at', ${alias}.metrics_last_trade_at_30d
+      )
+      else null
+    end
+  `;
+}
+
+function buildWalletIntelWhaleScoreSql(alias: string): string {
+  return `
+    case
+      when w.chain = 'solana'
+        then coalesce(nullif(${alias}.metrics_volume_30d, 0), ${alias}.exposure_usd, 0)
+      else coalesce(${alias}.metrics_volume_30d, 0)
+    end
+  `;
+}
+
 function buildSlimWhaleSelectorSql(
   orderBy: string,
   includeInferred: boolean,
@@ -1361,19 +1394,16 @@ function buildSlimWhaleSelectorSql(
                 (w.metadata->>'kind' = 'safe') as is_safe,
                 w.first_seen_at,
                 w.last_seen_at,
-                metrics.metrics_volume,
-                metrics.metrics_pnl,
-                metrics.metrics_trades,
-                exposure.exposure_usd,
-                exposure.hedged_notional_usd,
-                exposure.net_imbalance_usd,
-                exposure.hedge_ratio,
-                exposure.two_sided_markets,
-                case
-                  when w.chain = 'solana'
-                    then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
-                  else coalesce(metrics.metrics_volume, 0)
-                end as whale_score,
+                wis.metrics_volume_30d as metrics_volume,
+                wis.metrics_pnl_30d as metrics_pnl,
+                wis.metrics_roi_30d as metrics_roi,
+                wis.metrics_trades_30d as metrics_trades,
+                wis.exposure_usd,
+                wis.hedged_notional_usd,
+                wis.net_imbalance_usd,
+                wis.hedge_ratio,
+                wis.two_sided_markets,
+                ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
                 owner.owner_address,
                 activity.last_activity_at,
                 activity.has_trade_activity,
@@ -1381,17 +1411,7 @@ function buildSlimWhaleSelectorSql(
               from wallets w
               join wallet_tag_map tm on tm.wallet_id = w.id
                and tm.tag_id = $3::uuid
-              left join lateral (
-                select
-                  s.volume_usd as metrics_volume,
-                  s.pnl_usd as metrics_pnl,
-                  s.roi as metrics_roi,
-                  s.trades_count as metrics_trades
-                from wallet_metrics_snapshots s
-                where s.wallet_id = w.id and s.period = '30d'
-                order by s.as_of desc
-                limit 1
-              ) metrics on true
+              left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
               left join lateral (
                 select
                   max(wah.last_occurred_at) as last_activity_at,
@@ -1401,7 +1421,6 @@ function buildSlimWhaleSelectorSql(
                 where wah.wallet_id = w.id
                   and wah.hour_bucket >= now() - ($2::text || ' days')::interval
               ) activity on true
-              left join wallet_position_exposure exposure on exposure.wallet_id = w.id
               left join lateral (
                 select w2.address as owner_address
                 from wallets w2
@@ -1414,6 +1433,90 @@ function buildSlimWhaleSelectorSql(
               where activity.last_activity_at is not null
               order by ${orderBy}
               limit $1
+            `;
+}
+
+function buildSlimWhaleSelectorWithSnapshotShortlistSql(
+  orderBy: string,
+  includeInferred: boolean,
+): string {
+  const inferredSelect = includeInferred
+    ? `,
+                inferred.wins as inferred_wins,
+                inferred.total as inferred_total`
+    : `,
+                null::int as inferred_wins,
+                null::int as inferred_total`;
+  const inferredJoin = includeInferred
+    ? `
+              left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id`
+    : "";
+  return `
+              with shortlist as materialized (
+                select
+                  w.id,
+                  wis.last_activity_at,
+                  ${buildWalletIntelWhaleScoreSql("wis")} as whale_score
+                from wallets w
+                join wallet_tag_map tm on tm.wallet_id = w.id
+                 and tm.tag_id = $4::uuid
+                join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+                where wis.last_activity_at is not null
+                order by
+                  wis.last_activity_at desc nulls last,
+                  whale_score desc nulls last,
+                  w.last_seen_at desc
+                limit $1
+              )
+              select
+                w.id,
+                w.address,
+                w.chain,
+                w.label,
+                null::text as user_name,
+                null::text as user_label_color,
+                w.is_system_flagged,
+                (w.metadata->>'kind' = 'safe') as is_safe,
+                w.first_seen_at,
+                w.last_seen_at,
+                wis.metrics_volume_30d as metrics_volume,
+                wis.metrics_pnl_30d as metrics_pnl,
+                wis.metrics_roi_30d as metrics_roi,
+                wis.metrics_trades_30d as metrics_trades,
+                wis.exposure_usd,
+                wis.hedged_notional_usd,
+                wis.net_imbalance_usd,
+                wis.hedge_ratio,
+                wis.two_sided_markets,
+                ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
+                owner.owner_address,
+                activity.last_activity_at,
+                activity.has_trade_activity,
+                activity.has_holder_activity${inferredSelect}
+              from shortlist s
+              join wallets w on w.id = s.id
+              left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+              left join lateral (
+                select
+                  max(wah.last_occurred_at) as last_activity_at,
+                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+                  bool_or(wah.activity_type = 'holder') as has_holder_activity
+                from wallet_activity_hourly wah
+                where wah.wallet_id = w.id
+                  and wah.hour_bucket >= now() - ($3::text || ' days')::interval
+              ) activity on true
+              left join lateral (
+                select w2.address as owner_address
+                from wallets w2
+                where w.metadata->>'kind' = 'safe'
+                  and w2.metadata->>'kind' = 'safe_owner'
+                  and w2.metadata->>'derivedFrom' = w.address
+                  and w2.chain = w.chain
+                limit 1
+              ) owner on true${inferredJoin}
+              where activity.last_activity_at is not null
+              order by ${orderBy}
+              limit $2
             `;
 }
 
@@ -2742,35 +2845,19 @@ async function loadWalletRowsByIds(
         w.first_seen_at,
         w.last_seen_at,
         ta.tags,
-        lm.metrics,
+        ${buildWalletIntelSelectorMetricsJsonSql("wis")} as metrics,
         wp.profile,
         wp.updated_at as profile_updated_at
       from wallet_set ws
       join wallets w on w.id = ws.wallet_id
+      left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
       left join wallet_user_labels wl
         on wl.wallet_id = w.id
        and wl.user_id = $1
       left join wallet_user_names wn
-        on wn.wallet_id = w.id
+       on wn.wallet_id = w.id
        and wn.user_id = $1
       left join tags_agg ta on ta.wallet_id = w.id
-      left join lateral (
-        select jsonb_build_object(
-          'period', s.period,
-          'as_of', s.as_of,
-          'trades_count', s.trades_count,
-          'volume_usd', s.volume_usd,
-          'pnl_usd', s.pnl_usd,
-          'roi', s.roi,
-          'win_rate', s.win_rate,
-          'avg_hold_hours', s.avg_hold_hours,
-          'last_trade_at', s.last_trade_at
-        ) as metrics
-        from wallet_metrics_snapshots s
-        where s.wallet_id = w.id and s.period = '30d'
-        order by s.as_of desc
-        limit 1
-      ) lm on true
       left join wallet_profiles wp on wp.wallet_id = w.id
       where ($3::text[] is null or wp.profile->'categories' ?| $3::text[])
       order by w.last_seen_at desc
@@ -4848,15 +4935,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               case "volume_30d":
                 return "whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "trades_30d":
-                return "metrics.metrics_trades desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+                return "wis.metrics_trades_30d desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "exposure_usd":
-                return "exposure.exposure_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+                return "wis.exposure_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "imbalance_usd":
-                return "exposure.net_imbalance_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+                return "wis.net_imbalance_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "winrate":
                 return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "pnl_30d":
-                return "metrics.metrics_pnl desc nulls last, whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
+                return "wis.metrics_pnl_30d desc nulls last, whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
               case "last_activity":
               default:
                 return "activity.last_activity_at desc nulls last, whale_score desc nulls last, w.last_seen_at desc";
@@ -4882,11 +4969,31 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             tagsFilter.length === 0 &&
             primaryFilter.length === 0 &&
             labelsFilter.length === 0;
+          const useSnapshotWhaleShortlist =
+            useSlimWhaleSelector && query.sort === "last_activity";
+          const snapshotWhaleShortlistLimit = useSnapshotWhaleShortlist
+            ? Math.min(
+                Math.max((query.offset + query.limit) * 10, 250),
+                maxScanCandidates + 1,
+              )
+            : null;
 
           const whaleRows = useSlimWhaleSelector
             ? await client.query<WhaleSelectorSlimRow>(
-                buildSlimWhaleSelectorSql(orderBy, query.sort === "winrate"),
-                [maxScanCandidates + 1, query.windowDays, whaleTagId],
+                useSnapshotWhaleShortlist
+                  ? buildSlimWhaleSelectorWithSnapshotShortlistSql(
+                      orderBy,
+                      query.sort === "winrate",
+                    )
+                  : buildSlimWhaleSelectorSql(orderBy, query.sort === "winrate"),
+                useSnapshotWhaleShortlist
+                  ? [
+                      snapshotWhaleShortlistLimit,
+                      maxScanCandidates + 1,
+                      query.windowDays,
+                      whaleTagId,
+                    ]
+                  : [maxScanCandidates + 1, query.windowDays, whaleTagId],
               )
             : await client.query<WhaleSelectorRow>(
                 `
@@ -4904,31 +5011,30 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     w.last_seen_at,
                     (wf.wallet_id is not null) as is_followed,
                     tags.tags,
-                    metrics.metrics,
-                    metrics.metrics_volume,
-                    metrics.metrics_pnl,
-                    metrics.metrics_trades,
-                    exposure.exposure_usd,
-                    exposure.hedged_notional_usd,
-                    exposure.net_imbalance_usd,
-                    exposure.hedge_ratio,
-                    exposure.two_sided_markets,
-                    case
-                      when w.chain = 'solana'
-                        then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
-                      else coalesce(metrics.metrics_volume, 0)
-                    end as whale_score,
+                    ${buildWalletIntelSelectorMetricsJsonSql("wis")} as metrics,
+                    wis.metrics_volume_30d as metrics_volume,
+                    wis.metrics_pnl_30d as metrics_pnl,
+                    wis.metrics_trades_30d as metrics_trades,
+                    wis.exposure_usd,
+                    wis.hedged_notional_usd,
+                    wis.net_imbalance_usd,
+                    wis.hedge_ratio,
+                    wis.two_sided_markets,
+                    ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
                     owner.owner_address,
                     owner.owner_label,
                     owner.owner_wallet_id,
                     wp.profile as profile,
                     wp.updated_at as profile_updated_at,
                     activity.last_activity_at,
+                    activity.has_trade_activity,
+                    activity.has_holder_activity,
                     inferred.wins as inferred_wins,
                     inferred.total as inferred_total
                   from wallets w
                   join wallet_tag_map tm on tm.wallet_id = w.id
                    and tm.tag_id = $5::uuid
+                  left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
                   left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
                   left join wallet_user_labels wl
                     on wl.wallet_id = w.id
@@ -4949,27 +5055,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   ) tags on true
                   left join lateral (
                     select
-                      jsonb_build_object(
-                        'period', s.period,
-                        'as_of', s.as_of,
-                        'trades_count', s.trades_count,
-                        'volume_usd', s.volume_usd,
-                        'pnl_usd', s.pnl_usd,
-                        'roi', s.roi,
-                        'win_rate', s.win_rate,
-                        'avg_hold_hours', s.avg_hold_hours,
-                        'last_trade_at', s.last_trade_at
-                      ) as metrics,
-                      s.volume_usd as metrics_volume,
-                      s.pnl_usd as metrics_pnl,
-                      s.trades_count as metrics_trades
-                    from wallet_metrics_snapshots s
-                    where s.wallet_id = w.id and s.period = '30d'
-                    order by s.as_of desc
-                    limit 1
-                  ) metrics on true
-                  left join lateral (
-                    select
                       max(wah.last_occurred_at) as last_activity_at,
                       bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
                       bool_or(wah.activity_type = 'holder') as has_holder_activity
@@ -4977,7 +5062,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     where wah.wallet_id = w.id
                       and wah.hour_bucket >= now() - ($3::text || ' days')::interval
                   ) activity on true
-                  left join wallet_position_exposure exposure on exposure.wallet_id = w.id
                   left join lateral (
                     select
                       w2.address as owner_address,

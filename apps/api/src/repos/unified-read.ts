@@ -46,6 +46,7 @@ export type FavoriteFeedEventPage = {
 };
 
 const LIMITLESS_AMM_STALE_FALLBACK_INTERVAL = "interval '15 minutes'";
+const FEED_HEAVY_QUERY_WORK_MEM = "32MB";
 
 function buildLimitlessAmmFallbackAllowedExpr(
   nowParam: string,
@@ -448,13 +449,22 @@ function buildFeedMarketViewContext(args: {
   };
 }
 
-async function queryRowsWithSearchHint<T extends QueryResultRow>(
+function isSafeLocalWorkMem(value: string): boolean {
+  return /^[1-9][0-9]*(kB|MB|GB)$/i.test(value);
+}
+
+async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   pool: Pool,
   sql: string,
   params: PgParams,
-  useSearchHint: boolean,
+  options?: {
+    useSearchHint?: boolean;
+    workMem?: string | null;
+  },
 ): Promise<T[]> {
-  if (!useSearchHint) {
+  const useSearchHint = options?.useSearchHint ?? false;
+  const workMem = options?.workMem ?? null;
+  if (!useSearchHint && !workMem) {
     const { rows } = await pool.query<T>(sql, params);
     return rows;
   }
@@ -462,7 +472,15 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL enable_seqscan = off");
+    if (useSearchHint) {
+      await client.query("SET LOCAL enable_seqscan = off");
+    }
+    if (workMem) {
+      if (!isSafeLocalWorkMem(workMem)) {
+        throw new Error(`Unsafe local work_mem value: ${workMem}`);
+      }
+      await client.query(`SET LOCAL work_mem = '${workMem}'`);
+    }
     const { rows } = await client.query<T>(sql, params);
     await client.query("COMMIT");
     return rows;
@@ -476,6 +494,108 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   } finally {
     client.release();
   }
+}
+
+async function queryRowsWithSearchHint<T extends QueryResultRow>(
+  pool: Pool,
+  sql: string,
+  params: PgParams,
+  useSearchHint: boolean,
+  workMem?: string | null,
+): Promise<T[]> {
+  return queryRowsWithLocalSettings<T>(pool, sql, params, {
+    useSearchHint,
+    workMem,
+  });
+}
+
+function buildFeedBookSnapshotCtes(args: {
+  nowParam: string;
+  include24h: boolean;
+  sourceCteName?: string;
+  tokenYesColumn?: string;
+  tokenNoColumn?: string;
+}): {
+  ctes: string[];
+  yesTopJoin: string;
+  noTopJoin: string;
+  yes24hJoin: string;
+} {
+  const sourceCteName = args.sourceCteName ?? "market_base";
+  const tokenYesColumn = args.tokenYesColumn ?? "resolved_token_yes";
+  const tokenNoColumn = args.tokenNoColumn ?? "resolved_token_no";
+  const ctes = [
+    `
+      token_set as materialized (
+        select ${tokenYesColumn} as token_id
+        from ${sourceCteName}
+        where ${tokenYesColumn} is not null
+        union
+        select ${tokenNoColumn} as token_id
+        from ${sourceCteName}
+        where ${tokenNoColumn} is not null
+      )
+    `,
+    `
+      latest_book_snapshot as materialized (
+        select
+          b.token_id,
+          b.best_bid,
+          b.best_ask
+        from unified_token_top_latest b
+        join token_set ts on ts.token_id = b.token_id
+      )
+    `,
+    `
+      latest_book_fallback as materialized (
+        select distinct on (b.token_id)
+          b.token_id,
+          b.best_bid,
+          b.best_ask
+        from unified_book_top b
+        join token_set ts on ts.token_id = b.token_id
+        left join latest_book_snapshot lbs on lbs.token_id = b.token_id
+        where lbs.token_id is null
+          and b.ts > (${args.nowParam}::timestamptz - interval '7 days')
+        order by b.token_id, b.ts desc
+      )
+    `,
+    `
+      latest_book as materialized (
+        select
+          b.token_id,
+          b.best_bid,
+          b.best_ask
+        from latest_book_snapshot b
+        union all
+        select
+          b.token_id,
+          b.best_bid,
+          b.best_ask
+        from latest_book_fallback b
+      )
+    `,
+  ];
+  if (args.include24h) {
+    ctes.push(`
+      book_24h as materialized (
+        select
+          b.token_id,
+          b.avg_mid_24h as avg_mid
+        from unified_token_change_24h b
+        join token_set ts on ts.token_id = b.token_id
+        where b.avg_mid_24h is not null
+      )
+    `);
+  }
+  return {
+    ctes,
+    yesTopJoin: `left join latest_book yes_top on yes_top.token_id = m.${tokenYesColumn}`,
+    noTopJoin: `left join latest_book no_top on no_top.token_id = m.${tokenNoColumn}`,
+    yes24hJoin: args.include24h
+      ? `left join book_24h yes_24h on yes_24h.token_id = m.${tokenYesColumn}`
+      : "",
+  };
 }
 
 export async function fetchFeedCategoryFacetRows(
@@ -707,22 +827,6 @@ export async function fetchFeedEventIds(
         ${eventChangeWhere.length ? "where " + eventChangeWhere.join(" and ") : ""}
       )
     `);
-    change24hParts.push(`
-      event_change as (
-        select
-          m.event_id,
-          avg(mc.change_24h) as change_24h
-        from unified_markets m
-        join filtered_events fe on fe.id = m.event_id
-        left join unified_market_change_24h mc on mc.market_id = m.id
-        where m.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-          and ${renderableMarketExpr}
-        group by m.event_id
-      )
-    `);
 
     const withClause = `with ${change24hParts.join(",\n")}`;
     const eventChangeSql = `
@@ -730,7 +834,7 @@ export async function fetchFeedEventIds(
       select e.id
       from unified_events e
       join filtered_events fe on fe.id = e.id
-      left join event_change ec on ec.event_id = e.id
+      left join unified_event_change_24h ec on ec.event_id = e.id
       order by ec.change_24h ${sortDir} nulls last, e.id
       limit ${inputs.limit} offset ${inputs.offset}
     `;
@@ -740,6 +844,7 @@ export async function fetchFeedEventIds(
       eventChangeSql,
       params,
       search.hasSearch,
+      FEED_HEAVY_QUERY_WORK_MEM,
     );
   }
 
@@ -815,30 +920,10 @@ export async function fetchFeedEventIds(
     marketLiquidityDisplayExpr,
     yesMidExpr,
   });
-  const change24hCteParts: string[] = [];
-  if (inputs.sort === "change24h") {
-    change24hCteParts.push(`
-      market_change as (
-        select
-          m.id as market_id,
-          mc.change_24h
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        left join unified_market_change_24h mc on mc.market_id = m.id
-        where m.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
-          and ${supportedLimitlessMarketExpr}
-          and ${renderableMarketExpr}
-          ${eventWhere.length ? `and ${eventWhere.join(" and ")}` : ""}
-      )
-    `);
-  }
-  const marketChangeJoin =
+  const eventChangeJoin =
     inputs.sort === "change24h"
-      ? "left join market_change mc on mc.market_id = m.id"
+      ? "left join unified_event_change_24h ec on ec.event_id = e.id"
       : "";
-  const change24hExpr = inputs.sort === "change24h" ? "mc.change_24h" : "null";
   const tradeJoin =
     inputs.sort === "trending_v2"
       ? "left join unified_event_trade_24h et on et.event_id = e.id"
@@ -852,7 +937,7 @@ export async function fetchFeedEventIds(
   else if (inputs.sort === "openinterest")
     eventOrder = `(${eventOpenInterestExpr}) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "change24h")
-    eventOrder = `avg(${change24hExpr}) ${sortDir} nulls last, e.id`;
+    eventOrder = `max(ec.change_24h) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "time")
     eventOrder = `e.end_date ${sortDir} nulls last, e.id`;
   else if (inputs.filter === "newest")
@@ -881,7 +966,6 @@ export async function fetchFeedEventIds(
 
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
-  if (change24hCteParts.length) withParts.push(...change24hCteParts);
   const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
 
   const eventSql = `
@@ -895,7 +979,7 @@ export async function fetchFeedEventIds(
       and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
       and ${renderableMarketExpr}
-    ${marketChangeJoin}
+    ${eventChangeJoin}
     ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
@@ -909,6 +993,7 @@ export async function fetchFeedEventIds(
     eventSql,
     params,
     search.hasSearch,
+    inputs.sort === "change24h" ? FEED_HEAVY_QUERY_WORK_MEM : null,
   );
 }
 
@@ -1138,25 +1223,10 @@ export async function fetchFeedMarkets(
       ord
     from unnest(${eventIdsParam}::text[]) with ordinality as t(event_id, ord)
   `;
-  const yesTopJoin = `left join lateral (
-          select best_bid, best_ask
-          from unified_book_top
-          where token_id = m.resolved_token_yes
-            and ts > (${nowParam}::timestamptz - interval '7 days')
-          order by ts desc
-          limit 1
-        ) yes_top on true`;
-  const yes24hJoin =
-    inputs.sort === "change24h"
-      ? ""
-      : `left join lateral (
-          select avg_mid
-          from unified_book_top_1h
-          where token_id = m.resolved_token_yes
-            and bucket <= (${nowParam}::timestamptz - interval '24 hours')
-          order by bucket desc
-          limit 1
-        ) yes_24h on true`;
+  const bookSnapshot = buildFeedBookSnapshotCtes({
+    nowParam,
+    include24h: inputs.sort !== "change24h",
+  });
   const marketChangeJoin =
     inputs.sort === "change24h"
       ? "left join market_change mc on mc.market_id = m.id"
@@ -1173,6 +1243,7 @@ export async function fetchFeedMarkets(
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`event_order as (${eventOrderSql})`);
   withParts.push(`market_base as (${marketBaseSql})`);
+  withParts.push(...bookSnapshot.ctes);
   const withClause = `with ${withParts.join(",\n")}`;
   const marketSql = `
     ${withClause}
@@ -1237,22 +1308,21 @@ export async function fetchFeedMarkets(
     join market_base m on m.event_id = e.id
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
-    ${yesTopJoin}
-    ${yes24hJoin}
+    ${bookSnapshot.yesTopJoin}
+    ${bookSnapshot.yes24hJoin}
     ${marketChangeJoin}
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = m.resolved_token_no
-        and ts > (${nowParam}::timestamptz - interval '7 days')
-      order by ts desc
-      limit 1
-    ) no_top on true
+    ${bookSnapshot.noTopJoin}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
-  const { rows } = await pool.query<FeedMarketRow>(marketSql, params);
-  return rows;
+  return await queryRowsWithLocalSettings<FeedMarketRow>(pool, marketSql, params, {
+    workMem:
+      inputs.sort === "change24h" ||
+      inputs.sort === "trending" ||
+      inputs.sort === "trending_v2"
+        ? FEED_HEAVY_QUERY_WORK_MEM
+        : null,
+  });
 }
 
 export async function fetchFeedMarketsDirect(
@@ -1353,12 +1423,7 @@ export async function fetchFeedMarketsDirect(
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
-      ? `left join lateral (
-          select t.volume_24h
-          from unified_market_trade_24h t
-          where t.market_id = m.id
-          limit 1
-        ) trade_24h on true`
+      ? "left join unified_market_trade_24h trade_24h on trade_24h.market_id = m.id"
       : "";
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
@@ -1412,25 +1477,10 @@ export async function fetchFeedMarketsDirect(
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
     end`}
   `;
-  const yesTopJoin = `left join lateral (
-          select best_bid, best_ask
-          from unified_book_top
-          where token_id = m.resolved_token_yes
-            and ts > (${nowParam}::timestamptz - interval '7 days')
-          order by ts desc
-          limit 1
-        ) yes_top on true`;
-  const yes24hJoin =
-    inputs.sort === "change24h"
-      ? ""
-      : `left join lateral (
-          select avg_mid
-          from unified_book_top_1h
-          where token_id = m.resolved_token_yes
-            and bucket <= (${nowParam}::timestamptz - interval '24 hours')
-          order by bucket desc
-          limit 1
-        ) yes_24h on true`;
+  const bookSnapshot = buildFeedBookSnapshotCtes({
+    nowParam,
+    include24h: inputs.sort !== "change24h",
+  });
   const marketChangeJoin =
     inputs.sort === "change24h"
       ? "left join market_change mc on mc.market_id = m.id"
@@ -1451,6 +1501,7 @@ export async function fetchFeedMarketsDirect(
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);
   withParts.push(`market_base as (${marketBaseSql})`);
+  withParts.push(...bookSnapshot.ctes);
   const withClause = `with ${withParts.join(",\n")}`;
 
   const marketSql = `
@@ -1515,22 +1566,21 @@ export async function fetchFeedMarketsDirect(
     join market_base m on m.event_id = e.id
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
-    ${yesTopJoin}
-    ${yes24hJoin}
+    ${bookSnapshot.yesTopJoin}
+    ${bookSnapshot.yes24hJoin}
     ${marketChangeJoin}
-    left join lateral (
-      select best_bid, best_ask
-      from unified_book_top
-      where token_id = m.resolved_token_no
-        and ts > (${nowParam}::timestamptz - interval '7 days')
-      order by ts desc
-      limit 1
-    ) no_top on true
+    ${bookSnapshot.noTopJoin}
     order by m.ord, m.venue_market_id
   `;
 
-  const { rows } = await pool.query<FeedMarketRow>(marketSql, params);
-  return rows;
+  return await queryRowsWithLocalSettings<FeedMarketRow>(pool, marketSql, params, {
+    workMem:
+      inputs.sort === "change24h" ||
+      inputs.sort === "trending" ||
+      inputs.sort === "trending_v2"
+        ? FEED_HEAVY_QUERY_WORK_MEM
+        : null,
+  });
 }
 
 export async function fetchFavoriteFeedEventPage(

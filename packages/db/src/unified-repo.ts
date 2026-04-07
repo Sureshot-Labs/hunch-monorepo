@@ -841,6 +841,40 @@ export async function writeUnifiedBookTop(
       ],
     );
 
+    await pool.query(
+      `
+      insert into unified_token_top_latest (
+        token_id,
+        venue,
+        ts,
+        best_bid,
+        best_ask,
+        mid,
+        spread,
+        updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6,$7, now())
+      on conflict (token_id) do update
+        set venue = excluded.venue,
+            ts = excluded.ts,
+            best_bid = excluded.best_bid,
+            best_ask = excluded.best_ask,
+            mid = excluded.mid,
+            spread = excluded.spread,
+            updated_at = now()
+      where excluded.ts >= unified_token_top_latest.ts
+    `,
+      [
+        tokenId,
+        venueFromUnifiedTokenId(tokenId),
+        ts.toISOString(),
+        bestBid,
+        bestAsk,
+        mid,
+        spread,
+      ],
+    );
+
     setBookTopCache(tokenId, {
       bestBid,
       bestAsk,

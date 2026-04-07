@@ -25,29 +25,37 @@ services:
       retries: 20
     volumes:
       - ${PGDATA_DIR:-/opt/hunch-data/postgres}:/var/lib/postgresql/data
-    shm_size: 256mb
+    shm_size: ${PG_SHM_SIZE:-2gb}
     command:
       - postgres
       - -c
-      - shared_buffers=128MB
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       - -c
-      - max_connections=100
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
       - -c
-      - effective_cache_size=256MB
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-6GB}
       - -c
-      - maintenance_work_mem=64MB
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-256MB}
       - -c
-      - work_mem=4MB
+      - work_mem=${PG_WORK_MEM:-4MB}
       - -c
-      - statement_timeout=120000
+      - shared_preload_libraries=${PG_SHARED_PRELOAD_LIBRARIES:-timescaledb,pg_stat_statements}
       - -c
-      - max_wal_size=4GB
+      - track_io_timing=${PG_TRACK_IO_TIMING:-on}
       - -c
-      - min_wal_size=1GB
+      - max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-4}
       - -c
-      - wal_compression=on
+      - max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-2}
       - -c
-      - checkpoint_completion_target=0.9
+      - statement_timeout=${PG_STATEMENT_TIMEOUT:-120000}
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
+      - -c
+      - min_wal_size=${PG_MIN_WAL_SIZE:-1GB}
+      - -c
+      - wal_compression=${PG_WAL_COMPRESSION:-on}
+      - -c
+      - checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION_TARGET:-0.9}
 
   redis:
     image: redis/redis-stack-server:latest

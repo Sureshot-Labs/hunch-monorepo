@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "pnpm -C ../../packages/db build",
     "dev": "tsx src/main.ts",
+    "prestart": "pnpm -C ../../packages/db build",
     "start": "node --enable-source-maps dist/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
