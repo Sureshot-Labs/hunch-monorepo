@@ -146,11 +146,11 @@ add_signals_case() {
 }
 
 # Whales: base requested shape + toggles/filters.
-add_whales_case "base" "includeSummary=true&includeAttribution=true&windowHours=${WINDOW_HOURS}"
-add_whales_case "attr:off" "includeSummary=true&includeAttribution=false&windowHours=${WINDOW_HOURS}"
-add_whales_case "summary:off" "includeSummary=false&includeAttribution=true&windowHours=${WINDOW_HOURS}"
-add_whales_case "window:24h" "includeSummary=true&includeAttribution=true&windowHours=24"
-add_whales_case "window:336h" "includeSummary=true&includeAttribution=true&windowHours=336"
+add_whales_case "base" "includeSummary=true&includeAttribution=true&windowDays=${WINDOW_DAYS}&windowHours=${WINDOW_HOURS}"
+add_whales_case "attr:off" "includeSummary=true&includeAttribution=false&windowDays=${WINDOW_DAYS}&windowHours=${WINDOW_HOURS}"
+add_whales_case "summary:off" "includeSummary=false&includeAttribution=true&windowDays=${WINDOW_DAYS}&windowHours=${WINDOW_HOURS}"
+add_whales_case "window:24h" "includeSummary=true&includeAttribution=true&windowDays=1&windowHours=24"
+add_whales_case "window:336h" "includeSummary=true&includeAttribution=true&windowDays=14&windowHours=336"
 
 # Summary: base requested shape + toggles/filters.
 add_summary_case "base" "includeAttribution=true&windowHours=${WINDOW_HOURS}"

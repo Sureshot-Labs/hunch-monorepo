@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
 import { PublicKey } from "@solana/web3.js";
@@ -9,7 +9,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
-import { getRedis } from "../redis.js";
+import { getRedisStatus } from "../redis.js";
 import {
   derivePolymarketFunders,
   inspectSafeWallet,
@@ -479,6 +479,13 @@ type WhalePageMetadataRow = CandidateWalletRow & {
   owner_address: string | null;
   owner_label: string | null;
   owner_wallet_id: string | null;
+};
+
+type WalletActivityStateRow = {
+  wallet_id: string;
+  last_activity_at: Date | null;
+  has_trade_activity: boolean | null;
+  has_holder_activity: boolean | null;
 };
 
 type WalletAttributionFilterRow = {
@@ -1258,7 +1265,9 @@ function walletIntelCacheKey(
   return `wallet-intel:v1:${routeKey}:${userId}:${digest}`;
 }
 
-type WalletIntelCacheClient = NonNullable<Awaited<ReturnType<typeof getRedis>>>;
+type WalletIntelCacheClient = NonNullable<
+  Awaited<ReturnType<typeof getRedisStatus>>["redis"]
+>;
 type WalletIntelCacheLayer = "local" | "redis";
 type WalletIntelLocalCacheEntry = {
   body: string;
@@ -1312,10 +1321,15 @@ async function readWalletIntelCachedBody(
   const localBody = readWalletIntelLocalCache(cacheKey);
   if (localBody) return { body: localBody, layer: "local" };
   if (!cacheClient) return null;
-  const redisBody = await cacheClient.get(cacheKey);
-  if (!redisBody) return null;
-  writeWalletIntelLocalCache(cacheKey, redisBody, ttlSec);
-  return { body: redisBody, layer: "redis" };
+  try {
+    const redisBody = await cacheClient.get(cacheKey);
+    if (!redisBody) return null;
+    writeWalletIntelLocalCache(cacheKey, redisBody, ttlSec);
+    return { body: redisBody, layer: "redis" };
+  } catch (error) {
+    console.warn("[wallet-intel-cache] Redis read failed", String(error));
+    return null;
+  }
 }
 
 async function writeWalletIntelCachedBody(
@@ -1459,7 +1473,7 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                   ${buildWalletIntelWhaleScoreSql("wis")} as whale_score
                 from wallets w
                 join wallet_tag_map tm on tm.wallet_id = w.id
-                 and tm.tag_id = $4::uuid
+                 and tm.tag_id = $3::uuid
                 join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
                 where wis.last_activity_at is not null
                 order by
@@ -1490,21 +1504,12 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                 wis.two_sided_markets,
                 ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
                 owner.owner_address,
-                activity.last_activity_at,
-                activity.has_trade_activity,
-                activity.has_holder_activity${inferredSelect}
+                wis.last_activity_at,
+                null::boolean as has_trade_activity,
+                null::boolean as has_holder_activity${inferredSelect}
               from shortlist s
               join wallets w on w.id = s.id
               left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-              left join lateral (
-                select
-                  max(wah.last_occurred_at) as last_activity_at,
-                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
-                  bool_or(wah.activity_type = 'holder') as has_holder_activity
-                from wallet_activity_hourly wah
-                where wah.wallet_id = w.id
-                  and wah.hour_bucket >= now() - ($3::text || ' days')::interval
-              ) activity on true
               left join lateral (
                 select w2.address as owner_address
                 from wallets w2
@@ -1514,10 +1519,20 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                   and w2.chain = w.chain
                 limit 1
               ) owner on true${inferredJoin}
-              where activity.last_activity_at is not null
+              where wis.last_activity_at is not null
               order by ${orderBy}
               limit $2
             `;
+}
+
+function resolveWalletActivityKind(
+  hasTrade: boolean | null | undefined,
+  hasHolder: boolean | null | undefined,
+): WhaleWalletItem["activityKind"] {
+  if (hasTrade && hasHolder) return "mixed";
+  if (hasTrade) return "trade";
+  if (hasHolder) return "holder";
+  return null;
 }
 
 function mapWhaleRowToItem(
@@ -1557,14 +1572,10 @@ function mapWhaleRowToItem(
     metrics: row.metrics ?? null,
     portfolioPerformance30d: null,
     lastActivityAt: row.last_activity_at,
-    activityKind: (() => {
-      const hasTrade = row.has_trade_activity ?? false;
-      const hasHolder = row.has_holder_activity ?? false;
-      if (hasTrade && hasHolder) return "mixed";
-      if (hasTrade) return "trade";
-      if (hasHolder) return "holder";
-      return null;
-    })(),
+    activityKind: resolveWalletActivityKind(
+      row.has_trade_activity,
+      row.has_holder_activity,
+    ),
     trackedExposureUsd: nullableNumber(row.exposure_usd),
     trackedHedgedNotionalUsd: nullableNumber(row.hedged_notional_usd),
     trackedNetImbalanceUsd: nullableNumber(row.net_imbalance_usd),
@@ -1789,27 +1800,68 @@ export function buildWalletSummaryItem(
   };
 }
 
-async function withJitDisabled<T>(
+function isSafeLocalWorkMem(value: string): boolean {
+  return /^[1-9][0-9]*(kB|MB|GB)$/i.test(value);
+}
+
+async function withWalletIntelQuerySettings<T>(
   client: PoolClient,
+  options: {
+    workMem?: string | null;
+    disableJit?: boolean;
+  },
   task: () => Promise<T>,
 ): Promise<T> {
-  const show = await client.query<{ jit: string }>("show jit");
-  const previous = show.rows[0]?.jit?.toLowerCase() === "off" ? "off" : "on";
-  const changed = previous !== "off";
-  if (changed) {
-    await client.query("set jit = off");
+  const workMem = options.workMem ?? null;
+  const disableJit = options.disableJit ?? true;
+  if (!workMem && !disableJit) {
+    return task();
   }
+
+  await client.query("BEGIN");
   try {
-    return await task();
-  } finally {
-    if (changed) {
-      try {
-        await client.query(`set jit = ${previous}`);
-      } catch {
-        // ignore reset failures when connection is no longer usable
-      }
+    if (disableJit) {
+      await client.query("SET LOCAL jit = off");
     }
+    if (workMem) {
+      if (!isSafeLocalWorkMem(workMem)) {
+        throw new Error(`Unsafe local work_mem value: ${workMem}`);
+      }
+      await client.query(`SET LOCAL work_mem = '${workMem}'`);
+    }
+    const result = await task();
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // ignore rollback failures on broken connections
+    }
+    throw error;
   }
+}
+
+type WalletIntelCacheStatusResult = Awaited<ReturnType<typeof getRedisStatus>>;
+
+async function resolveWalletIntelCacheContext(
+  ttlSec: number,
+): Promise<WalletIntelCacheStatusResult> {
+  if (ttlSec <= 0) {
+    return { redis: null, status: "disabled" };
+  }
+  return getRedisStatus();
+}
+
+function applyWalletIntelCacheHeaders(input: {
+  reply: FastifyReply;
+  hit: boolean;
+  layer?: WalletIntelCacheLayer | "none";
+  cacheStatus: WalletIntelCacheStatusResult["status"];
+}) {
+  input.reply.header("x-cache", input.hit ? "hit" : "miss");
+  input.reply.header("x-cache-layer", input.layer ?? "none");
+  input.reply.header("x-cache-status", input.cacheStatus);
 }
 
 function signalMatchesFilters(
@@ -2865,6 +2917,36 @@ async function loadWalletRowsByIds(
     [userId, walletIds, categoryFilter],
   );
   return rows.rows;
+}
+
+async function loadWalletActivityStateByIds(
+  client: PoolClient,
+  walletIds: string[],
+  windowDays: number,
+): Promise<Map<string, WalletActivityStateRow>> {
+  const byWalletId = new Map<string, WalletActivityStateRow>();
+  if (walletIds.length === 0) return byWalletId;
+
+  const rows = await client.query<WalletActivityStateRow>(
+    `
+      select
+        wah.wallet_id,
+        max(wah.last_occurred_at) as last_activity_at,
+        bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
+        bool_or(wah.activity_type = 'holder') as has_holder_activity
+      from wallet_activity_hourly wah
+      where wah.wallet_id = any($1::uuid[])
+        and wah.hour_bucket >= now() - ($2::text || ' days')::interval
+      group by wah.wallet_id
+    `,
+    [walletIds, Math.max(1, Math.trunc(windowDays))],
+  );
+
+  for (const row of rows.rows) {
+    byWalletId.set(row.wallet_id, row);
+  }
+
+  return byWalletId;
 }
 
 async function loadWalletPageStateByIds(
@@ -4898,7 +4980,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         labelsFilterTyped,
       );
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
-      const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
       const cacheKey = walletIntelCacheKey(
         "wallets-whales",
         userId ?? "anon",
@@ -4910,14 +4993,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         cacheTtlSec,
       );
       if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("x-cache-layer", cached.layer);
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
-        const result = await withJitDisabled(client, async () => {
+        const result = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          async () => {
           const [signalsPolicy, attributionPolicy, refreshPolicy] =
             await Promise.all([
             resolveWalletIntelSignalsPolicy(client),
@@ -4929,26 +5019,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             primaryFilter.length > 0 || labelsFilter.length > 0;
           const includeAttributionInResponse =
             query.includeAttribution && attributionEnabled;
-
-          const orderBy = (() => {
-            switch (query.sort) {
-              case "volume_30d":
-                return "whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "trades_30d":
-                return "wis.metrics_trades_30d desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "exposure_usd":
-                return "wis.exposure_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "imbalance_usd":
-                return "wis.net_imbalance_usd desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "winrate":
-                return "case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "pnl_30d":
-                return "wis.metrics_pnl_30d desc nulls last, whale_score desc nulls last, activity.last_activity_at desc nulls last, w.last_seen_at desc";
-              case "last_activity":
-              default:
-                return "activity.last_activity_at desc nulls last, whale_score desc nulls last, w.last_seen_at desc";
-            }
-          })();
 
           const windowHours = resolveSignalWindowHours(
             query.windowHours,
@@ -4971,6 +5041,28 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             labelsFilter.length === 0;
           const useSnapshotWhaleShortlist =
             useSlimWhaleSelector && query.sort === "last_activity";
+          const whaleActivityOrderExpr = useSnapshotWhaleShortlist
+            ? "wis.last_activity_at"
+            : "activity.last_activity_at";
+          const orderBy = (() => {
+            switch (query.sort) {
+              case "volume_30d":
+                return `whale_score desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "trades_30d":
+                return `wis.metrics_trades_30d desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "exposure_usd":
+                return `wis.exposure_usd desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "imbalance_usd":
+                return `wis.net_imbalance_usd desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "winrate":
+                return `case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "pnl_30d":
+                return `wis.metrics_pnl_30d desc nulls last, whale_score desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+              case "last_activity":
+              default:
+                return `${whaleActivityOrderExpr} desc nulls last, whale_score desc nulls last, w.last_seen_at desc`;
+            }
+          })();
           const snapshotWhaleShortlistLimit = useSnapshotWhaleShortlist
             ? Math.min(
                 Math.max((query.offset + query.limit) * 10, 250),
@@ -4990,7 +5082,6 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   ? [
                       snapshotWhaleShortlistLimit,
                       maxScanCandidates + 1,
-                      query.windowDays,
                       whaleTagId,
                     ]
                   : [maxScanCandidates + 1, query.windowDays, whaleTagId],
@@ -5281,6 +5372,26 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           );
           const pagedIds = pagedRows.map((row) => row.walletId);
 
+          if (useSnapshotWhaleShortlist && pagedIds.length > 0) {
+            const activityStateMap = await loadWalletActivityStateByIds(
+              client,
+              pagedIds,
+              query.windowDays,
+            );
+            pagedRows = pagedRows.map((row) => {
+              const activityState = activityStateMap.get(row.walletId);
+              if (!activityState) return row;
+              return {
+                ...row,
+                lastActivityAt: activityState.last_activity_at ?? row.lastActivityAt,
+                activityKind: resolveWalletActivityKind(
+                  activityState.has_trade_activity,
+                  activityState.has_holder_activity,
+                ),
+              };
+            });
+          }
+
           if (useSlimWhaleSelector && pagedIds.length > 0) {
             const pageMetadataMap = await loadWhalePageMetadataByIds(
               client,
@@ -5451,8 +5562,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             body,
             cacheTtlSec,
           );
-          reply.header("x-cache", "miss");
         }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(body);
       } catch (error) {
@@ -5746,7 +5862,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const query = request.query;
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
-      const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-summary-stats",
         userId ?? "anon",
@@ -5758,15 +5875,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         cacheTtlSec,
       );
       if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("x-cache-layer", cached.layer);
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
 
       const client = await pool.connect();
       try {
-        const payload = await withJitDisabled(client, async () => {
+        const payload = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "16MB" },
+          async () => {
           const [refreshPolicy, signalsPolicy] = await Promise.all([
             resolveWalletIntelRefreshPolicy(client),
             resolveWalletIntelSignalsPolicy(client),
@@ -5797,8 +5921,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             JSON.stringify(payload),
             cacheTtlSec,
           );
-          reply.header("x-cache", "miss");
         }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
+        });
 
         return reply.send(payload);
       } catch (error) {
@@ -5853,7 +5982,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         labelsFilterTyped,
       );
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
-      const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-summary",
         userId ?? "anon",
@@ -5865,14 +5995,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         cacheTtlSec,
       );
       if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("x-cache-layer", cached.layer);
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
-        const payload = await withJitDisabled(client, async () => {
+        const payload = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          async () => {
           const [refreshPolicy, signalsPolicy, attributionPolicy] =
             await Promise.all([
               resolveWalletIntelRefreshPolicy(client),
@@ -6342,8 +6479,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             body,
             cacheTtlSec,
           );
-          reply.header("x-cache", "miss");
         }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(body);
       } catch (error) {
@@ -6402,7 +6544,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Authentication required for following scope" });
       }
       const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
-      const cacheClient = cacheTtlSec > 0 ? await getRedis() : null;
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
       const cacheKey = walletIntelCacheKey(
         "wallets-activity-signals",
         userId ?? "anon",
@@ -6414,14 +6557,21 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         cacheTtlSec,
       );
       if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("x-cache-layer", cached.layer);
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(cached.body);
       }
       const client = await pool.connect();
       try {
-        const payload = await withJitDisabled(client, async () => {
+        const payload = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "48MB" },
+          async () => {
           const [signalsPolicy, refreshPolicy, attributionPolicy] =
             await Promise.all([
               resolveWalletIntelSignalsPolicy(client),
@@ -6823,8 +6973,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             body,
             cacheTtlSec,
           );
-          reply.header("x-cache", "miss");
         }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
+        });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(body);
       } catch (error) {
