@@ -537,7 +537,7 @@ function buildFeedBookSnapshotCtes(args: {
       )
     `,
     `
-      latest_book_snapshot as materialized (
+      latest_book as materialized (
         select
           b.token_id,
           b.best_bid,
@@ -545,35 +545,6 @@ function buildFeedBookSnapshotCtes(args: {
         from unified_token_top_latest b
         join token_set ts on ts.token_id = b.token_id
         where b.ts > (${args.nowParam}::timestamptz - interval '7 days')
-      )
-    `,
-    `
-      latest_book_fallback as materialized (
-        select distinct on (b.token_id)
-          b.token_id,
-          b.best_bid,
-          b.best_ask
-        from unified_book_top b
-        join token_set ts on ts.token_id = b.token_id
-        left join latest_book_snapshot lbs on lbs.token_id = b.token_id
-        where lbs.token_id is null
-          and b.ts > (${args.nowParam}::timestamptz - interval '7 days')
-        order by b.token_id, b.ts desc
-      )
-    `,
-    `
-      latest_book as materialized (
-        select
-          b.token_id,
-          b.best_bid,
-          b.best_ask
-        from latest_book_snapshot b
-        union all
-        select
-          b.token_id,
-          b.best_bid,
-          b.best_ask
-        from latest_book_fallback b
       )
     `,
   ];
