@@ -544,6 +544,7 @@ function buildFeedBookSnapshotCtes(args: {
           b.best_ask
         from unified_token_top_latest b
         join token_set ts on ts.token_id = b.token_id
+        where b.ts > (${args.nowParam}::timestamptz - interval '7 days')
       )
     `,
     `
