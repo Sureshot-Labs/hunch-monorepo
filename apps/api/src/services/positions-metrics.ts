@@ -468,12 +468,11 @@ async function fetchMarksByToken(
       from unified_market_tokens mt
       left join lateral (
         select
-          ubt.best_bid,
-          ubt.best_ask,
-          ubt.mid
-        from unified_book_top ubt
-        where ubt.token_id = mt.token_id
-        order by ubt.ts desc
+          utl.best_bid,
+          utl.best_ask,
+          utl.mid
+        from unified_token_top_latest utl
+        where utl.token_id = mt.token_id
         limit 1
       ) top on true
       left join unified_markets m

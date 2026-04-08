@@ -296,6 +296,10 @@ export async function upsertUnifiedMarket(
   pool: Pool,
   marketRow: UnifiedMarketRow,
 ): Promise<string> {
+  const existingTokenSources = await loadUnifiedMarketTokenSources(pool, [
+    marketRow.id,
+  ]);
+  const existingTokenSource = existingTokenSources.get(marketRow.id);
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
@@ -423,7 +427,9 @@ export async function upsertUnifiedMarket(
 
   const result = await pool.query(query, values);
   const id = result.rows[0].id as string;
-  await syncUnifiedMarketTokens(pool, [id]);
+  if (shouldSyncUnifiedMarketTokens(marketRow, existingTokenSource)) {
+    await syncUnifiedMarketTokens(pool, [id]);
+  }
   return id;
 }
 
@@ -595,11 +601,19 @@ export async function upsertUnifiedMarkets(
 
   const batches = chunkArray(rows, 500);
   for (const batch of batches) {
-    await pool.query(query, [JSON.stringify(batch)]);
-    await syncUnifiedMarketTokens(
+    const existingTokenSources = await loadUnifiedMarketTokenSources(
       pool,
       batch.map((row) => row.id),
     );
+    await pool.query(query, [JSON.stringify(batch)]);
+    const changedMarketIds = batch
+      .filter((row) =>
+        shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
+      )
+      .map((row) => row.id);
+    if (changedMarketIds.length > 0) {
+      await syncUnifiedMarketTokens(pool, changedMarketIds);
+    }
   }
 }
 
@@ -654,6 +668,78 @@ function buildMarketTokenRows(market: MarketTokenSource): UnifiedMarketTokenRow[
   }
 
   return tokens;
+}
+
+async function loadUnifiedMarketTokenSources(
+  pool: Pool,
+  marketIds: string[],
+): Promise<Map<string, MarketTokenSource>> {
+  const ids = Array.from(new Set(marketIds)).filter(Boolean);
+  if (ids.length === 0) return new Map();
+
+  const { rows } = await pool.query<MarketTokenSource>(
+    `
+      select id, venue, token_yes, token_no, clob_token_ids
+      from unified_markets
+      where id = any($1::text[])
+    `,
+    [ids],
+  );
+
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+function resolvePersistedMarketTokenSource(
+  next: MarketTokenSource,
+  current?: MarketTokenSource,
+): MarketTokenSource {
+  const token_yes =
+    current?.venue === "kalshi" &&
+    current.token_yes?.startsWith("sol:") &&
+    next.token_yes?.startsWith("kalshi:")
+      ? current.token_yes
+      : next.token_yes;
+
+  const token_no =
+    current?.venue === "kalshi" &&
+    current.token_no?.startsWith("sol:") &&
+    next.token_no?.startsWith("kalshi:")
+      ? current.token_no
+      : next.token_no;
+
+  return {
+    id: next.id,
+    venue: next.venue,
+    token_yes,
+    token_no,
+    clob_token_ids: next.clob_token_ids,
+  };
+}
+
+function buildMarketTokenSignature(source: MarketTokenSource): string[] {
+  return buildMarketTokenRows(source)
+    .map(
+      (row) => `${row.venue}:${row.token_id}:${row.outcome_side ?? "__NULL__"}`,
+    )
+    .sort();
+}
+
+function shouldSyncUnifiedMarketTokens(
+  next: MarketTokenSource,
+  current?: MarketTokenSource,
+): boolean {
+  if (!current) return true;
+
+  const currentSignature = buildMarketTokenSignature(current);
+  const nextSignature = buildMarketTokenSignature(
+    resolvePersistedMarketTokenSource(next, current),
+  );
+
+  if (currentSignature.length !== nextSignature.length) return true;
+  for (let index = 0; index < currentSignature.length; index += 1) {
+    if (currentSignature[index] !== nextSignature[index]) return true;
+  }
+  return false;
 }
 
 export async function syncUnifiedMarketTokens(

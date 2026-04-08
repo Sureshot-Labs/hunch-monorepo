@@ -367,13 +367,12 @@ export async function fetchMarketHolderData(inputs: {
   if (tokenIds.length > 0) {
     const { rows: topRows } = await db.query<TopRow>(
       `
-        select distinct on (token_id)
+        select
           token_id,
           best_bid,
           best_ask
-        from unified_book_top
+        from unified_token_top_latest
         where token_id = any($1::text[])
-        order by token_id, ts desc
       `,
       [tokenIds],
     );

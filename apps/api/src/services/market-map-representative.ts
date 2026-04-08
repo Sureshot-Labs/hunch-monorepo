@@ -455,20 +455,18 @@ export async function selectRankedRepresentativeMarketsForEvents(
       ) mt
       left join lateral (
         select best_bid, best_ask
-        from unified_book_top
+        from unified_token_top_latest
         where mt.token_yes is not null
           and token_id = mt.token_yes
           and ts > ($5::timestamptz - interval '7 days')
-        order by ts desc
         limit 1
       ) yes_top on true
       left join lateral (
         select best_bid, best_ask
-        from unified_book_top
+        from unified_token_top_latest
         where mt.token_no is not null
           and token_id = mt.token_no
           and ts > ($5::timestamptz - interval '7 days')
-        order by ts desc
         limit 1
       ) no_top on true
       left join polymarket_markets pm

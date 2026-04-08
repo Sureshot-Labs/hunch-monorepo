@@ -441,25 +441,43 @@ async function fetchHotMarketsByTokenIds(
 ): Promise<Array<{ marketId: string; tokenIds: string[] }>> {
   if (!tokenIds.length) return [];
   const { rows } = await pool.query<{
-    id: string | null;
-    clob_token_ids: unknown;
+    market_id: string | null;
+    token_ids: string[] | null;
   }>(
     `
-      select id, clob_token_ids
-      from polymarket_markets
-      where clob_token_ids is not null
-        and clob_token_ids <> '[]'
-        and (clob_token_ids::jsonb ?| $1::text[])
+      with matched_markets as (
+        select distinct mt.market_id
+        from unified_market_tokens mt
+        where mt.venue = 'polymarket'
+          and mt.token_id = any($1::text[])
+      )
+      select
+        mm.market_id,
+        array_agg(
+          mt.token_id
+          order by
+            case mt.outcome_side
+              when 'YES' then 0
+              when 'NO' then 1
+              else 2
+            end,
+            mt.token_id
+        ) as token_ids
+      from matched_markets mm
+      join unified_market_tokens mt
+        on mt.market_id = mm.market_id
+       and mt.venue = 'polymarket'
+      group by mm.market_id
     `,
     [tokenIds],
   );
 
   const markets: Array<{ marketId: string; tokenIds: string[] }> = [];
   for (const row of rows) {
-    if (!row.id) continue;
-    const ids = parseJsonStringArray(row.clob_token_ids);
+    if (!row.market_id) continue;
+    const ids = Array.isArray(row.token_ids) ? row.token_ids : [];
     if (!ids.length) continue;
-    markets.push({ marketId: row.id, tokenIds: ids });
+    markets.push({ marketId: row.market_id, tokenIds: ids });
   }
   return markets;
 }
@@ -508,31 +526,104 @@ async function fetchTopTokens(
 ): Promise<string[]> {
   if (limitTokens <= 0) return [];
   const limitMarkets = Math.max(100, limitTokens * 2);
-  const { rows } = await pool.query(
+  const shortlistFactors = [5, 15, 40];
+  for (const factor of shortlistFactors) {
+    const shortlistMarkets = Math.max(limitMarkets * factor, 1_000);
+    const out = await fetchTopTokensFromShortlist(
+      shortlistMarkets,
+      limitTokens,
+      exclude,
+    );
+    if (out.length >= limitTokens) return out;
+  }
+
+  const fallback = await fetchTopTokensFromSourceScan(limitMarkets, limitTokens, exclude);
+  if (fallback.length < limitTokens) {
+    log.warn("Polymarket top token shortlist underfilled; broad scan fallback still short", {
+      limitTokens,
+      returned: fallback.length,
+      limitMarkets,
+    });
+  }
+  return fallback;
+}
+
+async function fetchTopTokensFromShortlist(
+  shortlistMarkets: number,
+  limitTokens: number,
+  exclude: Set<string>,
+): Promise<string[]> {
+  const { rows } = await pool.query<{ clob_token_ids: unknown }>(
     `
-    select clob_token_ids
-    from polymarket_markets
-    where closed = false
-      and archived = false
-      and enable_order_book = true
-      and accepting_orders = true
-      and clob_token_ids is not null
-      and clob_token_ids <> '[]'
-    order by
-      coalesce(volume24hr_clob, 0) desc,
-      coalesce(liquidity_clob, 0) desc,
-      coalesce(volume24hr, 0) desc,
-      coalesce(liquidity, 0) desc
-    limit $1
+      with candidate_markets as (
+        select venue_market_id
+        from unified_markets
+        where venue = 'polymarket'
+          and status = 'ACTIVE'
+          and venue_market_id is not null
+          and clob_token_ids is not null
+          and clob_token_ids <> '[]'
+        order by volume_24h desc nulls last, liquidity desc nulls last, venue_market_id
+        limit $1
+      )
+      select pm.clob_token_ids
+      from candidate_markets c
+      join polymarket_markets pm
+        on pm.id = c.venue_market_id
+      where pm.closed = false
+        and pm.archived = false
+        and pm.enable_order_book = true
+        and pm.accepting_orders = true
+        and pm.clob_token_ids is not null
+        and pm.clob_token_ids <> '[]'
+      order by
+        coalesce(pm.volume24hr_clob, 0) desc,
+        coalesce(pm.liquidity_clob, 0) desc,
+        coalesce(pm.volume24hr, 0) desc,
+        coalesce(pm.liquidity, 0) desc
+    `,
+    [shortlistMarkets],
+  );
+
+  return collectTopTokensFromRows(rows, limitTokens, exclude);
+}
+
+async function fetchTopTokensFromSourceScan(
+  limitMarkets: number,
+  limitTokens: number,
+  exclude: Set<string>,
+): Promise<string[]> {
+  const { rows } = await pool.query<{ clob_token_ids: unknown }>(
+    `
+      select clob_token_ids
+      from polymarket_markets
+      where closed = false
+        and archived = false
+        and enable_order_book = true
+        and accepting_orders = true
+        and clob_token_ids is not null
+        and clob_token_ids <> '[]'
+      order by
+        coalesce(volume24hr_clob, 0) desc,
+        coalesce(liquidity_clob, 0) desc,
+        coalesce(volume24hr, 0) desc,
+        coalesce(liquidity, 0) desc
+      limit $1
     `,
     [limitMarkets],
   );
 
+  return collectTopTokensFromRows(rows, limitTokens, exclude);
+}
+
+function collectTopTokensFromRows(
+  rows: Array<{ clob_token_ids?: unknown }>,
+  limitTokens: number,
+  exclude: Set<string>,
+): string[] {
   const out: string[] = [];
   for (const row of rows) {
-    const tokenIds = parseJsonStringArray(
-      (row as { clob_token_ids?: unknown }).clob_token_ids,
-    );
+    const tokenIds = parseJsonStringArray(row.clob_token_ids);
     for (const tokenId of tokenIds) {
       if (exclude.has(tokenId)) continue;
       exclude.add(tokenId);
@@ -553,19 +644,26 @@ async function fetchHotEventIdsFromTokens(): Promise<string[]> {
   const tokenIds = await fetchHotTokenIds(probeLimit);
   if (!tokenIds.length) return [];
 
-  const { rows } = await pool.query<{ event_id: string }>(
+  const { rows } = await pool.query<{ venue_event_id: string | null }>(
     `
-      select distinct event_id
-      from polymarket_markets
-      where clob_token_ids is not null
-        and clob_token_ids <> '[]'
-        and (clob_token_ids::jsonb ?| $1::text[])
+      select distinct e.venue_event_id
+      from unified_market_tokens mt
+      join unified_markets m
+        on m.id = mt.market_id
+      join unified_events e
+        on e.id = m.event_id
+      where mt.venue = 'polymarket'
+        and e.venue = 'polymarket'
+        and e.venue_event_id is not null
+        and mt.token_id = any($1::text[])
       limit $2
     `,
     [tokenIds, env.hotStatusMaxEvents],
   );
 
-  return rows.map((row) => row.event_id).filter(Boolean);
+  return rows
+    .map((row) => row.venue_event_id)
+    .filter((eventId): eventId is string => Boolean(eventId));
 }
 
 export async function syncHotEventStatuses(): Promise<void> {

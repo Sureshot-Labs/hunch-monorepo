@@ -1966,20 +1966,18 @@ export async function fetchMarketDetails(
     ) mt
     left join lateral (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_yes
         and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
-      order by ts desc
       limit 1
     ) yes_top on true
     left join lateral (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_no
         and m.status = 'ACTIVE'
         and ts > now() - interval '7 days'
-      order by ts desc
       limit 1
     ) no_top on true
     LEFT JOIN polymarket_markets pm
@@ -2159,16 +2157,14 @@ export async function fetchEventDetails(
     ) mt on true
     LEFT JOIN LATERAL (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_yes
-      order by ts desc
       limit 1
     ) yes_top on true
     LEFT JOIN LATERAL (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_no
-      order by ts desc
       limit 1
     ) no_top on true
     LEFT JOIN polymarket_markets pm
@@ -2224,16 +2220,14 @@ export async function fetchMarketSignalPricingByIds(
     ) mt on true
     LEFT JOIN LATERAL (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_yes
-      order by ts desc
       limit 1
     ) yes_top on true
     LEFT JOIN LATERAL (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = mt.token_no
-      order by ts desc
       limit 1
     ) no_top on true
     LEFT JOIN polymarket_markets pm
@@ -2338,18 +2332,16 @@ export async function fetchMarketsByTokenIds(
   const topJoins = includeTop
     ? `left join lateral (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = token_yes.token_id
         and ts > now() - interval '7 days'
-      order by ts desc
       limit 1
     ) yes_top on true
     left join lateral (
       select best_bid, best_ask
-      from unified_book_top
+      from unified_token_top_latest
       where token_id = token_no.token_id
         and ts > now() - interval '7 days'
-      order by ts desc
       limit 1
     ) no_top on true`
     : "";

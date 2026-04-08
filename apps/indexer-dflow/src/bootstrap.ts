@@ -867,6 +867,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
 
   const allTokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));
   let processedMarkets = 0;
+  const touchedEventIds = new Set<string>();
 
   if (allTokenIds.length) {
     const mints = Array.from(
@@ -969,6 +970,7 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
         for (const mapped of group.mappedMarkets) {
           unifiedMarketRows.push(mapped.marketRow);
           tokenRows.push(...mapped.tokenRows);
+          touchedEventIds.add(mapped.marketRow.event_id);
         }
       }
 
@@ -1017,7 +1019,9 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
     }
   }
 
-  const reconciledEvents = await reconcileKalshiEventStatuses();
+  const reconciledEvents = await reconcileKalshiEventStatuses(
+    Array.from(touchedEventIds),
+  );
 
   log.info("DFlow hot status refresh complete", {
     tokens: allTokenIds.length,
