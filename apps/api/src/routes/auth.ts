@@ -9,6 +9,7 @@ import { z as zod } from "zod";
 import {
   AuthService,
   PrivyTerminalAuthError,
+  type User,
   WalletAlreadyExistsError,
   WalletNotFoundError,
   WalletUnlinkNotAllowedError,
@@ -26,6 +27,7 @@ import {
 } from "../privy-service.js";
 import {
   addWalletBodySchema,
+  authMeSuccessResponseSchema,
   authErrorResponseSchema,
   authPrivyBodySchema,
   authPrivySuccessResponseSchema,
@@ -86,6 +88,26 @@ function readRequestUserAgent(headers: Record<string, unknown>): string {
     readRequestHeaderValue(headers, "user-agent") ??
     "unknown"
   );
+}
+
+function resolvePostSignupOnboardingRequired(user: User): boolean {
+  return user.createdAt >= env.postSignupOnboardingEligibleAfter;
+}
+
+function buildAuthUserPayload(user: User) {
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+    isAdmin: user.isAdmin,
+    isActive: user.isActive,
+    isVerified: user.isVerified,
+    postSignupOnboardingRequired: resolvePostSignupOnboardingRequired(user),
+    createdAt: user.createdAt.toISOString(),
+    lastLoginAt: user.lastLoginAt?.toISOString(),
+  };
 }
 
 function getPolymarketConnectFailureResponse(error: unknown): {
@@ -496,18 +518,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            displayName: user.displayName,
-            avatarUrl: user.avatarUrl,
-            isAdmin: user.isAdmin,
-            isActive: user.isActive,
-            isVerified: user.isVerified,
-            createdAt: user.createdAt.toISOString(),
-            lastLoginAt: user.lastLoginAt?.toISOString(),
-          },
+          user: buildAuthUserPayload(user),
           session: {
             token: sessionToken,
             expiresAt: session.expiresAt.toISOString(),
@@ -609,7 +620,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/auth/me",
-    { preHandler: createAuthMiddleware() },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        response: {
+          200: authMeSuccessResponseSchema,
+          401: authErrorResponseSchema,
+          500: authErrorResponseSchema,
+        },
+      },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = request.walletAddress;
@@ -628,18 +648,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
-          user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            displayName: user.displayName,
-            avatarUrl: user.avatarUrl,
-            isAdmin: user.isAdmin,
-            isActive: user.isActive,
-            isVerified: user.isVerified,
-            createdAt: user.createdAt,
-            lastLoginAt: user.lastLoginAt,
-          },
+          user: buildAuthUserPayload(user),
           wallets: wallets.map((w) => ({
             id: w.id,
             walletAddress: w.walletAddress,
@@ -647,16 +656,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             name: w.name,
             isPrimary: w.isPrimary,
             isVerified: w.isVerified,
-            createdAt: w.createdAt,
-            updatedAt: w.updatedAt,
+            createdAt: w.createdAt.toISOString(),
+            updatedAt: w.updatedAt.toISOString(),
           })),
           polymarketCredentials: polymarketCreds
             ? {
                 id: polymarketCreds.id,
                 walletAddress: polymarketCreds.walletAddress,
                 isActive: polymarketCreds.isActive,
-                createdAt: polymarketCreds.createdAt,
-                lastUsedAt: polymarketCreds.lastUsedAt,
+                createdAt: polymarketCreds.createdAt.toISOString(),
+                lastUsedAt: polymarketCreds.lastUsedAt?.toISOString() ?? null,
               }
             : null,
           currentWallet: walletAddress,

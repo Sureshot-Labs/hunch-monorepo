@@ -50,3 +50,19 @@ export const rewardsLeaderboardQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
+
+export const rewardsTutorialStateSchema = z.object({
+  dismissedAt: z.string().nullable(),
+});
+
+export const rewardsTutorialStateResponseSchema = z.object({
+  ok: z.literal(true),
+  tutorial: rewardsTutorialStateSchema,
+});
+
+export const rewardsOnboardingShareClaimResponseSchema = z.object({
+  ok: z.literal(true),
+  granted: z.boolean(),
+  alreadyGranted: z.boolean(),
+  pointsAwarded: z.number().int().positive(),
+});

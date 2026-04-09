@@ -57,6 +57,14 @@ export type InboundReferralRow = {
   referrer_display_name: string | null;
 };
 
+export type UserTutorialDismissalRow = {
+  user_id: string;
+  tutorial_key: string;
+  dismissed_at: Date;
+  created_at: Date;
+  updated_at: Date;
+};
+
 export type RewardsLeaderboardMetric = "points" | "volume" | "pnl";
 export type RewardsLeaderboardInterval =
   | "daily"
@@ -416,6 +424,45 @@ export async function clearUserReferralCodeIfMatches(
     [userId, referralCode],
   );
   return Number(rowCount ?? 0) > 0;
+}
+
+export async function fetchUserTutorialDismissal(
+  pool: DbQuery,
+  inputs: { userId: string; tutorialKey: string },
+): Promise<UserTutorialDismissalRow | null> {
+  const { rows } = await pool.query<UserTutorialDismissalRow>(
+    `
+      select user_id, tutorial_key, dismissed_at, created_at, updated_at
+      from user_tutorial_dismissals
+      where user_id = $1
+        and tutorial_key = $2
+      limit 1
+    `,
+    [inputs.userId, inputs.tutorialKey],
+  );
+  return rows[0] ?? null;
+}
+
+export async function upsertUserTutorialDismissal(
+  pool: DbQuery,
+  inputs: { userId: string; tutorialKey: string },
+): Promise<UserTutorialDismissalRow> {
+  const { rows } = await pool.query<UserTutorialDismissalRow>(
+    `
+      insert into user_tutorial_dismissals (
+        user_id,
+        tutorial_key,
+        dismissed_at
+      )
+      values ($1, $2, now())
+      on conflict (user_id, tutorial_key)
+      do update
+      set dismissed_at = user_tutorial_dismissals.dismissed_at
+      returning user_id, tutorial_key, dismissed_at, created_at, updated_at
+    `,
+    [inputs.userId, inputs.tutorialKey],
+  );
+  return rows[0];
 }
 
 export async function lockUserReferralCodeByUserId(

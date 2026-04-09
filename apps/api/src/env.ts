@@ -126,6 +126,13 @@ function parseEnum<T extends string>(
   return match ?? fallback;
 }
 
+function optionalIsoDate(value: string | undefined, fallback: Date): Date {
+  if (!value) return fallback;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed;
+}
+
 const JWT_EXPIRES_IN_UNIT_MS: Record<string, number> = {
   ms: 1,
   msec: 1,
@@ -623,6 +630,10 @@ const analyticsServerForwardingMode = parseEnum(
   ["database", "off"] as const,
   analyticsServerForwardingEnabled ? "database" : "off",
 );
+const postSignupOnboardingEligibleAfter = optionalIsoDate(
+  process.env.POST_SIGNUP_ONBOARDING_ELIGIBLE_AFTER,
+  new Date("2026-04-09T00:00:00.000Z"),
+);
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -641,6 +652,7 @@ export const env = {
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   authAccessState,
+  postSignupOnboardingEligibleAfter,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
   holdersTtlSec: Number(process.env.API_HOLDERS_TTL_SEC ?? "300"),

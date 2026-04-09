@@ -42,19 +42,41 @@ export const authPrivyTerminalErrorResponseSchema = z.object({
   conflictWalletAddresses: z.array(z.string()).optional(),
 });
 
+export const authUserSchema = z.object({
+  id: z.string(),
+  email: z.string().optional(),
+  username: z.string().optional(),
+  displayName: z.string().optional(),
+  avatarUrl: z.string().optional(),
+  isAdmin: z.boolean(),
+  isActive: z.boolean(),
+  isVerified: z.boolean(),
+  postSignupOnboardingRequired: z.boolean(),
+  createdAt: z.string(),
+  lastLoginAt: z.string().optional(),
+});
+
+export const authWalletSchema = z.object({
+  id: z.string(),
+  walletAddress: z.string(),
+  walletType: z.string(),
+  name: z.string().nullable(),
+  isPrimary: z.boolean(),
+  isVerified: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export const authPolymarketCredentialsInfoSchema = z.object({
+  id: z.string(),
+  walletAddress: z.string(),
+  isActive: z.boolean(),
+  createdAt: z.string(),
+  lastUsedAt: z.string().nullable(),
+});
+
 export const authPrivySuccessResponseSchema = z.object({
-  user: z.object({
-    id: z.string(),
-    email: z.string().optional(),
-    username: z.string().optional(),
-    displayName: z.string().optional(),
-    avatarUrl: z.string().optional(),
-    isAdmin: z.boolean(),
-    isActive: z.boolean(),
-    isVerified: z.boolean(),
-    createdAt: z.string(),
-    lastLoginAt: z.string().optional(),
-  }),
+  user: authUserSchema,
   session: z.object({
     token: z.string(),
     expiresAt: z.string(),
@@ -72,8 +94,15 @@ export const authPrivySuccessResponseSchema = z.object({
       referredUserKey: z.string(),
       source: z.literal("auth_privy"),
       status: z.literal("attached"),
-    })
+  })
     .optional(),
+});
+
+export const authMeSuccessResponseSchema = z.object({
+  user: authUserSchema,
+  wallets: z.array(authWalletSchema),
+  polymarketCredentials: authPolymarketCredentialsInfoSchema.nullable(),
+  currentWallet: z.string(),
 });
 
 export const venueCredentialsBodySchema = z.object({

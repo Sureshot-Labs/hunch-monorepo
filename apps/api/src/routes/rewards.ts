@@ -14,12 +14,17 @@ import {
   rewardsClaimBodySchema,
   rewardsReferralAttachBodySchema,
   rewardsLeaderboardQuerySchema,
+  rewardsOnboardingShareClaimResponseSchema,
   rewardsReferralCodeUpdateBodySchema,
   rewardsReferralsQuerySchema,
+  rewardsTutorialStateResponseSchema,
 } from "../schemas/rewards.js";
+import { authErrorResponseSchema } from "../schemas/auth.js";
 import {
   attachReferralCodeForExistingUser,
+  claimOnboardingShareBonus,
   createRewardClaim,
+  dismissRewardsTutorial,
   getOrCreateReferralCode,
   getRewardsLeaderboard,
   getRewardsPolicy,
@@ -27,6 +32,7 @@ import {
   getRewardsClaimableByChainMicro,
   getRewardsReferrals,
   getRewardsSummary,
+  getRewardsTutorialState,
   setReferralCodeForUser,
 } from "../services/rewards.js";
 import {
@@ -50,6 +56,8 @@ function buildRewardsClaimCollectorPayload(inputs: {
     ...(inputs.errorMessage ? { error_message: inputs.errorMessage } : {}),
   };
 }
+
+const REWARDS_INTRO_TUTORIAL_KEY = "rewards-intro";
 
 export const rewardsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -231,6 +239,110 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, leaderboard });
+    },
+  );
+
+  z.get(
+    "/rewards/tutorials/rewards-intro",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        response: {
+          200: rewardsTutorialStateResponseSchema,
+          401: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const tutorial = await getRewardsTutorialState(pool, {
+        userId: user.id,
+        tutorialKey: REWARDS_INTRO_TUTORIAL_KEY,
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        tutorial: {
+          dismissedAt: tutorial.dismissedAt?.toISOString() ?? null,
+        },
+      });
+    },
+  );
+
+  z.post(
+    "/rewards/tutorials/rewards-intro/dismiss",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        response: {
+          200: rewardsTutorialStateResponseSchema,
+          401: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const tutorial = await dismissRewardsTutorial(pool, {
+        userId: user.id,
+        tutorialKey: REWARDS_INTRO_TUTORIAL_KEY,
+      });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        tutorial: {
+          dismissedAt: tutorial.dismissedAt?.toISOString() ?? null,
+        },
+      });
+    },
+  );
+
+  z.post(
+    "/rewards/onboarding-share/claim",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        response: {
+          200: rewardsOnboardingShareClaimResponseSchema,
+          401: authErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      let walletAddress = request.walletAddress?.trim() ?? null;
+      if (!walletAddress) {
+        const wallets = await AuthService.getUserWallets(user.id);
+        walletAddress =
+          wallets.find((wallet) => wallet.isPrimary)?.walletAddress ??
+          wallets[0]?.walletAddress ??
+          null;
+      }
+
+      const result = await claimOnboardingShareBonus(pool, {
+        userId: user.id,
+        walletAddress,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        ...result,
+      });
     },
   );
 

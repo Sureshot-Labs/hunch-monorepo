@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { Pool } from "pg";
 import type { DbQuery } from "../db.js";
 import {
   clearUserReferralCodeIfMatches,
@@ -6,6 +7,7 @@ import {
   fetchClaimedTotalsByChain,
   fetchFeeTotalsByChain,
   fetchInboundReferralForUser,
+  fetchUserTutorialDismissal,
   fetchQualifiedReferralCount,
   fetchReferralFeeTotalsByChain,
   fetchRewardsLeaderboardMe,
@@ -24,6 +26,7 @@ import {
   type RewardsLeaderboardRow,
   markQualifiedReferralsForUser,
   setUserReferralCode,
+  upsertUserTutorialDismissal,
 } from "../repos/rewards.js";
 import {
   normalizeRewardsChainId,
@@ -34,6 +37,7 @@ import {
   usdcMicroToDecimalString,
 } from "../lib/usdc.js";
 import {
+  insertVolumeEventsWithMultiplier,
   resolveRewardsMultiplierAtEvent,
   type RewardsMultiplierSource,
 } from "./rewards-multiplier.js";
@@ -42,6 +46,10 @@ const REFERRAL_CODE_MIN_LENGTH = 3;
 const REFERRAL_CODE_MAX_LENGTH = 10;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const ONBOARDING_SHARE_BONUS_SOURCE_ID = "manual:onboarding-share-v1";
+const ONBOARDING_SHARE_BONUS_POINTS = 200;
+const ONBOARDING_SHARE_BONUS_SOURCE_TYPE = "execution";
+const ONBOARDING_SHARE_BONUS_VENUE = "growth";
 
 const DEFAULT_POLICY = {
   tiers: [
@@ -152,6 +160,10 @@ export type ReferralAttachmentState = {
     username: string | null;
     displayName: string | null;
   } | null;
+};
+
+export type RewardsTutorialState = {
+  dismissedAt: Date | null;
 };
 
 function normalizeTier(raw: unknown): RewardsTier | null {
@@ -401,6 +413,55 @@ export async function getReferralAttachmentStatus(
   inputs: { userId: string },
 ): Promise<ReferralAttachmentState> {
   return buildReferralAttachmentState(pool, inputs.userId);
+}
+
+export async function getRewardsTutorialState(
+  pool: DbQuery,
+  inputs: { userId: string; tutorialKey: string },
+): Promise<RewardsTutorialState> {
+  const row = await fetchUserTutorialDismissal(pool, inputs);
+  return {
+    dismissedAt: row?.dismissed_at ?? null,
+  };
+}
+
+export async function dismissRewardsTutorial(
+  pool: DbQuery,
+  inputs: { userId: string; tutorialKey: string },
+): Promise<RewardsTutorialState> {
+  const row = await upsertUserTutorialDismissal(pool, inputs);
+  return {
+    dismissedAt: row.dismissed_at,
+  };
+}
+
+export async function claimOnboardingShareBonus(
+  pool: Pool,
+  inputs: { userId: string; walletAddress: string | null },
+): Promise<{
+  granted: boolean;
+  alreadyGranted: boolean;
+  pointsAwarded: number;
+}> {
+  const inserted = await insertVolumeEventsWithMultiplier(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: ONBOARDING_SHARE_BONUS_VENUE,
+    sourceType: ONBOARDING_SHARE_BONUS_SOURCE_TYPE,
+    events: [
+      {
+        sourceId: ONBOARDING_SHARE_BONUS_SOURCE_ID,
+        notionalUsd: ONBOARDING_SHARE_BONUS_POINTS,
+        createdAt: new Date(),
+      },
+    ],
+  });
+
+  return {
+    granted: inserted.inserted > 0,
+    alreadyGranted: inserted.inserted === 0,
+    pointsAwarded: ONBOARDING_SHARE_BONUS_POINTS,
+  };
 }
 
 export async function attachReferralCodeForExistingUser(
