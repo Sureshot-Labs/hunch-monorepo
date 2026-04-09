@@ -46,7 +46,20 @@ function isKalshiInsufficientTradeFundsMessage(message: string): boolean {
   );
 }
 
+function isExpiredBlockhashMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("blockhash not found") ||
+    normalized.includes("blockhash expired") ||
+    normalized.includes("transaction expired") ||
+    normalized.includes("block height exceeded")
+  );
+}
+
 function normalizeEmbeddedSolanaRpcErrorMessage(message: string): string {
+  if (isExpiredBlockhashMessage(message)) {
+    return "Transaction expired. Refresh quote and try again.";
+  }
   if (isKalshiReduceOrderEscrowInitializationMessage(message)) {
     return "Trade could not be prepared yet. Retry the sell in a moment.";
   }
