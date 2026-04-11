@@ -13,6 +13,10 @@ import {
   fetchEvmCode,
 } from "../services/polygon-rpc.js";
 import {
+  derivePolymarketFunders,
+  type PolymarketFunderCandidate,
+} from "../services/polymarket-funder.js";
+import {
   resolveLimitlessAuthContext,
   verifyLimitlessAuthContext,
 } from "../services/limitless-auth.js";
@@ -111,6 +115,22 @@ const walletBalancesInflight = new Map<
   Promise<{ balances: WalletBalanceItem[]; warnings: string[] }>
 >();
 
+function isSafeFunderCandidateForBalanceLookup(
+  candidate: PolymarketFunderCandidate,
+  signerWalletAddress: string,
+): boolean {
+  if (!candidate.funder) return false;
+  if (candidate.deployed !== true) return false;
+  if (candidate.contractKind !== "SAFE_LIKE") return false;
+  if (candidate.safeThreshold != null && candidate.safeThreshold > 1) {
+    return false;
+  }
+  if (!candidate.safeOwners?.length) return true;
+  return candidate.safeOwners.some(
+    (owner) => owner.toLowerCase() === signerWalletAddress.toLowerCase(),
+  );
+}
+
 function getVenueStatusCacheKey(inputs: {
   userId: string;
   walletAddress: string;
@@ -199,7 +219,7 @@ const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
     },
     [EVM_NATIVE_ADDRESS]: {
       address: EVM_NATIVE_ADDRESS,
-      symbol: "MATIC",
+      symbol: "POL",
       decimals: 18,
       name: "Polygon",
     },
@@ -436,14 +456,29 @@ async function loadBalanceWalletLookup(
             "polymarket",
             wallet.walletAddress,
           );
+          const funderDerive = await derivePolymarketFunders({
+            signer: wallet.walletAddress,
+            storedFunder: creds?.funderAddress ?? null,
+            includeMagicProxy: false,
+          });
+          const safeFunders = funderDerive.candidates
+            .filter((candidate) =>
+              isSafeFunderCandidateForBalanceLookup(
+                candidate,
+                wallet.walletAddress,
+              ),
+            )
+            .map((candidate) => candidate.funder);
           return {
             signerWalletAddress: wallet.walletAddress,
             funderAddress: creds?.funderAddress ?? null,
+            safeFunders,
           };
         } catch {
           return {
             signerWalletAddress: wallet.walletAddress,
             funderAddress: null,
+            safeFunders: [] as string[],
           };
         }
       },
@@ -460,6 +495,17 @@ async function loadBalanceWalletLookup(
         linkedWalletAddress: candidate.signerWalletAddress,
         source: "derived_funder",
       });
+
+      for (const safeFunderAddress of candidate.safeFunders) {
+        const safeKey = normalizeWalletLookupKey(safeFunderAddress);
+        if (!safeKey || lookup.has(safeKey)) continue;
+        lookup.set(safeKey, {
+          walletAddress: safeFunderAddress,
+          walletType: "ethereum",
+          linkedWalletAddress: candidate.signerWalletAddress,
+          source: "derived_funder",
+        });
+      }
     }
   }
 
@@ -1160,7 +1206,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             address: funder,
                           });
 
-                      const [signerCode, funderCode, snapshot] =
+                      const [signerCode, funderCode, snapshot, funderNativeBalance, signerNativeBalance] =
                         await Promise.all([
                           signerCodePromise,
                           funderCodePromise,
@@ -1173,6 +1219,18 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             negRiskAdapterAddress,
                             feeCollectorAddress,
                           }),
+                          fetchEvmBalance({
+                            rpcUrl: env.polygonRpcUrl,
+                            timeoutMs: env.polygonRpcTimeoutMs,
+                            address: funder,
+                          }),
+                          shouldFetchSignerUsdc
+                            ? fetchEvmBalance({
+                                rpcUrl: env.polygonRpcUrl,
+                                timeoutMs: env.polygonRpcTimeoutMs,
+                                address: walletAddress,
+                              })
+                            : Promise.resolve<bigint | null>(null),
                         ]);
 
                       const usdcBalance = snapshot.usdcBalance;
@@ -1306,6 +1364,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           balance: ethers.formatUnits(oldUsdcBalance, 6),
                           balanceRaw: oldUsdcBalance.toString(),
                         },
+                        native: {
+                          symbol: "POL",
+                          decimals: 18,
+                          balance: ethers.formatUnits(funderNativeBalance, 18),
+                          balanceRaw: funderNativeBalance.toString(),
+                        },
                         ...(funderIsContract
                           ? {
                               signerUsdc: {
@@ -1329,6 +1393,17 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                                 ),
                                 balanceRaw: (
                                   signerOldUsdcBalanceResolved ?? 0n
+                                ).toString(),
+                              },
+                              signerNative: {
+                                symbol: "POL",
+                                decimals: 18,
+                                balance: ethers.formatUnits(
+                                  signerNativeBalance ?? 0n,
+                                  18,
+                                ),
+                                balanceRaw: (
+                                  signerNativeBalance ?? 0n
                                 ).toString(),
                               },
                             }
