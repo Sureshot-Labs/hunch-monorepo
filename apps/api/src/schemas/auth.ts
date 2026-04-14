@@ -60,6 +60,12 @@ export const authWalletSchema = z.object({
   id: z.string(),
   walletAddress: z.string(),
   walletType: z.string(),
+  walletSource: z
+    .enum(["embedded", "smart", "external", "unknown"])
+    .optional(),
+  isEmbeddedWallet: z.boolean().optional(),
+  isSmartWallet: z.boolean().optional(),
+  isInternalWallet: z.boolean().optional(),
   name: z.string().nullable(),
   isPrimary: z.boolean(),
   isVerified: z.boolean(),
