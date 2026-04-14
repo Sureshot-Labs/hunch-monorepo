@@ -603,14 +603,14 @@ export async function upsertUnifiedMarkets(
   for (const batch of batches) {
     const existingTokenSources = await loadUnifiedMarketTokenSources(
       pool,
-      batch.map((row) => row.id),
+      batch.map((row: UnifiedMarketRow) => row.id),
     );
     await pool.query(query, [JSON.stringify(batch)]);
     const changedMarketIds = batch
-      .filter((row) =>
+      .filter((row: UnifiedMarketRow) =>
         shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
       )
-      .map((row) => row.id);
+      .map((row: UnifiedMarketRow) => row.id);
     if (changedMarketIds.length > 0) {
       await syncUnifiedMarketTokens(pool, changedMarketIds);
     }
