@@ -20,6 +20,7 @@ import {
   resolveLimitlessAuthContext,
   verifyLimitlessAuthContext,
 } from "../services/limitless-auth.js";
+import { isLimitlessPartnerHmacConfigured } from "../services/limitless-client.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import {
   fetchPolymarketOnchainSnapshot,
@@ -1421,14 +1422,31 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                       };
                     })(),
                     (async () => {
-                      const authContext = limitlessCreds
-                        ? await resolveLimitlessAuthContext(user.id, walletAddress)
-                        : null;
                       const snapshot = await fetchLimitlessOnchainSnapshot({
                         rpcUrl: env.baseRpcUrl,
                         timeoutMs: env.baseRpcTimeoutMs,
                         owner: walletAddress,
                       });
+                      if (!isLimitlessPartnerHmacConfigured()) {
+                        return {
+                          supported: false,
+                          ready: false,
+                          reasons: ["service_unavailable"],
+                          hasCredentials: false,
+                          error: "Limitless is temporarily unavailable.",
+                          chainId: 8453,
+                          usdc: {
+                            tokenAddress: env.limitlessUsdcAddress,
+                            decimals: 6,
+                            balance: ethers.formatUnits(snapshot.usdcBalance, 6),
+                            balanceRaw: snapshot.usdcBalance.toString(),
+                          },
+                        };
+                      }
+
+                      const authContext = limitlessCreds
+                        ? await resolveLimitlessAuthContext(user.id, walletAddress)
+                        : null;
                       const reasons: string[] = [];
                       let hasCredentials = false;
                       if (!limitlessCreds || !authContext) {

@@ -2,9 +2,9 @@
 
 import assert from "node:assert/strict";
 
+import { env } from "./env.js";
 import {
   loadLimitlessProfileForWallet,
-  validateLimitlessApiKeyForWallet,
   verifyLimitlessAuthContext,
   type LimitlessAuthContext,
 } from "./services/limitless-auth.js";
@@ -13,98 +13,100 @@ function test(name: string, fn: () => Promise<void>) {
   tests.push({ name, fn });
 }
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
 const tests: Array<{ name: string; fn: () => Promise<void> }> = [];
 
-test("validateLimitlessApiKeyForWallet normalizes wallet casing before lookup", async () => {
-  const requests: string[] = [];
-  globalThis.fetch = async (input) => {
-    requests.push(String(input));
-    return jsonResponse({
-      id: 460208,
-      account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
-      client: "eoa",
-    });
-  };
-
-  const result = await validateLimitlessApiKeyForWallet({
-    apiKey: "lmts_test_key",
-    walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(
-    requests[0],
-    "https://api.limitless.exchange/profiles/0xD829f31579e3129a551c9AB3980eFA8E5E041131",
-  );
-});
-
-test("verifyLimitlessAuthContext rejects api keys bound to another wallet", async () => {
-  globalThis.fetch = async () =>
-    jsonResponse({
-      id: 123,
-      account: "0x1111111111111111111111111111111111111111",
-      client: "eoa",
-    });
-
-  const authContext: LimitlessAuthContext = {
+function buildAuthContext(
+  profile: { id?: number; account?: string; client?: string } | null,
+): LimitlessAuthContext {
+  return {
     creds: {
       id: "cred-1",
       userId: "user-1",
       walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
       venue: "limitless",
-      apiKey: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
-      apiSecret: "lmts_test_key",
+      apiKey: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+      apiSecret: "",
       isActive: true,
-      additionalData: { authMode: "api_key" },
+      additionalData: profile
+        ? { authMode: "partner_hmac", profile }
+        : { authMode: "partner_hmac" },
       createdAt: new Date(),
       updatedAt: new Date(),
     },
-    authMode: "api_key",
-    apiKey: "lmts_test_key",
-    storedProfile: null,
+    authMode: "partner_hmac",
+    storedProfile: profile,
   };
+}
 
-  const result = await verifyLimitlessAuthContext({
-    authContext,
-    walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
-  });
+test("verifyLimitlessAuthContext rejects when partner HMAC is not configured", async () => {
+  const originalTokenId = env.limitlessHmacTokenId;
+  const originalSecret = env.limitlessHmacSecret;
+  env.limitlessHmacTokenId = "";
+  env.limitlessHmacSecret = "";
 
-  assert.equal(result.ok, false);
-  if (result.ok) return;
-  assert.equal(result.status, 400);
-  assert.equal(
-    result.message,
-    "Limitless API key belongs to a different account.",
-  );
-});
-
-test("loadLimitlessProfileForWallet merges stored and live profile fields", async () => {
-  globalThis.fetch = async () =>
-    jsonResponse({
-      id: 460208,
-      account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
-      rank: { feeRateBps: 300 },
+  try {
+    const result = await verifyLimitlessAuthContext({
+      authContext: buildAuthContext({
+        id: 460208,
+        account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+        client: "eoa",
+      }),
+      walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
     });
 
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.status, 503);
+    assert.equal(result.message, "Limitless is temporarily unavailable.");
+  } finally {
+    env.limitlessHmacTokenId = originalTokenId;
+    env.limitlessHmacSecret = originalSecret;
+  }
+});
+
+test("verifyLimitlessAuthContext rejects stored profiles bound to another wallet", async () => {
+  const originalTokenId = env.limitlessHmacTokenId;
+  const originalSecret = env.limitlessHmacSecret;
+  env.limitlessHmacTokenId = "token-id";
+  env.limitlessHmacSecret = "c2VjcmV0";
+
+  try {
+    const result = await verifyLimitlessAuthContext({
+      authContext: buildAuthContext({
+        id: 123,
+        account: "0x1111111111111111111111111111111111111111",
+        client: "eoa",
+      }),
+      walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.status, 400);
+    assert.equal(
+      result.message,
+      "Stored Limitless profile belongs to a different account.",
+    );
+  } finally {
+    env.limitlessHmacTokenId = originalTokenId;
+    env.limitlessHmacSecret = originalSecret;
+  }
+});
+
+test("loadLimitlessProfileForWallet merges stored and base profile fields", async () => {
   const profile = await loadLimitlessProfileForWallet({
     walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
-    authContext: {
-      authMode: "api_key",
-      apiKey: "lmts_test_key",
-    },
+    authContext: { authMode: "partner_hmac" },
     additionalData: {
-      authMode: "api_key",
+      authMode: "partner_hmac",
       profile: {
         account: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
         client: "eoa",
       },
+    },
+    baseProfile: {
+      id: 460208,
+      rank: { feeRateBps: 300 },
     },
   });
 
@@ -113,18 +115,12 @@ test("loadLimitlessProfileForWallet merges stored and live profile fields", asyn
   assert.equal(profile?.rank?.feeRateBps, 300);
 });
 
-const originalFetch = globalThis.fetch;
-
-try {
-  for (const { name, fn } of tests) {
-    try {
-      await fn();
-      console.log(`ok - ${name}`);
-    } catch (error) {
-      console.error(`not ok - ${name}`);
-      throw error;
-    }
+for (const { name, fn } of tests) {
+  try {
+    await fn();
+    console.log(`ok - ${name}`);
+  } catch (error) {
+    console.error(`not ok - ${name}`);
+    throw error;
   }
-} finally {
-  globalThis.fetch = originalFetch;
 }

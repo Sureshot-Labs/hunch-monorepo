@@ -1048,6 +1048,8 @@ export const env = {
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",
   limitlessApiTimeoutMs: optionalPositiveInt("LIMITLESS_API_TIMEOUT_MS", 15_000),
+  limitlessHmacTokenId: process.env.LIMITLESS_HMAC_TOKEN_ID?.trim() || "",
+  limitlessHmacSecret: process.env.LIMITLESS_HMAC_SECRET?.trim() || "",
   limitlessReferralCode: process.env.LIMITLESS_REFERRAL_CODE?.trim() || "",
   limitlessUsdcAddress:
     process.env.LIMITLESS_USDC_ADDRESS?.trim() ||

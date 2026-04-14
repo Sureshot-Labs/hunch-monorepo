@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -6,19 +7,12 @@ import {
 } from "./wallet-intel-retry.js";
 
 type LimitlessResult =
-  | { ok: true; payload: unknown; sessionCookie?: string }
-  | { ok: false; status: number; payload: unknown; sessionCookie?: string };
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown };
 
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-}
-
-function extractSessionCookie(headers: Headers): string | null {
-  const raw = headers.get("set-cookie");
-  if (!raw) return null;
-  const match = raw.match(/limitless_session=([^;]+)/i);
-  return match?.[1] ?? null;
 }
 
 async function readJsonOrText(res: Response): Promise<unknown> {
@@ -56,14 +50,55 @@ export function extractLimitlessMessage(payload: unknown): string | null {
   return null;
 }
 
+export function isLimitlessPartnerHmacConfigured(): boolean {
+  return Boolean(env.limitlessHmacTokenId && env.limitlessHmacSecret);
+}
+
+function buildLimitlessCanonicalMessage(inputs: {
+  timestamp: string;
+  method: "GET" | "POST" | "DELETE";
+  requestPath: string;
+  bodyString?: string;
+}): string {
+  return `${inputs.timestamp}\n${inputs.method}\n${inputs.requestPath}\n${inputs.bodyString ?? ""}`;
+}
+
+function buildLimitlessPartnerHmacHeaders(inputs: {
+  method: "GET" | "POST" | "DELETE";
+  requestPath: string;
+  bodyString?: string;
+}): Record<string, string> {
+  if (!isLimitlessPartnerHmacConfigured()) {
+    throw new Error("Limitless partner HMAC is not configured.");
+  }
+
+  const timestamp = new Date().toISOString();
+  const message = buildLimitlessCanonicalMessage({
+    timestamp,
+    method: inputs.method,
+    requestPath: inputs.requestPath,
+    bodyString: inputs.bodyString,
+  });
+  const signature = createHmac(
+    "sha256",
+    Buffer.from(env.limitlessHmacSecret, "base64"),
+  )
+    .update(message)
+    .digest("base64");
+
+  return {
+    "lmts-api-key": env.limitlessHmacTokenId,
+    "lmts-timestamp": timestamp,
+    "lmts-signature": signature,
+  };
+}
+
 export async function limitlessRequest(inputs: {
   method: "GET" | "POST" | "DELETE";
   requestPath: string;
-  sessionCookie?: string | null;
-  apiKey?: string | null;
+  auth?: "none" | "partner_hmac";
   headers?: Record<string, string>;
   body?: unknown;
-  captureSessionCookie?: boolean;
   timeoutMs?: number;
   baseUrl?: string;
   telemetry?: WalletIntelRetryTelemetry | null;
@@ -86,12 +121,24 @@ export async function limitlessRequest(inputs: {
     headers.set("X-API-Version", env.limitlessApiVersion);
   }
 
-  if (inputs.apiKey) {
-    headers.set("X-API-Key", inputs.apiKey);
-  }
-
-  if (inputs.sessionCookie) {
-    headers.set("Cookie", `limitless_session=${inputs.sessionCookie}`);
+  if (inputs.auth === "partner_hmac") {
+    if (!isLimitlessPartnerHmacConfigured()) {
+      return {
+        ok: false,
+        status: 503,
+        payload: {
+          error: "Limitless partner HMAC is not configured.",
+        },
+      };
+    }
+    const authHeaders = buildLimitlessPartnerHmacHeaders({
+      method: inputs.method,
+      requestPath,
+      bodyString,
+    });
+    for (const [key, value] of Object.entries(authHeaders)) {
+      headers.set(key, value);
+    }
   }
 
   if (bodyString !== undefined) {
@@ -111,27 +158,19 @@ export async function limitlessRequest(inputs: {
   });
 
   const payload = await readJsonOrText(res);
-  const sessionCookie = inputs.captureSessionCookie
-    ? extractSessionCookie(res.headers)
-    : null;
 
   if (!res.ok) {
     return {
       ok: false,
       status: res.status,
       payload,
-      ...(sessionCookie ? { sessionCookie } : {}),
     };
   }
 
   return {
     ok: true,
     payload,
-    ...(sessionCookie ? { sessionCookie } : {}),
   };
 }
 
-export type LimitlessRequestAuthInputs =
-  | { apiKey: string; sessionCookie?: never }
-  | { sessionCookie: string; apiKey?: never }
-  | { apiKey?: undefined; sessionCookie?: undefined };
+export type LimitlessRequestAuthInputs = { auth: "partner_hmac" };

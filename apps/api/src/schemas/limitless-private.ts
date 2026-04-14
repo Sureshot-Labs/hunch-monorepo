@@ -55,11 +55,7 @@ const limitlessOrderSchema = z
   .passthrough();
 
 export const limitlessAuthLoginBodySchema = z.object({
-  apiKey: z.string().trim().min(1).optional(),
   client: zClientType.optional(),
-  smartWallet: zEthAddress.optional(),
-  referralCode: z.string().optional(),
-  r: z.string().optional(),
   account: zEthAddress.optional(),
   signingMessage: z.string().optional(),
   signature: z.string().optional(),
@@ -130,6 +126,5 @@ export const limitlessAccountQuerySchema = z.object({
   adapterSpender: zEthAddress.optional(),
   ammSpender: zEthAddress.optional(),
   tokenId: z.string().optional(),
-  verifySession: z.coerce.boolean().optional(),
   refresh: zOptionalBool.optional(),
 });

@@ -1449,7 +1449,7 @@ async function syncLimitlessPositionsFromPortfolio(
     inputs.walletAddress,
   );
   if (!authContext || !creds) {
-    throw new Error("Limitless credentials not found (connect first).");
+    throw new Error("Connect Limitless for this wallet before syncing positions.");
   }
 
   const upstream = await limitlessRequest({

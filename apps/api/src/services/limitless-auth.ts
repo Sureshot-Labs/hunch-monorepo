@@ -1,9 +1,7 @@
-import { ethers } from "ethers";
 import { AuthService, type VenueCredentials } from "../auth.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
-  extractLimitlessMessage,
-  limitlessRequest,
+  isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
 } from "./limitless-client.js";
 
@@ -14,37 +12,17 @@ export type LimitlessProfile = {
   rank?: { feeRateBps?: number; name?: string };
 };
 
-export type LimitlessAuthMode = "api_key" | "session";
+export type LimitlessAuthMode = "partner_hmac";
 
 export type LimitlessAuthContext = {
   creds: VenueCredentials;
   authMode: LimitlessAuthMode;
-  apiKey?: string;
-  sessionCookie?: string;
   storedProfile: LimitlessProfile | null;
 };
 
 export type LimitlessAuthVerification =
   | { ok: true; profile: LimitlessProfile | null; payload: unknown }
   | { ok: false; status: number; payload: unknown; message: string | null };
-
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  const payload = parts[1];
-  if (!payload) return null;
-  const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-  const padding = normalized.length % 4;
-  const padded =
-    padding === 0 ? normalized : `${normalized}${"=".repeat(4 - padding)}`;
-  try {
-    const json = Buffer.from(padded, "base64").toString("utf8");
-    const parsed = JSON.parse(json);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -138,15 +116,6 @@ export function extractLimitlessProfile(value: unknown): LimitlessProfile | null
   };
 }
 
-export function extractLimitlessProfileFromSessionCookie(
-  sessionCookie: string | null | undefined,
-): LimitlessProfile | null {
-  if (!sessionCookie) return null;
-  const payload = decodeJwtPayload(sessionCookie);
-  if (!payload) return null;
-  return extractLimitlessProfile(payload);
-}
-
 export function mergeLimitlessProfiles(
   base: LimitlessProfile | null,
   extra: LimitlessProfile | null,
@@ -180,60 +149,29 @@ function extractStoredProfile(additionalData: unknown): LimitlessProfile | null 
 
 function extractStoredAuthMode(
   creds: VenueCredentials,
-): LimitlessAuthMode {
+): LimitlessAuthMode | null {
   const additionalData = creds.additionalData;
-  if (isRecord(additionalData) && additionalData.authMode === "api_key") {
-    return "api_key";
+  if (isRecord(additionalData) && additionalData.authMode === "partner_hmac") {
+    return "partner_hmac";
   }
-  if (isRecord(additionalData) && additionalData.authMode === "session") {
-    return "session";
-  }
-  const secret = creds.apiSecret.trim();
-  if (secret.toLowerCase().startsWith("lmts_")) return "api_key";
-  return "session";
+  const profile = extractStoredProfile(creds.additionalData);
+  return profile ? "partner_hmac" : null;
 }
 
 export function buildLimitlessRequestAuthInputs(
-  authContext: Pick<LimitlessAuthContext, "authMode" | "apiKey" | "sessionCookie">,
+  _authContext?: Pick<LimitlessAuthContext, "authMode"> | null,
 ): LimitlessRequestAuthInputs {
-  if (authContext.authMode === "api_key") {
-    return authContext.apiKey ? { apiKey: authContext.apiKey } : {};
-  }
-  return authContext.sessionCookie
-    ? { sessionCookie: authContext.sessionCookie }
-    : {};
+  return { auth: "partner_hmac" };
 }
 
 export async function loadLimitlessProfileForWallet(inputs: {
   walletAddress: string;
-  authContext?: Pick<
-    LimitlessAuthContext,
-    "authMode" | "apiKey" | "sessionCookie"
-  > | null;
+  authContext?: Pick<LimitlessAuthContext, "authMode"> | null;
   additionalData?: unknown;
   baseProfile?: LimitlessProfile | null;
 }): Promise<LimitlessProfile | null> {
   const storedProfile = extractLimitlessProfile(inputs.additionalData ?? null);
-  const sessionProfile =
-    inputs.authContext?.authMode === "session"
-      ? extractLimitlessProfileFromSessionCookie(
-          inputs.authContext.sessionCookie,
-        )
-      : null;
-  const liveProfile = inputs.authContext
-    ? await fetchLimitlessProfileForAddress({
-        address: inputs.walletAddress,
-        ...buildLimitlessRequestAuthInputs(inputs.authContext),
-      })
-    : null;
-
-  return mergeLimitlessProfiles(
-    inputs.baseProfile ?? null,
-    mergeLimitlessProfiles(
-      sessionProfile,
-      mergeLimitlessProfiles(storedProfile, liveProfile),
-    ),
-  );
+  return mergeLimitlessProfiles(inputs.baseProfile ?? null, storedProfile);
 }
 
 export async function resolveLimitlessAuthContext(
@@ -248,40 +186,12 @@ export async function resolveLimitlessAuthContext(
   if (!creds) return null;
 
   const authMode = extractStoredAuthMode(creds);
-  const secret = creds.apiSecret.trim();
+  if (!authMode) return null;
   return {
     creds,
     authMode,
-    ...(authMode === "api_key" && secret ? { apiKey: secret } : {}),
-    ...(authMode === "session" && secret ? { sessionCookie: secret } : {}),
-    storedProfile: mergeLimitlessProfiles(
-      extractStoredProfile(creds.additionalData),
-      authMode === "session" ? extractLimitlessProfileFromSessionCookie(secret) : null,
-    ),
+    storedProfile: extractStoredProfile(creds.additionalData),
   };
-}
-
-export async function fetchLimitlessProfileForAddress(inputs: {
-  address: string;
-  apiKey?: string | null;
-  sessionCookie?: string | null;
-}): Promise<LimitlessProfile | null> {
-  const trimmedAddress = inputs.address.trim();
-  if (!trimmedAddress) return null;
-  let requestAddress = trimmedAddress;
-  try {
-    requestAddress = ethers.getAddress(trimmedAddress);
-  } catch {
-    // Non-checksummed but otherwise valid addresses can still be queried as-is.
-  }
-  const upstream = await limitlessRequest({
-    method: "GET",
-    requestPath: `/profiles/${encodeURIComponent(requestAddress)}`,
-    ...(inputs.apiKey ? { apiKey: inputs.apiKey } : {}),
-    ...(inputs.sessionCookie ? { sessionCookie: inputs.sessionCookie } : {}),
-  });
-  if (!upstream.ok) return null;
-  return extractLimitlessProfile(upstream.payload);
 }
 
 export async function verifyLimitlessAuthContext(inputs: {
@@ -289,102 +199,41 @@ export async function verifyLimitlessAuthContext(inputs: {
   walletAddress: string;
 }): Promise<LimitlessAuthVerification> {
   const walletAddress = inputs.walletAddress.trim();
-  if (inputs.authContext.authMode === "api_key") {
-    const profile = await fetchLimitlessProfileForAddress({
-      address: walletAddress,
-      apiKey: inputs.authContext.apiKey,
-    });
-    if (!profile) {
-      return {
-        ok: false,
-        status: 401,
-        payload: { error: "Limitless API key is invalid." },
-        message: "Limitless API key is invalid.",
-      };
-    }
-    const actual = profile.account ? normalizeAddress(profile.account) : null;
-    if (actual && actual !== normalizeAddress(walletAddress)) {
-      return {
-        ok: false,
-        status: 400,
-        payload: {
-          error: "Limitless API key belongs to a different account.",
-          expected: walletAddress,
-          actual: profile.account,
-        },
-        message: "Limitless API key belongs to a different account.",
-      };
-    }
-    return { ok: true, profile, payload: profile };
-  }
-
-  const upstream = await limitlessRequest({
-    method: "GET",
-    requestPath: "/auth/verify-auth",
-    ...(inputs.authContext.sessionCookie
-      ? { sessionCookie: inputs.authContext.sessionCookie }
-      : {}),
-  });
-  if (!upstream.ok) {
+  if (!isLimitlessPartnerHmacConfigured()) {
     return {
       ok: false,
-      status: upstream.status,
-      payload: upstream.payload,
-      message: extractLimitlessMessage(upstream.payload),
+      status: 503,
+      payload: { error: "Limitless is temporarily unavailable." },
+      message: "Limitless is temporarily unavailable.",
+    };
+  }
+
+  const profile = inputs.authContext.storedProfile;
+  if (!profile?.id) {
+    return {
+      ok: false,
+      status: 400,
+      payload: { error: "Limitless profile mapping is missing." },
+      message: "Limitless profile mapping is missing.",
+    };
+  }
+  const actual = profile.account ? normalizeAddress(profile.account) : null;
+  if (actual && actual !== normalizeAddress(walletAddress)) {
+    return {
+      ok: false,
+      status: 400,
+      payload: {
+        error: "Stored Limitless profile belongs to a different account.",
+        expected: walletAddress,
+        actual: profile.account,
+      },
+      message: "Stored Limitless profile belongs to a different account.",
     };
   }
 
   return {
     ok: true,
-    profile: extractLimitlessProfile(upstream.payload),
-    payload: upstream.payload,
+    profile,
+    payload: { profile },
   };
-}
-
-export async function validateLimitlessApiKeyForWallet(inputs: {
-  apiKey: string;
-  walletAddress: string;
-}): Promise<
-  | { ok: true; profile: LimitlessProfile | null; payload: unknown }
-  | { ok: false; status: number; payload: unknown; message: string }
-> {
-  const profile = await fetchLimitlessProfileForAddress({
-    address: inputs.walletAddress,
-    apiKey: inputs.apiKey,
-  });
-
-  if (!profile) {
-    const upstream = await limitlessRequest({
-      method: "GET",
-      requestPath: `/profiles/${encodeURIComponent(inputs.walletAddress.trim())}`,
-      apiKey: inputs.apiKey,
-    });
-    if (!upstream.ok) {
-      return {
-        ok: false,
-        status: upstream.status,
-        payload: upstream.payload,
-        message:
-          extractLimitlessMessage(upstream.payload) ??
-          "Failed to validate Limitless API key.",
-      };
-    }
-    return {
-      ok: true,
-      profile: extractLimitlessProfile(upstream.payload),
-      payload: upstream.payload,
-    };
-  }
-
-  const actual = profile?.account ? normalizeAddress(profile.account) : null;
-  if (actual && actual !== normalizeAddress(inputs.walletAddress)) {
-    return {
-      ok: false,
-      status: 400,
-      payload: profile,
-      message: "Limitless API key belongs to a different account.",
-    };
-  }
-
-  return { ok: true, profile, payload: profile };
 }

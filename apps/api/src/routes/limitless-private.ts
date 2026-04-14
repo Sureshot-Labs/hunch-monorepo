@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
@@ -19,6 +19,7 @@ import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js"
 import { fetchConditionalTokensPayouts } from "../services/limitless-redemption.js";
 import {
   extractLimitlessMessage,
+  isLimitlessPartnerHmacConfigured,
   limitlessRequest,
   type LimitlessRequestAuthInputs,
 } from "../services/limitless-client.js";
@@ -28,7 +29,6 @@ import {
   loadLimitlessProfileForWallet,
   type LimitlessProfile,
   resolveLimitlessAuthContext,
-  validateLimitlessApiKeyForWallet,
   verifyLimitlessAuthContext,
 } from "../services/limitless-auth.js";
 import {
@@ -687,6 +687,78 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     return [walletAddress];
   };
 
+  const sendLimitlessUnavailable = (reply: FastifyReply) => {
+    reply.code(503);
+    return reply.send({ error: "Limitless is temporarily unavailable." });
+  };
+
+  const requireLimitlessPartnerAuth = async (inputs: {
+    reply: FastifyReply;
+    userId: string;
+    walletAddress: string;
+  }) => {
+    if (!isLimitlessPartnerHmacConfigured()) {
+      sendLimitlessUnavailable(inputs.reply);
+      return null;
+    }
+
+    const creds = await AuthService.getVenueCredentials(
+      inputs.userId,
+      "limitless",
+      inputs.walletAddress,
+    );
+    const authContext = await resolveLimitlessAuthContext(
+      inputs.userId,
+      inputs.walletAddress,
+    );
+
+    if (!authContext || !creds) {
+      inputs.reply.code(400);
+      inputs.reply.send({
+        error: "Connect Limitless for this wallet first.",
+      });
+      return null;
+    }
+
+    const verification = await verifyLimitlessAuthContext({
+      authContext,
+      walletAddress: inputs.walletAddress,
+    });
+    if (!verification.ok) {
+      inputs.reply.code(mapLimitlessUpstreamStatus(verification.status));
+      inputs.reply.send({
+        error:
+          verification.message ??
+          "Limitless connection is invalid for the selected wallet.",
+        status: verification.status,
+        payload: verification.payload,
+      });
+      return null;
+    }
+
+    const profile = await loadLimitlessProfileForWallet({
+      walletAddress: inputs.walletAddress,
+      authContext,
+      additionalData: creds.additionalData ?? null,
+      baseProfile: verification.profile,
+    });
+
+    if (!profile?.id) {
+      inputs.reply.code(400);
+      inputs.reply.send({
+        error: "Limitless profile mapping is missing for this wallet.",
+      });
+      return null;
+    }
+
+    return {
+      creds,
+      authContext,
+      profile,
+      requestAuth: buildLimitlessRequestAuthInputs(authContext),
+    };
+  };
+
   /**
    * GET /auth/signing-message
    */
@@ -697,6 +769,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!request.user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isLimitlessPartnerHmacConfigured()) {
+        return sendLimitlessUnavailable(reply);
       }
 
       const upstream = await limitlessRequest({
@@ -753,64 +829,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
 
-      const pastedApiKey =
-        typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-      if (pastedApiKey) {
-        const validation = await validateLimitlessApiKeyForWallet({
-          apiKey: pastedApiKey,
-          walletAddress: signer,
-        });
-        if (!validation.ok) {
-          reply.code(
-            validation.status >= 400 && validation.status < 500
-              ? validation.status
-              : 502,
-          );
-          return reply.send({
-            error: "Limitless API key validation failed",
-            message: validation.message,
-            status: validation.status,
-            payload: validation.payload,
-          });
-        }
-
-        const profile = extractLimitlessProfile(validation.payload);
-        const signerChecksum = toChecksumAddress(signer) ?? signer;
-        const profileSafe: LimitlessProfile | null = profile
-          ? { ...profile, client: profile.client ?? "eoa" }
-          : { account: signerChecksum, client: "eoa" };
-
-        try {
-          await AuthService.createOrUpdateVenueCredentials(
-            user.id,
-            signer,
-            "limitless",
-            profileSafe?.account ?? signer,
-            pastedApiKey,
-            {
-              authMode: "api_key",
-              profile: profileSafe,
-            },
-          );
-        } catch (error) {
-          app.log.error(
-            { error, userId: user.id, signer },
-            "Failed to store Limitless API key credentials",
-          );
-          reply.code(500);
-          return reply.send({
-            error: "Failed to store Limitless credentials",
-          });
-        }
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          authMode: "api_key",
-          profile: profileSafe,
-        });
-      }
-
       const headerAccount = getHeaderValue(request.headers, "x-account");
       const headerMessage = getHeaderValue(request.headers, "x-signing-message");
       const headerSignature = getHeaderValue(request.headers, "x-signature");
@@ -838,55 +856,73 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "x-account is not a valid EVM address" });
       }
 
-      const referralCode =
-        (typeof body.referralCode === "string" && body.referralCode.trim()) ||
-        (typeof body.r === "string" && body.r.trim()) ||
-        (env.limitlessReferralCode || undefined);
-
       const clientType = body.client ?? "eoa";
+      if (!isLimitlessPartnerHmacConfigured()) {
+        return sendLimitlessUnavailable(reply);
+      }
 
       const upstream = await limitlessRequest({
         method: "POST",
-        requestPath: "/auth/login",
+        requestPath: "/profiles/partner-accounts",
+        auth: "partner_hmac",
         headers: {
           "x-account": checksumAccount,
           "x-signing-message": signingMessage,
           "x-signature": signature,
         },
-        body: {
-          client: clientType,
-          ...(body.smartWallet ? { smartWallet: body.smartWallet } : {}),
-          ...(referralCode ? { r: referralCode } : {}),
-        },
-        captureSessionCookie: true,
       });
 
       if (!upstream.ok) {
+        if (upstream.status === 409) {
+          const existingAuthContext = await resolveLimitlessAuthContext(
+            user.id,
+            signer,
+          );
+          const existingProfile = existingAuthContext
+            ? await loadLimitlessProfileForWallet({
+                walletAddress: signer,
+                authContext: existingAuthContext,
+                additionalData: existingAuthContext.creds.additionalData ?? null,
+              })
+            : null;
+          if (existingProfile?.id) {
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send({
+              ok: true,
+              authMode: "partner_hmac",
+              profile: existingProfile,
+            });
+          }
+        }
+
         reply.code(
           upstream.status >= 400 && upstream.status < 500
             ? upstream.status
             : 502,
         );
         return reply.send({
-          error: "Limitless login failed",
+          error: "Limitless connect failed",
           status: upstream.status,
-          payload: upstream.payload,
-        });
-      }
-
-      const sessionCookie = upstream.sessionCookie;
-      if (!sessionCookie) {
-        reply.code(502);
-        return reply.send({
-          error: "Limitless login did not return a session cookie",
           payload: upstream.payload,
         });
       }
 
       const profile = extractLimitlessProfile(upstream.payload);
       const profileSafe: LimitlessProfile | null = profile
-        ? { ...profile, client: profile.client ?? clientType }
+        ? {
+            ...profile,
+            account: profile.account ?? checksumAccount,
+            client: profile.client ?? clientType,
+          }
         : { account: checksumAccount, client: clientType };
+
+      if (!profileSafe?.id) {
+        reply.code(502);
+        return reply.send({
+          error: "Limitless partner account creation did not return a profile id",
+          payload: upstream.payload,
+        });
+      }
 
       try {
         await AuthService.createOrUpdateVenueCredentials(
@@ -894,10 +930,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           signer,
           "limitless",
           profileSafe?.account ?? checksumAccount,
-          sessionCookie,
-          profileSafe
-            ? { authMode: "session", profile: profileSafe }
-            : { authMode: "session" },
+          "",
+          { authMode: "partner_hmac", profile: profileSafe },
         );
       } catch (error) {
         app.log.error(
@@ -913,7 +947,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        authMode: "session",
+        authMode: "partner_hmac",
         profile: profileSafe,
       });
     },
@@ -933,33 +967,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext) {
-        reply.code(400);
-        return reply.send({ error: "Limitless credentials not found" });
-      }
-
-      const verification = await verifyLimitlessAuthContext({
-        authContext,
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
         walletAddress: signer,
       });
-
-      if (!verification.ok) {
-        reply.code(mapLimitlessUpstreamStatus(verification.status));
-        return reply.send({
-          error: "Limitless verify failed",
-          message: verification.message,
-          status: verification.status,
-          payload: verification.payload,
-        });
-      }
+      if (!partnerAuth) return;
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        authMode: authContext.authMode,
-        account: verification.payload,
-        profile: verification.profile,
+        authMode: partnerAuth.authContext.authMode,
+        account: partnerAuth.profile.account ?? signer,
+        profile: partnerAuth.profile,
       });
     },
   );
@@ -978,51 +998,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      let upstream:
-        | Awaited<ReturnType<typeof limitlessRequest>>
-        | null = null;
-      if (authContext?.authMode === "session" && authContext.sessionCookie) {
-        upstream = await limitlessRequest({
-          method: "POST",
-          requestPath: "/auth/logout",
-          sessionCookie: authContext.sessionCookie,
-          body: {},
-        });
-      }
-
       const deactivatedCount = await AuthService.deactivateVenueCredentials(
         user.id,
         "limitless",
         signer,
       );
 
-      if (upstream && !upstream.ok) {
-        app.log.warn(
-          {
-            userId: user.id,
-            walletAddress: signer,
-            status: upstream.status,
-          },
-          "Limitless upstream logout failed; local credentials were deactivated",
-        );
-      }
-
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
         disconnected: true,
         deactivatedCount,
-        upstream: upstream
-          ? upstream.ok
-            ? { ok: true, payload: upstream.payload }
-          : { ok: false, status: upstream.status, payload: upstream.payload }
-          : {
-              ok: false,
-              reason: authContext?.authMode === "api_key"
-                ? "api_key_mode"
-                : "missing_session_cookie",
-            },
+        mode: "local_disconnect",
       });
     },
   );
@@ -1069,10 +1056,12 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         creds?.updatedAt instanceof Date
           ? creds.updatedAt.toISOString()
           : creds?.updatedAt ?? null;
-      const verifySession = request.query.verifySession === true;
       const refresh = request.query.refresh === true;
-      let sessionValid: boolean | null = null;
-      let hasCredentials = Boolean(creds);
+      let hasCredentials =
+        Boolean(creds) &&
+        Boolean(authContext) &&
+        isLimitlessPartnerHmacConfigured();
+      let verifiedProfileBase: LimitlessProfile | null = null;
 
       const clobSpender = request.query.clobSpender ?? env.limitlessClobAddress;
       const negRiskSpender =
@@ -1083,7 +1072,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const cacheEnabled =
         !refresh &&
-        !verifySession &&
         env.limitlessAccountCacheTtlMs > 0;
       const cacheKey = buildLimitlessAccountCacheKey({
         userId: user.id,
@@ -1110,22 +1098,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      if (verifySession) {
-        if (!authContext) {
-          sessionValid = false;
-          hasCredentials = false;
-        } else {
-          const verification = await verifyLimitlessAuthContext({
-            authContext,
-            walletAddress: signer,
-          });
-          sessionValid = verification.ok;
-          if (!verification.ok) {
-            hasCredentials = false;
-          }
+      if (hasCredentials && authContext) {
+        const verification = await verifyLimitlessAuthContext({
+          authContext,
+          walletAddress: signer,
+        });
+        hasCredentials = verification.ok;
+        if (verification.ok) {
+          verifiedProfileBase = verification.profile;
         }
-      } else if (authContext?.authMode === "api_key") {
-        sessionValid = hasCredentials ? true : false;
       }
 
       try {
@@ -1208,6 +1189,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                   walletAddress: signer,
                   authContext,
                   additionalData: creds?.additionalData ?? null,
+                  baseProfile: verifiedProfileBase,
                 })
               : Promise.resolve(null),
           ]);
@@ -1286,7 +1268,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             profile: profile ?? null,
             hasCredentials,
             ...(authContext?.authMode ? { authMode: authContext.authMode } : {}),
-            ...(sessionValid == null ? {} : { sessionValid }),
           };
         })();
 
@@ -1418,68 +1399,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
-      const requestAuth = buildLimitlessRequestAuthInputs(authContext);
-
-      const verification = await verifyLimitlessAuthContext({
-        authContext,
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
         walletAddress: signer,
       });
-      if (!verification.ok) {
-        await AuthService.deactivateVenueCredentials(user.id, "limitless", signer);
-        reply.code(400);
-        return reply.send({
-          error:
-            authContext.authMode === "api_key"
-              ? "Limitless API key is invalid. Reconnect Limitless and retry."
-              : "Limitless session is invalid. Reconnect Limitless and retry.",
-          status: verification.status,
-          payload: verification.payload,
-        });
-      }
-      const verifiedProfile = extractLimitlessProfile(verification.payload);
-      const verifiedAccount =
-        typeof verifiedProfile?.account === "string"
-          ? toChecksumAddress(verifiedProfile.account)
-          : null;
-      if (
-        verifiedAccount &&
-        normalizeAddress(verifiedAccount) !== normalizeAddress(signer)
-      ) {
-        await AuthService.deactivateVenueCredentials(user.id, "limitless", signer);
-        reply.code(400);
-        return reply.send({
-          error:
-            authContext.authMode === "api_key"
-              ? "Limitless API key belongs to a different account. Reconnect Limitless for this wallet."
-              : "Limitless session belongs to a different account. Reconnect Limitless for this wallet.",
-          expected: signer,
-          actual: verifiedAccount,
-        });
-      }
+      if (!partnerAuth) return;
 
-      const profile = await loadLimitlessProfileForWallet({
-        walletAddress: signer,
-        authContext,
-        additionalData: creds?.additionalData ?? null,
-        baseProfile: verifiedProfile,
-      });
+      const { profile, requestAuth } = partnerAuth;
       const ownerId = profile?.id;
       if (!ownerId) {
         reply.code(400);
         return reply.send({
-          error: "Limitless ownerId not available (connect first)",
+          error: "Limitless profile mapping is missing for this wallet.",
         });
       }
       if (request.body.ownerId != null && request.body.ownerId !== ownerId) {
@@ -1723,6 +1655,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderType: request.body.orderType,
         marketSlug: request.body.marketSlug,
         ownerId,
+        onBehalfOf: ownerId,
       };
 
       const upstream = await limitlessRequest({
@@ -1733,11 +1666,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
-        const upstreamMessage =
-          extractLimitlessMessage(upstream.payload) ??
-          (upstream.status === 401 || upstream.status === 403
-            ? "Limitless session expired. Reconnect Limitless."
-            : null);
+        const upstreamMessage = extractLimitlessMessage(upstream.payload);
         reply.code(mapLimitlessUpstreamStatus(upstream.status));
         return reply.send({
           error: "Limitless order placement failed",
@@ -2041,25 +1970,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
         method: "GET",
         requestPath: `/markets/${encodeURIComponent(
           request.query.slug,
         )}/user-orders`,
-        ...buildLimitlessRequestAuthInputs(authContext),
+        ...partnerAuth.requestAuth,
       });
 
       if (!upstream.ok) {
@@ -2186,21 +2109,42 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           continue;
         }
 
-        const creds = await AuthService.getVenueCredentials(
-          user.id,
-          "limitless",
-          wallet,
-        );
-        const authContext = await resolveLimitlessAuthContext(user.id, wallet);
-        if (!authContext || !creds) {
-          errors += 1;
-          results.push({
-            walletAddress: wallet,
-            status: "error",
-            error: "Limitless credentials not found (connect first).",
-          });
-          continue;
-        }
+      if (!isLimitlessPartnerHmacConfigured()) {
+        errors += 1;
+        results.push({
+          walletAddress: wallet,
+          status: "error",
+          error: "Limitless is temporarily unavailable.",
+        });
+        continue;
+      }
+
+      const authContext = await resolveLimitlessAuthContext(user.id, wallet);
+      if (!authContext) {
+        errors += 1;
+        results.push({
+          walletAddress: wallet,
+          status: "error",
+          error: "Connect Limitless for this wallet before syncing history.",
+        });
+        continue;
+      }
+
+      const verification = await verifyLimitlessAuthContext({
+        authContext,
+        walletAddress: wallet,
+      });
+      if (!verification.ok) {
+        errors += 1;
+        results.push({
+          walletAddress: wallet,
+          status: "error",
+          error:
+            verification.message ??
+            "Limitless connection is invalid for this wallet.",
+        });
+        continue;
+      }
 
         let stats;
         try {
@@ -2289,13 +2233,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
       const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      const requestAuth = authContext
+      const requestAuth = authContext && isLimitlessPartnerHmacConfigured()
         ? buildLimitlessRequestAuthInputs(authContext)
         : {};
 
@@ -2330,7 +2269,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         const profile = await loadLimitlessProfileForWallet({
           walletAddress: signer,
           authContext,
-          additionalData: creds?.additionalData ?? null,
+          additionalData: authContext.creds.additionalData ?? null,
         });
         const ownerId = profile?.id;
 
@@ -2360,6 +2299,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 orderType: "FOK",
                 marketSlug: request.query.slug,
                 ownerId,
+                onBehalfOf: ownerId,
               },
             });
             if (!probe.ok) {
@@ -2414,23 +2354,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
         method: "GET",
         requestPath: `/orders/${request.params.orderId}`,
-        ...buildLimitlessRequestAuthInputs(authContext),
+        ...partnerAuth.requestAuth,
       });
 
       if (!upstream.ok) {
@@ -2464,23 +2398,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
         method: "DELETE",
         requestPath: `/orders/${request.params.orderId}`,
-        ...buildLimitlessRequestAuthInputs(authContext),
+        ...partnerAuth.requestAuth,
       });
 
       if (!upstream.ok) {
@@ -2540,23 +2468,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
         method: "POST",
         requestPath: "/orders/cancel-batch",
-        ...buildLimitlessRequestAuthInputs(authContext),
+        ...partnerAuth.requestAuth,
         body: { orderIds: request.body.orderIds },
       });
 
@@ -2629,19 +2551,13 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
-      const requestAuth = buildLimitlessRequestAuthInputs(authContext);
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
+      const requestAuth = partnerAuth.requestAuth;
 
       let openOrderIds: string[] = [];
       const openOrders = await limitlessRequest({
@@ -2741,23 +2657,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const creds = await AuthService.getVenueCredentials(
-        user.id,
-        "limitless",
-        signer,
-      );
-      const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      if (!authContext || !creds) {
-        reply.code(400);
-        return reply.send({
-          error: "Limitless credentials not found (connect first)",
-        });
-      }
+      const partnerAuth = await requireLimitlessPartnerAuth({
+        reply,
+        userId: user.id,
+        walletAddress: signer,
+      });
+      if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
         method: "GET",
         requestPath: `/markets/${encodeURIComponent(request.query.slug)}/user-orders`,
-        ...buildLimitlessRequestAuthInputs(authContext),
+        ...partnerAuth.requestAuth,
       });
 
       if (!upstream.ok) {
