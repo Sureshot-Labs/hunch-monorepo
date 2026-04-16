@@ -115,6 +115,45 @@ test("loadLimitlessProfileForWallet merges stored and base profile fields", asyn
   assert.equal(profile?.rank?.feeRateBps, 300);
 });
 
+test("resolveLimitlessAuthContext does not upgrade legacy auth rows implicitly", async () => {
+  const { resolveLimitlessAuthContext } = await import(
+    "./services/limitless-auth.js"
+  );
+  const { AuthService } = await import("./auth.js");
+
+  const originalGetVenueCredentials = AuthService.getVenueCredentials;
+  AuthService.getVenueCredentials = async () =>
+    ({
+      id: "cred-legacy",
+      userId: "user-1",
+      walletAddress: "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+      venue: "limitless",
+      apiKey: "legacy",
+      apiSecret: "",
+      isActive: true,
+      additionalData: {
+        authMode: "session",
+        profile: {
+          id: 460208,
+          account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+          client: "eoa",
+        },
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }) as Awaited<ReturnType<typeof AuthService.getVenueCredentials>>;
+
+  try {
+    const result = await resolveLimitlessAuthContext(
+      "user-1",
+      "0xd829f31579e3129a551c9ab3980efa8e5e041131"
+    );
+    assert.equal(result, null);
+  } finally {
+    AuthService.getVenueCredentials = originalGetVenueCredentials;
+  }
+});
+
 for (const { name, fn } of tests) {
   try {
     await fn();

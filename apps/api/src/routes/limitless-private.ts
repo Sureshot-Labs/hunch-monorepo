@@ -67,6 +67,14 @@ function toChecksumAddress(value: string): string | null {
   }
 }
 
+function encodeLimitlessSigningMessageHeader(value: string): string {
+  const trimmed = value.trim();
+  if (/^0x[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+    return trimmed;
+  }
+  return `0x${Buffer.from(value, "utf8").toString("hex")}`;
+}
+
 function mapLimitlessUpstreamStatus(status: number): number {
   if (status === 401 || status === 403) return 400;
   if (status >= 400 && status < 500) return status;
@@ -861,37 +869,112 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return sendLimitlessUnavailable(reply);
       }
 
+      const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+        signingMessage,
+      );
       const upstream = await limitlessRequest({
         method: "POST",
         requestPath: "/profiles/partner-accounts",
         auth: "partner_hmac",
+        body: {
+          displayName: checksumAccount,
+        },
         headers: {
           "x-account": checksumAccount,
-          "x-signing-message": signingMessage,
+          "x-signing-message": encodedSigningMessage,
           "x-signature": signature,
         },
       });
 
       if (!upstream.ok) {
         if (upstream.status === 409) {
-          const existingAuthContext = await resolveLimitlessAuthContext(
+          const existingCreds = await AuthService.getVenueCredentials(
             user.id,
+            "limitless",
             signer,
           );
-          const existingProfile = existingAuthContext
-            ? await loadLimitlessProfileForWallet({
-                walletAddress: signer,
-                authContext: existingAuthContext,
-                additionalData: existingAuthContext.creds.additionalData ?? null,
-              })
+          const storedExistingProfile = existingCreds
+            ? extractLimitlessProfile(existingCreds.additionalData ?? null)
             : null;
-          if (existingProfile?.id) {
+          if (
+            storedExistingProfile?.id &&
+            (!storedExistingProfile.account ||
+              normalizeAddress(storedExistingProfile.account) ===
+                normalizeAddress(checksumAccount))
+          ) {
+            const recoveredProfile: LimitlessProfile = {
+              ...storedExistingProfile,
+              account: storedExistingProfile.account ?? checksumAccount,
+              client: storedExistingProfile.client ?? clientType,
+            };
+            try {
+              await AuthService.createOrUpdateVenueCredentials(
+                user.id,
+                signer,
+                "limitless",
+                recoveredProfile.account ?? checksumAccount,
+                "",
+                { authMode: "partner_hmac", profile: recoveredProfile },
+              );
+            } catch (error) {
+              app.log.error(
+                { error, userId: user.id, signer },
+                "Failed to store recovered Limitless credentials from existing mapping",
+              );
+              reply.code(500);
+              return reply.send({
+                error: "Failed to store recovered Limitless credentials",
+              });
+            }
+
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,
               authMode: "partner_hmac",
-              profile: existingProfile,
+              profile: recoveredProfile,
             });
+          }
+
+          const profileLookup = await limitlessRequest({
+            method: "GET",
+            requestPath: `/profiles/${checksumAccount}`,
+            auth: "partner_hmac",
+          });
+          if (profileLookup.ok) {
+            const existingProfile = extractLimitlessProfile(profileLookup.payload);
+            if (existingProfile?.id) {
+              const recoveredProfile: LimitlessProfile = {
+                ...existingProfile,
+                account: existingProfile.account ?? checksumAccount,
+                client: existingProfile.client ?? clientType,
+              };
+              try {
+                await AuthService.createOrUpdateVenueCredentials(
+                  user.id,
+                  signer,
+                  "limitless",
+                  recoveredProfile.account ?? checksumAccount,
+                  "",
+                  { authMode: "partner_hmac", profile: recoveredProfile },
+                );
+              } catch (error) {
+                app.log.error(
+                  { error, userId: user.id, signer },
+                  "Failed to store recovered Limitless credentials",
+                );
+                reply.code(500);
+                return reply.send({
+                  error: "Failed to store recovered Limitless credentials",
+                });
+              }
+
+              reply.header("Content-Type", "application/json; charset=utf-8");
+              return reply.send({
+                ok: true,
+                authMode: "partner_hmac",
+                profile: recoveredProfile,
+              });
+            }
           }
         }
 

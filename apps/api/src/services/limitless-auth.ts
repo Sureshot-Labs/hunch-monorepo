@@ -154,8 +154,7 @@ function extractStoredAuthMode(
   if (isRecord(additionalData) && additionalData.authMode === "partner_hmac") {
     return "partner_hmac";
   }
-  const profile = extractStoredProfile(creds.additionalData);
-  return profile ? "partner_hmac" : null;
+  return null;
 }
 
 export function buildLimitlessRequestAuthInputs(
