@@ -42,10 +42,24 @@ import {
   syncLimitlessHistoryForWallet,
 } from "../services/limitless-history.js";
 import {
+  buildEmbeddedPersonalSignRequest,
+  executePreparedPrivySignatureRequest,
+  findEmbeddedAuthorizationSignature,
+  resolveEmbeddedPrivyWalletContext,
+  type EmbeddedPrivyAuthorizationRequest,
+} from "../services/embedded-privy.js";
+import {
+  buildEmbeddedExecutionSingleFlightKey,
+  getEmbeddedExecutionSingleFlightPromise,
+  runEmbeddedExecutionSingleFlight,
+} from "../services/embedded-execution-singleflight.js";
+import {
   limitlessAuthLoginBodySchema,
   limitlessAccountQuerySchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
+  limitlessEmbeddedEnsureReadyBodySchema,
+  limitlessEmbeddedEnsureReadyExecuteBodySchema,
   limitlessHistoryQuerySchema,
   limitlessMarketExchangeQuerySchema,
   limitlessOpenOrdersQuerySchema,
@@ -700,6 +714,207 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ error: "Limitless is temporarily unavailable." });
   };
 
+  const persistLimitlessProfileForWallet = async (inputs: {
+    userId: string;
+    signer: string;
+    account: string;
+    profile: LimitlessProfile;
+  }) => {
+    await AuthService.createOrUpdateVenueCredentials(
+      inputs.userId,
+      inputs.signer,
+      "limitless",
+      inputs.account,
+      "",
+      { authMode: "partner_hmac", profile: inputs.profile },
+    );
+  };
+
+  const connectLimitlessPartnerAccount = async (inputs: {
+    userId: string;
+    signer: string;
+    account: string;
+    signingMessage: string;
+    signature: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<
+    | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
+    | {
+        ok: false;
+        httpStatus: number;
+        error: string;
+        status?: number;
+        payload?: unknown;
+      }
+  > => {
+    const checksumAccount = toChecksumAddress(inputs.account);
+    if (!checksumAccount) {
+      return {
+        ok: false,
+        httpStatus: 400,
+        error: "x-account is not a valid EVM address",
+      };
+    }
+
+    const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+      inputs.signingMessage,
+    );
+    const upstream = await limitlessRequest({
+      method: "POST",
+      requestPath: "/profiles/partner-accounts",
+      auth: "partner_hmac",
+      body: {
+        displayName: checksumAccount,
+      },
+      headers: {
+        "x-account": checksumAccount,
+        "x-signing-message": encodedSigningMessage,
+        "x-signature": inputs.signature,
+      },
+    });
+
+    if (!upstream.ok) {
+      if (upstream.status === 409) {
+        const existingCreds = await AuthService.getVenueCredentials(
+          inputs.userId,
+          "limitless",
+          inputs.signer,
+        );
+        const storedExistingProfile = existingCreds
+          ? extractLimitlessProfile(existingCreds.additionalData ?? null)
+          : null;
+        if (
+          storedExistingProfile?.id &&
+          (!storedExistingProfile.account ||
+            normalizeAddress(storedExistingProfile.account) ===
+              normalizeAddress(checksumAccount))
+        ) {
+          const recoveredProfile: LimitlessProfile = {
+            ...storedExistingProfile,
+            account: storedExistingProfile.account ?? checksumAccount,
+            client: storedExistingProfile.client ?? inputs.clientType,
+          };
+          try {
+            await persistLimitlessProfileForWallet({
+              userId: inputs.userId,
+              signer: inputs.signer,
+              account: recoveredProfile.account ?? checksumAccount,
+              profile: recoveredProfile,
+            });
+          } catch (error) {
+            app.log.error(
+              { error, userId: inputs.userId, signer: inputs.signer },
+              "Failed to store recovered Limitless credentials from existing mapping",
+            );
+            return {
+              ok: false,
+              httpStatus: 500,
+              error: "Failed to store recovered Limitless credentials",
+            };
+          }
+
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile: recoveredProfile,
+          };
+        }
+
+        const profileLookup = await limitlessRequest({
+          method: "GET",
+          requestPath: `/profiles/${checksumAccount}`,
+          auth: "partner_hmac",
+        });
+        if (profileLookup.ok) {
+          const existingProfile = extractLimitlessProfile(profileLookup.payload);
+          if (existingProfile?.id) {
+            const recoveredProfile: LimitlessProfile = {
+              ...existingProfile,
+              account: existingProfile.account ?? checksumAccount,
+              client: existingProfile.client ?? inputs.clientType,
+            };
+            try {
+              await persistLimitlessProfileForWallet({
+                userId: inputs.userId,
+                signer: inputs.signer,
+                account: recoveredProfile.account ?? checksumAccount,
+                profile: recoveredProfile,
+              });
+            } catch (error) {
+              app.log.error(
+                { error, userId: inputs.userId, signer: inputs.signer },
+                "Failed to store recovered Limitless credentials",
+              );
+              return {
+                ok: false,
+                httpStatus: 500,
+                error: "Failed to store recovered Limitless credentials",
+              };
+            }
+
+            return {
+              ok: true,
+              authMode: "partner_hmac",
+              profile: recoveredProfile,
+            };
+          }
+        }
+      }
+
+      return {
+        ok: false,
+        httpStatus:
+          upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502,
+        error: "Limitless connect failed",
+        status: upstream.status,
+        payload: upstream.payload,
+      };
+    }
+
+    const profile = extractLimitlessProfile(upstream.payload);
+    const profileSafe: LimitlessProfile | null = profile
+      ? {
+          ...profile,
+          account: profile.account ?? checksumAccount,
+          client: profile.client ?? inputs.clientType,
+        }
+      : { account: checksumAccount, client: inputs.clientType };
+
+    if (!profileSafe?.id) {
+      return {
+        ok: false,
+        httpStatus: 502,
+        error: "Limitless partner account creation did not return a profile id",
+        payload: upstream.payload,
+      };
+    }
+
+    try {
+      await persistLimitlessProfileForWallet({
+        userId: inputs.userId,
+        signer: inputs.signer,
+        account: profileSafe.account ?? checksumAccount,
+        profile: profileSafe,
+      });
+    } catch (error) {
+      app.log.error(
+        { error, userId: inputs.userId, signer: inputs.signer },
+        "Failed to store Limitless credentials",
+      );
+      return {
+        ok: false,
+        httpStatus: 500,
+        error: "Failed to store Limitless credentials",
+      };
+    }
+
+    return {
+      ok: true,
+      authMode: "partner_hmac",
+      profile: profileSafe,
+    };
+  };
+
   const requireLimitlessPartnerAuth = async (inputs: {
     reply: FastifyReply;
     userId: string;
@@ -858,181 +1073,264 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           error: "x-account must match the selected wallet",
         });
       }
-      const checksumAccount = toChecksumAddress(account);
-      if (!checksumAccount) {
-        reply.code(400);
-        return reply.send({ error: "x-account is not a valid EVM address" });
-      }
 
       const clientType = body.client ?? "eoa";
       if (!isLimitlessPartnerHmacConfigured()) {
         return sendLimitlessUnavailable(reply);
       }
 
-      const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+      const result = await connectLimitlessPartnerAccount({
+        userId: user.id,
+        signer,
+        account,
         signingMessage,
-      );
-      const upstream = await limitlessRequest({
-        method: "POST",
-        requestPath: "/profiles/partner-accounts",
-        auth: "partner_hmac",
-        body: {
-          displayName: checksumAccount,
-        },
-        headers: {
-          "x-account": checksumAccount,
-          "x-signing-message": encodedSigningMessage,
-          "x-signature": signature,
-        },
+        signature,
+        clientType,
       });
 
-      if (!upstream.ok) {
-        if (upstream.status === 409) {
-          const existingCreds = await AuthService.getVenueCredentials(
-            user.id,
-            "limitless",
-            signer,
-          );
-          const storedExistingProfile = existingCreds
-            ? extractLimitlessProfile(existingCreds.additionalData ?? null)
-            : null;
-          if (
-            storedExistingProfile?.id &&
-            (!storedExistingProfile.account ||
-              normalizeAddress(storedExistingProfile.account) ===
-                normalizeAddress(checksumAccount))
-          ) {
-            const recoveredProfile: LimitlessProfile = {
-              ...storedExistingProfile,
-              account: storedExistingProfile.account ?? checksumAccount,
-              client: storedExistingProfile.client ?? clientType,
-            };
-            try {
-              await AuthService.createOrUpdateVenueCredentials(
-                user.id,
-                signer,
-                "limitless",
-                recoveredProfile.account ?? checksumAccount,
-                "",
-                { authMode: "partner_hmac", profile: recoveredProfile },
-              );
-            } catch (error) {
-              app.log.error(
-                { error, userId: user.id, signer },
-                "Failed to store recovered Limitless credentials from existing mapping",
-              );
-              reply.code(500);
-              return reply.send({
-                error: "Failed to store recovered Limitless credentials",
-              });
-            }
-
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({
-              ok: true,
-              authMode: "partner_hmac",
-              profile: recoveredProfile,
-            });
-          }
-
-          const profileLookup = await limitlessRequest({
-            method: "GET",
-            requestPath: `/profiles/${checksumAccount}`,
-            auth: "partner_hmac",
-          });
-          if (profileLookup.ok) {
-            const existingProfile = extractLimitlessProfile(profileLookup.payload);
-            if (existingProfile?.id) {
-              const recoveredProfile: LimitlessProfile = {
-                ...existingProfile,
-                account: existingProfile.account ?? checksumAccount,
-                client: existingProfile.client ?? clientType,
-              };
-              try {
-                await AuthService.createOrUpdateVenueCredentials(
-                  user.id,
-                  signer,
-                  "limitless",
-                  recoveredProfile.account ?? checksumAccount,
-                  "",
-                  { authMode: "partner_hmac", profile: recoveredProfile },
-                );
-              } catch (error) {
-                app.log.error(
-                  { error, userId: user.id, signer },
-                  "Failed to store recovered Limitless credentials",
-                );
-                reply.code(500);
-                return reply.send({
-                  error: "Failed to store recovered Limitless credentials",
-                });
-              }
-
-              reply.header("Content-Type", "application/json; charset=utf-8");
-              return reply.send({
-                ok: true,
-                authMode: "partner_hmac",
-                profile: recoveredProfile,
-              });
-            }
-          }
-        }
-
-        reply.code(
-          upstream.status >= 400 && upstream.status < 500
-            ? upstream.status
-            : 502,
-        );
+      if (!result.ok) {
+        reply.code(result.httpStatus);
         return reply.send({
-          error: "Limitless connect failed",
-          status: upstream.status,
-          payload: upstream.payload,
-        });
-      }
-
-      const profile = extractLimitlessProfile(upstream.payload);
-      const profileSafe: LimitlessProfile | null = profile
-        ? {
-            ...profile,
-            account: profile.account ?? checksumAccount,
-            client: profile.client ?? clientType,
-          }
-        : { account: checksumAccount, client: clientType };
-
-      if (!profileSafe?.id) {
-        reply.code(502);
-        return reply.send({
-          error: "Limitless partner account creation did not return a profile id",
-          payload: upstream.payload,
-        });
-      }
-
-      try {
-        await AuthService.createOrUpdateVenueCredentials(
-          user.id,
-          signer,
-          "limitless",
-          profileSafe?.account ?? checksumAccount,
-          "",
-          { authMode: "partner_hmac", profile: profileSafe },
-        );
-      } catch (error) {
-        app.log.error(
-          { error, userId: user.id, signer },
-          "Failed to store Limitless credentials",
-        );
-        reply.code(500);
-        return reply.send({
-          error: "Failed to store Limitless credentials",
+          error: result.error,
+          ...(result.status != null ? { status: result.status } : {}),
+          ...(result.payload !== undefined ? { payload: result.payload } : {}),
         });
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({
-        ok: true,
-        authMode: "partner_hmac",
-        profile: profileSafe,
-      });
+      return reply.send(result);
+    },
+  );
+
+  z.post(
+    "/embedded/ensure-ready/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessEmbeddedEnsureReadyBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Limitless automation requires an EVM wallet address",
+        });
+      }
+      if (!isLimitlessPartnerHmacConfigured()) {
+        return sendLimitlessUnavailable(reply);
+      }
+
+      try {
+        const context = await resolveEmbeddedPrivyWalletContext({
+          user,
+          signer,
+          venueLabel: "Limitless",
+        });
+        const creds = await AuthService.getVenueCredentials(
+          user.id,
+          "limitless",
+          signer,
+        );
+        const authContext = await resolveLimitlessAuthContext(user.id, signer);
+        let connected = false;
+        if (creds && authContext) {
+          const verification = await verifyLimitlessAuthContext({
+            authContext,
+            walletAddress: signer,
+          });
+          connected = verification.ok;
+        }
+
+        if (connected) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            signer: context.signer,
+            connected: true,
+            requests: [],
+          });
+        }
+
+        const signingMessageUpstream = await limitlessRequest({
+          method: "GET",
+          requestPath: "/auth/signing-message",
+        });
+        if (!signingMessageUpstream.ok) {
+          reply.code(502);
+          return reply.send({
+            error: "Limitless signing message failed",
+            status: signingMessageUpstream.status,
+            payload: signingMessageUpstream.payload,
+          });
+        }
+        const signingMessage = extractLimitlessMessage(
+          signingMessageUpstream.payload,
+        );
+        if (!signingMessage) {
+          reply.code(502);
+          return reply.send({
+            error: "Limitless signing message invalid",
+            payload: signingMessageUpstream.payload,
+          });
+        }
+
+        const requests: EmbeddedPrivyAuthorizationRequest[] = [
+          buildEmbeddedPersonalSignRequest({
+            context,
+            id: "limitless-connect",
+            label: "Limitless connect",
+            message: signingMessage,
+          }),
+        ];
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          signer: context.signer,
+          connected: false,
+          signingMessage,
+          requests,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to prepare embedded Limitless readiness",
+        );
+        reply.code(500);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Embedded Limitless setup preparation failed",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/ensure-ready/execute",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessEmbeddedEnsureReadyExecuteBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Limitless automation requires an EVM wallet address",
+        });
+      }
+      if (!isLimitlessPartnerHmacConfigured()) {
+        return sendLimitlessUnavailable(reply);
+      }
+
+      try {
+        const lockKey = normalizeAddress(signer);
+        const singleFlightKey = buildEmbeddedExecutionSingleFlightKey(
+          "limitless-private",
+          "embedded-ensure-ready",
+          lockKey,
+        );
+        const existingExecution =
+          getEmbeddedExecutionSingleFlightPromise<Record<string, unknown>>(
+            singleFlightKey,
+          );
+        if (existingExecution) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(await existingExecution);
+        }
+
+        const result = await runEmbeddedExecutionSingleFlight({
+          key: singleFlightKey,
+          run: async () => {
+            const context = await resolveEmbeddedPrivyWalletContext({
+              user,
+              signer,
+              venueLabel: "Limitless",
+            });
+
+            const connectRequest = buildEmbeddedPersonalSignRequest({
+              context,
+              id: "limitless-connect",
+              label: "Limitless connect",
+              message: request.body.signingMessage,
+            });
+            const authorizationSignature = findEmbeddedAuthorizationSignature(
+              request.body.signedRequests,
+              connectRequest.id,
+            );
+            const signature = await executePreparedPrivySignatureRequest({
+              request: connectRequest,
+              authorizationSignature,
+            });
+
+            const connectResult = await connectLimitlessPartnerAccount({
+              userId: user.id,
+              signer,
+              account: context.signer,
+              signingMessage: request.body.signingMessage,
+              signature,
+              clientType: "base",
+            });
+
+            if (!connectResult.ok) {
+              throw Object.assign(new Error(connectResult.error), {
+                responseStatus: connectResult.httpStatus,
+                responsePayload: {
+                  ...(connectResult.status != null
+                    ? { status: connectResult.status }
+                    : {}),
+                  ...(connectResult.payload !== undefined
+                    ? { payload: connectResult.payload }
+                    : {}),
+                },
+              });
+            }
+
+            return {
+              ok: true,
+              signer: context.signer,
+              connected: true,
+              authMode: connectResult.authMode,
+              profile: connectResult.profile,
+            };
+          },
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
+      } catch (error) {
+        const status =
+          typeof (error as { responseStatus?: unknown })?.responseStatus ===
+          "number"
+            ? ((error as { responseStatus: number }).responseStatus ?? 500)
+            : 500;
+        const payload =
+          (error as { responsePayload?: unknown })?.responsePayload ?? undefined;
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Failed to execute embedded Limitless readiness",
+        );
+        reply.code(status);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Embedded Limitless setup execution failed",
+          ...(payload !== undefined ? (payload as Record<string, unknown>) : {}),
+        });
+      }
     },
   );
 
@@ -2345,7 +2643,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       let canonicalExchangeAddress = exchangeAddress;
       let canonicalAdapterAddress = adapterAddress;
 
-      if (authContext && isEvmWallet(signer)) {
+      if (
+        (request.query.forceCanonical || !exchangeAddress) &&
+        authContext &&
+        isEvmWallet(signer)
+      ) {
         const signerChecksum = toChecksumAddress(signer);
         const tokenPair = extractLimitlessTokenPair(upstream.payload);
         const probeTokenId = tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? null;

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { embeddedPrivyAuthorizationSignatureSchema } from "./embedded-wallets.js";
 import {
   zCsvString,
   zEthAddress,
@@ -61,6 +62,15 @@ export const limitlessAuthLoginBodySchema = z.object({
   signature: z.string().optional(),
 });
 
+export const limitlessEmbeddedEnsureReadyBodySchema = z.object({});
+
+export const limitlessEmbeddedEnsureReadyExecuteBodySchema = z.object({
+  signingMessage: z.string().trim().min(1, "signingMessage is required"),
+  signedRequests: z
+    .array(embeddedPrivyAuthorizationSignatureSchema)
+    .default([]),
+});
+
 export const limitlessOrderBodySchema = z.object({
   order: limitlessOrderSchema,
   orderType: zOrderType.default("GTC"),
@@ -84,6 +94,7 @@ export const limitlessMarketExchangeQuerySchema = z.object({
       z.enum(["BUY", "SELL"]),
     )
     .optional(),
+  forceCanonical: zOptionalBool.optional(),
 });
 
 export const limitlessHistoryQuerySchema = z.object({
