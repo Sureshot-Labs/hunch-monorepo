@@ -438,6 +438,13 @@ function resolveAffiliateDefaults(inputs: {
   affiliateFeePercent?: number;
   affiliateFeeRecipient?: string;
 }): AffiliateDefaults {
+  // Solana deBridge routes currently fail when we inject our generic wallet-level
+  // affiliate recipient. Until we derive the exact Solana referral account shape
+  // expected by deBridge, fail open by omitting default affiliate params there.
+  if (inputs.srcChainId === SOLANA_CHAIN_ID) {
+    return {};
+  }
+
   if (
     inputs.affiliateFeePercent != null ||
     (inputs.affiliateFeeRecipient &&

@@ -993,20 +993,18 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const walletLookup = await loadBalanceWalletLookup(user.id);
-      const resolvedWallets = walletsRequested.map((walletAddress) =>
-        walletLookup.get(normalizeWalletLookupKey(walletAddress)) ?? null,
-      );
+      const resolvedWallets = walletsRequested.map((walletAddress) => {
+        const wallet =
+          walletLookup.get(normalizeWalletLookupKey(walletAddress)) ?? null;
+        return {
+          requestedWalletAddress: walletAddress,
+          wallet,
+        };
+      });
 
-      if (resolvedWallets.some((wallet) => wallet == null)) {
-        reply.code(403);
-        return reply.send({
-          error: "Wallet is not linked to the authenticated user",
-        });
-      }
-
-      const walletsToQuery = resolvedWallets.filter(
-        (wallet): wallet is BalanceWalletResolution => wallet != null,
-      );
+      const walletsToQuery = resolvedWallets
+        .map((entry) => entry.wallet)
+        .filter((wallet): wallet is BalanceWalletResolution => wallet != null);
 
       const results = await mapWithConcurrency(
         walletsToQuery,
@@ -1042,10 +1040,41 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         },
       );
 
+      const resultByWalletAddress = new Map(
+        results.map((result) => [
+          normalizeWalletLookupKey(result.walletAddress),
+          result,
+        ]),
+      );
+
+      const orderedResults = resolvedWallets.map((entry) => {
+        if (!entry.wallet) {
+          return {
+            walletAddress: entry.requestedWalletAddress,
+            walletType: null,
+            balances: [] as WalletBalanceItem[],
+            warnings: [] as string[],
+            error: "Wallet is not linked to the authenticated user",
+          };
+        }
+
+        return (
+          resultByWalletAddress.get(
+            normalizeWalletLookupKey(entry.wallet.walletAddress),
+          ) ?? {
+            walletAddress: entry.wallet.walletAddress,
+            walletType: entry.wallet.walletType,
+            balances: [] as WalletBalanceItem[],
+            warnings: [] as string[],
+            error: "Balance lookup failed",
+          }
+        );
+      });
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        wallets: results,
+        wallets: orderedResults,
       });
     },
   );

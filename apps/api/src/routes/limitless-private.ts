@@ -15,7 +15,10 @@ import {
   fetchEvmCode,
   fetchErc1155IsApprovedForAll,
 } from "../services/polygon-rpc.js";
-import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
+import {
+  fetchLimitlessAmmQuote,
+  fetchLimitlessOnchainSnapshot,
+} from "../services/limitless-onchain.js";
 import { fetchConditionalTokensPayouts } from "../services/limitless-redemption.js";
 import {
   extractLimitlessMessage,
@@ -56,6 +59,7 @@ import {
 import {
   limitlessAuthLoginBodySchema,
   limitlessAccountQuerySchema,
+  limitlessAmmQuoteQuerySchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
   limitlessEmbeddedEnsureReadyBodySchema,
@@ -1673,6 +1677,92 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Limitless account snapshot",
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /amm/quote
+   * Returns a Base-backed Limitless AMM quote without depending on wallet provider chain state.
+   */
+  z.get(
+    "/amm/quote",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessAmmQuoteQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const amountUsdRaw =
+        request.query.amountUsdRaw != null
+          ? BigInt(request.query.amountUsdRaw)
+          : null;
+      const amountSharesRaw =
+        request.query.amountSharesRaw != null
+          ? BigInt(request.query.amountSharesRaw)
+          : null;
+
+      if (
+        request.query.side === "BUY" &&
+        (amountUsdRaw == null || amountUsdRaw <= 0n)
+      ) {
+        reply.code(400);
+        return reply.send({ error: "amountUsdRaw is required for BUY quotes" });
+      }
+
+      if (
+        request.query.side === "SELL" &&
+        (amountSharesRaw == null || amountSharesRaw <= 0n)
+      ) {
+        reply.code(400);
+        return reply.send({
+          error: "amountSharesRaw is required for SELL quotes",
+        });
+      }
+
+      try {
+        const quote = await fetchLimitlessAmmQuote({
+          rpcUrl: env.baseRpcUrl,
+          timeoutMs: env.baseRpcTimeoutMs,
+          marketAddress: request.query.marketAddress,
+          outcomeIndex: request.query.outcomeIndex,
+          side: request.query.side,
+          amountUsdRaw,
+          amountSharesRaw,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          marketAddress: ethers.getAddress(request.query.marketAddress),
+          outcomeIndex: request.query.outcomeIndex,
+          side: request.query.side,
+          sharesRaw: quote.sharesRaw?.toString() ?? null,
+          returnAmountRaw: quote.returnAmountRaw?.toString() ?? null,
+        });
+      } catch (error) {
+        request.log.warn(
+          {
+            error,
+            marketAddress: request.query.marketAddress,
+            outcomeIndex: request.query.outcomeIndex,
+            side: request.query.side,
+          },
+          "Limitless AMM quote failed",
+        );
+        reply.code(502);
+        return reply.send({
+          error:
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "Unable to fetch Limitless AMM quote",
         });
       }
     },

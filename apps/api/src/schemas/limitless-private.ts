@@ -139,3 +139,11 @@ export const limitlessAccountQuerySchema = z.object({
   tokenId: z.string().optional(),
   refresh: zOptionalBool.optional(),
 });
+
+export const limitlessAmmQuoteQuerySchema = z.object({
+  marketAddress: zEthAddressRequired,
+  outcomeIndex: z.coerce.number().int().min(0),
+  side: z.enum(["BUY", "SELL"]),
+  amountUsdRaw: z.string().regex(/^\d+$/).optional(),
+  amountSharesRaw: z.string().regex(/^\d+$/).optional(),
+});
