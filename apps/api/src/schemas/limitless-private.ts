@@ -76,9 +76,15 @@ export const limitlessEmbeddedEnsureReadyExecuteBodySchema = z.object({
     .default([]),
 });
 
-export const limitlessEmbeddedSignOrderBodySchema = z.object({
+export const limitlessEmbeddedSignOrderPrepareBodySchema = z.object({
   marketSlug: zLimitlessSlug,
   order: limitlessOrderSchema.omit({ signature: true }),
+});
+
+export const limitlessEmbeddedSignOrderExecuteBodySchema = z.object({
+  marketSlug: zLimitlessSlug,
+  order: limitlessOrderSchema.omit({ signature: true }),
+  exchangeAddress: zEthAddressRequired,
   authorizationSignature: z.string().trim().min(1).optional(),
 });
 

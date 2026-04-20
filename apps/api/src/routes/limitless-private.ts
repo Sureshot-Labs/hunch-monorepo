@@ -66,7 +66,8 @@ import {
   limitlessCancelBatchBodySchema,
   limitlessEmbeddedEnsureReadyBodySchema,
   limitlessEmbeddedEnsureReadyExecuteBodySchema,
-  limitlessEmbeddedSignOrderBodySchema,
+  limitlessEmbeddedSignOrderExecuteBodySchema,
+  limitlessEmbeddedSignOrderPrepareBodySchema,
   limitlessHistoryQuerySchema,
   limitlessMarketExchangeQuerySchema,
   limitlessOpenOrdersQuerySchema,
@@ -245,6 +246,47 @@ function buildEmbeddedLimitlessOrderRequest(inputs: {
       },
     },
   });
+}
+
+async function prepareEmbeddedLimitlessOrderSigningRequest(inputs: {
+  context: Awaited<ReturnType<typeof resolveEmbeddedPrivyWalletContext>>;
+  marketSlug: string;
+  requestAuth: LimitlessRequestAuthInputs;
+  payload: LimitlessEmbeddedOrderPayload;
+  signer: string;
+  ownerId: number;
+  exchangeAddress?: string | null;
+}): Promise<{
+  exchangeAddress: string;
+  request: EmbeddedPrivyAuthorizationRequest;
+}> {
+  const providedExchangeAddress = inputs.exchangeAddress?.trim() ?? "";
+  const resolvedExchangeAddress = providedExchangeAddress
+    ? toChecksumAddress(providedExchangeAddress)
+    : null;
+  if (providedExchangeAddress && !resolvedExchangeAddress) {
+    throw new Error("Embedded Limitless exchange address is invalid.");
+  }
+  const exchangeAddress =
+    resolvedExchangeAddress ??
+    (
+      await resolveEmbeddedLimitlessOrderSigningContext({
+        marketSlug: inputs.marketSlug,
+        requestAuth: inputs.requestAuth,
+        payload: inputs.payload,
+        signer: inputs.signer,
+        ownerId: inputs.ownerId,
+      })
+    ).exchangeAddress;
+
+  return {
+    exchangeAddress,
+    request: buildEmbeddedLimitlessOrderRequest({
+      context: inputs.context,
+      payload: inputs.payload,
+      exchangeAddress,
+    }),
+  };
 }
 
 function buildLimitlessAccountCacheKey(inputs: {
@@ -1614,9 +1656,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     {
       preHandler: createAuthMiddleware(),
       schema: {
-        body: limitlessEmbeddedSignOrderBodySchema.omit({
-          authorizationSignature: true,
-        }),
+        body: limitlessEmbeddedSignOrderPrepareBodySchema,
       },
     },
     async (request, reply) => {
@@ -1650,21 +1690,20 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         if (ownerId == null) {
           throw new Error("Limitless profile mapping is missing for this wallet.");
         }
-        const signingContext =
-          await resolveEmbeddedLimitlessOrderSigningContext({
-            marketSlug: request.body.marketSlug,
-            requestAuth: partnerAuth.requestAuth,
-            payload: request.body.order as LimitlessEmbeddedOrderPayload,
-            signer,
-            ownerId,
-          });
-        const signRequest = buildEmbeddedLimitlessOrderRequest({
+        const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
           context,
+          marketSlug: request.body.marketSlug,
+          requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
-          exchangeAddress: signingContext.exchangeAddress,
+          signer,
+          ownerId,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, request: signRequest });
+        return reply.send({
+          ok: true,
+          exchangeAddress: prepared.exchangeAddress,
+          request: prepared.request,
+        });
       } catch (error) {
         const status =
           typeof (error as { responseStatus?: unknown })?.responseStatus ===
@@ -1688,7 +1727,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     "/embedded/sign-order",
     {
       preHandler: createAuthMiddleware(),
-      schema: { body: limitlessEmbeddedSignOrderBodySchema },
+      schema: { body: limitlessEmbeddedSignOrderExecuteBodySchema },
     },
     async (request, reply) => {
       const user = request.user;
@@ -1721,21 +1760,17 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         if (ownerId == null) {
           throw new Error("Limitless profile mapping is missing for this wallet.");
         }
-        const signingContext =
-          await resolveEmbeddedLimitlessOrderSigningContext({
-            marketSlug: request.body.marketSlug,
-            requestAuth: partnerAuth.requestAuth,
-            payload: request.body.order as LimitlessEmbeddedOrderPayload,
-            signer,
-            ownerId,
-          });
-        const signRequest = buildEmbeddedLimitlessOrderRequest({
+        const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
           context,
+          marketSlug: request.body.marketSlug,
+          requestAuth: partnerAuth.requestAuth,
           payload: request.body.order as LimitlessEmbeddedOrderPayload,
-          exchangeAddress: signingContext.exchangeAddress,
+          signer,
+          ownerId,
+          exchangeAddress: request.body.exchangeAddress,
         });
         const signature = await executePreparedPrivySignatureRequest({
-          request: signRequest,
+          request: prepared.request,
           authorizationSignature: request.body.authorizationSignature ?? "",
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
