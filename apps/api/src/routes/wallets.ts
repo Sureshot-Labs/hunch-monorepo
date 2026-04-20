@@ -514,6 +514,44 @@ async function loadBalanceWalletLookup(
   return lookup;
 }
 
+async function resolveVenueStatusLinkedWallets(
+  userId: string,
+  walletAddresses: string[],
+): Promise<Awaited<ReturnType<typeof AuthService.getUserWallets>> | null> {
+  const walletLookup = await loadBalanceWalletLookup(userId);
+  const linkedWallets = await AuthService.getUserWallets(userId);
+  const linkedWalletsByKey = new Map<string, (typeof linkedWallets)[number]>();
+
+  for (const wallet of linkedWallets) {
+    const key = normalizeWalletLookupKey(wallet.walletAddress);
+    if (!key) continue;
+    linkedWalletsByKey.set(key, wallet);
+  }
+
+  const resolvedByLinkedKey = new Map<
+    string,
+    (typeof linkedWallets)[number]
+  >();
+
+  for (const walletAddress of walletAddresses) {
+    const resolution =
+      walletLookup.get(normalizeWalletLookupKey(walletAddress)) ?? null;
+    if (!resolution) return null;
+
+    const linkedKey = normalizeWalletLookupKey(resolution.linkedWalletAddress);
+    if (!linkedKey) return null;
+
+    const linkedWallet = linkedWalletsByKey.get(linkedKey) ?? null;
+    if (!linkedWallet) return null;
+
+    if (!resolvedByLinkedKey.has(linkedKey)) {
+      resolvedByLinkedKey.set(linkedKey, linkedWallet);
+    }
+  }
+
+  return Array.from(resolvedByLinkedKey.values());
+}
+
 function isEvmNativeAddress(address: string) {
   const lower = address.toLowerCase();
   return lower === EVM_NATIVE_ADDRESS || lower === EVM_NATIVE_ALT;
@@ -1106,41 +1144,39 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       >;
 
       if (query.wallets && query.wallets.length > 0) {
-        const resolved: typeof walletList = [];
-        for (const address of query.wallets) {
-          const wallet = await AuthService.getUserWalletByAddress(
-            user.id,
-            address,
-          );
-          if (!wallet) {
-            reply.code(403);
-            return reply.send({
-              error: "Wallet is not linked to the authenticated user",
-            });
-          }
-          resolved.push(wallet);
-        }
-        walletList = resolved;
-      } else if (query.walletAddress) {
-        const wallet = await AuthService.getUserWalletByAddress(
+        const resolved = await resolveVenueStatusLinkedWallets(
           user.id,
-          query.walletAddress,
+          query.wallets,
         );
-        if (!wallet) {
+        if (!resolved) {
           reply.code(403);
           return reply.send({
             error: "Wallet is not linked to the authenticated user",
           });
         }
-        walletList = [wallet];
+        walletList = resolved;
+      } else if (query.walletAddress) {
+        const resolved = await resolveVenueStatusLinkedWallets(
+          user.id,
+          [query.walletAddress],
+        );
+        if (!resolved || resolved.length === 0) {
+          reply.code(403);
+          return reply.send({
+            error: "Wallet is not linked to the authenticated user",
+          });
+        }
+        walletList = resolved;
       } else if (includeAll) {
         walletList = await AuthService.getUserWallets(user.id);
       } else {
-        const wallet = await AuthService.getUserWalletByAddress(
+        const resolved = await resolveVenueStatusLinkedWallets(
           user.id,
-          sessionWallet,
+          [sessionWallet],
         );
-        if (wallet) walletList = [wallet];
+        if (resolved && resolved.length > 0) {
+          walletList = resolved;
+        }
       }
 
       const relayerEnabled = Boolean(
