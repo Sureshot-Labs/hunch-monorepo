@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { embeddedPrivyAuthorizationSignatureSchema } from "./embedded-wallets.js";
 import {
+  zBytes32,
   zCsvString,
   zEthAddress,
   zEthAddressRequired,
@@ -25,6 +26,10 @@ const zOptionalBool = z
   .union([z.boolean(), z.string(), z.undefined()])
   .transform((v) => v === true || v === "true")
   .catch(false);
+const zOutcome = z.preprocess(
+  (v) => (typeof v === "string" ? v.toUpperCase() : v),
+  z.enum(["YES", "NO"]),
+);
 const LIMITLESS_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/i;
 const zLimitlessSlug = z
   .string()
@@ -128,6 +133,14 @@ export const limitlessAmmOrderBodySchema = z.object({
 
 export const limitlessRedemptionQuerySchema = z.object({
   conditionIds: zCsvString("conditionIds is required"),
+  adapter: zEthAddress.optional(),
+});
+
+export const limitlessRedemptionPlanQuerySchema = z.object({
+  outcome: zOutcome,
+  tokenId: zRequiredString("tokenId is required"),
+  conditionId: zBytes32,
+  negRisk: zOptionalBool.optional(),
   adapter: zEthAddress.optional(),
 });
 

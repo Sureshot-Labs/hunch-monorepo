@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { zEthAddress, zEthAddressRequired, zRequiredString } from "./common.js";
+import {
+  zBytes32,
+  zEthAddress,
+  zEthAddressRequired,
+  zRequiredString,
+} from "./common.js";
 
 const zNumberish = z.union([z.string(), z.number()]);
 
@@ -9,6 +14,10 @@ const zOrderType = z.preprocess(
 );
 
 const zAmountType = z.enum(["usd", "shares"]);
+const zOutcome = z.preprocess(
+  (v) => (typeof v === "string" ? v.toUpperCase() : v),
+  z.enum(["YES", "NO"]),
+);
 const zOptionalBool = z
   .union([z.boolean(), z.string(), z.undefined()])
   .transform((v) => v === true || v === "true")
@@ -116,6 +125,17 @@ export const polymarketMarketInfoQuerySchema = z
 
 export const polymarketAccountQuerySchema = z.object({
   refresh: zOptionalBool.optional(),
+});
+
+export const polymarketRedemptionPlanQuerySchema = z.object({
+  outcome: zOutcome,
+  tokenId: zRequiredString("tokenId is required"),
+  negRisk: zOptionalBool.optional(),
+  funderAddress: zEthAddress.optional(),
+  conditionId: zBytes32.optional(),
+  questionId: zBytes32.optional(),
+  negRiskParentConditionId: zBytes32.optional(),
+  negRiskRequestId: zBytes32.optional(),
 });
 
 export const polymarketOrderParamsQuerySchema = z.object({

@@ -14,6 +14,10 @@ export const zEthAddressRequired = z.preprocess(
     .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid wallet address format"),
 );
 
+export const zBytes32 = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid bytes32 format");
+
 export const zNonEmptyString = (message: string) => z.string().min(1, message);
 
 export const zRequiredString = (message: string) =>

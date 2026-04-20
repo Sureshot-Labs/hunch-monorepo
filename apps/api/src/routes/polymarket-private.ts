@@ -16,6 +16,7 @@ import {
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveBatchBodySchema,
   polymarketAccountQuerySchema,
+  polymarketRedemptionPlanQuerySchema,
   polymarketEmbeddedEnsureReadyBodySchema,
   polymarketEmbeddedEnsureReadyExecuteBodySchema,
   polymarketEmbeddedSignFeeAuthBodySchema,
@@ -37,6 +38,7 @@ import {
   fetchPolymarketOnchainSnapshot,
   POLYGON_NATIVE_USDC_ADDRESS,
 } from "../services/polymarket-onchain.js";
+import { buildPolymarketRedemptionPlan } from "../services/polymarket-redemption-plan.js";
 import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
 import { polymarketClient } from "../services/polymarket-client.js";
@@ -2187,6 +2189,72 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Polymarket account snapshot",
+        });
+      }
+    },
+  );
+
+  z.get(
+    "/redemption-plan",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: polymarketRedemptionPlanQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket redemption requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const credsInfo = await AuthService.getVenueCredentialsInfo(
+          user.id,
+          "polymarket",
+          signer,
+        );
+        const funder = request.query.funderAddress ?? credsInfo?.funderAddress ?? signer;
+        const plan = await buildPolymarketRedemptionPlan({
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          funder,
+          conditionalTokensAddress: env.polymarketConditionalTokensAddress,
+          collateralTokenAddress: env.polymarketUsdcAddress,
+          negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress ?? null,
+          outcome: request.query.outcome,
+          positionTokenId: request.query.tokenId,
+          conditionId: request.query.conditionId ?? null,
+          questionId: request.query.questionId ?? null,
+          negRiskParentConditionId:
+            request.query.negRiskParentConditionId ?? null,
+          negRiskRequestId: request.query.negRiskRequestId ?? null,
+          isNegRisk: request.query.negRisk === true,
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(plan);
+      } catch (error) {
+        app.log.error(
+          {
+            error,
+            userId: user.id,
+            signer,
+            tokenId: request.query.tokenId,
+            outcome: request.query.outcome,
+          },
+          "Failed to build Polymarket redemption plan",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Failed to prepare Polymarket redemption",
         });
       }
     },

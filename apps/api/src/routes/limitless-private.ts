@@ -19,6 +19,7 @@ import {
   fetchLimitlessAmmQuote,
   fetchLimitlessOnchainSnapshot,
 } from "../services/limitless-onchain.js";
+import { buildLimitlessRedemptionPlan } from "../services/limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "../services/limitless-redemption.js";
 import {
   extractLimitlessMessage,
@@ -69,6 +70,7 @@ import {
   limitlessOpenOrdersQuerySchema,
   limitlessOrderBodySchema,
   limitlessOrderIdParamsSchema,
+  limitlessRedemptionPlanQuerySchema,
   limitlessRedemptionQuerySchema,
   limitlessSlugParamsSchema,
 } from "../schemas/limitless-private.js";
@@ -1841,6 +1843,60 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(502);
         return reply.send({
           error: "Failed to fetch Limitless redemption status",
+        });
+      }
+    },
+  );
+
+  z.get(
+    "/redemption-plan",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessRedemptionPlanQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Limitless redemption requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const plan = await buildLimitlessRedemptionPlan({
+          rpcUrl: env.baseRpcUrl,
+          timeoutMs: env.baseRpcTimeoutMs,
+          owner: signer,
+          conditionId: request.query.conditionId,
+          tokenId: request.query.tokenId,
+          outcome: request.query.outcome,
+          isNegRisk: request.query.negRisk === true,
+          adapterAddress: request.query.adapter ?? null,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(plan);
+      } catch (error) {
+        app.log.error(
+          {
+            error,
+            userId: user.id,
+            signer,
+            tokenId: request.query.tokenId,
+            conditionId: request.query.conditionId,
+            outcome: request.query.outcome,
+          },
+          "Failed to build Limitless redemption plan",
+        );
+        reply.code(502);
+        return reply.send({
+          error: "Failed to prepare Limitless redemption",
         });
       }
     },
