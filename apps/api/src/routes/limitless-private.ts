@@ -47,6 +47,7 @@ import {
 } from "../services/limitless-history.js";
 import {
   buildEmbeddedPersonalSignRequest,
+  createEmbeddedPrivyWalletRpcRequest,
   executePreparedPrivySignatureRequest,
   findEmbeddedAuthorizationSignature,
   resolveEmbeddedPrivyWalletContext,
@@ -65,6 +66,7 @@ import {
   limitlessCancelBatchBodySchema,
   limitlessEmbeddedEnsureReadyBodySchema,
   limitlessEmbeddedEnsureReadyExecuteBodySchema,
+  limitlessEmbeddedSignOrderBodySchema,
   limitlessHistoryQuerySchema,
   limitlessMarketExchangeQuerySchema,
   limitlessOpenOrdersQuerySchema,
@@ -107,6 +109,46 @@ const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> = 
   [normalizeAddress("0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6")]:
     "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
 };
+const LIMITLESS_CLOB_EIP712_NAME = "Limitless CTF Exchange";
+const LIMITLESS_CLOB_EIP712_VERSION = "1";
+const LIMITLESS_CLOB_CHAIN_ID = 8453;
+const LIMITLESS_ORDER_TYPES = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "signer", type: "address" },
+    { name: "taker", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "makerAmount", type: "uint256" },
+    { name: "takerAmount", type: "uint256" },
+    { name: "expiration", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "feeRateBps", type: "uint256" },
+    { name: "side", type: "uint8" },
+    { name: "signatureType", type: "uint8" },
+  ],
+} as const;
+const LIMITLESS_DOMAIN_TYPES = [
+  { name: "name", type: "string" },
+  { name: "version", type: "string" },
+  { name: "chainId", type: "uint256" },
+  { name: "verifyingContract", type: "address" },
+] as const;
+
+type LimitlessEmbeddedOrderPayload = {
+  salt: string | number;
+  maker: string;
+  signer: string;
+  taker?: string;
+  tokenId: string | number;
+  makerAmount: string | number;
+  takerAmount: string | number;
+  expiration: string | number;
+  nonce: string | number;
+  feeRateBps?: string | number;
+  side: string | number;
+  signatureType: string | number;
+};
 
 type LimitlessAccountPayload = Record<string, unknown>;
 type LimitlessAccountCacheEntry = {
@@ -122,6 +164,87 @@ function resolveLimitlessLegacyOperatorForExchange(
   if (!exchangeAddress) return null;
   const mapped = LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
   return mapped ?? null;
+}
+
+function canonicalizeLimitlessOrderPayload(
+  payload: LimitlessEmbeddedOrderPayload,
+): Record<string, string | number> & {
+  maker: string;
+  signer: string;
+  taker: string;
+} {
+  return {
+    ...payload,
+    maker: ethers.getAddress(payload.maker),
+    signer: ethers.getAddress(payload.signer),
+    taker: ethers.getAddress(
+      typeof payload.taker === "string" && payload.taker.trim().length > 0
+        ? payload.taker
+        : ethers.ZeroAddress,
+    ),
+    feeRateBps: payload.feeRateBps ?? 0,
+  };
+}
+
+function buildEmbeddedLimitlessOrderTypedData(inputs: {
+  signer: string;
+  payload: LimitlessEmbeddedOrderPayload;
+  exchangeAddress: string;
+}) {
+  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
+  const typedPayload = canonicalizeLimitlessOrderPayload(inputs.payload);
+  if (typedPayload.signer.toLowerCase() !== inputs.signer.toLowerCase()) {
+    throw new Error(
+      "Embedded Limitless order signer must match the selected Trading Wallet.",
+    );
+  }
+  if (typedPayload.maker.toLowerCase() !== inputs.signer.toLowerCase()) {
+    throw new Error(
+      "Embedded Limitless order maker must match the selected Trading Wallet.",
+    );
+  }
+  return {
+    domain: {
+      name: LIMITLESS_CLOB_EIP712_NAME,
+      version: LIMITLESS_CLOB_EIP712_VERSION,
+      chainId: LIMITLESS_CLOB_CHAIN_ID,
+      verifyingContract: exchangeAddress,
+    },
+    types: {
+      EIP712Domain: LIMITLESS_DOMAIN_TYPES,
+      Order: LIMITLESS_ORDER_TYPES.Order,
+    },
+    primaryType: "Order",
+    message: typedPayload,
+  } as const;
+}
+
+function buildEmbeddedLimitlessOrderRequest(inputs: {
+  context: Awaited<ReturnType<typeof resolveEmbeddedPrivyWalletContext>>;
+  payload: LimitlessEmbeddedOrderPayload;
+  exchangeAddress: string;
+}): EmbeddedPrivyAuthorizationRequest {
+  const typedData = buildEmbeddedLimitlessOrderTypedData({
+    signer: inputs.context.signer,
+    payload: inputs.payload,
+    exchangeAddress: inputs.exchangeAddress,
+  });
+  return createEmbeddedPrivyWalletRpcRequest({
+    id: "limitless-order-signature",
+    label: "Limitless order signature",
+    walletId: inputs.context.walletId,
+    body: {
+      method: "eth_signTypedData_v4",
+      params: {
+        typed_data: {
+          primary_type: typedData.primaryType,
+          domain: typedData.domain,
+          types: typedData.types,
+          message: typedData.message,
+        },
+      },
+    },
+  });
 }
 
 function buildLimitlessAccountCacheKey(inputs: {
@@ -688,6 +811,114 @@ async function resolveLimitlessTokenPairForSlug(inputs: {
   };
 }
 
+async function resolveEmbeddedLimitlessOrderSigningContext(inputs: {
+  marketSlug: string;
+  requestAuth: LimitlessRequestAuthInputs;
+  payload: LimitlessEmbeddedOrderPayload;
+  signer: string;
+  ownerId: number;
+}): Promise<{
+  exchangeAddress: string;
+}> {
+  const marketSlug = inputs.marketSlug.trim();
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(marketSlug)}`,
+    ...inputs.requestAuth,
+  });
+
+  if (!upstream.ok) {
+    throw Object.assign(
+      new Error("Limitless market exchange fetch failed"),
+      {
+        responseStatus: 502,
+        responsePayload: {
+          status: upstream.status,
+          payload: upstream.payload,
+        },
+      },
+    );
+  }
+
+  const tokenId = normalizeLimitlessRawTokenId(inputs.payload.tokenId);
+  if (!tokenId) {
+    throw new Error("Embedded Limitless order token is invalid.");
+  }
+
+  const tokenPair =
+    extractLimitlessTokenPair(upstream.payload) ??
+    (await resolveLimitlessTokenPairForSlug({
+      slug: marketSlug,
+      requestAuth: inputs.requestAuth,
+    }));
+  if (!tokenPair?.tokenYes && !tokenPair?.tokenNo) {
+    throw new Error("Unable to resolve Limitless market tokens.");
+  }
+  if (
+    tokenId !== tokenPair.tokenYes &&
+    tokenId !== tokenPair.tokenNo
+  ) {
+    throw new Error(
+      "Embedded Limitless order token does not belong to this market.",
+    );
+  }
+
+  const exchangeAddress = extractLimitlessMarketExchangeAddress(upstream.payload);
+  if (!exchangeAddress) {
+    throw new Error(
+      "Unable to resolve Limitless exchange for this market.",
+    );
+  }
+
+  let canonicalExchangeAddress = exchangeAddress;
+  const probeTokenId =
+    tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? tokenId;
+  const signerChecksum = toChecksumAddress(inputs.signer);
+  if (signerChecksum && inputs.ownerId && probeTokenId) {
+    const probeSide = Number(inputs.payload.side) === 1 ? 1 : 0;
+    try {
+      const probe = await limitlessRequest({
+        method: "POST",
+        requestPath: "/orders",
+        ...inputs.requestAuth,
+        body: {
+          order: {
+            salt: Date.now() * 1000,
+            maker: signerChecksum,
+            signer: signerChecksum,
+            taker: "0x0000000000000000000000000000000000000000",
+            tokenId: probeTokenId,
+            makerAmount: 1_000_000,
+            takerAmount: 1,
+            expiration: "0",
+            nonce: 0,
+            feeRateBps: 300,
+            side: probeSide,
+            signatureType: 0,
+            signature: `0x${"0".repeat(130)}`,
+          },
+          orderType: "FOK",
+          marketSlug,
+          ownerId: inputs.ownerId,
+          onBehalfOf: inputs.ownerId,
+        },
+      });
+      if (!probe.ok) {
+        const probedExchange = extractLimitlessExpectedExchangeAddress(
+          probe.payload,
+        );
+        if (probedExchange) {
+          canonicalExchangeAddress = probedExchange;
+        }
+      }
+    } catch (error) {
+      void error;
+    }
+  }
+
+  return { exchangeAddress: canonicalExchangeAddress };
+}
+
 export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -781,6 +1012,44 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
     if (!upstream.ok) {
       if (upstream.status === 409) {
+        const upstreamExistingProfile = extractLimitlessProfile(upstream.payload);
+        if (
+          upstreamExistingProfile?.id &&
+          (!upstreamExistingProfile.account ||
+            normalizeAddress(upstreamExistingProfile.account) ===
+              normalizeAddress(checksumAccount))
+        ) {
+          const recoveredProfile: LimitlessProfile = {
+            ...upstreamExistingProfile,
+            account: upstreamExistingProfile.account ?? checksumAccount,
+            client: upstreamExistingProfile.client ?? inputs.clientType,
+          };
+          try {
+            await persistLimitlessProfileForWallet({
+              userId: inputs.userId,
+              signer: inputs.signer,
+              account: recoveredProfile.account ?? checksumAccount,
+              profile: recoveredProfile,
+            });
+          } catch (error) {
+            app.log.error(
+              { error, userId: inputs.userId, signer: inputs.signer },
+              "Failed to store recovered Limitless credentials from 409 response",
+            );
+            return {
+              ok: false,
+              httpStatus: 500,
+              error: "Failed to store recovered Limitless credentials",
+            };
+          }
+
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile: recoveredProfile,
+          };
+        }
+
         const existingCreds = await AuthService.getVenueCredentials(
           inputs.userId,
           "limitless",
@@ -1335,6 +1604,156 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               ? error.message
               : "Embedded Limitless setup execution failed",
           ...(payload !== undefined ? (payload as Record<string, unknown>) : {}),
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-order/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        body: limitlessEmbeddedSignOrderBodySchema.omit({
+          authorizationSignature: true,
+        }),
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Limitless automation requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const partnerAuth = await requireLimitlessPartnerAuth({
+          reply,
+          userId: user.id,
+          walletAddress: signer,
+        });
+        if (!partnerAuth) return;
+
+        const context = await resolveEmbeddedPrivyWalletContext({
+          user,
+          signer,
+          venueLabel: "Limitless",
+        });
+        const ownerId = partnerAuth.profile.id;
+        if (ownerId == null) {
+          throw new Error("Limitless profile mapping is missing for this wallet.");
+        }
+        const signingContext =
+          await resolveEmbeddedLimitlessOrderSigningContext({
+            marketSlug: request.body.marketSlug,
+            requestAuth: partnerAuth.requestAuth,
+            payload: request.body.order as LimitlessEmbeddedOrderPayload,
+            signer,
+            ownerId,
+          });
+        const signRequest = buildEmbeddedLimitlessOrderRequest({
+          context,
+          payload: request.body.order as LimitlessEmbeddedOrderPayload,
+          exchangeAddress: signingContext.exchangeAddress,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, request: signRequest });
+      } catch (error) {
+        const status =
+          typeof (error as { responseStatus?: unknown })?.responseStatus ===
+          "number"
+            ? ((error as { responseStatus: number }).responseStatus ?? 400)
+            : 400;
+        reply.code(status);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare Limitless order signature",
+          ...(((error as { responsePayload?: unknown })?.responsePayload ??
+            undefined) as Record<string, unknown> | undefined),
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-order",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: limitlessEmbeddedSignOrderBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!isEvmWallet(signer)) {
+        reply.code(400);
+        return reply.send({
+          error: "Embedded Limitless automation requires an EVM wallet address",
+        });
+      }
+
+      try {
+        const partnerAuth = await requireLimitlessPartnerAuth({
+          reply,
+          userId: user.id,
+          walletAddress: signer,
+        });
+        if (!partnerAuth) return;
+
+        const context = await resolveEmbeddedPrivyWalletContext({
+          user,
+          signer,
+          venueLabel: "Limitless",
+        });
+        const ownerId = partnerAuth.profile.id;
+        if (ownerId == null) {
+          throw new Error("Limitless profile mapping is missing for this wallet.");
+        }
+        const signingContext =
+          await resolveEmbeddedLimitlessOrderSigningContext({
+            marketSlug: request.body.marketSlug,
+            requestAuth: partnerAuth.requestAuth,
+            payload: request.body.order as LimitlessEmbeddedOrderPayload,
+            signer,
+            ownerId,
+          });
+        const signRequest = buildEmbeddedLimitlessOrderRequest({
+          context,
+          payload: request.body.order as LimitlessEmbeddedOrderPayload,
+          exchangeAddress: signingContext.exchangeAddress,
+        });
+        const signature = await executePreparedPrivySignatureRequest({
+          request: signRequest,
+          authorizationSignature: request.body.authorizationSignature ?? "",
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, signature });
+      } catch (error) {
+        const status =
+          typeof (error as { responseStatus?: unknown })?.responseStatus ===
+          "number"
+            ? ((error as { responseStatus: number }).responseStatus ?? 400)
+            : 400;
+        reply.code(status);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to sign Limitless order",
+          ...(((error as { responsePayload?: unknown })?.responsePayload ??
+            undefined) as Record<string, unknown> | undefined),
         });
       }
     },

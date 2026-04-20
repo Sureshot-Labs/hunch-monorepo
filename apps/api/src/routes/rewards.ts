@@ -207,6 +207,8 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const data = await getRewardsReferrals(pool, {
         userId: user.id,
+        sortBy: query.sortBy,
+        sortDir: query.sortDir,
         limit: query.limit,
         offset: query.offset,
       });

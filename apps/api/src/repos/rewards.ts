@@ -73,6 +73,9 @@ export type RewardsLeaderboardInterval =
   | "yearly"
   | "alltime";
 
+export type RewardsReferralsSortBy = "bonus" | "points" | "createdAt";
+export type RewardsReferralsSortDir = "asc" | "desc";
+
 export type RewardsLeaderboardRow = {
   userId: string;
   rank: number;
@@ -854,7 +857,13 @@ export async function fetchClaimedTotal(
 
 export async function fetchReferralsForUser(
   pool: DbQuery,
-  inputs: { userId: string; limit: number; offset: number },
+  inputs: {
+    userId: string;
+    sortBy: RewardsReferralsSortBy;
+    sortDir: RewardsReferralsSortDir;
+    limit: number;
+    offset: number;
+  },
 ): Promise<
   Array<{
     id: string;
@@ -864,8 +873,10 @@ export async function fetchReferralsForUser(
     created_at: Date;
     wallet_address: string | null;
     points: number;
+    bonus: number;
   }>
 > {
+  const orderByClause = resolveRewardsReferralsOrderBy(inputs);
   const { rows } = await pool.query<{
     id: string;
     referred_user_id: string;
@@ -874,29 +885,57 @@ export async function fetchReferralsForUser(
     created_at: Date;
     wallet_address: string | null;
     points: string | null;
+    bonus: string | null;
   }>(
     `
-      with points as (
-        select user_id, coalesce(sum(points_awarded), 0)::text as points
-        from volume_events
-        group by user_id
+      with referral_rows as (
+        select
+          r.id,
+          r.referred_user_id,
+          r.status,
+          r.qualified_at,
+          r.created_at
+        from referrals r
+        where r.referrer_user_id = $1
+      ),
+      points as (
+        select
+          ve.user_id,
+          coalesce(sum(ve.points_awarded), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      referral_bonus as (
+        select
+          fe.user_id,
+          coalesce(sum(fe.referral_earned_usdc), 0) as total_bonus
+        from fee_events fe
+        join referral_rows rr
+          on rr.referred_user_id = fe.user_id
+        where fe.liability_snapshot_source = 'event_time_frozen'
+          and fe.status <> 'failed'
+        group by fe.user_id
       )
       select
-        r.id,
-        r.referred_user_id,
-        r.status,
-        r.qualified_at,
-        r.created_at,
+        rr.id,
+        rr.referred_user_id,
+        rr.status,
+        rr.qualified_at,
+        rr.created_at,
         w.wallet_address,
-        p.points
-      from referrals r
+        coalesce(p.points, 0)::text as points,
+        coalesce(rb.total_bonus, 0)::text as bonus
+      from referral_rows rr
       left join user_wallets w
-        on w.user_id = r.referred_user_id
+        on w.user_id = rr.referred_user_id
        and w.is_primary = true
       left join points p
-        on p.user_id = r.referred_user_id
-      where r.referrer_user_id = $1
-      order by r.created_at desc
+        on p.user_id = rr.referred_user_id
+      left join referral_bonus rb
+        on rb.user_id = rr.referred_user_id
+      order by ${orderByClause}
       limit $2 offset $3
     `,
     [inputs.userId, inputs.limit, inputs.offset],
@@ -910,7 +949,26 @@ export async function fetchReferralsForUser(
     created_at: row.created_at,
     wallet_address: row.wallet_address ?? null,
     points: Number(row.points ?? 0),
+    bonus: Number(row.bonus ?? 0),
   }));
+}
+
+export function resolveRewardsReferralsOrderBy(inputs: {
+  sortBy: RewardsReferralsSortBy;
+  sortDir: RewardsReferralsSortDir;
+}): string {
+  const direction = inputs.sortDir === "asc" ? "asc" : "desc";
+
+  switch (inputs.sortBy) {
+    case "bonus":
+      return `coalesce(rb.total_bonus, 0) ${direction}, rr.created_at ${direction}, rr.id ${direction}`;
+    case "points":
+      return `coalesce(p.points, 0) ${direction}, rr.created_at ${direction}, rr.id ${direction}`;
+    case "createdAt":
+      return `rr.created_at ${direction}, rr.id ${direction}`;
+    default:
+      return `coalesce(rb.total_bonus, 0) desc, rr.created_at desc, rr.id desc`;
+  }
 }
 
 export async function fetchAdminManualVolumeEvents(

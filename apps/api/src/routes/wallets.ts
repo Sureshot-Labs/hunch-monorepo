@@ -74,7 +74,7 @@ const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
 const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
-const KALSHI_MIN_SOL_BUFFER_LAMPORTS = 20_000_000n;
+const KALSHI_LOW_SOL_BUFFER_LAMPORTS = 2_000_000n;
 
 const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
   "100000001": "245022934", // Neon
@@ -1645,8 +1645,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               const usdcAmount = usdcBalance?.amount ?? 0n;
               const usdcDecimals = usdcBalance?.decimals ?? 6;
               const reasons: string[] = [];
-              if (solBalance < KALSHI_MIN_SOL_BUFFER_LAMPORTS) {
-                reasons.push("insufficient_sol");
+              if (solBalance < KALSHI_LOW_SOL_BUFFER_LAMPORTS) {
+                reasons.push("low_sol_balance");
               }
               if (usdcAmount <= 0n) reasons.push("insufficient_usdc");
 

@@ -2,6 +2,8 @@ import { z } from "zod";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 
 export const rewardsReferralsQuerySchema = z.object({
+  sortBy: z.enum(["bonus", "points", "createdAt"]).default("bonus"),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });

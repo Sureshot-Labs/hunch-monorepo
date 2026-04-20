@@ -19,8 +19,10 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  fetchReferralsForUser,
   fetchQualifiedReferralCount,
   markQualifiedReferralsForUser,
+  resolveRewardsReferralsOrderBy,
 } from "./repos/rewards.js";
 import {
   capTreasurySweepAmountMicro,
@@ -255,6 +257,33 @@ function createQualifiedReferralCountDb(seed: {
       }
 
       throw new Error(`Unhandled SQL in qualified referral count test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
+function createFetchReferralsDb(seed: {
+  rows: Array<{
+    id: string;
+    referred_user_id: string;
+    status: string;
+    qualified_at: Date | null;
+    created_at: Date;
+    wallet_address: string | null;
+    points: string | null;
+    bonus: string | null;
+  }>;
+  capture?: { sql?: string; params?: unknown[] };
+}): import("./db.js").DbQuery {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      if (seed.capture) {
+        seed.capture.sql = sql;
+        seed.capture.params = Array.isArray(params) ? params : [];
+      }
+      if (sql.includes("with referral_rows as")) {
+        return { rows: seed.rows };
+      }
+      throw new Error(`Unhandled SQL in fetch referrals test db: ${sql}`);
     },
   } as import("./db.js").DbQuery;
 }
@@ -763,6 +792,74 @@ const tests: TestCase[] = [
       });
 
       assert.equal(total, 1);
+    },
+  },
+  {
+    name: "referrals order bonus desc uses deterministic tie breakers",
+    run: () => {
+      assert.equal(
+        resolveRewardsReferralsOrderBy({ sortBy: "bonus", sortDir: "desc" }),
+        "coalesce(rb.total_bonus, 0) desc, rr.created_at desc, rr.id desc",
+      );
+    },
+  },
+  {
+    name: "referrals order bonus asc uses deterministic tie breakers",
+    run: () => {
+      assert.equal(
+        resolveRewardsReferralsOrderBy({ sortBy: "bonus", sortDir: "asc" }),
+        "coalesce(rb.total_bonus, 0) asc, rr.created_at asc, rr.id asc",
+      );
+    },
+  },
+  {
+    name: "referrals order createdAt sorts by timestamp then id",
+    run: () => {
+      assert.equal(
+        resolveRewardsReferralsOrderBy({ sortBy: "createdAt", sortDir: "desc" }),
+        "rr.created_at desc, rr.id desc",
+      );
+    },
+  },
+  {
+    name: "fetchReferralsForUser aggregates frozen referral bonus and maps numeric fields",
+    run: async () => {
+      const capture: { sql?: string; params?: unknown[] } = {};
+      const db = createFetchReferralsDb({
+        capture,
+        rows: [
+          {
+            id: "ref-1",
+            referred_user_id: "user-b",
+            status: "qualified",
+            qualified_at: new Date("2026-02-02T00:00:00.000Z"),
+            created_at: new Date("2026-02-01T00:00:00.000Z"),
+            wallet_address: "0xabc",
+            points: "1250",
+            bonus: "4.25",
+          },
+        ],
+      });
+
+      const rows = await fetchReferralsForUser(db, {
+        userId: "user-a",
+        sortBy: "bonus",
+        sortDir: "desc",
+        limit: 10,
+        offset: 0,
+      });
+
+      assert.match(capture.sql ?? "", /sum\(fe\.referral_earned_usdc\)/);
+      assert.match(
+        capture.sql ?? "",
+        /fe\.liability_snapshot_source = 'event_time_frozen'/,
+      );
+      assert.match(capture.sql ?? "", /fe\.status <> 'failed'/);
+      assert.deepEqual(capture.params, ["user-a", 10, 0]);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.points, 1250);
+      assert.equal(rows[0]?.bonus, 4.25);
+      assert.equal(rows[0]?.wallet_address, "0xabc");
     },
   },
 ];

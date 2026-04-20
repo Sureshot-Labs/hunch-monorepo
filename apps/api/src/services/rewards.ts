@@ -24,6 +24,8 @@ import {
   type RewardsLeaderboardInterval,
   type RewardsLeaderboardMetric,
   type RewardsLeaderboardRow,
+  type RewardsReferralsSortBy,
+  type RewardsReferralsSortDir,
   markQualifiedReferralsForUser,
   setUserReferralCode,
   upsertUserTutorialDismissal,
@@ -822,7 +824,13 @@ export async function getRewardsClaimableByChainMicro(
 
 export async function getRewardsReferrals(
   pool: DbQuery,
-  inputs: { userId: string; limit: number; offset: number },
+  inputs: {
+    userId: string;
+    sortBy: RewardsReferralsSortBy;
+    sortDir: RewardsReferralsSortDir;
+    limit: number;
+    offset: number;
+  },
 ): Promise<{
   referrals: Array<{
     id: string;
@@ -832,6 +840,7 @@ export async function getRewardsReferrals(
     createdAt: Date;
     tier: RewardsTier;
     points: number;
+    bonus: number;
   }>;
   policy: RewardsPolicy;
 }> {
@@ -851,6 +860,7 @@ export async function getRewardsReferrals(
       qualifiedAt: row.qualified_at,
       createdAt: row.created_at,
       points: row.points,
+      bonus: row.bonus,
       tier,
     };
   });
