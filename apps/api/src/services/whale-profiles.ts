@@ -110,10 +110,30 @@ type WhaleProfileInput = {
   };
   metrics: {
     volume_30d: number | null;
+    pnl_30d: number | null;
     trades_30d: number | null;
+    avg_trade_usd: number | null;
     roi: number | null;
+    pnl_to_volume_ratio: number | null;
     win_rate: number | null;
     last_trade_at: string | null;
+  };
+  performance_context: {
+    start_marked_pnl_30d: number | null;
+    current_marked_pnl: number | null;
+    portfolio_change_30d: number | null;
+    min_portfolio_change_30d: number | null;
+    max_portfolio_change_30d: number | null;
+    trade_pnl_30d: number | null;
+    trade_roi_30d: number | null;
+    pnl_to_volume_ratio: number | null;
+  };
+  positioning_context: {
+    avg_open_position_usd: number | null;
+    largest_position_usd: number | null;
+    weighted_avg_held_odds: number | null;
+    high_probability_exposure_share: number | null;
+    low_probability_exposure_share: number | null;
   };
   inferred: {
     win_rate: number | null;
@@ -926,6 +946,44 @@ export function summarizeProfileMarkets(
   };
 }
 
+function buildPositioningContext(input: {
+  grossExposureUsd: number | null;
+  markets: WhaleProfileInput["top_markets"];
+}): WhaleProfileInput["positioning_context"] {
+  const marketCount = input.markets.length;
+  const grossExposureUsd = Math.max(0, input.grossExposureUsd ?? 0);
+  let largestPositionUsd = 0;
+  let heldOddsWeightUsd = 0;
+  let weightedHeldOddsTotal = 0;
+  let highProbabilityUsd = 0;
+  let lowProbabilityUsd = 0;
+
+  for (const market of input.markets) {
+    const grossUsd = resolveMarketGrossUsd(market);
+    if (grossUsd <= 0) continue;
+    largestPositionUsd = Math.max(largestPositionUsd, grossUsd);
+
+    const heldOdds = market.held_odds;
+    if (heldOdds == null || !Number.isFinite(heldOdds)) continue;
+    heldOddsWeightUsd += grossUsd;
+    weightedHeldOddsTotal += heldOdds * grossUsd;
+    if (heldOdds >= 0.8) highProbabilityUsd += grossUsd;
+    if (heldOdds <= 0.2) lowProbabilityUsd += grossUsd;
+  }
+
+  return {
+    avg_open_position_usd:
+      grossExposureUsd > 0 && marketCount > 0 ? grossExposureUsd / marketCount : null,
+    largest_position_usd: largestPositionUsd > 0 ? largestPositionUsd : null,
+    weighted_avg_held_odds:
+      heldOddsWeightUsd > 0 ? weightedHeldOddsTotal / heldOddsWeightUsd : null,
+    high_probability_exposure_share:
+      heldOddsWeightUsd > 0 ? highProbabilityUsd / heldOddsWeightUsd : null,
+    low_probability_exposure_share:
+      heldOddsWeightUsd > 0 ? lowProbabilityUsd / heldOddsWeightUsd : null,
+  };
+}
+
 function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
   const recent = input.recent_window;
   const recentHash: WhaleProfileInput["recent_window"] = {
@@ -982,6 +1040,49 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
       roi: bucketSignedDecimal(point.roi),
     })),
   };
+  const metricsHash: WhaleProfileInput["metrics"] = {
+    ...input.metrics,
+    pnl_30d: bucketSignedUsd(input.metrics.pnl_30d),
+    avg_trade_usd: bucketSignedUsd(input.metrics.avg_trade_usd),
+    pnl_to_volume_ratio: bucketSignedDecimal(input.metrics.pnl_to_volume_ratio),
+  };
+  const performanceContextHash: WhaleProfileInput["performance_context"] = {
+    start_marked_pnl_30d: bucketSignedUsd(
+      input.performance_context.start_marked_pnl_30d,
+    ),
+    current_marked_pnl: bucketSignedUsd(input.performance_context.current_marked_pnl),
+    portfolio_change_30d: bucketSignedUsd(
+      input.performance_context.portfolio_change_30d,
+    ),
+    min_portfolio_change_30d: bucketSignedUsd(
+      input.performance_context.min_portfolio_change_30d,
+    ),
+    max_portfolio_change_30d: bucketSignedUsd(
+      input.performance_context.max_portfolio_change_30d,
+    ),
+    trade_pnl_30d: bucketSignedUsd(input.performance_context.trade_pnl_30d),
+    trade_roi_30d: bucketSignedDecimal(input.performance_context.trade_roi_30d),
+    pnl_to_volume_ratio: bucketSignedDecimal(
+      input.performance_context.pnl_to_volume_ratio,
+    ),
+  };
+  const positioningContextHash: WhaleProfileInput["positioning_context"] = {
+    avg_open_position_usd: bucketSignedUsd(
+      input.positioning_context.avg_open_position_usd,
+    ),
+    largest_position_usd: bucketSignedUsd(
+      input.positioning_context.largest_position_usd,
+    ),
+    weighted_avg_held_odds: bucketRate(
+      input.positioning_context.weighted_avg_held_odds,
+    ),
+    high_probability_exposure_share: bucketRate(
+      input.positioning_context.high_probability_exposure_share,
+    ),
+    low_probability_exposure_share: bucketRate(
+      input.positioning_context.low_probability_exposure_share,
+    ),
+  };
   const signalsHash: WhaleProfileInput["signals"] = {
     summary: input.signals.summary
       ? {
@@ -1006,6 +1107,9 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
 
   return {
     ...input,
+    metrics: metricsHash,
+    performance_context: performanceContextHash,
+    positioning_context: positioningContextHash,
     category_mix: input.category_mix.map((item) => ({
       category: item.category,
       volumeUsd: bucketSignedUsd(item.volumeUsd) ?? 0,
@@ -2117,6 +2221,22 @@ function buildProfileInput(
     wallet.is_safe ? "safe" : "eoa";
   const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
   const sourceLabel = normalizeText(wallet.label);
+  const volume30d = parseNumber(wallet.metrics_volume);
+  const pnl30d = parseNumber(wallet.metrics_pnl);
+  const trades30d = wallet.metrics_trades ?? null;
+  const roi30d = parseNumber(wallet.metrics_roi);
+  const avgTradeUsd =
+    volume30d != null && trades30d != null && trades30d > 0
+      ? volume30d / trades30d
+      : null;
+  const pnlToVolumeRatio =
+    pnl30d != null && volume30d != null && volume30d > 0
+      ? pnl30d / volume30d
+      : roi30d;
+  const positioningContext = buildPositioningContext({
+    grossExposureUsd: effectiveGrossUsd,
+    markets: allCurrentMarkets,
+  });
 
   return {
     context: {
@@ -2139,14 +2259,28 @@ function buildProfileInput(
       owner_role: ownerRole,
     },
     metrics: {
-      volume_30d: parseNumber(wallet.metrics_volume),
-      trades_30d: wallet.metrics_trades ?? null,
-      roi: parseNumber(wallet.metrics_roi),
+      volume_30d: volume30d,
+      pnl_30d: pnl30d,
+      trades_30d: trades30d,
+      avg_trade_usd: avgTradeUsd,
+      roi: roi30d,
+      pnl_to_volume_ratio: pnlToVolumeRatio,
       win_rate: parseNumber(wallet.metrics_win_rate),
       last_trade_at: wallet.metrics_last_trade_at
         ? wallet.metrics_last_trade_at.toISOString()
         : null,
     },
+    performance_context: {
+      start_marked_pnl_30d: context.performance30d.startPnlUsd,
+      current_marked_pnl: context.performance30d.endPnlUsd,
+      portfolio_change_30d: context.performance30d.deltaPnlUsd,
+      min_portfolio_change_30d: context.performance30d.minPnlUsd,
+      max_portfolio_change_30d: context.performance30d.maxPnlUsd,
+      trade_pnl_30d: pnl30d,
+      trade_roi_30d: roi30d,
+      pnl_to_volume_ratio: pnlToVolumeRatio,
+    },
+    positioning_context: positioningContext,
     inferred: {
       win_rate:
         wallet.inferred_total && wallet.inferred_total > 0
@@ -2918,6 +3052,17 @@ Rules:
   - current_portfolio.omitted_market_count and omitted_gross_usd describe the held tail not listed in top_markets.
 - category_mix is the 30d traded-volume mix by canonical category.
 - entry_brackets describes where this wallet tends to enter positions, grouped by price/likelihood ranges.
+- metrics.pnl_30d is current 30d trade-ledger PnL.
+- metrics.avg_trade_usd is average observed 30d trade/change size.
+- metrics.pnl_to_volume_ratio shows whether PnL is large or tiny relative to 30d volume.
+- performance_context gives direct PnL context:
+  - current_marked_pnl is the latest marked PnL snapshot.
+  - portfolio_change_30d is the 30d change in marked PnL from start to end.
+  - trade_pnl_30d and trade_roi_30d describe the current 30d trade ledger.
+  Use these to understand magnitude and swings, but do not turn the profile into a metrics dump.
+- positioning_context summarizes current book shape:
+  - avg_open_position_usd and largest_position_usd show position sizing.
+  - weighted_avg_held_odds and high_probability_exposure_share show whether the wallet mostly holds likely outcomes.
 - performance_30d summarizes the 30d PnL/ROI path.
   - delta_* shows change across the 30d window.
   - min_* and max_* show the range inside the window.
