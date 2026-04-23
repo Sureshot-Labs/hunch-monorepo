@@ -27,6 +27,7 @@ export type EmbeddedEthereumTransactionSpec = {
   to: string;
   data?: string | null;
   value?: string | null;
+  gas?: string | null;
   sponsor?: boolean;
 };
 
@@ -73,7 +74,9 @@ function normalizeValueHex(value: string | null | undefined): `0x${string}` | nu
   const trimmed = value.trim();
   if (!trimmed) return null;
   try {
-    return `0x${BigInt(trimmed).toString(16)}` as `0x${string}`;
+    const parsed = BigInt(trimmed);
+    if (parsed <= 0n) return null;
+    return `0x${parsed.toString(16)}` as `0x${string}`;
   } catch {
     return null;
   }
@@ -379,6 +382,7 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
       );
     })();
   const value = normalizeValueHex(inputs.transaction.value);
+  const gas = normalizeValueHex(inputs.transaction.gas);
 
   return createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
@@ -394,6 +398,7 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
           to: to as `0x${string}`,
           data,
           ...(value ? { value } : {}),
+          ...(gas ? { gas } : {}),
         },
       },
     },

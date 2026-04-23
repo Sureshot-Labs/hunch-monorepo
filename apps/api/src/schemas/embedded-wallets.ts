@@ -10,6 +10,7 @@ export const embeddedEvmTransactionSchema = z.object({
     .regex(/^0x(?:[0-9a-fA-F]{2})*$/)
     .default("0x"),
   value: z.string().trim().min(1).max(120).optional(),
+  gas: z.string().trim().min(1).max(120).optional(),
   sponsor: z.boolean().optional(),
 });
 

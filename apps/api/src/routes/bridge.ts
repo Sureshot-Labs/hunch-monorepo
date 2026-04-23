@@ -23,6 +23,27 @@ import {
   bridgeTokensQuerySchema,
 } from "../schemas/bridge.js";
 import {
+  BridgeRequestProvider,
+  BridgeSwapType,
+  HUNCH_SOLANA_CHAIN_ID,
+  ResolvedBridgeProvider,
+  buildAcrossSuggestedFeesQuery,
+  buildAcrossSwapApprovalQuery,
+  getAcrossExecutionError,
+  getAcrossConfig,
+  normalizeAcrossEvmToSolanaQuoteResponse,
+  normalizeAcrossQuoteResponse,
+  normalizeAcrossSolanaSourceQuoteResponse,
+  normalizeAcrossStatusPayload,
+  resolveAcrossAppFeeForRoute,
+  resolveAcrossRoute,
+} from "../services/across-bridge.js";
+import {
+  acrossRequest,
+  extractAcrossErrorMessage,
+  isAcrossFallbackableError,
+} from "../services/across-client.js";
+import {
   debridgeRequest,
   extractDebridgeErrorMessage,
 } from "../services/debridge-client.js";
@@ -63,9 +84,14 @@ type DebridgeOrderInputs = {
   dstChainOrderAuthorityAddress?: string;
 };
 
-type BridgeSwapType = "cross_chain" | "same_chain";
-type BridgeOrderStatus = "created" | "submitted" | "fulfilled" | "failed";
-const SOLANA_CHAIN_ID = "7565164";
+type BridgeOrderStatus =
+  | "created"
+  | "submitted"
+  | "fulfilled"
+  | "failed"
+  | "expired"
+  | "refunded";
+const SOLANA_CHAIN_ID = HUNCH_SOLANA_CHAIN_ID;
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
 const BSC_CHAIN_ID = "56";
@@ -146,11 +172,12 @@ function canonicalizeBridgeOrderStatus(
     normalized === "cancelled" ||
     normalized === "canceled" ||
     normalized === "reverted" ||
-    normalized === "error" ||
-    normalized === "expired"
+    normalized === "error"
   ) {
     return "failed";
   }
+  if (normalized === "expired") return "expired";
+  if (normalized === "refunded") return "refunded";
 
   return fallback;
 }
@@ -159,7 +186,12 @@ function isTerminalBridgeOrderStatus(
   value: string | null | undefined,
 ): boolean {
   const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
-  return normalized === "fulfilled" || normalized === "failed";
+  return (
+    normalized === "fulfilled" ||
+    normalized === "failed" ||
+    normalized === "expired" ||
+    normalized === "refunded"
+  );
 }
 
 function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
@@ -722,10 +754,308 @@ function resolveSwapType(
   return srcChainId === dstChainId ? "same_chain" : "cross_chain";
 }
 
+function isAcrossFallbackEligible(inputs: {
+  requestedProvider: BridgeRequestProvider;
+  resolvedProvider: ResolvedBridgeProvider;
+  status?: number;
+  payload?: unknown;
+}): boolean {
+  if (inputs.requestedProvider !== "auto" || inputs.resolvedProvider !== "across") {
+    return false;
+  }
+  if (inputs.status == null) return true;
+  return isAcrossFallbackableError({
+    status: inputs.status,
+    payload: inputs.payload,
+  });
+}
+
+type AcrossBridgePayloadInputs = {
+  swapType: BridgeSwapType;
+  srcChainId: string;
+  dstChainId: string;
+  srcToken: string;
+  dstToken: string;
+  amountIn: string;
+  senderAddress: string;
+  recipientAddress: string;
+  slippage?: number;
+  requireExecutable: boolean;
+};
+
+type AcrossSwapDiscoveryCache = {
+  ok: true;
+  expiresAt: number;
+  chains: Set<string>;
+  tokens: Set<string>;
+};
+
+let acrossSwapDiscoveryCache: AcrossSwapDiscoveryCache | null = null;
+const ACROSS_SWAP_DISCOVERY_TTL_MS = 5 * 60 * 1000;
+
+async function getAcrossSwapDiscovery(config: ReturnType<typeof getAcrossConfig>) {
+  const now = Date.now();
+  if (acrossSwapDiscoveryCache && acrossSwapDiscoveryCache.expiresAt > now) {
+    return acrossSwapDiscoveryCache;
+  }
+
+  const [chainsRes, tokensRes] = await Promise.all([
+    acrossRequest({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      integratorId: config.integratorId,
+      timeoutMs: config.timeoutMs,
+      method: "GET",
+      requestPath: "/swap/chains",
+    }),
+    acrossRequest({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      integratorId: config.integratorId,
+      timeoutMs: config.timeoutMs,
+      method: "GET",
+      requestPath: "/swap/tokens",
+    }),
+  ]);
+
+  if (!chainsRes.ok) {
+    return {
+      ok: false as const,
+      status: chainsRes.status,
+      payload: chainsRes.payload,
+      message: extractAcrossErrorMessage(chainsRes.payload) || "Across chain discovery failed",
+    };
+  }
+  if (!tokensRes.ok) {
+    return {
+      ok: false as const,
+      status: tokensRes.status,
+      payload: tokensRes.payload,
+      message: extractAcrossErrorMessage(tokensRes.payload) || "Across token discovery failed",
+    };
+  }
+
+  const chains = new Set<string>();
+  for (const entry of Array.isArray(chainsRes.payload) ? chainsRes.payload : []) {
+    if (!isRecord(entry)) continue;
+    const chainId =
+      typeof entry.chainId === "number" || typeof entry.chainId === "string"
+        ? String(entry.chainId)
+        : "";
+    if (chainId) chains.add(chainId);
+  }
+
+  const tokens = new Set<string>();
+  for (const entry of Array.isArray(tokensRes.payload) ? tokensRes.payload : []) {
+    if (!isRecord(entry)) continue;
+    const chainId =
+      typeof entry.chainId === "number" || typeof entry.chainId === "string"
+        ? String(entry.chainId)
+        : "";
+    const address =
+      typeof entry.address === "string" ? entry.address.trim().toLowerCase() : "";
+    if (chainId && address) tokens.add(`${chainId}:${address}`);
+  }
+
+  acrossSwapDiscoveryCache = {
+    ok: true,
+    expiresAt: now + ACROSS_SWAP_DISCOVERY_TTL_MS,
+    chains,
+    tokens,
+  };
+  return acrossSwapDiscoveryCache;
+}
+
+async function validateAcrossSwapApiSupport(inputs: {
+  config: ReturnType<typeof getAcrossConfig>;
+  srcChainId: string;
+  dstChainId: string;
+  srcToken: string;
+  dstToken: string;
+}): Promise<{ ok: true } | { ok: false; status: number; payload: unknown; message: string }> {
+  const discovery = await getAcrossSwapDiscovery(inputs.config);
+  if (!discovery.ok) return discovery;
+
+  const srcAcrossChain = inputs.srcChainId;
+  const dstAcrossChain = inputs.dstChainId;
+  if (!discovery.chains.has(srcAcrossChain) || !discovery.chains.has(dstAcrossChain)) {
+    return {
+      ok: false,
+      status: 400,
+      payload: {
+        error: "Across Swap API does not support this chain pair",
+        code: "across_swap_chain_unsupported",
+      },
+      message: "Across Swap API does not support this chain pair",
+    };
+  }
+
+  const srcTokenKey = `${srcAcrossChain}:${inputs.srcToken.toLowerCase()}`;
+  const dstTokenKey = `${dstAcrossChain}:${inputs.dstToken.toLowerCase()}`;
+  if (!discovery.tokens.has(srcTokenKey) || !discovery.tokens.has(dstTokenKey)) {
+    return {
+      ok: false,
+      status: 400,
+      payload: {
+        error: "Across Swap API does not support this token pair",
+        code: "across_swap_token_unsupported",
+      },
+      message: "Across Swap API does not support this token pair",
+    };
+  }
+
+  return { ok: true };
+}
+
+async function fetchAcrossBridgePayload(
+  inputs: AcrossBridgePayloadInputs,
+): Promise<
+  | { ok: true; payload: Record<string, unknown>; providerPayload: unknown }
+  | { ok: false; status: number; payload: unknown; message: string }
+> {
+  const route = resolveAcrossRoute(inputs);
+  if (!route.ok) {
+    return {
+      ok: false,
+      status: 400,
+      payload: { error: route.message, code: route.code },
+      message: route.message,
+    };
+  }
+
+  const appFee = resolveAcrossAppFeeForRoute(route.mode, inputs.dstChainId);
+  if (!appFee.ok) {
+    return {
+      ok: false,
+      status: 500,
+      payload: { error: appFee.error, code: "across_app_fee_invalid" },
+      message: appFee.error,
+    };
+  }
+
+  const acrossConfig = getAcrossConfig();
+  if (route.mode === "swap_api") {
+    const support = await validateAcrossSwapApiSupport({
+      config: acrossConfig,
+      srcChainId: inputs.srcChainId,
+      dstChainId: inputs.dstChainId,
+      srcToken: inputs.srcToken,
+      dstToken: inputs.dstToken,
+    });
+    if (!support.ok) return support;
+  }
+
+  const request =
+    route.mode === "swap_api"
+      ? {
+          requestPath: "/swap/approval",
+          query: buildAcrossSwapApprovalQuery({
+            srcChainId: inputs.srcChainId,
+            dstChainId: inputs.dstChainId,
+            srcToken: inputs.srcToken,
+            dstToken: inputs.dstToken,
+            amountIn: inputs.amountIn,
+            senderAddress: inputs.senderAddress,
+            recipientAddress: inputs.recipientAddress,
+            slippage: inputs.slippage,
+          }),
+        }
+      : {
+          requestPath: "/suggested-fees",
+          query: buildAcrossSuggestedFeesQuery({
+            srcChainId: inputs.srcChainId,
+            dstChainId: inputs.dstChainId,
+            srcToken: inputs.srcToken,
+            dstToken: inputs.dstToken,
+            amountIn: inputs.amountIn,
+            recipientAddress: inputs.recipientAddress,
+          }),
+        };
+
+  const upstream = await acrossRequest({
+    baseUrl: acrossConfig.baseUrl,
+    apiKey: acrossConfig.apiKey,
+    integratorId: acrossConfig.integratorId,
+    timeoutMs: acrossConfig.timeoutMs,
+    method: "GET",
+    requestPath: request.requestPath,
+    query: request.query,
+  });
+
+  if (!upstream.ok) {
+    const reason = extractAcrossErrorMessage(upstream.payload);
+    return {
+      ok: false,
+      status: upstream.status,
+      payload: upstream.payload,
+      message: reason || "Across quote failed",
+    };
+  }
+
+  try {
+    const payload =
+      route.mode === "swap_api"
+        ? normalizeAcrossQuoteResponse({
+            payload: upstream.payload,
+            swapType: inputs.swapType,
+            srcChainId: inputs.srcChainId,
+            dstChainId: inputs.dstChainId,
+            srcToken: inputs.srcToken,
+            dstToken: inputs.dstToken,
+          })
+        : route.mode === "evm_to_solana"
+          ? normalizeAcrossEvmToSolanaQuoteResponse({
+              payload: upstream.payload,
+              swapType: inputs.swapType,
+              srcChainId: inputs.srcChainId,
+              dstChainId: inputs.dstChainId,
+              srcToken: inputs.srcToken,
+              dstToken: inputs.dstToken,
+              amountIn: inputs.amountIn,
+              senderAddress: inputs.senderAddress,
+              recipientAddress: inputs.recipientAddress,
+            })
+          : await normalizeAcrossSolanaSourceQuoteResponse({
+              payload: upstream.payload,
+              swapType: inputs.swapType,
+              srcChainId: inputs.srcChainId,
+              dstChainId: inputs.dstChainId,
+              srcToken: inputs.srcToken,
+              dstToken: inputs.dstToken,
+              amountIn: inputs.amountIn,
+              senderAddress: inputs.senderAddress,
+              recipientAddress: inputs.recipientAddress,
+              integratorId: acrossConfig.integratorId,
+            });
+    const executionError = inputs.requireExecutable
+      ? getAcrossExecutionError(payload)
+      : null;
+    if (executionError) {
+      return {
+        ok: false,
+        status: 502,
+        payload: { error: executionError, code: "across_missing_tx" },
+        message: executionError,
+      };
+    }
+    return { ok: true, payload, providerPayload: upstream.payload };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Across response normalization failed";
+    return {
+      ok: false,
+      status: 502,
+      payload: { error: message, code: "across_normalization_failed" },
+      message,
+    };
+  }
+}
+
 export const bridgeRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   const notifyBridgeStatusByTx = async (
+    provider: ResolvedBridgeProvider,
     txHash: string,
     statusRaw: string | null,
   ) => {
@@ -741,12 +1071,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       `
         select user_id, src_chain_id, dst_chain_id, order_id
         from bridge_orders
-        where provider = 'debridge'
-          and tx_hash_src = $1
+        where provider = $1
+          and tx_hash_src = $2
         order by updated_at desc
         limit 1
       `,
-      [txHash],
+      [provider, txHash],
     );
 
     const row = rows[0];
@@ -755,7 +1085,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       pool,
       buildBridgeNotification({
         userId: row.user_id,
-        provider: "debridge",
+        provider,
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
@@ -767,6 +1097,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
   };
 
   const notifyBridgeStatusByOrder = async (
+    provider: ResolvedBridgeProvider,
     orderId: string,
     statusRaw: string | null,
   ) => {
@@ -782,12 +1113,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       `
         select user_id, src_chain_id, dst_chain_id, tx_hash_src
         from bridge_orders
-        where provider = 'debridge'
-          and order_id = $1
+        where provider = $1
+          and order_id = $2
         order by updated_at desc
         limit 1
       `,
-      [orderId],
+      [provider, orderId],
     );
 
     const row = rows[0];
@@ -796,7 +1127,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       pool,
       buildBridgeNotification({
         userId: row.user_id,
-        provider: "debridge",
+        provider,
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
@@ -812,6 +1143,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: bridgeChainsQuerySchema } },
     async (request, reply) => {
       const { provider } = request.query;
+      // Discovery still comes from the existing deBridge-backed cache/endpoints.
       if (provider !== "debridge") {
         reply.code(400);
         return reply.send({ error: "Unsupported bridge provider" });
@@ -850,10 +1182,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: bridgeQuoteQuerySchema } },
     async (request, reply) => {
       const query = request.query;
-      if (query.provider !== "debridge") {
-        reply.code(400);
-        return reply.send({ error: "Unsupported bridge provider" });
-      }
       const swapType = resolveSwapType(
         query.srcChainId,
         query.dstChainId,
@@ -889,6 +1217,67 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       if (addressValidationError) {
         reply.code(400);
         return reply.send({ error: addressValidationError });
+      }
+
+      const acrossRoute = resolveAcrossRoute({
+        swapType,
+        srcChainId: query.srcChainId,
+        dstChainId: query.dstChainId,
+        srcToken: query.srcToken,
+        dstToken: query.dstToken,
+      });
+      const resolvedProvider: ResolvedBridgeProvider =
+        query.provider === "debridge"
+          ? "debridge"
+          : query.provider === "across"
+            ? "across"
+            : acrossRoute.ok
+              ? "across"
+              : "debridge";
+
+      if (query.provider === "across" && !acrossRoute.ok) {
+        reply.code(400);
+        return reply.send({
+          error: acrossRoute.message,
+          code: acrossRoute.code,
+        });
+      }
+
+      if (resolvedProvider === "across") {
+        const acrossResult = await fetchAcrossBridgePayload({
+          swapType,
+          srcChainId: query.srcChainId,
+          dstChainId: query.dstChainId,
+          srcToken: query.srcToken,
+          dstToken: query.dstToken,
+          amountIn: query.amountIn,
+          senderAddress: addresses.senderAddress,
+          recipientAddress: addresses.recipientAddress,
+          slippage: query.slippage,
+          requireExecutable: false,
+        });
+
+        if (acrossResult.ok) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(acrossResult.payload);
+        }
+
+        if (
+          !isAcrossFallbackEligible({
+            requestedProvider: query.provider,
+            resolvedProvider,
+            status: acrossResult.status,
+            payload: acrossResult.payload,
+          })
+        ) {
+          reply.code(acrossResult.status >= 500 ? 502 : acrossResult.status);
+          return reply.send({
+            error: acrossResult.message,
+            status: acrossResult.status,
+            message: acrossResult.message,
+            payload: acrossResult.payload,
+          });
+        }
       }
 
       const debridgeConfig = await getDebridgeConfig();
@@ -969,6 +1358,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           string,
           unknown
         >),
+        provider: "debridge",
         swapType,
       });
     },
@@ -988,10 +1378,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
-      if (body.provider !== "debridge") {
-        reply.code(400);
-        return reply.send({ error: "Unsupported bridge provider" });
-      }
       const swapType = resolveSwapType(
         body.srcChainId,
         body.dstChainId,
@@ -1037,6 +1423,163 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "senderAddress is not linked to the authenticated user",
         });
+      }
+
+      const acrossRoute = resolveAcrossRoute({
+        swapType,
+        srcChainId: body.srcChainId,
+        dstChainId: body.dstChainId,
+        srcToken: body.srcToken,
+        dstToken: body.dstToken,
+      });
+      const resolvedProvider: ResolvedBridgeProvider =
+        body.provider === "debridge"
+          ? "debridge"
+          : body.provider === "across"
+            ? "across"
+            : acrossRoute.ok
+              ? "across"
+              : "debridge";
+
+      if (body.provider === "across" && !acrossRoute.ok) {
+        reply.code(400);
+        return reply.send({
+          error: acrossRoute.message,
+          code: acrossRoute.code,
+        });
+      }
+
+      if (resolvedProvider === "across") {
+        const acrossResult = await fetchAcrossBridgePayload({
+          swapType,
+          srcChainId: body.srcChainId,
+          dstChainId: body.dstChainId,
+          srcToken: body.srcToken,
+          dstToken: body.dstToken,
+          amountIn: body.amountIn,
+          senderAddress: addresses.senderAddress,
+          recipientAddress: addresses.recipientAddress,
+          slippage: body.slippage,
+          requireExecutable: true,
+        });
+
+        if (acrossResult.ok) {
+            const normalizedPayload = acrossResult.payload;
+            const providerPayload = isRecord(acrossResult.providerPayload)
+              ? acrossResult.providerPayload
+              : {};
+            const txMeta =
+              isRecord(normalizedPayload.tx) && normalizedPayload.tx.kind === "evm"
+                ? {
+                    to:
+                      typeof normalizedPayload.tx.to === "string"
+                        ? normalizedPayload.tx.to
+                        : null,
+                    value:
+                      typeof normalizedPayload.tx.value === "string"
+                        ? normalizedPayload.tx.value
+                        : null,
+                    kind: normalizedPayload.tx.kind,
+                  }
+                : isRecord(normalizedPayload.tx)
+                  ? { kind: normalizedPayload.tx.kind ?? null }
+                  : null;
+            const insertResult = await pool.query<{ id: string }>(
+              `
+                insert into bridge_orders (
+                  user_id,
+                  provider,
+                  swap_type,
+                  src_chain_id,
+                  dst_chain_id,
+                  src_token,
+                  dst_token,
+                  amount_in,
+                  slippage_bps,
+                  quote_id,
+                  order_id,
+                  status,
+                  fees,
+                  metadata
+                )
+                values (
+                  $1,
+                  $2,
+                  $3,
+                  $4,
+                  $5,
+                  $6,
+                  $7,
+                  $8,
+                  $9,
+                  $10,
+                  $11,
+                  $12,
+                  $13,
+                  $14
+                )
+                returning id
+              `,
+              [
+                user.id,
+                "across",
+                swapType,
+                body.srcChainId,
+                body.dstChainId,
+                body.srcToken,
+                body.dstToken,
+                body.amountIn,
+                body.slippage != null ? Math.round(body.slippage * 100) : null,
+                typeof normalizedPayload.id === "string"
+                  ? normalizedPayload.id
+                  : null,
+                null,
+                "created",
+                normalizedPayload.fees ?? null,
+                {
+                  tx: txMeta,
+                  estimation: normalizedPayload.estimation ?? null,
+                  tokenIn: null,
+                  tokenOut: null,
+                  across: {
+                    approvalTxns:
+                      normalizedPayload.approvalTxns ?? null,
+                    checks: normalizedPayload.checks ?? null,
+                    warnings: normalizedPayload.warnings ?? null,
+                    inputAmount: normalizedPayload.inputAmount ?? null,
+                    expectedOutputAmount:
+                      normalizedPayload.expectedOutputAmount ?? null,
+                    minOutputAmount:
+                      normalizedPayload.minOutputAmount ?? null,
+                    providerPayload,
+                  },
+                },
+              ],
+            );
+            const bridgeOrderId = insertResult.rows[0]?.id ?? null;
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send({
+              ...normalizedPayload,
+              bridgeOrderId,
+            });
+        }
+
+        if (
+          !isAcrossFallbackEligible({
+            requestedProvider: body.provider,
+            resolvedProvider,
+            status: acrossResult.status,
+            payload: acrossResult.payload,
+          })
+        ) {
+          reply.code(acrossResult.status >= 500 ? 502 : acrossResult.status);
+          return reply.send({
+            error: acrossResult.message,
+            status: acrossResult.status,
+            message: acrossResult.message,
+            payload: acrossResult.payload,
+          });
+        }
       }
 
       const debridgeConfig = await getDebridgeConfig();
@@ -1163,6 +1706,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             dst_token,
             amount_in,
             slippage_bps,
+            quote_id,
             order_id,
             status,
             fees,
@@ -1181,13 +1725,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             $10,
             $11,
             $12,
-            $13
+            $13,
+            $14
           )
           returning id
         `,
         [
           user.id,
-          body.provider,
+          "debridge",
           swapType,
           body.srcChainId,
           body.dstChainId,
@@ -1195,6 +1740,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           body.dstToken,
           body.amountIn,
           body.slippage != null ? Math.round(body.slippage * 100) : null,
+          null,
           orderId,
           "created",
           fees,
@@ -1209,6 +1755,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           string,
           unknown
         >),
+        provider: "debridge",
         bridgeOrderId,
         swapType,
       });
@@ -1220,9 +1767,150 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: bridgeStatusQuerySchema } },
     async (request, reply) => {
       const query = request.query;
-      if (query.provider !== "debridge") {
-        reply.code(400);
-        return reply.send({ error: "Unsupported bridge provider" });
+
+      if (query.provider === "across") {
+        const acrossConfig = getAcrossConfig();
+        const orderId = query.orderId?.trim();
+        const txHash = query.txHash?.trim();
+        if (!txHash) {
+          reply.code(400);
+          return reply.send({ error: "txHash is required for Across status" });
+        }
+
+        const resolvedTxHash = txHash;
+        let resolvedSwapType: BridgeSwapType | null = query.swapType ?? null;
+        let resolvedChainId = query.chainId?.trim() || null;
+        let resolvedStoredStatus: string | null = null;
+
+        if (!resolvedSwapType || !resolvedChainId) {
+          const { rows } = await pool.query<{
+            swap_type: BridgeSwapType;
+            src_chain_id: string;
+            tx_hash_src: string | null;
+            status: string | null;
+          }>(
+            `
+              select swap_type, src_chain_id, tx_hash_src, status
+              from bridge_orders
+              where provider = 'across'
+                and tx_hash_src = $1
+              order by updated_at desc
+              limit 1
+            `,
+            [resolvedTxHash],
+          );
+          if (rows[0]) {
+            resolvedSwapType = resolvedSwapType ?? rows[0].swap_type;
+            resolvedChainId = resolvedChainId ?? rows[0].src_chain_id;
+            resolvedStoredStatus = rows[0].status?.trim() || null;
+          }
+        }
+
+        const upstream = await acrossRequest({
+          baseUrl: acrossConfig.baseUrl,
+          apiKey: acrossConfig.apiKey,
+          integratorId: acrossConfig.integratorId,
+          timeoutMs: acrossConfig.timeoutMs,
+          method: "GET",
+          requestPath: "/deposit/status",
+          query: { depositTxnRef: resolvedTxHash },
+        });
+
+        if (!upstream.ok) {
+          const failedStatus = await fetchCrossChainSourceFailureStatus({
+            chainId: resolvedChainId,
+            txHash: resolvedTxHash,
+          });
+          if (failedStatus) {
+            await pool.query(
+              `
+                update bridge_orders
+                set status = $1, updated_at = now()
+                where provider = 'across'
+                  and tx_hash_src = $2
+              `,
+              [failedStatus, resolvedTxHash],
+            );
+            await notifyBridgeStatusByTx("across", resolvedTxHash, failedStatus);
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send({
+              ok: true,
+              provider: "across",
+              swapType: resolvedSwapType ?? "cross_chain",
+              orderIds: orderId ? [orderId] : [],
+              txLookup: null,
+              orders: [
+                {
+                  orderId: orderId ?? resolvedTxHash,
+                  payload: { status: failedStatus, source: "rpc" },
+                },
+              ],
+            });
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            provider: "across",
+            swapType: resolvedSwapType ?? "cross_chain",
+            orderIds: orderId ? [orderId] : [],
+            txLookup: null,
+            orders: [
+              {
+                orderId: orderId ?? resolvedTxHash,
+                payload: {
+                  status: resolvedStoredStatus ?? "submitted",
+                  source: "indexer_pending",
+                  error: extractAcrossErrorMessage(upstream.payload),
+                },
+              },
+            ],
+          });
+        }
+
+        const normalizedPayload = normalizeAcrossStatusPayload(upstream.payload);
+        const normalizedStatus =
+          typeof normalizedPayload.status === "string"
+            ? normalizedPayload.status
+            : null;
+        if (normalizedStatus) {
+          await pool.query(
+            `
+              update bridge_orders
+              set status = $1, updated_at = now()
+              where provider = 'across'
+                and tx_hash_src = $2
+            `,
+            [normalizedStatus, resolvedTxHash],
+          );
+          if (
+            normalizedStatus === "fulfilled" ||
+            normalizedStatus === "failed" ||
+            normalizedStatus === "expired" ||
+            normalizedStatus === "refunded"
+          ) {
+            await notifyBridgeStatusByTx(
+              "across",
+              resolvedTxHash,
+              normalizedStatus,
+            );
+          }
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          provider: "across",
+          swapType: resolvedSwapType ?? "cross_chain",
+          orderIds: orderId ? [orderId] : [],
+          txLookup: null,
+          orders: [
+            {
+              orderId: orderId ?? resolvedTxHash,
+              payload: normalizedPayload,
+            },
+          ],
+        });
       }
 
       const debridgeConfig = await getDebridgeConfig();
@@ -1259,7 +1947,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             `,
             [failedStatus, inputs.orderId, inputs.txHash],
           );
-          await notifyBridgeStatusByOrder(inputs.orderId, failedStatus);
+          await notifyBridgeStatusByOrder("debridge", inputs.orderId, failedStatus);
           return failedStatus;
         }
         if (!inputs.txHash) return null;
@@ -1272,7 +1960,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           `,
           [failedStatus, inputs.txHash],
         );
-        await notifyBridgeStatusByTx(inputs.txHash, failedStatus);
+        await notifyBridgeStatusByTx("debridge", inputs.txHash, failedStatus);
         return failedStatus;
       };
 
@@ -1349,7 +2037,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [canonicalStatus, txHash],
             );
-            await notifyBridgeStatusByTx(txHash, canonicalStatus);
+            await notifyBridgeStatusByTx("debridge", txHash, canonicalStatus);
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,
@@ -1419,7 +2107,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 `,
                 [canonicalStatus, txHash],
               );
-              await notifyBridgeStatusByTx(txHash, canonicalStatus);
+              await notifyBridgeStatusByTx("debridge", txHash, canonicalStatus);
               reply.header("Content-Type", "application/json; charset=utf-8");
               return reply.send({
                 ok: true,
@@ -1448,7 +2136,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [status, txHash],
             );
-            await notifyBridgeStatusByTx(txHash, status);
+            await notifyBridgeStatusByTx("debridge", txHash, status);
           }
         }
 
@@ -1652,7 +2340,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               `,
               [status, id],
             );
-            await notifyBridgeStatusByOrder(id, status);
+            await notifyBridgeStatusByOrder("debridge", id, status);
           }
         }
         orders.push({ orderId: id, payload });
@@ -1692,10 +2380,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
-      if (body.provider !== "debridge") {
-        reply.code(400);
-        return reply.send({ error: "Unsupported bridge provider" });
-      }
 
       const bridgeOrderId = body.bridgeOrderId?.trim() || null;
       const orderId = body.orderId?.trim() || null;
@@ -1724,13 +2408,13 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             set ${txColumn} = $1,
                 status = $2,
                 updated_at = now()
-            where provider = 'debridge'
-              and order_id = $3
-              and user_id = $4
+            where provider = $3
+              and order_id = $4
+              and user_id = $5
           `;
       const updateParams = bridgeOrderId
         ? [txHashValue, status, bridgeOrderId, user.id]
-        : [txHashValue, status, orderId, user.id];
+        : [txHashValue, status, body.provider, orderId, user.id];
       const { rowCount } = await pool.query(updateQuery, updateParams);
 
       if (!rowCount) {
@@ -1763,10 +2447,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         sync,
         syncLimit,
       } = request.query;
-      if (sync && provider && provider !== "debridge") {
-        reply.code(400);
-        return reply.send({ error: "Sync only supported for debridge" });
-      }
 
       const debridgeConfig = await getDebridgeConfig();
       const countParams: Array<string | number> = [user.id];
@@ -1859,7 +2539,42 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           return failedStatus ? failedStatus : null;
         };
 
-        for (const row of pendingRows) {
+        if (syncProvider === "across") {
+          const acrossConfig = getAcrossConfig();
+          for (const row of pendingRows) {
+            try {
+              if (!row.tx_hash_src) continue;
+              const statusRes = await acrossRequest({
+                baseUrl: acrossConfig.baseUrl,
+                apiKey: acrossConfig.apiKey,
+                integratorId: acrossConfig.integratorId,
+                timeoutMs: acrossConfig.timeoutMs,
+                method: "GET",
+                requestPath: "/deposit/status",
+                query: { depositTxnRef: row.tx_hash_src },
+              });
+              if (statusRes.ok) {
+                const payload = normalizeAcrossStatusPayload(statusRes.payload);
+                const status =
+                  typeof payload.status === "string"
+                    ? canonicalizeBridgeOrderStatus(payload.status)
+                    : null;
+                if (status) {
+                  await updateOrderStatus(status, row.id);
+                }
+                continue;
+              }
+              const fallbackStatus =
+                await resolveCrossChainFailedBySourceReceipt(row);
+              if (fallbackStatus) {
+                await updateOrderStatus(fallbackStatus, row.id);
+              }
+            } catch (error) {
+              request.log.warn({ error, orderId: row.id }, "Across sync failed");
+            }
+          }
+        } else {
+          for (const row of pendingRows) {
           try {
             if (row.swap_type === "same_chain") {
               if (!row.tx_hash_src) continue;
@@ -1995,6 +2710,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             request.log.warn({ error, orderId: row.id }, "Bridge sync failed");
           }
         }
+        }
       }
 
       const { rows } = await pool.query(
@@ -2082,11 +2798,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           tags: unknown;
         }>(
           `
-            select chain_id, address, symbol, name, decimals, logo_uri, tags
+            select distinct on (address)
+              chain_id, address, symbol, name, decimals, logo_uri, tags
             from bridge_token_cache
-            where provider = 'debridge'
-              and chain_id = $1
+            where chain_id = $1
               and address = any($2::text[])
+            order by address, updated_at desc
           `,
           [chainId, addresses],
         );
@@ -2185,6 +2902,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: bridgeTokensQuerySchema } },
     async (request, reply) => {
       const { provider, chainId, search, limit } = request.query;
+      // Discovery still comes from the existing deBridge-backed cache/endpoints.
       if (provider !== "debridge") {
         reply.code(400);
         return reply.send({ error: "Unsupported bridge provider" });

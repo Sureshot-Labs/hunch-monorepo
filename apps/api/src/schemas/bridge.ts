@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { zRequiredString } from "./common.js";
-export const zBridgeProvider = z.enum(["debridge"]);
+
+export const zBridgeDiscoveryProvider = z.literal("debridge");
+export const zBridgeProvider = z.enum(["debridge", "across"]);
+export const zBridgeRequestProvider = z.enum(["auto", "debridge", "across"]);
 export const zBridgeSwapType = z.enum(["cross_chain", "same_chain"]);
 
 const zChainId = z.preprocess(
@@ -9,11 +12,11 @@ const zChainId = z.preprocess(
 );
 
 export const bridgeChainsQuerySchema = z.object({
-  provider: zBridgeProvider.default("debridge"),
+  provider: zBridgeDiscoveryProvider.default("debridge"),
 });
 
 export const bridgeTokensQuerySchema = z.object({
-  provider: zBridgeProvider.default("debridge"),
+  provider: zBridgeDiscoveryProvider.default("debridge"),
   chainId: zChainId,
   search: z.string().optional(),
   limit: z
@@ -38,7 +41,7 @@ const zOptionalBool = z.preprocess((value) => {
 }, z.boolean());
 
 export const bridgeQuoteQuerySchema = z.object({
-  provider: zBridgeProvider.default("debridge"),
+  provider: zBridgeRequestProvider.default("debridge"),
   swapType: zBridgeSwapType.optional(),
   srcChainId: zChainId,
   dstChainId: zChainId,
@@ -61,7 +64,7 @@ export const bridgeQuoteQuerySchema = z.object({
 });
 
 export const bridgeOrderBodySchema = bridgeQuoteQuerySchema.extend({
-  provider: zBridgeProvider.default("debridge"),
+  provider: zBridgeRequestProvider.default("debridge"),
 });
 
 export const bridgeStatusQuerySchema = z.object({

@@ -1165,6 +1165,17 @@ export const env = {
   debridgeAffiliateFeeRecipients:
     process.env.DEBRIDGE_AFFILIATE_FEE_RECIPIENTS?.trim() || "",
   debridgeReferralCode: optionalNonNegativeInt("DEBRIDGE_REFERRAL_CODE", 0),
+  acrossApiBase:
+    process.env.ACROSS_API_BASE?.trim() || "https://app.across.to/api",
+  acrossApiKey: process.env.ACROSS_API_KEY?.trim() || "",
+  acrossIntegratorId: process.env.ACROSS_INTEGRATOR_ID?.trim() || "",
+  bridgeAcrossEnabled:
+    parseOptionalBool(process.env.BRIDGE_ACROSS_ENABLED) ?? false,
+  acrossRouteAllowlist: parseList(process.env.ACROSS_ROUTE_ALLOWLIST),
+  acrossAppFee: optionalRatio01("ACROSS_APP_FEE", 0),
+  acrossAppFeeRecipients:
+    process.env.ACROSS_APP_FEE_RECIPIENTS?.trim() || "",
+  acrossTimeoutMs: optionalPositiveInt("ACROSS_TIMEOUT_MS", 15_000),
 
   polymarketBuilderApiKey:
     process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
