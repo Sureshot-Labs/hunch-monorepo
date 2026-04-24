@@ -14,6 +14,12 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import {
+  type BridgeOrderStatus,
+  canonicalizeBridgeOrderStatus,
+  getBridgeNotificationStatus,
+  isTerminalBridgeOrderStatus,
+} from "../services/bridge-status.js";
+import {
   bridgeChainsQuerySchema,
   bridgeOrderBodySchema,
   bridgeOrdersQuerySchema,
@@ -85,13 +91,6 @@ type DebridgeOrderInputs = {
   dstChainOrderAuthorityAddress?: string;
 };
 
-type BridgeOrderStatus =
-  | "created"
-  | "submitted"
-  | "fulfilled"
-  | "failed"
-  | "expired"
-  | "refunded";
 const SOLANA_CHAIN_ID = HUNCH_SOLANA_CHAIN_ID;
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
@@ -140,68 +139,6 @@ type AffiliateDefaults = {
   affiliateFeePercent?: number;
   affiliateFeeRecipient?: string;
 };
-
-function canonicalizeBridgeOrderStatus(
-  value: string | null | undefined,
-  fallback: BridgeOrderStatus = "submitted",
-): BridgeOrderStatus {
-  if (!value) return fallback;
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return fallback;
-
-  if (normalized === "created") return "created";
-  if (
-    normalized === "submitted" ||
-    normalized === "pending" ||
-    normalized === "processing" ||
-    normalized === "in_progress" ||
-    normalized === "in progress" ||
-    normalized === "queued"
-  ) {
-    return "submitted";
-  }
-  if (
-    normalized === "fulfilled" ||
-    normalized === "completed" ||
-    normalized === "success" ||
-    normalized === "confirmed"
-  ) {
-    return "fulfilled";
-  }
-  if (
-    normalized === "failed" ||
-    normalized === "cancelled" ||
-    normalized === "canceled" ||
-    normalized === "reverted" ||
-    normalized === "error"
-  ) {
-    return "failed";
-  }
-  if (normalized === "expired") return "expired";
-  if (normalized === "refunded") return "refunded";
-
-  return fallback;
-}
-
-function isTerminalBridgeOrderStatus(
-  value: string | null | undefined,
-): boolean {
-  const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
-  return (
-    normalized === "fulfilled" ||
-    normalized === "failed" ||
-    normalized === "expired" ||
-    normalized === "refunded"
-  );
-}
-
-function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
-  if (!value) return null;
-  const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
-  if (normalized === "fulfilled" || normalized === "refunded") return "completed";
-  if (normalized === "failed" || normalized === "expired") return "failed";
-  return null;
-}
 
 function resolveDebridgeChainAlias(chainId: string): string {
   return DEBRIDGE_CHAIN_ID_ALIASES[chainId] ?? chainId;
@@ -1137,7 +1074,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     txHash: string,
     statusRaw: string | null,
   ) => {
-    const status = normalizeBridgeStatus(statusRaw);
+    const status = getBridgeNotificationStatus(statusRaw);
     if (!status) return;
 
     const { rows } = await pool.query<{
@@ -1179,7 +1116,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     orderId: string,
     statusRaw: string | null,
   ) => {
-    const status = normalizeBridgeStatus(statusRaw);
+    const status = getBridgeNotificationStatus(statusRaw);
     if (!status) return;
 
     const { rows } = await pool.query<{
@@ -2474,7 +2411,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 : null;
           if (statusRaw) {
             status = canonicalizeBridgeOrderStatus(statusRaw);
-            if (status !== "fulfilled" && status !== "failed") {
+            if (!isTerminalBridgeOrderStatus(status)) {
               const failedStatus = await markCrossChainFailedFromSourceReceipt({
                 chainId: resolvedChainId,
                 txHash: resolvedTxHash,

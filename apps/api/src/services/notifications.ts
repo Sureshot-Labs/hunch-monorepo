@@ -182,16 +182,24 @@ export function buildRedemptionNotification(input: {
 export function buildBridgeNotification(input: {
   userId: string;
   provider: string;
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "refunded";
   srcChainId?: string | null;
   dstChainId?: string | null;
   bridgeOrderId?: string | null;
   txHash?: string | null;
 }): NotificationInput {
   const title =
-    input.status === "completed" ? "Bridge completed" : "Bridge failed";
+    input.status === "completed"
+      ? "Bridge completed"
+      : input.status === "refunded"
+        ? "Bridge refunded"
+        : "Bridge failed";
   const severity: NotificationSeverity =
-    input.status === "completed" ? "success" : "error";
+    input.status === "completed"
+      ? "success"
+      : input.status === "refunded"
+        ? "warning"
+        : "error";
   const route =
     input.srcChainId && input.dstChainId
       ? `${input.srcChainId} → ${input.dstChainId}`
@@ -207,7 +215,12 @@ export function buildBridgeNotification(input: {
 
   return {
     userId: input.userId,
-    type: input.status === "completed" ? "bridge_completed" : "bridge_failed",
+    type:
+      input.status === "completed"
+        ? "bridge_completed"
+        : input.status === "refunded"
+          ? "bridge_refunded"
+          : "bridge_failed",
     title,
     body,
     severity,
