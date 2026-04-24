@@ -146,6 +146,17 @@ const tests: TestCase[] = [
             swapType: "cross_chain",
             srcChainId: HUNCH_SOLANA_CHAIN_ID,
             dstChainId: "137",
+            srcToken: "11111111111111111111111111111111",
+            dstToken: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+          }),
+          { ok: true, mode: "swap_api" },
+        );
+
+        assert.deepEqual(
+          resolveAcrossRoute({
+            swapType: "cross_chain",
+            srcChainId: HUNCH_SOLANA_CHAIN_ID,
+            dstChainId: "137",
             srcToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             dstToken: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
           }),
@@ -181,24 +192,29 @@ const tests: TestCase[] = [
     run: () => {
       withAcrossEnv(
         () => {
-          assert.deepEqual(resolveAcrossAppFeeForRoute("solana_source", "137"), {
-            ok: true,
-          });
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("evm_to_solana", HUNCH_SOLANA_CHAIN_ID),
+            resolveAcrossAppFeeForRoute("solana_source", HUNCH_SOLANA_CHAIN_ID, "137"),
             { ok: true },
           );
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("swap_api", HUNCH_SOLANA_CHAIN_ID),
+            resolveAcrossAppFeeForRoute("evm_to_solana", "137", HUNCH_SOLANA_CHAIN_ID),
+            { ok: true },
+          );
+          assert.deepEqual(
+            resolveAcrossAppFeeForRoute("swap_api", "137", HUNCH_SOLANA_CHAIN_ID),
+            { ok: true },
+          );
+          assert.deepEqual(
+            resolveAcrossAppFeeForRoute("swap_api", HUNCH_SOLANA_CHAIN_ID, "137"),
             { ok: true },
           );
 
-          const missingRecipient = resolveAcrossAppFeeForRoute("swap_api", "8453");
+          const missingRecipient = resolveAcrossAppFeeForRoute("swap_api", "137", "8453");
           assert.equal(missingRecipient.ok, false);
 
           env.acrossAppFeeRecipients =
             "8453:0x3B5EdF27853C5E521D2419508AAfcf9A1DB2b493";
-          const appFee = resolveAcrossAppFeeForRoute("swap_api", "8453");
+          const appFee = resolveAcrossAppFeeForRoute("swap_api", "137", "8453");
           assert.deepEqual(appFee, {
             ok: true,
             appFee: 0.001,
@@ -253,6 +269,22 @@ const tests: TestCase[] = [
           assert.equal(evmToSolanaSwapApprovalQuery.appFeeRecipient, undefined);
           assert.equal(
             evmToSolanaSwapApprovalQuery.destinationChainId,
+            ACROSS_SOLANA_CHAIN_ID,
+          );
+
+          const solanaSourceSwapApprovalQuery = buildAcrossSwapApprovalQuery({
+            srcChainId: HUNCH_SOLANA_CHAIN_ID,
+            dstChainId: "137",
+            srcToken: "11111111111111111111111111111111",
+            dstToken: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+            amountIn: "1000000",
+            senderAddress: "7GyRwj3RfmWAFM5mPHcrREEiTVasmHvSWQoCGQ9heAAr",
+            recipientAddress: "0x1111111111111111111111111111111111111111",
+          });
+          assert.equal(solanaSourceSwapApprovalQuery.appFee, undefined);
+          assert.equal(solanaSourceSwapApprovalQuery.appFeeRecipient, undefined);
+          assert.equal(
+            solanaSourceSwapApprovalQuery.originChainId,
             ACROSS_SOLANA_CHAIN_ID,
           );
         },

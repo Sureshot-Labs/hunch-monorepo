@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { ethers } from "ethers";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -278,7 +278,7 @@ const FALLBACK_TOKEN_META: Record<
 > = {
   "137": {
     "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": {
-      symbol: "USDC",
+      symbol: "USDC.e",
       decimals: 6,
       name: "USD Coin (PoS)",
     },
@@ -582,6 +582,68 @@ function buildDebridgeSameChainQuery(inputs: DebridgeSameChainInputs) {
   return query;
 }
 
+function readStringField(payload: Record<string, unknown>, field: string) {
+  const value = payload[field];
+  return typeof value === "string" ? value : null;
+}
+
+function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
+  if (payload.startsWith("0x")) {
+    const hex = payload.slice(2);
+    if (!hex.length || hex.length % 2 !== 0) return null;
+    return Buffer.from(hex, "hex");
+  }
+  try {
+    return Buffer.from(payload, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function getSolanaTransactionRequiredSigners(payload: unknown): string[] | null {
+  if (!isRecord(payload) || !isRecord(payload.tx)) return null;
+  const txData = readStringField(payload.tx, "data");
+  if (!txData) return null;
+  const raw = decodeSerializedSolanaTransaction(txData);
+  if (!raw) return null;
+
+  try {
+    const tx = VersionedTransaction.deserialize(raw);
+    return tx.message.staticAccountKeys
+      .slice(0, tx.message.header.numRequiredSignatures)
+      .map(key => key.toBase58());
+  } catch {
+    return null;
+  }
+}
+
+function validateDebridgeSameChainSolanaSigner(inputs: {
+  swapType: BridgeSwapType;
+  chainId: string;
+  senderAddress: string;
+  payload: unknown;
+}): { message: string; requiredSigners: string[] } | null {
+  if (
+    inputs.swapType !== "same_chain" ||
+    inputs.chainId !== SOLANA_CHAIN_ID
+  ) {
+    return null;
+  }
+
+  const requiredSigners = getSolanaTransactionRequiredSigners(inputs.payload);
+  if (!requiredSigners || requiredSigners.includes(inputs.senderAddress)) {
+    return null;
+  }
+
+  return {
+    message:
+      `deBridge returned a Solana transaction that requires ${requiredSigners.join(", ") || "no wallet"} ` +
+      `to sign, but the selected source wallet is ${inputs.senderAddress}. ` +
+      "This deBridge same-chain Solana route is not signable by the selected source wallet.",
+    requiredSigners,
+  };
+}
+
 async function fetchEvmReceiptStatus(inputs: {
   chainId: string;
   txHash: string;
@@ -759,6 +821,8 @@ function isAcrossFallbackEligible(inputs: {
   requestedProvider: BridgeRequestProvider;
   resolvedProvider: ResolvedBridgeProvider;
   routeMode?: "swap_api" | "evm_to_solana" | "solana_source";
+  srcChainId: string;
+  dstChainId: string;
   status?: number;
   payload?: unknown;
 }): boolean {
@@ -767,7 +831,12 @@ function isAcrossFallbackEligible(inputs: {
   }
   // Solana Across routes avoid deBridge's source-native fixed fee. Falling back
   // silently would make the user approve a materially different route/cost.
-  if (inputs.routeMode && inputs.routeMode !== "swap_api") return false;
+  if (
+    inputs.srcChainId === HUNCH_SOLANA_CHAIN_ID ||
+    inputs.dstChainId === HUNCH_SOLANA_CHAIN_ID
+  ) {
+    return false;
+  }
   if (inputs.status == null) return true;
   return isAcrossFallbackableError({
     status: inputs.status,
@@ -928,7 +997,11 @@ async function fetchAcrossBridgePayload(
     };
   }
 
-  const appFee = resolveAcrossAppFeeForRoute(route.mode, inputs.dstChainId);
+  const appFee = resolveAcrossAppFeeForRoute(
+    route.mode,
+    inputs.srcChainId,
+    inputs.dstChainId,
+  );
   if (!appFee.ok) {
     return {
       ok: false,
@@ -1412,6 +1485,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             requestedProvider: query.provider,
             resolvedProvider,
             routeMode: acrossRoute.ok ? acrossRoute.mode : undefined,
+            srcChainId: query.srcChainId,
+            dstChainId: query.dstChainId,
             status: acrossResult.status,
             payload: acrossResult.payload,
           })
@@ -1495,6 +1570,23 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           status: upstream.status,
           message: reason || "deBridge quote failed",
           payload: upstream.payload,
+        });
+      }
+
+      const signerMismatch = validateDebridgeSameChainSolanaSigner({
+        swapType,
+        chainId: query.srcChainId,
+        senderAddress: addresses.senderAddress,
+        payload: upstream.payload,
+      });
+      if (signerMismatch) {
+        reply.code(422);
+        return reply.send({
+          error: signerMismatch.message,
+          message: signerMismatch.message,
+          provider: "debridge",
+          swapType,
+          requiredSigners: signerMismatch.requiredSigners,
         });
       }
 
@@ -1715,6 +1807,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             requestedProvider: body.provider,
             resolvedProvider,
             routeMode: acrossRoute.ok ? acrossRoute.mode : undefined,
+            srcChainId: body.srcChainId,
+            dstChainId: body.dstChainId,
             status: acrossResult.status,
             payload: acrossResult.payload,
           })
@@ -1798,6 +1892,23 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           status: upstream.status,
           message: reason || "deBridge order failed",
           payload: upstream.payload,
+        });
+      }
+
+      const signerMismatch = validateDebridgeSameChainSolanaSigner({
+        swapType,
+        chainId: body.srcChainId,
+        senderAddress: addresses.senderAddress,
+        payload: upstream.payload,
+      });
+      if (signerMismatch) {
+        reply.code(422);
+        return reply.send({
+          error: signerMismatch.message,
+          message: signerMismatch.message,
+          provider: "debridge",
+          swapType,
+          requiredSigners: signerMismatch.requiredSigners,
         });
       }
 

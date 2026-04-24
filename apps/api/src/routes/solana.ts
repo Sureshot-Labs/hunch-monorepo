@@ -338,9 +338,14 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
           { error, userId: user.id, walletAddress },
           "Solana submit failed",
         );
+        const message =
+          error instanceof Error && error.message.trim()
+            ? error.message
+            : "Solana submit failed";
         reply.code(502);
         return reply.send({
           error: "Solana submit failed",
+          message,
         });
       }
     },

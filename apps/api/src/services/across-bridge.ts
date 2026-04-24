@@ -42,6 +42,10 @@ const ACROSS_USDC_ADDRESSES: Record<string, Set<string>> = {
     "epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v",
   ]),
 };
+const SOLANA_NATIVE_ADDRESSES = new Set([
+  "11111111111111111111111111111111",
+  "so11111111111111111111111111111111111111112",
+]);
 
 function normalizeAddress(address: string): string {
   return address.trim().toLowerCase();
@@ -117,6 +121,13 @@ function isAcrossSupportedToken(chainId: string, tokenAddress: string): boolean 
   return supported.has(normalizeAddress(tokenAddress));
 }
 
+function isSolanaNativeToken(chainId: string, tokenAddress: string): boolean {
+  return (
+    chainId === HUNCH_SOLANA_CHAIN_ID &&
+    SOLANA_NATIVE_ADDRESSES.has(normalizeAddress(tokenAddress))
+  );
+}
+
 function isAcrossAllowlistedRoute(inputs: {
   srcChainId: string;
   dstChainId: string;
@@ -165,15 +176,31 @@ export function resolveAcrossRoute(inputs: {
       message: "Across route is not allowlisted",
     };
   }
+  const sourceIsAcrossUsdc = isAcrossSupportedToken(
+    inputs.srcChainId,
+    inputs.srcToken,
+  );
+  const destinationIsAcrossUsdc = isAcrossSupportedToken(
+    inputs.dstChainId,
+    inputs.dstToken,
+  );
+  const sourceIsSolanaNative = isSolanaNativeToken(
+    inputs.srcChainId,
+    inputs.srcToken,
+  );
+
   if (
-    !isAcrossSupportedToken(inputs.srcChainId, inputs.srcToken) ||
-    !isAcrossSupportedToken(inputs.dstChainId, inputs.dstToken)
+    !(sourceIsAcrossUsdc || sourceIsSolanaNative) ||
+    !destinationIsAcrossUsdc
   ) {
     return {
       ok: false,
       code: "across_token_unsupported",
       message: "Across route is not supported for the selected tokens",
     };
+  }
+  if (sourceIsSolanaNative) {
+    return { ok: true, mode: "swap_api" };
   }
   if (inputs.srcChainId === HUNCH_SOLANA_CHAIN_ID) {
     return { ok: true, mode: "solana_source" };
@@ -223,6 +250,7 @@ export function resolveAcrossAppFee(dstChainId: string):
 
 export function resolveAcrossAppFeeForRoute(
   mode: AcrossRouteMode,
+  srcChainId: string,
   dstChainId: string,
 ):
   | {
@@ -231,7 +259,11 @@ export function resolveAcrossAppFeeForRoute(
       appFeeRecipient?: string;
     }
   | { ok: false; error: string } {
-  if (mode !== "swap_api" || dstChainId === HUNCH_SOLANA_CHAIN_ID) {
+  if (
+    mode !== "swap_api" ||
+    srcChainId === HUNCH_SOLANA_CHAIN_ID ||
+    dstChainId === HUNCH_SOLANA_CHAIN_ID
+  ) {
     return { ok: true };
   }
   return resolveAcrossAppFee(dstChainId);
@@ -257,6 +289,7 @@ export function buildAcrossSwapApprovalQuery(inputs: {
 }): Record<string, string | number | boolean | undefined> {
   const config = getAcrossConfig();
   const appFee =
+    inputs.srcChainId === HUNCH_SOLANA_CHAIN_ID ||
     inputs.dstChainId === HUNCH_SOLANA_CHAIN_ID
       ? { ok: true as const }
       : resolveAcrossAppFee(inputs.dstChainId);
