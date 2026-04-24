@@ -11,8 +11,12 @@ import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { ethers } from "ethers";
 
 import { env } from "./env.js";
-import { isAcrossFallbackableError } from "./services/across-client.js";
 import {
+  acrossRequest,
+  isAcrossFallbackableError,
+} from "./services/across-client.js";
+import {
+  ACROSS_SOLANA_CHAIN_ID,
   HUNCH_SOLANA_CHAIN_ID,
   buildAcrossSuggestedFeesQuery,
   buildAcrossSwapApprovalQuery,
@@ -134,7 +138,7 @@ function deriveDepositSeedHash(inputs: {
 
 const tests: TestCase[] = [
   {
-    name: "resolveAcrossRoute uses Solana-specific modes",
+    name: "resolveAcrossRoute uses Swap API for EVM-origin Solana routes",
     run: () => {
       withAcrossEnv(() => {
         assert.deepEqual(
@@ -156,7 +160,18 @@ const tests: TestCase[] = [
             srcToken: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
             dstToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           }),
-          { ok: true, mode: "evm_to_solana" },
+          { ok: true, mode: "swap_api" },
+        );
+
+        assert.deepEqual(
+          resolveAcrossRoute({
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: HUNCH_SOLANA_CHAIN_ID,
+            srcToken: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+            dstToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          }),
+          { ok: true, mode: "swap_api" },
         );
       });
     },
@@ -171,6 +186,10 @@ const tests: TestCase[] = [
           });
           assert.deepEqual(
             resolveAcrossAppFeeForRoute("evm_to_solana", HUNCH_SOLANA_CHAIN_ID),
+            { ok: true },
+          );
+          assert.deepEqual(
+            resolveAcrossAppFeeForRoute("swap_api", HUNCH_SOLANA_CHAIN_ID),
             { ok: true },
           );
 
@@ -220,12 +239,71 @@ const tests: TestCase[] = [
             swapApprovalQuery.appFeeRecipient,
             "0x3B5EdF27853C5E521D2419508AAfcf9A1DB2b493",
           );
+
+          const evmToSolanaSwapApprovalQuery = buildAcrossSwapApprovalQuery({
+            srcChainId: "137",
+            dstChainId: HUNCH_SOLANA_CHAIN_ID,
+            srcToken: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+            dstToken: SOLANA_USDC,
+            amountIn: "1000000",
+            senderAddress: "0x1111111111111111111111111111111111111111",
+            recipientAddress: "7GyRwj3RfmWAFM5mPHcrREEiTVasmHvSWQoCGQ9heAAr",
+          });
+          assert.equal(evmToSolanaSwapApprovalQuery.appFee, undefined);
+          assert.equal(evmToSolanaSwapApprovalQuery.appFeeRecipient, undefined);
+          assert.equal(
+            evmToSolanaSwapApprovalQuery.destinationChainId,
+            ACROSS_SOLANA_CHAIN_ID,
+          );
         },
         {
           appFee: 0.001,
           appFeeRecipients:
             "8453:0x3B5EdF27853C5E521D2419508AAfcf9A1DB2b493",
         },
+      );
+    },
+  },
+  {
+    name: "Across status requests can omit integratorId",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const capturedUrls: string[] = [];
+      globalThis.fetch = (async (input) => {
+        capturedUrls.push(String(input));
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+      try {
+        await acrossRequest({
+          baseUrl: "https://app.across.to/api",
+          timeoutMs: 1000,
+          method: "GET",
+          requestPath: "/deposit/status",
+          integratorId: "0x00f7",
+          includeIntegratorId: false,
+          query: { depositTxnRef: "0xabc" },
+        });
+        await acrossRequest({
+          baseUrl: "https://app.across.to/api",
+          timeoutMs: 1000,
+          method: "GET",
+          requestPath: "/swap/chains",
+          integratorId: "0x00f7",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      assert.equal(
+        capturedUrls[0],
+        "https://app.across.to/api/deposit/status?depositTxnRef=0xabc",
+      );
+      assert.equal(
+        capturedUrls[1],
+        "https://app.across.to/api/swap/chains?integratorId=0x00f7",
       );
     },
   },
@@ -376,7 +454,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "embedded EVM transaction requests omit zero gas and value",
+    name: "embedded EVM transaction requests omit gas and zero value",
     run: () => {
       const request = buildEmbeddedEthereumSendTransactionRequest({
         context: {
@@ -397,7 +475,7 @@ const tests: TestCase[] = [
           to: "0x2222222222222222222222222222222222222222",
           data: "0x",
           value: "0",
-          gas: "0",
+          gas: "98561",
         },
       });
       const body = request.input.body as {

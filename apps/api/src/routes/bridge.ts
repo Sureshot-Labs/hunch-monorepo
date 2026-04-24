@@ -23,6 +23,7 @@ import {
   bridgeTokensQuerySchema,
 } from "../schemas/bridge.js";
 import {
+  acrossChainIdForHunch,
   BridgeRequestProvider,
   BridgeSwapType,
   HUNCH_SOLANA_CHAIN_ID,
@@ -757,12 +758,16 @@ function resolveSwapType(
 function isAcrossFallbackEligible(inputs: {
   requestedProvider: BridgeRequestProvider;
   resolvedProvider: ResolvedBridgeProvider;
+  routeMode?: "swap_api" | "evm_to_solana" | "solana_source";
   status?: number;
   payload?: unknown;
 }): boolean {
   if (inputs.requestedProvider !== "auto" || inputs.resolvedProvider !== "across") {
     return false;
   }
+  // Solana Across routes avoid deBridge's source-native fixed fee. Falling back
+  // silently would make the user approve a materially different route/cost.
+  if (inputs.routeMode && inputs.routeMode !== "swap_api") return false;
   if (inputs.status == null) return true;
   return isAcrossFallbackableError({
     status: inputs.status,
@@ -876,8 +881,8 @@ async function validateAcrossSwapApiSupport(inputs: {
   const discovery = await getAcrossSwapDiscovery(inputs.config);
   if (!discovery.ok) return discovery;
 
-  const srcAcrossChain = inputs.srcChainId;
-  const dstAcrossChain = inputs.dstChainId;
+  const srcAcrossChain = acrossChainIdForHunch(inputs.srcChainId);
+  const dstAcrossChain = acrossChainIdForHunch(inputs.dstChainId);
   if (!discovery.chains.has(srcAcrossChain) || !discovery.chains.has(dstAcrossChain)) {
     return {
       ok: false,
@@ -1266,6 +1271,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           !isAcrossFallbackEligible({
             requestedProvider: query.provider,
             resolvedProvider,
+            routeMode: acrossRoute.ok ? acrossRoute.mode : undefined,
             status: acrossResult.status,
             payload: acrossResult.payload,
           })
@@ -1568,6 +1574,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           !isAcrossFallbackEligible({
             requestedProvider: body.provider,
             resolvedProvider,
+            routeMode: acrossRoute.ok ? acrossRoute.mode : undefined,
             status: acrossResult.status,
             payload: acrossResult.payload,
           })
@@ -1810,6 +1817,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           baseUrl: acrossConfig.baseUrl,
           apiKey: acrossConfig.apiKey,
           integratorId: acrossConfig.integratorId,
+          includeIntegratorId: false,
           timeoutMs: acrossConfig.timeoutMs,
           method: "GET",
           requestPath: "/deposit/status",
@@ -2548,6 +2556,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 baseUrl: acrossConfig.baseUrl,
                 apiKey: acrossConfig.apiKey,
                 integratorId: acrossConfig.integratorId,
+                includeIntegratorId: false,
                 timeoutMs: acrossConfig.timeoutMs,
                 method: "GET",
                 requestPath: "/deposit/status",

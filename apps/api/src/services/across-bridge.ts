@@ -178,9 +178,6 @@ export function resolveAcrossRoute(inputs: {
   if (inputs.srcChainId === HUNCH_SOLANA_CHAIN_ID) {
     return { ok: true, mode: "solana_source" };
   }
-  if (inputs.dstChainId === HUNCH_SOLANA_CHAIN_ID) {
-    return { ok: true, mode: "evm_to_solana" };
-  }
   return { ok: true, mode: "swap_api" };
 }
 
@@ -234,7 +231,9 @@ export function resolveAcrossAppFeeForRoute(
       appFeeRecipient?: string;
     }
   | { ok: false; error: string } {
-  if (mode !== "swap_api") return { ok: true };
+  if (mode !== "swap_api" || dstChainId === HUNCH_SOLANA_CHAIN_ID) {
+    return { ok: true };
+  }
   return resolveAcrossAppFee(dstChainId);
 }
 
@@ -257,10 +256,11 @@ export function buildAcrossSwapApprovalQuery(inputs: {
   slippage?: number;
 }): Record<string, string | number | boolean | undefined> {
   const config = getAcrossConfig();
-  const appFee = resolveAcrossAppFee(inputs.dstChainId);
-  if (!appFee.ok) {
-    throw new Error(appFee.error);
-  }
+  const appFee =
+    inputs.dstChainId === HUNCH_SOLANA_CHAIN_ID
+      ? { ok: true as const }
+      : resolveAcrossAppFee(inputs.dstChainId);
+  if (!appFee.ok) throw new Error(appFee.error);
   return {
     tradeType: "exactInput",
     originChainId: acrossChainIdForHunch(inputs.srcChainId),

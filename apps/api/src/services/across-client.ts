@@ -29,6 +29,7 @@ export async function acrossRequest(inputs: {
   requestPath: string;
   apiKey?: string;
   integratorId?: string;
+  includeIntegratorId?: boolean;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
 }): Promise<
@@ -46,7 +47,11 @@ export async function acrossRequest(inputs: {
       params.set(key, String(value));
     }
   }
-  if (inputs.integratorId?.trim() && !params.has("integratorId")) {
+  if (
+    inputs.includeIntegratorId !== false &&
+    inputs.integratorId?.trim() &&
+    !params.has("integratorId")
+  ) {
     params.set("integratorId", inputs.integratorId.trim());
   }
 

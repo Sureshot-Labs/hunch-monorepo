@@ -382,7 +382,6 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
       );
     })();
   const value = normalizeValueHex(inputs.transaction.value);
-  const gas = normalizeValueHex(inputs.transaction.gas);
 
   return createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
@@ -398,7 +397,6 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
           to: to as `0x${string}`,
           data,
           ...(value ? { value } : {}),
-          ...(gas ? { gas } : {}),
         },
       },
     },
