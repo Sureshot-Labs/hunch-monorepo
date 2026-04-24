@@ -198,8 +198,8 @@ function isTerminalBridgeOrderStatus(
 function normalizeBridgeStatus(value: string | null): "completed" | "failed" | null {
   if (!value) return null;
   const normalized = canonicalizeBridgeOrderStatus(value, "submitted");
-  if (normalized === "fulfilled") return "completed";
-  if (normalized === "failed") return "failed";
+  if (normalized === "fulfilled" || normalized === "refunded") return "completed";
+  if (normalized === "failed" || normalized === "expired") return "failed";
   return null;
 }
 
@@ -1143,6 +1143,146 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
+  const syncAcrossBridgeOrderByTx = async (inputs: {
+    txHash: string;
+    chainId?: string | null;
+    storedStatus?: string | null;
+    orderId?: string | null;
+  }): Promise<{
+    status: BridgeOrderStatus;
+    payload: Record<string, unknown>;
+    source: "across" | "indexer_pending" | "rpc";
+  }> => {
+    const acrossConfig = getAcrossConfig();
+    const txHash = inputs.txHash.trim();
+    const upstream = await acrossRequest({
+      baseUrl: acrossConfig.baseUrl,
+      apiKey: acrossConfig.apiKey,
+      integratorId: acrossConfig.integratorId,
+      includeIntegratorId: false,
+      timeoutMs: acrossConfig.timeoutMs,
+      method: "GET",
+      requestPath: "/deposit/status",
+      query: { depositTxnRef: txHash },
+    });
+
+    const persistAcrossStatus = async (
+      status: BridgeOrderStatus,
+      payload: Record<string, unknown>,
+    ) => {
+      const readPayloadString = (key: string): string | null => {
+        const value = payload[key];
+        if (typeof value !== "string") return null;
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+      };
+      const fillTxHash =
+        readPayloadString("fillTxnRef") ??
+        readPayloadString("fillTxHash") ??
+        readPayloadString("fillTx") ??
+        readPayloadString("fillTxnHash");
+      const refundTxHash =
+        readPayloadString("depositRefundTxnRef") ??
+        readPayloadString("depositRefundTxHash") ??
+        readPayloadString("refundTxHash") ??
+        readPayloadString("refundTxnRef");
+      const depositId = readPayloadString("depositId");
+
+      await pool.query(
+        `
+          update bridge_orders
+          set status = $1::text,
+              tx_hash_dst = coalesce($2::text, tx_hash_dst),
+              metadata = jsonb_set(
+                coalesce(metadata, '{}'::jsonb),
+                '{across}',
+                coalesce(metadata->'across', '{}'::jsonb)
+                  || jsonb_strip_nulls(jsonb_build_object(
+                    'statusPayload', $3::jsonb,
+                    'fillTxnRef', $2::text,
+                    'depositRefundTxnRef', $4::text,
+                    'depositId', $5::text,
+                    'lastStatusSyncedAt', to_jsonb(now())
+                  )),
+                true
+              ),
+              updated_at = now()
+          where provider = 'across'
+            and tx_hash_src = $6::text
+        `,
+        [
+          status,
+          fillTxHash,
+          JSON.stringify(payload),
+          refundTxHash,
+          depositId,
+          txHash,
+        ],
+      );
+
+      if (isTerminalBridgeOrderStatus(status)) {
+        await notifyBridgeStatusByTx("across", txHash, status);
+      }
+    };
+
+    if (!upstream.ok) {
+      const chainId = inputs.chainId?.trim();
+      const sourceReceipt = chainId
+        ? await fetchSourceReceiptStatus({ chainId, txHash })
+        : null;
+      const sourceStatus = sourceReceipt?.status
+        ? canonicalizeBridgeOrderStatus(sourceReceipt.status)
+        : null;
+      if (sourceStatus === "failed") {
+        const payload = { status: "failed", source: "rpc" };
+        await persistAcrossStatus("failed", payload);
+        return { status: "failed", payload, source: "rpc" };
+      }
+
+      const pendingStatus = canonicalizeBridgeOrderStatus(
+        inputs.storedStatus,
+        "submitted",
+      );
+      const payload = {
+        status: pendingStatus,
+        source:
+          sourceStatus === "fulfilled"
+            ? "source_confirmed"
+            : "indexer_pending",
+        sourceTxStatus: sourceStatus,
+        error: extractAcrossErrorMessage(upstream.payload),
+      };
+      await pool.query(
+        `
+          update bridge_orders
+          set metadata = jsonb_set(
+                coalesce(metadata, '{}'::jsonb),
+                '{across}',
+                coalesce(metadata->'across', '{}'::jsonb)
+                  || jsonb_strip_nulls(jsonb_build_object(
+                    'statusPayload', $1::jsonb,
+                    'lastStatusSyncedAt', to_jsonb(now())
+                  )),
+                true
+              ),
+              updated_at = now()
+          where provider = 'across'
+            and tx_hash_src = $2::text
+        `,
+        [JSON.stringify(payload), txHash],
+      );
+      return { status: pendingStatus, payload, source: "indexer_pending" };
+    }
+
+    const payload = normalizeAcrossStatusPayload(upstream.payload);
+    const status = canonicalizeBridgeOrderStatus(
+      typeof payload.status === "string" ? payload.status : null,
+      "submitted",
+    );
+    await persistAcrossStatus(status, payload);
+    return { status, payload, source: "across" };
+  };
+
   z.get(
     "/bridge/chains",
     { schema: { querystring: bridgeChainsQuerySchema } },
@@ -1776,7 +1916,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
 
       if (query.provider === "across") {
-        const acrossConfig = getAcrossConfig();
         const orderId = query.orderId?.trim();
         const txHash = query.txHash?.trim();
         if (!txHash) {
@@ -1813,97 +1952,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const upstream = await acrossRequest({
-          baseUrl: acrossConfig.baseUrl,
-          apiKey: acrossConfig.apiKey,
-          integratorId: acrossConfig.integratorId,
-          includeIntegratorId: false,
-          timeoutMs: acrossConfig.timeoutMs,
-          method: "GET",
-          requestPath: "/deposit/status",
-          query: { depositTxnRef: resolvedTxHash },
+        const synced = await syncAcrossBridgeOrderByTx({
+          txHash: resolvedTxHash,
+          chainId: resolvedChainId,
+          storedStatus: resolvedStoredStatus,
+          orderId,
         });
-
-        if (!upstream.ok) {
-          const failedStatus = await fetchCrossChainSourceFailureStatus({
-            chainId: resolvedChainId,
-            txHash: resolvedTxHash,
-          });
-          if (failedStatus) {
-            await pool.query(
-              `
-                update bridge_orders
-                set status = $1, updated_at = now()
-                where provider = 'across'
-                  and tx_hash_src = $2
-              `,
-              [failedStatus, resolvedTxHash],
-            );
-            await notifyBridgeStatusByTx("across", resolvedTxHash, failedStatus);
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({
-              ok: true,
-              provider: "across",
-              swapType: resolvedSwapType ?? "cross_chain",
-              orderIds: orderId ? [orderId] : [],
-              txLookup: null,
-              orders: [
-                {
-                  orderId: orderId ?? resolvedTxHash,
-                  payload: { status: failedStatus, source: "rpc" },
-                },
-              ],
-            });
-          }
-
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          return reply.send({
-            ok: true,
-            provider: "across",
-            swapType: resolvedSwapType ?? "cross_chain",
-            orderIds: orderId ? [orderId] : [],
-            txLookup: null,
-            orders: [
-              {
-                orderId: orderId ?? resolvedTxHash,
-                payload: {
-                  status: resolvedStoredStatus ?? "submitted",
-                  source: "indexer_pending",
-                  error: extractAcrossErrorMessage(upstream.payload),
-                },
-              },
-            ],
-          });
-        }
-
-        const normalizedPayload = normalizeAcrossStatusPayload(upstream.payload);
-        const normalizedStatus =
-          typeof normalizedPayload.status === "string"
-            ? normalizedPayload.status
-            : null;
-        if (normalizedStatus) {
-          await pool.query(
-            `
-              update bridge_orders
-              set status = $1, updated_at = now()
-              where provider = 'across'
-                and tx_hash_src = $2
-            `,
-            [normalizedStatus, resolvedTxHash],
-          );
-          if (
-            normalizedStatus === "fulfilled" ||
-            normalizedStatus === "failed" ||
-            normalizedStatus === "expired" ||
-            normalizedStatus === "refunded"
-          ) {
-            await notifyBridgeStatusByTx(
-              "across",
-              resolvedTxHash,
-              normalizedStatus,
-            );
-          }
-        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -1915,7 +1969,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           orders: [
             {
               orderId: orderId ?? resolvedTxHash,
-              payload: normalizedPayload,
+              payload: synced.payload,
             },
           ],
         });
@@ -2485,6 +2539,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           src_chain_id: string;
           order_id: string | null;
           tx_hash_src: string | null;
+          status: string | null;
         }>(
           `
             select
@@ -2492,7 +2547,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               swap_type,
               src_chain_id,
               order_id,
-              tx_hash_src
+              tx_hash_src,
+              status
             from bridge_orders
             where user_id = $1
               and provider = $2
@@ -2518,7 +2574,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           return canonicalizeBridgeOrderStatus(rawStatus);
         };
         const isTerminalStatus = (value: BridgeOrderStatus) => {
-          return value === "fulfilled" || value === "failed";
+          return isTerminalBridgeOrderStatus(value);
         };
         const updateOrderStatus = async (status: BridgeOrderStatus, id: string) => {
           await pool.query(
@@ -2548,36 +2604,15 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         };
 
         if (syncProvider === "across") {
-          const acrossConfig = getAcrossConfig();
           for (const row of pendingRows) {
             try {
               if (!row.tx_hash_src) continue;
-              const statusRes = await acrossRequest({
-                baseUrl: acrossConfig.baseUrl,
-                apiKey: acrossConfig.apiKey,
-                integratorId: acrossConfig.integratorId,
-                includeIntegratorId: false,
-                timeoutMs: acrossConfig.timeoutMs,
-                method: "GET",
-                requestPath: "/deposit/status",
-                query: { depositTxnRef: row.tx_hash_src },
+              await syncAcrossBridgeOrderByTx({
+                txHash: row.tx_hash_src,
+                chainId: row.src_chain_id,
+                storedStatus: row.status,
+                orderId: row.order_id,
               });
-              if (statusRes.ok) {
-                const payload = normalizeAcrossStatusPayload(statusRes.payload);
-                const status =
-                  typeof payload.status === "string"
-                    ? canonicalizeBridgeOrderStatus(payload.status)
-                    : null;
-                if (status) {
-                  await updateOrderStatus(status, row.id);
-                }
-                continue;
-              }
-              const fallbackStatus =
-                await resolveCrossChainFailedBySourceReceipt(row);
-              if (fallbackStatus) {
-                await updateOrderStatus(fallbackStatus, row.id);
-              }
             } catch (error) {
               request.log.warn({ error, orderId: row.id }, "Across sync failed");
             }

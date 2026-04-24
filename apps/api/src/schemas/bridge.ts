@@ -78,8 +78,8 @@ export const bridgeStatusQuerySchema = z.object({
 export const bridgeSubmitBodySchema = z.object({
   provider: zBridgeProvider.default("debridge"),
   swapType: zBridgeSwapType.optional(),
-  bridgeOrderId: z.string().optional(),
-  orderId: z.string().optional(),
+  bridgeOrderId: z.string().nullable().optional(),
+  orderId: z.string().nullable().optional(),
   txHash: zRequiredString("txHash is required"),
   txChain: z.enum(["src", "dst"]).optional(),
   status: z.string().optional(),
