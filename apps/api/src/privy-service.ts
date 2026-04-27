@@ -26,6 +26,11 @@ export type PrivyWalletProfile = PrivyWallet & {
   isInternalWallet: boolean;
   walletId?: string | null;
 };
+export type PrivyWebhookHeaders = {
+  id: string;
+  timestamp: string;
+  signature: string;
+};
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const PRIVY_USER_SYNC_MAX_ATTEMPTS = 6;
@@ -169,6 +174,20 @@ export class PrivyService {
     } catch (error) {
       throw new PrivyAccessTokenError(
         `Invalid Privy access token: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  static async verifyWebhook(
+    payload: object,
+    headers: PrivyWebhookHeaders,
+    signingKey: string,
+  ): Promise<unknown> {
+    try {
+      return await privyClient.verifyWebhook(payload, headers, signingKey);
+    } catch (error) {
+      throw new PrivyAccessTokenError(
+        `Invalid Privy webhook signature: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
   }

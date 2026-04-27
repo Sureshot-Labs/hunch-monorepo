@@ -952,6 +952,7 @@ export const env = {
   ),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
+  privyWebhookSecret: process.env.PRIVY_WEBHOOK_SECRET?.trim() || "",
   metricsAuthToken: process.env.METRICS_AUTH_TOKEN?.trim() || "",
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
   pricesSseMaxConnectionsPerIp: optionalPositiveInt(

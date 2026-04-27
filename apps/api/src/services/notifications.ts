@@ -236,6 +236,91 @@ export function buildBridgeNotification(input: {
   };
 }
 
+function formatDepositChain(caip2?: string | null): string | null {
+  if (!caip2) return null;
+  const normalized = caip2.toLowerCase();
+  if (normalized.startsWith("solana:")) return "Solana";
+  if (normalized === "eip155:8453") return "Base";
+  if (normalized === "eip155:137") return "Polygon";
+  if (normalized === "eip155:1") return "Ethereum";
+  return caip2;
+}
+
+function formatDepositNetwork(caip2?: string | null): string | null {
+  if (!caip2) return null;
+  const normalized = caip2.toLowerCase();
+  if (normalized.startsWith("solana:")) return "solana";
+  if (normalized === "eip155:8453") return "base";
+  if (normalized === "eip155:137") return "polygon";
+  if (normalized === "eip155:1") return "ethereum";
+  return null;
+}
+
+function formatDepositAsset(
+  asset: Record<string, unknown> | null | undefined,
+  caip2?: string | null,
+): string {
+  const type = typeof asset?.type === "string" ? asset.type : "";
+  const mint = typeof asset?.mint === "string" ? asset.mint : "";
+  const address = typeof asset?.address === "string" ? asset.address : "";
+  const normalizedCaip2 = caip2?.toLowerCase() ?? "";
+  if (type === "native-token") {
+    if (normalizedCaip2.startsWith("solana:")) return "SOL";
+    if (normalizedCaip2 === "eip155:137") return "POL";
+    return "native token";
+  }
+  if (
+    mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ||
+    address.toLowerCase() === "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" ||
+    address.toLowerCase() === "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359" ||
+    address.toLowerCase() === "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+  ) {
+    return "USDC";
+  }
+  if (type === "spl") return "SPL token";
+  if (type === "erc20") return "token";
+  return "funds";
+}
+
+export function buildDepositNotification(input: {
+  userId: string;
+  source: string;
+  walletAddress?: string | null;
+  walletType?: string | null;
+  caip2?: string | null;
+  asset?: Record<string, unknown> | null;
+  amountRaw: string;
+  txHash?: string | null;
+  idempotencyKey: string;
+}): NotificationInput {
+  const asset = formatDepositAsset(input.asset, input.caip2);
+  const chain = formatDepositChain(input.caip2);
+  const body = chain
+    ? `${asset} deposit received on ${chain}`
+    : `${asset} deposit received`;
+  const dedupeKey = `deposit:${input.source}:${input.idempotencyKey}`;
+
+  return {
+    userId: input.userId,
+    type: "deposit_received",
+    title: "Deposit received",
+    body,
+    severity: "success",
+    data: {
+      category: "system",
+      source: input.source,
+      walletAddress: input.walletAddress ?? null,
+      walletType: input.walletType ?? null,
+      caip2: input.caip2 ?? null,
+      network: formatDepositNetwork(input.caip2),
+      asset: input.asset ?? null,
+      amountRaw: input.amountRaw,
+      txHash: input.txHash ?? null,
+    },
+    dedupeKey,
+  };
+}
+
 export function buildRewardNotification(input: {
   userId: string;
   status: "submitted" | "confirmed" | "failed";
