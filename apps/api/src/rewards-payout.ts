@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
 
-import { getOrCreateAssociatedTokenAccount, transferChecked } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 import { pathToFileURL } from "node:url";
@@ -14,7 +18,10 @@ import {
   buildRewardNotification,
   createNotificationSafe,
 } from "./services/notifications.js";
-import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
+import {
+  fetchSolanaSignatureStatus,
+  waitForSolanaSignatureConfirmation,
+} from "./services/solana-rpc.js";
 
 type ClaimRow = {
   id: string;
@@ -115,8 +122,7 @@ function resolveChainAlias(chainId: string): string | null {
 function buildChainConfigs(): Record<string, ChainConfig> {
   const polygonUsdc =
     env.rewardsUsdcPolygon?.trim() || env.polymarketUsdcAddress;
-  const baseUsdc =
-    env.rewardsUsdcBase?.trim() || env.limitlessUsdcAddress;
+  const baseUsdc = env.rewardsUsdcBase?.trim() || env.limitlessUsdcAddress;
 
   return {
     "137": {
@@ -228,6 +234,27 @@ async function fetchPendingClaims(
     [chainIds, limit],
   );
   return rows;
+}
+
+async function fetchClaimById(id: string): Promise<ClaimRow | null> {
+  const { rows } = await pool.query<ClaimRow>(
+    `
+      select
+        id,
+        user_id,
+        wallet_address,
+        chain_id,
+        amount_usdc::text as amount_usdc,
+        status,
+        tx_hash,
+        created_at
+      from reward_claims
+      where id = $1
+      limit 1
+    `,
+    [id],
+  );
+  return rows[0] ?? null;
 }
 
 async function failPendingClaims(
@@ -414,10 +441,7 @@ async function confirmEvmClaim(
   }
 }
 
-async function confirmSolanaClaim(
-  claim: ClaimRow,
-  connection: Connection,
-) {
+async function confirmSolanaClaim(claim: ClaimRow, connection: Connection) {
   if (!claim.tx_hash) return;
   const status = await connection.getSignatureStatus(claim.tx_hash, {
     searchTransactionHistory: true,
@@ -428,7 +452,10 @@ async function confirmSolanaClaim(
     await markClaimStatus({ id: claim.id, status: "failed" });
     return;
   }
-  if (value.confirmationStatus === "confirmed" || value.confirmationStatus === "finalized") {
+  if (
+    value.confirmationStatus === "confirmed" ||
+    value.confirmationStatus === "finalized"
+  ) {
     await markClaimStatus({ id: claim.id, status: "confirmed" });
   }
 }
@@ -477,39 +504,58 @@ async function sendSolanaClaim(
 
   const mint = new PublicKey(config.usdcMint);
   const recipient = new PublicKey(claim.wallet_address);
-  const sourceAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    keypair,
-    mint,
-    keypair.publicKey,
+  const sourceAccount = getAssociatedTokenAddressSync(mint, keypair.publicKey);
+  const destinationAccount = getAssociatedTokenAddressSync(mint, recipient);
+  const transaction = new Transaction().add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      keypair.publicKey,
+      sourceAccount,
+      keypair.publicKey,
+      mint,
+    ),
+    createAssociatedTokenAccountIdempotentInstruction(
+      keypair.publicKey,
+      destinationAccount,
+      recipient,
+      mint,
+    ),
+    createTransferCheckedInstruction(
+      sourceAccount,
+      mint,
+      destinationAccount,
+      keypair.publicKey,
+      amountRaw,
+      config.decimals,
+    ),
   );
-  const destinationAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    keypair,
-    mint,
-    recipient,
-  );
-  const signature = await transferChecked(
-    connection,
-    keypair,
-    sourceAccount.address,
-    mint,
-    destinationAccount.address,
-    keypair.publicKey,
-    amountRaw,
-    config.decimals,
-  );
+  const signature = await connection.sendTransaction(transaction, [keypair], {
+    preflightCommitment: "confirmed",
+    skipPreflight: false,
+  });
   await markClaimStatus({
     id: claim.id,
     status: "submitted",
     txHash: signature,
   });
-  const confirmation = await waitForSolanaSignatureConfirmation({
-    rpcUrls: env.solanaRpcUrls,
-    signature,
-    timeoutMs: env.solanaRpcTimeoutMs,
-    commitment: "confirmed",
-  });
+
+  let confirmation: { status: "fulfilled" | "failed" | "submitted" };
+  try {
+    confirmation = await waitForSolanaSignatureConfirmation({
+      rpcUrls: env.solanaRpcUrls,
+      signature,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      commitment: "confirmed",
+    });
+  } catch (error) {
+    console.warn(
+      "Solana claim confirmation check failed after broadcast",
+      claim.id,
+      signature,
+      error instanceof Error ? error.message : error,
+    );
+    return;
+  }
+
   if (confirmation.status === "failed") {
     await markClaimStatus({ id: claim.id, status: "failed" });
   } else if (confirmation.status !== "fulfilled") {
@@ -519,9 +565,80 @@ async function sendSolanaClaim(
   }
 }
 
-export async function runRewardsPayout(
-  options: RewardsPayoutOptions,
+async function markSolanaClaimAfterPayoutError(claim: ClaimRow) {
+  const current = await fetchClaimById(claim.id);
+  const txHash = current?.tx_hash;
+  if (!txHash) {
+    await markClaimStatus({ id: claim.id, status: "failed" });
+    return;
+  }
+
+  let status: { status: "submitted" | "fulfilled" | "failed" } | null = null;
+  try {
+    status = await fetchSolanaSignatureStatus({
+      rpcUrls: env.solanaRpcUrls,
+      signature: txHash,
+      timeoutMs: env.solanaRpcTimeoutMs,
+    });
+  } catch (error) {
+    console.warn(
+      "Solana claim status check failed after payout error",
+      claim.id,
+      txHash,
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  if (status?.status === "fulfilled") {
+    await markClaimStatus({ id: claim.id, status: "confirmed" });
+    return;
+  }
+  if (status?.status === "failed") {
+    await markClaimStatus({ id: claim.id, status: "failed" });
+    return;
+  }
+  if (current?.status !== "submitted") {
+    await markClaimStatus({ id: claim.id, status: "submitted", txHash });
+  }
+}
+
+async function markEvmClaimAfterPayoutError(
+  claim: ClaimRow,
+  provider: ethers.JsonRpcProvider,
 ) {
+  const current = await fetchClaimById(claim.id);
+  const txHash = current?.tx_hash;
+  if (!txHash) {
+    await markClaimStatus({ id: claim.id, status: "failed" });
+    return;
+  }
+
+  let receipt: ethers.TransactionReceipt | null = null;
+  try {
+    receipt = await provider.getTransactionReceipt(txHash);
+  } catch (error) {
+    console.warn(
+      "EVM claim receipt check failed after payout error",
+      claim.id,
+      txHash,
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  if (receipt?.status === 1) {
+    await markClaimStatus({ id: claim.id, status: "confirmed" });
+    return;
+  }
+  if (receipt?.status === 0) {
+    await markClaimStatus({ id: claim.id, status: "failed" });
+    return;
+  }
+  if (current?.status !== "submitted") {
+    await markClaimStatus({ id: claim.id, status: "submitted", txHash });
+  }
+}
+
+export async function runRewardsPayout(options: RewardsPayoutOptions) {
   const chainConfigs = buildChainConfigs();
   const supportedChains = Object.keys(chainConfigs);
   const chainId = options.chainId ? resolveChainAlias(options.chainId) : null;
@@ -580,7 +697,9 @@ export async function runRewardsPayout(
       if (options.dryRun) {
         console.log(`Dry run: ${pending.length} pending claims`);
         pending.forEach((claim) => {
-          console.log(`${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`);
+          console.log(
+            `${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`,
+          );
         });
         return;
       }
@@ -588,7 +707,9 @@ export async function runRewardsPayout(
       const failed = await failPendingClaims(chainFilter, options.limit);
       console.log(`Failed ${failed.length} pending claims`);
       failed.forEach((claim) => {
-        console.log(`${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`);
+        console.log(
+          `${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`,
+        );
       });
       for (const claim of failed) {
         await notifyClaimStatus(claim, "failed");
@@ -596,9 +717,7 @@ export async function runRewardsPayout(
       return;
     }
 
-    const needsEvm = chainFilter.some(
-      (id) => chainConfigs[id]?.kind === "evm",
-    );
+    const needsEvm = chainFilter.some((id) => chainConfigs[id]?.kind === "evm");
     const needsSolana = chainFilter.some(
       (id) => chainConfigs[id]?.kind === "solana",
     );
@@ -618,7 +737,8 @@ export async function runRewardsPayout(
     if (!options.confirmOnly && !options.dryRun) {
       if (needsEvm) {
         const missingEvmChains = chainFilter.filter(
-          (id) => chainConfigs[id]?.kind === "evm" && !evmPayoutKeyByChain.get(id),
+          (id) =>
+            chainConfigs[id]?.kind === "evm" && !evmPayoutKeyByChain.get(id),
         );
         if (missingEvmChains.length) {
           throw new Error(
@@ -684,7 +804,9 @@ export async function runRewardsPayout(
       );
       console.log(`Dry run: ${pending.rows.length} pending claims`);
       pending.rows.forEach((claim) => {
-        console.log(`${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`);
+        console.log(
+          `${claim.id} ${claim.chain_id} ${claim.amount_usdc} -> ${claim.wallet_address}`,
+        );
       });
       return;
     }
@@ -730,6 +852,15 @@ export async function runRewardsPayout(
           claim.chain_id,
           error instanceof Error ? error.message : error,
         );
+        if (config.kind === "solana") {
+          await markSolanaClaimAfterPayoutError(claim);
+          continue;
+        }
+        const provider = providerByChain.get(claim.chain_id);
+        if (provider) {
+          await markEvmClaimAfterPayoutError(claim, provider);
+          continue;
+        }
         await markClaimStatus({ id: claim.id, status: "failed" });
       }
     }
