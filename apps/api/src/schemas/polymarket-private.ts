@@ -23,7 +23,7 @@ const zOptionalBool = z
   .transform((v) => v === true || v === "true")
   .catch(false);
 
-const polymarketOrderSchema = z
+const polymarketOrderSchemaV1 = z
   .object({
     salt: zNumberish,
     maker: zEthAddressRequired,
@@ -41,7 +41,7 @@ const polymarketOrderSchema = z
   })
   .passthrough();
 
-const polymarketUnsignedOrderSchema = z
+const polymarketUnsignedOrderSchemaV1 = z
   .object({
     salt: zNumberish,
     maker: zEthAddressRequired,
@@ -58,7 +58,52 @@ const polymarketUnsignedOrderSchema = z
   })
   .passthrough();
 
-const polymarketFeeAuthSchema = z.object({
+const polymarketOrderSchemaV2 = z
+  .object({
+    salt: zNumberish,
+    maker: zEthAddressRequired,
+    signer: zEthAddressRequired,
+    tokenId: zNumberish,
+    makerAmount: zNumberish,
+    takerAmount: zNumberish,
+    side: zNumberish,
+    signatureType: zNumberish,
+    timestamp: zNumberish,
+    metadata: zBytes32,
+    builder: zBytes32,
+    signature: zRequiredString("signature is required"),
+    expiration: zNumberish.optional(),
+  })
+  .passthrough();
+
+const polymarketUnsignedOrderSchemaV2 = z
+  .object({
+    salt: zNumberish,
+    maker: zEthAddressRequired,
+    signer: zEthAddressRequired,
+    tokenId: zNumberish,
+    makerAmount: zNumberish,
+    takerAmount: zNumberish,
+    side: zNumberish,
+    signatureType: zNumberish,
+    timestamp: zNumberish,
+    metadata: zBytes32,
+    builder: zBytes32,
+    expiration: zNumberish.optional(),
+  })
+  .passthrough();
+
+const polymarketOrderSchema = z.union([
+  polymarketOrderSchemaV2,
+  polymarketOrderSchemaV1,
+]);
+
+const polymarketUnsignedOrderSchema = z.union([
+  polymarketUnsignedOrderSchemaV2,
+  polymarketUnsignedOrderSchemaV1,
+]);
+
+const polymarketFeeAuthSchemaV1 = z.object({
   signer: zEthAddressRequired,
   vault: zEthAddressRequired,
   exchange: zEthAddressRequired,
@@ -67,6 +112,20 @@ const polymarketFeeAuthSchema = z.object({
   nonce: zNumberish,
   deadline: zNumberish,
 });
+
+const polymarketFeeAuthSchemaV3 = z.object({
+  signer: zEthAddressRequired,
+  vault: zEthAddressRequired,
+  exchange: zEthAddressRequired,
+  orderHash: zRequiredString("orderHash is required"),
+  feeBps: zNumberish,
+  deadline: zNumberish,
+});
+
+const polymarketFeeAuthSchema = z.union([
+  polymarketFeeAuthSchemaV1,
+  polymarketFeeAuthSchemaV3,
+]);
 
 export const polymarketPlaceOrderBodySchema = z.object({
   order: polymarketOrderSchema,

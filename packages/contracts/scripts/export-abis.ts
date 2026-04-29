@@ -12,8 +12,16 @@ const exportsList: AbiExport[] = [
     outFile: "PolymarketFeeCollector.json",
   },
   {
+    artifact: "PolymarketFeeCollectorClobV2.sol/PolymarketFeeCollectorClobV2.json",
+    outFile: "PolymarketFeeCollectorClobV2.json",
+  },
+  {
     artifact: "PolymarketInterfaces.sol/IPolymarketExchange.json",
     outFile: "IPolymarketExchange.json",
+  },
+  {
+    artifact: "PolymarketInterfacesV2.sol/IPolymarketExchangeV2.json",
+    outFile: "IPolymarketExchangeV2.json",
   },
 ];
 

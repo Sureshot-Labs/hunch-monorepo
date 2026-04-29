@@ -11,6 +11,7 @@
     "typechain": "hardhat typechain",
     "abi:export": "ts-node scripts/export-abis.ts",
     "deploy": "hardhat run scripts/deploy.ts",
+    "deploy:clob-v2": "hardhat run scripts/deploy-clob-v2.ts",
     "demo": "node demo/server.js",
     "typecheck": "tsc -p tsconfig.build.json --noEmit"
   },

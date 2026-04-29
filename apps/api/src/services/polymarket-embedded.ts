@@ -55,6 +55,22 @@ const POLYMARKET_ORDER_TYPES = {
   ],
 } as const;
 
+const POLYMARKET_ORDER_TYPES_V2 = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "signer", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "makerAmount", type: "uint256" },
+    { name: "takerAmount", type: "uint256" },
+    { name: "side", type: "uint8" },
+    { name: "signatureType", type: "uint8" },
+    { name: "timestamp", type: "uint256" },
+    { name: "metadata", type: "bytes32" },
+    { name: "builder", type: "bytes32" },
+  ],
+} as const;
+
 const FEE_AUTH_TYPES = {
   FeeAuth: [
     { name: "signer", type: "address" },
@@ -63,6 +79,17 @@ const FEE_AUTH_TYPES = {
     { name: "orderHash", type: "bytes32" },
     { name: "feeBps", type: "uint256" },
     { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+const FEE_AUTH_TYPES_V3 = {
+  FeeAuthV3: [
+    { name: "signer", type: "address" },
+    { name: "vault", type: "address" },
+    { name: "exchange", type: "address" },
+    { name: "orderHash", type: "bytes32" },
+    { name: "feeBps", type: "uint256" },
     { name: "deadline", type: "uint256" },
   ],
 } as const;
@@ -130,9 +157,12 @@ export type PolymarketOrderPayload = {
   tokenId: string | number;
   makerAmount: string | number;
   takerAmount: string | number;
-  expiration: string | number;
-  nonce: string | number;
-  feeRateBps: string | number;
+  expiration?: string | number;
+  nonce?: string | number;
+  feeRateBps?: string | number;
+  timestamp?: string | number;
+  metadata?: string;
+  builder?: string;
   side: number | string;
   signatureType: number | string;
 };
@@ -143,7 +173,7 @@ export type FeeAuthPayload = {
   exchange: string;
   orderHash: string;
   feeBps: string | number;
-  nonce: string | number;
+  nonce?: string | number;
   deadline: string | number;
 };
 
@@ -517,15 +547,26 @@ async function signTypedDataWithEmbeddedWallet(inputs: {
 function canonicalizeOrderPayload(
   payload: PolymarketOrderPayload,
 ): PolymarketOrderPayload {
-  return {
+  const output = {
     ...payload,
     maker: requireAddress(payload.maker, "Invalid Polymarket maker address."),
     signer: requireAddress(payload.signer, "Invalid Polymarket signer address."),
-    taker: requireAddress(
+  };
+  if (!isPolymarketOrderPayloadV2(payload)) {
+    output.taker = requireAddress(
       payload.taker ?? ZERO_ADDRESS,
       "Invalid Polymarket taker address.",
-    ),
-  };
+    );
+  }
+  return output;
+}
+
+function isPolymarketOrderPayloadV2(payload: PolymarketOrderPayload): boolean {
+  return Boolean(payload.timestamp != null && payload.metadata && payload.builder);
+}
+
+function isFeeAuthPayloadV3(payload: FeeAuthPayload): boolean {
+  return payload.nonce == null;
 }
 
 function canonicalizeFeeAuthPayload(payload: FeeAuthPayload): FeeAuthPayload {
@@ -641,16 +682,19 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
       "Embedded Polymarket order signer must match the selected Trading Wallet.",
     );
   }
+  const isV2Order = isPolymarketOrderPayloadV2(typedPayload);
   return {
     domain: {
       name: "Polymarket CTF Exchange",
-      version: "1",
+      version: isV2Order ? "2" : "1",
       chainId: POLY_CHAIN_ID,
       verifyingContract: exchangeAddress,
     },
     types: {
       EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-      Order: POLYMARKET_ORDER_TYPES.Order,
+      Order: isV2Order
+        ? POLYMARKET_ORDER_TYPES_V2.Order
+        : POLYMARKET_ORDER_TYPES.Order,
     },
     primaryType: "Order",
     message: typedPayload,
@@ -703,15 +747,17 @@ function buildEmbeddedPolymarketFeeAuthTypedData(inputs: {
   return {
     domain: {
       name: "Polymarket Aggregator FeeCollector",
-      version: "2",
+      version: isFeeAuthPayloadV3(typedPayload) ? "3" : "2",
       chainId: POLY_CHAIN_ID,
       verifyingContract: feeCollectorAddress,
     },
     types: {
       EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-      FeeAuth: FEE_AUTH_TYPES.FeeAuth,
+      ...(isFeeAuthPayloadV3(typedPayload)
+        ? { FeeAuthV3: FEE_AUTH_TYPES_V3.FeeAuthV3 }
+        : { FeeAuth: FEE_AUTH_TYPES.FeeAuth }),
     },
-    primaryType: "FeeAuth",
+    primaryType: isFeeAuthPayloadV3(typedPayload) ? "FeeAuthV3" : "FeeAuth",
     message: typedPayload,
   } as const;
 }
@@ -903,13 +949,15 @@ export async function signEmbeddedPolymarketOrder(inputs: {
     typedData: {
       domain: {
         name: "Polymarket CTF Exchange",
-        version: "1",
+        version: isPolymarketOrderPayloadV2(typedPayload) ? "2" : "1",
         chainId: POLY_CHAIN_ID,
         verifyingContract: exchangeAddress,
       },
       types: {
         EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-        Order: POLYMARKET_ORDER_TYPES.Order,
+        Order: isPolymarketOrderPayloadV2(typedPayload)
+          ? POLYMARKET_ORDER_TYPES_V2.Order
+          : POLYMARKET_ORDER_TYPES.Order,
       },
       primaryType: "Order",
       message: typedPayload,
@@ -938,15 +986,17 @@ export async function signEmbeddedPolymarketFeeAuth(inputs: {
     typedData: {
       domain: {
         name: "Polymarket Aggregator FeeCollector",
-        version: "2",
+        version: isFeeAuthPayloadV3(typedPayload) ? "3" : "2",
         chainId: POLY_CHAIN_ID,
         verifyingContract: feeCollectorAddress,
       },
       types: {
         EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-        FeeAuth: FEE_AUTH_TYPES.FeeAuth,
+        ...(isFeeAuthPayloadV3(typedPayload)
+          ? { FeeAuthV3: FEE_AUTH_TYPES_V3.FeeAuthV3 }
+          : { FeeAuth: FEE_AUTH_TYPES.FeeAuth }),
       },
-      primaryType: "FeeAuth",
+      primaryType: isFeeAuthPayloadV3(typedPayload) ? "FeeAuthV3" : "FeeAuth",
       message: typedPayload,
     },
   });

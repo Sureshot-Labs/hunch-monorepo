@@ -31,6 +31,7 @@ const erc20Iface = new Interface([
 ]);
 
 const polymarketExchangeIface = new Interface(abis.IPolymarketExchange);
+const polymarketExchangeV2Iface = new Interface(abis.IPolymarketExchangeV2);
 const feeCollectorIface = new Interface(abis.PolymarketFeeCollector);
 const multicallIface = new Interface([
   "function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) view returns (tuple(bool success, bytes returnData)[] returnData)",
@@ -382,6 +383,46 @@ export async function fetchPolymarketOrderHash(inputs: {
   return value;
 }
 
+export async function fetchPolymarketOrderHashV2(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  exchangeAddress: string;
+  order: {
+    salt: string | number | bigint;
+    maker: string;
+    signer: string;
+    tokenId: string | number | bigint;
+    makerAmount: string | number | bigint;
+    takerAmount: string | number | bigint;
+    side: number;
+    signatureType: number;
+    timestamp: string | number | bigint;
+    metadata: string;
+    builder: string;
+    signature: string;
+  };
+}): Promise<string> {
+  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
+  const data = polymarketExchangeV2Iface.encodeFunctionData("hashOrder", [
+    inputs.order,
+  ]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: exchangeAddress, data }, "latest"],
+  });
+  const decoded = polymarketExchangeV2Iface.decodeFunctionResult(
+    "hashOrder",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  if (typeof value !== "string") {
+    throw new Error("Polygon RPC: invalid V2 hashOrder result");
+  }
+  return value;
+}
+
 export async function fetchPolymarketOrderStatus(inputs: {
   rpcUrl: string;
   timeoutMs: number;
@@ -429,6 +470,57 @@ export async function fetchPolymarketOrderStatus(inputs: {
   }
   return {
     isFilledOrCancelled,
+    remaining,
+  };
+}
+
+export async function fetchPolymarketOrderStatusV2(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  exchangeAddress: string;
+  orderHash: string;
+}): Promise<{ filled: boolean; remaining: bigint }> {
+  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
+  const data = polymarketExchangeV2Iface.encodeFunctionData("getOrderStatus", [
+    inputs.orderHash,
+  ]);
+  const result = await ethRpcRequest<string>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    method: "eth_call",
+    params: [{ to: exchangeAddress, data }, "latest"],
+  });
+  const decoded = polymarketExchangeV2Iface.decodeFunctionResult(
+    "getOrderStatus",
+    result,
+  ) as unknown;
+  const value = Array.isArray(decoded) ? decoded[0] : null;
+  const record =
+    value && typeof value === "object"
+      ? (value as {
+          0?: boolean;
+          1?: bigint;
+          filled?: boolean;
+          remaining?: bigint;
+        })
+      : null;
+  const filled =
+    typeof record?.filled === "boolean"
+      ? record.filled
+      : typeof record?.[0] === "boolean"
+        ? record[0]
+        : null;
+  const remaining =
+    typeof record?.remaining === "bigint"
+      ? record.remaining
+      : typeof record?.[1] === "bigint"
+        ? record[1]
+        : null;
+  if (filled == null || remaining == null) {
+    throw new Error("Polygon RPC: invalid V2 getOrderStatus result");
+  }
+  return {
+    filled,
     remaining,
   };
 }

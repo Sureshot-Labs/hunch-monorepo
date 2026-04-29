@@ -32,7 +32,9 @@ import {
 import {
   fetchEvmCode,
   fetchPolymarketOrderHash,
+  fetchPolymarketOrderHashV2,
   fetchPolymarketOrderStatus,
+  fetchPolymarketOrderStatusV2,
 } from "../services/polygon-rpc.js";
 import {
   fetchPolymarketOnchainSnapshot,
@@ -120,6 +122,7 @@ type PolymarketUnconfirmedRow = {
   token_id: string | null;
   order_hash: string | null;
   order_payload: unknown | null;
+  order_payload_version: string | null;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -298,18 +301,6 @@ function writePolymarketAccountCache(key: string, value: PolymarketAccountPayloa
     value,
     expiresAt: Date.now() + env.polymarketAccountCacheTtlMs,
   });
-}
-
-function getPolymarketBuilderCreds() {
-  return env.polymarketBuilderApiKey &&
-    env.polymarketBuilderApiSecret &&
-    env.polymarketBuilderApiPassphrase
-    ? {
-        key: env.polymarketBuilderApiKey,
-        secret: env.polymarketBuilderApiSecret,
-        passphrase: env.polymarketBuilderApiPassphrase,
-      }
-    : undefined;
 }
 
 function normalizeHex(value: string): string {
@@ -962,6 +953,21 @@ function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
   return null;
 }
 
+function isPolymarketOrderPayloadV2(orderPayload: unknown): boolean {
+  return (
+    isRecord(orderPayload) &&
+    "timestamp" in orderPayload &&
+    "metadata" in orderPayload &&
+    "builder" in orderPayload
+  );
+}
+
+function resolvePolymarketOrderPayloadVersion(orderPayload: unknown): string {
+  return isPolymarketOrderPayloadV2(orderPayload)
+    ? "polymarket_clob_v2"
+    : "polymarket_clob_v1";
+}
+
 async function resolvePolymarketOrderExchangeAddress(inputs: {
   tokenId?: string | null;
   explicitExchangeAddress?: string | null;
@@ -985,7 +991,23 @@ async function fetchPolymarketExecutionSummary(inputs: {
   exchangeAddress: string;
   orderHash: string;
   makerAmount: bigint;
+  orderPayloadVersion?: string | null;
 }) {
+  if (inputs.orderPayloadVersion === "polymarket_clob_v2") {
+    const onchainStatus = await fetchPolymarketOrderStatusV2({
+      rpcUrl: env.polygonRpcUrl,
+      timeoutMs: env.polygonRpcTimeoutMs,
+      exchangeAddress: inputs.exchangeAddress,
+      orderHash: inputs.orderHash,
+    });
+    const isLiveDefault = !onchainStatus.filled && onchainStatus.remaining === 0n;
+    return summarizePolymarketOnchainOrderExecution({
+      makerAmount: inputs.makerAmount,
+      remaining: isLiveDefault ? inputs.makerAmount : onchainStatus.remaining,
+      isFilledOrCancelled: onchainStatus.filled,
+    });
+  }
+
   const onchainStatus = await fetchPolymarketOrderStatus({
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,
@@ -1003,6 +1025,7 @@ async function waitForPolymarketExecutionConfirmation(inputs: {
   exchangeAddress: string;
   orderHash: string;
   makerAmount: bigint;
+  orderPayloadVersion?: string | null;
 }) {
   for (let attempt = 0; attempt < POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS; attempt += 1) {
     const summary = await fetchPolymarketExecutionSummary(inputs);
@@ -1021,7 +1044,7 @@ async function reconcileUnconfirmedOrders(inputs: {
 }) {
   const { rows } = await pool.query<PolymarketUnconfirmedRow>(
     `
-      select id, token_id, order_hash, order_payload
+      select id, token_id, order_hash, order_payload, order_payload_version
       from orders
       where user_id = $1
         and venue = 'polymarket'
@@ -1072,6 +1095,8 @@ async function reconcileUnconfirmedOrders(inputs: {
         exchangeAddress,
         orderHash,
         makerAmount,
+        orderPayloadVersion:
+          row.order_payload_version ?? resolvePolymarketOrderPayloadVersion(row.order_payload),
       });
       const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
       if (!isPolymarketUnconfirmedStatus(nextStatus)) {
@@ -1105,10 +1130,6 @@ async function reconcileUnconfirmedOrders(inputs: {
   return { checked: rows.length, confirmedCount, unmatchedCount };
 }
 
-function generatePolymarketNonce(): string {
-  return "0";
-}
-
 function normalizeOrderForPayload(
   order: Record<string, unknown>,
   side: PolymarketSide,
@@ -1132,6 +1153,7 @@ function normalizeOrderForPayload(
     "tokenId",
     "makerAmount",
     "takerAmount",
+    "timestamp",
     "expiration",
     "nonce",
     "feeRateBps",
@@ -1140,18 +1162,17 @@ function normalizeOrderForPayload(
     if (value !== null) normalized[key] = value;
   }
 
-  const takerRaw = order.taker;
-  if (typeof takerRaw !== "string" || takerRaw.trim().length === 0) {
-    normalized.taker = ZERO_ADDRESS;
+  if (!isPolymarketOrderPayloadV2(order)) {
+    const takerRaw = order.taker;
+    if (typeof takerRaw !== "string" || takerRaw.trim().length === 0) {
+      normalized.taker = ZERO_ADDRESS;
+    }
   }
 
   return normalized;
 }
 
-function normalizeOrderForHash(
-  order: Record<string, unknown>,
-  side: PolymarketSide,
-): {
+type NormalizedPolymarketOrderV1 = {
   salt: string;
   maker: string;
   signer: string;
@@ -1165,7 +1186,27 @@ function normalizeOrderForHash(
   side: number;
   signatureType: number;
   signature: string;
-} | null {
+};
+
+type NormalizedPolymarketOrderV2 = {
+  salt: string;
+  maker: string;
+  signer: string;
+  tokenId: string;
+  makerAmount: string;
+  takerAmount: string;
+  side: number;
+  signatureType: number;
+  timestamp: string;
+  metadata: string;
+  builder: string;
+  signature: string;
+};
+
+function normalizeOrderForHashV1(
+  order: Record<string, unknown>,
+  side: PolymarketSide,
+): NormalizedPolymarketOrderV1 | null {
   const signatureType = normalizeSignatureType(order.signatureType);
   if (signatureType == null) return null;
 
@@ -1214,6 +1255,66 @@ function normalizeOrderForHash(
     signatureType,
     signature,
   };
+}
+
+function normalizeOrderForHashV2(
+  order: Record<string, unknown>,
+  side: PolymarketSide,
+): NormalizedPolymarketOrderV2 | null {
+  const signatureType = normalizeSignatureType(order.signatureType);
+  if (signatureType == null) return null;
+
+  const maker = typeof order.maker === "string" ? order.maker.trim() : "";
+  const signer = typeof order.signer === "string" ? order.signer.trim() : "";
+  if (!maker || !signer) return null;
+
+  const salt = normalizeNumberishString(order.salt);
+  const tokenId = normalizeNumberishString(order.tokenId);
+  const makerAmount = normalizeNumberishString(order.makerAmount);
+  const takerAmount = normalizeNumberishString(order.takerAmount);
+  const timestamp = normalizeNumberishString(order.timestamp);
+  const metadata = typeof order.metadata === "string" ? order.metadata.trim() : "";
+  const builder = typeof order.builder === "string" ? order.builder.trim() : "";
+  if (
+    !salt ||
+    !tokenId ||
+    !makerAmount ||
+    !takerAmount ||
+    !timestamp ||
+    !metadata ||
+    !builder
+  ) {
+    return null;
+  }
+
+  const signature =
+    typeof order.signature === "string" ? order.signature.trim() : "";
+  if (!signature) return null;
+
+  return {
+    salt,
+    maker,
+    signer,
+    tokenId,
+    makerAmount,
+    takerAmount,
+    side: side === "BUY" ? 0 : 1,
+    signatureType,
+    timestamp,
+    metadata,
+    builder,
+    signature,
+  };
+}
+
+function normalizeOrderForHash(
+  order: Record<string, unknown>,
+  side: PolymarketSide,
+): NormalizedPolymarketOrderV1 | NormalizedPolymarketOrderV2 | null {
+  if (isPolymarketOrderPayloadV2(order)) {
+    return normalizeOrderForHashV2(order, side);
+  }
+  return normalizeOrderForHashV1(order, side);
 }
 
 function derivePriceAndSize(
@@ -1426,11 +1527,21 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           : 0;
 
       reply.header("Content-Type", "application/json; charset=utf-8");
+      const nowMs = Date.now().toString();
+      const zeroBytes32 =
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
       return reply.send({
         ok: true,
+        version: "polymarket_clob_v2",
         tokenId,
-        nonce: generatePolymarketNonce(),
-        feeRateBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
+        timestamp: nowMs,
+        metadata: zeroBytes32,
+        builder: zeroBytes32,
+        exchangeAddress:
+          marketInfo?.neg_risk === true
+            ? env.polymarketNegRiskExchangeAddress
+            : env.polymarketExchangeAddress,
+        collateralAddress: env.polymarketUsdcAddress,
         takerFeeBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
         makerFeeBps: Number.isFinite(makerFeeBps) ? makerFeeBps : 0,
       });
@@ -1515,12 +1626,19 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         env.polymarketExchangeAddress;
 
       try {
-        const orderHash = await fetchPolymarketOrderHash({
-          rpcUrl: env.polygonRpcUrl,
-          timeoutMs: env.polygonRpcTimeoutMs,
-          exchangeAddress,
-          order: normalizedForHash,
-        });
+        const orderHash = isPolymarketOrderPayloadV2(order)
+          ? await fetchPolymarketOrderHashV2({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              exchangeAddress,
+              order: normalizedForHash as NormalizedPolymarketOrderV2,
+            })
+          : await fetchPolymarketOrderHash({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              exchangeAddress,
+              order: normalizedForHash as NormalizedPolymarketOrderV1,
+            });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -2074,8 +2192,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             }),
           ]);
 
-          const usdcBalance = snapshot.usdcBalance;
-          const oldUsdcBalance = snapshot.oldUsdcBalance;
+          const pusdBalance = snapshot.pusdBalance;
+          const nativeUsdcBalance = snapshot.nativeUsdcBalance;
           const allowanceExchange = snapshot.allowanceExchange;
           const allowanceNegRisk = snapshot.allowanceNegRisk;
           const okExchange = snapshot.okExchange;
@@ -2086,6 +2204,48 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           const feeCollectorNonce = snapshot.feeCollectorNonce;
 
           const isContract = typeof code === "string" && code.length > 2;
+          const pusdStatus = {
+            tokenAddress: env.polymarketUsdcAddress,
+            decimals: 6,
+            balance: ethers.formatUnits(pusdBalance, 6),
+            balanceRaw: pusdBalance.toString(),
+            allowance: {
+              exchange: {
+                spender: env.polymarketExchangeAddress,
+                allowance: ethers.formatUnits(allowanceExchange, 6),
+                allowanceRaw: allowanceExchange.toString(),
+              },
+              negRiskExchange: {
+                spender: env.polymarketNegRiskExchangeAddress,
+                allowance: ethers.formatUnits(allowanceNegRisk, 6),
+                allowanceRaw: allowanceNegRisk.toString(),
+              },
+              ...(negRiskAdapterAddress
+                ? {
+                    negRiskAdapter: {
+                      spender: negRiskAdapterAddress,
+                      allowance: ethers.formatUnits(
+                        allowanceNegRiskAdapter ?? 0n,
+                        6,
+                      ),
+                      allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
+                    },
+                  }
+                : {}),
+              ...(feeCollectorAddress
+                ? {
+                    feeCollector: {
+                      spender: feeCollectorAddress,
+                      allowance: ethers.formatUnits(
+                        allowanceFeeCollector ?? 0n,
+                        6,
+                      ),
+                      allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
+                    },
+                  }
+                : {}),
+            },
+          };
 
           return {
             ok: true,
@@ -2098,53 +2258,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             funderIsContract: isContract,
             rpcUrl: env.polygonRpcUrl,
             negRiskAdapterAddress: negRiskAdapterAddress || null,
-            usdc: {
-              tokenAddress: env.polymarketUsdcAddress,
-              decimals: 6,
-              balance: ethers.formatUnits(usdcBalance, 6),
-              balanceRaw: usdcBalance.toString(),
-              allowance: {
-                exchange: {
-                  spender: env.polymarketExchangeAddress,
-                  allowance: ethers.formatUnits(allowanceExchange, 6),
-                  allowanceRaw: allowanceExchange.toString(),
-                },
-                negRiskExchange: {
-                  spender: env.polymarketNegRiskExchangeAddress,
-                  allowance: ethers.formatUnits(allowanceNegRisk, 6),
-                  allowanceRaw: allowanceNegRisk.toString(),
-                },
-                ...(negRiskAdapterAddress
-                  ? {
-                      negRiskAdapter: {
-                        spender: negRiskAdapterAddress,
-                        allowance: ethers.formatUnits(
-                          allowanceNegRiskAdapter ?? 0n,
-                          6,
-                        ),
-                        allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
-                      },
-                    }
-                  : {}),
-                ...(feeCollectorAddress
-                  ? {
-                      feeCollector: {
-                        spender: feeCollectorAddress,
-                        allowance: ethers.formatUnits(
-                          allowanceFeeCollector ?? 0n,
-                          6,
-                        ),
-                        allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
-                      },
-                    }
-                  : {}),
-              },
-            },
+            pusd: pusdStatus,
+            usdc: pusdStatus,
             nativeUsdc: {
               tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
               decimals: 6,
-              balance: ethers.formatUnits(oldUsdcBalance, 6),
-              balanceRaw: oldUsdcBalance.toString(),
+              balance: ethers.formatUnits(nativeUsdcBalance, 6),
+              balanceRaw: nativeUsdcBalance.toString(),
             },
             conditionalTokens: {
               contractAddress: env.polymarketConditionalTokensAddress,
@@ -2723,7 +2843,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
-        builderCreds: getPolymarketBuilderCreds(),
         method: "GET",
         requestPath: requestPathAll,
       });
@@ -2911,7 +3030,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
-        builderCreds: getPolymarketBuilderCreds(),
         method: "GET",
         requestPath,
       });
@@ -3005,6 +3123,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const orderType = normalizeOrderTypeForClob(body.orderType);
       const orderTokenId = extractTokenId(order);
+      const isClobV2Order = isPolymarketOrderPayloadV2(order);
+      if (!isClobV2Order) {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Polymarket CLOB V1 order payloads are no longer supported. Build and sign a CLOB V2 order with timestamp, metadata, and builder fields.",
+        });
+      }
       let marketInfo = null;
       if (orderTokenId) {
         marketInfo = await fetchPolymarketMarketInfo(pool, {
@@ -3020,11 +3146,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           makerFeeRaw != null && makerFeeRaw !== ""
             ? Math.max(0, Number(makerFeeRaw))
             : 0;
-        const orderFeeBps = parseNumberish(order.feeRateBps) ?? 0;
         const expectedFeeBps =
           orderType === "GTC" || orderType === "GTD"
             ? makerFeeBps
             : takerFeeBps;
+        const orderFeeBps = isClobV2Order
+          ? expectedFeeBps
+          : parseNumberish(order.feeRateBps) ?? 0;
         if (expectedFeeBps > 0 && orderFeeBps !== expectedFeeBps) {
           reply.code(400);
           return reply.send({
@@ -3037,6 +3165,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const normalizedOrder = normalizeOrderForPayload(order, side);
       const normalizedForHash = normalizeOrderForHash(order, side);
+      if (isClobV2Order && normalizedOrder.expiration == null) {
+        normalizedOrder.expiration = "0";
+      }
       const orderPayload = normalizedForHash ?? normalizedOrder;
 
       const feeAuth = body.feeAuth;
@@ -3064,12 +3195,20 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      orderHash = await fetchPolymarketOrderHash({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        exchangeAddress,
-        order: normalizedForHash,
-      });
+      orderHash =
+        isClobV2Order
+          ? await fetchPolymarketOrderHashV2({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              exchangeAddress,
+              order: normalizedForHash as NormalizedPolymarketOrderV2,
+            })
+          : await fetchPolymarketOrderHash({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              exchangeAddress,
+              order: normalizedForHash as NormalizedPolymarketOrderV1,
+            });
 
       if (feeAuth || feeAuthSig) {
         if (!feeAuth || !feeAuthSig) {
@@ -3143,7 +3282,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           exchange: feeAuthExchange,
           orderHash,
           feeBps: normalizeNumberishString(feeAuth.feeBps) ?? feeAuth.feeBps,
-          nonce: normalizeNumberishString(feeAuth.nonce) ?? feeAuth.nonce,
+          ...("nonce" in feeAuth
+            ? {
+                nonce:
+                  normalizeNumberishString(feeAuth.nonce) ?? feeAuth.nonce,
+              }
+            : {}),
           deadline: normalizeNumberishString(feeAuth.deadline) ?? feeAuth.deadline,
         };
       }
@@ -3155,8 +3299,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
 
-      const builderCreds = getPolymarketBuilderCreds();
-      //console.log("ENV", env.polymarketBuilderApiKey, env.polymarketBuilderApiSecret, env.polymarketBuilderApiPassphrase);      
       const upstream = await polymarketL2Request({
         baseUrl: env.polymarketClobBase,
         timeoutMs: 10_000,
@@ -3166,7 +3308,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           apiSecret: creds.apiSecret,
           apiPassphrase: creds.apiPassphrase,
         },
-        builderCreds,
         method: "POST",
         requestPath: "/order",
         body: payload,
@@ -3240,6 +3381,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               exchangeAddress,
               orderHash,
               makerAmount,
+              orderPayloadVersion: resolvePolymarketOrderPayloadVersion(orderPayload),
             });
             status = execution?.hasExecution
               ? "matched"
@@ -3278,6 +3420,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         errorMessage: null,
         rawError: null,
         orderPayload,
+        orderPayloadVersion: resolvePolymarketOrderPayloadVersion(orderPayload),
         orderHash,
         feeBps,
         feeAuth: feeAuthStored,
@@ -3431,7 +3574,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             apiSecret: creds.apiSecret,
             apiPassphrase: creds.apiPassphrase,
           },
-          builderCreds: getPolymarketBuilderCreds(),
           method: "DELETE",
           requestPath: "/order",
           body: { orderID: request.body.orderID },

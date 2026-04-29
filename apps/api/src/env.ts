@@ -635,6 +635,19 @@ const postSignupOnboardingEligibleAfter = optionalIsoDate(
   new Date("2026-04-09T00:00:00.000Z"),
 );
 
+const POLYMARKET_PUSD_ADDRESS =
+  "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const POLYMARKET_USDCE_ADDRESS =
+  "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const POLYMARKET_EXCHANGE_V2_ADDRESS =
+  "0xE111180000d2663C0091e4f400237545B87B996B";
+const POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS =
+  "0xe2222d279d744050d28e00520010520000310F59";
+const POLYMARKET_COLLATERAL_ONRAMP_ADDRESS =
+  "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+const POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS =
+  "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
@@ -1069,15 +1082,29 @@ export const env = {
     "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
+  polymarketPusdAddress:
+    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
+    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
+    POLYMARKET_PUSD_ADDRESS,
+  polymarketUsdceAddress:
+    process.env.POLYMARKET_USDCE_ADDRESS?.trim() ||
+    POLYMARKET_USDCE_ADDRESS,
   polymarketUsdcAddress:
-    process.env.POLYMARKET_USDC_ADDRESS?.trim() ||
-    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
+    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
+    POLYMARKET_PUSD_ADDRESS,
   polymarketExchangeAddress:
     process.env.POLYMARKET_EXCHANGE_ADDRESS?.trim() ||
-    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    POLYMARKET_EXCHANGE_V2_ADDRESS,
   polymarketNegRiskExchangeAddress:
     process.env.POLYMARKET_NEG_RISK_EXCHANGE_ADDRESS?.trim() ||
-    "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS,
+  polymarketCollateralOnrampAddress:
+    process.env.POLYMARKET_COLLATERAL_ONRAMP_ADDRESS?.trim() ||
+    POLYMARKET_COLLATERAL_ONRAMP_ADDRESS,
+  polymarketCollateralOfframpAddress:
+    process.env.POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS?.trim() ||
+    POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS,
   polymarketNegRiskAdapterAddress:
     process.env.POLYMARKET_NEG_RISK_ADAPTER_ADDRESS?.trim() ||
     "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
@@ -1109,6 +1136,10 @@ export const env = {
     process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
   feeCollectorPrivateKey:
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
+  feeCollectorLegacyAddress:
+    process.env.HUNCH_FEE_COLLECTOR_LEGACY_ADDRESS?.trim() || "",
+  feeCollectorLegacyPrivateKey:
+    process.env.HUNCH_FEE_COLLECTOR_LEGACY_PRIVATE_KEY?.trim() || "",
   dflowFeeAccount: process.env.DFLOW_USDC_FEE_ACCOUNT?.trim() || "",
   rewardsTreasuryBufferUsd: optionalNonNegativeNumber(
     "HUNCH_REWARDS_TREASURY_BUFFER_USD",
@@ -1143,11 +1174,15 @@ export const env = {
   rewardsPayoutPrivateKey:
     process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
   rewardsUsdcAddressPolygon:
-    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() || "",
+    process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() ||
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() ||
+    "",
   rewardsUsdcAddressBase:
     process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
   rewardsUsdcPolygon:
-    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() || "",
+    process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() ||
+    process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() ||
+    "",
   rewardsUsdcBase:
     process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
   rewardsSolanaSecretKeyCanonical:

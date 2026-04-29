@@ -208,7 +208,21 @@ const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
   [POLYGON_CHAIN_ID]: {
     [env.polymarketUsdcAddress.toLowerCase()]: {
       address: env.polymarketUsdcAddress,
-      symbol: "USDC",
+      symbol:
+        env.polymarketUsdcAddress.toLowerCase() ===
+        env.polymarketPusdAddress.toLowerCase()
+          ? "pUSD"
+          : "USDC.e",
+      decimals: 6,
+      name:
+        env.polymarketUsdcAddress.toLowerCase() ===
+        env.polymarketPusdAddress.toLowerCase()
+          ? "Polymarket USD"
+          : "USD Coin (PoS)",
+    },
+    [env.polymarketUsdceAddress.toLowerCase()]: {
+      address: env.polymarketUsdceAddress,
+      symbol: "USDC.e",
       decimals: 6,
       name: "USD Coin (PoS)",
     },
@@ -1299,10 +1313,13 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             : Promise.resolve<bigint | null>(null),
                         ]);
 
-                      const usdcBalance = snapshot.usdcBalance;
-                      const oldUsdcBalance = snapshot.oldUsdcBalance;
-                      const signerUsdcBalance = snapshot.signerUsdcBalance;
-                      const signerOldUsdcBalance = snapshot.signerOldUsdcBalance;
+                      const pusdBalance = snapshot.pusdBalance;
+                      const usdceBalance = snapshot.usdceBalance;
+                      const nativeUsdcBalance = snapshot.nativeUsdcBalance;
+                      const signerPusdBalance = snapshot.signerPusdBalance;
+                      const signerUsdceBalance = snapshot.signerUsdceBalance;
+                      const signerNativeUsdcBalance =
+                        snapshot.signerNativeUsdcBalance;
                       const allowanceExchange = snapshot.allowanceExchange;
                       const allowanceNegRisk = snapshot.allowanceNegRisk;
                       const okExchange = snapshot.okExchange;
@@ -1317,21 +1334,25 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         typeof signerCode === "string" && signerCode.length > 2;
                       const funderIsContract =
                         typeof funderCode === "string" && funderCode.length > 2;
-                      const signerUsdcBalanceResolved =
-                        shouldFetchSignerUsdc && signerUsdcBalance != null
-                          ? signerUsdcBalance
-                          : usdcBalance;
-                      const signerOldUsdcBalanceResolved =
-                        shouldFetchSignerUsdc && signerOldUsdcBalance != null
-                          ? signerOldUsdcBalance
-                          : oldUsdcBalance;
+                      const signerPusdBalanceResolved =
+                        shouldFetchSignerUsdc && signerPusdBalance != null
+                          ? signerPusdBalance
+                          : pusdBalance;
+                      const signerUsdceBalanceResolved =
+                        shouldFetchSignerUsdc && signerUsdceBalance != null
+                          ? signerUsdceBalance
+                          : usdceBalance;
+                      const signerNativeUsdcBalanceResolved =
+                        shouldFetchSignerUsdc && signerNativeUsdcBalance != null
+                          ? signerNativeUsdcBalance
+                          : nativeUsdcBalance;
 
                       const reasons: string[] = [];
                       if (!polymarketCreds) reasons.push("missing_credentials");
                       if (funderIsContract && !relayerEnabled) {
                         reasons.push("relayer_disabled");
                       }
-                      if (usdcBalance <= 0n) reasons.push("insufficient_usdc");
+                      if (pusdBalance <= 0n) reasons.push("insufficient_usdc");
                       if (allowanceExchange <= 0n) {
                         reasons.push("allowance_exchange");
                       }
@@ -1360,6 +1381,71 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         negRiskReasons.push("allowance_neg_risk_adapter");
                       }
 
+                      const pusdStatus = {
+                        tokenAddress: env.polymarketUsdcAddress,
+                        decimals: 6,
+                        balance: ethers.formatUnits(pusdBalance, 6),
+                        balanceRaw: pusdBalance.toString(),
+                        allowance: {
+                          exchange: {
+                            spender: env.polymarketExchangeAddress,
+                            allowance: ethers.formatUnits(
+                              allowanceExchange,
+                              6,
+                            ),
+                            allowanceRaw: allowanceExchange.toString(),
+                          },
+                          negRiskExchange: {
+                            spender: env.polymarketNegRiskExchangeAddress,
+                            allowance: ethers.formatUnits(
+                              allowanceNegRisk,
+                              6,
+                            ),
+                            allowanceRaw: allowanceNegRisk.toString(),
+                          },
+                          ...(negRiskAdapterAddress
+                            ? {
+                                negRiskAdapter: {
+                                  spender: negRiskAdapterAddress,
+                                  allowance: ethers.formatUnits(
+                                    allowanceNegRiskAdapter ?? 0n,
+                                    6,
+                                  ),
+                                  allowanceRaw: (
+                                    allowanceNegRiskAdapter ?? 0n
+                                  ).toString(),
+                                },
+                              }
+                            : {}),
+                          ...(feeCollectorAddress
+                            ? {
+                                feeCollector: {
+                                  spender: feeCollectorAddress,
+                                  allowance: ethers.formatUnits(
+                                    allowanceFeeCollector ?? 0n,
+                                    6,
+                                  ),
+                                  allowanceRaw: (
+                                    allowanceFeeCollector ?? 0n
+                                  ).toString(),
+                                },
+                              }
+                            : {}),
+                        },
+                      };
+
+                      const signerPusdStatus = {
+                        tokenAddress: env.polymarketUsdcAddress,
+                        decimals: 6,
+                        balance: ethers.formatUnits(
+                          signerPusdBalanceResolved ?? 0n,
+                          6,
+                        ),
+                        balanceRaw: (
+                          signerPusdBalanceResolved ?? 0n
+                        ).toString(),
+                      };
+
                       return {
                         supported: true,
                         ready: reasons.length === 0,
@@ -1372,63 +1458,19 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         funderSource,
                         funderIsContract,
                         relayerEnabled,
-                        usdc: {
-                          tokenAddress: env.polymarketUsdcAddress,
+                        pusd: pusdStatus,
+                        usdc: pusdStatus,
+                        usdce: {
+                          tokenAddress: env.polymarketUsdceAddress,
                           decimals: 6,
-                          balance: ethers.formatUnits(usdcBalance, 6),
-                          balanceRaw: usdcBalance.toString(),
-                          allowance: {
-                            exchange: {
-                              spender: env.polymarketExchangeAddress,
-                              allowance: ethers.formatUnits(
-                                allowanceExchange,
-                                6,
-                              ),
-                              allowanceRaw: allowanceExchange.toString(),
-                            },
-                            negRiskExchange: {
-                              spender: env.polymarketNegRiskExchangeAddress,
-                              allowance: ethers.formatUnits(
-                                allowanceNegRisk,
-                                6,
-                              ),
-                              allowanceRaw: allowanceNegRisk.toString(),
-                            },
-                            ...(negRiskAdapterAddress
-                              ? {
-                                  negRiskAdapter: {
-                                    spender: negRiskAdapterAddress,
-                                    allowance: ethers.formatUnits(
-                                      allowanceNegRiskAdapter ?? 0n,
-                                      6,
-                                    ),
-                                    allowanceRaw: (
-                                      allowanceNegRiskAdapter ?? 0n
-                                    ).toString(),
-                                  },
-                                }
-                              : {}),
-                            ...(feeCollectorAddress
-                              ? {
-                                  feeCollector: {
-                                    spender: feeCollectorAddress,
-                                    allowance: ethers.formatUnits(
-                                      allowanceFeeCollector ?? 0n,
-                                      6,
-                                    ),
-                                    allowanceRaw: (
-                                      allowanceFeeCollector ?? 0n
-                                    ).toString(),
-                                  },
-                                }
-                              : {}),
-                          },
+                          balance: ethers.formatUnits(usdceBalance, 6),
+                          balanceRaw: usdceBalance.toString(),
                         },
                         nativeUsdc: {
                           tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
                           decimals: 6,
-                          balance: ethers.formatUnits(oldUsdcBalance, 6),
-                          balanceRaw: oldUsdcBalance.toString(),
+                          balance: ethers.formatUnits(nativeUsdcBalance, 6),
+                          balanceRaw: nativeUsdcBalance.toString(),
                         },
                         native: {
                           symbol: "POL",
@@ -1438,15 +1480,17 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         },
                         ...(funderIsContract
                           ? {
-                              signerUsdc: {
-                                tokenAddress: env.polymarketUsdcAddress,
+                              signerPusd: signerPusdStatus,
+                              signerUsdc: signerPusdStatus,
+                              signerUsdce: {
+                                tokenAddress: env.polymarketUsdceAddress,
                                 decimals: 6,
                                 balance: ethers.formatUnits(
-                                  signerUsdcBalanceResolved ?? 0n,
+                                  signerUsdceBalanceResolved ?? 0n,
                                   6,
                                 ),
                                 balanceRaw: (
-                                  signerUsdcBalanceResolved ?? 0n
+                                  signerUsdceBalanceResolved ?? 0n
                                 ).toString(),
                               },
                               signerNativeUsdc: {
@@ -1454,11 +1498,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                                   POLYGON_NATIVE_USDC_ADDRESS,
                                 decimals: 6,
                                 balance: ethers.formatUnits(
-                                  signerOldUsdcBalanceResolved ?? 0n,
+                                  signerNativeUsdcBalanceResolved ?? 0n,
                                   6,
                                 ),
                                 balanceRaw: (
-                                  signerOldUsdcBalanceResolved ?? 0n
+                                  signerNativeUsdcBalanceResolved ?? 0n
                                 ).toString(),
                               },
                               signerNative: {

@@ -17,6 +17,7 @@ type FeeOrderRow = {
   filled_size: string | number | null;
   order_hash: string | null;
   order_payload: unknown | null;
+  order_payload_version: string | null;
   fee_auth: unknown | null;
   fee_auth_sig: string | null;
   fee_deadline: number | null;
@@ -24,7 +25,7 @@ type FeeOrderRow = {
   fee_collect_attempts: number | null;
 };
 
-type OrderStruct = {
+type OrderStructV1 = {
   salt: string;
   maker: string;
   signer: string;
@@ -40,7 +41,22 @@ type OrderStruct = {
   signature: string;
 };
 
-type FeeAuthStruct = {
+type OrderStructV2 = {
+  salt: string;
+  maker: string;
+  signer: string;
+  tokenId: string;
+  makerAmount: string;
+  takerAmount: string;
+  side: number;
+  signatureType: number;
+  timestamp: string;
+  metadata: string;
+  builder: string;
+  signature: string;
+};
+
+type FeeAuthStructV1 = {
   signer: string;
   vault: string;
   exchange: string;
@@ -49,6 +65,17 @@ type FeeAuthStruct = {
   nonce: string;
   deadline: string;
 };
+
+type FeeAuthStructV3 = {
+  signer: string;
+  vault: string;
+  exchange: string;
+  orderHash: string;
+  feeBps: string;
+  deadline: string;
+};
+
+type CollectorVersion = "v1" | "v2";
 
 export type CollectFeesOptions = {
   dryRun: boolean;
@@ -61,6 +88,7 @@ export type CollectFeesOptions = {
   archiveLegacy: boolean;
   txConfirmations: number;
   txTimeoutMs: number;
+  collectorVersion: CollectorVersion;
 };
 
 const DEFAULT_LIMIT = 25;
@@ -89,6 +117,9 @@ export function parseCollectFeesArgs(
   const orderHash = getValue("--order-hash");
   const txConfirmationsRaw = getValue("--tx-confirmations");
   const txTimeoutRaw = getValue("--tx-timeout-ms");
+  const collectorVersionRaw = getValue("--collector-version")?.toLowerCase();
+  const collectorVersion: CollectorVersion =
+    collectorVersionRaw === "v1" ? "v1" : "v2";
 
   const limit = limitRaw ? Math.max(1, Number(limitRaw)) : DEFAULT_LIMIT;
   const maxAttempts = maxAttemptsRaw
@@ -120,6 +151,7 @@ export function parseCollectFeesArgs(
     orderHash: orderHash?.trim(),
     txConfirmations,
     txTimeoutMs,
+    collectorVersion,
   };
 }
 
@@ -177,7 +209,7 @@ function normalizeSignatureType(value: unknown): number | null {
   return Math.trunc(parsed);
 }
 
-function normalizeOrderPayload(raw: unknown): OrderStruct | null {
+function normalizeOrderPayloadV1(raw: unknown): OrderStructV1 | null {
   if (!raw || typeof raw !== "object") return null;
   const payload = raw as Record<string, unknown>;
 
@@ -232,7 +264,61 @@ function normalizeOrderPayload(raw: unknown): OrderStruct | null {
   };
 }
 
-function normalizeFeeAuth(raw: unknown): FeeAuthStruct | null {
+function normalizeOrderPayloadV2(raw: unknown): OrderStructV2 | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Record<string, unknown>;
+
+  const side = normalizeOrderSide(payload.side);
+  const signatureType = normalizeSignatureType(payload.signatureType);
+  const salt = normalizeNumberishString(payload.salt);
+  const tokenId = normalizeNumberishString(payload.tokenId);
+  const makerAmount = normalizeNumberishString(payload.makerAmount);
+  const takerAmount = normalizeNumberishString(payload.takerAmount);
+  const timestamp = normalizeNumberishString(payload.timestamp);
+  const metadata =
+    typeof payload.metadata === "string" ? payload.metadata.trim() : "";
+  const builder =
+    typeof payload.builder === "string" ? payload.builder.trim() : "";
+  const signature =
+    typeof payload.signature === "string" ? payload.signature.trim() : "";
+
+  const maker = typeof payload.maker === "string" ? payload.maker.trim() : "";
+  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+
+  if (
+    side == null ||
+    signatureType == null ||
+    !salt ||
+    !tokenId ||
+    !makerAmount ||
+    !takerAmount ||
+    !timestamp ||
+    !metadata ||
+    !builder ||
+    !maker ||
+    !signer ||
+    !signature
+  ) {
+    return null;
+  }
+
+  return {
+    salt,
+    maker,
+    signer,
+    tokenId,
+    makerAmount,
+    takerAmount,
+    side,
+    signatureType,
+    timestamp,
+    metadata,
+    builder,
+    signature,
+  };
+}
+
+function normalizeFeeAuthV1(raw: unknown): FeeAuthStructV1 | null {
   if (!raw || typeof raw !== "object") return null;
   const payload = raw as Record<string, unknown>;
 
@@ -257,6 +343,33 @@ function normalizeFeeAuth(raw: unknown): FeeAuthStruct | null {
     orderHash,
     feeBps,
     nonce,
+    deadline,
+  };
+}
+
+function normalizeFeeAuthV3(raw: unknown): FeeAuthStructV3 | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Record<string, unknown>;
+
+  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+  const vault = typeof payload.vault === "string" ? payload.vault.trim() : "";
+  const exchange =
+    typeof payload.exchange === "string" ? payload.exchange.trim() : "";
+  const orderHash =
+    typeof payload.orderHash === "string" ? payload.orderHash.trim() : "";
+
+  const feeBps = normalizeNumberishString(payload.feeBps);
+  const deadline = normalizeNumberishString(payload.deadline);
+
+  if (!signer || !vault || !exchange || !orderHash) return null;
+  if (!feeBps || !deadline) return null;
+
+  return {
+    signer,
+    vault,
+    exchange,
+    orderHash,
+    feeBps,
     deadline,
   };
 }
@@ -309,6 +422,7 @@ async function insertFeeEvent(inputs: {
   orderHash: string;
   feeAmount: bigint;
   txHash: string;
+  feeAsset: string;
 }) {
   if (scriptReadOnly) return;
   const amount = formatUsdcAmount(inputs.feeAmount);
@@ -346,7 +460,7 @@ async function insertFeeEvent(inputs: {
         values (
           gen_random_uuid(),
           $1, $2, 'polymarket', '137', 'order', $3,
-          $4, 'USDC', $4, $5, $6, $7, $8, $9, $10, now(), 'collected', now(), now()
+          $4, $5, $4, $6, $7, $8, $9, $10, $11, now(), 'collected', now(), now()
         )
         on conflict (user_id, source_type, source_id)
         do update set
@@ -368,6 +482,7 @@ async function insertFeeEvent(inputs: {
         inputs.walletAddress,
         inputs.orderHash,
         amount,
+        inputs.feeAsset,
         snapshot.cashbackBpsApplied,
         snapshot.referralBpsApplied,
         snapshot.cashbackEarnedUsdc,
@@ -410,6 +525,12 @@ async function fetchPendingOrders(
     whereClause += ` AND (fee_collector_address IS NULL OR lower(fee_collector_address) = $${params.length})`;
   }
 
+  if (options.collectorVersion === "v2") {
+    whereClause += ` AND order_payload_version = 'polymarket_clob_v2'`;
+  } else {
+    whereClause += ` AND (order_payload_version IS NULL OR order_payload_version = 'polymarket_clob_v1')`;
+  }
+
   if (options.orderHash) {
     params.push(options.orderHash);
     whereClause += ` AND order_hash = $${params.length}`;
@@ -428,6 +549,7 @@ async function fetchPendingOrders(
       filled_size,
       order_hash,
       order_payload,
+      order_payload_version,
       fee_auth,
       fee_auth_sig,
       fee_deadline,
@@ -437,7 +559,7 @@ async function fetchPendingOrders(
     ${whereClause}
     ORDER BY
       (fee_auth->>'signer') ASC NULLS LAST,
-      (fee_auth->>'nonce')::numeric ASC NULLS LAST,
+      NULLIF(fee_auth->>'nonce', '')::numeric ASC NULLS LAST,
       posted_at ASC NULLS LAST
     LIMIT $${params.length}
   `;
@@ -528,8 +650,16 @@ export async function runCollectFees(
   options: CollectFeesOptions,
 ): Promise<CollectFeesRunResult> {
   scriptReadOnly = options.readOnly;
-  const feeCollectorAddress = env.feeCollectorAddress?.trim();
-  const privateKey = env.feeCollectorPrivateKey;
+  const feeCollectorAddress =
+    options.collectorVersion === "v1"
+      ? env.feeCollectorLegacyAddress?.trim() ||
+        env.feeCollectorAddress?.trim()
+      : env.feeCollectorAddress?.trim();
+  const privateKey =
+    options.collectorVersion === "v1"
+      ? env.feeCollectorLegacyPrivateKey?.trim() ||
+        env.feeCollectorPrivateKey
+      : env.feeCollectorPrivateKey;
 
   if (!feeCollectorAddress) {
     throw new Error("Missing HUNCH_FEE_COLLECTOR_ADDRESS");
@@ -542,14 +672,25 @@ export async function runCollectFees(
   const wallet = privateKey ? new ethers.Wallet(privateKey, provider) : null;
   const collector = new ethers.Contract(
     feeCollectorAddress,
-    abis.PolymarketFeeCollector,
+    options.collectorVersion === "v2"
+      ? abis.PolymarketFeeCollectorClobV2
+      : abis.PolymarketFeeCollector,
     wallet ?? provider,
   );
-  const collectorIface = new ethers.Interface(abis.PolymarketFeeCollector);
+  const collectorIface = new ethers.Interface(
+    options.collectorVersion === "v2"
+      ? abis.PolymarketFeeCollectorClobV2
+      : abis.PolymarketFeeCollector,
+  );
+  const exchangeAbi =
+    options.collectorVersion === "v2"
+      ? abis.IPolymarketExchangeV2
+      : abis.IPolymarketExchange;
+  const feeAsset = options.collectorVersion === "v2" ? "pUSD" : "USDC";
 
   const orders = await fetchPendingOrders(options, feeCollectorAddress);
   console.log(
-    `Found ${orders.length} pending fee orders (dryRun=${options.dryRun}, readOnly=${options.readOnly})`,
+    `Found ${orders.length} pending fee orders (collectorVersion=${options.collectorVersion}, dryRun=${options.dryRun}, readOnly=${options.readOnly})`,
   );
   if (orders.length > 0) {
     console.log(
@@ -595,7 +736,10 @@ export async function runCollectFees(
       continue;
     }
 
-    const order = normalizeOrderPayload(row.order_payload);
+    const order =
+      options.collectorVersion === "v2"
+        ? normalizeOrderPayloadV2(row.order_payload)
+        : normalizeOrderPayloadV1(row.order_payload);
     if (!order) {
       const reason = "Invalid order_payload";
       console.log(`Skip ${label}: ${reason}`);
@@ -608,7 +752,10 @@ export async function runCollectFees(
       continue;
     }
 
-    const feeAuth = normalizeFeeAuth(row.fee_auth);
+    const feeAuth =
+      options.collectorVersion === "v2"
+        ? normalizeFeeAuthV3(row.fee_auth)
+        : normalizeFeeAuthV1(row.fee_auth);
     if (!feeAuth) {
       const reason = "Invalid fee_auth payload";
       console.log(`Skip ${label}: ${reason}`);
@@ -674,7 +821,7 @@ export async function runCollectFees(
 
     const exchange = new ethers.Contract(
       feeAuth.exchange,
-      abis.IPolymarketExchange,
+      exchangeAbi,
       provider,
     );
 
@@ -701,10 +848,17 @@ export async function runCollectFees(
     let status: { isFilledOrCancelled: boolean; remaining: bigint };
     try {
       const rawStatus = await exchange.getOrderStatus(orderHash);
-      status = {
-        isFilledOrCancelled: Boolean(rawStatus.isFilledOrCancelled),
-        remaining: BigInt(rawStatus.remaining),
-      };
+      if (options.collectorVersion === "v2") {
+        status = {
+          isFilledOrCancelled: Boolean(rawStatus.filled),
+          remaining: BigInt(rawStatus.remaining),
+        };
+      } else {
+        status = {
+          isFilledOrCancelled: Boolean(rawStatus.isFilledOrCancelled),
+          remaining: BigInt(rawStatus.remaining),
+        };
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unknown order status error";
@@ -719,9 +873,13 @@ export async function runCollectFees(
     const remaining =
       remainingRaw <= options.dustRemainingMicro ? 0n : remainingRaw;
 
-    if (!status.isFilledOrCancelled && remaining > 0n) {
+    const v2DefaultUnfilled =
+      options.collectorVersion === "v2" &&
+      !status.isFilledOrCancelled &&
+      remainingRaw === 0n;
+    if (!status.isFilledOrCancelled && (remaining > 0n || v2DefaultUnfilled)) {
       console.log(
-        `Skip ${label}: order still live (remaining=${remaining}, maker=${makerAmount})`,
+        `Skip ${label}: order still live (remaining=${remainingRaw}, maker=${makerAmount})`,
       );
       skippedLive += 1;
       continue;
@@ -795,6 +953,7 @@ export async function runCollectFees(
             orderHash,
             feeAmount,
             txHash: tx.hash,
+            feeAsset,
           });
         }
       }

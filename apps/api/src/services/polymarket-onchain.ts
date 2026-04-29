@@ -22,9 +22,15 @@ export const POLYGON_NATIVE_USDC_ADDRESS =
   "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
 
 type Snapshot = {
+  pusdBalance: bigint;
   usdcBalance: bigint;
+  usdceBalance: bigint;
+  nativeUsdcBalance: bigint;
   oldUsdcBalance: bigint;
+  signerPusdBalance: bigint | null;
   signerUsdcBalance: bigint | null;
+  signerUsdceBalance: bigint | null;
+  signerNativeUsdcBalance: bigint | null;
   signerOldUsdcBalance: bigint | null;
   allowanceExchange: bigint;
   allowanceNegRisk: bigint;
@@ -94,6 +100,12 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     fallback: 0n,
   });
   entries.push({
+    target: env.polymarketUsdceAddress,
+    callData: erc20Iface.encodeFunctionData("balanceOf", [funder]),
+    decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
+    fallback: 0n,
+  });
+  entries.push({
     target: POLYGON_NATIVE_USDC_ADDRESS,
     callData: erc20Iface.encodeFunctionData("balanceOf", [funder]),
     decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
@@ -103,6 +115,12 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   if (inputs.includeSignerUsdc) {
     entries.push({
       target: env.polymarketUsdcAddress,
+      callData: erc20Iface.encodeFunctionData("balanceOf", [signer]),
+      decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
+      fallback: 0n,
+    });
+    entries.push({
+      target: env.polymarketUsdceAddress,
       callData: erc20Iface.encodeFunctionData("balanceOf", [signer]),
       decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
       fallback: 0n,
@@ -220,12 +238,16 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   });
 
   let cursor = 0;
-  const usdcBalance = decoded[cursor++] as bigint;
-  const oldUsdcBalance = decoded[cursor++] as bigint;
-  const signerUsdcBalance = inputs.includeSignerUsdc
+  const pusdBalance = decoded[cursor++] as bigint;
+  const usdceBalance = decoded[cursor++] as bigint;
+  const nativeUsdcBalance = decoded[cursor++] as bigint;
+  const signerPusdBalance = inputs.includeSignerUsdc
     ? (decoded[cursor++] as bigint)
     : null;
-  const signerOldUsdcBalance = inputs.includeSignerUsdc
+  const signerUsdceBalance = inputs.includeSignerUsdc
+    ? (decoded[cursor++] as bigint)
+    : null;
+  const signerNativeUsdcBalance = inputs.includeSignerUsdc
     ? (decoded[cursor++] as bigint)
     : null;
   const allowanceExchange = decoded[cursor++] as bigint;
@@ -247,10 +269,16 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
       : null;
 
   return {
-    usdcBalance,
-    oldUsdcBalance,
-    signerUsdcBalance,
-    signerOldUsdcBalance,
+    pusdBalance,
+    usdcBalance: pusdBalance,
+    usdceBalance,
+    nativeUsdcBalance,
+    oldUsdcBalance: nativeUsdcBalance,
+    signerPusdBalance,
+    signerUsdcBalance: signerPusdBalance,
+    signerUsdceBalance,
+    signerNativeUsdcBalance,
+    signerOldUsdcBalance: signerNativeUsdcBalance,
     allowanceExchange,
     allowanceNegRisk,
     allowanceNegRiskAdapter,

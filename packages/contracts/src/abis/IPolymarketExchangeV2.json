@@ -1,0 +1,114 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "orderHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getOrderStatus",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bool",
+            "name": "filled",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint248",
+            "name": "remaining",
+            "type": "uint248"
+          }
+        ],
+        "internalType": "struct IPolymarketExchangeV2.OrderStatus",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "salt",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "maker",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "signer",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "makerAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "takerAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum IPolymarketExchangeV2.Side",
+            "name": "side",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum IPolymarketExchangeV2.SignatureType",
+            "name": "signatureType",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "timestamp",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "metadata",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "builder",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes",
+            "name": "signature",
+            "type": "bytes"
+          }
+        ],
+        "internalType": "struct IPolymarketExchangeV2.Order",
+        "name": "order",
+        "type": "tuple"
+      }
+    ],
+    "name": "hashOrder",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

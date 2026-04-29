@@ -35,12 +35,32 @@ export async function runFeesCollectJob(
   overrides?: Partial<CollectFeesOptions>,
 ): Promise<CollectFeesRunResult> {
   const defaults = parseCollectFeesArgs([]);
-  return runCollectFees(
-    mergeOptions(defaults, {
-      archiveLegacy: true,
-      ...overrides,
-    }),
-  );
+  const baseOptions = mergeOptions(defaults, {
+    archiveLegacy: true,
+    ...overrides,
+  });
+
+  if (overrides?.collectorVersion) {
+    return runCollectFees(baseOptions);
+  }
+
+  const v2Result = await runCollectFees({
+    ...baseOptions,
+    collectorVersion: "v2",
+  });
+  const v1Result = await runCollectFees({
+    ...baseOptions,
+    collectorVersion: "v1",
+  });
+
+  return {
+    dryRunCount: v2Result.dryRunCount + v1Result.dryRunCount,
+    collected: v2Result.collected + v1Result.collected,
+    skippedLive: v2Result.skippedLive + v1Result.skippedLive,
+    skippedNoCharge: v2Result.skippedNoCharge + v1Result.skippedNoCharge,
+    skippedNothing: v2Result.skippedNothing + v1Result.skippedNothing,
+    skippedError: v2Result.skippedError + v1Result.skippedError,
+  };
 }
 
 export async function runFeesReconcileJob(
