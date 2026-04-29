@@ -259,6 +259,49 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "pUSD Privy deposit uses precise asset and Polygon label",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+        });
+        const pusdPayload = {
+          ...basePayload,
+          caip2: "eip155:137",
+          asset: {
+            type: "erc20",
+            address: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+          },
+          amount: "5000000",
+          idempotency_key: "deposit-key-pusd",
+        };
+
+        const result = await handlePrivyDepositWebhook(db, pusdPayload);
+
+        assert.equal(result.ok, true);
+        assert.equal(result.notified, true);
+        assert.equal(db.notificationInserts[0]?.body, "5 pUSD deposit received on Polygon");
+        assert.deepEqual(db.notificationInserts[0]?.data, {
+          category: "system",
+          source: "privy",
+          walletAddress: basePayload.recipient,
+          walletType: "ethereum",
+          caip2: "eip155:137",
+          network: "polygon",
+          asset: pusdPayload.asset,
+          amountRaw: "5000000",
+          amountLabel: "5 pUSD",
+          amountUsd: 5,
+          txHash: "0xabc",
+        });
+      });
+    },
+  },
+  {
     name: "duplicate recorded event retries notification and marks notified",
     run: async () => {
       await withRedisDisabled(async () => {

@@ -4,7 +4,10 @@ import bs58 from "bs58";
 import { ethers } from "ethers";
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
-import { normalizeRewardsChainId, type RewardsChainId } from "../lib/rewards-chain.js";
+import {
+  normalizeRewardsChainId,
+  type RewardsChainId,
+} from "../lib/rewards-chain.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 
 type ChainLiabilityRow = {
@@ -22,7 +25,9 @@ type ChainClaimsRow = {
 };
 
 const USDC_MICRO = 1_000_000n;
-const ERC20_BALANCE_ABI = ["function balanceOf(address owner) view returns (uint256)"];
+const ERC20_BALANCE_ABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+];
 
 function decimalToMicroFloor(value: string | null | undefined): bigint {
   const raw = (value ?? "0").trim();
@@ -142,7 +147,8 @@ async function fetchControlledHotBalance(
         env.rewardsPayoutPrivateKeyPolygon?.trim() ||
         env.rewardsPayoutPrivateKey?.trim();
       const usdcAddress =
-        env.rewardsUsdcPolygon?.trim() || env.polymarketUsdcAddress;
+        env.rewardsPayoutTokenAddressPolygon?.trim() ||
+        env.polymarketPusdAddress;
       if (!privateKey) {
         return {
           available: false,
@@ -169,7 +175,8 @@ async function fetchControlledHotBalance(
       const privateKey =
         env.rewardsPayoutPrivateKeyBase?.trim() ||
         env.rewardsPayoutPrivateKey?.trim();
-      const usdcAddress = env.rewardsUsdcBase?.trim() || env.limitlessUsdcAddress;
+      const usdcAddress =
+        env.rewardsUsdcBase?.trim() || env.limitlessUsdcAddress;
       if (!privateKey) {
         return {
           available: false,
@@ -438,87 +445,91 @@ export async function getRewardsTreasuryReport(
   for (const chainId of Array.from(chainIds).sort((a, b) =>
     a.localeCompare(b),
   )) {
-      const liability = liabilityByChain[chainId];
-      const claims = claimsByChain[chainId];
-      const grossCollectedFeesMicro = decimalToMicroFloor(
-        liability?.gross_collected_fees,
-      );
-      const liabilityCollectedMicro = decimalToMicroFloor(liability?.collected);
-      const liabilityPendingMicro = decimalToMicroFloor(liability?.pending);
-      const claimedConfirmedMicro = decimalToMicroFloor(claims?.confirmed);
-      const claimedOpenNonFailedMicro = decimalToMicroFloor(
-        claims?.open_non_failed,
-      );
-      const claimedNonFailedMicro = decimalToMicroFloor(claims?.non_failed);
+    const liability = liabilityByChain[chainId];
+    const claims = claimsByChain[chainId];
+    const grossCollectedFeesMicro = decimalToMicroFloor(
+      liability?.gross_collected_fees,
+    );
+    const liabilityCollectedMicro = decimalToMicroFloor(liability?.collected);
+    const liabilityPendingMicro = decimalToMicroFloor(liability?.pending);
+    const claimedConfirmedMicro = decimalToMicroFloor(claims?.confirmed);
+    const claimedOpenNonFailedMicro = decimalToMicroFloor(
+      claims?.open_non_failed,
+    );
+    const claimedNonFailedMicro = decimalToMicroFloor(claims?.non_failed);
 
-      const normalizedChainId = normalizeRewardsChainId(chainId);
-      const hotBalance =
-        normalizedChainId != null
-          ? await fetchControlledHotBalance(normalizedChainId)
-          : {
-              available: false,
-              balanceMicro: 0n,
-              error: "unsupported chain id",
-            };
-      const controlledHotBalanceMicro = hotBalance.balanceMicro;
-      const protocolReceivableBalanceMicro = 0n;
-      const computed = computeTreasuryChainMath({
-        liabilityCollectedMicro,
-        liabilityPendingMicro,
-        claimedConfirmedMicro,
-        claimedNonFailedMicro,
-        includePending,
-        bufferUsd: env.rewardsTreasuryBufferUsd,
-        bufferPct: env.rewardsTreasuryBufferPct,
-        controlledHotBalanceMicro,
-        protocolReceivableBalanceMicro,
-      });
+    const normalizedChainId = normalizeRewardsChainId(chainId);
+    const hotBalance =
+      normalizedChainId != null
+        ? await fetchControlledHotBalance(normalizedChainId)
+        : {
+            available: false,
+            balanceMicro: 0n,
+            error: "unsupported chain id",
+          };
+    const controlledHotBalanceMicro = hotBalance.balanceMicro;
+    const protocolReceivableBalanceMicro = 0n;
+    const computed = computeTreasuryChainMath({
+      liabilityCollectedMicro,
+      liabilityPendingMicro,
+      claimedConfirmedMicro,
+      claimedNonFailedMicro,
+      includePending,
+      bufferUsd: env.rewardsTreasuryBufferUsd,
+      bufferPct: env.rewardsTreasuryBufferPct,
+      controlledHotBalanceMicro,
+      protocolReceivableBalanceMicro,
+    });
 
-      chains.push({
-        chainId,
-        grossCollectedFeesMicro: grossCollectedFeesMicro.toString(),
-        grossCollectedFees: microToNumber(grossCollectedFeesMicro),
-        liabilityCollectedMicro: liabilityCollectedMicro.toString(),
-        liabilityCollected: microToNumber(liabilityCollectedMicro),
-        liabilityPendingMicro: liabilityPendingMicro.toString(),
-        liabilityPending: microToNumber(liabilityPendingMicro),
-        claimedConfirmedMicro: claimedConfirmedMicro.toString(),
-        claimedConfirmed: microToNumber(claimedConfirmedMicro),
-        claimedOpenNonFailedMicro: claimedOpenNonFailedMicro.toString(),
-        claimedOpenNonFailed: microToNumber(claimedOpenNonFailedMicro),
-        claimedNonFailedMicro: claimedNonFailedMicro.toString(),
-        claimedNonFailed: microToNumber(claimedNonFailedMicro),
-        claimableNowMicro: computed.claimableNowMicro.toString(),
-        claimableNow: microToNumber(computed.claimableNowMicro),
-        outstandingCollectedPayableMicro:
-          computed.outstandingCollectedPayableMicro.toString(),
-        outstandingCollectedPayable: microToNumber(
-          computed.outstandingCollectedPayableMicro,
+    chains.push({
+      chainId,
+      grossCollectedFeesMicro: grossCollectedFeesMicro.toString(),
+      grossCollectedFees: microToNumber(grossCollectedFeesMicro),
+      liabilityCollectedMicro: liabilityCollectedMicro.toString(),
+      liabilityCollected: microToNumber(liabilityCollectedMicro),
+      liabilityPendingMicro: liabilityPendingMicro.toString(),
+      liabilityPending: microToNumber(liabilityPendingMicro),
+      claimedConfirmedMicro: claimedConfirmedMicro.toString(),
+      claimedConfirmed: microToNumber(claimedConfirmedMicro),
+      claimedOpenNonFailedMicro: claimedOpenNonFailedMicro.toString(),
+      claimedOpenNonFailed: microToNumber(claimedOpenNonFailedMicro),
+      claimedNonFailedMicro: claimedNonFailedMicro.toString(),
+      claimedNonFailed: microToNumber(claimedNonFailedMicro),
+      claimableNowMicro: computed.claimableNowMicro.toString(),
+      claimableNow: microToNumber(computed.claimableNowMicro),
+      outstandingCollectedPayableMicro:
+        computed.outstandingCollectedPayableMicro.toString(),
+      outstandingCollectedPayable: microToNumber(
+        computed.outstandingCollectedPayableMicro,
+      ),
+      safetyBuffer: {
+        bufferUsdMicro: numberToMicroCeil(
+          env.rewardsTreasuryBufferUsd,
+        ).toString(),
+        bufferUsd: microToNumber(
+          numberToMicroCeil(env.rewardsTreasuryBufferUsd),
         ),
-        safetyBuffer: {
-          bufferUsdMicro: numberToMicroCeil(env.rewardsTreasuryBufferUsd).toString(),
-          bufferUsd: microToNumber(numberToMicroCeil(env.rewardsTreasuryBufferUsd)),
-          bufferPct: env.rewardsTreasuryBufferPct,
-          bufferAppliedMicro: computed.bufferAppliedMicro.toString(),
-          bufferApplied: microToNumber(computed.bufferAppliedMicro),
-        },
-        reserveFloorMicro: computed.reserveFloorMicro.toString(),
-        reserveFloor: microToNumber(computed.reserveFloorMicro),
-        controlledHotBalanceMicro: controlledHotBalanceMicro.toString(),
-        controlledHotBalance: microToNumber(controlledHotBalanceMicro),
-        protocolReceivableBalanceMicro: protocolReceivableBalanceMicro.toString(),
-        protocolReceivableBalance: microToNumber(protocolReceivableBalanceMicro),
-        deficitNowMicro: computed.deficitNowMicro.toString(),
-        deficitNow: microToNumber(computed.deficitNowMicro),
-        economicSurplusMicro: computed.economicSurplusMicro.toString(),
-        economicSurplus: microToNumber(computed.economicSurplusMicro),
-        sweepableNowMicro: computed.sweepableNowMicro.toString(),
-        sweepableNow: microToNumber(computed.sweepableNowMicro),
-        payoutAddressConfigured: Boolean(resolvePayoutAddress(chainId)),
-        hotBalanceAvailable: hotBalance.available,
-        hotBalanceError: hotBalance.error ?? null,
-      });
-    }
+        bufferPct: env.rewardsTreasuryBufferPct,
+        bufferAppliedMicro: computed.bufferAppliedMicro.toString(),
+        bufferApplied: microToNumber(computed.bufferAppliedMicro),
+      },
+      reserveFloorMicro: computed.reserveFloorMicro.toString(),
+      reserveFloor: microToNumber(computed.reserveFloorMicro),
+      controlledHotBalanceMicro: controlledHotBalanceMicro.toString(),
+      controlledHotBalance: microToNumber(controlledHotBalanceMicro),
+      protocolReceivableBalanceMicro: protocolReceivableBalanceMicro.toString(),
+      protocolReceivableBalance: microToNumber(protocolReceivableBalanceMicro),
+      deficitNowMicro: computed.deficitNowMicro.toString(),
+      deficitNow: microToNumber(computed.deficitNowMicro),
+      economicSurplusMicro: computed.economicSurplusMicro.toString(),
+      economicSurplus: microToNumber(computed.economicSurplusMicro),
+      sweepableNowMicro: computed.sweepableNowMicro.toString(),
+      sweepableNow: microToNumber(computed.sweepableNowMicro),
+      payoutAddressConfigured: Boolean(resolvePayoutAddress(chainId)),
+      hotBalanceAvailable: hotBalance.available,
+      hotBalanceError: hotBalance.error ?? null,
+    });
+  }
 
   return {
     liabilityMode: "event_time_frozen",

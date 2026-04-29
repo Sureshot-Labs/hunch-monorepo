@@ -1,18 +1,22 @@
 #!/usr/bin/env tsx
 
-import { getOrCreateAssociatedTokenAccount, transferChecked } from "@solana/spl-token";
+import {
+  getOrCreateAssociatedTokenAccount,
+  transferChecked,
+} from "@solana/spl-token";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { REWARDS_CHAIN_IDS, normalizeRewardsChainId, type RewardsChainId } from "./lib/rewards-chain.js";
-import { withRewardsChainLocks } from "./lib/rewards-locks.js";
 import {
-  parseUsdcToMicro,
-  usdcMicroToDecimalString,
-} from "./lib/usdc.js";
+  REWARDS_CHAIN_IDS,
+  normalizeRewardsChainId,
+  type RewardsChainId,
+} from "./lib/rewards-chain.js";
+import { withRewardsChainLocks } from "./lib/rewards-locks.js";
+import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 import {
   capTreasurySweepAmountMicro,
   getRewardsTreasuryReport,
@@ -43,7 +47,9 @@ export function parseRewardsTreasurySweepArgs(
   const parsedMaxMicro = maxUsdRaw ? parseUsdcToMicro(maxUsdRaw) : null;
 
   if (maxUsdRaw && (!parsedMaxMicro || parsedMaxMicro <= 0n)) {
-    throw new Error("--max-usd must be a positive USDC amount (up to 6 decimals)");
+    throw new Error(
+      "--max-usd must be a positive USDC amount (up to 6 decimals)",
+    );
   }
 
   return {
@@ -55,17 +61,20 @@ export function parseRewardsTreasurySweepArgs(
   };
 }
 
-type SweepRunStatus = "started" | "completed" | "partial" | "failed" | "skipped";
+type SweepRunStatus =
+  | "started"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "skipped";
 
-async function upsertRunLedger(
-  inputs: {
-    mode: "dry_run" | "execute";
-    status: SweepRunStatus;
-    report: { liabilityMode: string };
-    payload: unknown;
-    error?: string | null;
-  },
-): Promise<string | null> {
+async function upsertRunLedger(inputs: {
+  mode: "dry_run" | "execute";
+  status: SweepRunStatus;
+  report: { liabilityMode: string };
+  payload: unknown;
+  error?: string | null;
+}): Promise<string | null> {
   const regclass = await pool.query<{ table_name: string | null }>(
     `select to_regclass('public.reward_treasury_runs')::text as table_name`,
   );
@@ -223,15 +232,17 @@ function resolveColdAddressForChain(chainId: RewardsChainId): string | null {
   return env.rewardsTreasuryColdAddressSolana?.trim() || null;
 }
 
-function resolveSweepConfig(
-  chainId: RewardsChainId,
-): { config: SweepConfig | null; error?: string } {
+function resolveSweepConfig(chainId: RewardsChainId): {
+  config: SweepConfig | null;
+  error?: string;
+} {
   if (chainId === "137") {
     const privateKey =
       env.rewardsPayoutPrivateKeyPolygon?.trim() ||
       env.rewardsPayoutPrivateKey?.trim();
     const coldAddress = env.rewardsTreasuryColdAddressPolygon?.trim();
-    const usdcAddress = env.rewardsUsdcPolygon?.trim() || env.polymarketUsdcAddress;
+    const usdcAddress =
+      env.rewardsPayoutTokenAddressPolygon?.trim() || env.polymarketPusdAddress;
     if (!privateKey) {
       return { config: null, error: "missing polygon payout key" };
     }
@@ -334,7 +345,11 @@ async function executeEvmSweep(
 }> {
   const provider = new ethers.JsonRpcProvider(config.rpcUrl);
   const wallet = new ethers.Wallet(config.privateKey, provider);
-  const token = new ethers.Contract(config.usdcAddress, ERC20_SWEEP_ABI, wallet);
+  const token = new ethers.Contract(
+    config.usdcAddress,
+    ERC20_SWEEP_ABI,
+    wallet,
+  );
   const hotAddress = await wallet.getAddress();
   const coldAddress = config.coldAddress;
 
@@ -355,10 +370,14 @@ async function executeEvmSweep(
   const postHotBalance = BigInt(await token.balanceOf(hotAddress));
   const postColdBalance = BigInt(await token.balanceOf(coldAddress));
   if (preHotBalance - postHotBalance < amountMicro) {
-    throw new Error("post-check failed: hot balance did not decrease by amount");
+    throw new Error(
+      "post-check failed: hot balance did not decrease by amount",
+    );
   }
   if (postColdBalance - preColdBalance < amountMicro) {
-    throw new Error("post-check failed: cold balance did not increase by amount");
+    throw new Error(
+      "post-check failed: cold balance did not increase by amount",
+    );
   }
 
   return {
@@ -418,12 +437,18 @@ async function executeSolanaSweep(
   try {
     preHotBalance = BigInt(
       (
-        await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")
+        await connection.getTokenAccountBalance(
+          sourceAccount.address,
+          "confirmed",
+        )
       ).value.amount,
     );
     preColdBalance = BigInt(
       (
-        await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
+        await connection.getTokenAccountBalance(
+          destinationAccount.address,
+          "confirmed",
+        )
       ).value.amount,
     );
   } catch (error) {
@@ -473,22 +498,32 @@ async function executeSolanaSweep(
   try {
     postHotBalance = BigInt(
       (
-        await connection.getTokenAccountBalance(sourceAccount.address, "confirmed")
+        await connection.getTokenAccountBalance(
+          sourceAccount.address,
+          "confirmed",
+        )
       ).value.amount,
     );
     postColdBalance = BigInt(
       (
-        await connection.getTokenAccountBalance(destinationAccount.address, "confirmed")
+        await connection.getTokenAccountBalance(
+          destinationAccount.address,
+          "confirmed",
+        )
       ).value.amount,
     );
   } catch (error) {
     throw wrapSweepStage("post_balance", error);
   }
   if (preHotBalance - postHotBalance < amountMicro) {
-    throw new Error("post-check failed: hot balance did not decrease by amount");
+    throw new Error(
+      "post-check failed: hot balance did not decrease by amount",
+    );
   }
   if (postColdBalance - preColdBalance < amountMicro) {
-    throw new Error("post-check failed: cold balance did not increase by amount");
+    throw new Error(
+      "post-check failed: cold balance did not increase by amount",
+    );
   }
 
   return {
@@ -521,7 +556,9 @@ export async function runRewardsTreasurySweep(
     throw new Error("Unsupported chain. Allowed: 137, 8453, solana");
   }
 
-  const lockTargets = normalizedChainId ? [normalizedChainId] : REWARDS_CHAIN_IDS;
+  const lockTargets = normalizedChainId
+    ? [normalizedChainId]
+    : REWARDS_CHAIN_IDS;
   return withRewardsChainLocks(pool, lockTargets, async () => {
     const report = await getRewardsTreasuryReport(pool, {
       chainId: normalizedChainId,
@@ -542,7 +579,9 @@ export async function runRewardsTreasurySweep(
         options.maxMicro,
       );
       const hotBalanceLeftIfAppliedMicro =
-        hotBalanceNowMicro > amountMicro ? hotBalanceNowMicro - amountMicro : 0n;
+        hotBalanceNowMicro > amountMicro
+          ? hotBalanceNowMicro - amountMicro
+          : 0n;
       const amount = Number(usdcMicroToDecimalString(amountMicro));
       const shouldSweep = amountMicro > 0n && amountMicro >= minSweepMicro;
       let reason: string | null = null;
@@ -600,17 +639,24 @@ export async function runRewardsTreasurySweep(
           continue;
         }
         try {
-          const result = resolved.config.kind === "evm"
-            ? await executeEvmSweep(resolved.config, action.amountMicro)
-            : await executeSolanaSweep(resolved.config, action.amountMicro);
+          const result =
+            resolved.config.kind === "evm"
+              ? await executeEvmSweep(resolved.config, action.amountMicro)
+              : await executeSolanaSweep(resolved.config, action.amountMicro);
           action.executed = true;
           action.txHash = result.txHash;
           action.hotAddress = result.hotAddress;
           action.coldAddress = result.coldAddress;
           action.preHotBalance = usdcMicroToDecimalString(result.preHotBalance);
-          action.postHotBalance = usdcMicroToDecimalString(result.postHotBalance);
-          action.preColdBalance = usdcMicroToDecimalString(result.preColdBalance);
-          action.postColdBalance = usdcMicroToDecimalString(result.postColdBalance);
+          action.postHotBalance = usdcMicroToDecimalString(
+            result.postHotBalance,
+          );
+          action.preColdBalance = usdcMicroToDecimalString(
+            result.preColdBalance,
+          );
+          action.postColdBalance = usdcMicroToDecimalString(
+            result.postColdBalance,
+          );
         } catch (error) {
           action.error = describeError(error);
         }
@@ -621,11 +667,17 @@ export async function runRewardsTreasurySweep(
     const failedCount = actions.filter(
       (action) => action.shouldSweep && action.error != null,
     ).length;
-    const attemptedCount = actions.filter((action) => action.shouldSweep).length;
+    const attemptedCount = actions.filter(
+      (action) => action.shouldSweep,
+    ).length;
     const unavailableHotBalanceCount = actions.filter((action) =>
       (action.reason ?? "").startsWith("hot_balance_unavailable:"),
     ).length;
-    if (options.execute && status === "skipped" && unavailableHotBalanceCount > 0) {
+    if (
+      options.execute &&
+      status === "skipped" &&
+      unavailableHotBalanceCount > 0
+    ) {
       status = "failed";
     }
 
@@ -648,26 +700,24 @@ export async function runRewardsTreasurySweep(
       ),
     );
 
-    const runId = await upsertRunLedger(
-      {
-        mode: options.execute ? "execute" : "dry_run",
-        status,
+    const runId = await upsertRunLedger({
+      mode: options.execute ? "execute" : "dry_run",
+      status,
+      report,
+      payload: {
         report,
-        payload: {
-          report,
-          actions: actions.map((action) => ({
-            ...action,
-            amountMicro: action.amountMicro.toString(),
-          })),
-        },
-        error:
-          failedCount > 0
-            ? `${failedCount}/${attemptedCount} sweep action(s) failed`
-            : unavailableHotBalanceCount > 0 && options.execute
-              ? `${unavailableHotBalanceCount} chain(s) missing hot-balance prerequisites`
-            : null,
+        actions: actions.map((action) => ({
+          ...action,
+          amountMicro: action.amountMicro.toString(),
+        })),
       },
-    );
+      error:
+        failedCount > 0
+          ? `${failedCount}/${attemptedCount} sweep action(s) failed`
+          : unavailableHotBalanceCount > 0 && options.execute
+            ? `${unavailableHotBalanceCount} chain(s) missing hot-balance prerequisites`
+            : null,
+    });
     if (runId) {
       console.log(`Treasury run recorded: ${runId}`);
     }
@@ -687,9 +737,7 @@ export async function runRewardsTreasurySweep(
         failedCount > 0
           ? `${failedCount}/${attemptedCount} action(s) failed`
           : `${unavailableHotBalanceCount} chain(s) missing hot-balance prerequisites`;
-      throw new Error(
-        `Treasury sweep ${status}: ${failureMessage}`,
-      );
+      throw new Error(`Treasury sweep ${status}: ${failureMessage}`);
     }
 
     return result;

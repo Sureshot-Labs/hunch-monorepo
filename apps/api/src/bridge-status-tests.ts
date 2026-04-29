@@ -7,7 +7,10 @@ import {
   getBridgeNotificationStatus,
   isTerminalBridgeOrderStatus,
 } from "./services/bridge-status.js";
-import { buildBridgeNotification } from "./services/notifications.js";
+import {
+  buildBridgeNotification,
+  buildRewardNotification,
+} from "./services/notifications.js";
 
 assert.equal(canonicalizeBridgeOrderStatus("filled"), "fulfilled");
 assert.equal(canonicalizeBridgeOrderStatus("Fulfilled"), "fulfilled");
@@ -41,6 +44,30 @@ const refunded = buildBridgeNotification({
 
 assert.equal(refunded.type, "bridge_refunded");
 assert.equal(refunded.title, "Bridge refunded");
+assert.equal(refunded.body, "Across Polygon → Base");
 assert.equal(refunded.severity, "warning");
+
+const sameChain = buildBridgeNotification({
+  userId: "user-1",
+  provider: "debridge",
+  status: "completed",
+  srcChainId: "137",
+  dstChainId: "137",
+  bridgeOrderId: "order-2",
+  txHash: "0xdef",
+});
+
+assert.equal(sameChain.body, "deBridge Polygon → Polygon");
+
+const solanaReward = buildRewardNotification({
+  userId: "user-1",
+  status: "failed",
+  amountUsd: 0.01,
+  chainId: "solana",
+  claimId: "claim-1",
+  walletAddress: "wallet-1",
+});
+
+assert.equal(solanaReward.body, "$0.01 on Solana");
 
 console.log("[bridge-status-tests] ok");

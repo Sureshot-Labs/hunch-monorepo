@@ -13,7 +13,10 @@ import { abis } from "../lib/contracts.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
-import { fetchActiveDebridgeConfig, insertDebridgeConfig } from "../repos/debridge-config.js";
+import {
+  fetchActiveDebridgeConfig,
+  insertDebridgeConfig,
+} from "../repos/debridge-config.js";
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
@@ -27,7 +30,10 @@ import {
   upsertRewardsMultiplierOverride,
 } from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
-import { getRewardsPolicy, setReferralCodeForUser } from "../services/rewards.js";
+import {
+  getRewardsPolicy,
+  setReferralCodeForUser,
+} from "../services/rewards.js";
 import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import {
@@ -41,9 +47,7 @@ import {
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
-import {
-  fetchEvmMulticall,
-} from "../services/polygon-rpc.js";
+import { fetchEvmMulticall } from "../services/polygon-rpc.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -92,9 +96,21 @@ const DEBRIDGE_CHAIN_META: Record<
   string,
   { label: string; kind: "evm" | "solana"; explorer: string }
 > = {
-  "137": { label: "Polygon", kind: "evm", explorer: "https://polygonscan.com/address/" },
-  "8453": { label: "Base", kind: "evm", explorer: "https://basescan.org/address/" },
-  "7565164": { label: "Solana", kind: "solana", explorer: "https://solscan.io/account/" },
+  "137": {
+    label: "Polygon",
+    kind: "evm",
+    explorer: "https://polygonscan.com/address/",
+  },
+  "8453": {
+    label: "Base",
+    kind: "evm",
+    explorer: "https://basescan.org/address/",
+  },
+  "7565164": {
+    label: "Solana",
+    kind: "solana",
+    explorer: "https://solscan.io/account/",
+  },
 };
 
 type DebridgeConfig = {
@@ -185,7 +201,9 @@ function normalizeMultiplierReferralRules(
       if (!entry || typeof entry !== "object") return null;
       const record = entry as Record<string, unknown>;
       const minReferrals = normalizeNonNegativeNumber(
-        record.minReferrals ?? record.minQualifiedReferrals ?? record.min_referrals,
+        record.minReferrals ??
+          record.minQualifiedReferrals ??
+          record.min_referrals,
       );
       const multiplier = normalizePositiveNumber(record.multiplier);
       if (minReferrals == null || multiplier == null) return null;
@@ -198,7 +216,9 @@ function normalizeMultiplierReferralRules(
   return [...deduped.values()].sort((a, b) => a.minReferrals - b.minReferrals);
 }
 
-function normalizeMultiplierTierRules(raw: unknown): RewardsMultiplierTierRule[] {
+function normalizeMultiplierTierRules(
+  raw: unknown,
+): RewardsMultiplierTierRule[] {
   if (!Array.isArray(raw)) return [];
   const rules = raw
     .map((entry) => {
@@ -234,14 +254,19 @@ async function getDebridgeConfig(): Promise<DebridgeConfig> {
         row?.affiliate_fee_percent != null
           ? Number(row.affiliate_fee_percent)
           : env.debridgeAffiliateFeePercent,
-      affiliateFeeRecipients: row?.affiliate_fee_recipients ?? parseAffiliateRecipientMap(env.debridgeAffiliateFeeRecipients || ""),
+      affiliateFeeRecipients:
+        row?.affiliate_fee_recipients ??
+        parseAffiliateRecipientMap(env.debridgeAffiliateFeeRecipients || ""),
       referralCode:
         row?.referral_code != null
           ? Number(row.referral_code)
           : env.debridgeReferralCode,
       source: row ? "db" : "env",
     };
-    cachedDebridgeConfig = { value: config, expiresAt: now + DEBRIDGE_CONFIG_TTL_MS };
+    cachedDebridgeConfig = {
+      value: config,
+      expiresAt: now + DEBRIDGE_CONFIG_TTL_MS,
+    };
     return config;
   };
 
@@ -353,7 +378,8 @@ async function fetchPolymarketBalances(inputs: {
     timeoutMs: env.polygonRpcTimeoutMs,
     signer: inputs.walletAddress,
     funder,
-    includeSignerUsdc: funder.toLowerCase() !== inputs.walletAddress.toLowerCase(),
+    includeSignerUsdc:
+      funder.toLowerCase() !== inputs.walletAddress.toLowerCase(),
     negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress,
     feeCollectorAddress: env.feeCollectorAddress,
   });
@@ -364,9 +390,7 @@ async function fetchPolymarketBalances(inputs: {
   };
 }
 
-async function fetchLimitlessBalance(
-  walletAddress: string,
-): Promise<bigint> {
+async function fetchLimitlessBalance(walletAddress: string): Promise<bigint> {
   const snapshot = await fetchLimitlessOnchainSnapshot({
     rpcUrl: env.baseRpcUrl,
     timeoutMs: env.baseRpcTimeoutMs,
@@ -415,9 +439,7 @@ async function fetchFeeCollectorConfig(address: string): Promise<{
     collateralResult.returnData,
   ) as unknown;
 
-  const treasury = Array.isArray(treasuryDecoded)
-    ? treasuryDecoded[0]
-    : null;
+  const treasury = Array.isArray(treasuryDecoded) ? treasuryDecoded[0] : null;
   const collateral = Array.isArray(collateralDecoded)
     ? collateralDecoded[0]
     : null;
@@ -429,6 +451,22 @@ async function fetchFeeCollectorConfig(address: string): Promise<{
     treasury: ethers.getAddress(treasury),
     collateral: ethers.getAddress(collateral),
   };
+}
+
+function resolvePolygonTokenSymbol(address: string | null | undefined): string {
+  if (!address) return "USDC";
+  try {
+    const normalized = ethers.getAddress(address);
+    if (normalized === ethers.getAddress(env.polymarketPusdAddress)) {
+      return "pUSD";
+    }
+    if (normalized === ethers.getAddress(env.polymarketUsdceAddress)) {
+      return "USDC.e";
+    }
+  } catch {
+    return "USDC";
+  }
+  return "USDC";
 }
 
 async function fetchErc20Balance(inputs: {
@@ -507,6 +545,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: string | null;
           usdcBalance: string | null;
           usdcBalanceRaw: string | null;
+          payoutAsset: string;
+          payoutTokenAddress: string;
           coldAddress: string | null;
           error: string | null;
         };
@@ -520,6 +560,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: string | null;
           usdcBalance: string | null;
           usdcBalanceRaw: string | null;
+          payoutAsset: string;
+          payoutTokenAddress: string;
           coldAddress: string | null;
           error: string | null;
         };
@@ -533,6 +575,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: string | null;
           usdcBalance: string | null;
           usdcBalanceRaw: string | null;
+          payoutAsset: string;
+          payoutTokenAddress: string;
           coldAddress: string | null;
           error: string | null;
         };
@@ -547,6 +591,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: null,
           usdcBalance: null,
           usdcBalanceRaw: null,
+          payoutAsset: resolvePolygonTokenSymbol(
+            env.rewardsPayoutTokenAddressPolygon?.trim() ||
+              env.polymarketPusdAddress,
+          ),
+          payoutTokenAddress:
+            env.rewardsPayoutTokenAddressPolygon?.trim() ||
+            env.polymarketPusdAddress,
           coldAddress: env.rewardsTreasuryColdAddressPolygon || null,
           error: null,
         },
@@ -560,6 +611,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: null,
           usdcBalance: null,
           usdcBalanceRaw: null,
+          payoutAsset: "USDC",
+          payoutTokenAddress:
+            env.rewardsUsdcAddressBase || env.limitlessUsdcAddress,
           coldAddress: env.rewardsTreasuryColdAddressBase || null,
           error: null,
         },
@@ -573,6 +627,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: null,
           usdcBalance: null,
           usdcBalanceRaw: null,
+          payoutAsset: "USDC",
+          payoutTokenAddress: env.solanaUsdcMint,
           coldAddress: env.rewardsTreasuryColdAddressSolana || null,
           error: null,
         },
@@ -589,6 +645,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             kind: "evm" as const,
             explorer: "",
           };
+          const isBase = chainId === "8453";
+          const asset =
+            meta.kind === "solana"
+              ? "USDC"
+              : isBase
+                ? "USDC"
+                : resolvePolygonTokenSymbol(env.polymarketUsdcAddress);
           try {
             if (meta.kind === "solana") {
               const usdc = await fetchSolanaTokenBalanceByOwnerAndMint({
@@ -603,7 +666,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                 chainId,
                 chainLabel: meta.label,
                 address,
-                asset: "USDC",
+                asset,
                 balance: formatUiAmount(amount, decimals),
                 balanceRaw: amount.toString(),
                 mint: env.solanaUsdcMint,
@@ -611,7 +674,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               };
             }
 
-            const isBase = chainId === "8453";
             const tokenAddress = isBase
               ? env.limitlessUsdcAddress
               : env.polymarketUsdcAddress;
@@ -629,7 +691,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               chainId,
               chainLabel: meta.label,
               address,
-              asset: "USDC",
+              asset,
               balance: ethers.formatUnits(balance, 6),
               balanceRaw: balance.toString(),
               tokenAddress,
@@ -640,14 +702,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               chainId,
               chainLabel: meta.label,
               address,
-              asset: "USDC",
+              asset,
               balance: null,
               balanceRaw: null,
               explorer: meta.explorer,
               error:
-                error instanceof Error
-                  ? error.message
-                  : "Balance fetch failed",
+                error instanceof Error ? error.message : "Balance fetch failed",
             };
           }
         }),
@@ -668,7 +728,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           }
         } catch (error) {
           feeCollectorError =
-            error instanceof Error ? error.message : "Fee collector fetch failed";
+            error instanceof Error
+              ? error.message
+              : "Fee collector fetch failed";
         }
       }
 
@@ -717,7 +779,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
           const wallet = new ethers.Wallet(rewardsPayoutKeyPolygon, provider);
           const usdcAddress =
-            env.rewardsUsdcAddressPolygon?.trim() || env.polymarketUsdcAddress;
+            env.rewardsPayoutTokenAddressPolygon?.trim() ||
+            env.polymarketPusdAddress;
           const [nativeBalance, usdcBalance] = await Promise.all([
             provider.getBalance(wallet.address),
             fetchErc20Balance({
@@ -729,9 +792,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           ]);
 
           rewardsHotWallets.polygon.address = wallet.address;
-          rewardsHotWallets.polygon.nativeBalance = ethers.formatEther(
-            nativeBalance,
-          );
+          rewardsHotWallets.polygon.nativeBalance =
+            ethers.formatEther(nativeBalance);
           rewardsHotWallets.polygon.nativeBalanceRaw = nativeBalance.toString();
           rewardsHotWallets.polygon.usdcBalance = ethers.formatUnits(
             usdcBalance,
@@ -768,9 +830,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           ]);
 
           rewardsHotWallets.base.address = wallet.address;
-          rewardsHotWallets.base.nativeBalance = ethers.formatEther(
-            nativeBalance,
-          );
+          rewardsHotWallets.base.nativeBalance =
+            ethers.formatEther(nativeBalance);
           rewardsHotWallets.base.nativeBalanceRaw = nativeBalance.toString();
           rewardsHotWallets.base.usdcBalance = ethers.formatUnits(
             usdcBalance,
@@ -785,7 +846,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const rewardsPayoutSolanaSecret = env.rewardsSolanaSecretKey?.trim() || "";
+      const rewardsPayoutSolanaSecret =
+        env.rewardsSolanaSecretKey?.trim() || "";
       if (rewardsPayoutSolanaSecret) {
         rewardsHotWallets.solana.configured = true;
         try {
@@ -811,7 +873,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             SOLANA_LAMPORT_DECIMALS,
           );
           rewardsHotWallets.solana.nativeBalanceRaw = nativeBalance.toString();
-          rewardsHotWallets.solana.usdcBalance = usdcBalance?.uiAmountString ?? "0";
+          rewardsHotWallets.solana.usdcBalance =
+            usdcBalance?.uiAmountString ?? "0";
           rewardsHotWallets.solana.usdcBalanceRaw =
             usdcBalance?.amount.toString() ?? "0";
         } catch (error) {
@@ -868,6 +931,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           hasPrivateKey: Boolean(feeCollectorPrivateKey),
           chainId: 137,
           tokenAddress: feeCollectorCollateral ?? env.polymarketUsdcAddress,
+          tokenSymbol: resolvePolygonTokenSymbol(
+            feeCollectorCollateral ?? env.polymarketUsdcAddress,
+          ),
           balance:
             feeCollectorTreasuryBalance !== null
               ? ethers.formatUnits(feeCollectorTreasuryBalance, 6)
@@ -932,8 +998,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         baseUrl: null as string | null,
         error: null as string | null,
       };
-      let targets: Awaited<ReturnType<typeof readApiCacheWarmStatus>>["targets"] = [];
-      let redisError = redis ? null : error ?? null;
+      let targets: Awaited<
+        ReturnType<typeof readApiCacheWarmStatus>
+      >["targets"] = [];
+      let redisError = redis ? null : (error ?? null);
 
       if (redis) {
         try {
@@ -1014,8 +1082,16 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         };
         dlq: { key: string; length: number | null };
         indexes: {
-          event: { total: number | null; active: number | null; error: string | null };
-          market: { total: number | null; active: number | null; error: string | null };
+          event: {
+            total: number | null;
+            active: number | null;
+            error: string | null;
+          };
+          market: {
+            total: number | null;
+            active: number | null;
+            error: string | null;
+          };
         };
       } = {
         available: false,
@@ -1023,7 +1099,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           status === "loading"
             ? "Redis loading"
             : status === "error"
-              ? redisError ?? "Redis unavailable"
+              ? (redisError ?? "Redis unavailable")
               : "Redis not configured",
         stream: {
           key: streamKey,
@@ -1072,7 +1148,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           redisStats.dlq.length = dlqLength;
         } catch (error) {
           redisStats.error =
-            error instanceof Error ? error.message : "Redis stream lookup failed";
+            error instanceof Error
+              ? error.message
+              : "Redis stream lookup failed";
         }
 
         try {
@@ -1460,6 +1538,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
           if (wallet.wallet_type === "ethereum") {
             const polymarketEntries = await (async () => {
+              const polymarketAsset = resolvePolygonTokenSymbol(
+                env.polymarketUsdcAddress,
+              );
               try {
                 const data = await fetchPolymarketBalances({
                   userId: id,
@@ -1469,7 +1550,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                   {
                     venue: "polymarket",
                     chainId: 137,
-                    asset: "USDC",
+                    asset: polymarketAsset,
                     balance: ethers.formatUnits(data.funderBalance, 6),
                     balanceRaw: data.funderBalance.toString(),
                     tokenAddress: env.polymarketUsdcAddress,
@@ -1489,7 +1570,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                   entries.push({
                     venue: "polymarket",
                     chainId: 137,
-                    asset: "USDC",
+                    asset: polymarketAsset,
                     balance: ethers.formatUnits(data.signerBalance, 6),
                     balanceRaw: data.signerBalance.toString(),
                     tokenAddress: env.polymarketUsdcAddress,
@@ -1503,7 +1584,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                   {
                     venue: "polymarket",
                     chainId: 137,
-                    asset: "USDC",
+                    asset: polymarketAsset,
                     balance: null,
                     balanceRaw: null,
                     tokenAddress: env.polymarketUsdcAddress,
@@ -1638,7 +1719,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     "/admin/users/:id/activity",
     {
       preHandler: createAdminMiddleware(),
-      schema: { params: adminUserParamsSchema, querystring: adminUserActivityQuerySchema },
+      schema: {
+        params: adminUserParamsSchema,
+        querystring: adminUserActivityQuerySchema,
+      },
     },
     async (request, reply) => {
       const { id } = request.params;
@@ -1931,7 +2015,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           const otherActiveAdmins = Number(adminRows[0]?.count ?? 0);
           if (otherActiveAdmins === 0) {
             reply.code(400);
-            return reply.send({ error: "Cannot deactivate the last active admin" });
+            return reply.send({
+              error: "Cannot deactivate the last active admin",
+            });
           }
         }
       }
@@ -2160,9 +2246,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           body.affiliateFeePercent != null
             ? Number(body.affiliateFeePercent)
             : null,
-        affiliateFeeRecipients: recipients && Object.keys(recipients).length
-          ? recipients
-          : null,
+        affiliateFeeRecipients:
+          recipients && Object.keys(recipients).length ? recipients : null,
         referralCode:
           body.referralCode != null ? Number(body.referralCode) : null,
       });
@@ -2258,7 +2343,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const effectiveAt = body.effectiveAt ? new Date(body.effectiveAt) : new Date();
+      const effectiveAt = body.effectiveAt
+        ? new Date(body.effectiveAt)
+        : new Date();
       const actorId = request.user?.id ?? null;
       try {
         const row = await insertRuntimePolicy(pool, {
@@ -2374,7 +2461,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           id: inserted.id,
           effectiveAt: inserted.effective_at,
           globalMultiplier: Number(inserted.global_multiplier),
-          referralRules: normalizeMultiplierReferralRules(inserted.referral_rules),
+          referralRules: normalizeMultiplierReferralRules(
+            inserted.referral_rules,
+          ),
           tierRules: normalizeMultiplierTierRules(inserted.tier_rules),
           notes: inserted.notes ?? null,
           createdAt: inserted.created_at,
@@ -2446,7 +2535,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "User not found" });
       }
 
-      const effectiveAt = body.effectiveAt ? new Date(body.effectiveAt) : new Date();
+      const effectiveAt = body.effectiveAt
+        ? new Date(body.effectiveAt)
+        : new Date();
       const expiresAt =
         body.expiresAt === null
           ? null
@@ -2574,7 +2665,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           values ($1, $2, $3)
           returning effective_at, created_at
         `,
-        [effectiveAt, JSON.stringify(body.tiers), JSON.stringify(body.referralBonus)],
+        [
+          effectiveAt,
+          JSON.stringify(body.tiers),
+          JSON.stringify(body.referralBonus),
+        ],
       );
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -2701,7 +2796,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       schema: { params: adminManualPointsParamsSchema },
     },
     async (request, reply) => {
-      const deleted = await deleteAdminManualVolumeEvent(pool, request.params.id);
+      const deleted = await deleteAdminManualVolumeEvent(
+        pool,
+        request.params.id,
+      );
       if (!deleted) {
         reply.code(404);
         return reply.send({ error: "Manual admin points event not found" });

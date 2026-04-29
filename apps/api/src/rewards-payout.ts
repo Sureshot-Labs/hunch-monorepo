@@ -86,7 +86,14 @@ const DEFAULT_LIMIT = 25;
 const STALE_SUBMITTED_NO_TX_MIN_AGE_SEC = 300;
 
 const ERC20_ABI = [
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 value) returns (bool)",
+  "function balanceOf(address account) view returns (uint256)",
   "function transfer(address to, uint256 value) returns (bool)",
+];
+
+const POLYMARKET_COLLATERAL_ONRAMP_ABI = [
+  "function wrap(address asset, address to, uint256 amount)",
 ];
 
 export function parseRewardsPayoutArgs(
@@ -121,7 +128,7 @@ function resolveChainAlias(chainId: string): string | null {
 
 function buildChainConfigs(): Record<string, ChainConfig> {
   const polygonUsdc =
-    env.rewardsUsdcPolygon?.trim() || env.polymarketUsdcAddress;
+    env.rewardsPayoutTokenAddressPolygon?.trim() || env.polymarketPusdAddress;
   const baseUsdc = env.rewardsUsdcBase?.trim() || env.limitlessUsdcAddress;
 
   return {
@@ -154,6 +161,40 @@ function buildChainConfigs(): Record<string, ChainConfig> {
 
 function parseAmount(value: string, decimals: number): bigint {
   return ethers.parseUnits(value, decimals);
+}
+
+function formatAmount(value: bigint, decimals: number): string {
+  return ethers.formatUnits(value, decimals);
+}
+
+function toBigInt(value: unknown): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return BigInt(value);
+  }
+  if (typeof value === "string") return BigInt(value);
+  if (value && typeof value === "object" && "toString" in value) {
+    return BigInt(String(value));
+  }
+  throw new Error("Unable to parse bigint value");
+}
+
+function isSameEvmAddress(left: string, right: string): boolean {
+  try {
+    return ethers.getAddress(left) === ethers.getAddress(right);
+  } catch {
+    return false;
+  }
+}
+
+function sumValidClaimAmounts(claims: ClaimRow[], decimals: number): bigint {
+  let total = 0n;
+  for (const claim of claims) {
+    if (!isValidClaimAmount(claim.amount_usdc)) continue;
+    const amountRaw = parseAmount(claim.amount_usdc, decimals);
+    if (amountRaw > 0n) total += amountRaw;
+  }
+  return total;
 }
 
 function isValidClaimAmount(value: string): boolean {
@@ -457,6 +498,89 @@ async function confirmSolanaClaim(claim: ClaimRow, connection: Connection) {
     value.confirmationStatus === "finalized"
   ) {
     await markClaimStatus({ id: claim.id, status: "confirmed" });
+  }
+}
+
+async function ensurePolygonPayoutLiquidity(
+  claims: ClaimRow[],
+  config: EvmChainConfig,
+  wallet: ethers.Wallet,
+) {
+  if (config.chainId !== "137") return;
+  if (!env.rewardsAutoWrapUsdcePolygon) return;
+
+  const required = sumValidClaimAmounts(claims, config.decimals);
+  if (required <= 0n) return;
+
+  if (!isSameEvmAddress(config.usdcAddress, env.polymarketPusdAddress)) {
+    throw new Error(
+      "Polygon rewards payout token must be pUSD when USDC.e auto-wrap is enabled. Set HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON to pUSD or disable HUNCH_REWARDS_AUTO_WRAP_USDCE_POLYGON.",
+    );
+  }
+
+  const onrampAddress = env.polymarketCollateralOnrampAddress.trim();
+  const usdceAddress = env.polymarketUsdceAddress.trim();
+  if (!ethers.isAddress(onrampAddress)) {
+    throw new Error("Invalid POLYMARKET_COLLATERAL_ONRAMP_ADDRESS");
+  }
+  if (!ethers.isAddress(usdceAddress)) {
+    throw new Error("Invalid POLYMARKET_USDCE_ADDRESS");
+  }
+
+  const payoutToken = new ethers.Contract(
+    config.usdcAddress,
+    ERC20_ABI,
+    wallet,
+  );
+  const payoutBalance = toBigInt(await payoutToken.balanceOf(wallet.address));
+  if (payoutBalance >= required) return;
+
+  const shortfall = required - payoutBalance;
+  const usdceToken = new ethers.Contract(usdceAddress, ERC20_ABI, wallet);
+  const usdceBalance = toBigInt(await usdceToken.balanceOf(wallet.address));
+  if (usdceBalance < shortfall) {
+    throw new Error(
+      `Insufficient Polygon rewards liquidity: need ${formatAmount(required, config.decimals)} pUSD, have ${formatAmount(payoutBalance, config.decimals)} pUSD and ${formatAmount(usdceBalance, config.decimals)} USDC.e`,
+    );
+  }
+
+  const allowance = toBigInt(
+    await usdceToken.allowance(wallet.address, onrampAddress),
+  );
+  if (allowance < shortfall) {
+    console.log(
+      `Approving ${formatAmount(shortfall, config.decimals)} USDC.e for Polymarket collateral onramp`,
+    );
+    const approveTx = await usdceToken.approve(onrampAddress, shortfall);
+    const approveReceipt = await approveTx.wait();
+    if (approveReceipt?.status !== 1) {
+      throw new Error(
+        "USDC.e approval for Polymarket collateral onramp failed",
+      );
+    }
+  }
+
+  console.log(
+    `Wrapping ${formatAmount(shortfall, config.decimals)} USDC.e to pUSD for Polygon rewards payout`,
+  );
+  const onramp = new ethers.Contract(
+    onrampAddress,
+    POLYMARKET_COLLATERAL_ONRAMP_ABI,
+    wallet,
+  );
+  const wrapTx = await onramp.wrap(usdceAddress, wallet.address, shortfall);
+  const wrapReceipt = await wrapTx.wait();
+  if (wrapReceipt?.status !== 1) {
+    throw new Error("USDC.e to pUSD wrap failed");
+  }
+
+  const refreshedPayoutBalance = toBigInt(
+    await payoutToken.balanceOf(wallet.address),
+  );
+  if (refreshedPayoutBalance < required) {
+    throw new Error(
+      `Polygon rewards pUSD balance is still insufficient after wrap: need ${formatAmount(required, config.decimals)}, have ${formatAmount(refreshedPayoutBalance, config.decimals)}`,
+    );
   }
 }
 
@@ -820,6 +944,25 @@ export async function runRewardsPayout(options: RewardsPayoutOptions) {
       }
     }
     const solanaKeypair = needsSolana ? loadSolanaKeypair() : null;
+
+    const pendingBeforeReserve = await fetchPendingClaims(
+      chainFilter,
+      options.limit,
+    );
+    const polygonPending = pendingBeforeReserve.filter(
+      (claim) => claim.chain_id === "137",
+    );
+    if (polygonPending.length) {
+      const polygonConfig = chainConfigs["137"];
+      const polygonWallet = walletByChain.get("137");
+      if (polygonConfig?.kind === "evm" && polygonWallet) {
+        await ensurePolygonPayoutLiquidity(
+          polygonPending,
+          polygonConfig,
+          polygonWallet,
+        );
+      }
+    }
 
     const reserved = await reservePendingClaims(chainFilter, options.limit);
     for (const claim of reserved) {

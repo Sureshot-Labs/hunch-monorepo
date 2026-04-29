@@ -70,6 +70,83 @@ function formatVenue(venue: string): string {
   return venue.charAt(0).toUpperCase() + venue.slice(1);
 }
 
+function formatBridgeProvider(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "debridge") return "deBridge";
+  if (normalized === "across") return "Across";
+  return formatVenue(provider);
+}
+
+function formatChainLabel(chain?: string | number | null): string | null {
+  if (chain == null) return null;
+  const raw = String(chain).trim();
+  if (!raw) return null;
+
+  const normalized = raw.toLowerCase();
+  if (
+    normalized === "solana" ||
+    normalized.startsWith("solana:") ||
+    normalized === "7565164" ||
+    normalized === "34268394551451"
+  ) {
+    return "Solana";
+  }
+  if (normalized === "base" || normalized === "8453" || normalized === "eip155:8453") {
+    return "Base";
+  }
+  if (
+    normalized === "polygon" ||
+    normalized === "matic" ||
+    normalized === "137" ||
+    normalized === "eip155:137"
+  ) {
+    return "Polygon";
+  }
+  if (
+    normalized === "ethereum" ||
+    normalized === "eth" ||
+    normalized === "1" ||
+    normalized === "eip155:1"
+  ) {
+    return "Ethereum";
+  }
+
+  return raw;
+}
+
+function formatChainNetwork(chain?: string | number | null): string | null {
+  if (chain == null) return null;
+  const normalized = String(chain).trim().toLowerCase();
+  if (
+    normalized === "solana" ||
+    normalized.startsWith("solana:") ||
+    normalized === "7565164" ||
+    normalized === "34268394551451"
+  ) {
+    return "solana";
+  }
+  if (normalized === "base" || normalized === "8453" || normalized === "eip155:8453") {
+    return "base";
+  }
+  if (
+    normalized === "polygon" ||
+    normalized === "matic" ||
+    normalized === "137" ||
+    normalized === "eip155:137"
+  ) {
+    return "polygon";
+  }
+  if (
+    normalized === "ethereum" ||
+    normalized === "eth" ||
+    normalized === "1" ||
+    normalized === "eip155:1"
+  ) {
+    return "ethereum";
+  }
+  return null;
+}
+
 export function buildOrderNotification(input: {
   userId: string;
   venue: string;
@@ -230,11 +307,11 @@ export function buildBridgeNotification(input: {
         : "error";
   const route =
     input.srcChainId && input.dstChainId
-      ? `${input.srcChainId} → ${input.dstChainId}`
+      ? `${formatChainLabel(input.srcChainId)} → ${formatChainLabel(input.dstChainId)}`
       : null;
   const body = route
-    ? `${input.provider} ${route}`
-    : `${input.provider} bridge`;
+    ? `${formatBridgeProvider(input.provider)} ${route}`
+    : `${formatBridgeProvider(input.provider)} bridge`;
   const dedupeKey = input.bridgeOrderId
     ? `bridge:${input.bridgeOrderId}:${input.status}`
     : input.txHash
@@ -265,22 +342,30 @@ export function buildBridgeNotification(input: {
 }
 
 function formatDepositChain(caip2?: string | null): string | null {
-  if (!caip2) return null;
-  const normalized = caip2.toLowerCase();
-  if (normalized.startsWith("solana:")) return "Solana";
-  if (normalized === "eip155:8453") return "Base";
-  if (normalized === "eip155:137") return "Polygon";
-  if (normalized === "eip155:1") return "Ethereum";
-  return caip2;
+  return formatChainLabel(caip2);
 }
 
 function formatDepositNetwork(caip2?: string | null): string | null {
-  if (!caip2) return null;
-  const normalized = caip2.toLowerCase();
-  if (normalized.startsWith("solana:")) return "solana";
-  if (normalized === "eip155:8453") return "base";
-  if (normalized === "eip155:137") return "polygon";
-  if (normalized === "eip155:1") return "ethereum";
+  return formatChainNetwork(caip2);
+}
+
+function normalizeDepositAssetAddress(
+  asset: Record<string, unknown> | null | undefined,
+): string {
+  const address = typeof asset?.address === "string" ? asset.address : "";
+  return address.toLowerCase();
+}
+
+function formatKnownDepositUsdAsset(
+  asset: Record<string, unknown> | null | undefined,
+): string | null {
+  const mint = typeof asset?.mint === "string" ? asset.mint : "";
+  const address = normalizeDepositAssetAddress(asset);
+  if (mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") return "USDC";
+  if (address === "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913") return "USDC";
+  if (address === "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359") return "USDC";
+  if (address === "0x2791bca1f2de4661ed88a30c99a7a9449aa84174") return "USDC.e";
+  if (address === "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb") return "pUSD";
   return null;
 }
 
@@ -297,15 +382,14 @@ function formatDepositAsset(
     if (normalizedCaip2 === "eip155:137") return "POL";
     return "native token";
   }
-  if (isDepositUsdcAsset({ mint, address })) {
-    return "USDC";
-  }
+  const knownUsdAsset = formatKnownDepositUsdAsset({ mint, address });
+  if (knownUsdAsset) return knownUsdAsset;
   if (type === "spl") return "SPL token";
   if (type === "erc20") return "token";
   return "funds";
 }
 
-function isDepositUsdcAsset(
+function isDepositUsdStableAsset(
   asset: Record<string, unknown> | null | undefined,
 ): boolean {
   const mint = typeof asset?.mint === "string" ? asset.mint : "";
@@ -314,7 +398,8 @@ function isDepositUsdcAsset(
     mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ||
     address.toLowerCase() === "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" ||
     address.toLowerCase() === "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359" ||
-    address.toLowerCase() === "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+    address.toLowerCase() === "0x2791bca1f2de4661ed88a30c99a7a9449aa84174" ||
+    address.toLowerCase() === "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"
   );
 }
 
@@ -324,7 +409,7 @@ function inferDepositAssetDecimals(
 ): number | null {
   const type = typeof asset?.type === "string" ? asset.type : "";
   const normalizedCaip2 = caip2?.toLowerCase() ?? "";
-  if (isDepositUsdcAsset(asset)) return 6;
+  if (isDepositUsdStableAsset(asset)) return 6;
   if (type === "native-token") {
     if (normalizedCaip2.startsWith("solana:")) return 9;
     if (normalizedCaip2.startsWith("eip155:")) return 18;
@@ -362,7 +447,7 @@ export function buildDepositNotification(input: {
     asset: input.asset,
     caip2: input.caip2,
   });
-  const amountUsd = isDepositUsdcAsset(input.asset)
+  const amountUsd = isDepositUsdStableAsset(input.asset)
     ? parseScaledAmount(input.amountRaw, 6)
     : null;
   const assetLabel = amountLabel ?? asset;
@@ -414,7 +499,8 @@ export function buildRewardNotification(input: {
   };
 
   const amount = formatUsd(input.amountUsd, 2) ?? "$0.00";
-  const body = `${amount} on ${input.chainId}`;
+  const chain = formatChainLabel(input.chainId) ?? input.chainId;
+  const body = `${amount} on ${chain}`;
   const dedupeKey = `reward:${input.claimId}:${input.status}`;
 
   return {

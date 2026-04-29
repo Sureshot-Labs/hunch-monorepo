@@ -3,7 +3,10 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true });
 
 function req(name: string) {
@@ -255,9 +258,7 @@ if (
     value.includes("dev-"),
   )
 ) {
-  throw new Error(
-    "[env] DFlow dev endpoints are not allowed in production",
-  );
+  throw new Error("[env] DFlow dev endpoints are not allowed in production");
 }
 
 const dflowRequireApiKeySetting = parseOptionalBool(
@@ -274,9 +275,8 @@ const dflowGeoBlockEnabled = dflowGeoBlockEnabledSetting ?? false;
 const dflowGeoBlockCountries = parseList(
   process.env.DFLOW_GEO_BLOCK_COUNTRIES,
 ).map((country) => country.toUpperCase());
-const dflowGeoBlockDefaultRaw = process.env.DFLOW_GEO_BLOCK_DEFAULT
-  ?.trim()
-  .toLowerCase();
+const dflowGeoBlockDefaultRaw =
+  process.env.DFLOW_GEO_BLOCK_DEFAULT?.trim().toLowerCase();
 const dflowGeoBlockDefault: "allow" | "block" =
   dflowGeoBlockDefaultRaw === "allow" ? "allow" : "block";
 
@@ -438,9 +438,8 @@ const aiMarketMapMergePerVenueMinDefault = optionalNonNegativeInt(
   "AI_MARKET_MAP_MERGE_PER_VENUE_MIN_DEFAULT",
   5,
 );
-const aiMarketMapSizeByDefaultRaw = process.env.AI_MARKET_MAP_SIZE_BY_DEFAULT
-  ?.trim()
-  .toLowerCase();
+const aiMarketMapSizeByDefaultRaw =
+  process.env.AI_MARKET_MAP_SIZE_BY_DEFAULT?.trim().toLowerCase();
 const aiMarketMapSizeByDefault:
   | "count"
   | "volume24h"
@@ -635,10 +634,8 @@ const postSignupOnboardingEligibleAfter = optionalIsoDate(
   new Date("2026-04-09T00:00:00.000Z"),
 );
 
-const POLYMARKET_PUSD_ADDRESS =
-  "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
-const POLYMARKET_USDCE_ADDRESS =
-  "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const POLYMARKET_PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const POLYMARKET_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const POLYMARKET_EXCHANGE_V2_ADDRESS =
   "0xE111180000d2663C0091e4f400237545B87B996B";
 const POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS =
@@ -812,10 +809,7 @@ export const env = {
     "AI_WHALE_PROFILE_MAX_TOKENS_FALLBACK",
     560,
   ),
-  walletIntelMarketLimit: optionalPositiveInt(
-    "WALLET_INTEL_MARKET_LIMIT",
-    50,
-  ),
+  walletIntelMarketLimit: optionalPositiveInt("WALLET_INTEL_MARKET_LIMIT", 50),
   walletIntelMarketLimitPerVenue,
   walletIntelMarketLimitKalshi,
   walletIntelWhaleMarketLimit,
@@ -839,10 +833,7 @@ export const env = {
   walletIntelSelectionModePoly,
   walletIntelSelectionModeKalshi,
   walletIntelSelectionModeLimitless,
-  walletIntelHolderLimit: optionalPositiveInt(
-    "WALLET_INTEL_HOLDER_LIMIT",
-    20,
-  ),
+  walletIntelHolderLimit: optionalPositiveInt("WALLET_INTEL_HOLDER_LIMIT", 20),
   walletIntelSnapshotHours: optionalPositiveInt(
     "WALLET_INTEL_SNAPSHOT_HOURS",
     6,
@@ -1045,23 +1036,24 @@ export const env = {
     process.env.AVALANCHE_RPC_URL?.trim() ||
     "https://api.avax.network/ext/bc/C/rpc",
   lineaRpcUrl: process.env.LINEA_RPC_URL?.trim() || "https://rpc.linea.build",
-  baseRpcUrl:
-    process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
+  baseRpcUrl: process.env.BASE_RPC_URL?.trim() || "https://mainnet.base.org",
   baseRpcTimeoutMs: optionalPositiveInt("BASE_RPC_TIMEOUT_MS", 10_000),
   baseMulticallAddress:
     process.env.BASE_MULTICALL_ADDRESS?.trim() ||
     "0xca11bde05977b3631167028862be2a173976ca11",
   alchemyPolygonNftBaseUrl:
     process.env.ALCHEMY_POLYGON_NFT_BASE_URL?.trim() || "",
-  alchemyBaseNftBaseUrl:
-    process.env.ALCHEMY_BASE_NFT_BASE_URL?.trim() || "",
+  alchemyBaseNftBaseUrl: process.env.ALCHEMY_BASE_NFT_BASE_URL?.trim() || "",
   polymarketDataApiBase:
     process.env.POLYMARKET_DATA_API_BASE?.trim() ||
     "https://data-api.polymarket.com",
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",
-  limitlessApiTimeoutMs: optionalPositiveInt("LIMITLESS_API_TIMEOUT_MS", 15_000),
+  limitlessApiTimeoutMs: optionalPositiveInt(
+    "LIMITLESS_API_TIMEOUT_MS",
+    15_000,
+  ),
   limitlessHmacTokenId: process.env.LIMITLESS_HMAC_TOKEN_ID?.trim() || "",
   limitlessHmacSecret: process.env.LIMITLESS_HMAC_SECRET?.trim() || "",
   limitlessReferralCode: process.env.LIMITLESS_REFERRAL_CODE?.trim() || "",
@@ -1087,8 +1079,7 @@ export const env = {
     process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
     POLYMARKET_PUSD_ADDRESS,
   polymarketUsdceAddress:
-    process.env.POLYMARKET_USDCE_ADDRESS?.trim() ||
-    POLYMARKET_USDCE_ADDRESS,
+    process.env.POLYMARKET_USDCE_ADDRESS?.trim() || POLYMARKET_USDCE_ADDRESS,
   polymarketUsdcAddress:
     process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
     process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
@@ -1132,8 +1123,7 @@ export const env = {
     "HUNCH_FEE_POLICY_TTL_SEC",
     7 * 24 * 60 * 60,
   ),
-  feeCollectorAddress:
-    process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
+  feeCollectorAddress: process.env.HUNCH_FEE_COLLECTOR_ADDRESS?.trim() || "",
   feeCollectorPrivateKey:
     process.env.HUNCH_FEE_COLLECTOR_PRIVATE_KEY?.trim() || "",
   feeCollectorLegacyAddress:
@@ -1173,6 +1163,11 @@ export const env = {
     "",
   rewardsPayoutPrivateKey:
     process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
+  rewardsPayoutTokenAddressPolygon:
+    process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() || "",
+  rewardsAutoWrapUsdcePolygon:
+    parseOptionalBool(process.env.HUNCH_REWARDS_AUTO_WRAP_USDCE_POLYGON) ??
+    true,
   rewardsUsdcAddressPolygon:
     process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() ||
     process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() ||
@@ -1183,17 +1178,18 @@ export const env = {
     process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() ||
     process.env.HUNCH_REWARDS_USDC_ADDRESS_POLYGON?.trim() ||
     "",
-  rewardsUsdcBase:
-    process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
+  rewardsUsdcBase: process.env.HUNCH_REWARDS_USDC_ADDRESS_BASE?.trim() || "",
   rewardsSolanaSecretKeyCanonical:
     process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
   rewardsSolanaSecretKey:
     process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
 
   debridgeDlnBase:
-    process.env.DEBRIDGE_DLN_BASE?.trim() || "https://dln.debridge.finance/v1.0",
+    process.env.DEBRIDGE_DLN_BASE?.trim() ||
+    "https://dln.debridge.finance/v1.0",
   debridgeStatsBase:
-    process.env.DEBRIDGE_STATS_BASE?.trim() || "https://stats-api.dln.trade/api",
+    process.env.DEBRIDGE_STATS_BASE?.trim() ||
+    "https://stats-api.dln.trade/api",
   debridgeAffiliateFeePercent: optionalNonNegativeNumber(
     "DEBRIDGE_AFFILIATE_FEE_PERCENT",
     0,
@@ -1209,12 +1205,10 @@ export const env = {
     parseOptionalBool(process.env.BRIDGE_ACROSS_ENABLED) ?? false,
   acrossRouteAllowlist: parseList(process.env.ACROSS_ROUTE_ALLOWLIST),
   acrossAppFee: optionalRatio01("ACROSS_APP_FEE", 0),
-  acrossAppFeeRecipients:
-    process.env.ACROSS_APP_FEE_RECIPIENTS?.trim() || "",
+  acrossAppFeeRecipients: process.env.ACROSS_APP_FEE_RECIPIENTS?.trim() || "",
   acrossTimeoutMs: optionalPositiveInt("ACROSS_TIMEOUT_MS", 15_000),
 
-  polymarketBuilderApiKey:
-    process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
+  polymarketBuilderApiKey: process.env.POLYMARKET_BUILDER_API_KEY?.trim() || "",
   polymarketBuilderApiSecret:
     process.env.POLYMARKET_BUILDER_API_SECRET?.trim() || "",
   polymarketBuilderApiPassphrase:
