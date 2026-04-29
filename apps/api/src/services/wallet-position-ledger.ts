@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { normalizeOutcomeSideForStorage } from "./wallet-intel-helpers.js";
+import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
 import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
@@ -381,11 +382,18 @@ export async function loadWalletPositionLedgerMap(
         wa.created_at,
         wa.id
       from wallet_activity_events wa
+      left join unified_markets m on m.id = wa.market_id
+      left join unified_events e on e.id = m.event_id
       join input_keys k
         on k.wallet_id = wa.wallet_id
        and k.market_id = wa.market_id
        and k.outcome_side = upper(coalesce(wa.outcome_side, ''))
       where wa.activity_type in ('delta', 'trade')
+        and ${buildSnapshotDeltaTrackableActivitySql({
+          activityAlias: "wa",
+          marketAlias: "m",
+          eventAlias: "e",
+        })}
       order by
         wa.wallet_id,
         wa.market_id,

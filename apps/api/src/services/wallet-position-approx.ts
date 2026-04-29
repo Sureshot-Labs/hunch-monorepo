@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 
 import { isRecord } from "../lib/type-guards.js";
 import { normalizeOutcomeSideForStorage } from "./wallet-intel-helpers.js";
+import { buildWalletIntelTrackableMarketSql } from "./wallet-intel-market-eligibility.js";
 import {
   loadWalletPositionLedgerMap,
   makeWalletPositionLedgerKey,
@@ -365,12 +366,18 @@ export async function loadLatestWalletPositionNowMap(
           ws.venue,
           ws.snapshot_at
         from wallet_position_snapshots ws
+        join unified_markets um on um.id = ws.market_id
+        left join unified_events ue on ue.id = um.event_id
         join (
           select distinct wallet_id, venue
           from input_keys
         ) input_wallets
           on input_wallets.wallet_id = ws.wallet_id
          and input_wallets.venue = ws.venue
+        where ${buildWalletIntelTrackableMarketSql({
+          marketAlias: "um",
+          eventAlias: "ue",
+        })}
         order by ws.wallet_id, ws.venue, ws.snapshot_at desc
       )
       select

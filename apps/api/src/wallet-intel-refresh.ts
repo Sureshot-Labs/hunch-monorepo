@@ -26,6 +26,10 @@ import {
   shouldSuppressLegacySideTransitionDelta,
 } from "./services/wallet-intel-helpers.js";
 import {
+  buildSnapshotDeltaTrackableActivitySql,
+  buildWalletIntelTrackableMarketSql,
+} from "./services/wallet-intel-market-eligibility.js";
+import {
   createWalletIntelRetryTelemetry,
   type WalletIntelRetryTelemetry,
 } from "./services/wallet-intel-retry.js";
@@ -1680,6 +1684,31 @@ async function snapshotFollowedWalletPositions(
   return inserted;
 }
 
+async function filterTrackableMarketIds(
+  client: Queryable,
+  inputs: {
+    marketIds: string[];
+    asOf: Date;
+  },
+): Promise<string[]> {
+  if (inputs.marketIds.length === 0) return [];
+  const { rows } = await client.query<{ id: string }>(
+    `
+      select m.id
+      from unified_markets m
+      left join unified_events e on e.id = m.event_id
+      where m.id = any($1::text[])
+        and ${buildWalletIntelTrackableMarketSql({
+          marketAlias: "m",
+          eventAlias: "e",
+          asOfSql: "$2::timestamptz",
+        })}
+    `,
+    [inputs.marketIds, inputs.asOf],
+  );
+  return rows.map((row) => row.id);
+}
+
 async function applySnapshotDeltas(
   client: Queryable,
   inputs: {
@@ -1689,6 +1718,14 @@ async function applySnapshotDeltas(
   },
 ): Promise<{ inserts: number; updates: number }> {
   if (inputs.walletIds.length === 0 || inputs.marketIds.length === 0) {
+    return { inserts: 0, updates: 0 };
+  }
+
+  const eligibleMarketIds = await filterTrackableMarketIds(client, {
+    marketIds: inputs.marketIds,
+    asOf: inputs.occurredAt,
+  });
+  if (eligibleMarketIds.length === 0) {
     return { inserts: 0, updates: 0 };
   }
 
@@ -1708,7 +1745,7 @@ async function applySnapshotDeltas(
         and snapshot_at = $2
         and market_id = any($3::text[])
     `,
-    [inputs.walletIds, inputs.occurredAt, inputs.marketIds],
+    [inputs.walletIds, inputs.occurredAt, eligibleMarketIds],
   );
 
   const prevRows = await client.query<{
@@ -1735,7 +1772,7 @@ async function applySnapshotDeltas(
         and market_id = any($3::text[])
       order by wallet_id, venue, market_id, outcome_side, snapshot_at desc
     `,
-    [inputs.walletIds, inputs.occurredAt, inputs.marketIds],
+    [inputs.walletIds, inputs.occurredAt, eligibleMarketIds],
   );
 
   const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
@@ -1951,10 +1988,17 @@ async function loadWalletMetricsAggregateRows(
           ) as notional_usd,
           wa.occurred_at
         from wallet_activity_events wa
+        left join unified_markets m on m.id = wa.market_id
+        left join unified_events e on e.id = m.event_id
         where wa.wallet_id = any($1::uuid[])
           and wa.activity_type in ('delta', 'trade')
           and wa.occurred_at <= $2::timestamptz
           and ($3::timestamptz is null or wa.occurred_at >= $3::timestamptz)
+          and ${buildSnapshotDeltaTrackableActivitySql({
+            activityAlias: "wa",
+            marketAlias: "m",
+            eventAlias: "e",
+          })}
       )
       select
         b.wallet_id,
@@ -2016,11 +2060,18 @@ async function loadWalletMetricLedgerRows(
         wa.created_at,
         wa.id
       from wallet_activity_events wa
+      left join unified_markets m on m.id = wa.market_id
+      left join unified_events e on e.id = m.event_id
       where wa.wallet_id = any($1::uuid[])
         and wa.activity_type in ('delta', 'trade')
         and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
         and wa.occurred_at <= $2::timestamptz
         and ($3::timestamptz is null or wa.occurred_at >= $3::timestamptz)
+        and ${buildSnapshotDeltaTrackableActivitySql({
+          activityAlias: "wa",
+          marketAlias: "m",
+          eventAlias: "e",
+        })}
       order by
         wa.wallet_id,
         wa.market_id,
@@ -2373,11 +2424,18 @@ async function refreshWalletActivityBaseline(
         percentile_cont(0.5) within group (order by wa.size_usd) as p50_usd,
         percentile_cont(0.9) within group (order by wa.size_usd) as p90_usd
       from wallet_activity_events wa
+      left join unified_markets m on m.id = wa.market_id
+      left join unified_events e on e.id = m.event_id
       where wa.wallet_id = any($1::uuid[])
         and wa.activity_type in ('delta', 'trade')
         and wa.size_usd is not null
         and wa.occurred_at >= $3::timestamptz - ($2::text || ' days')::interval
         and wa.occurred_at <= $3::timestamptz
+        and ${buildSnapshotDeltaTrackableActivitySql({
+          activityAlias: "wa",
+          marketAlias: "m",
+          eventAlias: "e",
+        })}
       group by wa.wallet_id
       on conflict (wallet_id, window_days)
       do update set
@@ -2512,9 +2570,15 @@ async function refreshWalletActivityHourly(
           end as entered_late
         from wallet_activity_events wa
         left join unified_markets um on um.id = wa.market_id
+        left join unified_events ue on ue.id = um.event_id
         where wa.wallet_id = any($1::uuid[])
           and wa.activity_type in ('delta', 'trade', 'holder')
           and wa.occurred_at >= $2::timestamptz
+          and ${buildSnapshotDeltaTrackableActivitySql({
+            activityAlias: "wa",
+            marketAlias: "um",
+            eventAlias: "ue",
+          })}
       ) e
       group by
         e.wallet_id,
@@ -2566,7 +2630,14 @@ async function refreshWalletPositionExposure(
           ws.venue,
           max(ws.snapshot_at) as snapshot_at
         from wallet_position_snapshots ws
+        join unified_markets m on m.id = ws.market_id
+        left join unified_events e on e.id = m.event_id
         where ws.wallet_id = any($1::uuid[])
+          and ${buildWalletIntelTrackableMarketSql({
+            marketAlias: "m",
+            eventAlias: "e",
+            asOfSql: "$2::timestamptz",
+          })}
         group by ws.wallet_id, ws.venue
       ),
       latest_rows as (
@@ -2590,7 +2661,14 @@ async function refreshWalletPositionExposure(
           on l.wallet_id = ws.wallet_id
          and l.venue = ws.venue
          and l.snapshot_at = ws.snapshot_at
+        join unified_markets m on m.id = ws.market_id
+        left join unified_events e on e.id = m.event_id
         where ws.wallet_id = any($1::uuid[])
+          and ${buildWalletIntelTrackableMarketSql({
+            marketAlias: "m",
+            eventAlias: "e",
+            asOfSql: "$2::timestamptz",
+          })}
       ),
       market_rollup as (
         select
@@ -2771,9 +2849,16 @@ async function refreshSystemTags(
       from wallets w
       left join lateral (
         select max(occurred_at) as last_trade
-        from wallet_activity_events
-        where wallet_id = w.id
-          and activity_type in ('delta', 'trade')
+        from wallet_activity_events wa
+        left join unified_markets m on m.id = wa.market_id
+        left join unified_events e on e.id = m.event_id
+        where wa.wallet_id = w.id
+          and wa.activity_type in ('delta', 'trade')
+          and ${buildSnapshotDeltaTrackableActivitySql({
+            activityAlias: "wa",
+            marketAlias: "m",
+            eventAlias: "e",
+          })}
       ) t on true
       where w.id = any($1::uuid[])
         and (t.last_trade is null or t.last_trade < $3::timestamptz - ($2::text || ' days')::interval)
@@ -2786,9 +2871,16 @@ async function refreshSystemTags(
       select distinct wa.wallet_id
       from wallet_activity_events wa
       join wallets w on w.id = wa.wallet_id
+      left join unified_markets m on m.id = wa.market_id
+      left join unified_events e on e.id = m.event_id
       where wa.wallet_id = any($1::uuid[])
         and wa.activity_type in ('delta', 'trade', 'holder')
         and wa.size_usd is not null
+        and ${buildSnapshotDeltaTrackableActivitySql({
+          activityAlias: "wa",
+          marketAlias: "m",
+          eventAlias: "e",
+        })}
         and (
           (w.chain = 'solana' and wa.size_usd >= $2)
           or (w.chain <> 'solana' and wa.size_usd >= $3)
@@ -2989,6 +3081,7 @@ async function selectPolymarketByTrade(
   client: Queryable,
   hours: number,
   limit: number,
+  asOf: Date,
   mode: "trade_1h" | "trade_24h" | "hybrid",
 ): Promise<MarketPickRow[]> {
   const tradeTable =
@@ -3011,7 +3104,12 @@ async function selectPolymarketByTrade(
         on t.market_id = m.id
        and t.venue = 'polymarket'
       join recent r on r.token_id = t.token_id
-      where m.status = 'ACTIVE'
+      left join unified_events e on e.id = m.event_id
+      where ${buildWalletIntelTrackableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        asOfSql: "$3::timestamptz",
+      })}
         and m.venue = 'polymarket'
       group by m.id, m.venue, m.volume_24h, m.liquidity
       order by ${
@@ -3021,7 +3119,7 @@ async function selectPolymarketByTrade(
       } desc nulls last
       limit $2
     `,
-    [hours, limit],
+    [hours, limit, asOf],
   );
   return result.rows;
 }
@@ -3029,6 +3127,7 @@ async function selectPolymarketByTrade(
 async function selectPolymarketByMetric(
   client: Queryable,
   limit: number,
+  asOf: Date,
   mode: "volume_24h" | "liquidity",
 ): Promise<MarketPickRow[]> {
   const order =
@@ -3039,12 +3138,17 @@ async function selectPolymarketByMetric(
     `
       select m.id, m.venue, m.volume_24h
       from unified_markets m
-      where m.status = 'ACTIVE'
+      left join unified_events e on e.id = m.event_id
+      where ${buildWalletIntelTrackableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        asOfSql: "$2::timestamptz",
+      })}
         and m.venue = 'polymarket'
       order by ${order}
       limit $1
     `,
-    [limit],
+    [limit, asOf],
   );
   return result.rows;
 }
@@ -3053,6 +3157,7 @@ async function selectKalshiByTrade(
   client: Queryable,
   hours: number,
   limit: number,
+  asOf: Date,
   mode: "trade_1h" | "trade_24h" | "hybrid",
 ): Promise<MarketPickRow[]> {
   const tradeTable =
@@ -3075,7 +3180,12 @@ async function selectKalshiByTrade(
         on t.market_id = m.id
        and t.venue = 'kalshi'
       join recent r on r.token_id = t.token_id
-      where m.status = 'ACTIVE'
+      left join unified_events e on e.id = m.event_id
+      where ${buildWalletIntelTrackableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        asOfSql: "$3::timestamptz",
+      })}
         and m.venue = 'kalshi'
         and m.is_initialized is true
       group by m.id, m.venue, m.volume_24h, m.open_interest
@@ -3086,7 +3196,7 @@ async function selectKalshiByTrade(
       } desc nulls last
       limit $2
     `,
-    [hours, limit],
+    [hours, limit, asOf],
   );
   return result.rows;
 }
@@ -3094,6 +3204,7 @@ async function selectKalshiByTrade(
 async function selectKalshiByMetric(
   client: Queryable,
   limit: number,
+  asOf: Date,
   mode: "open_interest" | "updated",
 ): Promise<MarketPickRow[]> {
   const order =
@@ -3104,13 +3215,18 @@ async function selectKalshiByMetric(
     `
       select m.id, m.venue, m.volume_24h
       from unified_markets m
-      where m.status = 'ACTIVE'
+      left join unified_events e on e.id = m.event_id
+      where ${buildWalletIntelTrackableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        asOfSql: "$2::timestamptz",
+      })}
         and m.venue = 'kalshi'
         and m.is_initialized is true
       order by ${order}
       limit $1
     `,
-    [limit],
+    [limit, asOf],
   );
   return result.rows;
 }
@@ -3118,6 +3234,7 @@ async function selectKalshiByMetric(
 async function selectLimitlessByMetric(
   client: Queryable,
   limit: number,
+  asOf: Date,
   mode: "liquidity" | "updated" | "book" | "hybrid",
 ): Promise<MarketPickRow[]> {
   let order = "m.updated_at desc nulls last";
@@ -3136,12 +3253,17 @@ async function selectLimitlessByMetric(
     `
       select m.id, m.venue, m.volume_24h
       from unified_markets m
-      where m.status = 'ACTIVE'
+      left join unified_events e on e.id = m.event_id
+      where ${buildWalletIntelTrackableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        asOfSql: "$2::timestamptz",
+      })}
         and m.venue = 'limitless'
       order by ${order}
       limit $1
     `,
-    [limit],
+    [limit, asOf],
   );
   return result.rows;
 }
@@ -3151,6 +3273,7 @@ async function selectMarketsPerVenue(
   limitPoly: number,
   limitKalshi: number,
   limitLimitless: number,
+  asOf: Date,
 ): Promise<MarketPickRow[]> {
   const rows: MarketPickRow[] = [];
   const polyMode = walletIntelRefreshPolicy.selectionModePoly;
@@ -3159,29 +3282,29 @@ async function selectMarketsPerVenue(
 
   if (limitPoly > 0) {
     if (polyMode === "trade_1h") {
-      rows.push(...(await selectPolymarketByTrade(client, 1, limitPoly, "trade_1h")));
+      rows.push(...(await selectPolymarketByTrade(client, 1, limitPoly, asOf, "trade_1h")));
     } else if (polyMode === "trade_24h") {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "trade_24h")));
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "trade_24h")));
     } else if (polyMode === "hybrid") {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "hybrid")));
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "hybrid")));
     } else if (polyMode === "volume_24h" || polyMode === "liquidity") {
-      rows.push(...(await selectPolymarketByMetric(client, limitPoly, polyMode)));
+      rows.push(...(await selectPolymarketByMetric(client, limitPoly, asOf, polyMode)));
     } else {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, "trade_24h")));
+      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "trade_24h")));
     }
   }
 
   if (limitKalshi > 0) {
     if (kalshiMode === "trade_1h") {
-      rows.push(...(await selectKalshiByTrade(client, 1, limitKalshi, "trade_1h")));
+      rows.push(...(await selectKalshiByTrade(client, 1, limitKalshi, asOf, "trade_1h")));
     } else if (kalshiMode === "trade_24h") {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "trade_24h")));
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "trade_24h")));
     } else if (kalshiMode === "hybrid") {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "hybrid")));
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "hybrid")));
     } else if (kalshiMode === "open_interest" || kalshiMode === "updated") {
-      rows.push(...(await selectKalshiByMetric(client, limitKalshi, kalshiMode)));
+      rows.push(...(await selectKalshiByMetric(client, limitKalshi, asOf, kalshiMode)));
     } else {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, "trade_24h")));
+      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "trade_24h")));
     }
   }
 
@@ -3192,9 +3315,9 @@ async function selectMarketsPerVenue(
       limitlessMode === "book" ||
       limitlessMode === "hybrid"
     ) {
-      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, limitlessMode)));
+      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, asOf, limitlessMode)));
     } else {
-      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, "liquidity")));
+      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, asOf, "liquidity")));
     }
   }
 
@@ -3226,16 +3349,21 @@ async function runSnapshot(snapshotAt: Date) {
 
     const markets = await client.query<{ id: string; venue: string; volume_24h: number | null }>(
       `
-        select id, venue, volume_24h
-        from unified_markets
-        where status = 'ACTIVE'
-          and venue in ('polymarket', 'limitless', 'kalshi')
-          and (venue != 'kalshi' or is_initialized is true)
-          and coalesce(volume_24h, 0) >= $1
-        order by volume_24h desc nulls last
+        select m.id, m.venue, m.volume_24h
+        from unified_markets m
+        left join unified_events e on e.id = m.event_id
+        where ${buildWalletIntelTrackableMarketSql({
+          marketAlias: "m",
+          eventAlias: "e",
+          asOfSql: "$3::timestamptz",
+        })}
+          and m.venue in ('polymarket', 'limitless', 'kalshi')
+          and (m.venue != 'kalshi' or m.is_initialized is true)
+          and coalesce(m.volume_24h, 0) >= $1
+        order by m.volume_24h desc nulls last
         limit $2
       `,
-      [walletIntelRefreshPolicy.minVolume24h, marketLimit],
+      [walletIntelRefreshPolicy.minVolume24h, marketLimit, snapshotAt],
     );
 
     const marketsPerVenueRows =
@@ -3245,6 +3373,7 @@ async function runSnapshot(snapshotAt: Date) {
             marketLimitPerVenue,
             marketLimitKalshi,
             marketLimitPerVenue,
+            snapshotAt,
           )
         : [];
 
@@ -3260,14 +3389,19 @@ async function runSnapshot(snapshotAt: Date) {
           from user_watchlist uw
           join wallet_follows wf on wf.user_id = uw.user_id
           join unified_markets um on um.id = uw.market_id
-          where um.status = 'ACTIVE'
+          left join unified_events ue on ue.id = um.event_id
+          where ${buildWalletIntelTrackableMarketSql({
+            marketAlias: "um",
+            eventAlias: "ue",
+            asOfSql: "$2::timestamptz",
+          })}
             and um.venue in ('polymarket', 'limitless', 'kalshi')
             and (um.venue != 'kalshi' or um.is_initialized is true)
         ) selected
         order by volume_24h desc nulls last
         limit $1
       `,
-      [walletIntelRefreshPolicy.watchlistMarketLimit],
+      [walletIntelRefreshPolicy.watchlistMarketLimit, snapshotAt],
     );
 
     const whaleMarkets =
@@ -3283,13 +3417,18 @@ async function runSnapshot(snapshotAt: Date) {
               join wallet_tag_map tm on tm.wallet_id = ws.wallet_id
               join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
               join unified_markets um on um.id = ws.market_id
-              where um.status = 'ACTIVE'
+              left join unified_events ue on ue.id = um.event_id
+              where ${buildWalletIntelTrackableMarketSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+                asOfSql: "$2::timestamptz",
+              })}
                 and um.venue in ('polymarket', 'limitless', 'kalshi')
                 and (um.venue != 'kalshi' or um.is_initialized is true)
               order by um.volume_24h desc nulls last
               limit $1
             `,
-            [walletIntelRefreshPolicy.whaleMarketLimit],
+            [walletIntelRefreshPolicy.whaleMarketLimit, snapshotAt],
           )
         : { rows: [] };
 

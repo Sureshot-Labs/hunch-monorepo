@@ -5,6 +5,7 @@ import {
   makeWalletPositionLedgerKey,
   resolveApproxOpenEntryFromLedger,
 } from "./wallet-position-ledger.js";
+import { buildWalletIntelTrackableMarketSql } from "./wallet-intel-market-eligibility.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -84,7 +85,13 @@ export async function loadWalletOpenPositionStatsMap(
             ws.venue,
             ws.snapshot_at
           from wallet_position_snapshots ws
+          join unified_markets um on um.id = ws.market_id
+          left join unified_events ue on ue.id = um.event_id
           where ws.wallet_id = wallet_set.wallet_id
+            and ${buildWalletIntelTrackableMarketSql({
+              marketAlias: "um",
+              eventAlias: "ue",
+            })}
           order by ws.venue, ws.snapshot_at desc
         ) latest_venue_snapshot on true
       ),
@@ -121,6 +128,11 @@ export async function loadWalletOpenPositionStatsMap(
          and l.venue = ws.venue
          and l.snapshot_at = ws.snapshot_at
         left join unified_markets um on um.id = ws.market_id
+        left join unified_events ue on ue.id = um.event_id
+        where ${buildWalletIntelTrackableMarketSql({
+          marketAlias: "um",
+          eventAlias: "ue",
+        })}
       )
       select
         wallet_id,
@@ -135,14 +147,6 @@ export async function loadWalletOpenPositionStatsMap(
         or coalesce(size_usd, 0) > 0
       )
         and resolved_outcome not in ('YES', 'NO')
-        and (
-          market_status = ''
-          or market_status not in ('CLOSED', 'SETTLED', 'ARCHIVED')
-        )
-        and (
-          market_end_time is null
-          or market_end_time >= now()
-        )
     `,
     [walletIds],
   );

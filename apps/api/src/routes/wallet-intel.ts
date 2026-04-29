@@ -58,6 +58,10 @@ import {
   normalizeOutcomeSideForApi,
   parseMarketOutcomes,
 } from "../services/wallet-intel-helpers.js";
+import {
+  buildSnapshotDeltaTrackableActivitySql,
+  buildWalletIntelTrackableMarketSql,
+} from "../services/wallet-intel-market-eligibility.js";
 import { loadWalletOpenPositionStatsMap } from "../services/wallet-open-position-stats.js";
 import {
   loadLatestWalletPositionNowMap,
@@ -3091,10 +3095,16 @@ async function loadWalletResolvedTradeStatsMap(
           um.resolved_outcome
         from wallet_activity_events wa
         left join unified_markets um on um.id = wa.market_id
+        left join unified_events ue on ue.id = um.event_id
         where wa.wallet_id = any($1::uuid[])
           and wa.activity_type in ('delta', 'trade')
           and wa.action in ('OPENED', 'INCREASED', 'BUY', 'SELL')
           and wa.occurred_at >= now() - ($2::text || ' days')::interval
+          and ${buildSnapshotDeltaTrackableActivitySql({
+            activityAlias: "wa",
+            marketAlias: "um",
+            eventAlias: "ue",
+          })}
       )
       select
         wallet_id,
@@ -7127,6 +7137,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             left join unified_events ue on ue.id = um.event_id
             where ${where}
               and wa.activity_type in ('delta', 'trade')
+              and ${buildSnapshotDeltaTrackableActivitySql({
+                activityAlias: "wa",
+                marketAlias: "um",
+                eventAlias: "ue",
+              })}
             order by wa.occurred_at desc
             limit $${limitParam}
             offset $${offsetParam}
@@ -7290,7 +7305,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   ws.venue,
                   max(ws.snapshot_at) as snapshot_at
                 from wallet_position_snapshots ws
+                join unified_markets um on um.id = ws.market_id
+                left join unified_events ue on ue.id = um.event_id
                 where ${where}
+                  and ${buildWalletIntelTrackableMarketSql({
+                    marketAlias: "um",
+                    eventAlias: "ue",
+                  })}
                 group by ws.wallet_id, ws.venue
               )
               select
@@ -7342,6 +7363,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                and ${buildWalletIntelTrackableMarketSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })}
               order by
                 ws.snapshot_at desc,
                 ws.size_usd desc nulls last,
@@ -7397,6 +7422,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_events ue on ue.id = um.event_id
               where ${where}
                 and ${positionFilterSql}
+                and ${buildWalletIntelTrackableMarketSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })}
               order by
                 ws.snapshot_at desc,
                 ws.size_usd desc nulls last,
@@ -7547,6 +7576,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     coalesce(um.close_time, um.expiration_time) is not null
                     and coalesce(um.close_time, um.expiration_time) < now()
                   )
+                )
+                and (
+                  coalesce(um.close_time, um.expiration_time) is null
+                  or ws.snapshot_at <= coalesce(um.close_time, um.expiration_time)
                 )
             ),
             terminal_rows as (
