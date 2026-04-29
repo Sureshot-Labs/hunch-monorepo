@@ -545,6 +545,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: string | null;
           usdcBalance: string | null;
           usdcBalanceRaw: string | null;
+          usdceBalance: string | null;
+          usdceBalanceRaw: string | null;
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
@@ -591,6 +593,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           nativeBalanceRaw: null,
           usdcBalance: null,
           usdcBalanceRaw: null,
+          usdceBalance: null,
+          usdceBalanceRaw: null,
           payoutAsset: resolvePolygonTokenSymbol(
             env.rewardsPayoutTokenAddressPolygon?.trim() ||
               env.polymarketPusdAddress,
@@ -781,10 +785,16 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           const usdcAddress =
             env.rewardsPayoutTokenAddressPolygon?.trim() ||
             env.polymarketPusdAddress;
-          const [nativeBalance, usdcBalance] = await Promise.all([
+          const [nativeBalance, usdcBalance, usdceBalance] = await Promise.all([
             provider.getBalance(wallet.address),
             fetchErc20Balance({
               tokenAddress: usdcAddress,
+              owner: wallet.address,
+              rpcUrl: env.polygonRpcUrl,
+              multicallAddress: POLYGON_MULTICALL_ADDRESS,
+            }),
+            fetchErc20Balance({
+              tokenAddress: env.polymarketUsdceAddress,
               owner: wallet.address,
               rpcUrl: env.polygonRpcUrl,
               multicallAddress: POLYGON_MULTICALL_ADDRESS,
@@ -800,6 +810,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             6,
           );
           rewardsHotWallets.polygon.usdcBalanceRaw = usdcBalance.toString();
+          rewardsHotWallets.polygon.usdceBalance = ethers.formatUnits(
+            usdceBalance,
+            6,
+          );
+          rewardsHotWallets.polygon.usdceBalanceRaw = usdceBalance.toString();
         } catch (error) {
           rewardsHotWallets.polygon.error =
             error instanceof Error
