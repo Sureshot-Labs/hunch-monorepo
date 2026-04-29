@@ -899,6 +899,39 @@ function roundLimitPriceToTick(
   return roundedTicks * tickSize;
 }
 
+const DEFAULT_POLYMARKET_PRICE_TICK = 0.01;
+const POLYMARKET_SERVICE_NOT_READY_STATUS = 425;
+const POLYMARKET_ORDER_RETRY_DELAYS_MS = [250, 750, 1500] as const;
+
+function resolvePolymarketPriceTick(tickSize: number | null | undefined): number {
+  if (tickSize != null && Number.isFinite(tickSize) && tickSize > 0 && tickSize < 1) {
+    return tickSize;
+  }
+  return DEFAULT_POLYMARKET_PRICE_TICK;
+}
+
+function clampMarketOrderPriceToValidRange(
+  price: number,
+  tickSize: number | null | undefined,
+): number {
+  if (!Number.isFinite(price)) return price;
+  const tick = resolvePolymarketPriceTick(tickSize);
+  const maxTicksBelowOne = Math.max(1, Math.floor((1 - 1e-12) / tick));
+  const maxPrice = Number((maxTicksBelowOne * tick).toFixed(8));
+  const minPrice = tick;
+  return Math.min(maxPrice, Math.max(minPrice, price));
+}
+
+function isPolymarketServiceNotReadyResponse(inputs: {
+  status: number;
+  payload: unknown;
+}): boolean {
+  if (inputs.status !== POLYMARKET_SERVICE_NOT_READY_STATUS) return false;
+  const message = extractPolymarketUpstreamMessage(inputs.payload);
+  if (!message) return true;
+  return message.toLowerCase().includes("service not ready");
+}
+
 function gcd(a: bigint, b: bigint): bigint {
   let x = a < 0n ? -a : a;
   let y = b < 0n ? -b : b;
@@ -1884,21 +1917,28 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           (marketInfo?.order_price_min_tick_size != null
             ? Number(marketInfo.order_price_min_tick_size)
             : null);
+        const priceTick = resolvePolymarketPriceTick(tickSize);
         const minOrderSize =
           orderbook.minOrderSize ??
           (marketInfo?.order_min_size != null
             ? Number(marketInfo.order_min_size)
             : null);
 
-        if (tickSize != null) {
-          price = isLimitOrder
-            ? roundLimitPriceToTick(price, tickSize, body.side)
-            : roundPriceToTick(price, tickSize, body.side);
+        price = isLimitOrder
+          ? roundLimitPriceToTick(price, priceTick, body.side)
+          : roundPriceToTick(price, priceTick, body.side);
+
+        if (!isLimitOrder) {
+          price = clampMarketOrderPriceToValidRange(price, priceTick);
         }
 
-        if (!Number.isFinite(price) || price <= 0) {
+        if (!Number.isFinite(price) || price <= 0 || price >= 1) {
           reply.code(400);
-          return reply.send({ error: "Invalid price computed from orderbook" });
+          return reply.send({
+            error: isLimitOrder
+              ? "Polymarket limit price must be greater than 0 and less than 1"
+              : "Invalid price computed from orderbook",
+          });
         }
 
         const priceMicro = BigInt(Math.round(price * 1_000_000));
@@ -3298,20 +3338,49 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderType,
         ...(body.deferExec !== undefined ? { deferExec: body.deferExec } : {}),
       };
+      const clobCreds = {
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        apiPassphrase: creds.apiPassphrase,
+      };
 
-      const upstream = await polymarketL2Request({
-        baseUrl: env.polymarketClobBase,
-        timeoutMs: 10_000,
-        address: signer,
-        creds: {
-          apiKey: creds.apiKey,
-          apiSecret: creds.apiSecret,
-          apiPassphrase: creds.apiPassphrase,
-        },
-        method: "POST",
-        requestPath: "/order",
-        body: payload,
-      });
+      const submitOrder = () =>
+        polymarketL2Request({
+          baseUrl: env.polymarketClobBase,
+          timeoutMs: 10_000,
+          address: signer,
+          creds: clobCreds,
+          method: "POST",
+          requestPath: "/order",
+          body: payload,
+        });
+
+      let upstream = await submitOrder();
+      for (
+        let attempt = 0;
+        !upstream.ok &&
+        isPolymarketServiceNotReadyResponse(upstream) &&
+        attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
+        attempt += 1
+      ) {
+        const delayMs = POLYMARKET_ORDER_RETRY_DELAYS_MS[attempt] ?? 0;
+        request.log.warn(
+          {
+            upstreamStatus: upstream.status,
+            upstreamPayload: upstream.payload,
+            signer,
+            funder,
+            tokenId: orderTokenId,
+            orderType,
+            orderHash,
+            retryAttempt: attempt + 1,
+            retryDelayMs: delayMs,
+          },
+          "Polymarket order service not ready; retrying same signed order",
+        );
+        await sleep(delayMs);
+        upstream = await submitOrder();
+      }
 
       if (!upstream.ok) {
         const upstreamMessage = extractPolymarketUpstreamMessage(upstream.payload);
