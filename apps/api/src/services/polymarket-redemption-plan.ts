@@ -31,6 +31,7 @@ type PolymarketRedemptionPlanInputs = {
   funder: string;
   conditionalTokensAddress: string;
   collateralTokenAddress: string;
+  legacyCollateralTokenAddress?: string | null;
   negRiskAdapterAddress: string | null;
   outcome: "YES" | "NO";
   positionTokenId: string;
@@ -46,6 +47,16 @@ function normalizeBytes32(value: string | null | undefined): `0x${string}` | nul
   const trimmed = value.trim();
   if (!/^0x[a-fA-F0-9]{64}$/.test(trimmed)) return null;
   return trimmed as `0x${string}`;
+}
+
+function normalizeOptionalAddress(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    return ethers.getAddress(trimmed);
+  } catch {
+    return null;
+  }
 }
 
 function decodeBigInt(decoded: unknown): bigint {
@@ -133,11 +144,80 @@ async function readConditionPayout(inputs: {
   };
 }
 
+async function buildStandardConditionalRedemptionPlan(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  funderAddress: string;
+  conditionalTokensAddress: string;
+  collateralTokenAddress: string;
+  conditionId: `0x${string}`;
+  indexSet: bigint;
+  payout: Awaited<ReturnType<typeof readConditionPayout>>;
+}): Promise<RedemptionPlan> {
+  const collectionId = await safeEvmReadContract<`0x${string}`>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    target: inputs.conditionalTokensAddress,
+    iface: conditionalTokensIface,
+    functionName: "getCollectionId",
+    args: [ZERO_BYTES32, inputs.conditionId, inputs.indexSet],
+    decode: decodeBytes32,
+  });
+  const positionId = await safeEvmReadContract<bigint>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    target: inputs.conditionalTokensAddress,
+    iface: conditionalTokensIface,
+    functionName: "getPositionId",
+    args: [inputs.collateralTokenAddress, collectionId],
+    decode: decodeBigInt,
+  });
+  const balance = await safeEvmReadContract<bigint>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    target: inputs.conditionalTokensAddress,
+    iface: conditionalTokensIface,
+    functionName: "balanceOf",
+    args: [inputs.funderAddress, positionId],
+    decode: decodeBigInt,
+  });
+  if (balance <= 0n) {
+    return buildUnavailableRedemptionPlan({
+      venue: "polymarket",
+      chainId: POLY_CHAIN_ID,
+      reason: "no_redeemable_balance",
+      reasonMessage: "No redeemable balance found for this position.",
+      conditionResolved: true,
+      resolvedOutcome: inputs.payout.resolvedOutcome,
+      resolvedOutcomePct: inputs.payout.resolvedOutcomePct,
+    });
+  }
+
+  const data = conditionalTokensIface.encodeFunctionData("redeemPositions", [
+    inputs.collateralTokenAddress,
+    ZERO_BYTES32,
+    inputs.conditionId,
+    [inputs.indexSet],
+  ]);
+  return buildReadyRedemptionPlan({
+    venue: "polymarket",
+    chainId: POLY_CHAIN_ID,
+    targetAddress: inputs.conditionalTokensAddress,
+    data,
+    conditionResolved: true,
+    resolvedOutcome: inputs.payout.resolvedOutcome,
+    resolvedOutcomePct: inputs.payout.resolvedOutcomePct,
+  });
+}
+
 export async function buildPolymarketRedemptionPlan(
   inputs: PolymarketRedemptionPlanInputs,
 ): Promise<RedemptionPlan> {
   const conditionalTokensAddress = ethers.getAddress(inputs.conditionalTokensAddress);
   const collateralTokenAddress = ethers.getAddress(inputs.collateralTokenAddress);
+  const legacyCollateralTokenAddress = normalizeOptionalAddress(
+    inputs.legacyCollateralTokenAddress,
+  );
   const funderAddress = ethers.getAddress(inputs.funder);
   const indexSet = inputs.outcome === "YES" ? 1n : 2n;
 
@@ -169,35 +249,32 @@ export async function buildPolymarketRedemptionPlan(
         });
       }
 
-      const collectionId = await safeEvmReadContract<`0x${string}`>({
-        rpcUrl: inputs.rpcUrl,
-        timeoutMs: inputs.timeoutMs,
-        target: conditionalTokensAddress,
-        iface: conditionalTokensIface,
-        functionName: "getCollectionId",
-        args: [ZERO_BYTES32, conditionId, indexSet],
-        decode: decodeBytes32,
-      });
-      const positionId = await safeEvmReadContract<bigint>({
-        rpcUrl: inputs.rpcUrl,
-        timeoutMs: inputs.timeoutMs,
-        target: conditionalTokensAddress,
-        iface: conditionalTokensIface,
-        functionName: "getPositionId",
-        args: [collateralTokenAddress, collectionId],
-        decode: decodeBigInt,
-      });
-      const balance = await safeEvmReadContract<bigint>({
-        rpcUrl: inputs.rpcUrl,
-        timeoutMs: inputs.timeoutMs,
-        target: conditionalTokensAddress,
-        iface: conditionalTokensIface,
-        functionName: "balanceOf",
-        args: [funderAddress, positionId],
-        decode: decodeBigInt,
-      });
-      if (balance <= 0n) {
-        return buildUnavailableRedemptionPlan({
+      const includeLegacyCollateral =
+        legacyCollateralTokenAddress != null &&
+        legacyCollateralTokenAddress !== collateralTokenAddress;
+      const collateralCandidates = [
+        collateralTokenAddress,
+        ...(includeLegacyCollateral ? [legacyCollateralTokenAddress] : []),
+      ];
+      let noBalancePlan: RedemptionPlan | null = null;
+      for (const candidateCollateral of collateralCandidates) {
+        const plan = await buildStandardConditionalRedemptionPlan({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          funderAddress,
+          conditionalTokensAddress,
+          collateralTokenAddress: candidateCollateral,
+          conditionId,
+          indexSet,
+          payout,
+        });
+        if (plan.redeemable) return plan;
+        noBalancePlan ??= plan;
+      }
+
+      return (
+        noBalancePlan ??
+        buildUnavailableRedemptionPlan({
           venue: "polymarket",
           chainId: POLY_CHAIN_ID,
           reason: "no_redeemable_balance",
@@ -205,24 +282,8 @@ export async function buildPolymarketRedemptionPlan(
           conditionResolved: true,
           resolvedOutcome: payout.resolvedOutcome,
           resolvedOutcomePct: payout.resolvedOutcomePct,
-        });
-      }
-
-      const data = conditionalTokensIface.encodeFunctionData("redeemPositions", [
-        collateralTokenAddress,
-        ZERO_BYTES32,
-        conditionId,
-        [indexSet],
-      ]);
-      return buildReadyRedemptionPlan({
-        venue: "polymarket",
-        chainId: POLY_CHAIN_ID,
-        targetAddress: conditionalTokensAddress,
-        data,
-        conditionResolved: true,
-        resolvedOutcome: payout.resolvedOutcome,
-        resolvedOutcomePct: payout.resolvedOutcomePct,
-      });
+        })
+      );
     } catch (error) {
       if (error instanceof SafeEvmReadError) {
         return buildPreflightFailurePlan({

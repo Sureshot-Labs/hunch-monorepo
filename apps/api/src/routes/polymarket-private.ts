@@ -2388,6 +2388,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           funder,
           conditionalTokensAddress: env.polymarketConditionalTokensAddress,
           collateralTokenAddress: env.polymarketUsdcAddress,
+          legacyCollateralTokenAddress: env.polymarketUsdceAddress,
           negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress ?? null,
           outcome: request.query.outcome,
           positionTokenId: request.query.tokenId,
