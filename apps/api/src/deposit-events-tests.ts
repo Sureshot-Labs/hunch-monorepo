@@ -29,7 +29,12 @@ type MockDbOptions = {
 
 type MockDb = DbQuery & {
   calls: Array<{ sql: string; params?: unknown[] }>;
-  notificationInserts: Array<{ type: string; dedupeKey: string | null }>;
+  notificationInserts: Array<{
+    type: string;
+    body: string | null;
+    data: unknown;
+    dedupeKey: string | null;
+  }>;
   depositUpdates: Array<{ status: string; eventId: string }>;
 };
 
@@ -121,8 +126,10 @@ function createMockDb(options: MockDbOptions): MockDb {
 
     if (/insert into notifications/i.test(sql)) {
       const type = typeof params?.[1] === "string" ? params[1] : "";
+      const body = typeof params?.[3] === "string" ? params[3] : null;
+      const data = params?.[5];
       const dedupeKey = typeof params?.[6] === "string" ? params[6] : null;
-      notificationInserts.push({ type, dedupeKey });
+      notificationInserts.push({ type, body, data, dedupeKey });
       if (options.existingNotificationId) return { rows: [] };
       return {
         rows: [
@@ -205,6 +212,20 @@ const tests: TestCase[] = [
         assert.deepEqual(db.notificationInserts, [
           {
             type: "deposit_received",
+            body: "1 USDC deposit received on Base",
+            data: {
+              category: "system",
+              source: "privy",
+              walletAddress: basePayload.recipient,
+              walletType: "ethereum",
+              caip2: "eip155:8453",
+              network: "base",
+              asset: basePayload.asset,
+              amountRaw: "1000000",
+              amountLabel: "1 USDC",
+              amountUsd: 1,
+              txHash: "0xabc",
+            },
             dedupeKey: "deposit:privy:deposit-key-1",
           },
         ]);
