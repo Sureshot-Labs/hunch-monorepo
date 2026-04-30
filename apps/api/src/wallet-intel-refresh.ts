@@ -566,6 +566,23 @@ function parseMetadataSource(metadata: unknown): string | null {
 
 type Queryable = Pick<PoolClient, "query">;
 
+async function hasWalletActivityBaselineSampleCountColumn(
+  client: Queryable,
+): Promise<boolean> {
+  const result = await client.query<{ exists: boolean }>(
+    `
+      select exists (
+        select 1
+        from pg_attribute
+        where attrelid = to_regclass('public.wallet_activity_baseline')
+          and attname = 'sample_count'
+          and not attisdropped
+      )
+    `,
+  );
+  return result.rows[0]?.exists === true;
+}
+
 type WalletMetricsAggregateRow = {
   wallet_id: string;
   trades_count: number;
@@ -2408,6 +2425,21 @@ async function refreshWalletActivityBaseline(
   },
 ) {
   if (inputs.walletIds.length === 0) return;
+  const hasSampleCountColumn =
+    await hasWalletActivityBaselineSampleCountColumn(client);
+  const sampleCountInsertColumnSql = hasSampleCountColumn
+    ? `,
+        sample_count`
+    : "";
+  const sampleCountSelectSql = hasSampleCountColumn
+    ? `,
+        count(*)::int as sample_count`
+    : "";
+  const sampleCountUpdateSql = hasSampleCountColumn
+    ? `,
+        sample_count = excluded.sample_count`
+    : "";
+
   await client.query(
     `
       insert into wallet_activity_baseline (
@@ -2415,14 +2447,14 @@ async function refreshWalletActivityBaseline(
         window_days,
         as_of,
         p50_usd,
-        p90_usd
+        p90_usd${sampleCountInsertColumnSql}
       )
       select
         wa.wallet_id,
         $2::int,
         $3::timestamptz,
         percentile_cont(0.5) within group (order by wa.size_usd) as p50_usd,
-        percentile_cont(0.9) within group (order by wa.size_usd) as p90_usd
+        percentile_cont(0.9) within group (order by wa.size_usd) as p90_usd${sampleCountSelectSql}
       from wallet_activity_events wa
       left join unified_markets m on m.id = wa.market_id
       left join unified_events e on e.id = m.event_id
@@ -2440,7 +2472,7 @@ async function refreshWalletActivityBaseline(
       on conflict (wallet_id, window_days)
       do update set
         p50_usd = excluded.p50_usd,
-        p90_usd = excluded.p90_usd,
+        p90_usd = excluded.p90_usd${sampleCountUpdateSql},
         as_of = excluded.as_of,
         updated_at = now()
     `,

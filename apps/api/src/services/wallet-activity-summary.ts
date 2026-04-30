@@ -307,7 +307,12 @@ export function computeRobustUnusualScore(input: {
       input.minBaselineSamples ?? DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
     ),
   );
-  const sampleCount = Math.max(0, Math.trunc(input.baselineSampleCount ?? 0));
+  // Null means a legacy baseline row from before sample_count existed; keep it
+  // eligible until refresh writes the exact count.
+  const sampleCount =
+    input.baselineSampleCount == null
+      ? minBaselineSamples
+      : Math.max(0, Math.trunc(input.baselineSampleCount));
   if (sampleCount < minBaselineSamples) return null;
   const denominator = input.baselineP90Usd ?? 0;
   if (!Number.isFinite(denominator) || denominator <= 0) return null;
@@ -637,29 +642,11 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
   baseline as (
     select
       wb.wallet_id,
-      wb.p90_usd
+      wb.p90_usd,
+      nullif(to_jsonb(wb)->>'sample_count', '')::int as baseline_sample_count
     from wallet_activity_baseline wb
     join wallet_set ws on ws.wallet_id = wb.wallet_id
     where wb.window_days = $3::int
-  ),
-  baseline_samples as (
-    with baseline_event_counts as (
-      select
-        wae.wallet_id,
-        count(*)::int as baseline_sample_count
-      from wallet_activity_events wae
-      join wallet_set ws on ws.wallet_id = wae.wallet_id
-      where wae.activity_type in ('delta', 'trade')
-        and wae.size_usd is not null
-        and wae.occurred_at >= now() - ($3::text || ' days')::interval
-        and wae.occurred_at <= now()
-      group by wae.wallet_id
-    )
-    select
-      ws.wallet_id,
-      coalesce(bec.baseline_sample_count, 0)::int as baseline_sample_count
-    from wallet_set ws
-    left join baseline_event_counts bec on bec.wallet_id = ws.wallet_id
   ),
   events_window as (
     select
@@ -712,12 +699,12 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
     select
       e.*,
       b.p90_usd,
-      coalesce(bs.baseline_sample_count, 0) as baseline_sample_count,
+      b.baseline_sample_count,
       h.prior_distinct_markets,
       h.last_prior_activity_at,
       p.categories as profile_categories,
       case
-        when coalesce(bs.baseline_sample_count, 0) >= $19::int
+        when coalesce(b.baseline_sample_count, $19::int) >= $19::int
          and b.p90_usd is not null
          and b.p90_usd > 0
          and coalesce(e.max_abs_delta_usd, 0) >= b.p90_usd
@@ -737,7 +724,6 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
       end as has_profile_categories
     from enriched e
     left join baseline b on b.wallet_id = e.wallet_id
-    left join baseline_samples bs on bs.wallet_id = e.wallet_id
     left join history h on h.wallet_id = e.wallet_id
     left join profiles p on p.wallet_id = e.wallet_id
   )
@@ -984,7 +970,7 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_CTE_SQL = `,
       0::int as counts_flip,
       max(coalesce(cr.max_abs_delta_usd, 0)) as max_abs_delta_usd_window,
       max(cr.p90_usd) as baseline_p90_usd,
-      max(coalesce(cr.baseline_sample_count, 0))::int as baseline_sample_count
+      max(cr.baseline_sample_count)::int as baseline_sample_count
     from change_rows cr
     group by cr.wallet_id
   )
@@ -1021,29 +1007,11 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
   baseline as (
     select
       wb.wallet_id,
-      wb.p90_usd
+      wb.p90_usd,
+      nullif(to_jsonb(wb)->>'sample_count', '')::int as baseline_sample_count
     from wallet_activity_baseline wb
     join wallet_set ws on ws.wallet_id = wb.wallet_id
     where wb.window_days = $3::int
-  ),
-  baseline_samples as (
-    with baseline_event_counts as (
-      select
-        wae.wallet_id,
-        count(*)::int as baseline_sample_count
-      from wallet_activity_events wae
-      join wallet_set ws on ws.wallet_id = wae.wallet_id
-      where wae.activity_type in ('delta', 'trade')
-        and wae.size_usd is not null
-        and wae.occurred_at >= now() - ($3::text || ' days')::interval
-        and wae.occurred_at <= now()
-      group by wae.wallet_id
-    )
-    select
-      ws.wallet_id,
-      coalesce(bec.baseline_sample_count, 0)::int as baseline_sample_count
-    from wallet_set ws
-    left join baseline_event_counts bec on bec.wallet_id = ws.wallet_id
   ),
   summary as (
     select
@@ -1089,10 +1057,9 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
     s.counts_flip,
     s.max_abs_delta_usd_window,
     b.p90_usd as baseline_p90_usd,
-    coalesce(bs.baseline_sample_count, 0)::int as baseline_sample_count
+    b.baseline_sample_count::int as baseline_sample_count
   from summary s
   left join baseline b on b.wallet_id = s.wallet_id
-  left join baseline_samples bs on bs.wallet_id = s.wallet_id
 `;
 
 const FETCH_WALLET_ACTIVITY_SUMMARY_TOP_CHANGES_SQL = `
@@ -1688,29 +1655,11 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_PAGE_LABELS_SQL = `
   baseline as (
     select
       wb.wallet_id,
-      wb.p90_usd
+      wb.p90_usd,
+      nullif(to_jsonb(wb)->>'sample_count', '')::int as baseline_sample_count
     from wallet_activity_baseline wb
     join wallet_set ws on ws.wallet_id = wb.wallet_id
     where wb.window_days = $6::int
-  ),
-  baseline_samples as (
-    with baseline_event_counts as (
-      select
-        wae.wallet_id,
-        count(*)::int as baseline_sample_count
-      from wallet_activity_events wae
-      join wallet_set ws on ws.wallet_id = wae.wallet_id
-      where wae.activity_type in ('delta', 'trade')
-        and wae.size_usd is not null
-        and wae.occurred_at >= now() - ($6::text || ' days')::interval
-        and wae.occurred_at <= now()
-      group by wae.wallet_id
-    )
-    select
-      ws.wallet_id,
-      coalesce(bec.baseline_sample_count, 0)::int as baseline_sample_count
-    from wallet_set ws
-    left join baseline_event_counts bec on bec.wallet_id = ws.wallet_id
   ),
   profiles as (
     select
@@ -1755,7 +1704,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_PAGE_LABELS_SQL = `
     pr.market_id,
     pr.outcome_side,
     case
-      when coalesce(bs.baseline_sample_count, 0) >= $7::int
+      when coalesce(b.baseline_sample_count, $7::int) >= $7::int
        and b.p90_usd is not null
        and b.p90_usd > 0
        and coalesce(wr.max_abs_delta_usd, 0) >= b.p90_usd
@@ -1781,7 +1730,6 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_PAGE_LABELS_SQL = `
    and wr.market_id = pr.market_id
    and coalesce(wr.outcome_side, '') = coalesce(pr.outcome_side, '')
   left join baseline b on b.wallet_id = pr.wallet_id
-  left join baseline_samples bs on bs.wallet_id = pr.wallet_id
   left join profiles p on p.wallet_id = pr.wallet_id
 `;
 
