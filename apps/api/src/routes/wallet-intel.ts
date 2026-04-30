@@ -3077,53 +3077,29 @@ async function loadWalletFollowerCountsMap(
 async function loadWalletResolvedTradeStatsMap(
   client: PoolClient,
   walletIds: string[],
-  windowDays = 30,
 ): Promise<Map<string, WalletResolvedTradeStats>> {
   const byWalletId = new Map<string, WalletResolvedTradeStats>();
   if (walletIds.length === 0) return byWalletId;
 
   const rows = await client.query<{
     wallet_id: string;
-    resolved_count: number | null;
+    total: number | null;
     winning_count: number | null;
   }>(
     `
-      with resolved_rows as (
-        select
-          wa.wallet_id,
-          wa.outcome_side,
-          um.resolved_outcome
-        from wallet_activity_events wa
-        left join unified_markets um on um.id = wa.market_id
-        left join unified_events ue on ue.id = um.event_id
-        where wa.wallet_id = any($1::uuid[])
-          and wa.activity_type in ('delta', 'trade')
-          and wa.action in ('OPENED', 'INCREASED', 'BUY', 'SELL')
-          and wa.occurred_at >= now() - ($2::text || ' days')::interval
-          and ${buildSnapshotDeltaTrackableActivitySql({
-            activityAlias: "wa",
-            marketAlias: "um",
-            eventAlias: "ue",
-          })}
-      )
       select
         wallet_id,
-        count(*) filter (
-          where resolved_outcome in ('YES', 'NO')
-            and outcome_side in ('YES', 'NO')
-        )::int as resolved_count,
-        count(*) filter (
-          where resolved_outcome in ('YES', 'NO')
-          and outcome_side = resolved_outcome
-        )::int as winning_count
-      from resolved_rows
-      group by wallet_id
+        total,
+        wins as winning_count
+      from wallet_inferred_outcomes
+      where wallet_id = any($1::uuid[])
+        and total > 0
     `,
-    [walletIds, Math.max(1, Math.trunc(windowDays))],
+    [walletIds],
   );
 
   for (const row of rows.rows) {
-    const resolvedCount = Math.max(0, Number(row.resolved_count ?? 0));
+    const resolvedCount = Math.max(0, Number(row.total ?? 0));
     const winningCount = Math.max(0, Number(row.winning_count ?? 0));
     const losingCount = Math.max(resolvedCount - winningCount, 0);
     byWalletId.set(row.wallet_id, {
@@ -7305,13 +7281,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   ws.venue,
                   max(ws.snapshot_at) as snapshot_at
                 from wallet_position_snapshots ws
-                join unified_markets um on um.id = ws.market_id
-                left join unified_events ue on ue.id = um.event_id
                 where ${where}
-                  and ${buildWalletIntelTrackableMarketSql({
-                    marketAlias: "um",
-                    eventAlias: "ue",
-                  })}
                 group by ws.wallet_id, ws.venue
               )
               select

@@ -2630,14 +2630,7 @@ async function refreshWalletPositionExposure(
           ws.venue,
           max(ws.snapshot_at) as snapshot_at
         from wallet_position_snapshots ws
-        join unified_markets m on m.id = ws.market_id
-        left join unified_events e on e.id = m.event_id
         where ws.wallet_id = any($1::uuid[])
-          and ${buildWalletIntelTrackableMarketSql({
-            marketAlias: "m",
-            eventAlias: "e",
-            asOfSql: "$2::timestamptz",
-          })}
         group by ws.wallet_id, ws.venue
       ),
       latest_rows as (

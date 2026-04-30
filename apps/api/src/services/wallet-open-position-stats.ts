@@ -85,13 +85,7 @@ export async function loadWalletOpenPositionStatsMap(
             ws.venue,
             ws.snapshot_at
           from wallet_position_snapshots ws
-          join unified_markets um on um.id = ws.market_id
-          left join unified_events ue on ue.id = um.event_id
           where ws.wallet_id = wallet_set.wallet_id
-            and ${buildWalletIntelTrackableMarketSql({
-              marketAlias: "um",
-              eventAlias: "ue",
-            })}
           order by ws.venue, ws.snapshot_at desc
         ) latest_venue_snapshot on true
       ),
