@@ -1,5 +1,6 @@
 import { z as zod } from "zod";
 import type { DbQuery } from "../db.js";
+import { env } from "../env.js";
 import {
   buildDepositNotification,
   createNotificationSafe,
@@ -14,6 +15,7 @@ type DepositEventStatus =
   | "recorded"
   | "notified"
   | "ignored_bridge"
+  | "ignored_venue"
   | "unresolved";
 
 type UserWalletMatch = {
@@ -28,6 +30,13 @@ type BridgeOrderMatch = {
   provider: string;
   status: string;
   swap_type: string;
+};
+
+type ExecutionMatch = {
+  id: string;
+  user_id: string;
+  venue: string;
+  status: string | null;
 };
 
 type DepositEventRow = {
@@ -126,6 +135,54 @@ function normalizeWalletAddress(walletType: string, address: string): string {
   return walletType === "ethereum" ? address.toLowerCase() : address;
 }
 
+function normalizeEvmAddress(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return null;
+  return trimmed.toLowerCase();
+}
+
+function buildAddressSet(values: Array<string | null | undefined>): Set<string> {
+  return new Set(
+    values
+      .map((value) => normalizeEvmAddress(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+}
+
+function isVenueCashDeposit(event: PrivyFundsDepositedWebhook): boolean {
+  const caip2 = event.caip2.toLowerCase();
+  const sender = normalizeEvmAddress(event.sender);
+  const assetAddress = normalizeEvmAddress(event.asset.address);
+  if (!sender || !assetAddress) return false;
+
+  if (caip2 === "eip155:137") {
+    const cashAssets = buildAddressSet([
+      env.polymarketPusdAddress,
+      env.polymarketUsdcAddress,
+      env.polymarketUsdceAddress,
+    ]);
+    const venueSenders = buildAddressSet([
+      env.polymarketExchangeAddress,
+      env.polymarketNegRiskExchangeAddress,
+      env.polymarketNegRiskAdapterAddress,
+      env.polymarketCollateralOnrampAddress,
+      env.polymarketCollateralOfframpAddress,
+    ]);
+    return cashAssets.has(assetAddress) && venueSenders.has(sender);
+  }
+
+  if (caip2 === "eip155:8453") {
+    const cashAssets = buildAddressSet([env.limitlessUsdcAddress]);
+    const venueSenders = buildAddressSet([
+      env.limitlessClobAddress,
+      env.limitlessNegRiskAddress,
+    ]);
+    return cashAssets.has(assetAddress) && venueSenders.has(sender);
+  }
+
+  return false;
+}
+
 async function resolveUserWallet(
   db: DbQuery,
   input: { walletType: string; address: string },
@@ -166,6 +223,30 @@ async function findBridgeOrderByTxHash(
       limit 1
     `,
     params,
+  );
+  return rows[0] ?? null;
+}
+
+async function findExecutionByTxHash(
+  db: DbQuery,
+  txHash?: string | null,
+): Promise<ExecutionMatch | null> {
+  const trimmed = txHash?.trim();
+  if (!trimmed) return null;
+
+  const evmMatch = trimmed.startsWith("0x")
+    ? "or lower(tx_signature) = lower($1)"
+    : "";
+  const { rows } = await db.query<ExecutionMatch>(
+    `
+      select id, user_id, venue, status
+      from executions
+      where tx_signature = $1
+        ${evmMatch}
+      order by created_at desc
+      limit 1
+    `,
+    [trimmed],
   );
   return rows[0] ?? null;
 }
@@ -361,15 +442,22 @@ export async function handlePrivyDepositWebhook(
       ? await resolveUserWallet(db, { walletType, address: recipient })
       : null;
   const bridgeOrder = await findBridgeOrderByTxHash(db, event.transaction_hash);
+  const execution = bridgeOrder
+    ? null
+    : await findExecutionByTxHash(db, event.transaction_hash);
+  const venueCashDeposit =
+    !bridgeOrder && (Boolean(execution) || isVenueCashDeposit(event));
   const status: DepositEventStatus = bridgeOrder
     ? "ignored_bridge"
-    : wallet
-      ? "recorded"
-      : "unresolved";
+    : venueCashDeposit
+      ? "ignored_venue"
+      : wallet
+        ? "recorded"
+        : "unresolved";
 
   const insertedRow = await insertDepositEvent(db, {
     status,
-    userId: wallet?.user_id ?? bridgeOrder?.user_id ?? null,
+    userId: wallet?.user_id ?? bridgeOrder?.user_id ?? execution?.user_id ?? null,
     walletAddress: wallet?.wallet_address ?? recipient,
     walletType: wallet?.wallet_type ?? walletType,
     bridgeOrderId: bridgeOrder?.id ?? null,
@@ -401,6 +489,30 @@ export async function handlePrivyDepositWebhook(
       "Privy deposit webhook ignored because it matched a bridge order",
     );
     return { ok: true, duplicate, ignored: true, status: "ignored_bridge" };
+  }
+
+  if (venueCashDeposit) {
+    if (row.status !== "ignored_venue") {
+      await updateDepositEventStatus(db, {
+        eventId: row.id,
+        status: "ignored_venue",
+        userId: wallet?.user_id ?? execution?.user_id ?? null,
+        walletAddress: wallet?.wallet_address ?? recipient,
+        walletType: wallet?.wallet_type ?? walletType,
+      });
+    }
+    logger?.info?.(
+      {
+        depositEventId: row.id,
+        sender: event.sender ?? null,
+        asset: event.asset,
+        txHash: event.transaction_hash ?? null,
+        executionId: execution?.id ?? null,
+        venue: execution?.venue ?? null,
+      },
+      "Privy deposit webhook ignored because it matched venue cash movement",
+    );
+    return { ok: true, duplicate, ignored: true, status: "ignored_venue" };
   }
 
   if (!wallet) {

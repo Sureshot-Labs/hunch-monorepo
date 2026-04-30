@@ -21,6 +21,11 @@ type MockDbOptions = {
     id: string;
     userId: string;
   } | null;
+  execution?: {
+    id: string;
+    userId: string;
+    venue: string;
+  } | null;
   depositInsertConflict?: boolean;
   existingDepositStatus?: string;
   existingDepositUserId?: string | null;
@@ -88,6 +93,20 @@ function createMockDb(options: MockDbOptions): MockDb {
             provider: "debridge",
             status: "fulfilled",
             swap_type: "same_chain",
+          } as unknown as T,
+        ],
+      };
+    }
+
+    if (/from executions/i.test(sql)) {
+      if (!options.execution) return { rows: [] };
+      return {
+        rows: [
+          {
+            id: options.execution.id,
+            user_id: options.execution.userId,
+            venue: options.execution.venue,
+            status: "fulfilled",
           } as unknown as T,
         ],
       };
@@ -254,6 +273,76 @@ const tests: TestCase[] = [
         assert.equal(result.ok, true);
         assert.equal(result.ignored, true);
         assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "venue cash movement records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+        });
+        const payload = {
+          ...basePayload,
+          caip2: "eip155:137",
+          asset: {
+            type: "erc20",
+            address: env.polymarketPusdAddress,
+          },
+          sender: env.polymarketExchangeAddress,
+          idempotency_key: "deposit-key-polymarket-sell",
+        };
+
+        const result = await handlePrivyDepositWebhook(db, payload);
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_venue");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "DFlow execution-matched Solana deposit records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "5CnexXV3q3B4kDRev36fdMUoCpP4qFmS7PKXNpZrgL3H";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          execution: {
+            id: "execution-1",
+            userId: "user-1",
+            venue: "kalshi",
+          },
+        });
+        const payload = {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          sender: "dflow-token-account",
+          recipient: solanaWallet,
+          transaction_hash: "solana-signature-1",
+          idempotency_key: "deposit-key-dflow-sell",
+        };
+
+        const result = await handlePrivyDepositWebhook(db, payload);
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_venue");
         assert.deepEqual(db.notificationInserts, []);
       });
     },

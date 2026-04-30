@@ -143,6 +143,13 @@ const SAFE_PROXY_FACTORY_ABI = new Interface([
   "function createProxy(address paymentToken,uint256 payment,address paymentReceiver,(uint8 v,bytes32 r,bytes32 s) createSig)",
 ]);
 
+const TOKEN_APPROVAL_ABI = new Interface([
+  "function approve(address spender,uint256 value) returns (bool)",
+  "function setApprovalForAll(address operator,bool approved)",
+  "function allowance(address owner,address spender) view returns (uint256)",
+  "function isApprovedForAll(address account,address operator) view returns (bool)",
+]);
+
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
 export const HUNCH_PRIVY_ACCESS_TOKEN_HEADER = "x-hunch-privy-access-token";
@@ -183,6 +190,22 @@ type ApprovalTask = {
   data: string;
   description: string;
 };
+
+type ApprovalPostcondition =
+  | {
+      kind: "erc20";
+      tokenAddress: string;
+      owner: string;
+      spender: string;
+      amount: bigint;
+    }
+  | {
+      kind: "erc1155";
+      tokenAddress: string;
+      owner: string;
+      operator: string;
+      approved: boolean;
+    };
 
 export type EmbeddedPolymarketExecutionSummary = {
   signer: string;
@@ -234,6 +257,38 @@ function normalizeHex(value: string | null | undefined): string | null {
   const trimmed = value.trim();
   if (!/^0x[0-9a-fA-F]+$/.test(trimmed)) return null;
   return trimmed.toLowerCase();
+}
+
+function getRequestTransaction(
+  request: EmbeddedPrivyAuthorizationRequest,
+): {
+  from: string;
+  to: string;
+  data: string;
+} | null {
+  const params =
+    request.input.body &&
+    typeof request.input.body.params === "object" &&
+    request.input.body.params !== null
+      ? (request.input.body.params as Record<string, unknown>)
+      : null;
+  const transaction =
+    params &&
+    typeof params.transaction === "object" &&
+    params.transaction !== null
+      ? (params.transaction as Record<string, unknown>)
+      : null;
+  const from = normalizeAddress(
+    typeof transaction?.from === "string" ? transaction.from : null,
+  );
+  const to = normalizeAddress(
+    typeof transaction?.to === "string" ? transaction.to : null,
+  );
+  const data = normalizeHex(
+    typeof transaction?.data === "string" ? transaction.data : null,
+  );
+  if (!from || !to || !data) return null;
+  return { from, to, data };
 }
 
 function padHex(value: string): string {
@@ -364,6 +419,90 @@ function isPrivyInflightAuthorizationError(error: unknown): boolean {
 async function waitForInflightAuthorizationRetry(attempt: number) {
   const delayMs = 1_250 * (attempt + 1);
   await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function buildApprovalPostcondition(
+  request: EmbeddedPrivyAuthorizationRequest,
+): Promise<ApprovalPostcondition | null> {
+  const transaction = getRequestTransaction(request);
+  if (!transaction) return null;
+
+  let decoded: ethers.TransactionDescription | null = null;
+  try {
+    decoded = TOKEN_APPROVAL_ABI.parseTransaction({
+      data: transaction.data,
+      value: 0n,
+    });
+  } catch {
+    decoded = null;
+  }
+  if (!decoded) return null;
+
+  if (decoded.name === "approve") {
+    const spender = normalizeAddress(String(decoded.args[0]));
+    const amount = BigInt(decoded.args[1].toString());
+    if (!spender || amount <= 0n) return null;
+    return {
+      kind: "erc20",
+      tokenAddress: transaction.to,
+      owner: transaction.from,
+      spender,
+      amount,
+    };
+  }
+
+  if (decoded.name === "setApprovalForAll") {
+    const operator = normalizeAddress(String(decoded.args[0]));
+    const approved = Boolean(decoded.args[1]);
+    if (!operator) return null;
+    return {
+      kind: "erc1155",
+      tokenAddress: transaction.to,
+      owner: transaction.from,
+      operator,
+      approved,
+    };
+  }
+
+  return null;
+}
+
+async function isApprovalPostconditionSatisfied(
+  condition: ApprovalPostcondition,
+): Promise<boolean> {
+  const token = new ethers.Contract(
+    condition.tokenAddress,
+    TOKEN_APPROVAL_ABI,
+    polygonProvider(),
+  );
+  if (condition.kind === "erc20") {
+    const allowance = BigInt(
+      (await token.allowance(condition.owner, condition.spender)).toString(),
+    );
+    return allowance >= condition.amount;
+  }
+
+  const approved = Boolean(
+    await token.isApprovedForAll(condition.owner, condition.operator),
+  );
+  return approved === condition.approved;
+}
+
+async function waitForApprovalPostcondition(
+  condition: ApprovalPostcondition | null,
+  context: string,
+): Promise<void> {
+  if (!condition) return;
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      if (await isApprovalPostconditionSatisfied(condition)) return;
+    } catch {
+      // RPCs can transiently fail immediately after sponsored submission.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`${context} did not update on-chain in time.`);
 }
 
 function parsePrivyRpcSignatureResponse(payload: Record<string, unknown>): string {
@@ -1164,11 +1303,13 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
 }): Promise<string[]> {
   const pendingTransactions: Array<{
     request: EmbeddedPrivyAuthorizationRequest;
+    postcondition: ApprovalPostcondition | null;
     hash: string | null;
     transactionId: string | null;
     userOperationHash: string | null;
   }> = [];
   for (const request of inputs.requests) {
+    const postcondition = await buildApprovalPostcondition(request);
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
       request.id,
@@ -1207,6 +1348,7 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
       parsePrivyRpcTransactionHashResponse(payload);
     pendingTransactions.push({
       request,
+      postcondition,
       hash,
       transactionId,
       userOperationHash,
@@ -1228,6 +1370,10 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
         return resolvedHash;
       }
       if (pending.userOperationHash) {
+        await waitForApprovalPostcondition(
+          pending.postcondition,
+          pending.request.label,
+        );
         return pending.userOperationHash;
       }
       throw new Error(

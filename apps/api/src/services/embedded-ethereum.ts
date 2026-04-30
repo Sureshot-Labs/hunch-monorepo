@@ -47,6 +47,41 @@ type PrivyTransactionStatus =
   | "provider_error"
   | "pending";
 
+const TOKEN_IFACE = new ethers.Interface([
+  "function approve(address spender,uint256 value) returns (bool)",
+  "function transfer(address to,uint256 value) returns (bool)",
+  "function setApprovalForAll(address operator,bool approved)",
+  "function allowance(address owner,address spender) view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function isApprovedForAll(address account,address operator) view returns (bool)",
+]);
+
+type TokenPostcondition =
+  | {
+      kind: "approval";
+      chainId: number;
+      tokenAddress: string;
+      owner: string;
+      spender: string;
+      amount: bigint;
+    }
+  | {
+      kind: "transfer";
+      chainId: number;
+      tokenAddress: string;
+      recipient: string;
+      amount: bigint;
+      recipientBalanceBefore: bigint;
+    }
+  | {
+      kind: "approvalForAll";
+      chainId: number;
+      tokenAddress: string;
+      owner: string;
+      operator: string;
+      approved: boolean;
+    };
+
 function normalizeAddress(value: string | null | undefined): string | null {
   if (!value) return null;
   try {
@@ -115,6 +150,10 @@ function buildPrivyAppAuthHeaders(): HeadersInit {
     Accept: "application/json",
     "privy-app-id": env.privyAppId,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createPrivyWalletRpcRequest(args: {
@@ -245,6 +284,156 @@ function parsePrivyRpcTransactionHashResponse(payload: Record<string, unknown>):
     );
   }
   return { hash, transactionId, userOperationHash };
+}
+
+function getRequestTransaction(
+  request: EmbeddedPrivyAuthorizationRequest,
+): {
+  from: string;
+  to: string;
+  data: string;
+} | null {
+  const params =
+    request.input.body &&
+    typeof request.input.body.params === "object" &&
+    request.input.body.params !== null
+      ? (request.input.body.params as Record<string, unknown>)
+      : null;
+  const transaction =
+    params &&
+    typeof params.transaction === "object" &&
+    params.transaction !== null
+      ? (params.transaction as Record<string, unknown>)
+      : null;
+  const from = normalizeAddress(
+    typeof transaction?.from === "string" ? transaction.from : null,
+  );
+  const to = normalizeAddress(
+    typeof transaction?.to === "string" ? transaction.to : null,
+  );
+  const data = normalizeHex(
+    typeof transaction?.data === "string" ? transaction.data : null,
+  );
+  if (!from || !to || !data) return null;
+  return { from, to, data };
+}
+
+async function buildTokenPostcondition(
+  chainId: number,
+  request: EmbeddedPrivyAuthorizationRequest,
+): Promise<TokenPostcondition | null> {
+  const transaction = getRequestTransaction(request);
+  if (!transaction) return null;
+
+  let decoded: ethers.TransactionDescription | null = null;
+  try {
+    decoded = TOKEN_IFACE.parseTransaction({
+      data: transaction.data,
+      value: 0n,
+    });
+  } catch {
+    decoded = null;
+  }
+  if (!decoded) return null;
+
+  if (decoded.name === "approve") {
+    const spender = normalizeAddress(String(decoded.args[0]));
+    const amount = BigInt(decoded.args[1].toString());
+    if (!spender || amount <= 0n) return null;
+    return {
+      kind: "approval",
+      chainId,
+      tokenAddress: transaction.to,
+      owner: transaction.from,
+      spender,
+      amount,
+    };
+  }
+
+  if (decoded.name === "transfer") {
+    const recipient = normalizeAddress(String(decoded.args[0]));
+    const amount = BigInt(decoded.args[1].toString());
+    if (!recipient || amount <= 0n) return null;
+    if (recipient.toLowerCase() === transaction.from.toLowerCase()) return null;
+
+    const token = new ethers.Contract(
+      transaction.to,
+      TOKEN_IFACE,
+      evmProviderForChain(chainId),
+    );
+    const recipientBalanceBefore = BigInt(
+      (await token.balanceOf(recipient)).toString(),
+    );
+    return {
+      kind: "transfer",
+      chainId,
+      tokenAddress: transaction.to,
+      recipient,
+      amount,
+      recipientBalanceBefore,
+    };
+  }
+
+  if (decoded.name === "setApprovalForAll") {
+    const operator = normalizeAddress(String(decoded.args[0]));
+    const approved = Boolean(decoded.args[1]);
+    if (!operator) return null;
+    return {
+      kind: "approvalForAll",
+      chainId,
+      tokenAddress: transaction.to,
+      owner: transaction.from,
+      operator,
+      approved,
+    };
+  }
+
+  return null;
+}
+
+async function isTokenPostconditionSatisfied(
+  condition: TokenPostcondition,
+): Promise<boolean> {
+  const token = new ethers.Contract(
+    condition.tokenAddress,
+    TOKEN_IFACE,
+    evmProviderForChain(condition.chainId),
+  );
+  if (condition.kind === "approval") {
+    const allowance = BigInt(
+      (await token.allowance(condition.owner, condition.spender)).toString(),
+    );
+    return allowance >= condition.amount;
+  }
+
+  if (condition.kind === "approvalForAll") {
+    const approved = Boolean(
+      await token.isApprovedForAll(condition.owner, condition.operator),
+    );
+    return approved === condition.approved;
+  }
+
+  const recipientBalance = BigInt(
+    (await token.balanceOf(condition.recipient)).toString(),
+  );
+  return recipientBalance >= condition.recipientBalanceBefore + condition.amount;
+}
+
+async function waitForTokenPostcondition(
+  condition: TokenPostcondition | null,
+  context: string,
+): Promise<void> {
+  if (!condition) return;
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      if (await isTokenPostconditionSatisfied(condition)) return;
+    } catch {
+      // RPCs can transiently fail immediately after sponsored submission.
+    }
+    await sleep(1_000);
+  }
+  throw new Error(`${context} did not update on-chain in time.`);
 }
 
 async function waitForPrivyTransaction(
@@ -424,6 +613,10 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
 }): Promise<string[]> {
   const transactionHashes: string[] = [];
   for (const request of inputs.requests) {
+    const postcondition = await buildTokenPostcondition(
+      inputs.chainId,
+      request,
+    );
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
       request.id,
@@ -447,6 +640,7 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
     }
 
     if (userOperationHash) {
+      await waitForTokenPostcondition(postcondition, request.label);
       transactionHashes.push(userOperationHash);
       continue;
     }
