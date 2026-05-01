@@ -32,6 +32,11 @@ export type PolymarketDerivedFunderAddresses = {
   warnings: string[];
 };
 
+export type SafeWalletInspection =
+  | { status: "safe"; owners: string[]; threshold: number }
+  | { status: "not_safe" }
+  | { status: "error"; error: string };
+
 const SAFE_READ_IFACE = new Interface([
   "function getOwners() view returns (address[])",
   "function getThreshold() view returns (uint256)",
@@ -72,6 +77,11 @@ function findCandidateByAddress(
 
 function isEmptyCode(code: string | null): boolean {
   return !code || code === "0x" || code === "0x0";
+}
+
+function shortErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message.slice(0, 240);
+  return String(error).slice(0, 240);
 }
 
 function buildMagicProxyInitCode(implementation: string): string {
@@ -173,6 +183,78 @@ async function inspectSafe(inputs: {
   }
 }
 
+async function inspectSafeStrict(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  address: string;
+}): Promise<SafeWalletInspection> {
+  try {
+    const ownersData = SAFE_READ_IFACE.encodeFunctionData("getOwners");
+    const ownersRaw = await fetchEvmCall({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      to: inputs.address,
+      data: ownersData,
+    });
+    const ownersDecoded = SAFE_READ_IFACE.decodeFunctionResult(
+      "getOwners",
+      ownersRaw,
+    ) as unknown;
+    const owners = Array.isArray(ownersDecoded)
+      ? (ownersDecoded[0] as unknown)
+      : null;
+    if (!Array.isArray(owners) || owners.length === 0) {
+      return { status: "not_safe" };
+    }
+
+    const thresholdData = SAFE_READ_IFACE.encodeFunctionData("getThreshold");
+    const thresholdRaw = await fetchEvmCall({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      to: inputs.address,
+      data: thresholdData,
+    });
+    const thresholdDecoded = SAFE_READ_IFACE.decodeFunctionResult(
+      "getThreshold",
+      thresholdRaw,
+    ) as unknown;
+    const thresholdValue = Array.isArray(thresholdDecoded)
+      ? thresholdDecoded[0]
+      : null;
+    if (typeof thresholdValue !== "bigint") {
+      return { status: "not_safe" };
+    }
+    const thresholdNumber = Number(thresholdValue);
+    if (!Number.isFinite(thresholdNumber)) {
+      return { status: "not_safe" };
+    }
+
+    const normalizedOwners = owners
+      .map((owner) => (typeof owner === "string" ? normalizeEthAddress(owner) : null))
+      .filter((owner): owner is string => Boolean(owner));
+
+    const safe =
+      thresholdNumber >= 1 &&
+      thresholdNumber <= normalizedOwners.length &&
+      normalizedOwners.length > 0;
+
+    return safe
+      ? { status: "safe", owners: normalizedOwners, threshold: thresholdNumber }
+      : { status: "not_safe" };
+  } catch (error) {
+    const message = shortErrorMessage(error);
+    if (
+      message.includes("execution reverted") ||
+      message.includes("call revert exception") ||
+      message.includes("missing revert data") ||
+      message.includes("could not decode result data")
+    ) {
+      return { status: "not_safe" };
+    }
+    return { status: "error", error: message };
+  }
+}
+
 async function inspectCandidate(inputs: {
   rpcUrl: string;
   timeoutMs: number;
@@ -239,6 +321,31 @@ export async function inspectSafeWallet(inputs: {
   }
 
   return inspectSafe({ rpcUrl, timeoutMs, address: normalized });
+}
+
+export async function inspectSafeWalletStrict(inputs: {
+  address: string;
+  rpcUrl?: string;
+  timeoutMs?: number;
+}): Promise<SafeWalletInspection> {
+  const normalized = normalizeEthAddress(inputs.address);
+  if (!normalized) return { status: "not_safe" };
+  const rpcUrl = inputs.rpcUrl ?? env.polygonRpcUrl;
+  const timeoutMs = inputs.timeoutMs ?? env.polygonRpcTimeoutMs;
+
+  let code: string;
+  try {
+    code = await fetchEvmCode({
+      rpcUrl,
+      timeoutMs,
+      address: normalized,
+    });
+  } catch (error) {
+    return { status: "error", error: shortErrorMessage(error) };
+  }
+  if (isEmptyCode(code)) return { status: "not_safe" };
+
+  return inspectSafeStrict({ rpcUrl, timeoutMs, address: normalized });
 }
 
 export function derivePolymarketFunderAddresses(inputs: {

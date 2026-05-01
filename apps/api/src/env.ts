@@ -879,6 +879,18 @@ export const env = {
   walletIntelDormantDays: optionalPositiveInt("WALLET_INTEL_DORMANT_DAYS", 30),
   walletIntelWhaleUsd,
   walletIntelWhaleUsdSolana,
+  walletIntelSafeLinkLimit: optionalNonNegativeInt(
+    "WALLET_INTEL_SAFE_LINK_LIMIT",
+    25,
+  ),
+  walletIntelSafeLinkStaleHours: optionalPositiveInt(
+    "WALLET_INTEL_SAFE_LINK_STALE_HOURS",
+    168,
+  ),
+  walletIntelSafeLinkErrorStaleHours: optionalPositiveInt(
+    "WALLET_INTEL_SAFE_LINK_ERROR_STALE_HOURS",
+    6,
+  ),
   walletIntelSignalMaxOdds: optionalNonNegativeNumber(
     "WALLET_INTEL_SIGNAL_MAX_ODDS",
     0.05,

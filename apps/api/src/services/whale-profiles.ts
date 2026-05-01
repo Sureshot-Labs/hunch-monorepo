@@ -33,6 +33,10 @@ import {
   type WalletPerformance30dSummary,
   type WalletResolvedPositionSample,
 } from "./wallet-profile-features.js";
+import {
+  aggregateWalletMetricsFilterSql,
+  aggregateWalletMetricsPreferenceSql,
+} from "./wallet-metrics-constants.js";
 
 const PROFILE_VERSION = "v12";
 const CATEGORY_VALUES = [
@@ -1325,8 +1329,9 @@ async function loadWhaleSelectionRows(
         join tracker_surface ts on ts.id = s.wallet_id
         where s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of <= now() - interval '720 hours'
-        order by s.wallet_id, s.as_of desc
+        order by s.wallet_id, s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
       ),
       tracker_fallback_start as (
         select distinct on (s.wallet_id)
@@ -1337,9 +1342,10 @@ async function loadWhaleSelectionRows(
         join tracker_surface ts on ts.id = s.wallet_id
         where s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of > now() - interval '720 hours'
           and s.as_of <= now()
-        order by s.wallet_id, s.as_of asc
+        order by s.wallet_id, s.as_of asc, ${aggregateWalletMetricsPreferenceSql("s")}
       ),
       tracker_end_snap as (
         select distinct on (s.wallet_id)
@@ -1350,8 +1356,9 @@ async function loadWhaleSelectionRows(
         join tracker_surface ts on ts.id = s.wallet_id
         where s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of <= now()
-        order by s.wallet_id, s.as_of desc
+        order by s.wallet_id, s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
       ),
       tracker_portfolio_pnl as (
         select
@@ -1377,7 +1384,8 @@ async function loadWhaleSelectionRows(
         from wallet_metrics_snapshots s
         join selection_wallets sw on sw.id = s.wallet_id
         where s.period = '30d'
-        order by s.wallet_id, s.as_of desc
+          and ${aggregateWalletMetricsFilterSql("s")}
+        order by s.wallet_id, s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
       ),
       activity as (
         select
@@ -1638,8 +1646,10 @@ async function loadWhaleRowsByIds(
           s.win_rate as metrics_win_rate,
           s.last_trade_at as metrics_last_trade_at
         from wallet_metrics_snapshots s
-        where s.wallet_id = w.id and s.period = '30d'
-        order by s.as_of desc
+        where s.wallet_id = w.id
+          and s.period = '30d'
+          and ${aggregateWalletMetricsFilterSql("s")}
+        order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
         limit 1
       ) metrics on true
       left join lateral (

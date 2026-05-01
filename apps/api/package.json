@@ -38,6 +38,7 @@
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
+    "wallets:metrics:refresh": "tsx src/wallet-metrics-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",
     "kalshi:mint-audit": "tsx src/kalshi-mint-audit.ts",
     "kalshi:series-backfill": "tsx src/kalshi-series-backfill.ts",

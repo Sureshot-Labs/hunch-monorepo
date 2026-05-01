@@ -1,5 +1,11 @@
 import type { PoolClient } from "pg";
 
+import {
+  aggregateWalletMetricsFilterSql,
+  aggregateWalletMetricsPreferenceExpressionSql,
+  aggregateWalletMetricsPreferenceSql,
+} from "./wallet-metrics-constants.js";
+
 export type WalletActivitySparklinePoint = {
   bucketStart: Date;
   netChangeUsd: number;
@@ -280,8 +286,9 @@ export async function loadWalletPortfolioPerformanceMap(
         where s.wallet_id = ws.wallet_id
           and s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of <= $2::timestamptz
-        order by s.as_of desc
+        order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
         limit 1
       ) ss on true
       left join lateral (
@@ -293,9 +300,10 @@ export async function loadWalletPortfolioPerformanceMap(
           and s.wallet_id = ws.wallet_id
           and s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of > $2::timestamptz
           and s.as_of <= $3::timestamptz
-        order by s.as_of asc
+        order by s.as_of asc, ${aggregateWalletMetricsPreferenceSql("s")}
         limit 1
       ) fs on true
       left join lateral (
@@ -306,8 +314,9 @@ export async function loadWalletPortfolioPerformanceMap(
         where s.wallet_id = ws.wallet_id
           and s.period = 'all'
           and s.pnl_usd is not null
+          and ${aggregateWalletMetricsFilterSql("s")}
           and s.as_of <= $3::timestamptz
-        order by s.as_of desc
+        order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
         limit 1
       ) es on true
     `,
@@ -361,12 +370,14 @@ export async function fetchWalletPerformanceSeries(
                 s.win_rate,
                 s.avg_hold_hours,
                 s.last_trade_at,
+                ${aggregateWalletMetricsPreferenceExpressionSql("s")} as preferred_metric,
                 floor(
                   extract(epoch from s.as_of) / ($4::int * 3600)
                 )::bigint as bucket_index
               from wallet_metrics_snapshots s
               where s.wallet_id = $1::uuid
                 and s.period = $2::text
+                and ${aggregateWalletMetricsFilterSql("s")}
                 and s.as_of >= $3::timestamptz
                 and s.as_of <= $5::timestamptz
             ),
@@ -381,7 +392,7 @@ export async function fetchWalletPerformanceSeries(
                 avg_hold_hours,
                 last_trade_at
               from filtered
-              order by bucket_index, as_of desc
+              order by bucket_index, as_of desc, preferred_metric desc
             ),
             limited as (
               select
@@ -420,16 +431,38 @@ export async function fetchWalletPerformanceSeries(
         )
       : await client.query<WalletPerformanceSeriesDbRow>(
           `
-            select
-              s.as_of,
-              s.pnl_usd::text,
-              s.roi::text,
-              s.volume_usd::text,
-              s.trades_count,
-              s.win_rate::text,
-              s.avg_hold_hours::text,
-              s.last_trade_at
-            from (
+            with deduped as (
+              select
+                ranked.as_of,
+                ranked.pnl_usd,
+                ranked.roi,
+                ranked.volume_usd,
+                ranked.trades_count,
+                ranked.win_rate,
+                ranked.avg_hold_hours,
+                ranked.last_trade_at
+              from (
+                select
+                  s.as_of,
+                  s.pnl_usd,
+                  s.roi,
+                  s.volume_usd,
+                  s.trades_count,
+                  s.win_rate,
+                  s.avg_hold_hours,
+                  s.last_trade_at,
+                  row_number() over (
+                    partition by s.as_of
+                    order by ${aggregateWalletMetricsPreferenceSql("s")}
+                  ) as row_rank
+                from wallet_metrics_snapshots s
+                where s.wallet_id = $1::uuid
+                  and s.period = $2::text
+                  and ${aggregateWalletMetricsFilterSql("s")}
+              ) ranked
+              where ranked.row_rank = 1
+            ),
+            limited as (
               select
                 as_of,
                 pnl_usd,
@@ -439,13 +472,21 @@ export async function fetchWalletPerformanceSeries(
                 win_rate,
                 avg_hold_hours,
                 last_trade_at
-              from wallet_metrics_snapshots
-              where wallet_id = $1::uuid
-                and period = $2::text
+              from deduped
               order by as_of desc
               limit $3
-            ) s
-            order by s.as_of asc
+            )
+            select
+              as_of,
+              pnl_usd::text,
+              roi::text,
+              volume_usd::text,
+              trades_count,
+              win_rate::text,
+              avg_hold_hours::text,
+              last_trade_at
+            from limited
+            order by as_of asc
           `,
           [walletId, period, limit],
         );

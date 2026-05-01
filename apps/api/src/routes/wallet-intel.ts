@@ -62,6 +62,10 @@ import {
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "../services/wallet-intel-market-eligibility.js";
+import {
+  aggregateWalletMetricsFilterSql,
+  aggregateWalletMetricsPreferenceSql,
+} from "../services/wallet-metrics-constants.js";
 import { loadWalletOpenPositionStatsMap } from "../services/wallet-open-position-stats.js";
 import {
   loadLatestWalletPositionNowMap,
@@ -3699,9 +3703,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             if (safeCandidate) {
               const safeAddress = normalizeAddress(safeCandidate.funder);
               if (isValidWalletAddressForChain(safeAddress, "polygon")) {
-                const safeLabel = baseLabel
+                const safeUserLabel = baseLabel
                   ? `${baseLabel} (Trading wallet)`
-                  : "Trading wallet (auto)";
+                  : null;
                 const safeWalletResult = await client.query<WalletRow>(
                   `
                     insert into wallets (address, chain, label, metadata)
@@ -3717,7 +3721,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   [
                     safeAddress,
                     "polygon",
-                    safeLabel,
+                    null,
                     {
                       kind: "safe",
                       derivedFrom: address,
@@ -3737,7 +3741,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     `,
                     [user.id, safeWalletId],
                   );
-                  if (baseLabel) {
+                  if (safeUserLabel) {
                     await client.query(
                       `
                         insert into wallet_user_labels (user_id, wallet_id, label)
@@ -3747,7 +3751,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                           label = excluded.label,
                           updated_at = now()
                       `,
-                      [user.id, safeWalletId, `${baseLabel} (Trading wallet)`],
+                      [user.id, safeWalletId, safeUserLabel],
                     );
                   }
                 }
@@ -3786,9 +3790,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   isValidWalletAddressForChain(owner, "polygon") &&
                   owner !== address
                 ) {
-                  const ownerLabel = baseLabel
+                  const ownerUserLabel = baseLabel
                     ? `${baseLabel} (Signer wallet)`
-                    : "Signer wallet (auto)";
+                    : null;
                   const ownerWalletResult = await client.query<{
                     id: string;
                   }>(
@@ -3806,7 +3810,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     [
                       owner,
                       "polygon",
-                      ownerLabel,
+                      null,
                       {
                         kind: "safe_owner",
                         derivedFrom: address,
@@ -3825,7 +3829,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       `,
                       [user.id, ownerWalletId],
                     );
-                    if (baseLabel) {
+                    if (ownerUserLabel) {
                       await client.query(
                         `
                           insert into wallet_user_labels (user_id, wallet_id, label)
@@ -3835,7 +3839,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                             label = excluded.label,
                             updated_at = now()
                         `,
-                        [user.id, ownerWalletId, `${baseLabel} (Signer wallet)`],
+                        [user.id, ownerWalletId, ownerUserLabel],
                       );
                     }
                   }
@@ -4689,8 +4693,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 'last_trade_at', s.last_trade_at
               ) as metrics
               from wallet_metrics_snapshots s
-              where s.wallet_id = w.id and s.period = '30d'
-              order by s.as_of desc
+              where s.wallet_id = w.id
+                and s.period = '30d'
+                and ${aggregateWalletMetricsFilterSql("s")}
+              order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
               limit 1
             ) lm on true
             where wf.user_id = $1
@@ -4820,8 +4826,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 'last_trade_at', s.last_trade_at
               ) as metrics
               from wallet_metrics_snapshots s
-              where s.wallet_id = w.id and s.period = '30d'
-              order by s.as_of desc
+              where s.wallet_id = w.id
+                and s.period = '30d'
+                and ${aggregateWalletMetricsFilterSql("s")}
+              order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
               limit 1
             ) metrics on true
             left join lateral (
