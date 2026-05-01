@@ -11,6 +11,12 @@ import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
+  parseMetadata,
+  pickString,
+  resolveEventDescription,
+  resolveMarketDescription,
+} from "../lib/metadata-description.js";
+import {
   aggregateKalshiCandlesticks,
   deriveNoCandlesticksFromYes,
   formatKalshiCandlesticks,
@@ -65,31 +71,6 @@ type LimitlessMeta = {
   marketAddress?: string;
   tradeType?: string;
 };
-
-function parseMetadata(input: unknown): Record<string, unknown> | null {
-  if (!input) return null;
-  if (isRecord(input)) return input;
-  if (typeof input === "string") {
-    try {
-      const parsed = JSON.parse(input);
-      return isRecord(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function pickString(
-  obj: Record<string, unknown> | null,
-  key: string,
-): string | undefined {
-  if (!obj) return undefined;
-  const value = obj[key];
-  return typeof value === "string" && value.trim().length
-    ? value
-    : undefined;
-}
 
 function pickFirstString(
   obj: Record<string, unknown> | null,
@@ -193,9 +174,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         const now = new Date();
 
         const response = rows.map((row) => {
+          const marketMetadata = parseMetadata(row.market_metadata);
+          const eventMetadata = parseMetadata(row.event_metadata);
           const limitlessMeta =
             row.venue === "limitless"
-              ? extractLimitlessMeta(row.market_metadata, row.event_metadata)
+              ? extractLimitlessMeta(marketMetadata, eventMetadata)
               : null;
           const isLimitlessNegRisk = Boolean(
             limitlessMeta?.negRiskRequestId ||
@@ -260,7 +243,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
               venue: row.venue,
               venueMarketId: row.venue_market_id,
               marketTitle: row.market_title,
-              marketDescription: row.market_description,
+              marketDescription: resolveMarketDescription(
+                row.market_description,
+                marketMetadata,
+              ),
+              marketMetadata,
               marketType: row.market_type,
               tradeType,
               status: row.market_status,
@@ -342,7 +329,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
                 venue: row.event_venue,
                 venueEventId: row.venue_event_id,
                 eventTitle: row.event_title,
-                eventDescription: row.event_description || null,
+                eventDescription: resolveEventDescription(
+                  row.event_description,
+                  eventMetadata,
+                ),
+                eventMetadata,
                 category: row.event_category || null,
                 status: row.event_status,
                 startTime: row.start_date,
@@ -457,11 +448,13 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const market = rows[0];
+        const marketMetadata = parseMetadata(market.market_metadata);
+        const eventMetadata = parseMetadata(market.event_metadata);
         const limitlessMeta =
           market.venue === "limitless"
             ? extractLimitlessMeta(
-                market.market_metadata,
-                market.event_metadata,
+                marketMetadata,
+                eventMetadata,
               )
             : null;
         const isLimitlessNegRisk = Boolean(
@@ -510,7 +503,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           venue: market.venue,
           venueMarketId: market.venue_market_id,
           marketTitle: market.market_title,
-          marketDescription: market.market_description,
+          marketDescription: resolveMarketDescription(
+            market.market_description,
+            marketMetadata,
+          ),
+          marketMetadata,
           marketType: market.market_type,
           tradeType:
             market.venue === "limitless"
@@ -617,7 +614,11 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
           event: {
             eventId: market.event_id,
             eventTitle: market.event_title,
-            eventDescription: market.event_description,
+            eventDescription: resolveEventDescription(
+              market.event_description,
+              eventMetadata,
+            ),
+            eventMetadata,
             category: market.event_category,
             startTime: market.start_date,
             endTime: market.end_date,

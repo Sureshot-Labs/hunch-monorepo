@@ -3437,11 +3437,23 @@ async function runSnapshot(snapshotAt: Date) {
             volume_24h: number | null;
           }>(
             `
-              select distinct um.id, um.venue, um.volume_24h
-              from wallet_position_snapshots ws
-              join wallet_tag_map tm on tm.wallet_id = ws.wallet_id
-              join wallet_tags t on t.id = tm.tag_id and t.slug = 'whale'
-              join unified_markets um on um.id = ws.market_id
+              with whale_wallets as (
+                select tm.wallet_id
+                from wallet_tags t
+                join wallet_tag_map tm on tm.tag_id = t.id
+                where t.slug = 'whale'
+              ),
+              whale_markets as (
+                select distinct wah.market_id
+                from wallet_activity_hourly wah
+                join whale_wallets ww on ww.wallet_id = wah.wallet_id
+                where wah.hour_bucket >= $2::timestamptz - interval '7 days'
+                  and wah.activity_type in ('delta', 'trade')
+                  and wah.market_id is not null
+              )
+              select um.id, um.venue, um.volume_24h
+              from whale_markets wm
+              join unified_markets um on um.id = wm.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${buildWalletIntelTrackableMarketSql({
                 marketAlias: "um",

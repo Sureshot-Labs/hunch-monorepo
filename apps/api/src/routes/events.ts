@@ -10,6 +10,12 @@ import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
+  parseMetadata,
+  pickString,
+  resolveEventDescription,
+  resolveMarketDescription,
+} from "../lib/metadata-description.js";
+import {
   aggregateKalshiCandlesticks,
   deriveNoCandlesticksFromYes,
   formatKalshiCandlesticks,
@@ -86,31 +92,6 @@ type LimitlessMeta = {
   venueAdapter?: string;
   venueExchange?: string;
 };
-
-function parseMetadata(input: unknown): Record<string, unknown> | null {
-  if (!input) return null;
-  if (isRecord(input)) return input;
-  if (typeof input === "string") {
-    try {
-      const parsed = JSON.parse(input);
-      return isRecord(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function pickString(
-  obj: Record<string, unknown> | null,
-  key: string,
-): string | undefined {
-  if (!obj) return undefined;
-  const value = obj[key];
-  return typeof value === "string" && value.trim().length
-    ? value
-    : undefined;
-}
 
 function pickFirstString(
   obj: Record<string, unknown> | null,
@@ -407,9 +388,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
         const firstRow = rows[0];
 
+        const eventMetadata = parseMetadata(firstRow.event_metadata);
         const eventLimitlessMeta =
           firstRow.event_venue === "limitless"
-            ? extractLimitlessMeta(null, firstRow.event_metadata)
+            ? extractLimitlessMeta(null, eventMetadata)
             : null;
 
         // Build event object
@@ -418,7 +400,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           venue: firstRow.event_venue,
           venueEventId: firstRow.venue_event_id,
           eventTitle: firstRow.event_title,
-          eventDescription: firstRow.event_description || null,
+          eventDescription: resolveEventDescription(
+            firstRow.event_description,
+            eventMetadata,
+          ),
+          eventMetadata,
           category: firstRow.event_category || null,
           startTime: firstRow.start_date,
           endTime: firstRow.end_date,
@@ -471,9 +457,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
         // Process markets (sorted by YES probability desc)
         for (const row of marketRows) {
+          const marketMeta = parseMetadata(row.market_metadata);
           const limitlessMeta =
             row.market_venue === "limitless"
-              ? extractLimitlessMeta(row.market_metadata, row.event_metadata)
+              ? extractLimitlessMeta(marketMeta, eventMetadata)
               : null;
           const isLimitlessNegRisk = Boolean(
             limitlessMeta?.negRiskRequestId ||
@@ -481,7 +468,6 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               limitlessMeta?.venueAdapter ||
               limitlessMeta?.venueExchange,
           );
-          const marketMeta = parseMetadata(row.market_metadata);
           const tradeType =
             row.market_venue === "limitless"
               ? pickString(marketMeta, "tradeType") ?? null
@@ -540,7 +526,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             venue: row.market_venue,
             venueMarketId: row.venue_market_id,
             marketTitle: row.market_title,
-            marketDescription: row.market_description || null,
+            marketDescription: resolveMarketDescription(
+              row.market_description,
+              marketMeta,
+            ),
+            marketMetadata: marketMeta,
             marketType: row.market_type,
             tradeType,
             status: row.market_status,
