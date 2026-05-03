@@ -35,12 +35,14 @@ export async function fetchPolymarketMarketInfo(
           pm.accepting_orders,
           coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
           coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
-        from polymarket_markets pm
-        left join unified_markets m
-          on m.venue = 'polymarket' and m.venue_market_id = pm.id
-        where pm.clob_token_ids is not null
-          and pm.clob_token_ids <> ''
-          and pm.clob_token_ids::jsonb ? $1
+        from unified_markets m
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where m.venue = 'polymarket'
+          and m.clob_token_ids is not null
+          and m.clob_token_ids <> ''
+          and m.clob_token_ids <> '[]'
+          and m.clob_token_ids::jsonb ? $1
         limit 1
       `,
       [tokenId],
