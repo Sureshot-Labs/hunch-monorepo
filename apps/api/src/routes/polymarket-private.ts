@@ -30,6 +30,7 @@ import {
   polymarketQuoteBodySchema,
 } from "../schemas/polymarket-private.js";
 import {
+  fetchErc1155BalancesByOwner,
   fetchEvmCode,
   fetchPolymarketOrderHash,
   fetchPolymarketOrderHashV2,
@@ -94,6 +95,8 @@ const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const POLYMARKET_SELL_BALANCE_CHANGED_CODE =
+  "POLYMARKET_SELL_BALANCE_CHANGED";
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -3234,6 +3237,34 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "Order payload is missing required hash fields",
         });
+      }
+
+      if (side === "SELL") {
+        const requestedSharesRaw = parseBigIntValue(normalizedForHash.makerAmount);
+        const sellTokenId = normalizedForHash.tokenId;
+        if (requestedSharesRaw != null && requestedSharesRaw > 0n && sellTokenId) {
+          const balances = await fetchErc1155BalancesByOwner({
+            rpcUrl: env.polygonRpcUrl,
+            timeoutMs: env.polygonRpcTimeoutMs,
+            contractAddress: env.polymarketConditionalTokensAddress,
+            owner: funder,
+            tokenIds: [sellTokenId],
+          });
+          const availableSharesRaw = balances.get(sellTokenId) ?? 0n;
+          if (availableSharesRaw < requestedSharesRaw) {
+            reply.code(400);
+            return reply.send({
+              error: "Polymarket position balance changed",
+              code: POLYMARKET_SELL_BALANCE_CHANGED_CODE,
+              tokenId: sellTokenId,
+              owner: funder,
+              availableSharesRaw: availableSharesRaw.toString(),
+              requestedSharesRaw: requestedSharesRaw.toString(),
+              availableShares: ethers.formatUnits(availableSharesRaw, 6),
+              requestedShares: ethers.formatUnits(requestedSharesRaw, 6),
+            });
+          }
+        }
       }
 
       orderHash =
