@@ -993,11 +993,9 @@ export function mapToUnifiedMarket(
 
   if (m.archived) {
     status = "ARCHIVED";
-  } else if (m.closed || (m.active && m.closed)) {
-    // Prefer explicit close flags over endDate since Polymarket can
-    // keep accepting orders after the scheduled end time.
-    status = "CLOSED";
-  } else if (m.acceptingOrders === false) {
+  } else if (m.closed || m.active === false || m.acceptingOrders === false) {
+    // Prefer explicit source lifecycle flags over endDate. Polymarket can
+    // expose inactive candidate/placeholder slots while acceptingOrders=true.
     status = "CLOSED";
   }
 

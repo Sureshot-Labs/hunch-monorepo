@@ -2141,6 +2141,7 @@ export async function fetchEventDetails(
       m.updated_at as market_updated_at
     FROM unified_events e
     LEFT JOIN unified_markets m ON m.event_id = e.id
+      AND (e.status <> 'ACTIVE' OR m.status = 'ACTIVE')
       AND ${supportedLimitlessMarketExpr}
     LEFT JOIN LATERAL (
       select

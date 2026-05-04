@@ -111,6 +111,27 @@ test("market mapping inherits event tags when market category is missing", () =>
   assert.equal(unified.category, "politics");
 });
 
+test("market mapping closes inactive Polymarket child markets", () => {
+  const event = {
+    id: "31875",
+    title: "Republican Presidential Nominee 2028",
+    category: "politics",
+    markets: [],
+  } as unknown as TPolymarketEvent;
+  const market = {
+    id: "562009",
+    question: "Will an inactive candidate slot win?",
+    groupItemTitle: "Inactive Slot",
+    active: false,
+    closed: false,
+    archived: false,
+    acceptingOrders: true,
+  } as unknown as TPolymarketMarket;
+
+  const unified = mapToUnifiedMarket(market, event.id, event);
+  assert.equal(unified.status, "CLOSED");
+});
+
 test("event backfill resolver matches live event mapping", () => {
   const event = {
     id: "1",

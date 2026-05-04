@@ -40,6 +40,7 @@
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
     "wallets:metrics:refresh": "tsx src/wallet-metrics-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",
+    "polymarket:status-refresh": "tsx src/polymarket-status-refresh.ts",
     "kalshi:mint-audit": "tsx src/kalshi-mint-audit.ts",
     "kalshi:series-backfill": "tsx src/kalshi-series-backfill.ts",
     "market:token-backfill": "tsx src/market-token-backfill.ts",
