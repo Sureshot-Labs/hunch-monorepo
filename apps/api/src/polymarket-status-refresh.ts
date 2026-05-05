@@ -44,6 +44,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function chunkRows<T>(rows: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) {
+    chunks.push(rows.slice(i, i + size));
+  }
+  return chunks;
+}
+
 function increment(map: Map<string, number>, key: string, by = 1): void {
   map.set(key, (map.get(key) ?? 0) + by);
 }
@@ -57,12 +65,17 @@ function mapToObject(map: Map<string, number>): Record<string, number> {
 const targetStatusSql = `
   case
     when pm.archived is true then 'ARCHIVED'::unified_status
-    when pm.closed is true
-      or pm.active is false
-      or pm.accepting_orders is false
-      then 'CLOSED'::unified_status
-    else 'ACTIVE'::unified_status
+    else 'CLOSED'::unified_status
   end
+`;
+
+const inactiveSourceSql = `
+  (
+    pm.archived is true
+    or pm.closed is true
+    or pm.active is false
+    or pm.accepting_orders is false
+  )
 `;
 
 async function loadPlan(db: DbQuery) {
@@ -80,8 +93,8 @@ async function loadPlan(db: DbQuery) {
         join polymarket_markets pm
           on pm.id = um.venue_market_id
         where um.venue = 'polymarket'
-          and um.status not in ('SETTLED'::unified_status, 'ARCHIVED'::unified_status)
-          and um.status is distinct from ${targetStatusSql}
+          and um.status = 'ACTIVE'::unified_status
+          and ${inactiveSourceSql}
       )
       select current_status, target_status, count(*)::text as total
       from mismatches
@@ -112,9 +125,9 @@ async function loadDryRunPage(
       join polymarket_markets pm
         on pm.id = um.venue_market_id
       where um.venue = 'polymarket'
-        and um.status not in ('SETTLED'::unified_status, 'ARCHIVED'::unified_status)
+        and um.status = 'ACTIVE'::unified_status
         and ($1::text is null or um.id > $1)
-        and um.status is distinct from ${targetStatusSql}
+        and ${inactiveSourceSql}
       order by um.id
       limit $2
     `,
@@ -123,48 +136,39 @@ async function loadDryRunPage(
   return rows;
 }
 
-async function updatePage(
+async function updateRows(
   db: DbQuery,
-  after: string | null,
-  limit: number,
+  rowsToUpdate: StatusRow[],
 ): Promise<StatusRow[]> {
+  if (rowsToUpdate.length === 0) return [];
+
   const { rows } = await db.query<StatusRow>(
     `
-      with candidates as (
-        select
-          um.id,
-          um.status as current_status,
-          ${targetStatusSql} as target_status
-        from unified_markets um
-        join polymarket_markets pm
-          on pm.id = um.venue_market_id
-        where um.venue = 'polymarket'
-          and um.status not in ('SETTLED'::unified_status, 'ARCHIVED'::unified_status)
-          and ($1::text is null or um.id > $1)
-          and um.status is distinct from ${targetStatusSql}
-        order by um.id
-        limit $2
-      )
       update unified_markets um
       set
-        status = candidates.target_status,
+        status = input.target_status::unified_status,
         resolved_outcome = case
-          when candidates.target_status = 'ACTIVE'::unified_status then null
+          when input.target_status::unified_status = 'ACTIVE'::unified_status then null
           else um.resolved_outcome
         end,
         resolved_outcome_pct = case
-          when candidates.target_status = 'ACTIVE'::unified_status then null
+          when input.target_status::unified_status = 'ACTIVE'::unified_status then null
           else um.resolved_outcome_pct
         end,
         updated_at_db = now()
-      from candidates
-      where um.id = candidates.id
+      from jsonb_to_recordset($1::jsonb) as input(
+        id text,
+        current_status text,
+        target_status text
+      )
+      where um.id = input.id
+        and um.status = input.current_status::unified_status
       returning
         um.id,
-        candidates.current_status,
-        candidates.target_status
+        input.current_status::unified_status as current_status,
+        input.target_status::unified_status as target_status
     `,
-    [after, limit],
+    [JSON.stringify(rowsToUpdate)],
   );
   return rows;
 }
@@ -172,28 +176,37 @@ async function updatePage(
 async function main() {
   const dryRun = hasFlag("dry-run");
   const batch = parsePositiveInt("batch", 5000);
+  const updateBatch = Math.min(batch, parsePositiveInt("update-batch", 250));
   const limit = parseOptionalPositiveInt("limit");
   const delayMs = parseNonNegativeInt("delay", 0);
   const startAfter = parseArgValue("after");
+  const includePlan = (dryRun || hasFlag("plan")) && !hasFlag("skip-plan");
 
   const startedAt = Date.now();
   console.log("[polymarket:status-refresh] start", {
     dryRun,
     batch,
+    updateBatch: dryRun ? null : updateBatch,
     limit,
     delayMs,
     startAfter,
+    includePlan,
   });
 
   const client = await pool.connect();
   try {
     await client.query("SET statement_timeout = '120s'");
 
-    const plan = await loadPlan(client);
-    console.log("[polymarket:status-refresh] plan", plan);
+    if (includePlan) {
+      const plan = await loadPlan(client);
+      console.log("[polymarket:status-refresh] plan", plan);
+    } else {
+      console.log("[polymarket:status-refresh] plan skipped");
+    }
 
     let lastId: string | null = startAfter;
     let processed = 0;
+    let updated = 0;
     let pages = 0;
     const transitions = new Map<string, number>();
 
@@ -201,14 +214,22 @@ async function main() {
       const remaining = limit == null ? null : limit - processed;
       if (remaining != null && remaining <= 0) break;
       const pageLimit = remaining == null ? batch : Math.min(batch, remaining);
-      const rows = dryRun
-        ? await loadDryRunPage(client, lastId, pageLimit)
-        : await updatePage(client, lastId, pageLimit);
-      if (rows.length === 0) break;
+      const candidates = await loadDryRunPage(client, lastId, pageLimit);
+      if (candidates.length === 0) break;
+
+      const rows: StatusRow[] = [];
+      if (dryRun) {
+        rows.push(...candidates);
+      } else {
+        for (const chunk of chunkRows(candidates, updateBatch)) {
+          rows.push(...(await updateRows(client, chunk)));
+        }
+      }
 
       pages += 1;
-      processed += rows.length;
-      lastId = rows.reduce(
+      processed += candidates.length;
+      updated += dryRun ? 0 : rows.length;
+      lastId = candidates.reduce(
         (max, row) => (max == null || row.id > max ? row.id : max),
         lastId,
       );
@@ -217,9 +238,18 @@ async function main() {
         increment(transitions, `${row.current_status}->${row.target_status}`);
       }
 
+      if (!dryRun && rows.length !== candidates.length) {
+        console.warn("[polymarket:status-refresh] batch partial update", {
+          page: pages,
+          candidates: candidates.length,
+          updated: rows.length,
+        });
+      }
+
       console.log("[polymarket:status-refresh] batch", {
         page: pages,
-        rows: rows.length,
+        candidates: candidates.length,
+        updated: dryRun ? null : rows.length,
         processed,
         lastId,
       });
@@ -232,6 +262,7 @@ async function main() {
       dryRun,
       pages,
       processed,
+      updated: dryRun ? null : updated,
       transitions: mapToObject(transitions),
       lastId,
       elapsedSec,
