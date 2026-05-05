@@ -73,10 +73,7 @@ export const feedQuerySchema = z.object({
   min_volume24hr: z.coerce.number().catch(1e-9),
   min_liquidity: z.coerce.number().catch(0),
   q: z
-    .preprocess(
-      (v) => (typeof v === "string" ? v.trim() : v),
-      z.string(),
-    )
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
     .optional()
     .transform((v) => (v && v.length ? v : undefined)),
   view: z
@@ -92,9 +89,7 @@ export const feedQuerySchema = z.object({
       z.string(),
     )
     .optional()
-    .transform((v) =>
-      v === "grouped" || v === "single" ? v : undefined,
-    ),
+    .transform((v) => (v === "grouped" || v === "single" ? v : undefined)),
   venue: zVenueQuery,
   category: z.string().optional(),
   categories: zCategoriesQuery,

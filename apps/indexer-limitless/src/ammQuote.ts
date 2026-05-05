@@ -27,13 +27,18 @@ async function ethCall(inputs: {
         jsonrpc: "2.0",
         id: 1,
         method: "eth_call",
-        params: [{ to: ethers.getAddress(inputs.to), data: inputs.data }, "latest"],
+        params: [
+          { to: ethers.getAddress(inputs.to), data: inputs.data },
+          "latest",
+        ],
       }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      throw new Error(`Base RPC error: ${response.status} ${response.statusText}`);
+      throw new Error(
+        `Base RPC error: ${response.status} ${response.statusText}`,
+      );
     }
 
     const json = (await response.json()) as JsonRpcResponse<string>;

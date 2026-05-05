@@ -55,7 +55,9 @@ export function isMarketMapActionable(input: MarketMapUsabilityInput): boolean {
   return !CLOSED_LIKE_MARKET_STATUSES.has(normalizedStatus);
 }
 
-export function hasMarketMapOddsSignal(input: MarketMapUsabilityInput): boolean {
+export function hasMarketMapOddsSignal(
+  input: MarketMapUsabilityInput,
+): boolean {
   return (
     isFiniteNumber(input.yesProbability) ||
     isFiniteNumber(input.yesBid) ||

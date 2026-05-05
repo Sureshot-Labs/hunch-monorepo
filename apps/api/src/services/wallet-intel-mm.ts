@@ -25,10 +25,7 @@ export function computeMmSuspected(inputs: {
   refreshPolicy: Pick<WalletIntelRefreshPolicy, "whaleUsd" | "whaleUsdSolana">;
 }): boolean {
   const hedgeRatio = Math.max(0, inputs.hedgeRatio ?? 0);
-  const twoSidedMarkets = Math.max(
-    0,
-    Math.trunc(inputs.twoSidedMarkets ?? 0),
-  );
+  const twoSidedMarkets = Math.max(0, Math.trunc(inputs.twoSidedMarkets ?? 0));
   const exposureUsd = Math.max(0, inputs.exposureUsd ?? 0);
   const exposureThreshold =
     inputs.chain === "solana"
@@ -54,10 +51,7 @@ export function buildWalletMmDiagnostics(inputs: {
   const hedgedNotionalUsd = Math.max(0, inputs.hedgedNotionalUsd ?? 0);
   const netImbalanceUsd = Math.max(0, inputs.netImbalanceUsd ?? 0);
   const hedgeRatio = Math.max(0, Math.min(1, inputs.hedgeRatio ?? 0));
-  const twoSidedMarkets = Math.max(
-    0,
-    Math.trunc(inputs.twoSidedMarkets ?? 0),
-  );
+  const twoSidedMarkets = Math.max(0, Math.trunc(inputs.twoSidedMarkets ?? 0));
   const exposureUsdMin =
     inputs.chain === "solana"
       ? Math.max(0, inputs.refreshPolicy.whaleUsdSolana)

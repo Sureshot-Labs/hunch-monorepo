@@ -30,7 +30,8 @@ export async function debridgeRequest(inputs: {
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
 }): Promise<
-  { ok: true; payload: unknown } | { ok: false; status: number; payload: unknown }
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown }
 > {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl);
   const requestPath = inputs.requestPath.startsWith("/")

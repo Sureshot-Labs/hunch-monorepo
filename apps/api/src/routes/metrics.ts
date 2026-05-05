@@ -43,7 +43,9 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({ error: "Not found" });
     }
 
-    const token = authTokenFromHeaders(request.headers as Record<string, unknown>);
+    const token = authTokenFromHeaders(
+      request.headers as Record<string, unknown>,
+    );
     if (!token || !tokensEqual(expectedToken, token)) {
       reply.code(401);
       return reply.send({ error: "Unauthorized" });

@@ -148,11 +148,7 @@ function buildSnapshotFallback(
 
   const side = normalizeOutcomeSideForStorage(input.outcomeSide);
   const effectiveMark =
-    side === "YES"
-      ? markPrice
-      : side === "NO"
-        ? 1 - markPrice
-        : null;
+    side === "YES" ? markPrice : side === "NO" ? 1 - markPrice : null;
   if (effectiveMark == null) {
     return {
       approxEntryPrice: null,
@@ -213,7 +209,8 @@ function buildApproxFromLedger(
   ) {
     return buildSnapshotFallback(input, markPrice);
   }
-  const approxEntryPrice = openEntry.source === "activity" ? openEntry.entryPrice : null;
+  const approxEntryPrice =
+    openEntry.source === "activity" ? openEntry.entryPrice : null;
 
   const openPnlUsd =
     ledger.remainingShares > NET_SHARES_EPSILON

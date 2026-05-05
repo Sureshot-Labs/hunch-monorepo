@@ -39,16 +39,14 @@ const zOptionalNumber = z
     return Number.isFinite(n) ? n : undefined;
   });
 
-const zOptionalCsv = z
-  .union([z.string(), z.undefined()])
-  .transform((value) => {
-    if (!value) return undefined;
-    const list = value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-    return list.length ? list : undefined;
-  });
+const zOptionalCsv = z.union([z.string(), z.undefined()]).transform((value) => {
+  if (!value) return undefined;
+  const list = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return list.length ? list : undefined;
+});
 
 export const eventSimilarQuerySchema = z.object({
   limit: zOptionalInt.optional(),

@@ -60,9 +60,7 @@ export const authWalletSchema = z.object({
   id: z.string(),
   walletAddress: z.string(),
   walletType: z.string(),
-  walletSource: z
-    .enum(["embedded", "smart", "external", "unknown"])
-    .optional(),
+  walletSource: z.enum(["embedded", "smart", "external", "unknown"]).optional(),
   isEmbeddedWallet: z.boolean().optional(),
   isSmartWallet: z.boolean().optional(),
   isInternalWallet: z.boolean().optional(),
@@ -100,7 +98,7 @@ export const authPrivySuccessResponseSchema = z.object({
       referredUserKey: z.string(),
       source: z.literal("auth_privy"),
       status: z.literal("attached"),
-  })
+    })
     .optional(),
 });
 
@@ -153,9 +151,7 @@ export const polymarketConnectBodySchema = z.object({
 
 export const polymarketEmbeddedConnectBodySchema = z.object({
   funderAddress: zEthAddress.optional(),
-  authorizationSignature: zRequiredString(
-    "authorizationSignature is required",
-  ),
+  authorizationSignature: zRequiredString("authorizationSignature is required"),
 });
 
 export const polymarketFunderBodySchema = z.object({

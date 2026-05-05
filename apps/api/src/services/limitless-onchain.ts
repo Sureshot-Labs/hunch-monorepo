@@ -19,11 +19,7 @@ type MulticallEntry<T> = {
   fallback: T;
 };
 
-function decodeBigInt(
-  iface: Interface,
-  fn: string,
-  data: string,
-): bigint {
+function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
@@ -228,10 +224,7 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   if (ammAddress) {
     entries.push({
       target: env.limitlessUsdcAddress,
-      callData: erc20Iface.encodeFunctionData("allowance", [
-        owner,
-        ammAddress,
-      ]),
+      callData: erc20Iface.encodeFunctionData("allowance", [owner, ammAddress]),
       decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
       fallback: 0n,
     });
@@ -261,7 +254,9 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   let cursor = 0;
   const usdcBalance = decoded[cursor++] as bigint;
   const allowanceClob = clobAddress ? (decoded[cursor++] as bigint) : null;
-  const allowanceNegRisk = negRiskAddress ? (decoded[cursor++] as bigint) : null;
+  const allowanceNegRisk = negRiskAddress
+    ? (decoded[cursor++] as bigint)
+    : null;
   const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
 
   return {

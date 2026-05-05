@@ -245,11 +245,14 @@ function resolveOptions(args: string[]): Options {
       max: 1_000_000,
       fallback: 50,
     }),
-    minVolume24h: clampNumber(parseNumber(parseFlag(args, "--min-volume-24h")), {
-      min: 0,
-      max: 1_000_000,
-      fallback: 200,
-    }),
+    minVolume24h: clampNumber(
+      parseNumber(parseFlag(args, "--min-volume-24h")),
+      {
+        min: 0,
+        max: 1_000_000,
+        fallback: 200,
+      },
+    ),
     minVenueCount: clampNumber(parseNumber(parseFlag(args, "--min-venues")), {
       min: 1,
       max: 10,
@@ -290,9 +293,7 @@ Options:
 }
 
 function buildClusterId(marketIds: string[]): string {
-  const hash = createHash("sha1")
-    .update(marketIds.join("|"))
-    .digest("hex");
+  const hash = createHash("sha1").update(marketIds.join("|")).digest("hex");
   return hash.slice(0, 12);
 }
 
@@ -921,7 +922,8 @@ function extractOfficeTokens(text: string | null | undefined): Set<string> {
   }
   if (lower.includes("prime minister")) office.add("prime_minister");
   if (lower.includes("governor")) office.add("governor");
-  if (lower.includes("senate") || lower.includes("senator")) office.add("senate");
+  if (lower.includes("senate") || lower.includes("senator"))
+    office.add("senate");
   if (lower.includes("house")) office.add("house");
   if (lower.includes("parliament")) office.add("parliament");
   if (lower.includes("mayor")) office.add("mayor");
@@ -953,7 +955,9 @@ function extractSelectionTokens(text: string | null | undefined): Set<string> {
   return selection;
 }
 
-function extractOutcomeScopeTokens(text: string | null | undefined): Set<string> {
+function extractOutcomeScopeTokens(
+  text: string | null | undefined,
+): Set<string> {
   const scope = new Set<string>();
   if (!text) return scope;
   const lower = text.toLowerCase().replace(/['’]/g, "");
@@ -991,7 +995,8 @@ function extractMonths(text: string | null | undefined): Set<string> {
   if (!text) return months;
   const matches = text.toLowerCase().match(/[a-z]+/g) ?? [];
   for (const token of matches) {
-    if (MONTH_TOKENS.has(token)) months.add(MONTH_NORMALIZATION[token] ?? token);
+    if (MONTH_TOKENS.has(token))
+      months.add(MONTH_NORMALIZATION[token] ?? token);
   }
   return months;
 }
@@ -1146,7 +1151,9 @@ function classifyQuestionType(text: string | null | undefined): QuestionType {
   return "other";
 }
 
-function classifyComparatorFamily(text: string | null | undefined): ComparatorFamily {
+function classifyComparatorFamily(
+  text: string | null | undefined,
+): ComparatorFamily {
   if (!text) return "other";
   const lower = text.toLowerCase();
   const normalized = lower.replace(/['’]/g, "");
@@ -1190,7 +1197,10 @@ function classifyComparatorFamily(text: string | null | undefined): ComparatorFa
     return "office_exit";
   }
 
-  if (normalized.includes("regime fall") || normalized.includes("regime-fall")) {
+  if (
+    normalized.includes("regime fall") ||
+    normalized.includes("regime-fall")
+  ) {
     return "regime_change";
   }
 
@@ -1259,10 +1269,7 @@ function classifyComparatorFamily(text: string | null | undefined): ComparatorFa
     return "group_winner";
   }
 
-  if (
-    normalized.includes("grand prix") &&
-    normalized.includes("winner")
-  ) {
+  if (normalized.includes("grand prix") && normalized.includes("winner")) {
     return "race_winner";
   }
 
@@ -1480,7 +1487,9 @@ function classifyComparatorFamily(text: string | null | undefined): ComparatorFa
   return "other";
 }
 
-function extractParticipantGroups(text: string | null | undefined): Array<Set<string>> {
+function extractParticipantGroups(
+  text: string | null | undefined,
+): Array<Set<string>> {
   if (!text) return [];
   const parts = text
     .replace(/[–—]/g, " vs ")
@@ -1513,17 +1522,19 @@ function extractSubjectTokens(
   fallbackText: string | null | undefined,
 ): Set<string> {
   const subject = new Set<string>();
-  const sources = [primaryText, fallbackText].filter(
-    (value): value is string => Boolean(value),
+  const sources = [primaryText, fallbackText].filter((value): value is string =>
+    Boolean(value),
   );
 
   for (const source of sources) {
     for (const token of extractEntityTokens(source)) {
-      if (LOW_VALUE_SUBJECT_TOKENS.has(token) || MONTH_TOKENS.has(token)) continue;
+      if (LOW_VALUE_SUBJECT_TOKENS.has(token) || MONTH_TOKENS.has(token))
+        continue;
       subject.add(token);
     }
     for (const token of extractTopicTokens(source)) {
-      if (LOW_VALUE_SUBJECT_TOKENS.has(token) || MONTH_TOKENS.has(token)) continue;
+      if (LOW_VALUE_SUBJECT_TOKENS.has(token) || MONTH_TOKENS.has(token))
+        continue;
       subject.add(token);
     }
   }
@@ -1566,7 +1577,11 @@ export function buildSignature(params: {
   const family = classifyComparatorFamily(text);
   const timeScope = classifyTimeScope(text);
   const priceMode =
-    type === "price" ? classifyPriceContractMode(`${params.eventTitle ?? ""} ${params.marketTitle ?? ""}`) : null;
+    type === "price"
+      ? classifyPriceContractMode(
+          `${params.eventTitle ?? ""} ${params.marketTitle ?? ""}`,
+        )
+      : null;
   const subjectTokens = extractSubjectTokens(
     params.eventTitle,
     params.marketTitle,
@@ -1623,8 +1638,7 @@ function familyRequiresScopeMatch(signature: Signature): boolean {
 
 function familyRequiresExactDateMatch(signature: Signature): boolean {
   return (
-    signature.family === "office_exit" ||
-    signature.family === "price_at_time"
+    signature.family === "office_exit" || signature.family === "price_at_time"
   );
 }
 
@@ -1655,10 +1669,18 @@ function timeCompatible(a: Signature, b: Signature): boolean {
     familyRequiresExplicitMonthMatch(a) ||
     familyRequiresExplicitMonthMatch(b)
   ) {
-    if (a.months.size !== b.months.size && (a.months.size > 0 || b.months.size > 0)) {
+    if (
+      a.months.size !== b.months.size &&
+      (a.months.size > 0 || b.months.size > 0)
+    ) {
       return false;
     }
-    if (a.months.size > 0 && b.months.size > 0 && a.years.size > 0 && b.years.size > 0) {
+    if (
+      a.months.size > 0 &&
+      b.months.size > 0 &&
+      a.years.size > 0 &&
+      b.years.size > 0
+    ) {
       let yearOverlap = false;
       for (const year of a.years) {
         if (b.years.has(year)) {
@@ -1694,7 +1716,10 @@ function timeCompatible(a: Signature, b: Signature): boolean {
 
 function normalizeTitleKey(value: string | null | undefined): string | null {
   if (!value) return null;
-  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "").trim();
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
   return normalized.length > 0 ? normalized : null;
 }
 
@@ -1736,7 +1761,11 @@ function selectSearchAnchorTokens(signature: Signature): string[] {
   return Array.from(anchors);
 }
 
-function scoreSignatureMatch(a: Signature, b: Signature, embedScore: number): number {
+function scoreSignatureMatch(
+  a: Signature,
+  b: Signature,
+  embedScore: number,
+): number {
   const embedSim = Math.max(0, Math.min(1, 1 - embedScore));
   const { intersection, jaccard } = computeTopicOverlap(a.tokens, b.tokens);
   const entityOverlap = intersectionSize(a.entityTokens, b.entityTokens);
@@ -1746,8 +1775,7 @@ function scoreSignatureMatch(a: Signature, b: Signature, embedScore: number): nu
     a.category && b.category ? (a.category === b.category ? 1 : 0) : 0.5;
   const timeScore = timeCompatible(a, b) ? 1 : 0;
   const entityScore = entityOverlap > 0 ? 1 : 0;
-  const lexicalScore =
-    intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
+  const lexicalScore = intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
 
   return (
     embedSim * 0.4 +
@@ -1769,8 +1797,7 @@ function scoreSignatureSimilarity(a: Signature, b: Signature): number {
     a.category && b.category ? (a.category === b.category ? 1 : 0) : 0.5;
   const timeScore = timeCompatible(a, b) ? 1 : 0;
   const entityScore = entityOverlap > 0 ? 1 : 0;
-  const lexicalScore =
-    intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
+  const lexicalScore = intersection >= 2 ? 1 : jaccard >= 0.15 ? 0.6 : jaccard;
 
   return (
     lexicalScore * 0.3 +
@@ -1971,19 +1998,13 @@ export function isSignatureCompatible(a: Signature, b: Signature): boolean {
   }
   if (a.category && b.category && a.category !== b.category) return false;
   if (!timeCompatible(a, b)) return false;
-  if (
-    requiresStrictEntityOverlap(a) ||
-    requiresStrictEntityOverlap(b)
-  ) {
+  if (requiresStrictEntityOverlap(a) || requiresStrictEntityOverlap(b)) {
     if (!participantGroupsCompatible(a, b)) return false;
   }
   const { intersection, jaccard } = computeTopicOverlap(a.tokens, b.tokens);
   const entityOverlap = intersectionSize(a.entityTokens, b.entityTokens);
   const subjectOverlap = intersectionSize(a.subjectTokens, b.subjectTokens);
-  if (
-    requiresStrictEntityOverlap(a) ||
-    requiresStrictEntityOverlap(b)
-  ) {
+  if (requiresStrictEntityOverlap(a) || requiresStrictEntityOverlap(b)) {
     if (entityOverlap < 2) return false;
   }
   if (
@@ -1992,20 +2013,17 @@ export function isSignatureCompatible(a: Signature, b: Signature): boolean {
   ) {
     if (entityOverlap < 1) return false;
   }
-  if (
-    requiresSubjectOverlap(a) ||
-    requiresSubjectOverlap(b)
-  ) {
+  if (requiresSubjectOverlap(a) || requiresSubjectOverlap(b)) {
     const minSubjectOverlap =
       requiresStrongerSubjectOverlap(a) || requiresStrongerSubjectOverlap(b)
-        ? Math.min(2, Math.max(1, Math.min(a.subjectTokens.size, b.subjectTokens.size)))
+        ? Math.min(
+            2,
+            Math.max(1, Math.min(a.subjectTokens.size, b.subjectTokens.size)),
+          )
         : 1;
     if (subjectOverlap < minSubjectOverlap) return false;
   }
-  if (
-    requiresOfficeOverlap(a) ||
-    requiresOfficeOverlap(b)
-  ) {
+  if (requiresOfficeOverlap(a) || requiresOfficeOverlap(b)) {
     if (
       a.officeTokens.size > 0 &&
       b.officeTokens.size > 0 &&
@@ -2014,10 +2032,7 @@ export function isSignatureCompatible(a: Signature, b: Signature): boolean {
       return false;
     }
   }
-  if (
-    requiresSelectionOverlap(a) ||
-    requiresSelectionOverlap(b)
-  ) {
+  if (requiresSelectionOverlap(a) || requiresSelectionOverlap(b)) {
     if (
       a.selectionTokens.size > 0 &&
       b.selectionTokens.size > 0 &&
@@ -2079,9 +2094,14 @@ function normalizeCategory(raw?: string | null): CoarseCategory | null {
   if (value.includes("sport")) return "sports";
   if (value.includes("polit")) return "politics";
   if (value.includes("crypto") || value.includes("token")) return "crypto";
-  if (value.includes("econom") || value.includes("macro") || value.includes("finance"))
+  if (
+    value.includes("econom") ||
+    value.includes("macro") ||
+    value.includes("finance")
+  )
     return "macro";
-  if (value.includes("entertain") || value.includes("culture")) return "entertainment";
+  if (value.includes("entertain") || value.includes("culture"))
+    return "entertainment";
   return null;
 }
 
@@ -2344,7 +2364,12 @@ function buildCandidateScore(
   hintScore: number | null,
   bonus: number,
 ): number {
-  return Math.max(scoreSignatureSimilarity(seedSignature, signature), hintScore ?? 0) + bonus;
+  return (
+    Math.max(
+      scoreSignatureSimilarity(seedSignature, signature),
+      hintScore ?? 0,
+    ) + bonus
+  );
 }
 
 function scoreStructuredCandidates(
@@ -2353,7 +2378,8 @@ function scoreStructuredCandidates(
   seedSignature: Signature,
   seedIdentity: StructuredIdentity,
 ): Array<{ id: string; matchScore: number; tier: MatchTier }> {
-  const candidates: Array<{ id: string; matchScore: number; tier: MatchTier }> = [];
+  const candidates: Array<{ id: string; matchScore: number; tier: MatchTier }> =
+    [];
 
   for (const row of rows) {
     if (row.event_id === seed.event_id) continue;
@@ -2376,7 +2402,10 @@ function scoreStructuredCandidates(
     });
 
     let structuredHits = 0;
-    if (seedIdentity.seriesKey && candidateIdentity.seriesKey === seedIdentity.seriesKey) {
+    if (
+      seedIdentity.seriesKey &&
+      candidateIdentity.seriesKey === seedIdentity.seriesKey
+    ) {
       structuredHits += 2;
     }
     if (
@@ -2385,10 +2414,16 @@ function scoreStructuredCandidates(
     ) {
       structuredHits += 1;
     }
-    if (seedIdentity.eventSlugKey && candidateIdentity.eventSlugKey === seedIdentity.eventSlugKey) {
+    if (
+      seedIdentity.eventSlugKey &&
+      candidateIdentity.eventSlugKey === seedIdentity.eventSlugKey
+    ) {
       structuredHits += 2;
     }
-    if (seedIdentity.marketSlugKey && candidateIdentity.marketSlugKey === seedIdentity.marketSlugKey) {
+    if (
+      seedIdentity.marketSlugKey &&
+      candidateIdentity.marketSlugKey === seedIdentity.marketSlugKey
+    ) {
       structuredHits += 2;
     }
     if (
@@ -2408,7 +2443,12 @@ function scoreStructuredCandidates(
     const bonus = Math.min(0.4, structuredHits * 0.08);
     candidates.push({
       id: row.id,
-      matchScore: buildCandidateScore(seedSignature, signature, row.hint_score, bonus),
+      matchScore: buildCandidateScore(
+        seedSignature,
+        signature,
+        row.hint_score,
+        bonus,
+      ),
       tier: "structuredExact",
     });
   }
@@ -2423,13 +2463,15 @@ function scoreLexicalCandidates(
 ): Array<{ id: string; matchScore: number; tier: MatchTier }> {
   const exactTitleKeys = Array.from(
     new Set(
-      [normalizeTitleKey(seed.event_title), normalizeTitleKey(seed.market_title)].filter(
-        (value): value is string => Boolean(value),
-      ),
+      [
+        normalizeTitleKey(seed.event_title),
+        normalizeTitleKey(seed.market_title),
+      ].filter((value): value is string => Boolean(value)),
     ),
   );
   const anchorTokens = selectSearchAnchorTokens(seedSignature);
-  const candidates: Array<{ id: string; matchScore: number; tier: MatchTier }> = [];
+  const candidates: Array<{ id: string; matchScore: number; tier: MatchTier }> =
+    [];
 
   for (const row of rows) {
     if (row.event_id === seed.event_id) continue;
@@ -2445,16 +2487,21 @@ function scoreLexicalCandidates(
     const normalizedEventKey = normalizeTitleKey(row.event_title);
     const normalizedMarketKey = normalizeTitleKey(row.market_title);
     const exactTitleMatch =
-      (normalizedEventKey != null && exactTitleKeys.includes(normalizedEventKey)) ||
-      (normalizedMarketKey != null && exactTitleKeys.includes(normalizedMarketKey));
+      (normalizedEventKey != null &&
+        exactTitleKeys.includes(normalizedEventKey)) ||
+      (normalizedMarketKey != null &&
+        exactTitleKeys.includes(normalizedMarketKey));
 
     const candidateTokens = new Set<string>([
       ...signature.tokens,
       ...signature.entityTokens,
       ...signature.subjectTokens,
     ]);
-    const anchorHits = anchorTokens.filter((token) => candidateTokens.has(token)).length;
-    if (!exactTitleMatch && anchorTokens.length >= 2 && anchorHits < 2) continue;
+    const anchorHits = anchorTokens.filter((token) =>
+      candidateTokens.has(token),
+    ).length;
+    if (!exactTitleMatch && anchorTokens.length >= 2 && anchorHits < 2)
+      continue;
 
     let bonus = Math.min(0.24, Math.max(0, row.hint_score ?? 0) * 0.25);
     if (exactTitleMatch) bonus += 0.18;
@@ -2463,7 +2510,12 @@ function scoreLexicalCandidates(
 
     candidates.push({
       id: row.id,
-      matchScore: buildCandidateScore(seedSignature, signature, row.hint_score, bonus),
+      matchScore: buildCandidateScore(
+        seedSignature,
+        signature,
+        row.hint_score,
+        bonus,
+      ),
       tier: "lexicalExact",
     });
   }
@@ -2503,37 +2555,49 @@ async function fetchStructuredCandidateMarkets(
     params.push(seedIdentity.seriesKey);
     const idx = params.length + 1;
     clauses.push(`coalesce(lower(e.series_key), '') = $${idx}`);
-    scoreParts.push(`case when coalesce(lower(e.series_key), '') = $${idx} then 1.2 else 0 end`);
+    scoreParts.push(
+      `case when coalesce(lower(e.series_key), '') = $${idx} then 1.2 else 0 end`,
+    );
   }
   if (seedIdentity.seriesTitleKey) {
     params.push(seedIdentity.seriesTitleKey);
     const idx = params.length + 1;
     clauses.push(`${normalizedSeriesTitleExpr} = $${idx}`);
-    scoreParts.push(`case when ${normalizedSeriesTitleExpr} = $${idx} then 0.95 else 0 end`);
+    scoreParts.push(
+      `case when ${normalizedSeriesTitleExpr} = $${idx} then 0.95 else 0 end`,
+    );
   }
   if (seedIdentity.eventSlugKey) {
     params.push(seedIdentity.eventSlugKey);
     const idx = params.length + 1;
     clauses.push(`${normalizedEventSlugExpr} = $${idx}`);
-    scoreParts.push(`case when ${normalizedEventSlugExpr} = $${idx} then 1.1 else 0 end`);
+    scoreParts.push(
+      `case when ${normalizedEventSlugExpr} = $${idx} then 1.1 else 0 end`,
+    );
   }
   if (seedIdentity.marketSlugKey) {
     params.push(seedIdentity.marketSlugKey);
     const idx = params.length + 1;
     clauses.push(`${normalizedMarketSlugExpr} = $${idx}`);
-    scoreParts.push(`case when ${normalizedMarketSlugExpr} = $${idx} then 1.05 else 0 end`);
+    scoreParts.push(
+      `case when ${normalizedMarketSlugExpr} = $${idx} then 1.05 else 0 end`,
+    );
   }
   if (seedIdentity.eventTitleKey) {
     params.push(seedIdentity.eventTitleKey);
     const idx = params.length + 1;
     clauses.push(`${normalizedEventExpr} = $${idx}`);
-    scoreParts.push(`case when ${normalizedEventExpr} = $${idx} then 0.85 else 0 end`);
+    scoreParts.push(
+      `case when ${normalizedEventExpr} = $${idx} then 0.85 else 0 end`,
+    );
   }
   if (seedIdentity.marketTitleKey) {
     params.push(seedIdentity.marketTitleKey);
     const idx = params.length + 1;
     clauses.push(`${normalizedMarketExpr} = $${idx}`);
-    scoreParts.push(`case when ${normalizedMarketExpr} = $${idx} then 0.8 else 0 end`);
+    scoreParts.push(
+      `case when ${normalizedMarketExpr} = $${idx} then 0.8 else 0 end`,
+    );
   }
 
   if (clauses.length === 0 || scoreParts.length === 0) return [];
@@ -2612,7 +2676,10 @@ async function fetchExactCandidateMarkets(
     fetchLexicalCandidateMarkets(seed, seedSignature),
   ]);
 
-  const best = new Map<string, { id: string; matchScore: number; tier: MatchTier }>();
+  const best = new Map<
+    string,
+    { id: string; matchScore: number; tier: MatchTier }
+  >();
   for (const candidate of [...structured, ...lexical]) {
     const existing = best.get(candidate.id);
     if (!existing || candidate.matchScore > existing.matchScore) {
@@ -2696,8 +2763,11 @@ function intersectionSize(a: Set<string>, b: Set<string>): number {
   return count;
 }
 
-function scoreCluster(metrics: ReturnType<typeof computeClusterMetrics>): number {
-  const spreadScore = metrics.priceSpread != null ? metrics.priceSpread * 100 : 0;
+function scoreCluster(
+  metrics: ReturnType<typeof computeClusterMetrics>,
+): number {
+  const spreadScore =
+    metrics.priceSpread != null ? metrics.priceSpread * 100 : 0;
   const liquidityScore = metrics.totalLiquidity
     ? Math.log10(metrics.totalLiquidity + 1)
     : 0;
@@ -2775,8 +2845,7 @@ function buildMatchDiagnostics(
       scores.length > 0
         ? scores.reduce((sum, value) => sum + value, 0) / scores.length
         : null,
-    exactMatchRatio:
-      details.length > 0 ? exactCount / details.length : null,
+    exactMatchRatio: details.length > 0 ? exactCount / details.length : null,
     prePruneOutlierRatio,
   };
 }
@@ -2828,10 +2897,7 @@ function clampConfidence(value: unknown): number {
   return Math.min(Math.max(n, 0), 1);
 }
 
-function normalizeOutliers(
-  value: unknown,
-  validIds: Set<string>,
-): string[] {
+function normalizeOutliers(value: unknown, validIds: Set<string>): string[] {
   if (!Array.isArray(value)) return [];
   const items = value
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
@@ -2892,7 +2958,10 @@ function truncateSummary(text: string, maxLen: number): string {
   return slice.trim();
 }
 
-function truncateInputText(text: string | null | undefined, maxLen: number): string | null {
+function truncateInputText(
+  text: string | null | undefined,
+  maxLen: number,
+): string | null {
   if (!text) return null;
   const trimmed = text.trim().replace(/\s+/g, " ");
   if (trimmed.length <= maxLen) return trimmed;
@@ -2907,7 +2976,7 @@ function sanitizeDescription(text: string | null | undefined): string | null {
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;|&#160;/gi, " ")
     .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, "\"")
+    .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
@@ -3112,7 +3181,10 @@ function rebuildClusterRecord(
   return {
     ...cluster,
     marketIds,
-    marketsPreview: priced.slice().sort((a, b) => scoreMarketSummary(b) - scoreMarketSummary(a)).slice(0, 6),
+    marketsPreview: priced
+      .slice()
+      .sort((a, b) => scoreMarketSummary(b) - scoreMarketSummary(a))
+      .slice(0, 6),
     marketCount: priced.length,
     venueCounts: metrics.venueCounts,
     venueCount: metrics.venueCount,
@@ -3138,7 +3210,9 @@ async function pruneClusterOutliers(
       ? analysis.outliers.length / cluster.marketIds.length
       : null;
   const outlierSet = new Set(analysis.outliers);
-  const remainingIds = cluster.marketIds.filter((marketId) => !outlierSet.has(marketId));
+  const remainingIds = cluster.marketIds.filter(
+    (marketId) => !outlierSet.has(marketId),
+  );
   if (remainingIds.length < 2) return null;
   const summaries = await fetchMarketSummariesByIds(remainingIds);
   if (summaries.length < 2) return null;
@@ -3173,22 +3247,25 @@ async function callOpenRouter(
     });
   }
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.openRouterKey}`,
-      "Content-Type": "application/json",
-      "X-Title": "Hunch Cluster Analysis",
+  const response = await fetch(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.openRouterKey}`,
+        "Content-Type": "application/json",
+        "X-Title": "Hunch Cluster Analysis",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0,
+        max_tokens: maxTokens,
+        reasoning: { effort: "low" },
+        response_format: responseFormat,
+      }),
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0,
-      max_tokens: maxTokens,
-      reasoning: { effort: "low" },
-      response_format: responseFormat,
-    }),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -3242,9 +3319,7 @@ async function callOpenRouter(
     return "";
   }
   if (Array.isArray(content)) {
-    const joined = content
-      .map((part) => extractPart(part))
-      .join("");
+    const joined = content.map((part) => extractPart(part)).join("");
     if (joined.trim().length > 0) return joined;
     if (aiClustersPolicy.debugLogs) {
       console.warn("[cluster] openrouter empty content", {
@@ -3275,8 +3350,7 @@ async function runStageAAnalysis(
   cluster: ClusterRecord,
   input: AnalysisInput,
 ): Promise<ClusterAnalysis | null> {
-  const system =
-    "You are an analyst. Return strict JSON only. No extra text.";
+  const system = "You are an analyst. Return strict JSON only. No extra text.";
   const user = `Given a cluster of prediction markets, identify the shared claim.\nReturn:\n- label: a short title (max 80 chars)\n- category: one of [macro, politics, sports, crypto, tech, culture, entertainment, climate, finance, other]\n- outliers: list of marketIds that do not match the shared claim\n- confidence: 0-1\n- query: a short web search query to find context\nRules:\n- label should be short, concrete, and degen-friendly\n- if the label matches a market title exactly, shorten it\n- do not include odds or prices in the label\n- only list outliers, not inliers\n- be conservative: only list outliers when clearly unrelated\n- query must be based on the label/theme only, never outliers\n\nCluster data (JSON):\n${JSON.stringify(input)}`;
 
   const fallbackModel =
@@ -3364,7 +3438,9 @@ async function runStageAAnalysis(
   const category = normalizeAnalysisCategory(parsed.category);
   const outliers = normalizeOutliers(parsed.outliers, validIds);
   const confidence = clampConfidence(parsed.confidence);
-  const safeLabel = isTrivialLabel(label, cluster.label) ? cluster.label : label;
+  const safeLabel = isTrivialLabel(label, cluster.label)
+    ? cluster.label
+    : label;
   const query = buildOutlierSafeQuery(safeLabel, input.markets, outliers);
 
   return {
@@ -3531,7 +3607,9 @@ async function runStageBAnalysis(
   const inlierMarkets = input.markets.filter(
     (market) => !outlierSet.has(market.marketId),
   );
-  const safeLabel = isTrivialLabel(label, cluster.label) ? cluster.label : label;
+  const safeLabel = isTrivialLabel(label, cluster.label)
+    ? cluster.label
+    : label;
   const query = buildOutlierSafeQuery(safeLabel, inlierMarkets, outliers);
 
   let sources: AnalysisSource[] | null = null;
@@ -3580,13 +3658,15 @@ function scoreStageB(cluster: ClusterRecord): number {
 
 function shouldReuseAnalysis(
   cluster: ClusterRecord,
-  existing: {
-    analysis: string | null;
-    analysisStatus: string | null;
-    analysisUpdatedAt: string | null;
-    marketIds: string | null;
-    version: string | null;
-  } | undefined,
+  existing:
+    | {
+        analysis: string | null;
+        analysisStatus: string | null;
+        analysisUpdatedAt: string | null;
+        marketIds: string | null;
+        version: string | null;
+      }
+    | undefined,
 ): ClusterAnalysis | null {
   if (!existing?.analysis || existing.analysisStatus !== "ready") return null;
   if (!existing.analysisUpdatedAt) return null;
@@ -3821,14 +3901,16 @@ async function buildClusters(
       marketCategory: seed.market_category,
       dates: [seed.end_date, seed.expiration_time, seed.close_time],
     });
-    const embeddingRaw = (await bufferClient.hmGet(
-      `ai:embed:market:${seed.id}`,
-      ["embedding"],
-    ))[0];
+    const embeddingRaw = (
+      await bufferClient.hmGet(`ai:embed:market:${seed.id}`, ["embedding"])
+    )[0];
     const embedding = Buffer.isBuffer(embeddingRaw) ? embeddingRaw : null;
     if (!embedding) continue;
 
-    const exactCandidates = await fetchExactCandidateMarkets(seed, seedSignature);
+    const exactCandidates = await fetchExactCandidateMarkets(
+      seed,
+      seedSignature,
+    );
     const neighbors = await fetchMarketNeighbors(redis, embedding, options);
     const exactScoreById = new Map(
       exactCandidates.map((candidate) => [candidate.id, candidate.matchScore]),
@@ -3930,13 +4012,15 @@ async function buildClusters(
         exactScore != null
           ? Math.max(
               exactScore,
-              embedMatchScore ?? scoreSignatureSimilarity(seedSignature, signature),
+              embedMatchScore ??
+                scoreSignatureSimilarity(seedSignature, signature),
             )
           : embedMatchScore != null
             ? embedMatchScore
             : scoreSignatureSimilarity(seedSignature, signature);
       const tier: MatchTier =
-        exactScore != null && exactScore >= (embedMatchScore ?? Number.NEGATIVE_INFINITY)
+        exactScore != null &&
+        exactScore >= (embedMatchScore ?? Number.NEGATIVE_INFINITY)
           ? (exactTierById.get(candidateId) ?? "structuredExact")
           : "marketEmbedding";
       const existing = bestByEvent.get(meta.event_id);
@@ -3988,9 +4072,17 @@ async function buildClusters(
   const mergeOverlap = 2;
   for (let i = 0; i < clusters.length; i += 1) {
     for (let j = i + 1; j < clusters.length; j += 1) {
-      if (!isSignatureCompatible(clusters[i].seedSignature, clusters[j].seedSignature))
+      if (
+        !isSignatureCompatible(
+          clusters[i].seedSignature,
+          clusters[j].seedSignature,
+        )
+      )
         continue;
-      const inter = intersectionSize(clusters[i].eventIds, clusters[j].eventIds);
+      const inter = intersectionSize(
+        clusters[i].eventIds,
+        clusters[j].eventIds,
+      );
       if (inter === 0) continue;
       const unionSize =
         clusters[i].eventIds.size + clusters[j].eventIds.size - inter;
@@ -4051,19 +4143,19 @@ async function buildClusters(
       .map((match) => marketMeta.get(match.marketId))
       .filter((row): row is ClusterMarketRow => Boolean(row))
       .filter((row) =>
-        cluster.seedMarketType ? row.market_type === cluster.seedMarketType : true,
+        cluster.seedMarketType
+          ? row.market_type === cluster.seedMarketType
+          : true,
       )
       .map((row) => buildMarketSummary(row));
 
     if (summaries.length < 2) continue;
 
-    const sorted = summaries
-      .slice()
-      .sort((a, b) => {
-        const scoreA = marketScoreById.get(a.marketId) ?? 0;
-        const scoreB = marketScoreById.get(b.marketId) ?? 0;
-        return scoreB - scoreA;
-      });
+    const sorted = summaries.slice().sort((a, b) => {
+      const scoreA = marketScoreById.get(a.marketId) ?? 0;
+      const scoreB = marketScoreById.get(b.marketId) ?? 0;
+      return scoreB - scoreA;
+    });
 
     const perVenueCounts = new Map<string, number>();
     const capped: ClusterMarketSummary[] = [];
@@ -4088,7 +4180,8 @@ async function buildClusters(
 
     const priced = capped.filter((summary) => summary.yesMid != null);
     if (priced.length < 2) continue;
-    const pricedVenueCount = new Set(priced.map((summary) => summary.venue)).size;
+    const pricedVenueCount = new Set(priced.map((summary) => summary.venue))
+      .size;
     if (pricedVenueCount < options.minVenueCount) continue;
 
     const metrics = computeClusterMetrics(priced);
@@ -4096,9 +4189,9 @@ async function buildClusters(
 
     const score = scoreCluster(metrics);
     const marketIds = priced.map((summary) => summary.marketId).sort();
-    const matchDetails = Array.from(cluster.matchedMarketsByEvent.values()).filter((detail) =>
-      marketIds.includes(detail.marketId),
-    );
+    const matchDetails = Array.from(
+      cluster.matchedMarketsByEvent.values(),
+    ).filter((detail) => marketIds.includes(detail.marketId));
     const marketsPreview = priced
       .slice()
       .sort((a, b) => {
@@ -4183,7 +4276,8 @@ async function storeClusters(
       market_count: String(cluster.marketCount),
       venue_count: String(cluster.venueCount),
       venue_counts: JSON.stringify(cluster.venueCounts),
-      price_spread: cluster.priceSpread != null ? String(cluster.priceSpread) : "",
+      price_spread:
+        cluster.priceSpread != null ? String(cluster.priceSpread) : "",
       min_liquidity:
         cluster.minLiquidity != null ? String(cluster.minLiquidity) : "",
       total_liquidity:
@@ -4239,7 +4333,10 @@ async function main() {
 
   const redis = createRedisClient({ url: env.redisUrl });
   redis.on("error", (e: unknown) => console.warn("[redis] err", String(e)));
-  await ensureRedis(redis, { waitForReady: true, logLabel: "ai-embed-cluster" });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "ai-embed-cluster",
+  });
 
   try {
     const seeds = await fetchSeedMarkets(options);

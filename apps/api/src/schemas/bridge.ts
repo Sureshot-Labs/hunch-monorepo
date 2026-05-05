@@ -21,8 +21,7 @@ export const bridgeTokensQuerySchema = z.object({
   search: z.string().optional(),
   limit: z
     .preprocess(
-      (value) =>
-        value == null || value === "" ? undefined : Number(value),
+      (value) => (value == null || value === "" ? undefined : Number(value)),
       z.number().int().min(1).max(1000),
     )
     .optional(),
@@ -90,22 +89,19 @@ export const bridgeOrdersQuerySchema = z.object({
   sync: zOptionalBool.optional(),
   syncLimit: z
     .preprocess(
-      (value) =>
-        value == null || value === "" ? undefined : Number(value),
+      (value) => (value == null || value === "" ? undefined : Number(value)),
       z.number().int().min(1).max(20),
     )
     .optional(),
   limit: z
     .preprocess(
-      (value) =>
-        value == null || value === "" ? undefined : Number(value),
+      (value) => (value == null || value === "" ? undefined : Number(value)),
       z.number().int().min(1).max(200),
     )
     .optional(),
   offset: z
     .preprocess(
-      (value) =>
-        value == null || value === "" ? undefined : Number(value),
+      (value) => (value == null || value === "" ? undefined : Number(value)),
       z.number().int().min(0).max(10_000),
     )
     .optional(),

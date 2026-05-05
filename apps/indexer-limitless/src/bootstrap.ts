@@ -183,10 +183,7 @@ async function applyOrderbookTop(
       });
     }
   } catch (error) {
-    if (
-      error instanceof Error &&
-      /market is not active/i.test(error.message)
-    ) {
+    if (error instanceof Error && /market is not active/i.test(error.message)) {
       return;
     }
     log.warn("Limitless orderbook fetch failed", { slug, error });
@@ -248,7 +245,9 @@ async function fetchHotTokenIds(limit?: number): Promise<string[]> {
 async function resolveOrderedHotLimitlessMarketRows(
   limit?: number,
 ): Promise<HotLimitlessMarketRow[]> {
-  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
+  const tokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 12),
+  );
   if (!tokenIds.length) return [];
 
   const params: Array<string[] | number> = [tokenIds];
@@ -347,7 +346,10 @@ export async function backfillHotLimitlessAmmPrices(): Promise<{
     };
   }
 
-  const candidates = selectHotAmmQuoteCandidates(rows, env.hotAmmQuoteMaxMarkets);
+  const candidates = selectHotAmmQuoteCandidates(
+    rows,
+    env.hotAmmQuoteMaxMarkets,
+  );
   const demandedMarkets = countHotAmmQuoteCandidates(rows);
   if (!candidates.length) {
     return {
@@ -426,7 +428,10 @@ export async function backfillHotLimitlessAmmPrices(): Promise<{
 
 function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   const clampedShare = Math.max(0, Math.min(1, hotShare));
-  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  const hotBudget = Math.max(
+    0,
+    Math.min(total, Math.round(total * clampedShare)),
+  );
   return { hotBudget };
 }
 
@@ -666,10 +671,13 @@ async function processFetchedMarkets(
       marketCount += processedMarkets;
 
       if (opts.logEach) {
-        log.info(`Processed ${mergedTop.marketType} market: ${mergedTop.title}`, {
-          eventId,
-          marketCount: processedMarkets,
-        });
+        log.info(
+          `Processed ${mergedTop.marketType} market: ${mergedTop.title}`,
+          {
+            eventId,
+            marketCount: processedMarkets,
+          },
+        );
       }
     } catch (error) {
       if (isPgSetupIssue(error)) throw error;

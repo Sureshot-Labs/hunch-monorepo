@@ -178,13 +178,17 @@ const tests: TestCase[] = [
         referenceTime,
       });
 
-      assert.ok(todayMatch > nextMonthMatch, `${todayMatch} should be > ${nextMonthMatch}`);
+      assert.ok(
+        todayMatch > nextMonthMatch,
+        `${todayMatch} should be > ${nextMonthMatch}`,
+      );
     },
   },
   {
     name: "scoreSignalMarketContractMatch penalizes opposite comparators",
     run: () => {
-      const evidenceText = "Selling pressure weakens odds of Bitcoin staying above $70k.";
+      const evidenceText =
+        "Selling pressure weakens odds of Bitcoin staying above $70k.";
 
       const aboveMatch = scoreSignalMarketContractMatch({
         evidenceText,
@@ -197,7 +201,10 @@ const tests: TestCase[] = [
         marketTitle: "$70,000 or below",
       });
 
-      assert.ok(aboveMatch > belowMatch, `${aboveMatch} should be > ${belowMatch}`);
+      assert.ok(
+        aboveMatch > belowMatch,
+        `${aboveMatch} should be > ${belowMatch}`,
+      );
     },
   },
   {
@@ -220,7 +227,10 @@ const tests: TestCase[] = [
       assert.ok(aligned.overlap.includes("bolsonaro"));
       assert.ok(misaligned.hasStrongEvidenceAnchors);
       assert.equal(misaligned.overlap.length, 0);
-      assert.ok(aligned.score > misaligned.score, `${aligned.score} should be > ${misaligned.score}`);
+      assert.ok(
+        aligned.score > misaligned.score,
+        `${aligned.score} should be > ${misaligned.score}`,
+      );
     },
   },
 ];

@@ -89,16 +89,13 @@ async function readConditionPayout(inputs: {
     }),
   ]);
 
-  const resolvedOutcome =
-    yesRaw > noRaw ? "YES" : noRaw > yesRaw ? "NO" : null;
+  const resolvedOutcome = yesRaw > noRaw ? "YES" : noRaw > yesRaw ? "NO" : null;
   const pctBasisPoints = Number((yesRaw * 10_000n) / payoutDenominator);
 
   return {
     conditionResolved: true,
     resolvedOutcome,
-    resolvedOutcomePct: Number.isFinite(pctBasisPoints)
-      ? pctBasisPoints
-      : null,
+    resolvedOutcomePct: Number.isFinite(pctBasisPoints) ? pctBasisPoints : null,
   };
 }
 
@@ -176,8 +173,7 @@ export async function buildLimitlessRedemptionPlan(
         });
       }
       const adapterAddress = ethers.getAddress(inputs.adapterAddress);
-      const amounts =
-        inputs.outcome === "YES" ? [balance, 0n] : [0n, balance];
+      const amounts = inputs.outcome === "YES" ? [balance, 0n] : [0n, balance];
       const data = negRiskAdapterIface.encodeFunctionData("redeemPositions", [
         conditionId,
         amounts,

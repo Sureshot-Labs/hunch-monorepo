@@ -87,7 +87,9 @@ async function backfillMarkets(
       options.limit != null ? Math.max(options.limit - total, 0) : undefined;
     if (remaining === 0) break;
     const pageSize =
-      remaining != null ? Math.min(options.batchSize, remaining) : options.batchSize;
+      remaining != null
+        ? Math.min(options.batchSize, remaining)
+        : options.batchSize;
 
     const params: Array<string | Date | string[] | number> = [pageSize];
     let where = "m.status = 'ACTIVE'";
@@ -181,7 +183,9 @@ async function backfillEvents(
       options.limit != null ? Math.max(options.limit - total, 0) : undefined;
     if (remaining === 0) break;
     const pageSize =
-      remaining != null ? Math.min(options.batchSize, remaining) : options.batchSize;
+      remaining != null
+        ? Math.min(options.batchSize, remaining)
+        : options.batchSize;
 
     const params: Array<string | Date | string[] | number> = [pageSize];
     let where = "e.status = 'ACTIVE'";
@@ -278,10 +282,10 @@ async function backfillEvents(
       cursorId === lastRow.id &&
       cursorTs.getTime() === nextCursorTs.getTime()
     ) {
-      console.warn(
-        "[backfill] events cursor stalled; stopping to avoid loop",
-        { cursorId, cursorTs },
-      );
+      console.warn("[backfill] events cursor stalled; stopping to avoid loop", {
+        cursorId,
+        cursorTs,
+      });
       break;
     }
     cursorTs = nextCursorTs;

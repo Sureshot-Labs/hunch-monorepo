@@ -190,7 +190,10 @@ export function normalizeDflowOrderStatusPayload(
     case "pendingClose":
       return { status: "pending_close", raw: record };
     case "closed":
-      return { status: fills.length > 0 ? "fulfilled" : "no_fill", raw: record };
+      return {
+        status: fills.length > 0 ? "fulfilled" : "no_fill",
+        raw: record,
+      };
     case "failed":
       return { status: "failed", raw: record };
     default:
@@ -295,10 +298,7 @@ export async function resolveKalshiExecutionSettlementStatus(inputs: {
       orderStatus.raw && typeof orderStatus.raw === "object"
         ? (orderStatus.raw as Record<string, unknown>)
         : null;
-    if (
-      inputs.skipTxFallbackOnOrderNotReady &&
-      rawRecord?.notReady === true
-    ) {
+    if (inputs.skipTxFallbackOnOrderNotReady && rawRecord?.notReady === true) {
       return { status: "submitted", settlementRaw: orderStatus.raw };
     }
     const txStatus = await fetchSolanaSignatureStatus({
@@ -421,7 +421,10 @@ export async function finalizeKalshiExecutionEffects(
 
   const usdcMint = env.solanaUsdcMint;
   let notionalUsd: number | null = null;
-  if (inputs.execution.input_mint === usdcMint && inputs.execution.amount_in != null) {
+  if (
+    inputs.execution.input_mint === usdcMint &&
+    inputs.execution.amount_in != null
+  ) {
     const decimals = inputs.execution.input_decimals ?? DEFAULT_USDC_DECIMALS;
     notionalUsd = Number(inputs.execution.amount_in) / Math.pow(10, decimals);
   } else if (
@@ -644,14 +647,14 @@ export async function finalizeKalshiExecutionEffects(
       verifiedFeeAmountUi = formatUiAmount(delta.deltaRaw, delta.decimals);
     } else {
       if (inputs.warnOnFeeVerificationDeferral !== false) {
-          inputs.logger?.warn?.(
-            {
-              executionId: inputs.execution.id,
-              txSignature: verificationSignature,
-              deltaStatus: delta.status,
-              mint: delta.mint ?? null,
-            },
-            "Deferring Kalshi fee event until fee-account delta is verifiable",
+        inputs.logger?.warn?.(
+          {
+            executionId: inputs.execution.id,
+            txSignature: verificationSignature,
+            deltaStatus: delta.status,
+            mint: delta.mint ?? null,
+          },
+          "Deferring Kalshi fee event until fee-account delta is verifiable",
         );
       }
       return { feeEventStored: false, referralFirstTrade };
@@ -660,7 +663,11 @@ export async function finalizeKalshiExecutionEffects(
 
   const feeAmountUsd = verifiedFeeAmountUi ?? feeAmountUi;
   const feeAmountNumber = feeAmountUsd != null ? Number(feeAmountUsd) : NaN;
-  if (!Number.isFinite(feeAmountNumber) || feeAmountNumber <= 0 || !feeAmountUsd) {
+  if (
+    !Number.isFinite(feeAmountNumber) ||
+    feeAmountNumber <= 0 ||
+    !feeAmountUsd
+  ) {
     return { feeEventStored: false, referralFirstTrade };
   }
 

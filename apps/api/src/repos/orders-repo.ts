@@ -10,7 +10,9 @@ function extractPayloadAddress(
   if (!payload || typeof payload !== "object") return null;
   const record = payload as Record<string, unknown>;
   const candidates =
-    key === "maker" ? [record.maker, record.maker_address] : [record.signer, record.signer_address];
+    key === "maker"
+      ? [record.maker, record.maker_address]
+      : [record.signer, record.signer_address];
   for (const value of candidates) {
     if (typeof value !== "string") continue;
     const trimmed = value.trim();
@@ -158,11 +160,7 @@ async function storeOrderInTx(
        posted_at DESC NULLS LAST,
        id DESC
      LIMIT 1`,
-    [
-      inputs.venue,
-      inputs.venueOrderId,
-      inputs.userId,
-    ],
+    [inputs.venue, inputs.venueOrderId, inputs.userId],
   );
 
   if (existingOrder.rows.length > 0) {
@@ -491,7 +489,10 @@ export async function fetchStoredOrderWalletContext(
     venue: string;
     venueOrderId: string;
   },
-): Promise<{ walletAddress: string | null; signerAddress: string | null } | null> {
+): Promise<{
+  walletAddress: string | null;
+  signerAddress: string | null;
+} | null> {
   const { rows } = await pool.query<{
     wallet_address: string | null;
     signer_address: string | null;

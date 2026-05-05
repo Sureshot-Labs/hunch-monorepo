@@ -103,13 +103,11 @@ describe("PolymarketFeeCollector (v2)", () => {
     await setCodeAt(EXCHANGE_ADDR, "MockExchange");
 
     const FeeCollector = await ethers.getContractFactory(
-      "PolymarketFeeCollector"
+      "PolymarketFeeCollector",
     );
-    feeCollector = (await FeeCollector.deploy(
-      treasury.address,
-      USDC_ADDR,
-      [EXCHANGE_ADDR]
-    )) as PolymarketFeeCollector;
+    feeCollector = (await FeeCollector.deploy(treasury.address, USDC_ADDR, [
+      EXCHANGE_ADDR,
+    ])) as PolymarketFeeCollector;
     await feeCollector.waitForDeployment();
   });
 
@@ -125,7 +123,7 @@ describe("PolymarketFeeCollector (v2)", () => {
     const networkData = await ethers.provider.getNetwork();
     const domain = buildDomain(
       Number(networkData.chainId),
-      await feeCollector.getAddress()
+      await feeCollector.getAddress(),
     );
     const authSignerAddress = params.authSignerAddress ?? signer.address;
     const signingWallet = params.signingWallet ?? signer;
@@ -138,13 +136,24 @@ describe("PolymarketFeeCollector (v2)", () => {
       nonce: params.nonce,
       deadline: params.deadline,
     };
-    const sig = await signingWallet.signTypedData(domain, feeAuthTypes, feeAuth);
+    const sig = await signingWallet.signTypedData(
+      domain,
+      feeAuthTypes,
+      feeAuth,
+    );
     return { feeAuth, sig };
   }
 
   it("charges fee for BUY order delta fill and updates state", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
 
     const remaining = order.makerAmount - ethers.parseUnits("60", 6);
@@ -152,7 +161,9 @@ describe("PolymarketFeeCollector (v2)", () => {
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -168,7 +179,7 @@ describe("PolymarketFeeCollector (v2)", () => {
         vault.address,
         signer.address,
         ethers.parseUnits("0.30", 6),
-        ethers.parseUnits("60", 6)
+        ethers.parseUnits("60", 6),
       );
 
     const treasuryBal = await mockUSDC.balanceOf(treasury.address);
@@ -181,10 +192,9 @@ describe("PolymarketFeeCollector (v2)", () => {
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
-    await expect(feeCollector.collectFee(order, feeAuth2, sig2)).to.be.revertedWithCustomError(
-      feeCollector,
-      "FeeAuthUsed"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth2, sig2),
+    ).to.be.revertedWithCustomError(feeCollector, "FeeAuthUsed");
   });
 
   it("handles SELL order delta", async () => {
@@ -196,7 +206,10 @@ describe("PolymarketFeeCollector (v2)", () => {
       takerAmount: ethers.parseUnits("150", 6),
     });
 
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
 
     const remaining = order.makerAmount - ethers.parseUnits("100", 6);
@@ -204,7 +217,9 @@ describe("PolymarketFeeCollector (v2)", () => {
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -221,8 +236,15 @@ describe("PolymarketFeeCollector (v2)", () => {
   });
 
   it("reverts if feeBps is above 100%", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
 
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
@@ -230,7 +252,9 @@ describe("PolymarketFeeCollector (v2)", () => {
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -239,22 +263,30 @@ describe("PolymarketFeeCollector (v2)", () => {
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "InvalidFeeBps"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "InvalidFeeBps");
   });
 
   it("reverts on expired deadline", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -263,22 +295,30 @@ describe("PolymarketFeeCollector (v2)", () => {
       deadline: BigInt(Math.floor(Date.now() / 1000) - 1),
     });
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "Expired"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "Expired");
   });
 
   it("reverts on FeeAuth reuse", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -289,22 +329,30 @@ describe("PolymarketFeeCollector (v2)", () => {
 
     await feeCollector.collectFee(order, feeAuth, sig);
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "FeeAuthUsed"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "FeeAuthUsed");
   });
 
   it("pauses and unpauses", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -317,10 +365,9 @@ describe("PolymarketFeeCollector (v2)", () => {
       .to.emit(feeCollector, "Paused")
       .withArgs(deployer.address);
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "PausedError"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "PausedError");
 
     await expect(feeCollector.connect(deployer).unpause())
       .to.emit(feeCollector, "Unpaused")
@@ -330,15 +377,24 @@ describe("PolymarketFeeCollector (v2)", () => {
   });
 
   it("reverts on ParamMismatch (wrong signer/vault/orderHash)", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -348,22 +404,30 @@ describe("PolymarketFeeCollector (v2)", () => {
     });
     feeAuth.vault = deployer.address;
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "ParamMismatch"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "ParamMismatch");
   });
 
   it("reverts on BadSignature", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth } = await signFeeAuth({
       orderHash,
@@ -373,22 +437,30 @@ describe("PolymarketFeeCollector (v2)", () => {
     });
 
     const badSig = "0x";
-    await expect(feeCollector.collectFee(order, feeAuth, badSig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "BadSignature"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, badSig),
+    ).to.be.revertedWithCustomError(feeCollector, "BadSignature");
   });
 
   it("reverts when exchange is not allowlisted", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -398,10 +470,9 @@ describe("PolymarketFeeCollector (v2)", () => {
       exchange: deployer.address,
     });
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "ExchangeNotAllowed"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "ExchangeNotAllowed");
   });
 
   it("supports EIP-1271 contract signer", async () => {
@@ -417,14 +488,19 @@ describe("PolymarketFeeCollector (v2)", () => {
       signatureType: 3,
     });
 
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
     const remaining = order.makerAmount - ethers.parseUnits("10", 6);
     await mockExchange.setOrderStatus(orderHash, false, remaining);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -439,15 +515,24 @@ describe("PolymarketFeeCollector (v2)", () => {
   });
 
   it("reverts on zero fee delta", async () => {
-    const order = buildOrder({ maker: vault.address, signer: signer.address, side: 0 });
-    const mockExchange = await ethers.getContractAt("MockExchange", EXCHANGE_ADDR);
+    const order = buildOrder({
+      maker: vault.address,
+      signer: signer.address,
+      side: 0,
+    });
+    const mockExchange = await ethers.getContractAt(
+      "MockExchange",
+      EXCHANGE_ADDR,
+    );
     const orderHash = await mockExchange.hashOrder(order);
 
     await mockExchange.setOrderStatus(orderHash, false, order.makerAmount);
 
     const mockUSDC = await ethers.getContractAt("MockUSDC", USDC_ADDR);
     await mockUSDC.mint(vault.address, ethers.parseUnits("1000", 6));
-    await mockUSDC.connect(vault).approve(await feeCollector.getAddress(), ethers.MaxUint256);
+    await mockUSDC
+      .connect(vault)
+      .approve(await feeCollector.getAddress(), ethers.MaxUint256);
 
     const { feeAuth, sig } = await signFeeAuth({
       orderHash,
@@ -456,9 +541,8 @@ describe("PolymarketFeeCollector (v2)", () => {
       deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
     });
 
-    await expect(feeCollector.collectFee(order, feeAuth, sig)).to.be.revertedWithCustomError(
-      feeCollector,
-      "NothingToCharge"
-    );
+    await expect(
+      feeCollector.collectFee(order, feeAuth, sig),
+    ).to.be.revertedWithCustomError(feeCollector, "NothingToCharge");
   });
 });

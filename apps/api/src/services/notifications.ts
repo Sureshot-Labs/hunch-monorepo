@@ -57,7 +57,9 @@ function formatScaledAmount(raw: string, decimals: number): string | null {
   const trimmedFraction =
     fractional.length > 6 ? fractional.slice(0, 6) : fractional;
   const displayFraction = trimmedFraction.replace(/0+$/, "");
-  return displayFraction ? `${whole.toString()}.${displayFraction}` : whole.toString();
+  return displayFraction
+    ? `${whole.toString()}.${displayFraction}`
+    : whole.toString();
 }
 
 function formatUsd(value: number | null, digits = 2): string | null {
@@ -91,7 +93,11 @@ function formatChainLabel(chain?: string | number | null): string | null {
   ) {
     return "Solana";
   }
-  if (normalized === "base" || normalized === "8453" || normalized === "eip155:8453") {
+  if (
+    normalized === "base" ||
+    normalized === "8453" ||
+    normalized === "eip155:8453"
+  ) {
     return "Base";
   }
   if (
@@ -125,7 +131,11 @@ function formatChainNetwork(chain?: string | number | null): string | null {
   ) {
     return "solana";
   }
-  if (normalized === "base" || normalized === "8453" || normalized === "eip155:8453") {
+  if (
+    normalized === "base" ||
+    normalized === "8453" ||
+    normalized === "eip155:8453"
+  ) {
     return "base";
   }
   if (
@@ -225,7 +235,8 @@ export function buildTradeNotification(input: {
   const bodyParts = [formatVenue(input.venue)];
   if (input.side) bodyParts.push(input.side);
   if (amount) bodyParts.push(amount);
-  const body = bodyParts.join(" ").trim() || `${formatVenue(input.venue)} trade`;
+  const body =
+    bodyParts.join(" ").trim() || `${formatVenue(input.venue)} trade`;
   const dedupeKey = input.txHash ? `trade:${input.txHash}` : null;
 
   return {

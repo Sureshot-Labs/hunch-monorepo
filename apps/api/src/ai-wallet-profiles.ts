@@ -24,8 +24,7 @@ function readArg(
 async function main() {
   const policy = await resolveAiWhaleProfilesPolicy(pool);
   const config = policy.effective;
-  const limit =
-    (readArg("limit") as number | undefined) ?? config.limit;
+  const limit = (readArg("limit") as number | undefined) ?? config.limit;
   const marketLimit =
     (readArg("market-limit") as number | undefined) ?? config.marketLimit;
   const windowDays =

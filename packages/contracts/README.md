@@ -36,6 +36,7 @@ POLYGON_DEPLOYER_KEY=...
 ```
 
 Fallbacks supported if `POLYGON_DEPLOYER_KEY` is not set:
+
 - `HUNCH_FEE_COLLECTOR_PRIVATE_KEY`
 - `HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_POLYGON`
 - `HUNCH_REWARDS_PAYOUT_PRIVATE_KEY`
@@ -79,5 +80,6 @@ Collector:
 ```
 
 Notes:
+
 - Use a single collector with an exchange allowlist (standard + neg-risk).
 - FeeAuth signatures support EOA and EIP-1271 contract signers.

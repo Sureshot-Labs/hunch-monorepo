@@ -30,7 +30,8 @@ export function parseReconcileKalshiExecutionsArgs(
 
   return {
     dryRun: args.includes("--dry-run"),
-    limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : DEFAULT_LIMIT,
+    limit:
+      Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : DEFAULT_LIMIT,
     minAgeSec:
       Number.isFinite(minAgeSec) && minAgeSec >= 0
         ? Math.trunc(minAgeSec)

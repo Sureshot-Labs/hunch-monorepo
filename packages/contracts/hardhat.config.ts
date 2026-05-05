@@ -7,7 +7,9 @@ import { resolve } from "node:path";
 dotenvConfig({ path: resolve(__dirname, ".env"), override: false });
 dotenvConfig({ path: resolve(__dirname, "../../.env"), override: false });
 
-function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+function firstNonEmpty(
+  ...values: Array<string | undefined>
+): string | undefined {
   for (const value of values) {
     const trimmed = value?.trim();
     if (trimmed) return trimmed;

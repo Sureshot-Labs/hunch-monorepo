@@ -2,10 +2,7 @@ import { type WalletApiRequestSignatureInput } from "@privy-io/server-auth";
 import { Interface, ethers } from "ethers";
 import type { User } from "../auth.js";
 import { env } from "../env.js";
-import {
-  type PrivyWalletProfile,
-  PrivyService,
-} from "../privy-service.js";
+import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 
 const POLY_CHAIN_ID = 137;
@@ -153,8 +150,7 @@ const TOKEN_APPROVAL_ABI = new Interface([
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
 export const HUNCH_PRIVY_ACCESS_TOKEN_HEADER = "x-hunch-privy-access-token";
-export const HUNCH_PRIVY_IDENTITY_TOKEN_HEADER =
-  "x-hunch-privy-identity-token";
+export const HUNCH_PRIVY_IDENTITY_TOKEN_HEADER = "x-hunch-privy-identity-token";
 
 export type PolymarketOrderPayload = {
   salt: string | number;
@@ -259,9 +255,7 @@ function normalizeHex(value: string | null | undefined): string | null {
   return trimmed.toLowerCase();
 }
 
-function getRequestTransaction(
-  request: EmbeddedPrivyAuthorizationRequest,
-): {
+function getRequestTransaction(request: EmbeddedPrivyAuthorizationRequest): {
   from: string;
   to: string;
   data: string;
@@ -376,9 +370,10 @@ async function executePreparedPrivyAuthorizationRequest(
     headers: buildPrivyWalletHeaders(request.input, authorizationSignature),
     body: JSON.stringify(request.input.body),
   });
-  const payload = (await response.json().catch(() => null)) as
-    | Record<string, unknown>
-    | null;
+  const payload = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
   if (!response.ok) {
     const message =
       (payload &&
@@ -505,7 +500,9 @@ async function waitForApprovalPostcondition(
   throw new Error(`${context} did not update on-chain in time.`);
 }
 
-function parsePrivyRpcSignatureResponse(payload: Record<string, unknown>): string {
+function parsePrivyRpcSignatureResponse(
+  payload: Record<string, unknown>,
+): string {
   const data =
     payload &&
     typeof payload.data === "object" &&
@@ -582,9 +579,10 @@ async function waitForPrivyTransaction(
         headers: buildPrivyAppAuthHeaders(),
       },
     );
-    const payload = (await response.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
     if (!response.ok) {
       const message =
         (payload &&
@@ -647,8 +645,8 @@ async function sendSponsoredPolygonTransaction(inputs: {
 }) {
   const signer = requireAddress(inputs.signer, "Invalid signer address.");
   const to = requireAddress(inputs.to, "Invalid Polygon target address.");
-  const result = await inputs.walletApiClient.walletApi.ethereum.sendTransaction(
-    {
+  const result =
+    await inputs.walletApiClient.walletApi.ethereum.sendTransaction({
       address: signer,
       chainType: "ethereum",
       caip2: POLY_CAIP2,
@@ -658,8 +656,7 @@ async function sendSponsoredPolygonTransaction(inputs: {
         to: to as `0x${string}`,
         data: normalizeHex(inputs.data) as `0x${string}`,
       },
-    },
-  );
+    });
   await waitForPolygonTransaction(result.hash, inputs.context);
   return result.hash;
 }
@@ -689,7 +686,10 @@ function canonicalizeOrderPayload(
   const output = {
     ...payload,
     maker: requireAddress(payload.maker, "Invalid Polymarket maker address."),
-    signer: requireAddress(payload.signer, "Invalid Polymarket signer address."),
+    signer: requireAddress(
+      payload.signer,
+      "Invalid Polymarket signer address.",
+    ),
   };
   if (!isPolymarketOrderPayloadV2(payload)) {
     output.taker = requireAddress(
@@ -701,7 +701,9 @@ function canonicalizeOrderPayload(
 }
 
 function isPolymarketOrderPayloadV2(payload: PolymarketOrderPayload): boolean {
-  return Boolean(payload.timestamp != null && payload.metadata && payload.builder);
+  return Boolean(
+    payload.timestamp != null && payload.metadata && payload.builder,
+  );
 }
 
 function isFeeAuthPayloadV3(payload: FeeAuthPayload): boolean {
@@ -711,7 +713,10 @@ function isFeeAuthPayloadV3(payload: FeeAuthPayload): boolean {
 function canonicalizeFeeAuthPayload(payload: FeeAuthPayload): FeeAuthPayload {
   return {
     ...payload,
-    signer: requireAddress(payload.signer, "Invalid Polymarket signer address."),
+    signer: requireAddress(
+      payload.signer,
+      "Invalid Polymarket signer address.",
+    ),
     vault: requireAddress(payload.vault, "Invalid Polymarket vault address."),
     exchange: requireAddress(
       payload.exchange,
@@ -1077,7 +1082,9 @@ export async function signEmbeddedPolymarketOrder(inputs: {
     "Invalid Polymarket exchange address.",
   );
   const typedPayload = canonicalizeOrderPayload(inputs.payload);
-  if (typedPayload.signer.toLowerCase() !== inputs.context.signer.toLowerCase()) {
+  if (
+    typedPayload.signer.toLowerCase() !== inputs.context.signer.toLowerCase()
+  ) {
     throw new Error(
       "Embedded Polymarket order signer must match the selected Trading Wallet.",
     );
@@ -1114,7 +1121,9 @@ export async function signEmbeddedPolymarketFeeAuth(inputs: {
     "Invalid Polymarket fee collector address.",
   );
   const typedPayload = canonicalizeFeeAuthPayload(inputs.payload);
-  if (typedPayload.signer.toLowerCase() !== inputs.context.signer.toLowerCase()) {
+  if (
+    typedPayload.signer.toLowerCase() !== inputs.context.signer.toLowerCase()
+  ) {
     throw new Error(
       "Embedded Polymarket fee authorization signer must match the selected Trading Wallet.",
     );
@@ -1228,7 +1237,10 @@ function buildApprovalTasks(inputs: {
       description: "USDC neg-risk adapter approval",
     });
   }
-  if (env.feeCollectorAddress && !inputs.currentApprovals.feeCollectorAllowanceOk) {
+  if (
+    env.feeCollectorAddress &&
+    !inputs.currentApprovals.feeCollectorAllowanceOk
+  ) {
     tasks.push({
       kind: "erc20_approve",
       target: env.polymarketUsdcAddress,
@@ -1325,10 +1337,7 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
         break;
       } catch (error) {
         lastError = error;
-        if (
-          !isPrivyInflightAuthorizationError(error) ||
-          attempt === 2
-        ) {
+        if (!isPrivyInflightAuthorizationError(error) || attempt === 2) {
           throw error;
         }
         await waitForInflightAuthorizationRetry(attempt);
@@ -1338,9 +1347,7 @@ export async function executeEmbeddedSignerApprovalRequests(inputs: {
     if (!payload) {
       throw (
         lastError ??
-        new Error(
-          `${request.label} did not produce a Privy wallet response.`,
-        )
+        new Error(`${request.label} did not produce a Privy wallet response.`)
       );
     }
 
@@ -1389,7 +1396,10 @@ async function executeSafeApprovalTasks(inputs: {
   tasks: ApprovalTask[];
 }) {
   const provider = polygonProvider();
-  const safeAddress = requireAddress(inputs.safeAddress, "Invalid Safe address.");
+  const safeAddress = requireAddress(
+    inputs.safeAddress,
+    "Invalid Safe address.",
+  );
   const nonceResult = await provider.call({
     to: safeAddress,
     data: SAFE_ABI.encodeFunctionData("nonce", []),
@@ -1403,7 +1413,10 @@ async function executeSafeApprovalTasks(inputs: {
     data: SAFE_ABI.encodeFunctionData("getThreshold", []),
   });
   const nonceDecoded = SAFE_ABI.decodeFunctionResult("nonce", nonceResult);
-  const ownersDecoded = SAFE_ABI.decodeFunctionResult("getOwners", ownersResult);
+  const ownersDecoded = SAFE_ABI.decodeFunctionResult(
+    "getOwners",
+    ownersResult,
+  );
   const thresholdDecoded = SAFE_ABI.decodeFunctionResult(
     "getThreshold",
     thresholdResult,
@@ -1413,7 +1426,10 @@ async function executeSafeApprovalTasks(inputs: {
     owner.toLowerCase(),
   );
   const threshold = Number(thresholdDecoded[0] as bigint);
-  if (!owners.includes(inputs.context.signer.toLowerCase()) || threshold !== 1) {
+  if (
+    !owners.includes(inputs.context.signer.toLowerCase()) ||
+    threshold !== 1
+  ) {
     throw new Error(
       "Embedded automation only supports 1/1 Safe funders owned by the Trading Wallet.",
     );

@@ -156,8 +156,7 @@ export async function loadWalletOpenPositionStatsMap(
 
   const accumulators = new Map<string, WalletOpenPositionAccumulator>();
   for (const row of rows) {
-    const accumulator =
-      accumulators.get(row.wallet_id) ?? createAccumulator();
+    const accumulator = accumulators.get(row.wallet_id) ?? createAccumulator();
     const shares = parseNumber(row.shares);
     const sizeUsd = parseNumber(row.size_usd);
     const observedPrice = parseNumber(row.observed_price);

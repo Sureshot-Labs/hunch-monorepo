@@ -152,7 +152,9 @@ async function insertMarket(market: SeededMarket): Promise<void> {
   );
 }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(
+  params: Record<string, string | number | undefined>,
+): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value == null) continue;
@@ -570,14 +572,16 @@ async function main() {
   } finally {
     env.feedTtlSec = previousFeedTtl;
     if (seededMarketIds.length > 0) {
-      await pool.query("delete from unified_markets where id = any($1::text[])", [
-        seededMarketIds,
-      ]);
+      await pool.query(
+        "delete from unified_markets where id = any($1::text[])",
+        [seededMarketIds],
+      );
     }
     if (seededEventIds.length > 0) {
-      await pool.query("delete from unified_events where id = any($1::text[])", [
-        seededEventIds,
-      ]);
+      await pool.query(
+        "delete from unified_events where id = any($1::text[])",
+        [seededEventIds],
+      );
     }
     await app.close();
   }

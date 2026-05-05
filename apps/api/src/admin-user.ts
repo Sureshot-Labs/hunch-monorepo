@@ -95,7 +95,11 @@ async function fetchUserById(userId: string, db: Queryable = pool) {
   return rows[0] ?? null;
 }
 
-async function setAdmin(userId: string, isAdmin: boolean, db: Queryable = pool) {
+async function setAdmin(
+  userId: string,
+  isAdmin: boolean,
+  db: Queryable = pool,
+) {
   await db.query(`update users set is_admin = $2 where id = $1`, [
     userId,
     isAdmin,
@@ -107,10 +111,10 @@ async function setKalshiProofBypass(
   enabled: boolean,
   db: Queryable = pool,
 ) {
-  await db.query(
-    `update users set kalshi_proof_bypass = $2 where id = $1`,
-    [userId, enabled],
-  );
+  await db.query(`update users set kalshi_proof_bypass = $2 where id = $1`, [
+    userId,
+    enabled,
+  ]);
 }
 
 async function listAdmins(db: Queryable = pool) {
@@ -139,7 +143,7 @@ async function resolveTargetUser(
   const users = targetWallet ? await fetchUsersByWallet(targetWallet, db) : [];
   const user = targetUserId
     ? await fetchUserById(targetUserId, db)
-    : users[0] ?? null;
+    : (users[0] ?? null);
 
   if (targetWallet && users.length > 1 && !targetUserId) {
     console.error("Multiple users found for wallet. Use --user-id:");
@@ -185,11 +189,17 @@ async function main() {
         await client.query("begin");
 
         const beforeCount = await countAdmins(client);
-        await client.query(`update users set is_admin = false where is_admin = true`);
+        await client.query(
+          `update users set is_admin = false where is_admin = true`,
+        );
 
         let keeperId: string | null = null;
         if (targetWallet || targetUserId) {
-          const keeper = await resolveTargetUser(targetWallet, targetUserId, client);
+          const keeper = await resolveTargetUser(
+            targetWallet,
+            targetUserId,
+            client,
+          );
           if (!keeper) {
             throw new Error("Keeper user not found");
           }
@@ -242,8 +252,7 @@ async function main() {
       return;
     }
 
-    const adminToggleCount =
-      Number(options.grant) + Number(options.revoke);
+    const adminToggleCount = Number(options.grant) + Number(options.revoke);
     const proofToggleCount =
       Number(options.proofBypassOn) + Number(options.proofBypassOff);
 

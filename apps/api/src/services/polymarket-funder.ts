@@ -3,7 +3,12 @@ import { env } from "../env.js";
 import { fetchEvmCall, fetchEvmCode } from "./polygon-rpc.js";
 
 type FunderSource = "signer" | "stored" | "magic_proxy" | "safe_proxy";
-type ContractKind = "EOA" | "SAFE_LIKE" | "CONTRACT" | "NOT_DEPLOYED" | "UNKNOWN";
+type ContractKind =
+  | "EOA"
+  | "SAFE_LIKE"
+  | "CONTRACT"
+  | "NOT_DEPLOYED"
+  | "UNKNOWN";
 
 export type PolymarketFunderCandidate = {
   funder: string;
@@ -42,8 +47,7 @@ const SAFE_READ_IFACE = new Interface([
   "function getThreshold() view returns (uint256)",
 ]);
 
-const MAGIC_PROXY_INIT_PREFIX =
-  "0x3d602d80600a3d3981f3363d3d373d3d3d363d73";
+const MAGIC_PROXY_INIT_PREFIX = "0x3d602d80600a3d3981f3363d3d373d3d3d363d73";
 const MAGIC_PROXY_INIT_SUFFIX = "5af43d82803e903d91602b57fd5bf3";
 
 function normalizeEthAddress(value: string | null | undefined): string | null {
@@ -98,9 +102,7 @@ function deriveMagicProxyAddress(signer: string): string | null {
 
   const initCode = buildMagicProxyInitCode(implementation);
   const initCodeHash = ethers.keccak256(initCode);
-  const salt = ethers.keccak256(
-    ethers.solidityPacked(["address"], [signer]),
-  );
+  const salt = ethers.keccak256(ethers.solidityPacked(["address"], [signer]));
 
   return ethers.getCreate2Address(factory, salt, initCodeHash);
 }
@@ -167,7 +169,9 @@ async function inspectSafe(inputs: {
     }
 
     const normalizedOwners = owners
-      .map((owner) => (typeof owner === "string" ? normalizeEthAddress(owner) : null))
+      .map((owner) =>
+        typeof owner === "string" ? normalizeEthAddress(owner) : null,
+      )
       .filter((owner): owner is string => Boolean(owner));
 
     const safe =
@@ -230,7 +234,9 @@ async function inspectSafeStrict(inputs: {
     }
 
     const normalizedOwners = owners
-      .map((owner) => (typeof owner === "string" ? normalizeEthAddress(owner) : null))
+      .map((owner) =>
+        typeof owner === "string" ? normalizeEthAddress(owner) : null,
+      )
       .filter((owner): owner is string => Boolean(owner));
 
     const safe =
@@ -365,8 +371,9 @@ export function derivePolymarketFunderAddresses(inputs: {
 
   const warnings: string[] = [];
   const safeProxy = deriveSafeProxyAddress(signerAddress);
-  const magicProxy =
-    inputs.includeMagicProxy ? deriveMagicProxyAddress(signerAddress) : null;
+  const magicProxy = inputs.includeMagicProxy
+    ? deriveMagicProxyAddress(signerAddress)
+    : null;
   const candidates = [signerAddress];
 
   if (safeProxy) {
@@ -444,9 +451,14 @@ export async function derivePolymarketFunders(inputs: {
   const storedMatchesSafe =
     Boolean(storedFunder && safeFunder) && storedFunder === safeFunder;
   const storedMatchesCanonical =
-    storedMatchesSafe || (Boolean(inputs.includeMagicProxy) && storedMatchesMagic);
+    storedMatchesSafe ||
+    (Boolean(inputs.includeMagicProxy) && storedMatchesMagic);
 
-  if (storedFunder && storedFunder !== signerAddress && !storedMatchesCanonical) {
+  if (
+    storedFunder &&
+    storedFunder !== signerAddress &&
+    !storedMatchesCanonical
+  ) {
     addCandidate({
       funder: storedFunder,
       signatureType: storedMatchesMagic ? 1 : 2,

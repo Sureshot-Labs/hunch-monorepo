@@ -33,7 +33,11 @@ export async function getRedisStatus(
     client = createRedisClient({ url: env.redisUrl });
     if (!client) {
       cacheStatus("error", "Redis client unavailable");
-      return { redis: null, status: "error", error: "Redis client unavailable" };
+      return {
+        redis: null,
+        status: "error",
+        error: "Redis client unavailable",
+      };
     }
     client.on("error", (e: unknown) => console.warn("[redis] err", String(e)));
   }
@@ -41,7 +45,8 @@ export async function getRedisStatus(
   try {
     await ensureRedis(client);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Redis connect failed";
+    const message =
+      error instanceof Error ? error.message : "Redis connect failed";
     cacheStatus("error", message);
     return { redis: null, status: "error", error: message };
   }

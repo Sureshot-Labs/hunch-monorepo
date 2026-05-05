@@ -151,15 +151,16 @@ const TECHNOLOGY_TAGS = new Set([
 const ENTERTAINMENT_TAGS = new Set(["entertainment", "culture"]);
 const WEATHER_TAGS = new Set(["weather", "climate"]);
 const HEALTH_TAGS = new Set(["health"]);
-const MENTIONS_TAGS = new Set(["mentions", "mention-markets", "tweets-markets"]);
+const MENTIONS_TAGS = new Set([
+  "mentions",
+  "mention-markets",
+  "tweets-markets",
+]);
 const POLITICS_DOMAIN_TAGS = new Set([
   "nav-domain-politics",
   "nav-domain-news",
 ]);
-const SPORTS_DOMAIN_TAGS = new Set([
-  "nav-domain-sports",
-  "nav-domain-sport",
-]);
+const SPORTS_DOMAIN_TAGS = new Set(["nav-domain-sports", "nav-domain-sport"]);
 
 // helper: parse volume (prefer formatted; else scale by decimals if looks integery)
 function parseVolume(
@@ -236,7 +237,9 @@ function normalizeCategoryList(values?: string[] | null): string[] {
   return out;
 }
 
-function collectTextTokens(...inputs: Array<string | null | undefined>): Set<string> {
+function collectTextTokens(
+  ...inputs: Array<string | null | undefined>
+): Set<string> {
   const tokens = new Set<string>();
   for (const input of inputs) {
     if (!input) continue;
@@ -320,7 +323,9 @@ function bestScoredCategory(
   return best;
 }
 
-function deriveCategoryFromTokens(tokens: string[]): LimitlessCategory | undefined {
+function deriveCategoryFromTokens(
+  tokens: string[],
+): LimitlessCategory | undefined {
   const scores = new Map<LimitlessCategory, number>();
   for (const token of tokens) {
     scoreCategoryToken(token, scores);
@@ -334,7 +339,11 @@ function deriveCategoryFromText(
 ): LimitlessCategory | undefined {
   const tokens = collectTextTokens(title, description);
 
-  if (tokens.has("trump") || tokens.has("president") || tokens.has("election")) {
+  if (
+    tokens.has("trump") ||
+    tokens.has("president") ||
+    tokens.has("election")
+  ) {
     return "politics";
   }
   if (tokens.has("bitcoin") || tokens.has("ethereum") || tokens.has("solana")) {
@@ -404,12 +413,7 @@ function pickImage(input: {
   logo?: string | null;
   creator?: { imageURI?: string | null } | null;
 }): string | undefined {
-  return (
-    input.ogImageURI ??
-    input.logo ??
-    input.creator?.imageURI ??
-    undefined
-  );
+  return input.ogImageURI ?? input.logo ?? input.creator?.imageURI ?? undefined;
 }
 
 function pickIcon(input: {
@@ -444,7 +448,8 @@ function extractVenueInfo(
       ? ((market as { exchange?: string }).exchange ?? undefined)
       : undefined;
   const exchangeAddressFromRoot =
-    typeof (market as { exchangeAddress?: unknown }).exchangeAddress === "string"
+    typeof (market as { exchangeAddress?: unknown }).exchangeAddress ===
+    "string"
       ? ((market as { exchangeAddress?: string }).exchangeAddress ?? undefined)
       : undefined;
   const exchange =
@@ -854,8 +859,9 @@ export function mapToUnifiedMarket(
       marketType: market.marketType,
       address: market.address ?? undefined,
       negRiskRequestId: market.negRiskRequestId ?? undefined,
-      negRiskMarketId: (market as { negRiskMarketId?: string | null })
-        .negRiskMarketId ?? undefined,
+      negRiskMarketId:
+        (market as { negRiskMarketId?: string | null }).negRiskMarketId ??
+        undefined,
       venueExchange: venueInfo?.exchange,
       venueAdapter: venueInfo?.adapter,
     },

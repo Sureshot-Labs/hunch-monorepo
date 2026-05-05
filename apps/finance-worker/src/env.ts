@@ -2,7 +2,10 @@ import { config } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true });
 
 function readEnv(key: string): string | undefined {
@@ -95,7 +98,10 @@ export const env = {
     15,
   ),
 
-  treasurySweepEnabled: parseBool(readEnv("HUNCH_FINANCE_SWEEP_ENABLED"), false),
+  treasurySweepEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_SWEEP_ENABLED"),
+    false,
+  ),
   treasurySweepIntervalSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_SWEEP_INTERVAL_SEC"),
     900,
@@ -156,8 +162,14 @@ export const env = {
     30,
   ),
 
-  jobTimeoutSec: parsePositiveInt(process.env.HUNCH_FINANCE_JOB_TIMEOUT_SEC, 300),
+  jobTimeoutSec: parsePositiveInt(
+    process.env.HUNCH_FINANCE_JOB_TIMEOUT_SEC,
+    300,
+  ),
   maxRetries: parsePositiveInt(process.env.HUNCH_FINANCE_MAX_RETRIES, 1),
-  retryBackoffSec: parsePositiveInt(process.env.HUNCH_FINANCE_RETRY_BACKOFF_SEC, 5),
+  retryBackoffSec: parsePositiveInt(
+    process.env.HUNCH_FINANCE_RETRY_BACKOFF_SEC,
+    5,
+  ),
   jitterSec: parsePositiveInt(process.env.HUNCH_FINANCE_JITTER_SEC, 30),
 };

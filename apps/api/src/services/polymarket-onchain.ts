@@ -50,11 +50,7 @@ type MulticallEntry<T> = {
   fallback: T;
 };
 
-function decodeBigInt(
-  iface: Interface,
-  fn: string,
-  data: string,
-): bigint {
+function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
@@ -63,11 +59,7 @@ function decodeBigInt(
   return value;
 }
 
-function decodeBool(
-  iface: Interface,
-  fn: string,
-  data: string,
-): boolean {
+function decodeBool(iface: Interface, fn: string, data: string): boolean {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "boolean") {

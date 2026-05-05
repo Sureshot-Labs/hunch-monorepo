@@ -43,7 +43,10 @@ export function evaluateSignalMarketWindow(
     input.resolvedOutcome && String(input.resolvedOutcome).trim().length > 0,
   );
   const isOpenNow =
-    marketStatus === "ACTIVE" && !isResolved && hasValidCloseAt && closeAtMs > nowMs;
+    marketStatus === "ACTIVE" &&
+    !isResolved &&
+    hasValidCloseAt &&
+    closeAtMs > nowMs;
   const isActiveWithInvalidClose =
     marketStatus === "ACTIVE" && (!hasValidCloseAt || closeAtMs <= nowMs);
   return {

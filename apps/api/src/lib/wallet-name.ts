@@ -5,9 +5,7 @@ export function normalizeWalletNameInput(input: string | null): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
   if (trimmed.length > MAX_WALLET_NAME_LENGTH) {
-    throw new Error(
-      `Wallet name is too long (max ${MAX_WALLET_NAME_LENGTH})`,
-    );
+    throw new Error(`Wallet name is too long (max ${MAX_WALLET_NAME_LENGTH})`);
   }
   for (let index = 0; index < trimmed.length; index += 1) {
     const code = trimmed.charCodeAt(index);

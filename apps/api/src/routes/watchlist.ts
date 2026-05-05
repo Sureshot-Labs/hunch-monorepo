@@ -178,7 +178,8 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
             liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
             acceptingOrders: computeAcceptingOrders({
-              status: typeof r.market_status === "string" ? r.market_status : null,
+              status:
+                typeof r.market_status === "string" ? r.market_status : null,
               closeTime: r.close_time,
               expirationTime: r.expiration_time,
               pmAcceptingOrders: r.pm_accepting_orders,
@@ -249,9 +250,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
         );
 
         const ids = Array.from(
-          new Set(
-            rows.map((row) => row.market_id).filter(Boolean),
-          ),
+          new Set(rows.map((row) => row.market_id).filter(Boolean)),
         );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -260,7 +259,10 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
           ids,
         });
       } catch (error) {
-        app.log.error({ error, userId: user.id }, "Failed to fetch watchlist ids");
+        app.log.error(
+          { error, userId: user.id },
+          "Failed to fetch watchlist ids",
+        );
         reply.code(500);
         return reply.send({
           error: "Failed to fetch watchlist ids",

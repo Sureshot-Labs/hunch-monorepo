@@ -29,9 +29,7 @@ import {
   selectRankedRepresentativeMarketsForEvents,
   type RankedRepresentativeMarket,
 } from "./services/market-map-representative.js";
-import {
-  isMarketMapUsable,
-} from "./services/market-map-quality.js";
+import { isMarketMapUsable } from "./services/market-map-quality.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
@@ -458,7 +456,7 @@ const ZERO_COST: CostEstimate = {
 
 function parseFlag(args: string[], flag: string): string | undefined {
   const inlinePrefix = `${flag}=`;
-  const inlineValue = args.find(arg => arg.startsWith(inlinePrefix));
+  const inlineValue = args.find((arg) => arg.startsWith(inlinePrefix));
   if (inlineValue) return inlineValue.slice(inlinePrefix.length);
   const idx = args.indexOf(flag);
   if (idx === -1) return undefined;
@@ -484,7 +482,10 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return n;
 }
 
-function parseNonNegativeFloat(raw: string | undefined, fallback: number): number {
+function parseNonNegativeFloat(
+  raw: string | undefined,
+  fallback: number,
+): number {
   if (!raw) return fallback;
   const n = Number.parseFloat(raw);
   if (!Number.isFinite(n) || n < 0) return fallback;
@@ -546,8 +547,13 @@ function parseDomainCsv(raw: string | undefined): string[] {
 
 function resolveArgs(argv: string[]): Args {
   const toolMode = parseModeTool(parseFlag(argv, "--tool-mode"));
-  const parsedSourceDenyDomains = parseDomainCsv(parseFlag(argv, "--source-deny-domains"));
-  const baseWindowHours = parsePositiveInt(parseFlag(argv, "--window-hours"), 24);
+  const parsedSourceDenyDomains = parseDomainCsv(
+    parseFlag(argv, "--source-deny-domains"),
+  );
+  const baseWindowHours = parsePositiveInt(
+    parseFlag(argv, "--window-hours"),
+    24,
+  );
   const windowHoursL3 = parsePositiveInt(
     parseFlag(argv, "--window-hours-l3"),
     baseWindowHours,
@@ -579,10 +585,21 @@ function resolveArgs(argv: string[]): Args {
     out: parseFlag(argv, "--out") ?? null,
     reportOut: parseFlag(argv, "--report-out") ?? null,
     reuseMode: parseReuseMode(parseFlag(argv, "--reuse-mode")),
-    persistenceMode: parsePersistenceMode(parseFlag(argv, "--persistence-mode")),
-    artifactTtlSec: parsePositiveInt(parseFlag(argv, "--artifact-ttl-sec"), 60 * 60 * 24 * 3),
-    stateTtlSec: parsePositiveInt(parseFlag(argv, "--state-ttl-sec"), 60 * 60 * 24 * 3),
-    statusTtlSec: parsePositiveInt(parseFlag(argv, "--status-ttl-sec"), 60 * 60 * 24 * 7),
+    persistenceMode: parsePersistenceMode(
+      parseFlag(argv, "--persistence-mode"),
+    ),
+    artifactTtlSec: parsePositiveInt(
+      parseFlag(argv, "--artifact-ttl-sec"),
+      60 * 60 * 24 * 3,
+    ),
+    stateTtlSec: parsePositiveInt(
+      parseFlag(argv, "--state-ttl-sec"),
+      60 * 60 * 24 * 3,
+    ),
+    statusTtlSec: parsePositiveInt(
+      parseFlag(argv, "--status-ttl-sec"),
+      60 * 60 * 24 * 7,
+    ),
     warmStartEvidenceLimit: parsePositiveInt(
       parseFlag(argv, "--warm-start-evidence-limit"),
       120,
@@ -629,12 +646,18 @@ function resolveArgs(argv: string[]): Args {
     ),
     maxCalls: parsePositiveInt(parseFlag(argv, "--max-calls"), 16),
     maxTurns: parsePositiveInt(parseFlag(argv, "--max-turns"), 2),
-    maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 900),
+    maxOutputTokens: parsePositiveInt(
+      parseFlag(argv, "--max-output-tokens"),
+      900,
+    ),
     maxEvidencePerCall: parsePositiveInt(
       parseFlag(argv, "--max-evidence-per-call"),
       8,
     ),
-    maxEvidenceTotal: parsePositiveInt(parseFlag(argv, "--max-evidence-total"), 240),
+    maxEvidenceTotal: parsePositiveInt(
+      parseFlag(argv, "--max-evidence-total"),
+      240,
+    ),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 80),
     maxRetries: parsePositiveInt(parseFlag(argv, "--max-retries"), 1),
     retryBaseMs: parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 1200),
@@ -672,12 +695,24 @@ function resolveArgs(argv: string[]): Args {
     windowHoursL1,
     windowHoursL2,
     windowHoursL3,
-    recentHoursHint: parsePositiveInt(parseFlag(argv, "--recent-hours-hint"), 6),
+    recentHoursHint: parsePositiveInt(
+      parseFlag(argv, "--recent-hours-hint"),
+      6,
+    ),
     topRootCount: parsePositiveInt(parseFlag(argv, "--top-root-count"), 6),
     branchPerCall: parsePositiveInt(parseFlag(argv, "--branch-per-call"), 3),
-    childSampleLimit: parsePositiveInt(parseFlag(argv, "--child-sample-limit"), 8),
-    siblingSampleLimit: parsePositiveInt(parseFlag(argv, "--sibling-sample-limit"), 6),
-    eventSampleLimit: parsePositiveInt(parseFlag(argv, "--event-sample-limit"), 10),
+    childSampleLimit: parsePositiveInt(
+      parseFlag(argv, "--child-sample-limit"),
+      8,
+    ),
+    siblingSampleLimit: parsePositiveInt(
+      parseFlag(argv, "--sibling-sample-limit"),
+      6,
+    ),
+    eventSampleLimit: parsePositiveInt(
+      parseFlag(argv, "--event-sample-limit"),
+      10,
+    ),
     topMarketsPerEvent: parsePositiveInt(
       parseFlag(argv, "--top-markets-per-event"),
       3,
@@ -686,7 +721,10 @@ function resolveArgs(argv: string[]): Args {
       parseFlag(argv, "--leaf-event-embedding-cap"),
       20,
     ),
-    routeMinSimilarity: parseRatio(parseFlag(argv, "--route-min-similarity"), 0),
+    routeMinSimilarity: parseRatio(
+      parseFlag(argv, "--route-min-similarity"),
+      0,
+    ),
     routeThresholdL1: parseRatio(parseFlag(argv, "--route-threshold-l1"), 0.2),
     routeThresholdL2: parseRatio(parseFlag(argv, "--route-threshold-l2"), 0.24),
     routeThresholdL3: parseRatio(parseFlag(argv, "--route-threshold-l3"), 0.28),
@@ -694,7 +732,9 @@ function resolveArgs(argv: string[]): Args {
     routeMinMarginL1,
     routeMinMarginL2,
     routeMinMarginL3,
-    sourceAllowDomains: parseDomainCsv(parseFlag(argv, "--source-allow-domains")),
+    sourceAllowDomains: parseDomainCsv(
+      parseFlag(argv, "--source-allow-domains"),
+    ),
     sourceDenyDomains:
       parsedSourceDenyDomains.length > 0
         ? parsedSourceDenyDomains
@@ -727,9 +767,18 @@ function resolveArgs(argv: string[]): Args {
       parseFlag(argv, "--low-yield-consecutive-threshold"),
       3,
     ),
-    enforceFreshness: parseBoolean(parseFlag(argv, "--enforce-freshness"), true),
-    reportTopLeaves: parsePositiveInt(parseFlag(argv, "--report-top-leaves"), 8),
-    reportTopEvidence: parsePositiveInt(parseFlag(argv, "--report-top-evidence"), 20),
+    enforceFreshness: parseBoolean(
+      parseFlag(argv, "--enforce-freshness"),
+      true,
+    ),
+    reportTopLeaves: parsePositiveInt(
+      parseFlag(argv, "--report-top-leaves"),
+      8,
+    ),
+    reportTopEvidence: parsePositiveInt(
+      parseFlag(argv, "--report-top-evidence"),
+      20,
+    ),
     dryRun: hasFlag(argv, "--dry-run"),
     verbose: hasFlag(argv, "--verbose"),
     leanOutput: hasFlag(argv, "--lean-output"),
@@ -739,11 +788,13 @@ function resolveArgs(argv: string[]): Args {
       process.env.XAI_BASE_URL?.trim() ||
       DEFAULT_XAI_BASE_URL,
     priceInputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-input-per-m") ?? process.env.XAI_PRICE_INPUT_PER_M,
+      parseFlag(argv, "--price-input-per-m") ??
+        process.env.XAI_PRICE_INPUT_PER_M,
       0.2,
     ),
     priceOutputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-output-per-m") ?? process.env.XAI_PRICE_OUTPUT_PER_M,
+      parseFlag(argv, "--price-output-per-m") ??
+        process.env.XAI_PRICE_OUTPUT_PER_M,
       0.5,
     ),
     priceWebPer1k: parseNonNegativeFloat(
@@ -865,7 +916,7 @@ function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
   if (!payload || typeof payload !== "object") return [];
   const output = (payload as Record<string, unknown>).output;
   if (!Array.isArray(output)) return [];
-  return output.filter(item => item && typeof item === "object") as Array<
+  return output.filter((item) => item && typeof item === "object") as Array<
     Record<string, unknown>
   >;
 }
@@ -873,7 +924,10 @@ function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
 function extractOutputText(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "";
   const obj = payload as Record<string, unknown>;
-  if (typeof obj.output_text === "string" && obj.output_text.trim().length > 0) {
+  if (
+    typeof obj.output_text === "string" &&
+    obj.output_text.trim().length > 0
+  ) {
     return obj.output_text;
   }
   const items = extractOutputItems(payload);
@@ -928,7 +982,9 @@ function extractCitationsCount(payload: unknown): number {
   return urls.size;
 }
 
-function extractServerSideToolUsage(payload: unknown): Record<string, unknown> | null {
+function extractServerSideToolUsage(
+  payload: unknown,
+): Record<string, unknown> | null {
   if (!payload || typeof payload !== "object") return null;
   const top = (payload as Record<string, unknown>).server_side_tool_usage;
   if (top && typeof top === "object" && !Array.isArray(top)) {
@@ -936,7 +992,8 @@ function extractServerSideToolUsage(payload: unknown): Record<string, unknown> |
   }
   const usage = (payload as Record<string, unknown>).usage;
   if (!usage || typeof usage !== "object") return null;
-  const details = (usage as Record<string, unknown>).server_side_tool_usage_details;
+  const details = (usage as Record<string, unknown>)
+    .server_side_tool_usage_details;
   if (details && typeof details === "object" && !Array.isArray(details)) {
     return details as Record<string, unknown>;
   }
@@ -972,7 +1029,8 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
   const inputDetails =
     obj.input_tokens_details && typeof obj.input_tokens_details === "object"
       ? (obj.input_tokens_details as Record<string, unknown>)
-      : obj.prompt_tokens_details && typeof obj.prompt_tokens_details === "object"
+      : obj.prompt_tokens_details &&
+          typeof obj.prompt_tokens_details === "object"
         ? (obj.prompt_tokens_details as Record<string, unknown>)
         : null;
   const outputDetails =
@@ -994,7 +1052,9 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
       0,
   );
   const xFallback = Number(
-    topLevelUsage.SERVER_SIDE_TOOL_X_SEARCH ?? topLevelUsage.x_search_calls ?? 0,
+    topLevelUsage.SERVER_SIDE_TOOL_X_SEARCH ??
+      topLevelUsage.x_search_calls ??
+      0,
   );
   const toolUsageDetails: ToolUsageDetails = {
     web_search_calls: Number(detailsObj?.web_search_calls ?? webFallback),
@@ -1054,7 +1114,7 @@ function extractToolAttemptCount(payload: unknown): number {
   const topToolCalls = (payload as Record<string, unknown>).tool_calls;
   if (Array.isArray(topToolCalls)) return topToolCalls.length;
   const outputItems = extractOutputItems(payload);
-  return outputItems.filter(output => {
+  return outputItems.filter((output) => {
     const type = output.type;
     if (typeof type !== "string") return false;
     return (
@@ -1133,12 +1193,12 @@ function extractJsonCandidate(raw: string): string | null {
         escaped = false;
       } else if (ch === "\\") {
         escaped = true;
-      } else if (ch === "\"") {
+      } else if (ch === '"') {
         inString = false;
       }
       continue;
     }
-    if (ch === "\"") {
+    if (ch === '"') {
       inString = true;
       continue;
     }
@@ -1152,12 +1212,10 @@ function extractJsonCandidate(raw: string): string | null {
 }
 
 function formatZodErrorCompact(error: ZodError): string {
-  const issues = error.issues
-    .slice(0, 8)
-    .map(issue => {
-      const path = issue.path.length > 0 ? issue.path.join(".") : "root";
-      return `${path}:${issue.message}`;
-    });
+  const issues = error.issues.slice(0, 8).map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+    return `${path}:${issue.message}`;
+  });
   return issues.length > 0 ? issues.join("; ") : "schema_invalid";
 }
 
@@ -1178,9 +1236,11 @@ function clampStringValue(
   return trimmed.slice(0, maxLen).trimEnd();
 }
 
-function salvageAgentOutput(
-  parsed: unknown,
-): { data: MapSearchAgentOutputV2; droppedEvidence: number; droppedIssues: number } | null {
+function salvageAgentOutput(parsed: unknown): {
+  data: MapSearchAgentOutputV2;
+  droppedEvidence: number;
+  droppedIssues: number;
+} | null {
   const record = asRecord(parsed);
   if (!record) return null;
 
@@ -1203,7 +1263,11 @@ function salvageAgentOutput(
   const candidate: Record<string, unknown> = {
     version: record.version,
     status: record.status,
-    summary: clampStringValue(record.summary, 260, "Partial evidence recovered."),
+    summary: clampStringValue(
+      record.summary,
+      260,
+      "Partial evidence recovered.",
+    ),
     next_focus: record.next_focus,
     evidence: keptEvidence,
   };
@@ -1219,11 +1283,15 @@ function salvageAgentOutput(
   }
 }
 
-function buildLenientAgentOutput(parsed: unknown): MapSearchAgentOutputV2 | null {
+function buildLenientAgentOutput(
+  parsed: unknown,
+): MapSearchAgentOutputV2 | null {
   const record = asRecord(parsed);
   if (!record) return null;
 
-  const rawEvidence = Array.isArray(record.evidence) ? record.evidence.slice(0, 12) : [];
+  const rawEvidence = Array.isArray(record.evidence)
+    ? record.evidence.slice(0, 12)
+    : [];
   const keptEvidence: MapSearchEvidenceItemV2[] = [];
   for (const item of rawEvidence) {
     const direct = mapSearchEvidenceItemV2Schema.safeParse(item);
@@ -1259,7 +1327,8 @@ function buildLenientAgentOutput(parsed: unknown): MapSearchAgentOutputV2 | null
           ? candidateRecord.confidence
           : 0.5,
     };
-    const fallbackParsed = mapSearchEvidenceItemV2Schema.safeParse(fallbackCandidate);
+    const fallbackParsed =
+      mapSearchEvidenceItemV2Schema.safeParse(fallbackCandidate);
     if (fallbackParsed.success) keptEvidence.push(fallbackParsed.data);
   }
 
@@ -1280,8 +1349,8 @@ function buildLenientAgentOutput(parsed: unknown): MapSearchAgentOutputV2 | null
   const summary = clampStringValue(record.summary, 260, summaryFallback);
   const nextFocus = Array.isArray(record.next_focus)
     ? record.next_focus
-        .map(item => clampStringValue(item, 120, ""))
-        .filter(item => item.length > 0)
+        .map((item) => clampStringValue(item, 120, ""))
+        .filter((item) => item.length > 0)
         .slice(0, 8)
     : [];
   const notes = clampStringValue(record.notes, 400, "");
@@ -1370,7 +1439,7 @@ function normalizeVector(values: readonly number[]): number[] {
   for (const value of values) norm += value * value;
   if (!Number.isFinite(norm) || norm <= 0) return Array.from(values, () => 0);
   const mag = Math.sqrt(norm);
-  return values.map(value => value / mag);
+  return values.map((value) => value / mag);
 }
 
 function parseEmbeddingBuffer(buffer: Buffer): number[] | null {
@@ -1397,7 +1466,7 @@ function averageVectors(vectors: readonly number[][]): number[] | null {
       acc[i] += vec[i] ?? 0;
     }
   }
-  return normalizeVector(acc.map(value => value / vectors.length));
+  return normalizeVector(acc.map((value) => value / vectors.length));
 }
 
 function parseDateIso(raw: string | null): Date | null {
@@ -1483,7 +1552,9 @@ function toEvidencePreviewFromAgent(
   };
 }
 
-function toEvidencePreviewFromMapEvidence(evidence: MapEvidence): EvidencePreview {
+function toEvidencePreviewFromMapEvidence(
+  evidence: MapEvidence,
+): EvidencePreview {
   return {
     headline: evidence.headline,
     summary: evidence.summary,
@@ -1571,7 +1642,9 @@ function fromPersistedEvidence(
   };
 }
 
-function parseResumeStatePayload(raw: string | null): ResumeStatePayload | null {
+function parseResumeStatePayload(
+  raw: string | null,
+): ResumeStatePayload | null {
   const parsed = safeJsonParse<ResumeStatePayload>(raw);
   if (!parsed || parsed.version !== "map_search_resume_v1") return null;
   if (!parsed.resume || !Array.isArray(parsed.resume.queue)) return null;
@@ -1647,7 +1720,7 @@ function toDateOnly(value: Date): string {
 }
 
 async function sleep(ms: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms));
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function computeBackoffMs(baseMs: number, attempt: number): number {
@@ -1898,7 +1971,7 @@ async function loadSnapshot(
   if (!Array.isArray(nodes)) {
     throw new Error(`Invalid map nodes payload for runId=${runId}`);
   }
-  const nodeById = new Map(nodes.map(node => [node.id, node]));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const childrenByParent = new Map<string | null, MarketMapNode[]>();
   for (const node of nodes) {
     const key = node.parentId ?? null;
@@ -1908,7 +1981,8 @@ async function loadSnapshot(
   }
   for (const [parentId, list] of childrenByParent.entries()) {
     list.sort((a, b) => {
-      if (b.sumVolume24h !== a.sumVolume24h) return b.sumVolume24h - a.sumVolume24h;
+      if (b.sumVolume24h !== a.sumVolume24h)
+        return b.sumVolume24h - a.sumVolume24h;
       if (b.score !== a.score) return b.score - a.score;
       return a.id.localeCompare(b.id);
     });
@@ -1950,8 +2024,8 @@ function tokenizeLoose(text: string): Set<string> {
     text
       .toLowerCase()
       .split(/[^a-z0-9]+/)
-      .map(token => token.trim())
-      .filter(token => token.length > 2),
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2),
   );
 }
 
@@ -2060,7 +2134,8 @@ function updateBudgetState(
   const nextExpectedInput =
     state.callsExecuted === 1
       ? call.usage.inputTokens
-      : alpha * call.usage.inputTokens + (1 - alpha) * state.expectedNextInputTokens;
+      : alpha * call.usage.inputTokens +
+        (1 - alpha) * state.expectedNextInputTokens;
   state.expectedNextInputTokens = Number.isFinite(nextExpectedInput)
     ? Math.max(0, nextExpectedInput)
     : state.expectedNextInputTokens;
@@ -2075,21 +2150,23 @@ function updateBudgetState(
   const nextExpectedOutput =
     state.callsExecuted === 1
       ? call.usage.outputTokens
-      : alpha * call.usage.outputTokens + (1 - alpha) * state.expectedNextOutputTokens;
+      : alpha * call.usage.outputTokens +
+        (1 - alpha) * state.expectedNextOutputTokens;
   state.expectedNextOutputTokens = Number.isFinite(nextExpectedOutput)
     ? Math.max(0, nextExpectedOutput)
     : state.expectedNextOutputTokens;
 }
 
-function evaluateBudgetStop(
-  args: Args,
-  state: BudgetState,
-): string | null {
+function evaluateBudgetStop(args: Args, state: BudgetState): string | null {
   if (state.callsExecuted >= args.maxCalls) return "max_calls";
-  if (state.totalInputTokens >= args.maxTotalInputTokens) return "max_total_input_tokens";
-  if (state.totalOutputTokens >= args.maxTotalOutputTokens) return "max_total_output_tokens";
-  if (state.totalToolAttempts >= args.maxTotalToolAttempts) return "max_total_tool_attempts";
-  if (state.totalChargedCostUsd >= args.budgetUsd) return "budget_usd_exhausted";
+  if (state.totalInputTokens >= args.maxTotalInputTokens)
+    return "max_total_input_tokens";
+  if (state.totalOutputTokens >= args.maxTotalOutputTokens)
+    return "max_total_output_tokens";
+  if (state.totalToolAttempts >= args.maxTotalToolAttempts)
+    return "max_total_tool_attempts";
+  if (state.totalChargedCostUsd >= args.budgetUsd)
+    return "budget_usd_exhausted";
   if (state.callsExecuted > 0) {
     const remainingInput = args.maxTotalInputTokens - state.totalInputTokens;
     if (remainingInput < state.expectedNextInputTokens) {
@@ -2151,7 +2228,10 @@ export async function runMapSearch(
   const xaiApiKey = process.env.XAI_API_KEY?.trim() ?? "";
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim() ?? "";
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: activeRunContext.scriptTag });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: activeRunContext.scriptTag,
+  });
   const bufferRedis = redis.withTypeMapping({
     [RESP_TYPES.BLOB_STRING]: Buffer,
   });
@@ -2179,7 +2259,10 @@ export async function runMapSearch(
     string,
     RankedRepresentativeMarket | null
   >();
-  const topMarketsByEventVenue = new Map<string, RankedRepresentativeMarket[]>();
+  const topMarketsByEventVenue = new Map<
+    string,
+    RankedRepresentativeMarket[]
+  >();
   const eventEmbeddingCache = new Map<string, number[] | null>();
   const nodeCentroidCache = new Map<string, number[] | null>();
   const nodeRepresentativeEmbeddingCache = new Map<string, number[] | null>();
@@ -2221,7 +2304,10 @@ export async function runMapSearch(
   const sameRunCoverageByNode = new Map<string, number>();
   let sameRunDiversifyActive = false;
 
-  const applySameRunNoveltyPriority = (nodeId: string, priority: number): number => {
+  const applySameRunNoveltyPriority = (
+    nodeId: string,
+    priority: number,
+  ): number => {
     if (!sameRunDiversifyActive) return priority;
     const coverage = sameRunCoverageByNode.get(nodeId) ?? 0;
     const noveltyMultiplier = Math.max(
@@ -2244,11 +2330,12 @@ export async function runMapSearch(
   const loadSameRunCoverage = (priorEvidence: PersistedEvidence[]): number => {
     sameRunCoverageByNode.clear();
     for (const prior of priorEvidence) {
-      const assigned = prior.assignedNodeId && nodeById.has(prior.assignedNodeId)
-        ? prior.assignedNodeId
-        : nodeById.has(prior.nodeId)
-          ? prior.nodeId
-          : null;
+      const assigned =
+        prior.assignedNodeId && nodeById.has(prior.assignedNodeId)
+          ? prior.assignedNodeId
+          : nodeById.has(prior.nodeId)
+            ? prior.nodeId
+            : null;
       if (!assigned) continue;
       markCoverageForNodeAndAncestors(assigned);
     }
@@ -2315,9 +2402,12 @@ export async function runMapSearch(
       }
 
       budgetState.callsExecuted = resumed.resume.budgetState.callsExecuted ?? 0;
-      budgetState.totalInputTokens = resumed.resume.budgetState.totalInputTokens ?? 0;
-      budgetState.totalOutputTokens = resumed.resume.budgetState.totalOutputTokens ?? 0;
-      budgetState.totalToolAttempts = resumed.resume.budgetState.totalToolAttempts ?? 0;
+      budgetState.totalInputTokens =
+        resumed.resume.budgetState.totalInputTokens ?? 0;
+      budgetState.totalOutputTokens =
+        resumed.resume.budgetState.totalOutputTokens ?? 0;
+      budgetState.totalToolAttempts =
+        resumed.resume.budgetState.totalToolAttempts ?? 0;
       budgetState.totalEstimatedCostUsd =
         resumed.resume.budgetState.totalEstimatedCostUsd ?? 0;
       budgetState.totalChargedCostUsd =
@@ -2338,10 +2428,12 @@ export async function runMapSearch(
 
       droppedByFreshnessTotal = resumed.resume.droppedByFreshnessTotal ?? 0;
       droppedBySourceCapTotal = resumed.resume.droppedBySourceCapTotal ?? 0;
-      droppedByDomainPolicyTotal = resumed.resume.droppedByDomainPolicyTotal ?? 0;
+      droppedByDomainPolicyTotal =
+        resumed.resume.droppedByDomainPolicyTotal ?? 0;
       leafAssignmentFixesTotal = resumed.resume.leafAssignmentFixesTotal ?? 0;
       fallbackSuppressedTotal = resumed.resume.fallbackSuppressedTotal ?? 0;
-      consecutiveTransportFailures = resumed.resume.consecutiveTransportFailures ?? 0;
+      consecutiveTransportFailures =
+        resumed.resume.consecutiveTransportFailures ?? 0;
       consecutiveLowYieldHighTools =
         resumed.resume.consecutiveLowYieldHighTools ?? 0;
 
@@ -2365,10 +2457,12 @@ export async function runMapSearch(
     reasonPrefix: "same_run_seed" | "same_run_diversify" | "warm_start",
   ): Promise<number> => {
     let assigned = 0;
-    const rootById = new Map(rootNodes.map(node => [node.id, node]));
+    const rootById = new Map(rootNodes.map((node) => [node.id, node]));
     for (const prior of priorEvidence) {
       const sourceText = `${prior.headline} ${prior.summary}`.trim();
-      const cachedEmbeddingRaw = await redis.get(mapSearchNewsEmbeddingKey(prior.id));
+      const cachedEmbeddingRaw = await redis.get(
+        mapSearchNewsEmbeddingKey(prior.id),
+      );
       const cachedEmbedding = (() => {
         if (!cachedEmbeddingRaw) return null;
         const parsed = safeJsonParse<number[]>(cachedEmbeddingRaw);
@@ -2378,10 +2472,15 @@ export async function runMapSearch(
       let bestRootId: string | null = null;
       let bestRootScore = 0;
       for (const root of rootNodes) {
-        const lexicalScore = lexicalSimilarity(sourceText, nodeDisplayLabel(root));
+        const lexicalScore = lexicalSimilarity(
+          sourceText,
+          nodeDisplayLabel(root),
+        );
         let score = lexicalScore;
         if (cachedEmbedding) {
-          const representativeEmbedding = await getNodeRepresentativeEmbedding(root.id);
+          const representativeEmbedding = await getNodeRepresentativeEmbedding(
+            root.id,
+          );
           const semanticScore = representativeEmbedding
             ? Math.max(0, dot(cachedEmbedding, representativeEmbedding))
             : 0;
@@ -2414,10 +2513,15 @@ export async function runMapSearch(
       let bestChild: MarketMapNode | null = null;
       let bestChildScore = 0;
       for (const child of children) {
-        const lexicalScore = lexicalSimilarity(sourceText, nodeDisplayLabel(child));
+        const lexicalScore = lexicalSimilarity(
+          sourceText,
+          nodeDisplayLabel(child),
+        );
         let score = lexicalScore;
         if (cachedEmbedding) {
-          const representativeEmbedding = await getNodeRepresentativeEmbedding(child.id);
+          const representativeEmbedding = await getNodeRepresentativeEmbedding(
+            child.id,
+          );
           const semanticScore = representativeEmbedding
             ? Math.max(0, dot(cachedEmbedding, representativeEmbedding))
             : 0;
@@ -2484,13 +2588,16 @@ export async function runMapSearch(
   }
 
   if (!resumeLoaded && sameRunSeedAssigned === 0 && shouldTryWarmStart) {
-    const previousRunIdRaw = (await redis.get(MAP_SEARCH_LATEST_KEY))?.trim() ?? "";
+    const previousRunIdRaw =
+      (await redis.get(MAP_SEARCH_LATEST_KEY))?.trim() ?? "";
     const previousRunId =
       previousRunIdRaw.length > 0 && previousRunIdRaw !== runId
         ? previousRunIdRaw
         : null;
     if (previousRunId) {
-      const priorArtifactRaw = await redis.get(mapSearchArtifactKey(previousRunId));
+      const priorArtifactRaw = await redis.get(
+        mapSearchArtifactKey(previousRunId),
+      );
       const priorEvidence = parsePriorEvidenceFromArtifact(
         priorArtifactRaw,
         args.warmStartEvidenceLimit,
@@ -2567,26 +2674,36 @@ export async function runMapSearch(
   });
 
   if (args.persistenceMode === "normalized_keys") {
-    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "running",
-      reason: "started",
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-    });
-    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "running",
-      reason: "started",
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-    });
+    await setSearchStatus(
+      redis,
+      mapSearchRunStatusKey(runId),
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "running",
+        reason: "started",
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      },
+    );
+    await setSearchStatus(
+      redis,
+      `${MAP_SEARCH_KEY_PREFIX}:status:last`,
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "running",
+        reason: "started",
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      },
+    );
   }
 
   async function writeCheckpoint(reason: string): Promise<void> {
@@ -2596,7 +2713,7 @@ export async function runMapSearch(
           a.callIndex - b.callIndex ||
           b.relevance + b.confidence - (a.relevance + a.confidence),
       )
-      .map(item => ({
+      .map((item) => ({
         id: item.id,
         callIndex: item.callIndex,
         nodeId: item.nodeId,
@@ -2632,17 +2749,23 @@ export async function runMapSearch(
         inputTokens: budgetState.totalInputTokens,
         outputTokens: budgetState.totalOutputTokens,
         toolAttempts: budgetState.totalToolAttempts,
-        estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+        estimatedTotalCostUsd: Number(
+          budgetState.totalEstimatedCostUsd.toFixed(6),
+        ),
         chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
         providerReportedCostUsd: Number(
           budgetState.totalProviderReportedCostUsd.toFixed(6),
         ),
         providerReportedCostCalls: budgetState.providerReportedCostCalls,
-        expectedNextInputTokens: Math.round(budgetState.expectedNextInputTokens),
+        expectedNextInputTokens: Math.round(
+          budgetState.expectedNextInputTokens,
+        ),
         expectedNextCallCostUsd: Number(
           budgetState.expectedNextCallCostUsd.toFixed(6),
         ),
-        expectedNextOutputTokens: Math.round(budgetState.expectedNextOutputTokens),
+        expectedNextOutputTokens: Math.round(
+          budgetState.expectedNextOutputTokens,
+        ),
         droppedByFreshnessTotal,
         droppedBySourceCapTotal,
         droppedByDomainPolicyTotal,
@@ -2654,7 +2777,7 @@ export async function runMapSearch(
         warmStartCandidates,
         warmStartAssigned,
       },
-      callsCompact: callRecords.map(call => ({
+      callsCompact: callRecords.map((call) => ({
         callIndex: call.callIndex,
         nodeId: call.nodeId,
         nodeLabel: call.nodeLabel,
@@ -2673,7 +2796,7 @@ export async function runMapSearch(
         fallbackSuppressed: call.fallbackSuppressed,
         budgetStop: call.budgetStop,
       })),
-      calls: callRecords.map(call => serializeCallRecord(call, args)),
+      calls: callRecords.map((call) => serializeCallRecord(call, args)),
       evidence,
     };
     if (args.out) {
@@ -2717,29 +2840,41 @@ export async function runMapSearch(
       EX: args.stateTtlSec,
     });
 
-    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "running",
-      reason,
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-    });
-    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "running",
-      reason,
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-    });
+    await setSearchStatus(
+      redis,
+      mapSearchRunStatusKey(runId),
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "running",
+        reason,
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      },
+    );
+    await setSearchStatus(
+      redis,
+      `${MAP_SEARCH_KEY_PREFIX}:status:last`,
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "running",
+        reason,
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      },
+    );
   }
 
-  async function getNodeEvents(nodeId: string): Promise<MarketMapEventSummary[]> {
+  async function getNodeEvents(
+    nodeId: string,
+  ): Promise<MarketMapEventSummary[]> {
     if (nodeEventsCache.has(nodeId)) return nodeEventsCache.get(nodeId) ?? [];
     const raw = await redis.get(marketMapRunNodeEventsKey(runId, nodeId));
     const events = safeJsonParse<MarketMapEventSummary[]>(raw) ?? [];
@@ -2792,7 +2927,10 @@ export async function runMapSearch(
         }
         for (const input of missingInputs) {
           const key = eventVenueKey(input.eventId, input.venue);
-          representativeMarketByEventVenue.set(key, selectedByKey.get(key) ?? null);
+          representativeMarketByEventVenue.set(
+            key,
+            selectedByKey.get(key) ?? null,
+          );
         }
       } catch (error) {
         enrichmentFailed = true;
@@ -2976,14 +3114,18 @@ export async function runMapSearch(
     if (eventEmbeddingCache.has(eventId)) {
       return eventEmbeddingCache.get(eventId) ?? null;
     }
-    const raw = await bufferRedis.hGet(`ai:embed:event:${eventId}`, "embedding");
+    const raw = await bufferRedis.hGet(
+      `ai:embed:event:${eventId}`,
+      "embedding",
+    );
     const vec = Buffer.isBuffer(raw) ? parseEmbeddingBuffer(raw) : null;
     eventEmbeddingCache.set(eventId, vec);
     return vec;
   }
 
   async function getNodeCentroid(nodeId: string): Promise<number[] | null> {
-    if (nodeCentroidCache.has(nodeId)) return nodeCentroidCache.get(nodeId) ?? null;
+    if (nodeCentroidCache.has(nodeId))
+      return nodeCentroidCache.get(nodeId) ?? null;
     const events = await getNodeEvents(nodeId);
     const vectors: number[][] = [];
     for (const event of events.slice(0, args.leafEventEmbeddingCap)) {
@@ -3066,9 +3208,15 @@ export async function runMapSearch(
         launchGuardStop = "max_calls";
         break;
       }
-      const reserveInputTokens = Math.max(0, budgetState.expectedNextInputTokens);
+      const reserveInputTokens = Math.max(
+        0,
+        budgetState.expectedNextInputTokens,
+      );
       const reserveCostUsd = Math.max(0, budgetState.expectedNextCallCostUsd);
-      const reserveOutputTokens = Math.max(0, budgetState.expectedNextOutputTokens);
+      const reserveOutputTokens = Math.max(
+        0,
+        budgetState.expectedNextOutputTokens,
+      );
       const projectedInput =
         budgetState.totalInputTokens +
         batchReservedInputTokens +
@@ -3104,10 +3252,12 @@ export async function runMapSearch(
       const inFlightAtLaunch = launches.length + 1;
       const promise = (async (): Promise<PreparedCallTask> => {
         const children = childrenByParent.get(node.id) ?? [];
-        const parent = node.parentId ? nodeById.get(node.parentId) ?? null : null;
+        const parent = node.parentId
+          ? (nodeById.get(node.parentId) ?? null)
+          : null;
         const siblings = parent ? (childrenByParent.get(parent.id) ?? []) : [];
         const siblingLabels = siblings
-          .filter(sibling => sibling.id !== node.id)
+          .filter((sibling) => sibling.id !== node.id)
           .slice(0, args.siblingSampleLimit)
           .map(nodeDisplayLabel);
         const childLabels = children
@@ -3115,7 +3265,9 @@ export async function runMapSearch(
           .map(nodeDisplayLabel);
         const events = await getNodeEvents(node.id);
         const sampledEvents = events.slice(0, args.eventSampleLimit);
-        const sampleEventTitles = sampledEvents.map(event => event.title.trim());
+        const sampleEventTitles = sampledEvents.map((event) =>
+          event.title.trim(),
+        );
         const marketsByEvent = await getTopMarketsForEvents(sampledEvents);
         const sampleEventMarketTitles = sampledEvents.map((event) => {
           const eventTitle = event.title.trim();
@@ -3217,9 +3369,17 @@ export async function runMapSearch(
               tools,
             );
           }
-          return { node, children, systemPrompt, userPrompt, nodeWindowHours, rawCall };
+          return {
+            node,
+            children,
+            systemPrompt,
+            userPrompt,
+            nodeWindowHours,
+            rawCall,
+          };
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           return {
             node,
             children,
@@ -3269,7 +3429,7 @@ export async function runMapSearch(
       continue;
     }
 
-    const results = await Promise.all(launches.map(launch => launch.promise));
+    const results = await Promise.all(launches.map((launch) => launch.promise));
     let batchStopReason: string | null = null;
 
     for (const task of results) {
@@ -3286,7 +3446,10 @@ export async function runMapSearch(
       } else {
         consecutiveTransportFailures = 0;
       }
-      const parseResult = parseAgentOutput(rawCall.outputText, args.strictSchema);
+      const parseResult = parseAgentOutput(
+        rawCall.outputText,
+        args.strictSchema,
+      );
       const routeCandidates: RouteCandidate[] = [];
       let newEvidenceCount = 0;
       let droppedByFreshnessCount = 0;
@@ -3307,7 +3470,10 @@ export async function runMapSearch(
         const freshnessCutoffMs = callStartedMs - nodeWindowHours * 3_600_000;
         const acceptedDomainCounts = new Map<string, number>();
         let acceptedUnconfirmedCount = 0;
-        for (const itemEvidence of agentData.evidence.slice(0, args.maxEvidencePerCall)) {
+        for (const itemEvidence of agentData.evidence.slice(
+          0,
+          args.maxEvidencePerCall,
+        )) {
           const sourceDomain = normalizeSourceDomain(
             itemEvidence.source_url,
             itemEvidence.source_domain,
@@ -3320,11 +3486,16 @@ export async function runMapSearch(
             }
           }
           const domainCount = acceptedDomainCounts.get(sourceDomain) ?? 0;
-          if (sourceDomain === "x.com" && domainCount >= args.maxXEvidencePerCall) {
+          if (
+            sourceDomain === "x.com" &&
+            domainCount >= args.maxXEvidencePerCall
+          ) {
             droppedBySourceCapCount += 1;
             continue;
           }
-          if (!domainAllowedByPolicy(sourceDomain, sourceAllowSet, sourceDenySet)) {
+          if (
+            !domainAllowedByPolicy(sourceDomain, sourceAllowSet, sourceDenySet)
+          ) {
             droppedByDomainPolicyCount += 1;
             continue;
           }
@@ -3385,8 +3556,9 @@ export async function runMapSearch(
 
       if (newEvidence.length > 0 && openRouterKey) {
         try {
-          const texts = newEvidence.map(evidence =>
-            `${evidence.headline}\n${evidence.summary}\nconfirmation:${evidence.confirmation}\nsource_tier:${evidence.sourceTier}`,
+          const texts = newEvidence.map(
+            (evidence) =>
+              `${evidence.headline}\n${evidence.summary}\nconfirmation:${evidence.confirmation}\nsource_tier:${evidence.sourceTier}`,
           );
           const vectors = await fetchOpenRouterEmbeddings(
             openRouterKey,
@@ -3413,7 +3585,10 @@ export async function runMapSearch(
           }
         >();
         const childCentroids = new Map<string, number[] | null>();
-        const childRepresentativeEmbeddings = new Map<string, number[] | null>();
+        const childRepresentativeEmbeddings = new Map<
+          string,
+          number[] | null
+        >();
         for (const child of children) {
           childCentroids.set(child.id, await getNodeCentroid(child.id));
           childRepresentativeEmbeddings.set(
@@ -3434,18 +3609,25 @@ export async function runMapSearch(
           let secondScore = -1;
 
           for (const child of children) {
-            const lexicalScore = lexicalSimilarity(evidenceText, nodeDisplayLabel(child));
+            const lexicalScore = lexicalSimilarity(
+              evidenceText,
+              nodeDisplayLabel(child),
+            );
             let score = lexicalScore;
             if (evidence.embedding) {
               const centroid = childCentroids.get(child.id) ?? null;
-              const representative = childRepresentativeEmbeddings.get(child.id) ?? null;
+              const representative =
+                childRepresentativeEmbeddings.get(child.id) ?? null;
               const centroidScore = centroid
                 ? Math.max(0, dot(evidence.embedding, centroid))
                 : 0;
               const representativeScore = representative
                 ? Math.max(0, dot(evidence.embedding, representative))
                 : 0;
-              score = 0.65 * centroidScore + 0.2 * representativeScore + 0.15 * lexicalScore;
+              score =
+                0.65 * centroidScore +
+                0.2 * representativeScore +
+                0.15 * lexicalScore;
             }
             if (score > bestScore) {
               secondScore = bestScore;
@@ -3479,7 +3661,8 @@ export async function runMapSearch(
           evidence.routeThresholdUsed = routeThresholdUsed;
 
           const minSimilarityPass =
-            args.routeMinSimilarity <= 0 || bestScore >= args.routeMinSimilarity;
+            args.routeMinSimilarity <= 0 ||
+            bestScore >= args.routeMinSimilarity;
           if (
             bestScore >= routeThresholdUsed &&
             margin >= routeMinMarginUsed &&
@@ -3493,7 +3676,8 @@ export async function runMapSearch(
               evidenceCount: 0,
               simSum: 0,
             };
-            current.score += evidence.relevance + evidence.confidence + bestScore;
+            current.score +=
+              evidence.relevance + evidence.confidence + bestScore;
             current.evidenceCount += 1;
             current.simSum += bestScore;
             childScore.set(bestChildId, current);
@@ -3548,7 +3732,10 @@ export async function runMapSearch(
           evidence.routeBestScore = null;
           evidence.routeSecondScore = null;
           evidence.routeMargin = null;
-          evidence.routeThresholdUsed = getRouteThresholdForLevel(node.level, args);
+          evidence.routeThresholdUsed = getRouteThresholdForLevel(
+            node.level,
+            args,
+          );
           evidence.routeReason = "leaf_self";
           if (!evidence.assignedNodeId) {
             evidence.assignedNodeId = node.id;
@@ -3568,8 +3755,12 @@ export async function runMapSearch(
             evidence.routeBestScore = null;
             evidence.routeSecondScore = null;
             evidence.routeMargin = null;
-            evidence.routeThresholdUsed = getRouteThresholdForLevel(node.level, args);
-            evidence.routeReason = children.length === 0 ? "leaf_self" : "no_candidate";
+            evidence.routeThresholdUsed = getRouteThresholdForLevel(
+              node.level,
+              args,
+            );
+            evidence.routeReason =
+              children.length === 0 ? "leaf_self" : "no_candidate";
           }
           leafAssignmentFixesCount += 1;
         }
@@ -3671,10 +3862,9 @@ export async function runMapSearch(
         assignedAvgSimilarity:
           assignedWithSimilarityCount > 0
             ? Number(
-                (
-                  assignedSimilaritySum /
-                  assignedWithSimilarityCount
-                ).toFixed(6),
+                (assignedSimilaritySum / assignedWithSimilarityCount).toFixed(
+                  6,
+                ),
               )
             : null,
         fallbackSuppressed,
@@ -3784,8 +3974,12 @@ export async function runMapSearch(
   markdownLines.push(`- map_generated_at: ${snapshot.meta.generatedAt}`);
   markdownLines.push(`- calls_executed: ${budgetState.callsExecuted}`);
   markdownLines.push(`- evidence_total: ${evidenceById.size}`);
-  markdownLines.push(`- spent_usd_charged: ${formatUsd(budgetState.totalChargedCostUsd)}`);
-  markdownLines.push(`- spent_usd_est: ${formatUsd(budgetState.totalEstimatedCostUsd)}`);
+  markdownLines.push(
+    `- spent_usd_charged: ${formatUsd(budgetState.totalChargedCostUsd)}`,
+  );
+  markdownLines.push(
+    `- spent_usd_est: ${formatUsd(budgetState.totalEstimatedCostUsd)}`,
+  );
   markdownLines.push(
     `- token_totals: input=${budgetState.totalInputTokens}, output=${budgetState.totalOutputTokens}`,
   );
@@ -3867,7 +4061,9 @@ export async function runMapSearch(
       inputTokens: budgetState.totalInputTokens,
       outputTokens: budgetState.totalOutputTokens,
       toolAttempts: budgetState.totalToolAttempts,
-      estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+      estimatedTotalCostUsd: Number(
+        budgetState.totalEstimatedCostUsd.toFixed(6),
+      ),
       chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
       providerReportedCostUsd: Number(
         budgetState.totalProviderReportedCostUsd.toFixed(6),
@@ -3877,7 +4073,9 @@ export async function runMapSearch(
       expectedNextCallCostUsd: Number(
         budgetState.expectedNextCallCostUsd.toFixed(6),
       ),
-      expectedNextOutputTokens: Math.round(budgetState.expectedNextOutputTokens),
+      expectedNextOutputTokens: Math.round(
+        budgetState.expectedNextOutputTokens,
+      ),
       droppedByFreshnessTotal,
       droppedBySourceCapTotal,
       droppedByDomainPolicyTotal,
@@ -3891,7 +4089,7 @@ export async function runMapSearch(
       warmStartAssigned,
       topLeaves: topLeaves.length,
     },
-    callsCompact: callRecords.map(call => ({
+    callsCompact: callRecords.map((call) => ({
       callIndex: call.callIndex,
       nodeId: call.nodeId,
       nodeLabel: call.nodeLabel,
@@ -3916,7 +4114,7 @@ export async function runMapSearch(
           a.callIndex - b.callIndex ||
           b.relevance + b.confidence - (a.relevance + a.confidence),
       )
-      .map(evidence => ({
+      .map((evidence) => ({
         id: evidence.id,
         callIndex: evidence.callIndex,
         nodeId: evidence.nodeId,
@@ -3925,7 +4123,7 @@ export async function runMapSearch(
         ...toEvidencePreviewFromMapEvidence(evidence),
       })),
     topLeaves,
-    topEvidence: topEvidence.map(evidence => ({
+    topEvidence: topEvidence.map((evidence) => ({
       id: evidence.id,
       headline: evidence.headline,
       summary: evidence.summary,
@@ -3948,7 +4146,7 @@ export async function runMapSearch(
       nodeId: evidence.nodeId,
       callIndex: evidence.callIndex,
     })),
-    calls: callRecords.map(call => serializeCallRecord(call, args)),
+    calls: callRecords.map((call) => serializeCallRecord(call, args)),
     markdownReport: args.leanOutput ? undefined : markdownReport,
   };
 
@@ -3992,37 +4190,51 @@ export async function runMapSearch(
         callRecords: callRecords.slice(),
       },
     };
-    await redis.set(mapSearchStateKey(runId), JSON.stringify(finalResumePayload), {
-      EX: args.stateTtlSec,
-    });
-    await setSearchStatus(redis, mapSearchRunStatusKey(runId), args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "completed",
-      reason: "completed",
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-      reuseMode: args.reuseMode,
-      resumeLoaded: resumeLoaded ? 1 : 0,
-      sameRunSeedAssigned,
-      warmStartAssigned,
-    });
-    await setSearchStatus(redis, `${MAP_SEARCH_KEY_PREFIX}:status:last`, args.statusTtlSec, {
-      state: args.dryRun ? "dry_run" : "completed",
-      reason: "completed",
-      runId,
-      at: nowIso(),
-      callsExecuted: budgetState.callsExecuted,
-      evidenceTotal: evidenceById.size,
-      chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
-      estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-      reuseMode: args.reuseMode,
-      resumeLoaded: resumeLoaded ? 1 : 0,
-      sameRunSeedAssigned,
-      warmStartAssigned,
-    });
+    await redis.set(
+      mapSearchStateKey(runId),
+      JSON.stringify(finalResumePayload),
+      {
+        EX: args.stateTtlSec,
+      },
+    );
+    await setSearchStatus(
+      redis,
+      mapSearchRunStatusKey(runId),
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "completed",
+        reason: "completed",
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+        reuseMode: args.reuseMode,
+        resumeLoaded: resumeLoaded ? 1 : 0,
+        sameRunSeedAssigned,
+        warmStartAssigned,
+      },
+    );
+    await setSearchStatus(
+      redis,
+      `${MAP_SEARCH_KEY_PREFIX}:status:last`,
+      args.statusTtlSec,
+      {
+        state: args.dryRun ? "dry_run" : "completed",
+        reason: "completed",
+        runId,
+        at: nowIso(),
+        callsExecuted: budgetState.callsExecuted,
+        evidenceTotal: evidenceById.size,
+        chargedCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+        estimatedCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
+        reuseMode: args.reuseMode,
+        resumeLoaded: resumeLoaded ? 1 : 0,
+        sameRunSeedAssigned,
+        warmStartAssigned,
+      },
+    );
   }
 
   if (!args.dryRun) {
@@ -4030,14 +4242,22 @@ export async function runMapSearch(
     const evidenceItems = Array.from(evidenceById.values());
     if (evidenceItems.length > 0) {
       for (const evidence of evidenceItems) {
-        await redis.set(mapSearchEvidenceDocKey(evidence.id), JSON.stringify({
-          ...toPersistedEvidence(evidence),
-          runId,
-          capturedAt: nowIso(),
-        }), {
-          EX: Math.max(args.artifactTtlSec, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC),
-        });
-        const publishedTs = parseDateIso(evidence.publishedAt)?.getTime() ?? nowMs;
+        await redis.set(
+          mapSearchEvidenceDocKey(evidence.id),
+          JSON.stringify({
+            ...toPersistedEvidence(evidence),
+            runId,
+            capturedAt: nowIso(),
+          }),
+          {
+            EX: Math.max(
+              args.artifactTtlSec,
+              MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC,
+            ),
+          },
+        );
+        const publishedTs =
+          parseDateIso(evidence.publishedAt)?.getTime() ?? nowMs;
         await redis.zAdd(MAP_SEARCH_RECENT_EVIDENCE_KEY, {
           score: publishedTs,
           value: evidence.id,
@@ -4047,12 +4267,18 @@ export async function runMapSearch(
             mapSearchNewsEmbeddingKey(evidence.id),
             JSON.stringify(evidence.embedding),
             {
-              EX: Math.max(args.artifactTtlSec, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC),
+              EX: Math.max(
+                args.artifactTtlSec,
+                MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC,
+              ),
             },
           );
         }
       }
-      await redis.expire(MAP_SEARCH_RECENT_EVIDENCE_KEY, MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC);
+      await redis.expire(
+        MAP_SEARCH_RECENT_EVIDENCE_KEY,
+        MAP_SEARCH_RECENT_EVIDENCE_TTL_SEC,
+      );
       await redis.zRemRangeByScore(
         MAP_SEARCH_RECENT_EVIDENCE_KEY,
         0,
@@ -4080,8 +4306,12 @@ export async function runMapSearch(
           runId,
           callsExecuted: budgetState.callsExecuted,
           evidenceTotal: evidenceById.size,
-          estimatedTotalCostUsd: Number(budgetState.totalEstimatedCostUsd.toFixed(6)),
-          chargedTotalCostUsd: Number(budgetState.totalChargedCostUsd.toFixed(6)),
+          estimatedTotalCostUsd: Number(
+            budgetState.totalEstimatedCostUsd.toFixed(6),
+          ),
+          chargedTotalCostUsd: Number(
+            budgetState.totalChargedCostUsd.toFixed(6),
+          ),
           topLeaves,
         },
         null,
@@ -4103,7 +4333,7 @@ const isDirectRun = (() => {
 })();
 
 if (isDirectRun) {
-  runMapSearch().catch(async error => {
+  runMapSearch().catch(async (error) => {
     console.error(`${logPrefix()} failed`, error);
     process.exit(1);
   });

@@ -51,7 +51,10 @@ function toCleanHashFields(
   payload: Record<string, string | number | null | undefined>,
 ): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(payload).map(([key, value]) => [key, value == null ? "" : String(value)]),
+    Object.entries(payload).map(([key, value]) => [
+      key,
+      value == null ? "" : String(value),
+    ]),
   );
 }
 
@@ -117,7 +120,10 @@ async function resolveReachableBaseUrl(
     }
   }
 
-  return { baseUrl: null, error: lastError ?? "No reachable internal API base URL" };
+  return {
+    baseUrl: null,
+    error: lastError ?? "No reachable internal API base URL",
+  };
 }
 
 async function runTarget(
@@ -164,7 +170,10 @@ async function updateTargetStats(
 ): Promise<void> {
   const key = apiCacheWarmTargetStatsKey(target.id);
   const previous = await redis.hGetAll(key);
-  const samples = Math.max(0, Math.trunc(parseOptionalNumber(previous.samples) ?? 0));
+  const samples = Math.max(
+    0,
+    Math.trunc(parseOptionalNumber(previous.samples) ?? 0),
+  );
   const nextSamples = samples + 1;
   const previousAvg = parseOptionalNumber(previous.avgDurationMs) ?? 0;
   const minPrev = parseOptionalNumber(previous.minDurationMs);
@@ -178,8 +187,9 @@ async function updateTargetStats(
     Math.trunc(parseOptionalNumber(previous.failureCount) ?? 0),
   );
   const avgDurationMs =
-    Math.round(((previousAvg * samples + result.durationMs) / nextSamples) * 100) /
-    100;
+    Math.round(
+      ((previousAvg * samples + result.durationMs) / nextSamples) * 100,
+    ) / 100;
 
   await redis.hSet(
     key,
@@ -193,8 +203,14 @@ async function updateTargetStats(
       failureCount: failurePrev + (result.ok ? 0 : 1),
       lastStatusCode: result.statusCode,
       lastDurationMs: result.durationMs,
-      minDurationMs: minPrev == null ? result.durationMs : Math.min(minPrev, result.durationMs),
-      maxDurationMs: maxPrev == null ? result.durationMs : Math.max(maxPrev, result.durationMs),
+      minDurationMs:
+        minPrev == null
+          ? result.durationMs
+          : Math.min(minPrev, result.durationMs),
+      maxDurationMs:
+        maxPrev == null
+          ? result.durationMs
+          : Math.max(maxPrev, result.durationMs),
       avgDurationMs,
       lastCache: result.cache,
       lastCacheLayer: result.cacheLayer,
@@ -212,7 +228,11 @@ export async function runApiCacheWarm(
   const startedAt = Date.now();
   const policy = await resolveApiCacheWarmPolicy(pool);
   const effective = policy.effective;
-  const { redis, status: redisStatus, error: redisError } = await getRedisStatus();
+  const {
+    redis,
+    status: redisStatus,
+    error: redisError,
+  } = await getRedisStatus();
 
   if (!effective.enabled && !options.force) {
     return {
@@ -246,7 +266,8 @@ export async function runApiCacheWarm(
       ? Date.parse(previous.runner.lastCompletedAt)
       : NaN;
     if (Number.isFinite(lastCompletedAtMs)) {
-      const nextEligibleAt = lastCompletedAtMs + effective.pollIntervalSec * 1000;
+      const nextEligibleAt =
+        lastCompletedAtMs + effective.pollIntervalSec * 1000;
       if (Date.now() < nextEligibleAt) {
         return {
           result: "skipped_rate",
@@ -266,7 +287,9 @@ export async function runApiCacheWarm(
   const selectedTargets = selectApiCacheWarmTargets(effective);
   const lockTtlSec = Math.max(
     30,
-    Math.ceil((effective.requestTimeoutMs * Math.max(1, selectedTargets.length)) / 1000) + 30,
+    Math.ceil(
+      (effective.requestTimeoutMs * Math.max(1, selectedTargets.length)) / 1000,
+    ) + 30,
   );
   const acquired = await acquireLock(redis, lockToken, lockTtlSec);
   if (!acquired) {
@@ -319,7 +342,9 @@ export async function runApiCacheWarm(
       };
     }
 
-    const baseUrlResult = await resolveReachableBaseUrl(effective.requestTimeoutMs);
+    const baseUrlResult = await resolveReachableBaseUrl(
+      effective.requestTimeoutMs,
+    );
     if (!baseUrlResult.baseUrl) {
       const durationMs = Date.now() - startedAt;
       await setRunnerStatus(redis, {

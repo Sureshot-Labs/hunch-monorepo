@@ -11,7 +11,10 @@ export type OpenRouterEmbeddingPricingPerM = {
 };
 
 // Verified from OpenRouter `/api/v1/models` and live usage.cost probes (2026-02-27).
-const OPENROUTER_MODEL_PRICING_PER_M: Record<string, OpenRouterModelPricingPerM> = {
+const OPENROUTER_MODEL_PRICING_PER_M: Record<
+  string,
+  OpenRouterModelPricingPerM
+> = {
   "openai/gpt-5.2": {
     inputPerM: 1.75,
     outputPerM: 14,

@@ -9,7 +9,10 @@ import { getRedis, getRedisStatus } from "../redis.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
-import { feedQuerySchema, resolveMinTotalVolumeFilter } from "../schemas/feed.js";
+import {
+  feedQuerySchema,
+  resolveMinTotalVolumeFilter,
+} from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
   fetchFavoriteFeedEventPage,
@@ -63,7 +66,11 @@ function parseTimestampMs(value: unknown): number | null {
   return parsed;
 }
 
-function decayWeight(tsMs: number, nowMs: number, halfLifeDays: number): number {
+function decayWeight(
+  tsMs: number,
+  nowMs: number,
+  halfLifeDays: number,
+): number {
   const ageMs = Math.max(0, nowMs - tsMs);
   const ageDays = ageMs / (24 * 60 * 60 * 1000);
   const lambda = Math.log(2) / halfLifeDays;
@@ -86,7 +93,10 @@ function normalizeVector(vec: Float32Array): Float32Array {
 }
 
 function vectorToBuffer(vec: Float32Array): Buffer {
-  const slice = vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength);
+  const slice = vec.buffer.slice(
+    vec.byteOffset,
+    vec.byteOffset + vec.byteLength,
+  );
   return Buffer.from(slice);
 }
 
@@ -122,12 +132,13 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
   }
 
   const negRiskExchange =
-    rRow.venue === "limitless" ? rRow.venue_exchange ?? null : null;
+    rRow.venue === "limitless" ? (rRow.venue_exchange ?? null) : null;
   const negRiskAdapter =
-    rRow.venue === "limitless" ? rRow.venue_adapter ?? null : null;
-  const tradeType = rRow.venue === "limitless" ? rRow.trade_type ?? null : null;
+    rRow.venue === "limitless" ? (rRow.venue_adapter ?? null) : null;
+  const tradeType =
+    rRow.venue === "limitless" ? (rRow.trade_type ?? null) : null;
   const marketAddress =
-    rRow.venue === "limitless" ? rRow.market_address ?? null : null;
+    rRow.venue === "limitless" ? (rRow.market_address ?? null) : null;
 
   const marketStatus =
     typeof rRow.market_status === "string" ? rRow.market_status : null;
@@ -214,7 +225,8 @@ function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
     category: rRow.category ?? null,
     startTime: rRow.start_date,
     endTime: rRow.end_date,
-    eventLiquidity: rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
+    eventLiquidity:
+      rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
     eventLiquidityDisplay:
       rRow.event_liquidity_display != null
         ? Number(rRow.event_liquidity_display)
@@ -719,11 +731,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             data: [],
           });
         }
-        const allRows = await fetchFeedMarkets(pool, {
-          ...baseInputs,
-          limit,
-          offset,
-        }, summary.eventIds);
+        const allRows = await fetchFeedMarkets(
+          pool,
+          {
+            ...baseInputs,
+            limit,
+            offset,
+          },
+          summary.eventIds,
+        );
         const eventMap: Record<string, FeedEvent> = {};
         for (const rRow of allRows) {
           const eventId = String(rRow.event_id);
@@ -777,8 +793,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const nowMs = Date.now();
-      const { rows: interactionRows } =
-        await pool.query<ForYouInteractionRow>(
+      const { rows: interactionRows } = await pool.query<ForYouInteractionRow>(
         `
         with interactions as (
           select w.user_id, w.market_id, w.created_at as ts, 3 as weight
@@ -888,8 +903,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const ageWithinHours = query.age_within_hours;
       const search = query.q;
 
-      const { rows: interactionRows } =
-        await pool.query<ForYouInteractionRow>(
+      const { rows: interactionRows } = await pool.query<ForYouInteractionRow>(
         `
         with interactions as (
           select w.user_id, w.market_id, w.created_at as ts, 3 as weight
@@ -965,14 +979,21 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const eventWeights = new Map<string, number>();
       for (const row of activeInteractions) {
         const tsMs = parseTimestampMs(row.ts) ?? nowMs;
-        const weight = row.weight * decayWeight(tsMs, nowMs, FOR_YOU_HALF_LIFE_DAYS);
-        eventWeights.set(row.event_id, (eventWeights.get(row.event_id) ?? 0) + weight);
+        const weight =
+          row.weight * decayWeight(tsMs, nowMs, FOR_YOU_HALF_LIFE_DAYS);
+        eventWeights.set(
+          row.event_id,
+          (eventWeights.get(row.event_id) ?? 0) + weight,
+        );
       }
 
       let sum: Float32Array | null = null;
       let weightSum = 0;
       for (const [eventId, weight] of eventWeights.entries()) {
-        const raw = await bufferClient.hGet(`ai:embed:event:${eventId}`, "embedding");
+        const raw = await bufferClient.hGet(
+          `ai:embed:event:${eventId}`,
+          "embedding",
+        );
         if (!Buffer.isBuffer(raw)) continue;
         const vec = parseEmbeddingBuffer(raw);
         if (!vec) continue;
@@ -1107,9 +1128,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           where.push(`e.venue = ANY(${add(venues)}::text[])`);
         }
         if (categories?.length) {
-          where.push(
-            `lower(e.category) = ANY(${add(categories)}::text[])`,
-          );
+          where.push(`lower(e.category) = ANY(${add(categories)}::text[])`);
         }
         if (endWithin) {
           where.push(
@@ -1225,7 +1244,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       });
 
       const pickRepresentative = (event: FeedEvent) => {
-        const candidates = event.markets.filter((market) => market.acceptingOrders);
+        const candidates = event.markets.filter(
+          (market) => market.acceptingOrders,
+        );
         if (!candidates.length) return null;
         candidates.sort((a, b) => {
           const byVol24h = b.volume24h - a.volume24h;
@@ -1320,14 +1341,20 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         ? [...filtered].sort((a, b) => {
             let cmp = 0;
             if (sort === "totalvol") {
-              cmp = compareNullableNumber(a.eventVolumeDisplay, b.eventVolumeDisplay);
+              cmp = compareNullableNumber(
+                a.eventVolumeDisplay,
+                b.eventVolumeDisplay,
+              );
             } else if (sort === "liquidity") {
               cmp = compareNullableNumber(
                 a.eventLiquidityDisplay,
                 b.eventLiquidityDisplay,
               );
             } else if (sort === "openinterest") {
-              cmp = compareNullableNumber(a.eventOpenInterest, b.eventOpenInterest);
+              cmp = compareNullableNumber(
+                a.eventOpenInterest,
+                b.eventOpenInterest,
+              );
             } else if (sort === "change24h") {
               cmp = compareNullableNumber(
                 eventChange24hById.get(a.eventId),

@@ -218,14 +218,22 @@ function extractNumericAnchors(value: string): number[] {
   return out;
 }
 
-function numericAnchorScore(evidence: number[], candidate: number[]): number | null {
+function numericAnchorScore(
+  evidence: number[],
+  candidate: number[],
+): number | null {
   if (evidence.length === 0 || candidate.length === 0) return null;
   let total = 0;
   for (const evidenceValue of evidence) {
     let best = 0;
     for (const candidateValue of candidate) {
-      const denom = Math.max(Math.abs(evidenceValue), Math.abs(candidateValue), 1);
-      const closeness = 1 - Math.min(1, Math.abs(evidenceValue - candidateValue) / denom);
+      const denom = Math.max(
+        Math.abs(evidenceValue),
+        Math.abs(candidateValue),
+        1,
+      );
+      const closeness =
+        1 - Math.min(1, Math.abs(evidenceValue - candidateValue) / denom);
       if (closeness > best) best = closeness;
     }
     total += best;
@@ -301,18 +309,30 @@ const OPERATOR_PATTERNS: Array<{ key: OperatorClass; patterns: RegExp[] }> = [
   },
   {
     key: "up",
-    patterns: [/\bup\b/i, /\brise\b/i, /\braise\b/i, /\bincrease\b/i, /\bhike\b/i],
+    patterns: [
+      /\bup\b/i,
+      /\brise\b/i,
+      /\braise\b/i,
+      /\bincrease\b/i,
+      /\bhike\b/i,
+    ],
   },
   {
     key: "down",
-    patterns: [/\bdown\b/i, /\bfall\b/i, /\blower\b/i, /\bdecrease\b/i, /\bcut\b/i],
+    patterns: [
+      /\bdown\b/i,
+      /\bfall\b/i,
+      /\blower\b/i,
+      /\bdecrease\b/i,
+      /\bcut\b/i,
+    ],
   },
 ];
 
 function extractOperatorAnchors(value: string): Set<OperatorClass> {
   const out = new Set<OperatorClass>();
   for (const entry of OPERATOR_PATTERNS) {
-    if (entry.patterns.some(pattern => pattern.test(value))) {
+    if (entry.patterns.some((pattern) => pattern.test(value))) {
       out.add(entry.key);
     }
   }
@@ -354,10 +374,14 @@ function sameUtcDay(a: Date, b: Date): boolean {
   );
 }
 
-function extractTimeAnchors(value: string, closeTime?: string | null, referenceTime?: Date): Set<string> {
+function extractTimeAnchors(
+  value: string,
+  closeTime?: string | null,
+  referenceTime?: Date,
+): Set<string> {
   const out = new Set<string>();
   for (const entry of MONTH_PATTERNS) {
-    if (entry.patterns.some(pattern => pattern.test(value))) {
+    if (entry.patterns.some((pattern) => pattern.test(value))) {
       out.add(entry.key);
     }
   }
@@ -378,7 +402,8 @@ function extractTimeAnchors(value: string, closeTime?: string | null, referenceT
   const parsed = new Date(closeTime);
   if (Number.isNaN(parsed.getTime())) return out;
   const now = referenceTime ?? new Date();
-  const monthKey = MONTH_PATTERNS[Math.max(0, Math.min(11, parsed.getUTCMonth()))]?.key;
+  const monthKey =
+    MONTH_PATTERNS[Math.max(0, Math.min(11, parsed.getUTCMonth()))]?.key;
   if (monthKey) out.add(monthKey);
   if (sameUtcDay(parsed, now)) out.add("today");
 
@@ -392,7 +417,9 @@ function extractTimeAnchors(value: string, closeTime?: string | null, referenceT
   ) {
     out.add("this_month");
   }
-  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const nextMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1),
+  );
   if (
     parsed.getUTCFullYear() === nextMonth.getUTCFullYear() &&
     parsed.getUTCMonth() === nextMonth.getUTCMonth()
@@ -400,24 +427,28 @@ function extractTimeAnchors(value: string, closeTime?: string | null, referenceT
     out.add("next_month");
   }
   if (parsed.getUTCFullYear() === now.getUTCFullYear()) out.add("this_year");
-  if (parsed.getUTCFullYear() === now.getUTCFullYear() + 1) out.add("next_year");
+  if (parsed.getUTCFullYear() === now.getUTCFullYear() + 1)
+    out.add("next_year");
 
-  const endOfMonth = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, 0));
+  const endOfMonth = new Date(
+    Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, 0),
+  );
   if (parsed.getUTCDate() === endOfMonth.getUTCDate()) out.add("end_of_month");
-  if (parsed.getUTCMonth() === 11 && parsed.getUTCDate() === 31) out.add("end_of_year");
+  if (parsed.getUTCMonth() === 11 && parsed.getUTCDate() === 31)
+    out.add("end_of_year");
 
   const diffMs = parsed.getTime() - now.getTime();
   if (diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000) out.add("this_week");
-  if (
-    diffMs > 7 * 24 * 60 * 60 * 1000 &&
-    diffMs <= 14 * 24 * 60 * 60 * 1000
-  ) {
+  if (diffMs > 7 * 24 * 60 * 60 * 1000 && diffMs <= 14 * 24 * 60 * 60 * 1000) {
     out.add("next_week");
   }
   return out;
 }
 
-function timeAnchorScore(evidence: Set<string>, candidate: Set<string>): number | null {
+function timeAnchorScore(
+  evidence: Set<string>,
+  candidate: Set<string>,
+): number | null {
   if (evidence.size === 0 || candidate.size === 0) return null;
   let overlap = 0;
   for (const key of evidence) {
@@ -434,9 +465,11 @@ export function scoreSignalTargetAnchorAlignment(
     `${input.eventTitle ?? ""} ${input.marketTitle ?? ""}`.trim(),
   );
   const targetSet = new Set(targetAnchors);
-  const overlap = evidenceAnchors.filter(token => targetSet.has(token));
+  const overlap = evidenceAnchors.filter((token) => targetSet.has(token));
   const score =
-    evidenceAnchors.length > 0 ? clamp01(overlap.length / evidenceAnchors.length) : 0;
+    evidenceAnchors.length > 0
+      ? clamp01(overlap.length / evidenceAnchors.length)
+      : 0;
   return {
     score,
     evidenceAnchors,

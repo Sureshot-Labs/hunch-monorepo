@@ -1,10 +1,9 @@
 import { z } from "zod";
 export const holdersQuerySchema = z.object({
-  marketId: z
-    .preprocess(
-      (v) => (typeof v === "string" ? v.trim() : v),
-      z.string().min(1, "marketId is required"),
-    ),
+  marketId: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim() : v),
+    z.string().min(1, "marketId is required"),
+  ),
   limit: z.coerce
     .number()
     .int()

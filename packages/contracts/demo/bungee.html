@@ -1,619 +1,874 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Bungee Bridge Demo (WIP)</title>
-  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
-  <style>
-    body { background:#0f1115; color:#e6e8ec; font-family: sans-serif; padding:16px; }
-    .card { border:1px solid #2a2d36; border-radius:10px; padding:12px; margin-bottom:12px; background:#13161d; }
-    button { padding:8px 10px; border:none; border-radius:8px; background:#2f6fed; color:#fff; cursor:pointer; }
-    input, select { width:100%; padding:8px; margin:6px 0; border-radius:6px; border:1px solid #2a2d36; background:#1b1e25; color:#e6e8ec; }
-    pre { background:#11141b; padding:10px; border-radius:6px; overflow:auto; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
-    .pill { display:inline-block; padding:4px 8px; border-radius:12px; background:#1f2330; margin:2px 4px 2px 0; font-size:12px; }
-    .list { max-height:220px; overflow:auto; border:1px solid #2a2d36; border-radius:8px; padding:6px; background:#0f1219; }
-    .item { padding:6px; border-bottom:1px solid #1f2330; cursor:pointer; }
-    .item:last-child { border-bottom:none; }
-  </style>
-</head>
-<body>
-  <h2>Bungee Bridge Demo (manual routes)</h2>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Bungee Bridge Demo (WIP)</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+    <style>
+      body {
+        background: #0f1115;
+        color: #e6e8ec;
+        font-family: sans-serif;
+        padding: 16px;
+      }
+      .card {
+        border: 1px solid #2a2d36;
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 12px;
+        background: #13161d;
+      }
+      button {
+        padding: 8px 10px;
+        border: none;
+        border-radius: 8px;
+        background: #2f6fed;
+        color: #fff;
+        cursor: pointer;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 8px;
+        margin: 6px 0;
+        border-radius: 6px;
+        border: 1px solid #2a2d36;
+        background: #1b1e25;
+        color: #e6e8ec;
+      }
+      pre {
+        background: #11141b;
+        padding: 10px;
+        border-radius: 6px;
+        overflow: auto;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .row3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 10px;
+      }
+      .pill {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 12px;
+        background: #1f2330;
+        margin: 2px 4px 2px 0;
+        font-size: 12px;
+      }
+      .list {
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid #2a2d36;
+        border-radius: 8px;
+        padding: 6px;
+        background: #0f1219;
+      }
+      .item {
+        padding: 6px;
+        border-bottom: 1px solid #1f2330;
+        cursor: pointer;
+      }
+      .item:last-child {
+        border-bottom: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Bungee Bridge Demo (manual routes)</h2>
 
-  <div class="card">
-    <h3>Wallets</h3>
-    <div class="row">
-      <div>
-        <label>MetaMask (EVM)</label>
-        <button id="connectEvm">Connect MetaMask</button>
-        <div id="evmAcct"></div>
-        <div id="evmChain"></div>
+    <div class="card">
+      <h3>Wallets</h3>
+      <div class="row">
+        <div>
+          <label>MetaMask (EVM)</label>
+          <button id="connectEvm">Connect MetaMask</button>
+          <div id="evmAcct"></div>
+          <div id="evmChain"></div>
+        </div>
+        <div>
+          <label>Phantom (Solana)</label>
+          <button id="connectSol">Connect Phantom</button>
+          <div id="solAcct"></div>
+          <div id="solNet"></div>
+        </div>
       </div>
-      <div>
-        <label>Phantom (Solana)</label>
-        <button id="connectSol">Connect Phantom</button>
-        <div id="solAcct"></div>
-        <div id="solNet"></div>
+    </div>
+
+    <div class="card">
+      <h3>API</h3>
+      <label>Base URL</label
+      ><input id="apiHost" value="https://public-backend.bungee.exchange" />
+      <div class="row">
+        <div>
+          <label>Chain IDs (comma for list/search)</label
+          ><input id="chainFilter" value="137,89999" />
+        </div>
+        <div>
+          <label>List type</label>
+          <select id="listType">
+            <option value="trending">trending</option>
+            <option value="full">full</option>
+          </select>
+        </div>
       </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h3>API</h3>
-    <label>Base URL</label><input id="apiHost" value="https://public-backend.bungee.exchange" />
-    <div class="row">
-      <div><label>Chain IDs (comma for list/search)</label><input id="chainFilter" value="137,89999" /></div>
-      <div><label>List type</label>
-        <select id="listType">
-          <option value="trending">trending</option>
-          <option value="full">full</option>
-        </select>
+      <div class="row">
+        <button id="fetchTokens">Fetch tokens list</button>
+        <button id="searchToken">Search token</button>
       </div>
+      <input
+        id="searchInput"
+        placeholder="Address / symbol / name for search"
+      />
+      <div id="tokenStatus"></div>
+      <div class="list" id="tokenList"></div>
     </div>
-    <div class="row">
-      <button id="fetchTokens">Fetch tokens list</button>
-      <button id="searchToken">Search token</button>
+
+    <div class="card">
+      <h3>Bridge Params</h3>
+      <div class="row3">
+        <div>
+          <label>Origin chainId</label><input id="originChain" value="137" />
+        </div>
+        <div>
+          <label>Destination chainId</label
+          ><input id="destChain" value="89999" />
+        </div>
+        <div>
+          <label>Amount (raw units)</label><input id="amount" value="1000000" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Input token</label
+          ><input
+            id="inputToken"
+            value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+          />
+        </div>
+        <div>
+          <label>Output token</label
+          ><input
+            id="outputToken"
+            value="0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>userAddress (sender)</label
+          ><input id="userAddress" placeholder="auto from wallet" />
+        </div>
+        <div>
+          <label>receiverAddress</label
+          ><input id="receiverAddress" placeholder="auto from dest wallet" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Slippage (%)</label><input id="slippage" value="0.5" />
+        </div>
+        <div>
+          <label>Refuel (true/false)</label><input id="refuel" value="false" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="presetEvmToSol">Preset: Polygon USDC ➜ Solana SOL</button>
+        <button id="presetSolToEvm">Preset: Solana SOL ➜ Polygon USDC</button>
+        <button id="presetPolyToSol">Preset: Polygon USDC ➜ Solana SOL</button>
+      </div>
+      <div class="row">
+        <button id="getQuote">GET /bungee/quote</button>
+        <button id="buildTx">GET /bungee/build-tx (selected quoteId)</button>
+        <button id="submitAuto">POST /bungee/submit (autoRoute)</button>
+      </div>
+      <div id="quoteStatus"></div>
+      <div class="list" id="routesList"></div>
     </div>
-    <input id="searchInput" placeholder="Address / symbol / name for search" />
-    <div id="tokenStatus"></div>
-    <div class="list" id="tokenList"></div>
-  </div>
 
-  <div class="card">
-    <h3>Bridge Params</h3>
-    <div class="row3">
-      <div><label>Origin chainId</label><input id="originChain" value="137" /></div>
-      <div><label>Destination chainId</label><input id="destChain" value="89999" /></div>
-      <div><label>Amount (raw units)</label><input id="amount" value="1000000" /></div>
+    <div class="card">
+      <h3>Execute</h3>
+      <div id="execStatus"></div>
+      <button id="sendTx">Send transaction (handles approval if needed)</button>
+      <div class="row">
+        <div>
+          <label>requestHash (auto)</label
+          ><input id="requestHash" placeholder="from autoRoute/requestHash" />
+        </div>
+        <div>
+          <label>txHash (origin)</label
+          ><input id="txHash" placeholder="source tx hash" />
+        </div>
+      </div>
+      <button id="checkStatus">GET /bungee/status</button>
     </div>
-    <div class="row">
-      <div><label>Input token</label><input id="inputToken" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" /></div>
-      <div><label>Output token</label><input id="outputToken" value="0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" /></div>
+
+    <div class="card">
+      <h3>Logs</h3>
+      <pre id="log"></pre>
     </div>
-    <div class="row">
-      <div><label>userAddress (sender)</label><input id="userAddress" placeholder="auto from wallet" /></div>
-      <div><label>receiverAddress</label><input id="receiverAddress" placeholder="auto from dest wallet" /></div>
-    </div>
-    <div class="row">
-      <div><label>Slippage (%)</label><input id="slippage" value="0.5" /></div>
-      <div><label>Refuel (true/false)</label><input id="refuel" value="false" /></div>
-    </div>
-    <div class="row">
-      <button id="presetEvmToSol">Preset: Polygon USDC ➜ Solana SOL</button>
-      <button id="presetSolToEvm">Preset: Solana SOL ➜ Polygon USDC</button>
-      <button id="presetPolyToSol">Preset: Polygon USDC ➜ Solana SOL</button>
-    </div>
-    <div class="row">
-      <button id="getQuote">GET /bungee/quote</button>
-      <button id="buildTx">GET /bungee/build-tx (selected quoteId)</button>
-      <button id="submitAuto">POST /bungee/submit (autoRoute)</button>
-    </div>
-    <div id="quoteStatus"></div>
-    <div class="list" id="routesList"></div>
-  </div>
 
-  <div class="card">
-    <h3>Execute</h3>
-    <div id="execStatus"></div>
-    <button id="sendTx">Send transaction (handles approval if needed)</button>
-    <div class="row">
-      <div><label>requestHash (auto)</label><input id="requestHash" placeholder="from autoRoute/requestHash" /></div>
-      <div><label>txHash (origin)</label><input id="txHash" placeholder="source tx hash" /></div>
-    </div>
-    <button id="checkStatus">GET /bungee/status</button>
-  </div>
-
-  <div class="card">
-    <h3>Logs</h3>
-    <pre id="log"></pre>
-  </div>
-
-  <script>
-    const logEl = document.getElementById("log");
-    const log = (m) => { logEl.textContent += m + "\\n"; console.log(m); };
-    const err = (m) => { logEl.textContent += "[ERR] " + m + "\\n"; console.error(m); };
-
-    let evmAddress = "";
-    let evmChainId = null;
-    let solWallet = null;
-    let solAddress = "";
-    let solConnection = null;
-
-    let lastTokens = [];
-    let lastQuote = null;
-    let selectedQuoteId = "";
-    let lastBuild = null;
-    let lastAutoRoute = null;
-
-    const USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
-    const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-    const SOLANA_CHAIN = 89999;
-    const DEFAULT_EVM_CHAIN = 137; // Polygon by default
-    const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-
-    const solKit = window.solanaWeb3 || {};
-    log("solana web3 loaded: " + !!solKit.Connection);
-
-    function getMetaMaskProvider() {
-      const eth = window.ethereum;
-      if (!eth) return null;
-      // If multiple providers are injected (e.g., Phantom + MetaMask), pick MetaMask explicitly
-      if (eth.providers && Array.isArray(eth.providers)) {
-        const mm = eth.providers.find((p) => p.isMetaMask);
-        if (mm) return mm;
-      }
-      return eth.isMetaMask ? eth : eth;
-    }
-
-    async function connectEvm() {
-      const eth = getMetaMaskProvider();
-      if (!eth) return alert("MetaMask required (Phantom’s EVM provider detected, please enable MetaMask)");
-      try {
-        // default to Polygon (137) so bridge params align
-        try { await ensureEvmChain(DEFAULT_EVM_CHAIN); } catch (e) { err("Chain switch warning: " + (e?.message || e)); }
-        const accounts = await eth.request({ method: "eth_requestAccounts" });
-        evmAddress = accounts[0];
-        const chainHex = await eth.request({ method: "eth_chainId" });
-        evmChainId = parseInt(chainHex, 16);
-        document.getElementById("evmAcct").textContent = `EVM: ${evmAddress}`;
-        document.getElementById("evmChain").textContent = `chainId: ${evmChainId}`;
-        if (!document.getElementById("userAddress").value) document.getElementById("userAddress").value = evmAddress;
-        log("Connected MetaMask " + evmAddress + " chain " + evmChainId);
-      } catch (e) {
-        err("MetaMask connect error: " + (e?.message || e));
-      }
-    }
-
-    async function connectSol() {
-      if (!window.solana || !window.solana.isPhantom) {
-        alert("Phantom wallet required");
-        return;
-      }
-      if (!solKit.Connection) {
-        alert("solana web3 failed to load");
-        return;
-      }
-      try {
-        const resp = await window.solana.connect({ onlyIfTrusted: false });
-        solWallet = window.solana;
-        solAddress = resp.publicKey.toBase58();
-        if (!solConnection) solConnection = new solKit.Connection("https://api.mainnet-beta.solana.com");
-        document.getElementById("solAcct").textContent = `Sol: ${solAddress}`;
-        document.getElementById("solNet").textContent = "mainnet-beta";
-        if (!document.getElementById("receiverAddress").value) document.getElementById("receiverAddress").value = solAddress;
-        log("Connected Phantom " + solAddress);
-      } catch (e) {
-        err("Phantom connect error: " + (e?.message || e));
-      }
-    }
-
-    const getApi = () => (document.getElementById("apiHost").value || "").replace(/\/$/, "");
-
-    function renderTokens(list) {
-      const wrap = document.getElementById("tokenList");
-      wrap.innerHTML = "";
-      list.forEach((t) => {
-        const div = document.createElement("div");
-        div.className = "item";
-        const ver = (t.verified || t.isVerified) ? "verified" : "unverified";
-        const shortAddr = t.address ? t.address.slice(0, 6) + "..." + t.address.slice(-4) : "";
-        div.innerHTML = `<strong>${t.symbol || "?"}</strong> ${t.name || ""} <span class="pill">chain ${t.chainId}</span> <span class="pill">${ver}</span><br/>${shortAddr}`;
-        div.onclick = () => {
-          const inEl = document.getElementById("inputToken");
-          const outEl = document.getElementById("outputToken");
-          if (!inEl.value) inEl.value = t.address;
-          else outEl.value = t.address;
-        };
-        wrap.appendChild(div);
-      });
-    }
-
-    function normalizeTokens(raw) {
-      if (!raw) return [];
-      if (Array.isArray(raw)) return raw;
-      if (typeof raw === "object") {
-        // result is keyed by chainId -> array
-        const arrs = Object.values(raw).filter(Array.isArray);
-        return arrs.flat();
-      }
-      return [];
-    }
-
-    async function fetchTokens() {
-      const status = document.getElementById("tokenStatus");
-      status.textContent = "Loading...";
-      try {
-        const api = getApi();
-        const params = new URLSearchParams();
-        const chains = document.getElementById("chainFilter").value.trim();
-        if (chains) params.append("chainIds", chains);
-        params.append("list", document.getElementById("listType").value);
-        const res = await fetch(`${api}/api/v1/tokens/list?${params.toString()}`);
-        const data = await res.json();
-        if (!data.success) throw new Error(data.message || "list error");
-        const tokens = normalizeTokens(data.result?.tokens || data.result);
-        lastTokens = tokens;
-        renderTokens(tokens);
-        status.textContent = `Got ${tokens.length} tokens`;
-      } catch (e) {
-        status.textContent = "Error: " + (e?.message || e);
-        err(status.textContent);
-      }
-    }
-
-    async function searchToken() {
-      const q = (document.getElementById("searchInput").value || "").trim();
-      if (!q) return alert("Enter search query");
-      const status = document.getElementById("tokenStatus");
-      status.textContent = "Searching...";
-      try {
-        const api = getApi();
-        const params = new URLSearchParams();
-        params.append("q", q);
-        const user = document.getElementById("userAddress").value.trim() || evmAddress || solAddress;
-        if (user) params.append("userAddress", user);
-        const res = await fetch(`${api}/api/v1/tokens/search?${params.toString()}`);
-        const data = await res.json();
-        if (!data.success) throw new Error(data.message || "search error");
-        const tokens = normalizeTokens(data.result?.tokens || data.result);
-        lastTokens = tokens;
-        renderTokens(tokens);
-        status.textContent = `Found ${tokens.length} tokens`;
-      } catch (e) {
-        status.textContent = "Error: " + (e?.message || e);
-        err(status.textContent);
-      }
-    }
-
-    function applyPreset(type) {
-      if (type === "evmToSol") {
-        document.getElementById("originChain").value = "137";
-        document.getElementById("destChain").value = SOLANA_CHAIN.toString();
-        document.getElementById("inputToken").value = USDC_POLYGON;
-        document.getElementById("outputToken").value = NATIVE;
-        if (evmAddress) document.getElementById("userAddress").value = evmAddress;
-        if (solAddress) document.getElementById("receiverAddress").value = solAddress;
-      } else if (type === "polyToSol") {
-        document.getElementById("originChain").value = "137";
-        document.getElementById("destChain").value = SOLANA_CHAIN.toString();
-        document.getElementById("inputToken").value = USDC_POLYGON;
-        document.getElementById("outputToken").value = NATIVE;
-        if (evmAddress) document.getElementById("userAddress").value = evmAddress;
-        if (solAddress) document.getElementById("receiverAddress").value = solAddress;
-      } else {
-        document.getElementById("originChain").value = SOLANA_CHAIN.toString();
-        document.getElementById("destChain").value = "137";
-        document.getElementById("inputToken").value = NATIVE;
-        document.getElementById("outputToken").value = USDC_POLYGON;
-        if (solAddress) document.getElementById("userAddress").value = solAddress;
-        if (evmAddress) document.getElementById("receiverAddress").value = evmAddress;
-      }
-    }
-
-    function buildQuoteParams() {
-      const qp = new URLSearchParams();
-      ["originChain","destChain","inputToken","outputToken","amount","userAddress","receiverAddress"].forEach((id) => {
-        const val = document.getElementById(id === "destChain" ? "destChain" : id).value.trim();
-        const keyMap = { originChain:"originChainId", destChain:"destinationChainId", inputToken:"inputToken", outputToken:"outputToken", amount:"inputAmount", userAddress:"userAddress", receiverAddress:"receiverAddress" };
-        if (val) qp.append(keyMap[id] || id, val);
-      });
-      const slip = document.getElementById("slippage").value.trim();
-      if (slip) qp.append("slippage", slip);
-      const refuel = document.getElementById("refuel").value.trim();
-      if (refuel) qp.append("refuel", refuel);
-      qp.append("enableManual", "true");
-      return qp;
-    }
-
-    function renderRoutes(resJson) {
-      const wrap = document.getElementById("routesList");
-      wrap.innerHTML = "";
-      selectedQuoteId = "";
-      lastBuild = null;
-      const routes = resJson?.result?.manualRoutes || [];
-      if (!routes.length) {
-        wrap.textContent = "No manualRoutes returned";
-        return;
-      }
-      routes.forEach((r, idx) => {
-        const div = document.createElement("div");
-        div.className = "item";
-        const amount = r.output?.amount || "?";
-        const minOut = r.output?.minAmountOut || "";
-        const name = r.routeDetails?.name || "route";
-        const fee = r.routeDetails?.routeFee?.amount || "";
-        const eta = r.estimatedTime || "";
-        div.innerHTML = `<input type="radio" name="routePick" ${idx===0?"checked":""} value="${r.quoteId}"/> Quote ${r.quoteId}<br/>
-          out=${amount} min=${minOut} fee=${fee} eta=${eta}s route=${name}`;
-        wrap.appendChild(div);
-        if (idx === 0) selectedQuoteId = r.quoteId;
-      });
-      const radios = wrap.querySelectorAll("input[name='routePick']");
-      radios.forEach((r) => {
-        r.onchange = () => { selectedQuoteId = r.value; };
-      });
-    }
-
-    async function getQuote() {
-      const status = document.getElementById("quoteStatus");
-      status.textContent = "Requesting quote...";
-      try {
-        const api = getApi();
-        const qp = buildQuoteParams();
-        const res = await fetch(`${api}/api/v1/bungee/quote?${qp.toString()}`);
-        const txt = await res.text();
-        let json = null;
-        try { json = JSON.parse(txt); } catch {}
-        lastQuote = json;
-        lastAutoRoute = json?.result?.autoRoute || null;
-        selectedQuoteId = "";
-        lastBuild = null;
-        document.getElementById("routesList").innerHTML = "";
-        if (json?.success) {
-          status.textContent = `Quote ${res.status}`;
-          log(`Quote (${res.status}): ${txt}`);
-          renderRoutes(json);
-          const manualCount = (json?.result?.manualRoutes || []).length;
-          if (!manualCount && !json?.result?.autoRoute) {
-            status.textContent = "No routes returned for these params";
-          }
-        } else {
-          status.textContent = `Quote error ${res.status}: ${txt}`;
-          err(status.textContent);
-        }
-      } catch (e) {
-        status.textContent = "Quote error: " + (e?.message || e);
-        err(status.textContent);
-      }
-    }
-
-    async function submitAuto() {
-      const status = document.getElementById("quoteStatus");
-      try {
-        if (!lastAutoRoute) throw new Error("No autoRoute in last quote");
-        if (!window.ethereum || !evmAddress) throw new Error("Connect MetaMask for signature");
-        const sr = lastAutoRoute.signTypedData || lastAutoRoute.signTypedDataPayload;
-        if (!sr || !sr.domain || !sr.types || !sr.values) throw new Error("signTypedData missing in autoRoute");
-        const provider = new ethers.providers.Web3Provider(window.ethereum);
-        const signer = provider.getSigner();
-        const sig = await signer._signTypedData(sr.domain, sr.types, sr.values);
-
-        const body = {
-          requestType: lastAutoRoute.requestType || "SINGLE_OUTPUT_REQUEST",
-          quoteId: lastAutoRoute.quoteId || selectedQuoteId || lastAutoRoute.requestHash,
-          request: lastAutoRoute.request || lastAutoRoute.basicReq || {},
-          userSignature: sig,
-        };
-
-        const api = getApi();
-        const res = await fetch(`${api}/api/v1/bungee/submit`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const txt = await res.text();
-        let json = null;
-        try { json = JSON.parse(txt); } catch {}
-        if (json?.success) {
-          status.textContent = `submit ${res.status}`;
-          log(`submit (${res.status}): ${txt}`);
-        } else {
-          status.textContent = `submit error ${res.status}: ${txt}`;
-          err(status.textContent);
-        }
-      } catch (e) {
-        status.textContent = "submit error: " + (e?.message || e);
-        err(status.textContent);
-      }
-    }
-
-    async function buildTx() {
-      const status = document.getElementById("quoteStatus");
-      if (!selectedQuoteId) {
-        document.getElementById("routesList").textContent = "No routes available. Adjust amount/tokens or try another chain.";
-        return;
-      }
-      status.textContent = "Building tx...";
-      try {
-        const api = getApi();
-        const res = await fetch(`${api}/api/v1/bungee/build-tx?quoteId=${selectedQuoteId}`);
-        const txt = await res.text();
-        let json = null;
-        try { json = JSON.parse(txt); } catch {}
-        lastBuild = json?.result || json;
-        if (json?.success) {
-          status.textContent = `build-tx ${res.status}`;
-          log(`build-tx (${res.status}): ${txt}`);
-        } else {
-          status.textContent = `build-tx error ${res.status}: ${txt}`;
-          err(status.textContent);
-        }
-      } catch (e) {
-        status.textContent = "build-tx error: " + (e?.message || e);
-        err(status.textContent);
-      }
-    }
-
-    async function ensureEvmChain(chainId) {
-      const eth = getMetaMaskProvider();
-      if (!eth) throw new Error("MetaMask not available");
-      const current = parseInt(await eth.request({ method: "eth_chainId" }), 16);
-      if (current === chainId) return;
-      const hexId = "0x" + chainId.toString(16);
-      try {
-        log(`Switching chain to ${chainId} (${hexId})`);
-        await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
-      } catch (e) {
-        throw new Error("Switch chain failed: " + (e?.message || e));
-      }
-    }
-
-    async function sendEvmTx(txData, approvalData, originChainId) {
-      const eth = getMetaMaskProvider();
-      if (!eth || !evmAddress) throw new Error("Connect MetaMask");
-      await ensureEvmChain(Number(originChainId));
-      if (approvalData && approvalData.amount && approvalData.tokenAddress && approvalData.spenderAddress) {
-        // Skip approval if allowance already sufficient
-        try {
-          const provider = new ethers.providers.Web3Provider(eth);
-          const erc20 = new ethers.Contract(
-            approvalData.tokenAddress,
-            ["function allowance(address,address) view returns (uint256)"],
-            provider
-          );
-          const needed = ethers.BigNumber.from(approvalData.amount);
-          const currentAlw = await erc20.allowance(evmAddress, approvalData.spenderAddress);
-          log(`Allowance check: current=${currentAlw.toString()} needed=${needed.toString()}`);
-          if (currentAlw.gte(needed)) {
-            log(`Approval not needed (allowance ${currentAlw.toString()} >= ${needed.toString()})`);
-          } else {
-            const iface = new ethers.utils.Interface(["function approve(address,uint256)"]);
-            // Approve exactly what is needed
-            const data = iface.encodeFunctionData("approve", [approvalData.spenderAddress, needed]);
-            const appr = {
-              from: evmAddress,
-              to: approvalData.tokenAddress,
-              data,
-              value: "0x0",
-            };
-            log("Sending approval tx...");
-            const sig = await eth.request({ method: "eth_sendTransaction", params: [appr] });
-            log("Approval tx hash: " + sig);
-          }
-        } catch (e) {
-          err("Allowance check/approve failed: " + (e?.message || e));
-          throw e;
-        }
-      }
-      const tx = {
-        from: evmAddress,
-        to: txData.to,
-        data: txData.data,
-        value: txData.value || "0x0",
+    <script>
+      const logEl = document.getElementById("log");
+      const log = (m) => {
+        logEl.textContent += m + "\\n";
+        console.log(m);
       };
-      log("Sending bridge tx...");
-      const hash = await eth.request({ method: "eth_sendTransaction", params: [tx] });
-      log("Bridge tx hash: " + hash);
-      document.getElementById("execStatus").textContent = "Sent tx: " + hash;
-    }
+      const err = (m) => {
+        logEl.textContent += "[ERR] " + m + "\\n";
+        console.error(m);
+      };
 
-    const b64ToUint8 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    const uint8ToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
+      let evmAddress = "";
+      let evmChainId = null;
+      let solWallet = null;
+      let solAddress = "";
+      let solConnection = null;
 
-    async function sendSolTx(txData) {
-      if (!solWallet) throw new Error("Connect Phantom");
-      if (!solConnection) solConnection = new solKit.Connection("https://api.mainnet-beta.solana.com");
+      let lastTokens = [];
+      let lastQuote = null;
+      let selectedQuoteId = "";
+      let lastBuild = null;
+      let lastAutoRoute = null;
 
-      // Case 1: base64 transaction blob
-      if (typeof txData === "string") {
-        const buf = b64ToUint8(txData);
-        let tx;
-        try { tx = solKit.VersionedTransaction.deserialize(buf); }
-        catch { tx = solKit.Transaction.from(buf); }
-        const signed = await solWallet.signTransaction(tx);
-        const raw = signed.serialize();
-        const sig = await solConnection.sendRawTransaction(raw);
-        log("Sent Sol tx: " + sig);
-        document.getElementById("execStatus").textContent = "Sol tx: " + sig;
-        return;
+      const USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+      const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+      const SOLANA_CHAIN = 89999;
+      const DEFAULT_EVM_CHAIN = 137; // Polygon by default
+      const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+      const solKit = window.solanaWeb3 || {};
+      log("solana web3 loaded: " + !!solKit.Connection);
+
+      function getMetaMaskProvider() {
+        const eth = window.ethereum;
+        if (!eth) return null;
+        // If multiple providers are injected (e.g., Phantom + MetaMask), pick MetaMask explicitly
+        if (eth.providers && Array.isArray(eth.providers)) {
+          const mm = eth.providers.find((p) => p.isMetaMask);
+          if (mm) return mm;
+        }
+        return eth.isMetaMask ? eth : eth;
       }
 
-      // Case 2: instructions + lookupTables
-      if (txData.instructions) {
-        const ix = txData.instructions.map((i) => new solKit.TransactionInstruction({
-          programId: new solKit.PublicKey(i.programId),
-          keys: i.keys.map((k) => ({ pubkey:new solKit.PublicKey(k.pubkey), isSigner:k.isSigner, isWritable:k.isWritable })),
-          data: Uint8Array.from(i.data),
-        }));
-        const payer = new solKit.PublicKey(solAddress);
-        const { blockhash, lastValidBlockHeight } = await solConnection.getLatestBlockhash("finalized");
-        const lookups = [];
-        if (txData.lookupTables && txData.lookupTables.length) {
-          for (const addr of txData.lookupTables) {
-            const lt = await solConnection.getAddressLookupTable(new solKit.PublicKey(addr));
-            if (lt.value) lookups.push(lt.value);
+      async function connectEvm() {
+        const eth = getMetaMaskProvider();
+        if (!eth)
+          return alert(
+            "MetaMask required (Phantom’s EVM provider detected, please enable MetaMask)",
+          );
+        try {
+          // default to Polygon (137) so bridge params align
+          try {
+            await ensureEvmChain(DEFAULT_EVM_CHAIN);
+          } catch (e) {
+            err("Chain switch warning: " + (e?.message || e));
           }
+          const accounts = await eth.request({ method: "eth_requestAccounts" });
+          evmAddress = accounts[0];
+          const chainHex = await eth.request({ method: "eth_chainId" });
+          evmChainId = parseInt(chainHex, 16);
+          document.getElementById("evmAcct").textContent = `EVM: ${evmAddress}`;
+          document.getElementById("evmChain").textContent =
+            `chainId: ${evmChainId}`;
+          if (!document.getElementById("userAddress").value)
+            document.getElementById("userAddress").value = evmAddress;
+          log("Connected MetaMask " + evmAddress + " chain " + evmChainId);
+        } catch (e) {
+          err("MetaMask connect error: " + (e?.message || e));
         }
-        const msg = solKit.MessageV0.compile({ payerKey:payer, recentBlockhash:blockhash, instructions:ix, addressLookupTableAccounts:lookups });
-        const tx = new solKit.VersionedTransaction(msg);
-        if (txData.signers) {
-          txData.signers.forEach((s) => {
-            try {
-              const kp = solKit.Keypair.fromSecretKey(Uint8Array.from(s));
-              tx.sign([kp]);
-            } catch {}
-          });
-        }
-        const signed = await solWallet.signTransaction(tx);
-        const sig = await solConnection.sendRawTransaction(signed.serialize(), { skipPreflight:false, maxRetries:3 });
-        await solConnection.confirmTransaction({ signature:sig, blockhash, lastValidBlockHeight });
-        log("Sent Sol tx: " + sig);
-        document.getElementById("execStatus").textContent = "Sol tx: " + sig;
-        return;
       }
-      throw new Error("Unknown Solana txData format");
-    }
 
-    async function sendTx() {
-      try {
-        if (!lastBuild || !lastBuild.txData) throw new Error("Run build-tx first");
-        const originChainId = Number(document.getElementById("originChain").value || "0");
-        const txData = lastBuild.txData;
-        const approvalData = lastBuild.approvalData;
-        if (originChainId === SOLANA_CHAIN) {
-          await sendSolTx(txData.swapTransaction || txData.tx || txData);
-        } else {
-          await sendEvmTx(txData, approvalData, originChainId);
-        }
-      } catch (e) {
-        err("sendTx error: " + (e?.message || e));
-        document.getElementById("execStatus").textContent = "Error: " + (e?.message || e);
-      }
-    }
-
-    async function checkStatus() {
-      try {
-        const api = getApi();
-        const reqHash = (document.getElementById("requestHash").value || "").trim();
-        const txHash = (document.getElementById("txHash").value || "").trim();
-        if (!reqHash && !txHash) {
-          document.getElementById("execStatus").textContent = "Provide requestHash or txHash";
+      async function connectSol() {
+        if (!window.solana || !window.solana.isPhantom) {
+          alert("Phantom wallet required");
           return;
         }
-        const params = new URLSearchParams();
-        if (reqHash) params.append("requestHash", reqHash);
-        if (txHash) params.append("txHash", txHash);
-        const res = await fetch(`${api}/api/v1/bungee/status?${params.toString()}`);
-        const txt = await res.text();
-        let json = null;
-        try { json = JSON.parse(txt); } catch {}
-        if (json?.success) {
-          document.getElementById("execStatus").textContent = `status ${res.status}`;
-          log(`status (${res.status}): ${txt}`);
-        } else {
-          document.getElementById("execStatus").textContent = `status error ${res.status}: ${txt}`;
-          err(`status error ${res.status}: ${txt}`);
+        if (!solKit.Connection) {
+          alert("solana web3 failed to load");
+          return;
         }
-      } catch (e) {
-        document.getElementById("execStatus").textContent = "status error: " + (e?.message || e);
-        err("status error: " + (e?.message || e));
+        try {
+          const resp = await window.solana.connect({ onlyIfTrusted: false });
+          solWallet = window.solana;
+          solAddress = resp.publicKey.toBase58();
+          if (!solConnection)
+            solConnection = new solKit.Connection(
+              "https://api.mainnet-beta.solana.com",
+            );
+          document.getElementById("solAcct").textContent = `Sol: ${solAddress}`;
+          document.getElementById("solNet").textContent = "mainnet-beta";
+          if (!document.getElementById("receiverAddress").value)
+            document.getElementById("receiverAddress").value = solAddress;
+          log("Connected Phantom " + solAddress);
+        } catch (e) {
+          err("Phantom connect error: " + (e?.message || e));
+        }
       }
-    }
 
-    document.getElementById("connectEvm").onclick = connectEvm;
-    document.getElementById("connectSol").onclick = connectSol;
-    document.getElementById("fetchTokens").onclick = fetchTokens;
-    document.getElementById("searchToken").onclick = searchToken;
-    document.getElementById("getQuote").onclick = getQuote;
-    document.getElementById("buildTx").onclick = buildTx;
-    document.getElementById("submitAuto").onclick = submitAuto;
-    document.getElementById("sendTx").onclick = sendTx;
-    document.getElementById("presetEvmToSol").onclick = () => applyPreset("evmToSol");
-    document.getElementById("presetSolToEvm").onclick = () => applyPreset("solToEvm");
-    document.getElementById("presetPolyToSol").onclick = () => applyPreset("polyToSol");
-    document.getElementById("checkStatus").onclick = checkStatus;
-  </script>
-</body>
+      const getApi = () =>
+        (document.getElementById("apiHost").value || "").replace(/\/$/, "");
+
+      function renderTokens(list) {
+        const wrap = document.getElementById("tokenList");
+        wrap.innerHTML = "";
+        list.forEach((t) => {
+          const div = document.createElement("div");
+          div.className = "item";
+          const ver = t.verified || t.isVerified ? "verified" : "unverified";
+          const shortAddr = t.address
+            ? t.address.slice(0, 6) + "..." + t.address.slice(-4)
+            : "";
+          div.innerHTML = `<strong>${t.symbol || "?"}</strong> ${t.name || ""} <span class="pill">chain ${t.chainId}</span> <span class="pill">${ver}</span><br/>${shortAddr}`;
+          div.onclick = () => {
+            const inEl = document.getElementById("inputToken");
+            const outEl = document.getElementById("outputToken");
+            if (!inEl.value) inEl.value = t.address;
+            else outEl.value = t.address;
+          };
+          wrap.appendChild(div);
+        });
+      }
+
+      function normalizeTokens(raw) {
+        if (!raw) return [];
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === "object") {
+          // result is keyed by chainId -> array
+          const arrs = Object.values(raw).filter(Array.isArray);
+          return arrs.flat();
+        }
+        return [];
+      }
+
+      async function fetchTokens() {
+        const status = document.getElementById("tokenStatus");
+        status.textContent = "Loading...";
+        try {
+          const api = getApi();
+          const params = new URLSearchParams();
+          const chains = document.getElementById("chainFilter").value.trim();
+          if (chains) params.append("chainIds", chains);
+          params.append("list", document.getElementById("listType").value);
+          const res = await fetch(
+            `${api}/api/v1/tokens/list?${params.toString()}`,
+          );
+          const data = await res.json();
+          if (!data.success) throw new Error(data.message || "list error");
+          const tokens = normalizeTokens(data.result?.tokens || data.result);
+          lastTokens = tokens;
+          renderTokens(tokens);
+          status.textContent = `Got ${tokens.length} tokens`;
+        } catch (e) {
+          status.textContent = "Error: " + (e?.message || e);
+          err(status.textContent);
+        }
+      }
+
+      async function searchToken() {
+        const q = (document.getElementById("searchInput").value || "").trim();
+        if (!q) return alert("Enter search query");
+        const status = document.getElementById("tokenStatus");
+        status.textContent = "Searching...";
+        try {
+          const api = getApi();
+          const params = new URLSearchParams();
+          params.append("q", q);
+          const user =
+            document.getElementById("userAddress").value.trim() ||
+            evmAddress ||
+            solAddress;
+          if (user) params.append("userAddress", user);
+          const res = await fetch(
+            `${api}/api/v1/tokens/search?${params.toString()}`,
+          );
+          const data = await res.json();
+          if (!data.success) throw new Error(data.message || "search error");
+          const tokens = normalizeTokens(data.result?.tokens || data.result);
+          lastTokens = tokens;
+          renderTokens(tokens);
+          status.textContent = `Found ${tokens.length} tokens`;
+        } catch (e) {
+          status.textContent = "Error: " + (e?.message || e);
+          err(status.textContent);
+        }
+      }
+
+      function applyPreset(type) {
+        if (type === "evmToSol") {
+          document.getElementById("originChain").value = "137";
+          document.getElementById("destChain").value = SOLANA_CHAIN.toString();
+          document.getElementById("inputToken").value = USDC_POLYGON;
+          document.getElementById("outputToken").value = NATIVE;
+          if (evmAddress)
+            document.getElementById("userAddress").value = evmAddress;
+          if (solAddress)
+            document.getElementById("receiverAddress").value = solAddress;
+        } else if (type === "polyToSol") {
+          document.getElementById("originChain").value = "137";
+          document.getElementById("destChain").value = SOLANA_CHAIN.toString();
+          document.getElementById("inputToken").value = USDC_POLYGON;
+          document.getElementById("outputToken").value = NATIVE;
+          if (evmAddress)
+            document.getElementById("userAddress").value = evmAddress;
+          if (solAddress)
+            document.getElementById("receiverAddress").value = solAddress;
+        } else {
+          document.getElementById("originChain").value =
+            SOLANA_CHAIN.toString();
+          document.getElementById("destChain").value = "137";
+          document.getElementById("inputToken").value = NATIVE;
+          document.getElementById("outputToken").value = USDC_POLYGON;
+          if (solAddress)
+            document.getElementById("userAddress").value = solAddress;
+          if (evmAddress)
+            document.getElementById("receiverAddress").value = evmAddress;
+        }
+      }
+
+      function buildQuoteParams() {
+        const qp = new URLSearchParams();
+        [
+          "originChain",
+          "destChain",
+          "inputToken",
+          "outputToken",
+          "amount",
+          "userAddress",
+          "receiverAddress",
+        ].forEach((id) => {
+          const val = document
+            .getElementById(id === "destChain" ? "destChain" : id)
+            .value.trim();
+          const keyMap = {
+            originChain: "originChainId",
+            destChain: "destinationChainId",
+            inputToken: "inputToken",
+            outputToken: "outputToken",
+            amount: "inputAmount",
+            userAddress: "userAddress",
+            receiverAddress: "receiverAddress",
+          };
+          if (val) qp.append(keyMap[id] || id, val);
+        });
+        const slip = document.getElementById("slippage").value.trim();
+        if (slip) qp.append("slippage", slip);
+        const refuel = document.getElementById("refuel").value.trim();
+        if (refuel) qp.append("refuel", refuel);
+        qp.append("enableManual", "true");
+        return qp;
+      }
+
+      function renderRoutes(resJson) {
+        const wrap = document.getElementById("routesList");
+        wrap.innerHTML = "";
+        selectedQuoteId = "";
+        lastBuild = null;
+        const routes = resJson?.result?.manualRoutes || [];
+        if (!routes.length) {
+          wrap.textContent = "No manualRoutes returned";
+          return;
+        }
+        routes.forEach((r, idx) => {
+          const div = document.createElement("div");
+          div.className = "item";
+          const amount = r.output?.amount || "?";
+          const minOut = r.output?.minAmountOut || "";
+          const name = r.routeDetails?.name || "route";
+          const fee = r.routeDetails?.routeFee?.amount || "";
+          const eta = r.estimatedTime || "";
+          div.innerHTML = `<input type="radio" name="routePick" ${idx === 0 ? "checked" : ""} value="${r.quoteId}"/> Quote ${r.quoteId}<br/>
+          out=${amount} min=${minOut} fee=${fee} eta=${eta}s route=${name}`;
+          wrap.appendChild(div);
+          if (idx === 0) selectedQuoteId = r.quoteId;
+        });
+        const radios = wrap.querySelectorAll("input[name='routePick']");
+        radios.forEach((r) => {
+          r.onchange = () => {
+            selectedQuoteId = r.value;
+          };
+        });
+      }
+
+      async function getQuote() {
+        const status = document.getElementById("quoteStatus");
+        status.textContent = "Requesting quote...";
+        try {
+          const api = getApi();
+          const qp = buildQuoteParams();
+          const res = await fetch(
+            `${api}/api/v1/bungee/quote?${qp.toString()}`,
+          );
+          const txt = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(txt);
+          } catch {}
+          lastQuote = json;
+          lastAutoRoute = json?.result?.autoRoute || null;
+          selectedQuoteId = "";
+          lastBuild = null;
+          document.getElementById("routesList").innerHTML = "";
+          if (json?.success) {
+            status.textContent = `Quote ${res.status}`;
+            log(`Quote (${res.status}): ${txt}`);
+            renderRoutes(json);
+            const manualCount = (json?.result?.manualRoutes || []).length;
+            if (!manualCount && !json?.result?.autoRoute) {
+              status.textContent = "No routes returned for these params";
+            }
+          } else {
+            status.textContent = `Quote error ${res.status}: ${txt}`;
+            err(status.textContent);
+          }
+        } catch (e) {
+          status.textContent = "Quote error: " + (e?.message || e);
+          err(status.textContent);
+        }
+      }
+
+      async function submitAuto() {
+        const status = document.getElementById("quoteStatus");
+        try {
+          if (!lastAutoRoute) throw new Error("No autoRoute in last quote");
+          if (!window.ethereum || !evmAddress)
+            throw new Error("Connect MetaMask for signature");
+          const sr =
+            lastAutoRoute.signTypedData || lastAutoRoute.signTypedDataPayload;
+          if (!sr || !sr.domain || !sr.types || !sr.values)
+            throw new Error("signTypedData missing in autoRoute");
+          const provider = new ethers.providers.Web3Provider(window.ethereum);
+          const signer = provider.getSigner();
+          const sig = await signer._signTypedData(
+            sr.domain,
+            sr.types,
+            sr.values,
+          );
+
+          const body = {
+            requestType: lastAutoRoute.requestType || "SINGLE_OUTPUT_REQUEST",
+            quoteId:
+              lastAutoRoute.quoteId ||
+              selectedQuoteId ||
+              lastAutoRoute.requestHash,
+            request: lastAutoRoute.request || lastAutoRoute.basicReq || {},
+            userSignature: sig,
+          };
+
+          const api = getApi();
+          const res = await fetch(`${api}/api/v1/bungee/submit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const txt = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(txt);
+          } catch {}
+          if (json?.success) {
+            status.textContent = `submit ${res.status}`;
+            log(`submit (${res.status}): ${txt}`);
+          } else {
+            status.textContent = `submit error ${res.status}: ${txt}`;
+            err(status.textContent);
+          }
+        } catch (e) {
+          status.textContent = "submit error: " + (e?.message || e);
+          err(status.textContent);
+        }
+      }
+
+      async function buildTx() {
+        const status = document.getElementById("quoteStatus");
+        if (!selectedQuoteId) {
+          document.getElementById("routesList").textContent =
+            "No routes available. Adjust amount/tokens or try another chain.";
+          return;
+        }
+        status.textContent = "Building tx...";
+        try {
+          const api = getApi();
+          const res = await fetch(
+            `${api}/api/v1/bungee/build-tx?quoteId=${selectedQuoteId}`,
+          );
+          const txt = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(txt);
+          } catch {}
+          lastBuild = json?.result || json;
+          if (json?.success) {
+            status.textContent = `build-tx ${res.status}`;
+            log(`build-tx (${res.status}): ${txt}`);
+          } else {
+            status.textContent = `build-tx error ${res.status}: ${txt}`;
+            err(status.textContent);
+          }
+        } catch (e) {
+          status.textContent = "build-tx error: " + (e?.message || e);
+          err(status.textContent);
+        }
+      }
+
+      async function ensureEvmChain(chainId) {
+        const eth = getMetaMaskProvider();
+        if (!eth) throw new Error("MetaMask not available");
+        const current = parseInt(
+          await eth.request({ method: "eth_chainId" }),
+          16,
+        );
+        if (current === chainId) return;
+        const hexId = "0x" + chainId.toString(16);
+        try {
+          log(`Switching chain to ${chainId} (${hexId})`);
+          await eth.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: hexId }],
+          });
+        } catch (e) {
+          throw new Error("Switch chain failed: " + (e?.message || e));
+        }
+      }
+
+      async function sendEvmTx(txData, approvalData, originChainId) {
+        const eth = getMetaMaskProvider();
+        if (!eth || !evmAddress) throw new Error("Connect MetaMask");
+        await ensureEvmChain(Number(originChainId));
+        if (
+          approvalData &&
+          approvalData.amount &&
+          approvalData.tokenAddress &&
+          approvalData.spenderAddress
+        ) {
+          // Skip approval if allowance already sufficient
+          try {
+            const provider = new ethers.providers.Web3Provider(eth);
+            const erc20 = new ethers.Contract(
+              approvalData.tokenAddress,
+              ["function allowance(address,address) view returns (uint256)"],
+              provider,
+            );
+            const needed = ethers.BigNumber.from(approvalData.amount);
+            const currentAlw = await erc20.allowance(
+              evmAddress,
+              approvalData.spenderAddress,
+            );
+            log(
+              `Allowance check: current=${currentAlw.toString()} needed=${needed.toString()}`,
+            );
+            if (currentAlw.gte(needed)) {
+              log(
+                `Approval not needed (allowance ${currentAlw.toString()} >= ${needed.toString()})`,
+              );
+            } else {
+              const iface = new ethers.utils.Interface([
+                "function approve(address,uint256)",
+              ]);
+              // Approve exactly what is needed
+              const data = iface.encodeFunctionData("approve", [
+                approvalData.spenderAddress,
+                needed,
+              ]);
+              const appr = {
+                from: evmAddress,
+                to: approvalData.tokenAddress,
+                data,
+                value: "0x0",
+              };
+              log("Sending approval tx...");
+              const sig = await eth.request({
+                method: "eth_sendTransaction",
+                params: [appr],
+              });
+              log("Approval tx hash: " + sig);
+            }
+          } catch (e) {
+            err("Allowance check/approve failed: " + (e?.message || e));
+            throw e;
+          }
+        }
+        const tx = {
+          from: evmAddress,
+          to: txData.to,
+          data: txData.data,
+          value: txData.value || "0x0",
+        };
+        log("Sending bridge tx...");
+        const hash = await eth.request({
+          method: "eth_sendTransaction",
+          params: [tx],
+        });
+        log("Bridge tx hash: " + hash);
+        document.getElementById("execStatus").textContent = "Sent tx: " + hash;
+      }
+
+      const b64ToUint8 = (b64) =>
+        Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const uint8ToB64 = (bytes) => btoa(String.fromCharCode(...bytes));
+
+      async function sendSolTx(txData) {
+        if (!solWallet) throw new Error("Connect Phantom");
+        if (!solConnection)
+          solConnection = new solKit.Connection(
+            "https://api.mainnet-beta.solana.com",
+          );
+
+        // Case 1: base64 transaction blob
+        if (typeof txData === "string") {
+          const buf = b64ToUint8(txData);
+          let tx;
+          try {
+            tx = solKit.VersionedTransaction.deserialize(buf);
+          } catch {
+            tx = solKit.Transaction.from(buf);
+          }
+          const signed = await solWallet.signTransaction(tx);
+          const raw = signed.serialize();
+          const sig = await solConnection.sendRawTransaction(raw);
+          log("Sent Sol tx: " + sig);
+          document.getElementById("execStatus").textContent = "Sol tx: " + sig;
+          return;
+        }
+
+        // Case 2: instructions + lookupTables
+        if (txData.instructions) {
+          const ix = txData.instructions.map(
+            (i) =>
+              new solKit.TransactionInstruction({
+                programId: new solKit.PublicKey(i.programId),
+                keys: i.keys.map((k) => ({
+                  pubkey: new solKit.PublicKey(k.pubkey),
+                  isSigner: k.isSigner,
+                  isWritable: k.isWritable,
+                })),
+                data: Uint8Array.from(i.data),
+              }),
+          );
+          const payer = new solKit.PublicKey(solAddress);
+          const { blockhash, lastValidBlockHeight } =
+            await solConnection.getLatestBlockhash("finalized");
+          const lookups = [];
+          if (txData.lookupTables && txData.lookupTables.length) {
+            for (const addr of txData.lookupTables) {
+              const lt = await solConnection.getAddressLookupTable(
+                new solKit.PublicKey(addr),
+              );
+              if (lt.value) lookups.push(lt.value);
+            }
+          }
+          const msg = solKit.MessageV0.compile({
+            payerKey: payer,
+            recentBlockhash: blockhash,
+            instructions: ix,
+            addressLookupTableAccounts: lookups,
+          });
+          const tx = new solKit.VersionedTransaction(msg);
+          if (txData.signers) {
+            txData.signers.forEach((s) => {
+              try {
+                const kp = solKit.Keypair.fromSecretKey(Uint8Array.from(s));
+                tx.sign([kp]);
+              } catch {}
+            });
+          }
+          const signed = await solWallet.signTransaction(tx);
+          const sig = await solConnection.sendRawTransaction(
+            signed.serialize(),
+            { skipPreflight: false, maxRetries: 3 },
+          );
+          await solConnection.confirmTransaction({
+            signature: sig,
+            blockhash,
+            lastValidBlockHeight,
+          });
+          log("Sent Sol tx: " + sig);
+          document.getElementById("execStatus").textContent = "Sol tx: " + sig;
+          return;
+        }
+        throw new Error("Unknown Solana txData format");
+      }
+
+      async function sendTx() {
+        try {
+          if (!lastBuild || !lastBuild.txData)
+            throw new Error("Run build-tx first");
+          const originChainId = Number(
+            document.getElementById("originChain").value || "0",
+          );
+          const txData = lastBuild.txData;
+          const approvalData = lastBuild.approvalData;
+          if (originChainId === SOLANA_CHAIN) {
+            await sendSolTx(txData.swapTransaction || txData.tx || txData);
+          } else {
+            await sendEvmTx(txData, approvalData, originChainId);
+          }
+        } catch (e) {
+          err("sendTx error: " + (e?.message || e));
+          document.getElementById("execStatus").textContent =
+            "Error: " + (e?.message || e);
+        }
+      }
+
+      async function checkStatus() {
+        try {
+          const api = getApi();
+          const reqHash = (
+            document.getElementById("requestHash").value || ""
+          ).trim();
+          const txHash = (document.getElementById("txHash").value || "").trim();
+          if (!reqHash && !txHash) {
+            document.getElementById("execStatus").textContent =
+              "Provide requestHash or txHash";
+            return;
+          }
+          const params = new URLSearchParams();
+          if (reqHash) params.append("requestHash", reqHash);
+          if (txHash) params.append("txHash", txHash);
+          const res = await fetch(
+            `${api}/api/v1/bungee/status?${params.toString()}`,
+          );
+          const txt = await res.text();
+          let json = null;
+          try {
+            json = JSON.parse(txt);
+          } catch {}
+          if (json?.success) {
+            document.getElementById("execStatus").textContent =
+              `status ${res.status}`;
+            log(`status (${res.status}): ${txt}`);
+          } else {
+            document.getElementById("execStatus").textContent =
+              `status error ${res.status}: ${txt}`;
+            err(`status error ${res.status}: ${txt}`);
+          }
+        } catch (e) {
+          document.getElementById("execStatus").textContent =
+            "status error: " + (e?.message || e);
+          err("status error: " + (e?.message || e));
+        }
+      }
+
+      document.getElementById("connectEvm").onclick = connectEvm;
+      document.getElementById("connectSol").onclick = connectSol;
+      document.getElementById("fetchTokens").onclick = fetchTokens;
+      document.getElementById("searchToken").onclick = searchToken;
+      document.getElementById("getQuote").onclick = getQuote;
+      document.getElementById("buildTx").onclick = buildTx;
+      document.getElementById("submitAuto").onclick = submitAuto;
+      document.getElementById("sendTx").onclick = sendTx;
+      document.getElementById("presetEvmToSol").onclick = () =>
+        applyPreset("evmToSol");
+      document.getElementById("presetSolToEvm").onclick = () =>
+        applyPreset("solToEvm");
+      document.getElementById("presetPolyToSol").onclick = () =>
+        applyPreset("polyToSol");
+      document.getElementById("checkStatus").onclick = checkStatus;
+    </script>
+  </body>
 </html>

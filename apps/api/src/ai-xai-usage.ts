@@ -3,7 +3,10 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { config } from "dotenv";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 console.log(`[ai:xai:usage] Loading env from ${envPath}`);
 config({ path: envPath, override: false });
 
@@ -67,7 +70,7 @@ const TIME_FIELDS = [
 ];
 
 function parseFlag(argv: string[], name: string): string | undefined {
-  const idx = argv.findIndex(value => value === name);
+  const idx = argv.findIndex((value) => value === name);
   if (idx === -1) return undefined;
   return argv[idx + 1];
 }
@@ -187,7 +190,10 @@ function hasV1Path(baseUrl: string): boolean {
   }
 }
 
-function candidateUrls(baseUrlRaw: string, resourcePathNoVersion: string): string[] {
+function candidateUrls(
+  baseUrlRaw: string,
+  resourcePathNoVersion: string,
+): string[] {
   const baseUrl = normalizeBaseUrl(baseUrlRaw);
   const resource = resourcePathNoVersion.replace(/^\/+/, "");
 
@@ -195,7 +201,9 @@ function candidateUrls(baseUrlRaw: string, resourcePathNoVersion: string): strin
   const withoutV1 = `${baseUrl}/${resource}`;
 
   // If base already ends with /v1, the first candidate should not add /v1 again.
-  const ordered = hasV1Path(baseUrl) ? [withoutV1, withV1] : [withV1, withoutV1];
+  const ordered = hasV1Path(baseUrl)
+    ? [withoutV1, withV1]
+    : [withV1, withoutV1];
   return Array.from(new Set(ordered));
 }
 
@@ -227,7 +235,9 @@ async function requestJson(
       typeof payload === "string"
         ? payload.slice(0, 600)
         : JSON.stringify(payload).slice(0, 600);
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${compact}`);
+    throw new Error(
+      `HTTP ${response.status} ${response.statusText}: ${compact}`,
+    );
   }
   return payload;
 }
@@ -287,7 +297,11 @@ function pickGroup(record: Record<string, unknown>): Record<string, string> {
     const value = record[key];
     if (!isRecord(value)) continue;
     for (const [k, v] of Object.entries(value)) {
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      if (
+        typeof v === "string" ||
+        typeof v === "number" ||
+        typeof v === "boolean"
+      ) {
         out[k] = String(v);
       }
     }
@@ -295,7 +309,11 @@ function pickGroup(record: Record<string, unknown>): Record<string, string> {
 
   for (const key of GROUP_FIELDS) {
     const value = record[key];
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
       out[key] = String(value);
     }
   }
@@ -312,14 +330,18 @@ function pickTime(record: Record<string, unknown>): string | null {
   }
   const timeRange = record.timeRange;
   if (isRecord(timeRange)) {
-    const start = typeof timeRange.startTime === "string" ? timeRange.startTime : null;
-    const end = typeof timeRange.endTime === "string" ? timeRange.endTime : null;
+    const start =
+      typeof timeRange.startTime === "string" ? timeRange.startTime : null;
+    const end =
+      typeof timeRange.endTime === "string" ? timeRange.endTime : null;
     if (start || end) return `${start ?? ""}|${end ?? ""}`;
   }
   return null;
 }
 
-function maybeExtractUsdRow(record: Record<string, unknown>): FlatUsageRow | null {
+function maybeExtractUsdRow(
+  record: Record<string, unknown>,
+): FlatUsageRow | null {
   const valueCandidates: unknown[] = [];
   valueCandidates.push(record.usd);
 
@@ -333,7 +355,7 @@ function maybeExtractUsdRow(record: Record<string, unknown>): FlatUsageRow | nul
   if (isRecord(metrics)) valueCandidates.push(metrics.usd);
 
   const usd = valueCandidates
-    .map(candidate => asNumber(candidate))
+    .map((candidate) => asNumber(candidate))
     .find((candidate): candidate is number => candidate !== null);
 
   if (usd === undefined) return null;
@@ -377,9 +399,9 @@ function extractUsageRows(payload: unknown): FlatUsageRow[] {
   }
   const unique = Array.from(dedupe.values());
 
-  const hasTimedRows = unique.some(row => row.time !== null);
+  const hasTimedRows = unique.some((row) => row.time !== null);
   if (!hasTimedRows) return unique;
-  return unique.filter(row => row.time !== null);
+  return unique.filter((row) => row.time !== null);
 }
 
 function summarizeUsage(payload: unknown): UsageSummary {
@@ -463,13 +485,27 @@ async function main(): Promise<void> {
     `/billing/teams/${encodeURIComponent(teamId)}/usage`,
   );
 
-  const reqTotal = buildUsageRequest(startTime, endTime, args.timezone, args.timeUnit, []);
-  const reqByDescription = buildUsageRequest(startTime, endTime, args.timezone, args.timeUnit, [
-    "description",
-  ]);
-  const reqByApiKey = buildUsageRequest(startTime, endTime, args.timezone, args.timeUnit, [
-    "api_key_id",
-  ]);
+  const reqTotal = buildUsageRequest(
+    startTime,
+    endTime,
+    args.timezone,
+    args.timeUnit,
+    [],
+  );
+  const reqByDescription = buildUsageRequest(
+    startTime,
+    endTime,
+    args.timezone,
+    args.timeUnit,
+    ["description"],
+  );
+  const reqByApiKey = buildUsageRequest(
+    startTime,
+    endTime,
+    args.timezone,
+    args.timeUnit,
+    ["api_key_id"],
+  );
 
   let resTotalResult: { payload: unknown; url: string };
   try {
@@ -491,7 +527,10 @@ async function main(): Promise<void> {
   const usageByDescriptionCandidates =
     resTotalResult.url === usageCandidates[0]
       ? usageCandidates
-      : [resTotalResult.url, ...usageCandidates.filter(url => url !== resTotalResult.url)];
+      : [
+          resTotalResult.url,
+          ...usageCandidates.filter((url) => url !== resTotalResult.url),
+        ];
 
   const resByDescriptionResult = await requestJsonWithFallback(
     apiKey,
@@ -540,7 +579,7 @@ async function main(): Promise<void> {
   let thisKeyUsd: number | null = null;
   if (targetApiKeyId && byApiKeySummary) {
     const rowsForKey = byApiKeySummary.rows.filter(
-      row => resolveApiKeyId(row) === targetApiKeyId,
+      (row) => resolveApiKeyId(row) === targetApiKeyId,
     );
     if (rowsForKey.length > 0) {
       thisKeyUsd = rowsForKey.reduce((acc, row) => acc + row.usd, 0);
@@ -548,7 +587,7 @@ async function main(): Promise<void> {
   }
 
   const topDescriptions = descriptionSummary.rows
-    .map(row => ({
+    .map((row) => ({
       description: row.group.description ?? "(unknown)",
       usd: row.usd,
       time: row.time ?? "",
@@ -567,9 +606,7 @@ async function main(): Promise<void> {
   );
 
   if (thisKeyUsd !== null) {
-    console.log(
-      `[ai:xai:usage] api_key_total_usd=${thisKeyUsd.toFixed(6)}`,
-    );
+    console.log(`[ai:xai:usage] api_key_total_usd=${thisKeyUsd.toFixed(6)}`);
   } else if (byApiKeyError) {
     console.log(
       `[ai:xai:usage] api_key_total_usd=unavailable (api_key_id grouping failed: ${byApiKeyError})`,
@@ -623,7 +660,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(error => {
+main().catch((error) => {
   console.error("[ai:xai:usage] failed", error);
   process.exit(1);
 });

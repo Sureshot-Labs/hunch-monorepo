@@ -9,7 +9,10 @@ export type BridgeOrderStatus =
 export type BridgeNotificationStatus = "completed" | "failed" | "refunded";
 
 function compactStatus(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
 export function canonicalizeBridgeOrderStatus(
@@ -54,11 +57,7 @@ export function canonicalizeBridgeOrderStatus(
   ) {
     return "refunded";
   }
-  if (
-    compact === "failed" ||
-    compact === "reverted" ||
-    compact === "error"
-  ) {
+  if (compact === "failed" || compact === "reverted" || compact === "error") {
     return "failed";
   }
   if (compact === "expired") return "expired";

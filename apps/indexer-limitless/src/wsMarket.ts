@@ -317,7 +317,10 @@ function arraysEqual(left: string[], right: string[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
-function hasRemovedTargets(currentValues: string[], nextValues: string[]): boolean {
+function hasRemovedTargets(
+  currentValues: string[],
+  nextValues: string[],
+): boolean {
   const nextSet = new Set(nextValues);
   return currentValues.some((value) => !nextSet.has(value));
 }
@@ -484,10 +487,7 @@ function createSocket(kind: WsSocketKind): Socket {
             }
 
             const [yesPrice, noPrice] = normalizeLimitlessPricePair(
-              [
-                entry.yesPrice ?? entry.yes,
-                entry.noPrice ?? entry.no,
-              ],
+              [entry.yesPrice ?? entry.yes, entry.noPrice ?? entry.no],
               "amm",
             );
 
@@ -505,7 +505,11 @@ function createSocket(kind: WsSocketKind): Socket {
 
   socket.on("disconnect", (reason) => {
     if (expectedDisconnectKinds.delete(kind)) {
-      log.info("Limitless WS disconnected for restart", { kind, label, reason });
+      log.info("Limitless WS disconnected for restart", {
+        kind,
+        label,
+        reason,
+      });
       return;
     }
     log.warn("Limitless WS disconnected", { kind, label, reason });

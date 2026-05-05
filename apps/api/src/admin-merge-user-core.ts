@@ -151,9 +151,10 @@ export async function mergeUsers(
       `user-merge:${source.id}:${target.id}`,
     ]);
 
-    summary.walletsInserted = (
-      await client.query(
-        `
+    summary.walletsInserted =
+      (
+        await client.query(
+          `
           insert into user_wallets (
             user_id,
             wallet_address,
@@ -184,13 +185,14 @@ export async function mergeUsers(
                 and t.wallet_address = w.wallet_address
             )
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.venueCredsDeduped = (
-      await client.query(
-        `
+    summary.venueCredsDeduped =
+      (
+        await client.query(
+          `
           delete from user_venue_credentials s
           using user_venue_credentials t
           where s.user_id = $2
@@ -198,83 +200,92 @@ export async function mergeUsers(
             and s.wallet_address = t.wallet_address
             and s.venue = t.venue
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.venueCredsMoved = (
-      await client.query(
-        `update user_venue_credentials set user_id = $1 where user_id = $2`,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+    summary.venueCredsMoved =
+      (
+        await client.query(
+          `update user_venue_credentials set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.sessionsMoved = (
-      await client.query(`update user_sessions set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.sessionsMoved =
+      (
+        await client.query(
+          `update user_sessions set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.watchlistDeduped = (
-      await client.query(
-        `
+    summary.watchlistDeduped =
+      (
+        await client.query(
+          `
           delete from user_watchlist s
           using user_watchlist t
           where s.user_id = $2
             and t.user_id = $1
             and s.market_id = t.market_id
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.watchlistMoved = (
-      await client.query(`update user_watchlist set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.watchlistMoved =
+      (
+        await client.query(
+          `update user_watchlist set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.tradingPrefsDropped = (
-      await client.query(
-        `
+    summary.tradingPrefsDropped =
+      (
+        await client.query(
+          `
           delete from user_trading_preferences
           where user_id = $2
             and exists (select 1 from user_trading_preferences where user_id = $1)
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.tradingPrefsMoved = (
-      await client.query(
-        `update user_trading_preferences set user_id = $1 where user_id = $2`,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+    summary.tradingPrefsMoved =
+      (
+        await client.query(
+          `update user_trading_preferences set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.tradingStatsDropped = (
-      await client.query(
-        `
+    summary.tradingStatsDropped =
+      (
+        await client.query(
+          `
           delete from user_trading_stats
           where user_id = $2
             and exists (select 1 from user_trading_stats where user_id = $1)
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.tradingStatsMoved = (
-      await client.query(
-        `update user_trading_stats set user_id = $1 where user_id = $2`,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+    summary.tradingStatsMoved =
+      (
+        await client.query(
+          `update user_trading_stats set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.idempotencyDeduped = (
-      await client.query(
-        `
+    summary.idempotencyDeduped =
+      (
+        await client.query(
+          `
           delete from idempotency s
           using idempotency t
           where s.user_id = $2
@@ -282,20 +293,22 @@ export async function mergeUsers(
             and s.endpoint = t.endpoint
             and s.idempotency_key = t.idempotency_key
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.idempotencyMoved = (
-      await client.query(`update idempotency set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.idempotencyMoved =
+      (
+        await client.query(
+          `update idempotency set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.executionsDeduped = (
-      await client.query(
-        `
+    summary.executionsDeduped =
+      (
+        await client.query(
+          `
           delete from executions s
           using executions t
           where s.user_id = $2
@@ -304,20 +317,22 @@ export async function mergeUsers(
             and s.venue = t.venue
             and s.tx_signature = t.tx_signature
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.executionsMoved = (
-      await client.query(`update executions set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.executionsMoved =
+      (
+        await client.query(
+          `update executions set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.positionsDeduped = (
-      await client.query(
-        `
+    summary.positionsDeduped =
+      (
+        await client.query(
+          `
           delete from positions s
           using positions t
           where s.user_id = $2
@@ -326,20 +341,22 @@ export async function mergeUsers(
             and s.venue = t.venue
             and s.token_id is not distinct from t.token_id
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.positionsMoved = (
-      await client.query(`update positions set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.positionsMoved =
+      (
+        await client.query(
+          `update positions set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.feeEventsDeduped = (
-      await client.query(
-        `
+    summary.feeEventsDeduped =
+      (
+        await client.query(
+          `
           delete from fee_events s
           using fee_events t
           where s.user_id = $2
@@ -347,20 +364,22 @@ export async function mergeUsers(
             and s.source_type = t.source_type
             and s.source_id = t.source_id
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.feeEventsMoved = (
-      await client.query(`update fee_events set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.feeEventsMoved =
+      (
+        await client.query(
+          `update fee_events set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.volumeEventsDeduped = (
-      await client.query(
-        `
+    summary.volumeEventsDeduped =
+      (
+        await client.query(
+          `
           delete from volume_events s
           using volume_events t
           where s.user_id = $2
@@ -368,95 +387,109 @@ export async function mergeUsers(
             and s.source_type = t.source_type
             and s.source_id = t.source_id
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.volumeEventsMoved = (
-      await client.query(`update volume_events set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.volumeEventsMoved =
+      (
+        await client.query(
+          `update volume_events set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.rewardClaimsMoved = (
-      await client.query(`update reward_claims set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.rewardClaimsMoved =
+      (
+        await client.query(
+          `update reward_claims set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.ordersMoved = (
-      await client.query(`update orders set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.ordersMoved =
+      (
+        await client.query(
+          `update orders set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.orderLogsMoved = (
-      await client.query(`update order_logs set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.orderLogsMoved =
+      (
+        await client.query(
+          `update order_logs set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.bridgeOrdersMoved = (
-      await client.query(`update bridge_orders set user_id = $1 where user_id = $2`, [
-        target.id,
-        source.id,
-      ])
-    ).rowCount ?? 0;
+    summary.bridgeOrdersMoved =
+      (
+        await client.query(
+          `update bridge_orders set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.referralsReferredDeduped = (
-      await client.query(
-        `
+    summary.referralsReferredDeduped =
+      (
+        await client.query(
+          `
           delete from referrals
           where referred_user_id = $2
             and exists (select 1 from referrals where referred_user_id = $1)
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.referralsReferredMoved = (
-      await client.query(
-        `update referrals set referred_user_id = $1 where referred_user_id = $2`,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+    summary.referralsReferredMoved =
+      (
+        await client.query(
+          `update referrals set referred_user_id = $1 where referred_user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.referralsReferrerDeduped = (
-      await client.query(
-        `
+    summary.referralsReferrerDeduped =
+      (
+        await client.query(
+          `
           delete from referrals
           where referrer_user_id = $2
             and referred_user_id = $1
         `,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.referralsReferrerMoved = (
-      await client.query(
-        `update referrals set referrer_user_id = $1 where referrer_user_id = $2`,
-        [target.id, source.id],
-      )
-    ).rowCount ?? 0;
+    summary.referralsReferrerMoved =
+      (
+        await client.query(
+          `update referrals set referrer_user_id = $1 where referrer_user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.referralsSelfRemoved = (
-      await client.query(
-        `delete from referrals where referrer_user_id = $1 and referred_user_id = $1`,
-        [target.id],
-      )
-    ).rowCount ?? 0;
+    summary.referralsSelfRemoved =
+      (
+        await client.query(
+          `delete from referrals where referrer_user_id = $1 and referred_user_id = $1`,
+          [target.id],
+        )
+      ).rowCount ?? 0;
 
-    summary.walletsDeleted = (
-      await client.query(`delete from user_wallets where user_id = $1`, [source.id])
-    ).rowCount ?? 0;
+    summary.walletsDeleted =
+      (
+        await client.query(`delete from user_wallets where user_id = $1`, [
+          source.id,
+        ])
+      ).rowCount ?? 0;
 
-    summary.primaryWalletAssigned = (
-      await client.query(
-        `
+    summary.primaryWalletAssigned =
+      (
+        await client.query(
+          `
           update user_wallets
           set is_primary = true
           where id = (
@@ -470,18 +503,19 @@ export async function mergeUsers(
             select 1 from user_wallets where user_id = $1 and is_primary = true
           )
         `,
-        [target.id],
-      )
-    ).rowCount ?? 0;
-
-    if (!options.keepSource) {
-      summary.sourceUserDeleted = (
-        await client.query(`delete from users where id = $1`, [source.id])
+          [target.id],
+        )
       ).rowCount ?? 0;
 
-      summary.targetUserUpdated = (
-        await client.query(
-          `
+    if (!options.keepSource) {
+      summary.sourceUserDeleted =
+        (await client.query(`delete from users where id = $1`, [source.id]))
+          .rowCount ?? 0;
+
+      summary.targetUserUpdated =
+        (
+          await client.query(
+            `
             update users
             set email = coalesce(email, $2),
                 username = coalesce(username, $3),
@@ -494,38 +528,39 @@ export async function mergeUsers(
                 last_login_at = greatest(coalesce(last_login_at, $10), $10)
             where id = $1
           `,
-          [
-            target.id,
-            source.email,
-            source.username,
-            source.display_name,
-            source.avatar_url,
-            source.privy_user_id,
-            source.referral_code,
-            source.is_admin ?? false,
-            source.kalshi_proof_bypass ?? false,
-            source.last_login_at,
-          ],
-        )
-      ).rowCount ?? 0;
+            [
+              target.id,
+              source.email,
+              source.username,
+              source.display_name,
+              source.avatar_url,
+              source.privy_user_id,
+              source.referral_code,
+              source.is_admin ?? false,
+              source.kalshi_proof_bypass ?? false,
+              source.last_login_at,
+            ],
+          )
+        ).rowCount ?? 0;
     } else {
-      summary.targetUserUpdated = (
-        await client.query(
-          `
+      summary.targetUserUpdated =
+        (
+          await client.query(
+            `
             update users
             set is_admin = is_admin or $2,
                 kalshi_proof_bypass = kalshi_proof_bypass or $3,
                 last_login_at = greatest(coalesce(last_login_at, $4), $4)
             where id = $1
           `,
-          [
-            target.id,
-            source.is_admin ?? false,
-            source.kalshi_proof_bypass ?? false,
-            source.last_login_at,
-          ],
-        )
-      ).rowCount ?? 0;
+            [
+              target.id,
+              source.is_admin ?? false,
+              source.kalshi_proof_bypass ?? false,
+              source.last_login_at,
+            ],
+          )
+        ).rowCount ?? 0;
     }
 
     if (options.dryRun) {

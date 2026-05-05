@@ -28,9 +28,7 @@ import {
   capTreasurySweepAmountMicro,
   computeTreasuryChainMath,
 } from "./services/rewards-treasury.js";
-import {
-  resolveBlockedRewardsMigrations,
-} from "./rewards-migration-preflight.js";
+import { resolveBlockedRewardsMigrations } from "./rewards-migration-preflight.js";
 
 type TestCase = {
   name: string;
@@ -55,22 +53,24 @@ function createReferralDb(
       ) {
         const userId = String(values[0] ?? "");
         const row = users.find((user) => user.id === userId) ?? null;
-        return { rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [] };
+        return {
+          rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [],
+        };
       }
 
       if (sql.includes("upper(referral_code) = upper($1)")) {
         const code = String(values[0] ?? "").toUpperCase();
         const row =
-          users.find(
-            (user) => user.referral_code?.toUpperCase() === code,
-          ) ?? null;
-        return { rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [] };
+          users.find((user) => user.referral_code?.toUpperCase() === code) ??
+          null;
+        return {
+          rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [],
+        };
       }
 
       if (sql.includes("update users set referral_code = $2 where id = $1")) {
         const userId = String(values[0] ?? "");
-        const referralCode =
-          values[1] == null ? null : String(values[1]);
+        const referralCode = values[1] == null ? null : String(values[1]);
         const conflict =
           referralCode != null
             ? users.find(
@@ -146,7 +146,9 @@ function createReferralAttachDb(seed: {
         sql.includes("where r.referred_user_id = $1")
       ) {
         const userId = String(values[0] ?? "");
-        const row = referrals.find((entry) => entry.referred_user_id === userId);
+        const row = referrals.find(
+          (entry) => entry.referred_user_id === userId,
+        );
         if (!row) return { rows: [] };
         const referrer =
           users.find((entry) => entry.id === row.referrer_user_id) ?? null;
@@ -168,7 +170,8 @@ function createReferralAttachDb(seed: {
       if (sql.includes("upper(referral_code) = upper($1)")) {
         const code = String(values[0] ?? "").toUpperCase();
         const row =
-          users.find((entry) => entry.referral_code?.toUpperCase() === code) ?? null;
+          users.find((entry) => entry.referral_code?.toUpperCase() === code) ??
+          null;
         return { rows: row ? [{ id: row.id }] : [] };
       }
 
@@ -189,7 +192,9 @@ function createReferralAttachDb(seed: {
             : values[4] == null
               ? null
               : new Date(String(values[4]));
-        if (referrals.some((entry) => entry.referred_user_id === referredUserId)) {
+        if (
+          referrals.some((entry) => entry.referred_user_id === referredUserId)
+        ) {
           return { rows: [] };
         }
         referrals.push({
@@ -256,7 +261,9 @@ function createQualifiedReferralCountDb(seed: {
         return { rows: [] };
       }
 
-      throw new Error(`Unhandled SQL in qualified referral count test db: ${sql}`);
+      throw new Error(
+        `Unhandled SQL in qualified referral count test db: ${sql}`,
+      );
     },
   } as import("./db.js").DbQuery;
 }
@@ -478,7 +485,10 @@ const tests: TestCase[] = [
       );
 
       assert.equal(result, "ok");
-      assert.equal(calls[0], "select pg_advisory_xact_lock(hashtext($1)::bigint)");
+      assert.equal(
+        calls[0],
+        "select pg_advisory_xact_lock(hashtext($1)::bigint)",
+      );
       assert.equal(calls[1], "callback");
     },
   },
@@ -593,7 +603,9 @@ const tests: TestCase[] = [
       const db = createReferralAttachDb({
         users: [{ id: "user-a", referral_code: null }],
       });
-      const status = await getReferralAttachmentStatus(db, { userId: "user-a" });
+      const status = await getReferralAttachmentStatus(db, {
+        userId: "user-a",
+      });
       assert.equal(status.hasReferrer, false);
       assert.equal(status.code, null);
       assert.equal(status.status, null);
@@ -816,7 +828,10 @@ const tests: TestCase[] = [
     name: "referrals order createdAt sorts by timestamp then id",
     run: () => {
       assert.equal(
-        resolveRewardsReferralsOrderBy({ sortBy: "createdAt", sortDir: "desc" }),
+        resolveRewardsReferralsOrderBy({
+          sortBy: "createdAt",
+          sortDir: "desc",
+        }),
         "rr.created_at desc, rr.id desc",
       );
     },

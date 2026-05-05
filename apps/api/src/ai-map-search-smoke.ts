@@ -16,7 +16,7 @@ if (isDirectRun) {
     commandName: "ai:map-search:smoke",
     scriptTag: "ai-map-search-smoke",
     qaScriptName: "ai-map-search-smoke",
-  }).catch(async error => {
+  }).catch(async (error) => {
     console.error("[ai-map-search-smoke] failed", error);
     process.exit(1);
   });

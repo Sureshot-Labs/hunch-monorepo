@@ -41,7 +41,9 @@ function parseFeeRateBps(value: unknown): number | undefined {
   return undefined;
 }
 
-export function extractLimitlessProfile(value: unknown): LimitlessProfile | null {
+export function extractLimitlessProfile(
+  value: unknown,
+): LimitlessProfile | null {
   if (!isRecord(value)) return null;
   const profileRaw = isRecord(value.profile) ? value.profile : value;
   if (!isRecord(profileRaw)) return null;
@@ -131,18 +133,20 @@ export function mergeLimitlessProfiles(
         }
       : undefined;
   return {
-    ...(base?.id ?? extra?.id ? { id: base?.id ?? extra?.id } : {}),
-    ...(base?.account ?? extra?.account
+    ...((base?.id ?? extra?.id) ? { id: base?.id ?? extra?.id } : {}),
+    ...((base?.account ?? extra?.account)
       ? { account: base?.account ?? extra?.account }
       : {}),
-    ...(base?.client ?? extra?.client
+    ...((base?.client ?? extra?.client)
       ? { client: base?.client ?? extra?.client }
       : {}),
     ...(rank ? { rank } : {}),
   };
 }
 
-function extractStoredProfile(additionalData: unknown): LimitlessProfile | null {
+function extractStoredProfile(
+  additionalData: unknown,
+): LimitlessProfile | null {
   if (!isRecord(additionalData)) return extractLimitlessProfile(additionalData);
   return extractLimitlessProfile(additionalData.profile ?? additionalData);
 }

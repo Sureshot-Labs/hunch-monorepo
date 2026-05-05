@@ -4,10 +4,7 @@ import bs58 from "bs58";
 
 import type { User } from "../auth.js";
 import { env } from "../env.js";
-import {
-  type PrivyWalletProfile,
-  PrivyService,
-} from "../privy-service.js";
+import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
@@ -173,9 +170,10 @@ async function executePreparedPrivyAuthorizationRequest(
     headers: buildPrivyWalletHeaders(request.input, authorizationSignature),
     body: JSON.stringify(request.input.body),
   });
-  const payload = (await response.json().catch(() => null)) as
-    | Record<string, unknown>
-    | null;
+  const payload = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
   if (!response.ok) {
     const rawMessage =
       (payload &&

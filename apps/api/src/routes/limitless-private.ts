@@ -42,9 +42,7 @@ import {
 import { tryRecordReferralFirstTradeConversion } from "../services/analytics-referrals.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
-import {
-  syncLimitlessHistoryForWallet,
-} from "../services/limitless-history.js";
+import { syncLimitlessHistoryForWallet } from "../services/limitless-history.js";
 import {
   buildEmbeddedPersonalSignRequest,
   createEmbeddedPrivyWalletRpcRequest,
@@ -106,10 +104,11 @@ function mapLimitlessUpstreamStatus(status: number): number {
 
 // Legacy Limitless markets sometimes expose only exchange in /markets payload.
 // For these, SELL CT approvals may require a separate operator not returned by API.
-const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> = {
-  [normalizeAddress("0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6")]:
-    "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
-};
+const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> =
+  {
+    [normalizeAddress("0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6")]:
+      "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
+  };
 const LIMITLESS_CLOB_EIP712_NAME = "Limitless CTF Exchange";
 const LIMITLESS_CLOB_EIP712_VERSION = "1";
 const LIMITLESS_CLOB_CHAIN_ID = 8453;
@@ -157,13 +156,17 @@ type LimitlessAccountCacheEntry = {
   expiresAt: number;
 };
 const limitlessAccountCache = new Map<string, LimitlessAccountCacheEntry>();
-const limitlessAccountInflight = new Map<string, Promise<LimitlessAccountPayload>>();
+const limitlessAccountInflight = new Map<
+  string,
+  Promise<LimitlessAccountPayload>
+>();
 
 function resolveLimitlessLegacyOperatorForExchange(
   exchangeAddress: string | null,
 ): string | null {
   if (!exchangeAddress) return null;
-  const mapped = LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
+  const mapped =
+    LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
   return mapped ?? null;
 }
 
@@ -311,7 +314,9 @@ function buildLimitlessAccountCacheKey(inputs: {
   ].join("|");
 }
 
-function readLimitlessAccountCache(key: string): LimitlessAccountPayload | null {
+function readLimitlessAccountCache(
+  key: string,
+): LimitlessAccountPayload | null {
   if (env.limitlessAccountCacheTtlMs <= 0) return null;
   const entry = limitlessAccountCache.get(key);
   if (!entry) return null;
@@ -322,7 +327,10 @@ function readLimitlessAccountCache(key: string): LimitlessAccountPayload | null 
   return entry.value;
 }
 
-function writeLimitlessAccountCache(key: string, value: LimitlessAccountPayload) {
+function writeLimitlessAccountCache(
+  key: string,
+  value: LimitlessAccountPayload,
+) {
   if (env.limitlessAccountCacheTtlMs <= 0) return;
   limitlessAccountCache.set(key, {
     value,
@@ -385,7 +393,8 @@ function extractLimitlessImmediateFill(
       : normalizeLimitlessAmount(sideAmountRaw);
   const sharesCandidates = [outcomeShares, fallback.size, sideShares];
   const shares = sharesCandidates.find(
-    (value): value is number => value != null && Number.isFinite(value) && value > 0,
+    (value): value is number =>
+      value != null && Number.isFinite(value) && value > 0,
   );
   if (shares == null) return null;
 
@@ -452,7 +461,11 @@ function coerceOrderNumber(
 ): number | null {
   if (value == null) return null;
   const raw =
-    typeof value === "string" ? value.trim() : typeof value === "number" ? value : null;
+    typeof value === "string"
+      ? value.trim()
+      : typeof value === "number"
+        ? value
+        : null;
   if (raw == null || raw === "") return null;
   const parsed = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(parsed)) {
@@ -548,8 +561,12 @@ function normalizeOrderId(value: unknown): string | null {
   return null;
 }
 
-function extractLimitlessOrderId(record: Record<string, unknown>): string | null {
-  return normalizeOrderId(readOrderField(record, ["id", "orderId", "order_id"]));
+function extractLimitlessOrderId(
+  record: Record<string, unknown>,
+): string | null {
+  return normalizeOrderId(
+    readOrderField(record, ["id", "orderId", "order_id"]),
+  );
 }
 
 function extractLimitlessTokenId(
@@ -582,7 +599,11 @@ function extractLimitlessOrderStatus(record: Record<string, unknown>): string {
   const value = readOrderField(record, ["status", "orderStatus"]);
   if (typeof value === "string" && value.trim()) {
     const normalized = value.trim().toLowerCase();
-    if (normalized === "open" || normalized === "active" || normalized === "live") {
+    if (
+      normalized === "open" ||
+      normalized === "active" ||
+      normalized === "live"
+    ) {
       return "live";
     }
     if (normalized === "cancelled" || normalized === "canceled") {
@@ -596,7 +617,9 @@ function extractLimitlessOrderStatus(record: Record<string, unknown>): string {
   return "live";
 }
 
-function extractLimitlessOrderPrice(record: Record<string, unknown>): number | null {
+function extractLimitlessOrderPrice(
+  record: Record<string, unknown>,
+): number | null {
   const value = readOrderField(record, [
     "price",
     "orderPrice",
@@ -607,7 +630,9 @@ function extractLimitlessOrderPrice(record: Record<string, unknown>): number | n
   return parseNumberish(value);
 }
 
-function extractLimitlessOrderSize(record: Record<string, unknown>): number | null {
+function extractLimitlessOrderSize(
+  record: Record<string, unknown>,
+): number | null {
   const value = readOrderField(record, [
     "size",
     "orderSize",
@@ -645,7 +670,9 @@ function extractLimitlessCanceledIds(
   return ids.length ? ids : fallback;
 }
 
-function extractLimitlessMarketExchangeAddress(payload: unknown): string | null {
+function extractLimitlessMarketExchangeAddress(
+  payload: unknown,
+): string | null {
   const marketRecord = isRecord(payload)
     ? isRecord(payload.market)
       ? payload.market
@@ -727,7 +754,9 @@ function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
   return null;
 }
 
-function extractLimitlessExpectedExchangeAddress(payload: unknown): string | null {
+function extractLimitlessExpectedExchangeAddress(
+  payload: unknown,
+): string | null {
   if (!isRecord(payload)) return null;
 
   const nestedPayload = isRecord(payload.payload) ? payload.payload : null;
@@ -738,8 +767,7 @@ function extractLimitlessExpectedExchangeAddress(payload: unknown): string | nul
     nestedPayload?.error,
   ];
 
-  const pattern =
-    /exchange address for this market:\s*(0x[a-fA-F0-9]{40})/i;
+  const pattern = /exchange address for this market:\s*(0x[a-fA-F0-9]{40})/i;
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const match = candidate.match(pattern);
@@ -754,7 +782,9 @@ function extractLimitlessExpectedExchangeAddress(payload: unknown): string | nul
 
 type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
 
-function normalizeRawLimitlessTokenIdFromUnknown(value: unknown): string | null {
+function normalizeRawLimitlessTokenIdFromUnknown(
+  value: unknown,
+): string | null {
   return typeof value === "string" ||
     typeof value === "number" ||
     typeof value === "bigint"
@@ -769,7 +799,9 @@ function extractLimitlessPositionTokenIds(value: unknown): string[] {
     .filter((entry): entry is string => Boolean(entry));
 }
 
-function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null {
+function extractLimitlessTokenPair(
+  payload: unknown,
+): LimitlessTokenPair | null {
   const marketRecord = isRecord(payload)
     ? isRecord(payload.market)
       ? payload.market
@@ -791,13 +823,17 @@ function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null 
       tokensRecord
         ? (tokensRecord.yes ?? tokensRecord.YES ?? tokensRecord[0])
         : null,
-    ) ?? positionIds[0] ?? null;
+    ) ??
+    positionIds[0] ??
+    null;
   const tokenNo =
     normalizeRawLimitlessTokenIdFromUnknown(
       tokensRecord
         ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1])
         : null,
-    ) ?? positionIds[1] ?? null;
+    ) ??
+    positionIds[1] ??
+    null;
 
   if (!tokenYes && !tokenNo) return null;
   return { tokenYes, tokenNo };
@@ -823,8 +859,12 @@ async function resolveLimitlessTokenPairForSlug(inputs: {
     `,
     [slug],
   );
-  const dbTokenYes = normalizeLimitlessRawTokenId(dbRow.rows[0]?.token_yes ?? null);
-  const dbTokenNo = normalizeLimitlessRawTokenId(dbRow.rows[0]?.token_no ?? null);
+  const dbTokenYes = normalizeLimitlessRawTokenId(
+    dbRow.rows[0]?.token_yes ?? null,
+  );
+  const dbTokenNo = normalizeLimitlessRawTokenId(
+    dbRow.rows[0]?.token_no ?? null,
+  );
   if (dbTokenYes && dbTokenNo) {
     return { tokenYes: dbTokenYes, tokenNo: dbTokenNo };
   }
@@ -870,16 +910,13 @@ async function resolveEmbeddedLimitlessOrderSigningContext(inputs: {
   });
 
   if (!upstream.ok) {
-    throw Object.assign(
-      new Error("Limitless market exchange fetch failed"),
-      {
-        responseStatus: 502,
-        responsePayload: {
-          status: upstream.status,
-          payload: upstream.payload,
-        },
+    throw Object.assign(new Error("Limitless market exchange fetch failed"), {
+      responseStatus: 502,
+      responsePayload: {
+        status: upstream.status,
+        payload: upstream.payload,
       },
-    );
+    });
   }
 
   const tokenId = normalizeLimitlessRawTokenId(inputs.payload.tokenId);
@@ -896,25 +933,21 @@ async function resolveEmbeddedLimitlessOrderSigningContext(inputs: {
   if (!tokenPair?.tokenYes && !tokenPair?.tokenNo) {
     throw new Error("Unable to resolve Limitless market tokens.");
   }
-  if (
-    tokenId !== tokenPair.tokenYes &&
-    tokenId !== tokenPair.tokenNo
-  ) {
+  if (tokenId !== tokenPair.tokenYes && tokenId !== tokenPair.tokenNo) {
     throw new Error(
       "Embedded Limitless order token does not belong to this market.",
     );
   }
 
-  const exchangeAddress = extractLimitlessMarketExchangeAddress(upstream.payload);
+  const exchangeAddress = extractLimitlessMarketExchangeAddress(
+    upstream.payload,
+  );
   if (!exchangeAddress) {
-    throw new Error(
-      "Unable to resolve Limitless exchange for this market.",
-    );
+    throw new Error("Unable to resolve Limitless exchange for this market.");
   }
 
   let canonicalExchangeAddress = exchangeAddress;
-  const probeTokenId =
-    tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? tokenId;
+  const probeTokenId = tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? tokenId;
   const signerChecksum = toChecksumAddress(inputs.signer);
   if (signerChecksum && inputs.ownerId && probeTokenId) {
     const probeSide = Number(inputs.payload.side) === 1 ? 1 : 0;
@@ -1054,7 +1087,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
     if (!upstream.ok) {
       if (upstream.status === 409) {
-        const upstreamExistingProfile = extractLimitlessProfile(upstream.payload);
+        const upstreamExistingProfile = extractLimitlessProfile(
+          upstream.payload,
+        );
         if (
           upstreamExistingProfile?.id &&
           (!upstreamExistingProfile.account ||
@@ -1143,7 +1178,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           auth: "partner_hmac",
         });
         if (profileLookup.ok) {
-          const existingProfile = extractLimitlessProfile(profileLookup.payload);
+          const existingProfile = extractLimitlessProfile(
+            profileLookup.payload,
+          );
           if (existingProfile?.id) {
             const recoveredProfile: LimitlessProfile = {
               ...existingProfile,
@@ -1181,7 +1218,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       return {
         ok: false,
         httpStatus:
-          upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502,
+          upstream.status >= 400 && upstream.status < 500
+            ? upstream.status
+            : 502,
         error: "Limitless connect failed",
         status: upstream.status,
         payload: upstream.payload,
@@ -1370,7 +1409,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       const headerAccount = getHeaderValue(request.headers, "x-account");
-      const headerMessage = getHeaderValue(request.headers, "x-signing-message");
+      const headerMessage = getHeaderValue(
+        request.headers,
+        "x-signing-message",
+      );
       const headerSignature = getHeaderValue(request.headers, "x-signature");
 
       const account = headerAccount ?? body.account;
@@ -1634,7 +1676,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             ? ((error as { responseStatus: number }).responseStatus ?? 500)
             : 500;
         const payload =
-          (error as { responsePayload?: unknown })?.responsePayload ?? undefined;
+          (error as { responsePayload?: unknown })?.responsePayload ??
+          undefined;
         app.log.error(
           { error, userId: user.id, signer },
           "Failed to execute embedded Limitless readiness",
@@ -1645,7 +1688,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Embedded Limitless setup execution failed",
-          ...(payload !== undefined ? (payload as Record<string, unknown>) : {}),
+          ...(payload !== undefined
+            ? (payload as Record<string, unknown>)
+            : {}),
         });
       }
     },
@@ -1688,7 +1733,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
         const ownerId = partnerAuth.profile.id;
         if (ownerId == null) {
-          throw new Error("Limitless profile mapping is missing for this wallet.");
+          throw new Error(
+            "Limitless profile mapping is missing for this wallet.",
+          );
         }
         const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
           context,
@@ -1758,7 +1805,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
         const ownerId = partnerAuth.profile.id;
         if (ownerId == null) {
-          throw new Error("Limitless profile mapping is missing for this wallet.");
+          throw new Error(
+            "Limitless profile mapping is missing for this wallet.",
+          );
         }
         const prepared = await prepareEmbeddedLimitlessOrderSigningRequest({
           context,
@@ -1883,7 +1932,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!signer) {
         reply.code(400);
         return reply.send({
-          error: "Limitless account snapshot requires a valid EVM wallet address",
+          error:
+            "Limitless account snapshot requires a valid EVM wallet address",
         });
       }
 
@@ -1896,7 +1946,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const credsUpdatedAtValue =
         creds?.updatedAt instanceof Date
           ? creds.updatedAt.toISOString()
-          : creds?.updatedAt ?? null;
+          : (creds?.updatedAt ?? null);
       const refresh = request.query.refresh === true;
       let hasCredentials =
         Boolean(creds) &&
@@ -1911,9 +1961,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const ammSpender = request.query.ammSpender ?? null;
       const tokenId = normalizeLimitlessRawTokenId(request.query.tokenId);
 
-      const cacheEnabled =
-        !refresh &&
-        env.limitlessAccountCacheTtlMs > 0;
+      const cacheEnabled = !refresh && env.limitlessAccountCacheTtlMs > 0;
       const cacheKey = buildLimitlessAccountCacheKey({
         userId: user.id,
         signer,
@@ -2042,7 +2090,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           const allowanceNegRisk = snapshot.allowanceNegRisk;
           const allowanceAmm = snapshot.allowanceAmm;
           const tokenBalanceRaw =
-            tokenId && tokenBalanceMap ? tokenBalanceMap.get(tokenId) ?? 0n : null;
+            tokenId && tokenBalanceMap
+              ? (tokenBalanceMap.get(tokenId) ?? 0n)
+              : null;
 
           const isContract = typeof code === "string" && code.length > 2;
 
@@ -2072,7 +2122,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                   ? {
                       negRisk: {
                         spender: negRiskSpender,
-                        allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
+                        allowance: ethers.formatUnits(
+                          allowanceNegRisk ?? 0n,
+                          6,
+                        ),
                         allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
                       },
                     }
@@ -2101,14 +2154,20 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 : {}),
               isApprovedForAll: {
                 ...(clobSpender ? { clob: approvedClob ?? false } : {}),
-                ...(negRiskSpender ? { negRisk: approvedNegRisk ?? false } : {}),
-                ...(adapterSpender ? { adapter: approvedAdapter ?? false } : {}),
+                ...(negRiskSpender
+                  ? { negRisk: approvedNegRisk ?? false }
+                  : {}),
+                ...(adapterSpender
+                  ? { adapter: approvedAdapter ?? false }
+                  : {}),
                 ...(ammSpender ? { amm: approvedAmm ?? false } : {}),
               },
             },
             profile: profile ?? null,
             hasCredentials,
-            ...(authContext?.authMode ? { authMode: authContext.authMode } : {}),
+            ...(authContext?.authMode
+              ? { authMode: authContext.authMode }
+              : {}),
           };
         })();
 
@@ -2408,8 +2467,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const order = request.body.order;
-      const orderSigner =
-        typeof order.signer === "string" ? order.signer : "";
+      const orderSigner = typeof order.signer === "string" ? order.signer : "";
       if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
         reply.code(400);
         return reply.send({
@@ -2680,7 +2738,12 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const makerAmount = parseNumberish(order.makerAmount);
       const takerAmount = parseNumberish(order.takerAmount);
       const price = parseNumberish(order.price);
-      const size = deriveSize(request.body.orderType, side, makerAmount, takerAmount);
+      const size = deriveSize(
+        request.body.orderType,
+        side,
+        makerAmount,
+        takerAmount,
+      );
       const status =
         (isRecord(upstream.payload) &&
           isRecord(upstream.payload.order) &&
@@ -2711,20 +2774,27 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         request.body.orderType === "FOK" &&
         tokenId
       ) {
-        const immediateFill = extractLimitlessImmediateFill(upstream.payload, side, {
-          price,
-          size,
-        });
+        const immediateFill = extractLimitlessImmediateFill(
+          upstream.payload,
+          side,
+          {
+            price,
+            size,
+          },
+        );
         if (immediateFill && isLimitlessTerminalFillStatus(status)) {
-          referralFirstTrade = await tryRecordReferralFirstTradeConversion(pool, {
-            userId: user.id,
-            venue: "limitless",
-            status,
-            sourceType: "order",
-            sourceId: venueOrderId,
-            txHash: null,
-            logger: app.log,
-          });
+          referralFirstTrade = await tryRecordReferralFirstTradeConversion(
+            pool,
+            {
+              userId: user.id,
+              venue: "limitless",
+              status,
+              sourceType: "order",
+              sourceId: venueOrderId,
+              txHash: null,
+              logger: app.log,
+            },
+          );
         }
         let optimisticApplied = false;
         if (immediateFill) {
@@ -3090,42 +3160,42 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           continue;
         }
 
-      if (!isLimitlessPartnerHmacConfigured()) {
-        errors += 1;
-        results.push({
-          walletAddress: wallet,
-          status: "error",
-          error: "Limitless is temporarily unavailable.",
-        });
-        continue;
-      }
+        if (!isLimitlessPartnerHmacConfigured()) {
+          errors += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "error",
+            error: "Limitless is temporarily unavailable.",
+          });
+          continue;
+        }
 
-      const authContext = await resolveLimitlessAuthContext(user.id, wallet);
-      if (!authContext) {
-        errors += 1;
-        results.push({
-          walletAddress: wallet,
-          status: "error",
-          error: "Connect Limitless for this wallet before syncing history.",
-        });
-        continue;
-      }
+        const authContext = await resolveLimitlessAuthContext(user.id, wallet);
+        if (!authContext) {
+          errors += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "error",
+            error: "Connect Limitless for this wallet before syncing history.",
+          });
+          continue;
+        }
 
-      const verification = await verifyLimitlessAuthContext({
-        authContext,
-        walletAddress: wallet,
-      });
-      if (!verification.ok) {
-        errors += 1;
-        results.push({
+        const verification = await verifyLimitlessAuthContext({
+          authContext,
           walletAddress: wallet,
-          status: "error",
-          error:
-            verification.message ??
-            "Limitless connection is invalid for this wallet.",
         });
-        continue;
-      }
+        if (!verification.ok) {
+          errors += 1;
+          results.push({
+            walletAddress: wallet,
+            status: "error",
+            error:
+              verification.message ??
+              "Limitless connection is invalid for this wallet.",
+          });
+          continue;
+        }
 
         let stats;
         try {
@@ -3215,9 +3285,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const authContext = await resolveLimitlessAuthContext(user.id, signer);
-      const requestAuth = authContext && isLimitlessPartnerHmacConfigured()
-        ? buildLimitlessRequestAuthInputs(authContext)
-        : {};
+      const requestAuth =
+        authContext && isLimitlessPartnerHmacConfigured()
+          ? buildLimitlessRequestAuthInputs(authContext)
+          : {};
 
       const upstream = await limitlessRequest({
         method: "GET",

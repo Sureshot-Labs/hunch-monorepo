@@ -9,7 +9,10 @@ import {
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 console.log(`[polyclob] Loading env from ${envPath}`);
 config({ path: envPath, override: false });
 
@@ -109,8 +112,7 @@ const baseUrl =
 const apiKey = process.env.POLYMARKET_L2_API_KEY?.trim();
 const apiSecret = process.env.POLYMARKET_L2_API_SECRET?.trim();
 const apiPassphrase = process.env.POLYMARKET_L2_API_PASSPHRASE?.trim();
-const resolvedAddress =
-  address ?? process.env.POLYMARKET_L2_ADDRESS?.trim();
+const resolvedAddress = address ?? process.env.POLYMARKET_L2_ADDRESS?.trim();
 
 type ResolvedCreds = {
   apiKey: string;
@@ -226,7 +228,7 @@ async function resolveDbCreds(): Promise<ResolvedCreds | null> {
     const key = getCredentialsEncryptionKey();
     const apiSecretResolved = row.api_secret_enc
       ? decryptCredentialsString(row.api_secret_enc, key)
-      : row.api_secret ?? "";
+      : (row.api_secret ?? "");
     const apiPassphraseResolved = row.api_passphrase_enc
       ? decryptCredentialsString(row.api_passphrase_enc, key)
       : "";

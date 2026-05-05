@@ -18,44 +18,46 @@ export const adminDebridgeConfigSchema = z.object({
   effectiveAt: z.string().datetime().optional(),
 });
 
-export const adminRewardsPolicySchema = z.object({
-  effectiveAt: z.string().datetime().optional(),
-  tiers: z
-    .array(
-      z.object({
-        tier: z.coerce.number().int().min(0),
-        name: z.string().min(1),
-        points: z.coerce.number().min(0),
-        cashbackBps: z.coerce.number().int().min(0).max(10_000),
-      }),
-    )
-    .min(1),
-  referralBonus: z
-    .array(
-      z.object({
-        minReferrals: z.coerce.number().int().min(0),
-        bonusBps: z.coerce.number().int().min(0).max(10_000),
-      }),
-    )
-    .min(1),
-}).superRefine((value, ctx) => {
-  const maxCashbackBps = Math.max(
-    0,
-    ...value.tiers.map((tier) => Number(tier.cashbackBps) || 0),
-  );
-  const maxReferralBps = Math.max(
-    0,
-    ...value.referralBonus.map((bonus) => Number(bonus.bonusBps) || 0),
-  );
-  if (maxCashbackBps + maxReferralBps > 10_000) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["referralBonus"],
-      message:
-        "Max cashback + referral bonus exceeds 100% of fees. Reduce referral bonus or cashback tiers.",
-    });
-  }
-});
+export const adminRewardsPolicySchema = z
+  .object({
+    effectiveAt: z.string().datetime().optional(),
+    tiers: z
+      .array(
+        z.object({
+          tier: z.coerce.number().int().min(0),
+          name: z.string().min(1),
+          points: z.coerce.number().min(0),
+          cashbackBps: z.coerce.number().int().min(0).max(10_000),
+        }),
+      )
+      .min(1),
+    referralBonus: z
+      .array(
+        z.object({
+          minReferrals: z.coerce.number().int().min(0),
+          bonusBps: z.coerce.number().int().min(0).max(10_000),
+        }),
+      )
+      .min(1),
+  })
+  .superRefine((value, ctx) => {
+    const maxCashbackBps = Math.max(
+      0,
+      ...value.tiers.map((tier) => Number(tier.cashbackBps) || 0),
+    );
+    const maxReferralBps = Math.max(
+      0,
+      ...value.referralBonus.map((bonus) => Number(bonus.bonusBps) || 0),
+    );
+    if (maxCashbackBps + maxReferralBps > 10_000) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["referralBonus"],
+        message:
+          "Max cashback + referral bonus exceeds 100% of fees. Reduce referral bonus or cashback tiers.",
+      });
+    }
+  });
 
 const multiplierValueSchema = z.coerce.number().positive().finite();
 
@@ -214,7 +216,12 @@ export const adminUserPrivyBindGrantSchema = z
   .object({
     userId: z.string().uuid().optional(),
     walletAddress: z.string().min(1).optional(),
-    expiresInHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
+    expiresInHours: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(24 * 30)
+      .optional(),
     note: z.string().trim().max(500).optional(),
     clear: z.coerce.boolean().optional(),
   })
@@ -328,7 +335,9 @@ export type AdminUserMergeBody = z.infer<typeof adminUserMergeSchema>;
 export type AdminUserPrivyBindGrantBody = z.infer<
   typeof adminUserPrivyBindGrantSchema
 >;
-export type AdminIntelPolicyParams = z.infer<typeof adminIntelPolicyParamsSchema>;
+export type AdminIntelPolicyParams = z.infer<
+  typeof adminIntelPolicyParamsSchema
+>;
 export type AdminIntelPolicyBody = z.infer<typeof adminIntelPolicyBodySchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
 export type AdminRewardsTreasuryQuery = z.infer<

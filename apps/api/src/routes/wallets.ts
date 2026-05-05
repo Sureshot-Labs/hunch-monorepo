@@ -6,7 +6,12 @@ import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { verifyProofAddress } from "../services/proof-client.js";
-import { fetchSolanaBalanceLamports, fetchSolanaMintDecimals, fetchSolanaTokenBalanceByOwnerAndMint, formatUiAmount } from "../services/solana-rpc.js";
+import {
+  fetchSolanaBalanceLamports,
+  fetchSolanaMintDecimals,
+  fetchSolanaTokenBalanceByOwnerAndMint,
+  formatUiAmount,
+} from "../services/solana-rpc.js";
 import {
   fetchErc20BalanceOf,
   fetchEvmBalance,
@@ -314,7 +319,10 @@ function normalizeTokenKey(chainId: string, address: string) {
   return `${chainId}:${normalizeTokenAddress(address)}`;
 }
 
-function getFallbackTokenMeta(chainId: string, address: string): TokenMeta | null {
+function getFallbackTokenMeta(
+  chainId: string,
+  address: string,
+): TokenMeta | null {
   const chainMeta = FALLBACK_TOKEN_META[chainId];
   if (!chainMeta) return null;
   const normalized = normalizeTokenAddress(address);
@@ -366,7 +374,9 @@ async function loadTokenMetaMap(
   return output;
 }
 
-function parseTokenRef(raw: string): { chainId: string; address: string } | null {
+function parseTokenRef(
+  raw: string,
+): { chainId: string; address: string } | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const [chainId, address] = trimmed.split(":");
@@ -542,10 +552,7 @@ async function resolveVenueStatusLinkedWallets(
     linkedWalletsByKey.set(key, wallet);
   }
 
-  const resolvedByLinkedKey = new Map<
-    string,
-    (typeof linkedWallets)[number]
-  >();
+  const resolvedByLinkedKey = new Map<string, (typeof linkedWallets)[number]>();
 
   for (const walletAddress of walletAddresses) {
     const resolution =
@@ -702,12 +709,14 @@ async function resolveWalletBalancesForWallet(inputs: {
       chainId: parsed.chainId,
       address: parsed.address,
       isNative:
-        parsed.chainId !== SOLANA_CHAIN_ID && isEvmNativeAddress(parsed.address),
+        parsed.chainId !== SOLANA_CHAIN_ID &&
+        isEvmNativeAddress(parsed.address),
     });
   }
 
   const isEvmWallet =
-    inputs.walletType === "ethereum" || isEvmWalletAddress(inputs.walletAddress);
+    inputs.walletType === "ethereum" ||
+    isEvmWalletAddress(inputs.walletAddress);
   const isSolanaWallet = !isEvmWallet;
   const balances: WalletBalanceItem[] = [];
 
@@ -721,7 +730,10 @@ async function resolveWalletBalancesForWallet(inputs: {
 
   const tokenMetaMapByChain = new Map<string, Map<string, TokenMeta>>();
   for (const [chainId, addresses] of addressesByChain.entries()) {
-    tokenMetaMapByChain.set(chainId, await loadTokenMetaMap(chainId, addresses));
+    tokenMetaMapByChain.set(
+      chainId,
+      await loadTokenMetaMap(chainId, addresses),
+    );
   }
 
   const resolveEntryBalance = async (entry: {
@@ -731,7 +743,9 @@ async function resolveWalletBalancesForWallet(inputs: {
   }) => {
     if (entry.chainId === SOLANA_CHAIN_ID) {
       if (!isSolanaWallet) {
-        warnings.push(`Solana balances require a Solana wallet (${entry.address})`);
+        warnings.push(
+          `Solana balances require a Solana wallet (${entry.address})`,
+        );
         return;
       }
 
@@ -789,7 +803,9 @@ async function resolveWalletBalancesForWallet(inputs: {
         decimals,
         balanceRaw: amount.toString(),
         balance:
-          decimals == null ? amount.toString() : formatUiAmount(amount, decimals),
+          decimals == null
+            ? amount.toString()
+            : formatUiAmount(amount, decimals),
         isNative: false,
       });
       return;
@@ -862,7 +878,11 @@ async function resolveWalletBalancesForWallet(inputs: {
     Array.from(entries.values()),
     tokenConcurrency,
     async (entry) => {
-      for (let attempt = 1; attempt <= env.walletBalancesRpcMaxAttempts; attempt += 1) {
+      for (
+        let attempt = 1;
+        attempt <= env.walletBalancesRpcMaxAttempts;
+        attempt += 1
+      ) {
         try {
           await resolveEntryBalance(entry);
           return;
@@ -975,11 +995,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       try {
         const { balances, warnings } =
           await resolveWalletBalancesForWalletWithInflight({
-          walletAddress: wallet.walletAddress,
-          walletType: wallet.walletType,
-          tokens,
-          chains,
-        });
+            walletAddress: wallet.walletAddress,
+            walletType: wallet.walletType,
+            tokens,
+            chains,
+          });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
@@ -1063,8 +1083,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         env.walletBalancesBatchConcurrency,
         async (wallet) => {
           try {
-            const resolved =
-              await resolveWalletBalancesForWalletWithInflight({
+            const resolved = await resolveWalletBalancesForWalletWithInflight({
               walletAddress: wallet.walletAddress,
               walletType: wallet.walletType,
               tokens,
@@ -1170,10 +1189,9 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         }
         walletList = resolved;
       } else if (query.walletAddress) {
-        const resolved = await resolveVenueStatusLinkedWallets(
-          user.id,
-          [query.walletAddress],
-        );
+        const resolved = await resolveVenueStatusLinkedWallets(user.id, [
+          query.walletAddress,
+        ]);
         if (!resolved || resolved.length === 0) {
           reply.code(403);
           return reply.send({
@@ -1184,10 +1202,9 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
       } else if (includeAll) {
         walletList = await AuthService.getUserWallets(user.id);
       } else {
-        const resolved = await resolveVenueStatusLinkedWallets(
-          user.id,
-          [sessionWallet],
-        );
+        const resolved = await resolveVenueStatusLinkedWallets(user.id, [
+          sessionWallet,
+        ]);
         if (resolved && resolved.length > 0) {
           walletList = resolved;
         }
@@ -1195,8 +1212,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
       const relayerEnabled = Boolean(
         env.polymarketBuilderApiKey &&
-          env.polymarketBuilderApiSecret &&
-          env.polymarketBuilderApiPassphrase,
+        env.polymarketBuilderApiSecret &&
+        env.polymarketBuilderApiPassphrase,
       );
 
       const results = await Promise.all(
@@ -1233,15 +1250,16 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               const funderUpdatedAtValue =
                 polymarketCreds?.funderUpdatedAt instanceof Date
                   ? polymarketCreds.funderUpdatedAt.toISOString()
-                  : polymarketCreds?.funderUpdatedAt ?? null;
+                  : (polymarketCreds?.funderUpdatedAt ?? null);
               const limitlessUpdatedAtValue =
                 limitlessCreds?.updatedAt instanceof Date
                   ? limitlessCreds.updatedAt.toISOString()
-                  : limitlessCreds?.updatedAt ?? null;
+                  : (limitlessCreds?.updatedAt ?? null);
               const signerNormalized = walletAddress.toLowerCase();
               const funderNormalized = funder.toLowerCase();
               const signerMatchesFunder = signerNormalized === funderNormalized;
-              const shouldFetchSignerUsdc = signerNormalized !== funderNormalized;
+              const shouldFetchSignerUsdc =
+                signerNormalized !== funderNormalized;
 
               const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
               const negRiskAdapterAddress =
@@ -1286,32 +1304,37 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             address: funder,
                           });
 
-                      const [signerCode, funderCode, snapshot, funderNativeBalance, signerNativeBalance] =
-                        await Promise.all([
-                          signerCodePromise,
-                          funderCodePromise,
-                          fetchPolymarketOnchainSnapshot({
-                            rpcUrl: env.polygonRpcUrl,
-                            timeoutMs: env.polygonRpcTimeoutMs,
-                            signer: walletAddress,
-                            funder,
-                            includeSignerUsdc: shouldFetchSignerUsdc,
-                            negRiskAdapterAddress,
-                            feeCollectorAddress,
-                          }),
-                          fetchEvmBalance({
-                            rpcUrl: env.polygonRpcUrl,
-                            timeoutMs: env.polygonRpcTimeoutMs,
-                            address: funder,
-                          }),
-                          shouldFetchSignerUsdc
-                            ? fetchEvmBalance({
-                                rpcUrl: env.polygonRpcUrl,
-                                timeoutMs: env.polygonRpcTimeoutMs,
-                                address: walletAddress,
-                              })
-                            : Promise.resolve<bigint | null>(null),
-                        ]);
+                      const [
+                        signerCode,
+                        funderCode,
+                        snapshot,
+                        funderNativeBalance,
+                        signerNativeBalance,
+                      ] = await Promise.all([
+                        signerCodePromise,
+                        funderCodePromise,
+                        fetchPolymarketOnchainSnapshot({
+                          rpcUrl: env.polygonRpcUrl,
+                          timeoutMs: env.polygonRpcTimeoutMs,
+                          signer: walletAddress,
+                          funder,
+                          includeSignerUsdc: shouldFetchSignerUsdc,
+                          negRiskAdapterAddress,
+                          feeCollectorAddress,
+                        }),
+                        fetchEvmBalance({
+                          rpcUrl: env.polygonRpcUrl,
+                          timeoutMs: env.polygonRpcTimeoutMs,
+                          address: funder,
+                        }),
+                        shouldFetchSignerUsdc
+                          ? fetchEvmBalance({
+                              rpcUrl: env.polygonRpcUrl,
+                              timeoutMs: env.polygonRpcTimeoutMs,
+                              address: walletAddress,
+                            })
+                          : Promise.resolve<bigint | null>(null),
+                      ]);
 
                       const pusdBalance = snapshot.pusdBalance;
                       const usdceBalance = snapshot.usdceBalance;
@@ -1389,18 +1412,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         allowance: {
                           exchange: {
                             spender: env.polymarketExchangeAddress,
-                            allowance: ethers.formatUnits(
-                              allowanceExchange,
-                              6,
-                            ),
+                            allowance: ethers.formatUnits(allowanceExchange, 6),
                             allowanceRaw: allowanceExchange.toString(),
                           },
                           negRiskExchange: {
                             spender: env.polymarketNegRiskExchangeAddress,
-                            allowance: ethers.formatUnits(
-                              allowanceNegRisk,
-                              6,
-                            ),
+                            allowance: ethers.formatUnits(allowanceNegRisk, 6),
                             allowanceRaw: allowanceNegRisk.toString(),
                           },
                           ...(negRiskAdapterAddress
@@ -1494,8 +1511,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                                 ).toString(),
                               },
                               signerNativeUsdc: {
-                                tokenAddress:
-                                  POLYGON_NATIVE_USDC_ADDRESS,
+                                tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
                                 decimals: 6,
                                 balance: ethers.formatUnits(
                                   signerNativeUsdcBalanceResolved ?? 0n,
@@ -1519,7 +1535,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             }
                           : {}),
                         conditionalTokens: {
-                          contractAddress: env.polymarketConditionalTokensAddress,
+                          contractAddress:
+                            env.polymarketConditionalTokensAddress,
                           isApprovedForAll: {
                             exchange: okExchange,
                             negRiskExchange: okNegRisk,
@@ -1547,14 +1564,20 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           usdc: {
                             tokenAddress: env.limitlessUsdcAddress,
                             decimals: 6,
-                            balance: ethers.formatUnits(snapshot.usdcBalance, 6),
+                            balance: ethers.formatUnits(
+                              snapshot.usdcBalance,
+                              6,
+                            ),
                             balanceRaw: snapshot.usdcBalance.toString(),
                           },
                         };
                       }
 
                       const authContext = limitlessCreds
-                        ? await resolveLimitlessAuthContext(user.id, walletAddress)
+                        ? await resolveLimitlessAuthContext(
+                            user.id,
+                            walletAddress,
+                          )
                         : null;
                       const reasons: string[] = [];
                       let hasCredentials = false;
@@ -1694,8 +1717,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               }
               if (usdcAmount <= 0n) reasons.push("insufficient_usdc");
 
-              const proofBypass =
-                user.kalshiProofBypass ? "user" : "none";
+              const proofBypass = user.kalshiProofBypass ? "user" : "none";
               let proofVerified = false;
               let proofRequiredForBuy = false;
               let proofReason:
@@ -1750,7 +1772,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 },
               };
             } catch (error) {
-              app.log.warn({ error, walletAddress }, "Kalshi venue status lookup failed");
+              app.log.warn(
+                { error, walletAddress },
+                "Kalshi venue status lookup failed",
+              );
               response.kalshi = {
                 supported: true,
                 ready: false,

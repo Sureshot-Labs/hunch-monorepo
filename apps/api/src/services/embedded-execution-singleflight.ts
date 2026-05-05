@@ -6,7 +6,10 @@ type EmbeddedExecutionSettledEntry = {
 };
 
 const embeddedExecutionInFlight = new Map<string, Promise<unknown>>();
-const embeddedExecutionSettled = new Map<string, EmbeddedExecutionSettledEntry>();
+const embeddedExecutionSettled = new Map<
+  string,
+  EmbeddedExecutionSettledEntry
+>();
 
 function pruneExpiredEmbeddedExecutionSettledEntries(now = Date.now()) {
   for (const [key, entry] of embeddedExecutionSettled.entries()) {
@@ -44,7 +47,9 @@ export async function runEmbeddedExecutionSingleFlight<T>(inputs: {
     return settled.value as T;
   }
 
-  const existing = embeddedExecutionInFlight.get(inputs.key) as Promise<T> | undefined;
+  const existing = embeddedExecutionInFlight.get(inputs.key) as
+    | Promise<T>
+    | undefined;
   if (existing) {
     return existing;
   }
@@ -53,7 +58,9 @@ export async function runEmbeddedExecutionSingleFlight<T>(inputs: {
     const result = await inputs.run();
     embeddedExecutionSettled.set(inputs.key, {
       value: result,
-      expiresAt: Date.now() + (inputs.settledTtlMs ?? DEFAULT_EMBEDDED_EXECUTION_SETTLED_TTL_MS),
+      expiresAt:
+        Date.now() +
+        (inputs.settledTtlMs ?? DEFAULT_EMBEDDED_EXECUTION_SETTLED_TTL_MS),
     });
     return result;
   })();

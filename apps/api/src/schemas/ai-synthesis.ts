@@ -3,7 +3,7 @@ import { z } from "zod";
 const zIsoDatetime = z
   .string()
   .min(1)
-  .refine(value => !Number.isNaN(Date.parse(value)), {
+  .refine((value) => !Number.isNaN(Date.parse(value)), {
     message: "Expected ISO datetime string",
   });
 
@@ -89,7 +89,7 @@ export const synthesisInputV1Schema = z
       .strict(),
     markets: z.array(synthesisInputMarketSnapshotV1Schema).min(1),
     freshness: z.preprocess(
-      raw => {
+      (raw) => {
         if (!raw || typeof raw !== "object") return raw;
         const obj = raw as Record<string, unknown>;
         if (
@@ -240,7 +240,7 @@ export function buildSynthesisUserPromptV1(input: SynthesisInputV1): string {
       volume_24h_source: undefined,
       liquidity_source: undefined,
     },
-    markets: input.markets.map(market => ({
+    markets: input.markets.map((market) => ({
       ...market,
       volume_24h_source: undefined,
       liquidity_source: undefined,

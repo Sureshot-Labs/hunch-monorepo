@@ -3,6 +3,7 @@
 This document summarizes what the Polymarket indexer pulls from the Gamma API and how the data is stored in the venue-specific and unified tables.
 
 Sources:
+
 - `hunch-monorepo/apps/indexer-polymarket/src/gammaClient.ts`
 - `hunch-monorepo/apps/indexer-polymarket/src/types.ts`
 - `hunch-monorepo/apps/indexer-polymarket/src/mappers.ts`
@@ -35,6 +36,7 @@ Data is written into `polymarket_events` and `polymarket_markets`. Both tables s
 ### `polymarket_events` (from each event)
 
 Mapped columns include:
+
 - `id`, `ticker`, `slug`, `title`, `description`, `resolution_source`
 - `start_date`, `creation_date`, `end_date`
 - `category`, `image`, `icon`
@@ -48,6 +50,7 @@ Mapped columns include:
 ### `polymarket_markets` (from each event.market)
 
 Mapped columns include:
+
 - IDs and text: `id`, `event_id`, `question`, `condition_id`, `slug`, `resolution_source`, `description`
 - Timing: `start_date`, `end_date`, `created_at`, `updated_at`, `accepting_orders_timestamp`
 - Status and flags: `active`, `closed`, `archived`, `new`, `featured`, `restricted`, `enable_order_book`, `accepting_orders`, `ready`, `funded`, `cyom`, `approved`, `automatically_active`, `clear_book_on_start`, `pending_deployment`, `deploying`, `rfq_enabled`, `holding_rewards_enabled`, `fees_enabled`
@@ -64,6 +67,7 @@ Mapped columns include:
 ### `unified_events`
 
 Mapped columns:
+
 - `id`: `polymarket:${event.id}`
 - `venue`: `polymarket`
 - `venue_event_id`: event.id
@@ -78,6 +82,7 @@ Mapped columns:
 ### `unified_markets`
 
 Mapped columns:
+
 - `id`: `polymarket:${market.id}`
 - `venue`: `polymarket`
 - `venue_market_id`: market.id
@@ -106,6 +111,7 @@ Important behavior: closed/archived markets are **retained** in `unified_markets
 ## Fields not mapped to columns (but preserved in raw)
 
 Gamma provides many fields that are not normalized into columns or unified metadata. Examples (not exhaustive):
+
 - `xAxisValue`, `yAxisValue`, `denominationToken`
 - `closedTime`, `wideFormat`, `mailchimpTag`, `curationOrder`
 - `makerBaseFee`, `takerBaseFee`, `notificationsEnabled`, `score`

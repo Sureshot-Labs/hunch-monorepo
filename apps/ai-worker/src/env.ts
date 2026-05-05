@@ -3,7 +3,10 @@ import { dirname, resolve } from "path";
 import { hostname } from "os";
 import { fileURLToPath } from "url";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true });
 
 function parseOptionalInt(v: string | undefined): number | undefined {
@@ -36,11 +39,19 @@ const concurrencyRaw = parseOptionalInt(process.env.AI_EMBED_CONCURRENCY);
 const concurrency = clampInt(concurrencyRaw, { min: 1, max: 32, fallback: 4 });
 
 const blockMsRaw = parseOptionalInt(process.env.AI_EMBED_BLOCK_MS);
-const blockMs = clampInt(blockMsRaw, { min: 100, max: 60_000, fallback: 2_000 });
+const blockMs = clampInt(blockMsRaw, {
+  min: 100,
+  max: 60_000,
+  fallback: 2_000,
+});
 
 const textVersion = process.env.AI_EMBED_TEXT_VERSION ?? "v3";
 const ttlRaw = parseOptionalInt(process.env.AI_EMBED_TTL_SEC);
-const embedTtlSec = clampInt(ttlRaw, { min: 3600, max: 30 * 24 * 3600, fallback: 2 * 24 * 3600 });
+const embedTtlSec = clampInt(ttlRaw, {
+  min: 3600,
+  max: 30 * 24 * 3600,
+  fallback: 2 * 24 * 3600,
+});
 
 const streamMaxLenRaw = parseOptionalInt(process.env.AI_EMBED_STREAM_MAXLEN);
 const streamMaxLen =

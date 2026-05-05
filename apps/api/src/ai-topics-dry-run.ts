@@ -120,7 +120,11 @@ type TopicSummaryRow = {
 };
 
 type Args = {
-  launchProfile: "custom" | "top50_per_venue" | "top100_per_venue" | "stress500_global";
+  launchProfile:
+    | "custom"
+    | "top50_per_venue"
+    | "top100_per_venue"
+    | "stress500_global";
   limit: number;
   venues: string[];
   categories: Category[];
@@ -512,7 +516,8 @@ const SPORTS_ENTITY_PATTERNS: Array<{ regex: RegExp; entity: string }> = [
     entity: "ncaa",
   },
   {
-    regex: /\bmarch madness\b|\belite eight\b|\bsweet sixteen\b|\bfinal four\b/i,
+    regex:
+      /\bmarch madness\b|\belite eight\b|\bsweet sixteen\b|\bfinal four\b/i,
     entity: "ncaa",
   },
 ];
@@ -712,7 +717,8 @@ const POLITICS_ROLE_PATTERNS: Array<{ regex: RegExp; entity: string }> = [
   { regex: /\bfed chair\b/i, entity: "fed-chair" },
   { regex: /\bsupreme court\b/i, entity: "supreme-court" },
   {
-    regex: /\b(?:us|u\.s\.|united states)\s+house(?:\s+of\s+representatives)?\b/i,
+    regex:
+      /\b(?:us|u\.s\.|united states)\s+house(?:\s+of\s+representatives)?\b/i,
     entity: "us-house",
   },
   { regex: /\b(?:us|u\.s\.|united states)\s+senate\b/i, entity: "us-senate" },
@@ -775,7 +781,11 @@ function isPlaceholderEntitySlug(value: string): boolean {
   const normalized = normalizeSlug(value);
   if (!normalized) return true;
   if (PLACEHOLDER_ENTITY_SLUGS.has(normalized)) return true;
-  if (/^(person|candidate|party|actor|leader|company|player|team)(-[a-z0-9]+)?$/.test(normalized)) {
+  if (
+    /^(person|candidate|party|actor|leader|company|player|team)(-[a-z0-9]+)?$/.test(
+      normalized,
+    )
+  ) {
     return true;
   }
   if (/^[a-z]$/.test(normalized)) return true;
@@ -803,7 +813,10 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return asInt > 0 ? asInt : fallback;
 }
 
-function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+function parseNonNegativeInt(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (value == null) return fallback;
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -819,7 +832,10 @@ function parseFraction(value: string | undefined, fallback: number): number {
   return n;
 }
 
-function parseNonNegativeNumber(value: string | undefined, fallback: number): number {
+function parseNonNegativeNumber(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (value == null) return fallback;
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -839,7 +855,7 @@ function parseCsv(value: string | undefined): string[] {
   if (!value) return [];
   return value
     .split(",")
-    .map(entry => entry.trim().toLowerCase())
+    .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
 }
 
@@ -877,15 +893,11 @@ function parseTierBMode(value: string | undefined): "normal" | "shed" {
   return value === "shed" ? "shed" : "normal";
 }
 
-function parseTieringMode(
-  value: string | undefined,
-): "threshold" | "score" {
+function parseTieringMode(value: string | undefined): "threshold" | "score" {
   return value === "threshold" ? "threshold" : "score";
 }
 
-function parseLaunchProfile(
-  value: string | undefined,
-): Args["launchProfile"] {
+function parseLaunchProfile(value: string | undefined): Args["launchProfile"] {
   if (value === "top50_per_venue") return "top50_per_venue";
   if (value === "top100_per_venue") return "top100_per_venue";
   if (value === "stress500_global") return "stress500_global";
@@ -937,7 +949,9 @@ function applyLaunchProfile(base: Args): Args {
 }
 
 function resolveArgs(argv: string[]): Args {
-  const searchCategoriesParsed = parseCategories(parseFlag(argv, "--search-categories"));
+  const searchCategoriesParsed = parseCategories(
+    parseFlag(argv, "--search-categories"),
+  );
   const requireOpenNowFlag = parseFlag(argv, "--require-open-now");
   if (requireOpenNowFlag != null && !parseBoolean(requireOpenNowFlag, true)) {
     console.warn(
@@ -1041,16 +1055,31 @@ function resolveArgs(argv: string[]): Args {
       parseFlag(argv, "--tier-c-combined-count"),
       1,
     ),
-    tierAWebCount: parseNonNegativeInt(parseFlag(argv, "--tier-a-web-count"), 1),
+    tierAWebCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-a-web-count"),
+      1,
+    ),
     tierAXCount: parseNonNegativeInt(parseFlag(argv, "--tier-a-x-count"), 1),
-    tierBWebCount: parseNonNegativeInt(parseFlag(argv, "--tier-b-web-count"), 1),
+    tierBWebCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-b-web-count"),
+      1,
+    ),
     tierBXCount: parseNonNegativeInt(parseFlag(argv, "--tier-b-x-count"), 1),
     tierBMode: parseTierBMode(parseFlag(argv, "--tier-b-mode")),
-    tierCWebCount: parseNonNegativeInt(parseFlag(argv, "--tier-c-web-count"), 1),
+    tierCWebCount: parseNonNegativeInt(
+      parseFlag(argv, "--tier-c-web-count"),
+      1,
+    ),
     tierCXCount: parseNonNegativeInt(parseFlag(argv, "--tier-c-x-count"), 1),
     tierCEnabled: parseBoolean(parseFlag(argv, "--tier-c-enabled"), true),
-    tierAutoPromoteA: parseBoolean(parseFlag(argv, "--tier-auto-promote-a"), true),
-    tierAutoPromoteB: parseBoolean(parseFlag(argv, "--tier-auto-promote-b"), true),
+    tierAutoPromoteA: parseBoolean(
+      parseFlag(argv, "--tier-auto-promote-a"),
+      true,
+    ),
+    tierAutoPromoteB: parseBoolean(
+      parseFlag(argv, "--tier-auto-promote-b"),
+      true,
+    ),
     tierAutoPromoteBMinTopics: parsePositiveInt(
       parseFlag(argv, "--tier-auto-promote-b-min-topics"),
       2,
@@ -1085,8 +1114,14 @@ function resolveArgs(argv: string[]): Args {
       10,
       ["polymarket", "kalshi"],
     ),
-    maxSearchTopics: parsePositiveInt(parseFlag(argv, "--max-search-topics"), 300),
-    strictInvariants: parseBoolean(parseFlag(argv, "--strict-invariants"), false),
+    maxSearchTopics: parsePositiveInt(
+      parseFlag(argv, "--max-search-topics"),
+      300,
+    ),
+    strictInvariants: parseBoolean(
+      parseFlag(argv, "--strict-invariants"),
+      false,
+    ),
     emitDemotionPreview: parseBoolean(
       parseFlag(argv, "--emit-demotion-preview"),
       false,
@@ -1164,7 +1199,7 @@ Options:
 
 function normalizeSlug(value: string): string {
   const asciiOnly = Array.from(value.normalize("NFKD"))
-    .filter(char => char.charCodeAt(0) <= 0x7f)
+    .filter((char) => char.charCodeAt(0) <= 0x7f)
     .join("");
   return asciiOnly
     .toLowerCase()
@@ -1197,13 +1232,13 @@ function normalizeTitle(text: string, category: Category): string {
 
 function tokenizeNormalized(text: string): string[] {
   return (text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-    .filter(token => token.length >= 3)
-    .filter(token => !STOPWORDS.has(token))
-    .filter(token => !GENERIC_TOKENS.has(token))
-    .filter(token => !MONTH_TOKENS.has(token))
-    .filter(token => !DAY_TOKENS.has(token))
-    .filter(token => !/^\d+$/.test(token))
-    .filter(token => !/^\d+(st|nd|rd|th)$/.test(token));
+    .filter((token) => token.length >= 3)
+    .filter((token) => !STOPWORDS.has(token))
+    .filter((token) => !GENERIC_TOKENS.has(token))
+    .filter((token) => !MONTH_TOKENS.has(token))
+    .filter((token) => !DAY_TOKENS.has(token))
+    .filter((token) => !/^\d+$/.test(token))
+    .filter((token) => !/^\d+(st|nd|rd|th)$/.test(token));
 }
 
 function looksLikeUsd(raw: string, suffix: string | undefined): boolean {
@@ -1224,11 +1259,12 @@ function normalizeCategory(
   const hasCryptoCue = CRYPTO_TEXT_CUE_PATTERN.test(lower);
   const hasPoliticsCue =
     POLITICS_TEXT_CUE_PATTERN.test(lower) ||
-    Array.from(POLITICS_COUNTRIES).some(country =>
+    Array.from(POLITICS_COUNTRIES).some((country) =>
       new RegExp(`\\b${country.replace(/-/g, "\\s+")}\\b`, "i").test(lower),
     );
   const hasSportsCue =
-    SPORTS_TEXT_CUE_PATTERN.test(lower) || SPORTS_CATEGORY_HINT_PATTERN.test(lower);
+    SPORTS_TEXT_CUE_PATTERN.test(lower) ||
+    SPORTS_CATEGORY_HINT_PATTERN.test(lower);
 
   // Prefer strong textual cues over noisy venue/category labels.
   if (hasSportsCue) return "sports";
@@ -1263,14 +1299,18 @@ function normalizeCategory(
   if (
     SPORTS_CATEGORY_HINT_PATTERN.test(lower) ||
     (/\b(vs\.?|@|at)\b/.test(lower) &&
-      (lower.includes("match") || lower.includes("game") || lower.includes("team")))
+      (lower.includes("match") ||
+        lower.includes("game") ||
+        lower.includes("team")))
   ) {
     return "sports";
   }
   return "other";
 }
 
-function parseDateBucket(value: Date | string | null | undefined): string | null {
+function parseDateBucket(
+  value: Date | string | null | undefined,
+): string | null {
   if (!value) return null;
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
@@ -1310,11 +1350,7 @@ function extractConstraint(text: string): Constraint {
     const right = parseMagnitude(range[3], range[4]);
     const hasUsd = looksLikeUsd(range[0], `${range[2]}${range[4]}`);
     const looksLikeYearRange =
-      !hasUsd &&
-      left >= 1900 &&
-      left <= 2100 &&
-      right >= 1900 &&
-      right <= 2100;
+      !hasUsd && left >= 1900 && left <= 2100 && right >= 1900 && right <= 2100;
     if (
       Number.isFinite(left) &&
       Number.isFinite(right) &&
@@ -1331,7 +1367,9 @@ function extractConstraint(text: string): Constraint {
     }
   }
 
-  const ouLine = source.match(/\b(?:o\/u|ou|over\/under)\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+  const ouLine = source.match(
+    /\b(?:o\/u|ou|over\/under)\s*([0-9]+(?:\.[0-9]+)?)\b/i,
+  );
   if (ouLine) {
     const value = Number(ouLine[1]);
     if (Number.isFinite(value)) {
@@ -1361,7 +1399,9 @@ function extractConstraint(text: string): Constraint {
     }
   }
 
-  const spread = source.match(/\b(?:spread|line)\s*([+-]?[0-9]+(?:\.[0-9]+)?)\b/i);
+  const spread = source.match(
+    /\b(?:spread|line)\s*([+-]?[0-9]+(?:\.[0-9]+)?)\b/i,
+  );
   if (spread) {
     const value = Number(spread[1]);
     if (Number.isFinite(value)) {
@@ -1375,7 +1415,9 @@ function extractConstraint(text: string): Constraint {
     }
   }
 
-  const arrowUp = source.match(/[↑]\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kKmMbB]?)/);
+  const arrowUp = source.match(
+    /[↑]\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kKmMbB]?)/,
+  );
   if (arrowUp) {
     const value = parseMagnitude(arrowUp[1], arrowUp[2]);
     if (Number.isFinite(value)) {
@@ -1389,7 +1431,9 @@ function extractConstraint(text: string): Constraint {
     }
   }
 
-  const arrowDown = source.match(/[↓]\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kKmMbB]?)/);
+  const arrowDown = source.match(
+    /[↓]\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)([kKmMbB]?)/,
+  );
   if (arrowDown) {
     const value = parseMagnitude(arrowDown[1], arrowDown[2]);
     if (Number.isFinite(value)) {
@@ -1408,7 +1452,11 @@ function extractConstraint(text: string): Constraint {
   );
   if (comparator) {
     const op =
-      comparator[1] === ">" ? ">=" : comparator[1] === "<" ? "<=" : comparator[1];
+      comparator[1] === ">"
+        ? ">="
+        : comparator[1] === "<"
+          ? "<="
+          : comparator[1];
     const value = parseMagnitude(comparator[2], comparator[3]);
     if (Number.isFinite(value)) {
       return {
@@ -1449,10 +1497,10 @@ function extractConstraint(text: string): Constraint {
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) {
-    return `[${value.map(item => stableStringify(item)).join(",")}]`;
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
   }
-  const entries = Object.entries(value as Record<string, unknown>).sort((a, b) =>
-    a[0].localeCompare(b[0]),
+  const entries = Object.entries(value as Record<string, unknown>).sort(
+    (a, b) => a[0].localeCompare(b[0]),
   );
   return `{${entries
     .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`)
@@ -1473,7 +1521,7 @@ function normalizeSportsTeamSlug(value: string): string {
   if (parts.length === 0) return "";
 
   // Keep acronym-like teams stable (e.g. U-S-A -> usa).
-  if (parts.length >= 2 && parts.every(part => part.length === 1)) {
+  if (parts.length >= 2 && parts.every((part) => part.length === 1)) {
     return parts.join("");
   }
 
@@ -1523,10 +1571,12 @@ function pruneSportsSideTokens(tokens: string[]): string[] {
 
 function isLikelySportsCompetitionSide(parts: string[]): boolean {
   if (parts.length === 0) return true;
-  const markerCount = parts.filter(token => SPORTS_COMPETITION_SIDE_TOKENS.has(token)).length;
+  const markerCount = parts.filter((token) =>
+    SPORTS_COMPETITION_SIDE_TOKENS.has(token),
+  ).length;
   if (markerCount >= 2) return true;
   const hasNameLikeToken = parts.some(
-    token =>
+    (token) =>
       token.length >= 3 &&
       !SPORTS_COMPETITION_SIDE_TOKENS.has(token) &&
       !SPORTS_TEAM_SIDE_STOP_TOKENS.has(token) &&
@@ -1536,7 +1586,8 @@ function isLikelySportsCompetitionSide(parts: string[]): boolean {
       !TEMPORAL_TOKENS.has(token),
   );
   if (markerCount >= 1 && !hasNameLikeToken) return true;
-  if (parts.includes("qualification") || parts.includes("qualifications")) return true;
+  if (parts.includes("qualification") || parts.includes("qualifications"))
+    return true;
   return false;
 }
 
@@ -1544,28 +1595,34 @@ function cleanTeamSide(value: string): string {
   const base = value
     .replace(/\([^)]*\)/g, " ")
     .replace(/[:|].*$/g, " ")
-    .replace(/\b(total|team|player)\s+(points?|goals?|runs?|sets?|games?|maps?)\b/gi, " ");
+    .replace(
+      /\b(total|team|player)\s+(points?|goals?|runs?|sets?|games?|maps?)\b/gi,
+      " ",
+    );
   const normalized = normalizeSportsTeamSlug(
     normalizeSlug(base)
-    .replace(
-      /^(championship|playoff|playoffs|final|finals|game|match|round|stage|group)-/,
-      "",
-    )
-    .replace(/-(before|after|by).*$/, "")
-    .replace(/-(total|team|player)-?(points?|goals?|runs?|sets?|games?|maps?)$/, "")
-    .replace(/-(points?|goals?|runs?|sets?|games?|maps?)$/, "")
-    .replace(/-?\d+(st|nd|rd|th)?$/, "")
-    .replace(/^-+|-+$/g, ""),
+      .replace(
+        /^(championship|playoff|playoffs|final|finals|game|match|round|stage|group)-/,
+        "",
+      )
+      .replace(/-(before|after|by).*$/, "")
+      .replace(
+        /-(total|team|player)-?(points?|goals?|runs?|sets?|games?|maps?)$/,
+        "",
+      )
+      .replace(/-(points?|goals?|runs?|sets?|games?|maps?)$/, "")
+      .replace(/-?\d+(st|nd|rd|th)?$/, "")
+      .replace(/^-+|-+$/g, ""),
   );
   if (!normalized) return "";
 
   let parts = normalized.split("-").filter(Boolean);
-  if (parts.length >= 2 && parts.every(part => part.length === 1)) {
+  if (parts.length >= 2 && parts.every((part) => part.length === 1)) {
     return parts.join("");
   }
   if (isLikelySportsCompetitionSide(parts)) return "";
 
-  parts = parts.filter(part => !/^\d+$/.test(part));
+  parts = parts.filter((part) => !/^\d+$/.test(part));
   parts = pruneSportsSideTokens(parts);
   if (parts.length === 0) return "";
 
@@ -1613,7 +1670,7 @@ function extractAcronymTokens(text: string): string[] {
 
 function extractSportsCandidateFallback(text: string): string | null {
   const normalized = normalizeTitle(text, "sports");
-  const tokens = tokenizeNormalized(normalized).filter(token => {
+  const tokens = tokenizeNormalized(normalized).filter((token) => {
     if (STOPWORDS.has(token)) return false;
     if (GENERIC_TOKENS.has(token)) return false;
     if (KEYWORD_NOISE.has(token)) return false;
@@ -1682,7 +1739,10 @@ function extractCapitalizedPhrases(text: string): string[] {
     while (parts.length > 1 && ENTITY_LEADING_NOISE.has(parts[0])) {
       parts.shift();
     }
-    while (parts.length > 1 && ENTITY_TRAILING_NOISE.has(parts[parts.length - 1])) {
+    while (
+      parts.length > 1 &&
+      ENTITY_TRAILING_NOISE.has(parts[parts.length - 1])
+    ) {
       parts.pop();
     }
     if (parts.length === 0) continue;
@@ -1691,7 +1751,7 @@ function extractCapitalizedPhrases(text: string): string[] {
     if (!candidate) continue;
     if (
       parts.every(
-        part =>
+        (part) =>
           MONTH_TOKENS.has(part) ||
           DAY_TOKENS.has(part) ||
           TEMPORAL_TOKENS.has(part) ||
@@ -1715,7 +1775,7 @@ function extractCapitalizedPhrases(text: string): string[] {
 
 function extractKeywordEntity(text: string): string {
   const tokens = tokenizeNormalized(text).filter(
-    token =>
+    (token) =>
       !QUESTION_ENTITY_BLOCKLIST.has(token) &&
       !KEYWORD_NOISE.has(token) &&
       !POLITICS_GENERIC_LABELS.has(token) &&
@@ -1735,7 +1795,7 @@ function extractEventAnchorKeyword(text: string): string | null {
   const normalized = normalizeTitle(text, "other");
   if (!normalized) return null;
   const tokens = tokenizeNormalized(normalized).filter(
-    token =>
+    (token) =>
       !KEYWORD_NOISE.has(token) &&
       !MONTH_TOKENS.has(token) &&
       !DAY_TOKENS.has(token) &&
@@ -1772,7 +1832,7 @@ function extractMentionTarget(text: string): string | null {
   const suffix = text.slice(mentionMatch.index + mentionMatch[0].length);
 
   const prefixPhrases = extractCapitalizedPhrases(prefix).filter(
-    phrase =>
+    (phrase) =>
       !isPlaceholderEntitySlug(phrase) &&
       !QUESTION_ENTITY_BLOCKLIST.has(phrase) &&
       !KEYWORD_NOISE.has(phrase) &&
@@ -1785,7 +1845,7 @@ function extractMentionTarget(text: string): string | null {
   }
 
   const phraseCandidates = extractCapitalizedPhrases(suffix).filter(
-    phrase =>
+    (phrase) =>
       !isPlaceholderEntitySlug(phrase) &&
       !QUESTION_ENTITY_BLOCKLIST.has(phrase) &&
       !KEYWORD_NOISE.has(phrase) &&
@@ -1797,8 +1857,10 @@ function extractMentionTarget(text: string): string | null {
     return phraseCandidates[0];
   }
 
-  const prefixTokens = tokenizeNormalized(normalizeTitle(prefix, "other")).filter(
-    token =>
+  const prefixTokens = tokenizeNormalized(
+    normalizeTitle(prefix, "other"),
+  ).filter(
+    (token) =>
       !QUESTION_ENTITY_BLOCKLIST.has(token) &&
       !KEYWORD_NOISE.has(token) &&
       !MENTION_STOP_TOKENS.has(token) &&
@@ -1813,7 +1875,7 @@ function extractMentionTarget(text: string): string | null {
   }
 
   const tokens = tokenizeNormalized(normalizeTitle(suffix, "other")).filter(
-    token =>
+    (token) =>
       !QUESTION_ENTITY_BLOCKLIST.has(token) &&
       !KEYWORD_NOISE.has(token) &&
       !MENTION_STOP_TOKENS.has(token) &&
@@ -1852,7 +1914,7 @@ function extractCandidateEntityFromText(
     return null;
   }
   const tokens = tokenizeNormalized(normalized).filter(
-    token => !POLITICS_GENERIC_LABELS.has(token),
+    (token) => !POLITICS_GENERIC_LABELS.has(token),
   );
   if (tokens.length === 0) return null;
   return isPlaceholderEntitySlug(tokens[0]) ? null : tokens[0];
@@ -1870,7 +1932,11 @@ function isLowSignalOutcomeLabel(value: string): boolean {
   if (!normalized) return true;
   if (/^[a-z]$/.test(normalized)) return true;
   if (/^(player|team)\s+[a-z0-9-]+$/.test(normalized)) return true;
-  if (/^(other|candidate|person|party|actor|leader|company)(\s+[a-z0-9-]+)?$/i.test(normalized)) {
+  if (
+    /^(other|candidate|person|party|actor|leader|company)(\s+[a-z0-9-]+)?$/i.test(
+      normalized,
+    )
+  ) {
     return true;
   }
   if (/^(yes|no|over|under|true|false)$/i.test(normalized)) return true;
@@ -1899,7 +1965,7 @@ function searchSubjectFromUnknownTopic(topic: TopicSummaryRow): string {
 
 function hasPoliticsGenericAnchors(tokens: string[]): boolean {
   return tokens.some(
-    token =>
+    (token) =>
       POLITICS_GENERIC_LABELS.has(token) ||
       token === "polling" ||
       token === "ceasefire",
@@ -1922,7 +1988,8 @@ function resolveEntity(
   const eventOnlyText = normalizeTitle(eventTitle ?? "", category);
   const marketOnlyText = normalizeTitle(marketTitle ?? "", category);
   const archetype = detectEntityArchetype(category, eventTitle, marketTitle);
-  const candidateFirst = archetype === "candidate_list" || archetype === "competition_winner";
+  const candidateFirst =
+    archetype === "candidate_list" || archetype === "competition_winner";
   const entitySourceText = candidateFirst
     ? marketOnlyText || eventOnlyText || normalizedText
     : eventOnlyText || marketOnlyText || normalizedText;
@@ -1953,7 +2020,8 @@ function resolveEntity(
         !isPlaceholderEntitySlug(normalizedCandidate)
       ) {
         const mappedCountry =
-          POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ?? normalizedCandidate;
+          POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ??
+          normalizedCandidate;
         if (POLITICS_COUNTRIES.has(mappedCountry)) {
           return {
             type: "country",
@@ -2052,9 +2120,11 @@ function resolveEntity(
     const teamInputs = candidateFirst
       ? [marketOnlyText, eventOnlyText, normalizedText]
       : [eventOnlyText, marketOnlyText, normalizedText];
-    const sawHeadToHead = teamInputs.some(input => HEAD_TO_HEAD_PATTERN.test(input));
+    const sawHeadToHead = teamInputs.some((input) =>
+      HEAD_TO_HEAD_PATTERN.test(input),
+    );
     const teams = teamInputs
-      .map(input => extractTeams(input))
+      .map((input) => extractTeams(input))
       .find((value): value is [string, string] => value !== null);
     if (teams) {
       return {
@@ -2076,13 +2146,13 @@ function resolveEntity(
         if (isPlaceholderEntitySlug(normalizedCandidate)) {
           // For placeholders like "Other", keep searching for stronger anchors.
         } else {
-        return {
-          type: "keyword",
-          value: normalizedCandidate,
-          source: "market",
-          archetype,
-          unknownReason: null,
-        };
+          return {
+            type: "keyword",
+            value: normalizedCandidate,
+            source: "market",
+            archetype,
+            unknownReason: null,
+          };
         }
       }
       const fallbackCandidate =
@@ -2128,7 +2198,7 @@ function resolveEntity(
     const sourceTokens = tokenizeNormalized(source);
     const phrases = extractCapitalizedPhrases(source);
     const hasRoleToken = (value: string): boolean =>
-      value.split("-").some(part => POLITICS_ROLE_TOKENS.has(part));
+      value.split("-").some((part) => POLITICS_ROLE_TOKENS.has(part));
 
     if (archetype === "candidate_list") {
       const coalition = extractCoalitionEntity(marketTitle ?? "");
@@ -2158,13 +2228,13 @@ function resolveEntity(
             unknownReason: null,
           };
         } else {
-        return {
-          type: "person",
-          value: normalizedCandidate,
-          source: "market",
-          archetype,
-          unknownReason: null,
-        };
+          return {
+            type: "person",
+            value: normalizedCandidate,
+            source: "market",
+            archetype,
+            unknownReason: null,
+          };
         }
       }
     }
@@ -2181,51 +2251,51 @@ function resolveEntity(
         if (isPlaceholderEntitySlug(normalizedCandidate)) {
           // Skip generic bucket labels like "Other", "Person X", "Candidate A".
         } else {
-        const mappedCountry =
-          POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ??
-          normalizedCandidate;
-        const isSingleToken = !normalizedCandidate.includes("-");
-        const singleTokenIsWeak =
-          isSingleToken &&
-          !POLITICS_PERSON_ALLOWLIST.has(normalizedCandidate) &&
-          normalizedCandidate.length < 4;
-        if (
-          normalizedCandidate &&
-          !singleTokenIsWeak &&
-          !STOPWORDS.has(normalizedCandidate) &&
-          !TEMPORAL_TOKENS.has(normalizedCandidate) &&
-          !MONTH_TOKENS.has(normalizedCandidate) &&
-          !DAY_TOKENS.has(normalizedCandidate) &&
-          !QUESTION_ENTITY_BLOCKLIST.has(normalizedCandidate) &&
-          !POLITICS_GENERIC_LABELS.has(normalizedCandidate) &&
-          !KEYWORD_NOISE.has(normalizedCandidate)
-        ) {
-          if (POLITICS_COUNTRIES.has(mappedCountry)) {
+          const mappedCountry =
+            POLITICS_COUNTRY_ALIASES.get(normalizedCandidate) ??
+            normalizedCandidate;
+          const isSingleToken = !normalizedCandidate.includes("-");
+          const singleTokenIsWeak =
+            isSingleToken &&
+            !POLITICS_PERSON_ALLOWLIST.has(normalizedCandidate) &&
+            normalizedCandidate.length < 4;
+          if (
+            normalizedCandidate &&
+            !singleTokenIsWeak &&
+            !STOPWORDS.has(normalizedCandidate) &&
+            !TEMPORAL_TOKENS.has(normalizedCandidate) &&
+            !MONTH_TOKENS.has(normalizedCandidate) &&
+            !DAY_TOKENS.has(normalizedCandidate) &&
+            !QUESTION_ENTITY_BLOCKLIST.has(normalizedCandidate) &&
+            !POLITICS_GENERIC_LABELS.has(normalizedCandidate) &&
+            !KEYWORD_NOISE.has(normalizedCandidate)
+          ) {
+            if (POLITICS_COUNTRIES.has(mappedCountry)) {
+              return {
+                type: "country",
+                value: mappedCountry,
+                source: "market",
+                archetype,
+                unknownReason: null,
+              };
+            }
+            if (normalizedCandidate.includes("party")) {
+              return {
+                type: "keyword",
+                value: normalizedCandidate,
+                source: "market",
+                archetype,
+                unknownReason: null,
+              };
+            }
             return {
-              type: "country",
-              value: mappedCountry,
-              source: "market",
-              archetype,
-              unknownReason: null,
-            };
-          }
-          if (normalizedCandidate.includes("party")) {
-            return {
-              type: "keyword",
+              type: "person",
               value: normalizedCandidate,
               source: "market",
               archetype,
               unknownReason: null,
             };
           }
-          return {
-            type: "person",
-            value: normalizedCandidate,
-            source: "market",
-            archetype,
-            unknownReason: null,
-          };
-        }
         }
       }
     }
@@ -2269,7 +2339,7 @@ function resolveEntity(
     }
 
     const filteredPhrases = phrases.filter(
-      phrase =>
+      (phrase) =>
         !POLITICS_GENERIC_LABELS.has(phrase) &&
         !POLITICS_GENERIC_PATTERN.test(phrase) &&
         !KEYWORD_NOISE.has(phrase) &&
@@ -2280,12 +2350,15 @@ function resolveEntity(
     );
 
     const multiWordPerson = filteredPhrases.find(
-      phrase =>
+      (phrase) =>
         phrase.includes("-") &&
         !hasRoleToken(phrase) &&
         phrase
           .split("-")
-          .every(part => !POLITICS_GENERIC_LABELS.has(part) && !KEYWORD_NOISE.has(part)),
+          .every(
+            (part) =>
+              !POLITICS_GENERIC_LABELS.has(part) && !KEYWORD_NOISE.has(part),
+          ),
     );
     if (multiWordPerson) {
       return {
@@ -2298,7 +2371,7 @@ function resolveEntity(
     }
 
     const singleWordPerson = filteredPhrases.find(
-      phrase =>
+      (phrase) =>
         POLITICS_PERSON_ALLOWLIST.has(phrase) ||
         (archetype === "candidate_list" && phrase.length >= 4),
     );
@@ -2312,7 +2385,7 @@ function resolveEntity(
       };
     }
 
-    const rolePhrase = filteredPhrases.find(phrase => hasRoleToken(phrase));
+    const rolePhrase = filteredPhrases.find((phrase) => hasRoleToken(phrase));
     if (rolePhrase) {
       return {
         type: "keyword",
@@ -2426,8 +2499,12 @@ function buildMarketWhere(args: Args, baseParams: SqlParam[]): string {
   if (args.requireOpenNow) {
     baseParams.push(new Date().toISOString());
     const nowIdx = baseParams.length;
-    parts.push(`(m.expiration_time is null or m.expiration_time > $${nowIdx}::timestamptz)`);
-    parts.push(`(m.close_time is null or m.close_time > $${nowIdx}::timestamptz)`);
+    parts.push(
+      `(m.expiration_time is null or m.expiration_time > $${nowIdx}::timestamptz)`,
+    );
+    parts.push(
+      `(m.close_time is null or m.close_time > $${nowIdx}::timestamptz)`,
+    );
     parts.push(`(e.end_date is null or e.end_date > $${nowIdx}::timestamptz)`);
   }
 
@@ -2518,7 +2595,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
       order by m.venue
     `;
     const venueRes = await pool.query<{ venue: string }>(venueSql, baseParams);
-    venues = venueRes.rows.map(row => row.venue).filter(Boolean);
+    venues = venueRes.rows.map((row) => row.venue).filter(Boolean);
   }
   if (venues.length === 0) {
     return [];
@@ -2584,7 +2661,7 @@ async function fetchRows(args: Args): Promise<MarketRow[]> {
 
   const topUp = await runGlobal(
     args.limit - result.rows.length,
-    result.rows.map(row => row.market_id),
+    result.rows.map((row) => row.market_id),
   );
   return result.rows.concat(topUp);
 }
@@ -2602,7 +2679,10 @@ async function fetchActiveVenueDistribution(
     group by m.venue
     order by count desc
   `;
-  const result = await pool.query<{ venue: string; count: number }>(sql, params);
+  const result = await pool.query<{ venue: string; count: number }>(
+    sql,
+    params,
+  );
   return result.rows.reduce<Record<string, number>>((acc, row) => {
     acc[row.venue] = row.count;
     return acc;
@@ -2702,12 +2782,12 @@ function candidateIntentAnchor(topic: TopicSummaryRow): string | null {
   if (!source) return null;
   const normalized = normalizeTitle(source, topic.category);
   const tokens = tokenizeNormalized(normalized)
-    .filter(token => !QUESTION_ENTITY_BLOCKLIST.has(token))
-    .filter(token => !KEYWORD_NOISE.has(token))
-    .filter(token => !MENTION_STOP_TOKENS.has(token))
-    .filter(token => !GENERIC_TOKENS.has(token))
-    .filter(token => !MONTH_TOKENS.has(token))
-    .filter(token => !DAY_TOKENS.has(token));
+    .filter((token) => !QUESTION_ENTITY_BLOCKLIST.has(token))
+    .filter((token) => !KEYWORD_NOISE.has(token))
+    .filter((token) => !MENTION_STOP_TOKENS.has(token))
+    .filter((token) => !GENERIC_TOKENS.has(token))
+    .filter((token) => !MONTH_TOKENS.has(token))
+    .filter((token) => !DAY_TOKENS.has(token));
   if (tokens.length === 0) return null;
   return tokens.slice(0, 8).join("-");
 }
@@ -2744,7 +2824,9 @@ function constraintClassForConstraint(constraint: Constraint): string {
   }
 }
 
-function normalizeSearchTopicForIntent(topic: TopicSummaryRow): TopicSummaryRow {
+function normalizeSearchTopicForIntent(
+  topic: TopicSummaryRow,
+): TopicSummaryRow {
   if (topic.archetype !== "candidate_list") return topic;
   const anchor = candidateIntentAnchor(topic);
   if (!anchor) return topic;
@@ -2775,15 +2857,15 @@ function candidateContextSuffix(topic: TopicSummaryRow): string {
   const uniqueCandidates = Array.from(
     new Set(
       topic.candidateEntities
-        .map(value => normalizeSlug(value))
-        .filter(value => value && !isPlaceholderEntitySlug(value))
-        .filter(value => value !== "unknown"),
+        .map((value) => normalizeSlug(value))
+        .filter((value) => value && !isPlaceholderEntitySlug(value))
+        .filter((value) => value !== "unknown"),
     ),
   );
   if (uniqueCandidates.length === 0) return "";
   const rendered = uniqueCandidates
     .slice(0, 6)
-    .map(value => value.replace(/-/g, " "));
+    .map((value) => value.replace(/-/g, " "));
   return ` Candidate set: ${rendered.join(", ")}.`;
 }
 
@@ -2807,7 +2889,8 @@ function topicIntentAnchor(topic: TopicSummaryRow): string {
 }
 
 function topicAliasTerms(topic: TopicSummaryRow, anchor: string): string[] {
-  const context = `${topic.sampleEventTitle ?? ""} ${topic.sampleMarketTitle ?? ""}`.toLowerCase();
+  const context =
+    `${topic.sampleEventTitle ?? ""} ${topic.sampleMarketTitle ?? ""}`.toLowerCase();
   const aliases: string[] = [];
 
   if (topic.category === "crypto") {
@@ -2821,9 +2904,15 @@ function topicAliasTerms(topic: TopicSummaryRow, anchor: string): string[] {
       lowerAnchor.includes("ethereum")
     ) {
       aliases.push("eth", "ethereum price", "spot ethereum");
-    } else if (lowerEntity.includes("solana") || lowerAnchor.includes("solana")) {
+    } else if (
+      lowerEntity.includes("solana") ||
+      lowerAnchor.includes("solana")
+    ) {
       aliases.push("sol", "solana price");
-    } else if (lowerEntity.includes("dogecoin") || lowerAnchor.includes("dogecoin")) {
+    } else if (
+      lowerEntity.includes("dogecoin") ||
+      lowerAnchor.includes("dogecoin")
+    ) {
       aliases.push("doge", "dogecoin price");
     } else if (lowerEntity.includes("xrp") || lowerAnchor.includes("xrp")) {
       aliases.push("ripple", "xrp price");
@@ -2930,13 +3019,20 @@ function buildSearchQueries(
   const candidateSuffix = candidateContextSuffix(topic);
   const intentAnchor = topicIntentAnchor(topic);
   const candidateTerms = topic.candidateEntities
-    .map(value => value.replace(/-/g, " "))
-    .filter(value => value && value !== "unknown")
+    .map((value) => value.replace(/-/g, " "))
+    .filter((value) => value && value !== "unknown")
     .slice(0, 6);
-  const mustTerms = dedupeTerms([intentAnchor, ...constraintTerms(topic)]).slice(0, 4);
+  const mustTerms = dedupeTerms([
+    intentAnchor,
+    ...constraintTerms(topic),
+  ]).slice(0, 4);
   const optionalTerms = dedupeTerms(candidateTerms).slice(0, 8);
   const aliasTerms = topicAliasTerms(topic, intentAnchor);
-  const termInstruction = buildTermInstruction(mustTerms, optionalTerms, aliasTerms);
+  const termInstruction = buildTermInstruction(
+    mustTerms,
+    optionalTerms,
+    aliasTerms,
+  );
   const lookbackHours = lookbackHoursForTier(tier, args);
   const lookbackDays = Math.max(1, Math.ceil(lookbackHours / 24));
   const fromDate = isoDateDaysAgo(lookbackDays);
@@ -2946,7 +3042,9 @@ function buildSearchQueries(
       ? { excluded_domains: args.webExcludedDomains.slice(0, 5) }
       : {};
   const xExcludedHandles =
-    args.xExcludedHandles.length > 0 ? args.xExcludedHandles.slice(0, 10) : undefined;
+    args.xExcludedHandles.length > 0
+      ? args.xExcludedHandles.slice(0, 10)
+      : undefined;
 
   const withInstructions = (base: string): string =>
     compactWhitespace(`${base} ${termInstruction}`);
@@ -2980,7 +3078,8 @@ function buildSearchQueries(
     };
   }
   if (topic.category === "politics") {
-    const context = `${topic.sampleEventTitle ?? ""} ${topic.sampleMarketTitle ?? ""}`.toLowerCase();
+    const context =
+      `${topic.sampleEventTitle ?? ""} ${topic.sampleMarketTitle ?? ""}`.toLowerCase();
     const electionLike =
       entity.includes("election") ||
       /\b(election|elect|poll|polling|primary|nominee|vote|voter|governor|president|senate|house)\b/.test(
@@ -3170,7 +3269,7 @@ function assignTiersByThreshold(
   if (args.tierAutoPromoteA) {
     const hasA = Array.from(tiers.values()).includes("A");
     if (!hasA) {
-      const candidate = byPriority.find(topic => {
+      const candidate = byPriority.find((topic) => {
         if (topic.entity === "unknown") return false;
         return topic.marketCount >= args.tierAutoPromoteAMinMarketCount;
       });
@@ -3179,7 +3278,7 @@ function assignTiersByThreshold(
   }
 
   if (args.tierAutoPromoteB) {
-    const currentB = Array.from(tiers.values()).filter(t => t === "B").length;
+    const currentB = Array.from(tiers.values()).filter((t) => t === "B").length;
     if (currentB < args.tierAutoPromoteBMinTopics) {
       let need = args.tierAutoPromoteBMinTopics - currentB;
       for (const topic of byPriority) {
@@ -3202,20 +3301,17 @@ function assignTiersByScore(
   args: Args,
 ): TierAssignment {
   const context = {
-    maxMarketCount: Math.max(
-      1,
-      ...topics.map(topic => topic.marketCount),
-    ),
-    maxEventCount: Math.max(1, ...topics.map(topic => topic.eventCount)),
-    maxVenueCount: Math.max(1, ...topics.map(topic => topic.venueCount)),
+    maxMarketCount: Math.max(1, ...topics.map((topic) => topic.marketCount)),
+    maxEventCount: Math.max(1, ...topics.map((topic) => topic.eventCount)),
+    maxVenueCount: Math.max(1, ...topics.map((topic) => topic.venueCount)),
     maxCandidateCount: Math.max(
       1,
-      ...topics.map(topic => topic.candidateEntities.length),
+      ...topics.map((topic) => topic.candidateEntities.length),
     ),
   };
 
   const scored = topics
-    .map(topic => ({
+    .map((topic) => ({
       topic,
       score: topicScore(topic, context),
     }))
@@ -3301,10 +3397,7 @@ function assignTiersByScore(
   return { tiers, scores };
 }
 
-function assignTiers(
-  topics: TopicSummaryRow[],
-  args: Args,
-): TierAssignment {
+function assignTiers(topics: TopicSummaryRow[], args: Args): TierAssignment {
   if (args.tieringMode === "threshold") {
     return assignTiersByThreshold(topics, args);
   }
@@ -3425,7 +3518,7 @@ async function main(): Promise<void> {
   }
 
   const topics: TopicSummaryRow[] = Array.from(topicMap.values())
-    .map(topic => ({
+    .map((topic) => ({
       topicKey: topic.topicKey,
       category: topic.category,
       entityType: topic.entityType,
@@ -3512,8 +3605,8 @@ async function main(): Promise<void> {
   }
 
   const searchTopics = Array.from(searchTopicMap.values())
-    .map(topic => normalizeSearchTopicForIntent(topic))
-    .filter(topic => isSearchTopicEligible(topic, args))
+    .map((topic) => normalizeSearchTopicForIntent(topic))
+    .filter((topic) => isSearchTopicEligible(topic, args))
     .sort((a, b) => b.marketCount - a.marketCount)
     .slice(0, args.maxSearchTopics);
   const tierAssignment = assignTiers(searchTopics, args);
@@ -3530,60 +3623,64 @@ async function main(): Promise<void> {
     { A: 0, B: 0, C: 0 },
   );
 
-  const topicSearchPreview = searchTopics.slice(0, args.showQueries).map(topic => {
-    const tier = topicTiers.get(topic.topicKey) ?? "C";
-    const cadenceMinutes = cadenceForTier(tier, args);
-    const lookback = windowForTier(tier, args);
-    const queries = buildSearchQueries(topic, tier, args);
-    const pack = countsForTier(tier, args);
-    const enabledPrompts: string[] = [];
-    if (pack.combinedCount > 0) {
-      enabledPrompts.push("prompt_combined");
-    }
-    return {
-      topicKey: topic.topicKey,
-      tier,
-      cadenceMinutes,
-      lookbackHours: lookback.lookbackHours,
-      category: topic.category,
-      entity: `${topic.entityType}:${topic.entity}`,
-      searchIntentKey: topic.searchIntentKey ?? searchIntentKey(topic),
-      constraintClass: constraintClassForConstraint(topic.constraint),
-      archetype: topic.archetype,
-      entitySource: topic.entitySource,
-      unknownReason: topic.unknownReason,
-      marketCount: topic.marketCount,
-      sampleEventId: topic.sampleEventId,
-      sampleMarketId: topic.sampleMarketId,
-      sampleVenue: topic.sampleVenue,
-      sampleEventStatus: topic.sampleEventStatus,
-      sampleEventEndDate: topic.sampleEventEndDate,
-      sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
-      tierScore: topicScores.get(topic.topicKey) ?? null,
-      candidateEntities: topic.candidateEntities.slice(0, 10),
-      promptCombined: queries.promptCombined,
-      retrievalPlan: queries.retrievalPlan,
-      webSearchTool: queries.webSearchTool,
-      xSearchTool: queries.xSearchTool,
-      pack: {
-        combinedCount: pack.combinedCount,
-        mode: tier === "B" ? args.tierBMode : "normal",
-        enabledPrompts,
-      },
-      xSearchWindow: {
-        fromDate: lookback.fromDate,
-        toDate: lookback.toDate,
+  const topicSearchPreview = searchTopics
+    .slice(0, args.showQueries)
+    .map((topic) => {
+      const tier = topicTiers.get(topic.topicKey) ?? "C";
+      const cadenceMinutes = cadenceForTier(tier, args);
+      const lookback = windowForTier(tier, args);
+      const queries = buildSearchQueries(topic, tier, args);
+      const pack = countsForTier(tier, args);
+      const enabledPrompts: string[] = [];
+      if (pack.combinedCount > 0) {
+        enabledPrompts.push("prompt_combined");
+      }
+      return {
+        topicKey: topic.topicKey,
+        tier,
+        cadenceMinutes,
         lookbackHours: lookback.lookbackHours,
-      },
-      schedule: {
-        bucketMinutes: bucketMinutesForTier(tier),
-      },
-    };
-  });
+        category: topic.category,
+        entity: `${topic.entityType}:${topic.entity}`,
+        searchIntentKey: topic.searchIntentKey ?? searchIntentKey(topic),
+        constraintClass: constraintClassForConstraint(topic.constraint),
+        archetype: topic.archetype,
+        entitySource: topic.entitySource,
+        unknownReason: topic.unknownReason,
+        marketCount: topic.marketCount,
+        sampleEventId: topic.sampleEventId,
+        sampleMarketId: topic.sampleMarketId,
+        sampleVenue: topic.sampleVenue,
+        sampleEventStatus: topic.sampleEventStatus,
+        sampleEventEndDate: topic.sampleEventEndDate,
+        sampleMarketUpdatedAt: topic.sampleMarketUpdatedAt,
+        tierScore: topicScores.get(topic.topicKey) ?? null,
+        candidateEntities: topic.candidateEntities.slice(0, 10),
+        promptCombined: queries.promptCombined,
+        retrievalPlan: queries.retrievalPlan,
+        webSearchTool: queries.webSearchTool,
+        xSearchTool: queries.xSearchTool,
+        pack: {
+          combinedCount: pack.combinedCount,
+          mode: tier === "B" ? args.tierBMode : "normal",
+          enabledPrompts,
+        },
+        xSearchWindow: {
+          fromDate: lookback.fromDate,
+          toDate: lookback.toDate,
+          lookbackHours: lookback.lookbackHours,
+        },
+        schedule: {
+          bucketMinutes: bucketMinutesForTier(tier),
+        },
+      };
+    });
 
-  const modeledTopicMarketCounts = searchTopics.map(topic => topic.marketCount);
+  const modeledTopicMarketCounts = searchTopics.map(
+    (topic) => topic.marketCount,
+  );
   const modeledAgesHours = searchTopics
-    .map(topic => {
+    .map((topic) => {
       const ts = topic.sampleMarketUpdatedAt
         ? new Date(topic.sampleMarketUpdatedAt).getTime()
         : Number.NaN;
@@ -3599,17 +3696,20 @@ async function main(): Promise<void> {
     },
     {},
   );
-  const modeledByVenue = searchTopics.reduce<Record<string, number>>((acc, topic) => {
-    for (const venue of topic.venues) {
-      acc[venue] = (acc[venue] ?? 0) + 1;
-    }
-    return acc;
-  }, {});
+  const modeledByVenue = searchTopics.reduce<Record<string, number>>(
+    (acc, topic) => {
+      for (const venue of topic.venues) {
+        acc[venue] = (acc[venue] ?? 0) + 1;
+      }
+      return acc;
+    },
+    {},
+  );
 
   const demotionPreview = args.emitDemotionPreview
     ? (() => {
         const suggestions = searchTopics
-          .map(topic => {
+          .map((topic) => {
             const currentTier = topicTiers.get(topic.topicKey) ?? "C";
             const reasons: string[] = [];
             let riskScore = 0;
@@ -3669,7 +3769,7 @@ async function main(): Promise<void> {
               sampleVenue: topic.sampleVenue,
             };
           })
-          .filter(item => item.action !== "keep")
+          .filter((item) => item.action !== "keep")
           .sort((a, b) => b.riskScore - a.riskScore);
 
         return {
@@ -3686,7 +3786,9 @@ async function main(): Promise<void> {
         enabled: false,
       };
 
-  const estimatedDailyRawByTier = searchTopics.reduce<Record<"A" | "B" | "C", number>>(
+  const estimatedDailyRawByTier = searchTopics.reduce<
+    Record<"A" | "B" | "C", number>
+  >(
     (acc, topic) => {
       const tier = topicTiers.get(topic.topicKey) ?? "C";
       if (tier === "C" && !args.tierCEnabled) return acc;
@@ -3701,9 +3803,12 @@ async function main(): Promise<void> {
   );
 
   const estimatedDailyRaw =
-    estimatedDailyRawByTier.A + estimatedDailyRawByTier.B + estimatedDailyRawByTier.C;
+    estimatedDailyRawByTier.A +
+    estimatedDailyRawByTier.B +
+    estimatedDailyRawByTier.C;
   const estimatedDailyRawCalls = estimatedDailyRaw;
-  const estimatedDailyNetCalls = estimatedDailyRawCalls * (1 - args.cacheHitRate);
+  const estimatedDailyNetCalls =
+    estimatedDailyRawCalls * (1 - args.cacheHitRate);
   const estimatedHourlyRawCalls = estimatedDailyRawCalls / 24;
   const estimatedHourlyNetCalls = estimatedDailyNetCalls / 24;
 
@@ -3712,19 +3817,19 @@ async function main(): Promise<void> {
   const duplicateRate = rowsUsed > 0 ? duplicates / rowsUsed : 0;
   const nowMs = Date.now();
   const nonActiveSamples = searchTopics.filter(
-    item => (item.sampleEventStatus ?? "").toUpperCase() !== "ACTIVE",
+    (item) => (item.sampleEventStatus ?? "").toUpperCase() !== "ACTIVE",
   ).length;
-  const endedSamples = searchTopics.filter(item => {
+  const endedSamples = searchTopics.filter((item) => {
     if (!item.sampleEventEndDate) return false;
     const ts = new Date(item.sampleEventEndDate).getTime();
     return Number.isFinite(ts) && ts <= nowMs;
   }).length;
-  const staleSamples6h = searchTopics.filter(item => {
+  const staleSamples6h = searchTopics.filter((item) => {
     if (!item.sampleMarketUpdatedAt) return false;
     const ts = new Date(item.sampleMarketUpdatedAt).getTime();
     return Number.isFinite(ts) && nowMs - ts > 6 * 3600 * 1000;
   }).length;
-  const staleSamples24h = searchTopics.filter(item => {
+  const staleSamples24h = searchTopics.filter((item) => {
     if (!item.sampleMarketUpdatedAt) return false;
     const ts = new Date(item.sampleMarketUpdatedAt).getTime();
     return Number.isFinite(ts) && nowMs - ts > 24 * 3600 * 1000;
@@ -3836,27 +3941,69 @@ async function main(): Promise<void> {
       estimatedCallsByTier: {
         A: {
           dailyRaw: Number(estimatedDailyRawByTier.A.toFixed(2)),
-          dailyAfterCache: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
-          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCache: Number(
+            (estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2),
+          ),
+          dailyAfterCacheToolCalls: Number(
+            (estimatedDailyRawByTier.A * (1 - args.cacheHitRate)).toFixed(2),
+          ),
           hourlyRaw: Number((estimatedDailyRawByTier.A / 24).toFixed(2)),
-          hourlyAfterCache: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
-          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCache: Number(
+            (
+              (estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
+          hourlyAfterCacheToolCalls: Number(
+            (
+              (estimatedDailyRawByTier.A * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
         },
         B: {
           dailyRaw: Number(estimatedDailyRawByTier.B.toFixed(2)),
-          dailyAfterCache: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
-          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCache: Number(
+            (estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2),
+          ),
+          dailyAfterCacheToolCalls: Number(
+            (estimatedDailyRawByTier.B * (1 - args.cacheHitRate)).toFixed(2),
+          ),
           hourlyRaw: Number((estimatedDailyRawByTier.B / 24).toFixed(2)),
-          hourlyAfterCache: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
-          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCache: Number(
+            (
+              (estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
+          hourlyAfterCacheToolCalls: Number(
+            (
+              (estimatedDailyRawByTier.B * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
         },
         C: {
           dailyRaw: Number(estimatedDailyRawByTier.C.toFixed(2)),
-          dailyAfterCache: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
-          dailyAfterCacheToolCalls: Number((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2)),
+          dailyAfterCache: Number(
+            (estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2),
+          ),
+          dailyAfterCacheToolCalls: Number(
+            (estimatedDailyRawByTier.C * (1 - args.cacheHitRate)).toFixed(2),
+          ),
           hourlyRaw: Number((estimatedDailyRawByTier.C / 24).toFixed(2)),
-          hourlyAfterCache: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
-          hourlyAfterCacheToolCalls: Number(((estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) / 24).toFixed(2)),
+          hourlyAfterCache: Number(
+            (
+              (estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
+          hourlyAfterCacheToolCalls: Number(
+            (
+              (estimatedDailyRawByTier.C * (1 - args.cacheHitRate)) /
+              24
+            ).toFixed(2),
+          ),
         },
       },
       topicsModeled: searchTopics.length,
@@ -3890,8 +4037,8 @@ async function main(): Promise<void> {
             modeledAgesHours.length > 0
               ? Number(Math.max(...modeledAgesHours).toFixed(2))
               : 0,
-          over12h: modeledAgesHours.filter(age => age > 12).length,
-          over24h: modeledAgesHours.filter(age => age > 24).length,
+          over12h: modeledAgesHours.filter((age) => age > 12).length,
+          over24h: modeledAgesHours.filter((age) => age > 24).length,
         },
         byCategory: modeledByCategory,
         byVenue: modeledByVenue,

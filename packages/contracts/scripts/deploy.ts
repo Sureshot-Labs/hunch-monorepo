@@ -39,15 +39,13 @@ async function main() {
       argv.collateral as string | undefined,
       process.env.FEE_COLLECTOR_COLLATERAL,
       process.env.HUNCH_FEE_COLLECTOR_COLLATERAL,
-    ) ||
-    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+    ) || "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
   const exchange =
     firstNonEmpty(
       argv.exchange as string | undefined,
       process.env.FEE_COLLECTOR_EXCHANGE,
       process.env.HUNCH_FEE_COLLECTOR_EXCHANGE,
-    ) ||
-    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+    ) || "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
   const negRiskExchange =
     (argv.negriskexchange as string | undefined) ||
     (argv["neg-risk-exchange"] as string | undefined) ||
@@ -75,11 +73,20 @@ async function main() {
   console.log("Deploying PolymarketFeeCollector v2 with params:");
   console.log({ treasury, collateral, exchanges });
 
-  const FeeCollector = await ethers.getContractFactory("PolymarketFeeCollector");
-  const feeCollector = await FeeCollector.deploy(treasury, collateral, exchanges);
+  const FeeCollector = await ethers.getContractFactory(
+    "PolymarketFeeCollector",
+  );
+  const feeCollector = await FeeCollector.deploy(
+    treasury,
+    collateral,
+    exchanges,
+  );
   await feeCollector.waitForDeployment();
 
-  console.log("PolymarketFeeCollector deployed to:", await feeCollector.getAddress());
+  console.log(
+    "PolymarketFeeCollector deployed to:",
+    await feeCollector.getAddress(),
+  );
 }
 
 main().catch((error) => {

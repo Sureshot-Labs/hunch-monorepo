@@ -99,14 +99,14 @@ function downsamplePerformancePoints(
   const result: WalletPerformanceSummaryPoint[] = [];
   const lastIndex = points.length - 1;
   for (let index = 0; index < maxPoints; index += 1) {
-    const pointIndex = Math.round((index * lastIndex) / Math.max(maxPoints - 1, 1));
+    const pointIndex = Math.round(
+      (index * lastIndex) / Math.max(maxPoints - 1, 1),
+    );
     const point = points[pointIndex];
     if (point) result.push(point);
   }
   return result.filter(
-    (point, index, list) =>
-      index === 0 ||
-      point.asOf !== list[index - 1]?.asOf,
+    (point, index, list) => index === 0 || point.asOf !== list[index - 1]?.asOf,
   );
 }
 
@@ -266,7 +266,7 @@ export async function loadWalletEntryBracketStats(
     return {
       bracket,
       avgStakeUsd: row ? nullableNumber(row.avg_stake_usd) : null,
-      totalStakeUsd: row ? nullableNumber(row.total_stake_usd) ?? 0 : 0,
+      totalStakeUsd: row ? (nullableNumber(row.total_stake_usd) ?? 0) : 0,
       tradeCount: row?.trade_count ?? 0,
       resolvedCount: row?.resolved_count ?? 0,
       winRate: row ? nullableNumber(row.win_rate) : null,
@@ -308,7 +308,9 @@ export async function loadWalletPerformance30dSummary(
   const portfolioPerformance = portfolioPnlSeries.performance;
   const startRoi = normalizeRate(nullableNumber(start?.roi ?? null));
   const endRoi = normalizeRate(nullableNumber(end?.roi ?? null));
-  const pnlRange = summarizeRange(normalizedPoints.map((point) => point.pnlUsd));
+  const pnlRange = summarizeRange(
+    normalizedPoints.map((point) => point.pnlUsd),
+  );
   const roiRange = summarizeRange(normalizedPoints.map((point) => point.roi));
 
   return {
@@ -321,8 +323,7 @@ export async function loadWalletPerformance30dSummary(
     deltaPnlUsd: portfolioPerformance?.pnlUsd ?? null,
     startRoi,
     endRoi,
-    deltaRoi:
-      startRoi != null && endRoi != null ? endRoi - startRoi : null,
+    deltaRoi: startRoi != null && endRoi != null ? endRoi - startRoi : null,
     minPnlUsd: pnlRange.min,
     maxPnlUsd: pnlRange.max,
     minRoi: roiRange.min,

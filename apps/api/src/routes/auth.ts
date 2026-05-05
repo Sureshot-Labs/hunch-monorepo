@@ -59,9 +59,7 @@ import {
   getReferralAttachmentStatus,
   type ReferralAttachmentStatus,
 } from "../services/rewards.js";
-import {
-  buildReferralSignupAttributionPayload,
-} from "../services/analytics-referrals.js";
+import { buildReferralSignupAttributionPayload } from "../services/analytics-referrals.js";
 import {
   DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
   getPrivyTerminalAuthMessage,
@@ -69,10 +67,7 @@ import {
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
-const ED25519_SPKI_PREFIX = Buffer.from(
-  "302a300506032b6570032100",
-  "hex",
-);
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function readRequestHeaderValue(
   headers: Record<string, unknown>,
@@ -138,7 +133,9 @@ function buildAuthWalletPayloads(
       walletType,
       wallet.walletAddress,
     );
-    const profile = walletProfileLookup.get(`${walletType}:${normalizedAddress}`);
+    const profile = walletProfileLookup.get(
+      `${walletType}:${normalizedAddress}`,
+    );
     const isEmbeddedWallet = profile?.source === "embedded";
     const isSmartWallet = profile?.source === "smart";
     const isInternalWallet = profile?.isInternalWallet;
@@ -167,7 +164,9 @@ function getPolymarketConnectFailureResponse(error: unknown): {
   const message =
     error instanceof Error ? error.message : "Polymarket connect failed";
   const status =
-    error instanceof Error && "status" in error && typeof error.status === "number"
+    error instanceof Error &&
+    "status" in error &&
+    typeof error.status === "number"
       ? error.status
       : null;
 
@@ -224,7 +223,8 @@ function getPrivyAuthFailureResponse(error: unknown): {
       status: 503,
       body: {
         error: "auth_unavailable",
-        message: "Authentication is temporarily unavailable. Please try again later.",
+        message:
+          "Authentication is temporarily unavailable. Please try again later.",
       },
     };
   }
@@ -246,7 +246,8 @@ function getPrivyAuthFailureResponse(error: unknown): {
     status: 500,
     body: {
       error: "auth_unavailable",
-      message: "Authentication is temporarily unavailable. Please try again later.",
+      message:
+        "Authentication is temporarily unavailable. Please try again later.",
     },
   };
 }
@@ -316,7 +317,11 @@ function verifySolanaSignature(params: {
 }
 
 type AuthAccessState = "off" | "prompt" | "required";
-type InviteReason = "missing_code" | "invalid_code" | "not_found" | "self_referral";
+type InviteReason =
+  | "missing_code"
+  | "invalid_code"
+  | "not_found"
+  | "self_referral";
 
 function mapAttachStatusToInviteReason(
   status: ReferralAttachmentStatus,
@@ -415,7 +420,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           reply.code(400);
           return reply.send({
             error: "invalid_privy_user",
-            message: "No supported wallet address was found in the Privy account.",
+            message:
+              "No supported wallet address was found in the Privy account.",
           });
         }
 
@@ -425,12 +431,14 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           effectiveAt: accessPolicyResolved.effectiveAt,
         });
 
-        let user: Awaited<ReturnType<typeof AuthService.createOrUpdateUserFromPrivy>>;
+        let user: Awaited<
+          ReturnType<typeof AuthService.createOrUpdateUserFromPrivy>
+        >;
         let invitePrompt = false;
         let inviteReason: InviteReason | null = null;
-        let referralSignupAttribution:
-          | ReturnType<typeof buildReferralSignupAttributionPayload>
-          | null = null;
+        let referralSignupAttribution: ReturnType<
+          typeof buildReferralSignupAttributionPayload
+        > | null = null;
         let effectiveAccessState = accessPolicyResolved.effective
           .state as AuthAccessState;
 
@@ -453,7 +461,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           const hasReferralCode = referralCode.trim().length > 0;
           const inviteConfirmed = body.inviteConfirmed === true;
 
-          if (effectiveAccessState === "required" || effectiveAccessState === "prompt") {
+          if (
+            effectiveAccessState === "required" ||
+            effectiveAccessState === "prompt"
+          ) {
             const current = await getReferralAttachmentStatus(client, {
               userId: user.id,
             });
@@ -465,10 +476,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
               } else if (!hasReferralCode) {
                 inviteReason = "missing_code";
               } else {
-                const attached = await attachReferralCodeForExistingUser(client, {
-                  userId: user.id,
-                  referralCode,
-                });
+                const attached = await attachReferralCodeForExistingUser(
+                  client,
+                  {
+                    userId: user.id,
+                    referralCode,
+                  },
+                );
                 inviteReason = mapAttachStatusToInviteReason(attached.status);
                 if (inviteReason == null) {
                   hasReferrer = true;
@@ -486,7 +500,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
               }
             }
 
-            if (effectiveAccessState === "required" && !hasReferrer && !inviteConfirmed) {
+            if (
+              effectiveAccessState === "required" &&
+              !hasReferrer &&
+              !inviteConfirmed
+            ) {
               inviteReason = "missing_code";
             }
 
@@ -504,11 +522,17 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           } else {
             if (hasReferralCode) {
               try {
-                const attached = await attachReferralCodeForExistingUser(client, {
-                  userId: user.id,
-                  referralCode,
-                });
-                if (attached.status === "attached" && attached.referral.code != null) {
+                const attached = await attachReferralCodeForExistingUser(
+                  client,
+                  {
+                    userId: user.id,
+                    referralCode,
+                  },
+                );
+                if (
+                  attached.status === "attached" &&
+                  attached.referral.code != null
+                ) {
                   referralSignupAttribution =
                     buildReferralSignupAttributionPayload({
                       userId: user.id,
@@ -641,26 +665,26 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     "/auth/logout",
     { preHandler: createAuthMiddleware() },
     async (request, reply) => {
-    const authHeader = request.headers.authorization;
+      const authHeader = request.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      reply.code(401);
-      return reply.send({ error: "Missing or invalid authorization header" });
-    }
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        reply.code(401);
+        return reply.send({ error: "Missing or invalid authorization header" });
+      }
 
-    const token = authHeader.substring(7);
+      const token = authHeader.substring(7);
 
-    try {
-      await AuthService.invalidateSession(token);
-      reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ message: "Successfully logged out" });
-    } catch (error) {
-      app.log.error({ error }, "Logout failed");
-      reply.code(500);
-      return reply.send({
-        error: "Logout failed",
-      });
-    }
+      try {
+        await AuthService.invalidateSession(token);
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ message: "Successfully logged out" });
+      } catch (error) {
+        app.log.error({ error }, "Logout failed");
+        reply.code(500);
+        return reply.send({
+          error: "Logout failed",
+        });
+      }
     },
   );
 
@@ -1073,13 +1097,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const validatedPolymarketFunder = await validatePolymarketFunderSelection(
-          {
+        const validatedPolymarketFunder =
+          await validatePolymarketFunderSelection({
             signer: walletAddress,
             funderAddress: request.body.funderAddress,
             includeMagicProxy: true,
-          },
-        );
+          });
         const updated = await AuthService.updateVenueFunderAddress(
           user.id,
           walletAddress,
@@ -1365,9 +1388,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
-        const match = walletType === "ethereum"
-          ? "lower(wallet_address) = lower($2)"
-          : "wallet_address = $2";
+        const match =
+          walletType === "ethereum"
+            ? "lower(wallet_address) = lower($2)"
+            : "wallet_address = $2";
         const conflict = await pool.query<{ user_id: string }>(
           `SELECT user_id
            FROM user_wallets

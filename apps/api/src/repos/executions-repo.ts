@@ -76,10 +76,8 @@ export async function storeExecution(
     raw?: unknown;
   },
 ): Promise<ExecutionRow> {
-  const amountIn =
-    inputs.amountIn == null ? null : String(inputs.amountIn);
-  const amountOut =
-    inputs.amountOut == null ? null : String(inputs.amountOut);
+  const amountIn = inputs.amountIn == null ? null : String(inputs.amountIn);
+  const amountOut = inputs.amountOut == null ? null : String(inputs.amountOut);
 
   const { rows } = await pool.query<ExecutionRow>(
     `

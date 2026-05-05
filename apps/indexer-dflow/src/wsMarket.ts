@@ -189,7 +189,9 @@ async function refreshTickerTokens(tickers: string[]): Promise<void> {
   missingTickers.clear();
 }
 
-async function ensureTickerTokens(ticker: string): Promise<TickerTokens | null> {
+async function ensureTickerTokens(
+  ticker: string,
+): Promise<TickerTokens | null> {
   const existing = tickerTokens.get(ticker);
   if (existing) return existing;
   if (missingTickers.has(ticker)) return null;
@@ -245,7 +247,9 @@ function sendSubscribeAll(ws: WebSocket) {
 }
 
 function sendUnsubscribeAll(ws: WebSocket) {
-  ws.send(JSON.stringify({ type: "unsubscribe", channel: "prices", all: true }));
+  ws.send(
+    JSON.stringify({ type: "unsubscribe", channel: "prices", all: true }),
+  );
 }
 
 async function syncSubscriptions(ws: WebSocket, tickers: string[]) {

@@ -99,7 +99,9 @@ export async function markHotTokens(inputs: MarkHotInputs): Promise<void> {
   });
 }
 
-export async function markStreamHotTokens(inputs: MarkHotInputs): Promise<void> {
+export async function markStreamHotTokens(
+  inputs: MarkHotInputs,
+): Promise<void> {
   await markTokensForKeySet(inputs, {
     keys: HOT_STREAM_KEYS,
     maxTokens: env.hotStreamTokensMax,

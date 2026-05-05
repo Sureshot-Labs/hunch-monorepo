@@ -283,7 +283,9 @@ const HEALTH_TAGS = new Set([
   "biotech",
 ]);
 
-function normalizeTagToken(value: string | null | undefined): string | undefined {
+function normalizeTagToken(
+  value: string | null | undefined,
+): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim().toLowerCase();
   if (!trimmed) return undefined;
@@ -319,7 +321,9 @@ function extractTagTokens(tags: unknown): string[] {
   return Array.from(out);
 }
 
-function scoreTagCategory(tag: string): { category: PolymarketCategory; weight: number } | null {
+function scoreTagCategory(
+  tag: string,
+): { category: PolymarketCategory; weight: number } | null {
   if (!tag) return null;
 
   if (MENTION_TAGS.has(tag)) {
@@ -373,7 +377,9 @@ function scoreTagCategory(tag: string): { category: PolymarketCategory; weight: 
   return null;
 }
 
-export function deriveCategoryFromTags(tags: unknown): PolymarketCategory | undefined {
+export function deriveCategoryFromTags(
+  tags: unknown,
+): PolymarketCategory | undefined {
   const tokens = extractTagTokens(tags);
   if (!tokens.length) return undefined;
 
@@ -381,7 +387,10 @@ export function deriveCategoryFromTags(tags: unknown): PolymarketCategory | unde
   for (const token of tokens) {
     const scored = scoreTagCategory(token);
     if (!scored) continue;
-    scores.set(scored.category, (scores.get(scored.category) ?? 0) + scored.weight);
+    scores.set(
+      scored.category,
+      (scores.get(scored.category) ?? 0) + scored.weight,
+    );
   }
   if (!scores.size) return undefined;
 
@@ -580,10 +589,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
   };
 }
 
-export function mapPolymarketMarketRow(
-  eventId: string,
-  m: TPolymarketMarket,
-) {
+export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
   return {
     id: m.id,
     event_id: eventId,
@@ -1016,7 +1022,9 @@ export function mapToUnifiedMarket(
     return m.question;
   })();
 
-  const outcomePrices = parseOutcomePrices(m.outcomePrices ?? extra.outcomePrices);
+  const outcomePrices = parseOutcomePrices(
+    m.outcomePrices ?? extra.outcomePrices,
+  );
   const resolvedOutcome =
     status !== "ACTIVE" ? resolveBinaryOutcome(outcomePrices) : undefined;
 

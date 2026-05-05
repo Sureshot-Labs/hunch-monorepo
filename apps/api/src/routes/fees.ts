@@ -49,7 +49,7 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       const feeBps = clampFeeBps(feeBpsRaw);
       const feeScaleRaw =
         venue === "kalshi"
-          ? activePolicy?.fee_scale ?? env.feeScaleKalshi
+          ? (activePolicy?.fee_scale ?? env.feeScaleKalshi)
           : 0;
       const feeScale = clampFeeScale(feeScaleRaw);
 

@@ -104,18 +104,18 @@ function tokenizeComparableText(value: string | null | undefined): Set<string> {
 }
 
 function extractMatchParticipantGroups(
-  value: string | null | undefined
+  value: string | null | undefined,
 ): ParticipantGroup[] {
   if (!value) return [];
   const parts = value
     .replace(/[–—]/g, " vs ")
     .split(/\b(?:vs\.?|versus)\b/i)
-    .map(part => part.trim())
-    .filter(part => part.length > 0);
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
   if (parts.length !== 2) return [];
   return parts
-    .map(part => ({ tokens: tokenizeComparableText(part) }))
-    .filter(group => group.tokens.size > 0);
+    .map((part) => ({ tokens: tokenizeComparableText(part) }))
+    .filter((group) => group.tokens.size > 0);
 }
 
 function intersectionSize(a: Set<string>, b: Set<string>): number {
@@ -127,10 +127,10 @@ function intersectionSize(a: Set<string>, b: Set<string>): number {
 }
 
 function inferSelectedParticipant(
-  market: ClusterMarketSummary
+  market: ClusterMarketSummary,
 ): ParticipantGroup | null {
   const participants = extractMatchParticipantGroups(
-    market.eventTitle ?? market.marketTitle
+    market.eventTitle ?? market.marketTitle,
   );
   if (participants.length !== 2) return null;
 
@@ -144,10 +144,7 @@ function inferSelectedParticipant(
 
   const normalizedTitle = normalizeComparableText(market.marketTitle);
   const normalizedEvent = normalizeComparableText(market.eventTitle);
-  if (
-    normalizedTitle.length > 0 &&
-    normalizedTitle === normalizedEvent
-  ) {
+  if (normalizedTitle.length > 0 && normalizedTitle === normalizedEvent) {
     return participants[0];
   }
 
@@ -156,7 +153,7 @@ function inferSelectedParticipant(
 
 function resolveComparablePrice(
   market: ClusterMarketSummary,
-  canonicalSelection: ParticipantGroup | null
+  canonicalSelection: ParticipantGroup | null,
 ): number | null {
   if (market.yesMid == null) return null;
   if (!canonicalSelection) return market.yesMid;
@@ -170,7 +167,7 @@ function resolveComparablePrice(
 }
 
 function resolveCanonicalSelection(
-  markets: ClusterMarketSummary[]
+  markets: ClusterMarketSummary[],
 ): ParticipantGroup | null {
   const inferred = markets
     .map(inferSelectedParticipant)
@@ -179,7 +176,7 @@ function resolveCanonicalSelection(
 
   const canonical = inferred[0];
   const hasOpposite = inferred.some(
-    selection => intersectionSize(selection.tokens, canonical.tokens) === 0
+    (selection) => intersectionSize(selection.tokens, canonical.tokens) === 0,
   );
   return hasOpposite ? canonical : null;
 }
@@ -192,15 +189,15 @@ export function resolveLiquidityDisplay(row: {
   const liquidity = toNumber(row.liquidity);
   if (liquidity != null && liquidity > 0) return liquidity;
 
-  const openInterest = toNumber(
-    row.openInterest ?? row.open_interest ?? null
-  );
+  const openInterest = toNumber(row.openInterest ?? row.open_interest ?? null);
   if (openInterest != null && openInterest > 0) return openInterest;
 
   return null;
 }
 
-export function resolveYesMid(row: Pick<ClusterMarketRow, "best_bid" | "best_ask" | "last_price">): number | null {
+export function resolveYesMid(
+  row: Pick<ClusterMarketRow, "best_bid" | "best_ask" | "last_price">,
+): number | null {
   const bid = toNumber(row.best_bid);
   const ask = toNumber(row.best_ask);
   if (bid != null && ask != null) return (bid + ask) / 2;
@@ -222,10 +219,12 @@ export function resolveExpiresAt(
   return null;
 }
 
-export function scoreMarket(row: Pick<
-  ClusterMarketRow,
-  "volume_24h" | "volume_total" | "liquidity" | "open_interest"
->): number {
+export function scoreMarket(
+  row: Pick<
+    ClusterMarketRow,
+    "volume_24h" | "volume_total" | "liquidity" | "open_interest"
+  >,
+): number {
   const volume24h = toNumber(row.volume_24h) ?? 0;
   const volumeTotal = toNumber(row.volume_total) ?? 0;
   const liquidity = toNumber(row.liquidity) ?? 0;
@@ -233,7 +232,9 @@ export function scoreMarket(row: Pick<
   return volume24h * 2 + liquidity + openInterest + volumeTotal * 0.2;
 }
 
-export function buildMarketSummary(row: ClusterMarketRow): ClusterMarketSummary {
+export function buildMarketSummary(
+  row: ClusterMarketRow,
+): ClusterMarketSummary {
   const yesBid = toNumber(row.best_bid);
   const yesAsk = toNumber(row.best_ask);
   const yesMid = resolveYesMid(row);

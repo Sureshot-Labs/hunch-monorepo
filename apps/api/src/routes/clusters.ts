@@ -52,7 +52,11 @@ type ClusterAnalysis = {
   outliers: string[];
   confidence: number;
   query?: string | null;
-  sources?: Array<{ title: string; url: string; snippet?: string | null }> | null;
+  sources?: Array<{
+    title: string;
+    url: string;
+    snippet?: string | null;
+  }> | null;
   model?: string | null;
   stage?: "fast" | "smart";
 };
@@ -72,9 +76,7 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   }
 }
 
-function normalizeAnalysis(
-  value: string | undefined,
-): ClusterAnalysis | null {
+function normalizeAnalysis(value: string | undefined): ClusterAnalysis | null {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as ClusterAnalysis;
@@ -103,7 +105,8 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
     score: parseNumber(hash.score) ?? 0,
     seedMarketId: hash.seed_market_id || null,
     marketCount: parseNumber(hash.market_count) ?? marketsPreview.length,
-    venueCount: parseNumber(hash.venue_count) ?? Object.keys(venueCounts).length,
+    venueCount:
+      parseNumber(hash.venue_count) ?? Object.keys(venueCounts).length,
     venueCounts,
     priceSpread: parseNumber(hash.price_spread),
     minLiquidity: parseNumber(hash.min_liquidity),
@@ -226,10 +229,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       const summaries = raw
         .map((values, idx) => {
           const hash = Object.fromEntries(
-            fields.map((field, fieldIdx) => [
-              field,
-              values?.[fieldIdx] ?? "",
-            ]),
+            fields.map((field, fieldIdx) => [field, values?.[fieldIdx] ?? ""]),
           ) as ClusterHash;
           return formatClusterSummary(ids[idx], hash);
         })
@@ -238,7 +238,9 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       let filtered = summaries;
       if (query.minAnalysisConfidence == null) {
         filtered = filtered.filter(
-          (cluster) => cluster.analysisStatus == null || cluster.analysisStatus === "ready",
+          (cluster) =>
+            cluster.analysisStatus == null ||
+            cluster.analysisStatus === "ready",
         );
       }
       const minLiquidity = query.minLiquidity;
@@ -259,8 +261,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       if (minSpread != null) {
         filtered = filtered.filter(
           (cluster) =>
-            cluster.priceSpread != null &&
-            cluster.priceSpread >= minSpread,
+            cluster.priceSpread != null && cluster.priceSpread >= minSpread,
         );
       }
       const minQualityScore = query.minQualityScore ?? defaults.minQualityScore;
@@ -280,8 +281,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             cluster.analysis.confidence >= minAnalysisConfidence,
         );
       }
-      const maxOutlierRatio =
-        query.maxOutlierRatio ?? defaults.maxOutlierRatio;
+      const maxOutlierRatio = query.maxOutlierRatio ?? defaults.maxOutlierRatio;
       if (maxOutlierRatio != null) {
         filtered = filtered.filter((cluster) => {
           if (!cluster.analysis) return true;

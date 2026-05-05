@@ -373,7 +373,10 @@ const tests: TestCase[] = [
 
         assert.equal(result.ok, true);
         assert.equal(result.notified, true);
-        assert.equal(db.notificationInserts[0]?.body, "5 pUSD deposit received on Polygon");
+        assert.equal(
+          db.notificationInserts[0]?.body,
+          "5 pUSD deposit received on Polygon",
+        );
         assert.deepEqual(db.notificationInserts[0]?.data, {
           category: "system",
           source: "privy",

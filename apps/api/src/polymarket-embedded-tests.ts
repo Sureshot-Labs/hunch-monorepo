@@ -45,7 +45,10 @@ const tests: TestCase[] = [
         { name: "chainId", type: "uint256" },
       ]);
       assert.equal(
-        Object.prototype.hasOwnProperty.call(payload.domain, "verifyingContract"),
+        Object.prototype.hasOwnProperty.call(
+          payload.domain,
+          "verifyingContract",
+        ),
         false,
       );
     },

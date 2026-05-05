@@ -166,7 +166,12 @@ async function reconcileKalshiEventStatuses(
 }
 
 function pickDflowEventTicker(event: TDflowEvent): string | null {
-  const candidates = [event.event_ticker, event.eventTicker, event.ticker, event.id];
+  const candidates = [
+    event.event_ticker,
+    event.eventTicker,
+    event.ticker,
+    event.id,
+  ];
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const trimmed = candidate.trim();
@@ -417,7 +422,10 @@ async function fetchHotTokenIds(limit?: number): Promise<string[]> {
 
 function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   const clampedShare = Math.max(0, Math.min(1, hotShare));
-  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  const hotBudget = Math.max(
+    0,
+    Math.min(total, Math.round(total * clampedShare)),
+  );
   return { hotBudget };
 }
 
@@ -461,10 +469,16 @@ function pickTradePrice(
 
   const price =
     tokenSide === "YES"
-      ? yesDollars ?? directDollars ?? yes ?? direct ?? null
+      ? (yesDollars ?? directDollars ?? yes ?? direct ?? null)
       : tokenSide === "NO"
-        ? noDollars ?? directDollars ?? no ?? direct ?? null
-        : directDollars ?? yesDollars ?? noDollars ?? direct ?? yes ?? no ?? null;
+        ? (noDollars ?? directDollars ?? no ?? direct ?? null)
+        : (directDollars ??
+          yesDollars ??
+          noDollars ??
+          direct ??
+          yes ??
+          no ??
+          null);
 
   if (price == null || price < 0 || price > 1) return null;
   return price;
@@ -536,9 +550,7 @@ async function fetchPositionTokenIds(
   return rows.map((row) => row.token_id).filter(Boolean);
 }
 
-async function fetchTickersForTokenIds(
-  tokenIds: string[],
-): Promise<string[]> {
+async function fetchTickersForTokenIds(tokenIds: string[]): Promise<string[]> {
   if (!tokenIds.length) return [];
   const { rows } = await pool.query<{
     token_id: string | null;
@@ -598,7 +610,9 @@ async function fetchTickersForEventIds(eventIds: string[]): Promise<string[]> {
 }
 
 async function fetchHotTickersOrdered(): Promise<string[]> {
-  const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
+  const hotTokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 12),
+  );
   const positionTokenIds = await fetchPositionTokenIds();
 
   const hotTickers = await fetchTickersForTokenIds(hotTokenIds);
@@ -649,8 +663,9 @@ async function fetchTradeTokenIds(): Promise<string[]> {
     clampHotProbeLimit(env.tradesTokenLimit * 8),
   );
   const positionTokenIds = await fetchPositionTokenIds();
-  const tokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]))
-    .filter((tokenId) => tokenId.startsWith("sol:"));
+  const tokenIds = Array.from(
+    new Set([...hotTokenIds, ...positionTokenIds]),
+  ).filter((tokenId) => tokenId.startsWith("sol:"));
   return tokenIds.slice(0, env.tradesTokenLimit);
 }
 
@@ -759,7 +774,10 @@ export async function resolveHotTickersForWs(): Promise<string[]> {
 async function fetchMarketEventInfoByTickers(
   tickers: string[],
 ): Promise<
-  Map<string, { eventCategory: string | null; eventId: string; eventTitle: string }>
+  Map<
+    string,
+    { eventCategory: string | null; eventId: string; eventTitle: string }
+  >
 > {
   if (!tickers.length) return new Map();
   const { rows } = await pool.query<{
@@ -807,7 +825,9 @@ function deriveNoAsk(yesBid: number | null): number | null {
 }
 
 async function refreshHotTokenTops(): Promise<number> {
-  const tokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 10));
+  const tokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 10),
+  );
   if (!tokenIds.length) return 0;
 
   const { rows } = await pool.query<{
@@ -832,16 +852,19 @@ async function refreshHotTokenTops(): Promise<number> {
     .map((row) => {
       const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
       const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
-      const bestBid =
-        row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
-      const bestAsk =
-        row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
+      const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
+      const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
       if (bestBid == null && bestAsk == null) return null;
       return { tokenId: row.token_id, bestBid, bestAsk };
     })
     .filter(
-      (row): row is { tokenId: string; bestBid: number | null; bestAsk: number | null } =>
-        Boolean(row),
+      (
+        row,
+      ): row is {
+        tokenId: string;
+        bestBid: number | null;
+        bestAsk: number | null;
+      } => Boolean(row),
     );
 
   if (!publish.length) return 0;
@@ -856,16 +879,22 @@ async function refreshHotTokenTops(): Promise<number> {
   return publish.length;
 }
 
-export async function syncHotMarketStatuses(): Promise<{ processedMarkets: number }> {
+export async function syncHotMarketStatuses(): Promise<{
+  processedMarkets: number;
+}> {
   if (!env.dflowEnabled) return { processedMarkets: 0 };
 
   await ensureRedis();
   await pool.query("select 1");
 
-  const hotTokenIds = await fetchHotTokenIds(clampHotProbeLimit(env.wsSubset * 12));
+  const hotTokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 12),
+  );
   const positionTokenIds = await fetchPositionTokenIds();
 
-  const allTokenIds = Array.from(new Set([...hotTokenIds, ...positionTokenIds]));
+  const allTokenIds = Array.from(
+    new Set([...hotTokenIds, ...positionTokenIds]),
+  );
   let processedMarkets = 0;
   const touchedEventIds = new Set<string>();
 
@@ -944,7 +973,10 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
           env.requireInitialized,
         );
         if (!mapped) continue;
-        const eventTicker = pickDflowMarketEventTicker(market, eventInfo.eventId);
+        const eventTicker = pickDflowMarketEventTicker(
+          market,
+          eventInfo.eventId,
+        );
         const groupKey = eventTicker ?? `__missing__:${eventInfo.eventId}`;
         const existing = mappedGroupsByEvent.get(groupKey);
         if (existing) {
@@ -959,13 +991,14 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
       }
 
       const mappedGroups = Array.from(mappedGroupsByEvent.values());
-      await maybeEnrichKalshiMappedMarketGroups(
-        mappedGroups,
-        "hot-status",
-      );
+      await maybeEnrichKalshiMappedMarketGroups(mappedGroups, "hot-status");
 
       const unifiedMarketRows: UnifiedMarketRow[] = [];
-      const tokenRows: Array<{ token_id: string; market_id: string; side: "YES" | "NO" }> = [];
+      const tokenRows: Array<{
+        token_id: string;
+        market_id: string;
+        side: "YES" | "NO";
+      }> = [];
       for (const group of mappedGroups) {
         for (const mapped of group.mappedMarkets) {
           unifiedMarketRows.push(mapped.marketRow);
@@ -989,20 +1022,22 @@ export async function syncHotMarketStatuses(): Promise<{ processedMarkets: numbe
               info.eventTitle,
             ]),
           );
-          const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
-            entity_type: "market",
-            market_id: row.id,
-            venue: row.venue,
-            status: row.status,
-            market_title: row.title,
-            event_title: eventTitleById.get(row.event_id),
-            description: row.description,
-            category: row.category,
-            outcomes: row.outcomes,
-            market_type: row.market_type,
-            updated_at: row.updated_at ?? row.created_at,
-            source: "dflow",
-          }));
+          const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map(
+            (row) => ({
+              entity_type: "market",
+              market_id: row.id,
+              venue: row.venue,
+              status: row.status,
+              market_title: row.title,
+              event_title: eventTitleById.get(row.event_id),
+              description: row.description,
+              category: row.category,
+              outcomes: row.outcomes,
+              market_type: row.market_type,
+              updated_at: row.updated_at ?? row.created_at,
+              source: "dflow",
+            }),
+          );
           await enqueueEmbedItems(redis, embedMarkets);
         } catch (err) {
           log.warn("DFlow embed enqueue failed", err);

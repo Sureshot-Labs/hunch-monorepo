@@ -10,7 +10,7 @@ export const pool: Pool = createPgPool({
   connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
 });
 
-pool.on("connect", client => {
+pool.on("connect", (client) => {
   // Wallet-intel endpoints hit expensive plans where JIT compile time dominates execution.
   void client.query("set jit = off").catch((e: unknown) => {
     console.error("[pg] failed to set jit=off", e);

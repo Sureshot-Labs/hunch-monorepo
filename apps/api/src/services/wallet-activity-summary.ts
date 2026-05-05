@@ -86,10 +86,7 @@ type WalletActivitySignalPageLabelDbRow = {
 
 export type WalletActivitySignalType = "longshot_large" | "longshot_large_late";
 export type WalletActivityLateBucket = "late" | "very_late" | "unknown";
-export type WalletActivityUnusualTier =
-  | "unusual"
-  | "very_unusual"
-  | "extreme";
+export type WalletActivityUnusualTier = "unusual" | "very_unusual" | "extreme";
 
 export type WalletActivityTopChange = {
   marketId: string;
@@ -207,8 +204,7 @@ export function compareWalletActivitySummaryStats(
   sortMode: WalletActivitySummarySortMode,
 ): number {
   if (sortMode === "net_change_usd") {
-    const netDelta =
-      Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
     const rightTime = right.lastActivityAt?.getTime() ?? 0;
     const leftTime = left.lastActivityAt?.getTime() ?? 0;
@@ -220,8 +216,7 @@ export function compareWalletActivitySummaryStats(
     const leftScore = left.unusualScore ?? 0;
     const rightScore = right.unusualScore ?? 0;
     if (rightScore !== leftScore) return rightScore - leftScore;
-    const netDelta =
-      Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
     const rightTime = right.lastActivityAt?.getTime() ?? 0;
     const leftTime = left.lastActivityAt?.getTime() ?? 0;
@@ -325,7 +320,11 @@ export function computeRobustUnusualScore(input: {
 export function resolveUnusualTier(
   score: number | null | undefined,
 ): WalletActivityUnusualTier | null {
-  if (score == null || !Number.isFinite(score) || score < UNUSUAL_TIER_UNUSUAL_MIN) {
+  if (
+    score == null ||
+    !Number.isFinite(score) ||
+    score < UNUSUAL_TIER_UNUSUAL_MIN
+  ) {
     return null;
   }
   if (score >= UNUSUAL_TIER_EXTREME_MIN) return "extreme";
@@ -439,7 +438,9 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
     const record = entry as Record<string, unknown>;
     const occurredAtRaw = record.occurredAt;
     const occurredAt =
-      occurredAtRaw instanceof Date ? occurredAtRaw : new Date(String(occurredAtRaw));
+      occurredAtRaw instanceof Date
+        ? occurredAtRaw
+        : new Date(String(occurredAtRaw));
     if (!Number.isFinite(occurredAt.getTime())) continue;
     items.push({
       marketId: String(record.marketId ?? ""),
@@ -589,11 +590,7 @@ function buildWalletActivitySummaryStatsParams(
   walletIds: string[],
   options: ReturnType<typeof resolveWalletActivityQuery>,
 ): unknown[] {
-  return [
-    walletIds,
-    options.windowHours,
-    options.baselineDays,
-  ];
+  return [walletIds, options.windowHours, options.baselineDays];
 }
 
 const FETCH_WALLET_ACTIVITY_BASE_SQL = `

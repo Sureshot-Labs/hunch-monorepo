@@ -9,7 +9,10 @@ import {
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 console.log(`[limitlesscurl] Loading env from ${envPath}`);
 config({ path: envPath, override: false });
 
@@ -111,8 +114,7 @@ async function resolveBody(): Promise<unknown> {
 
 const sessionFromEnv = process.env.LIMITLESS_SESSION?.trim();
 const apiKeyFromEnv = process.env.LIMITLESS_API_KEY?.trim();
-const resolvedAddress =
-  address ?? process.env.LIMITLESS_WALLET_ADDRESS?.trim();
+const resolvedAddress = address ?? process.env.LIMITLESS_WALLET_ADDRESS?.trim();
 
 type ResolvedAuth = {
   apiKey?: string;
@@ -221,17 +223,14 @@ async function resolveDbAuth(): Promise<ResolvedAuth | null> {
 
     if (!resolvedRow) return null;
     const secretRaw =
-      resolvedRow.api_secret_enc ??
-      resolvedRow.api_secret ??
-      null;
+      resolvedRow.api_secret_enc ?? resolvedRow.api_secret ?? null;
     if (!secretRaw) return null;
     const secret = resolvedRow.api_secret_enc
       ? decryptCredentialsString(secretRaw, encryptionKey)
       : secretRaw;
-    const auth =
-      secret.trim().toLowerCase().startsWith("lmts_")
-        ? { apiKey: secret }
-        : { sessionCookie: secret };
+    const auth = secret.trim().toLowerCase().startsWith("lmts_")
+      ? { apiKey: secret }
+      : { sessionCookie: secret };
 
     return {
       ...auth,
@@ -246,7 +245,10 @@ async function resolveDbAuth(): Promise<ResolvedAuth | null> {
 const resolvedBody = await resolveBody();
 const auth =
   (apiKeyFromEnv && { apiKey: apiKeyFromEnv, source: "env" as const }) ||
-  (sessionFromEnv && { sessionCookie: sessionFromEnv, source: "env" as const }) ||
+  (sessionFromEnv && {
+    sessionCookie: sessionFromEnv,
+    source: "env" as const,
+  }) ||
   (useDb ? await resolveDbAuth() : null);
 
 if (!auth?.sessionCookie && !auth?.apiKey) {

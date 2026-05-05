@@ -129,8 +129,7 @@ function addWalletProfile(
     address: normalized,
     walletType: input.walletType,
     source: input.source,
-    isInternalWallet:
-      input.source === "embedded" || input.source === "smart",
+    isInternalWallet: input.source === "embedded" || input.source === "smart",
     walletId: input.walletId ?? undefined,
   };
   if (input.prepend) {
@@ -401,9 +400,10 @@ export class PrivyService {
     const expectedAddedWalletAddresses = this.normalizeExpectedWalletAddresses(
       options?.expectedAddedWalletAddresses,
     );
-    const expectedRemovedWalletAddresses = this.normalizeExpectedWalletAddresses(
-      options?.expectedRemovedWalletAddresses,
-    );
+    const expectedRemovedWalletAddresses =
+      this.normalizeExpectedWalletAddresses(
+        options?.expectedRemovedWalletAddresses,
+      );
     const maxSyncAttempts = Math.max(
       1,
       options?.maxSyncAttempts ?? PRIVY_USER_SYNC_MAX_ATTEMPTS,

@@ -226,7 +226,8 @@ function normalizeOrderPayloadV1(raw: unknown): OrderStructV1 | null {
     typeof payload.signature === "string" ? payload.signature.trim() : "";
 
   const maker = typeof payload.maker === "string" ? payload.maker.trim() : "";
-  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+  const signer =
+    typeof payload.signer === "string" ? payload.signer.trim() : "";
   const taker = typeof payload.taker === "string" ? payload.taker.trim() : "";
 
   if (
@@ -283,7 +284,8 @@ function normalizeOrderPayloadV2(raw: unknown): OrderStructV2 | null {
     typeof payload.signature === "string" ? payload.signature.trim() : "";
 
   const maker = typeof payload.maker === "string" ? payload.maker.trim() : "";
-  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+  const signer =
+    typeof payload.signer === "string" ? payload.signer.trim() : "";
 
   if (
     side == null ||
@@ -322,7 +324,8 @@ function normalizeFeeAuthV1(raw: unknown): FeeAuthStructV1 | null {
   if (!raw || typeof raw !== "object") return null;
   const payload = raw as Record<string, unknown>;
 
-  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+  const signer =
+    typeof payload.signer === "string" ? payload.signer.trim() : "";
   const vault = typeof payload.vault === "string" ? payload.vault.trim() : "";
   const exchange =
     typeof payload.exchange === "string" ? payload.exchange.trim() : "";
@@ -351,7 +354,8 @@ function normalizeFeeAuthV3(raw: unknown): FeeAuthStructV3 | null {
   if (!raw || typeof raw !== "object") return null;
   const payload = raw as Record<string, unknown>;
 
-  const signer = typeof payload.signer === "string" ? payload.signer.trim() : "";
+  const signer =
+    typeof payload.signer === "string" ? payload.signer.trim() : "";
   const vault = typeof payload.vault === "string" ? payload.vault.trim() : "";
   const exchange =
     typeof payload.exchange === "string" ? payload.exchange.trim() : "";
@@ -652,13 +656,11 @@ export async function runCollectFees(
   scriptReadOnly = options.readOnly;
   const feeCollectorAddress =
     options.collectorVersion === "v1"
-      ? env.feeCollectorLegacyAddress?.trim() ||
-        env.feeCollectorAddress?.trim()
+      ? env.feeCollectorLegacyAddress?.trim() || env.feeCollectorAddress?.trim()
       : env.feeCollectorAddress?.trim();
   const privateKey =
     options.collectorVersion === "v1"
-      ? env.feeCollectorLegacyPrivateKey?.trim() ||
-        env.feeCollectorPrivateKey
+      ? env.feeCollectorLegacyPrivateKey?.trim() || env.feeCollectorPrivateKey
       : env.feeCollectorPrivateKey;
 
   if (!feeCollectorAddress) {
@@ -864,7 +866,11 @@ export async function runCollectFees(
         error instanceof Error ? error.message : "Unknown order status error";
       console.log(`Skip ${label}: getOrderStatus failed (${message})`);
       skippedError += 1;
-      await updateFeeError(row.id, attempts, `getOrderStatus failed: ${message}`);
+      await updateFeeError(
+        row.id,
+        attempts,
+        `getOrderStatus failed: ${message}`,
+      );
       continue;
     }
 
@@ -933,7 +939,9 @@ export async function runCollectFees(
             if (!parsed || parsed.name !== "FeeCollected") continue;
             const rawOrderHash = parsed.args.orderHash;
             const eventOrderHash =
-              typeof rawOrderHash === "string" ? normalizeHex(rawOrderHash) : "";
+              typeof rawOrderHash === "string"
+                ? normalizeHex(rawOrderHash)
+                : "";
             if (eventOrderHash && eventOrderHash !== orderHash) continue;
             feeAmount = BigInt(parsed.args.feeAmount);
             break;

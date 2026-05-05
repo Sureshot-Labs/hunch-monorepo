@@ -141,7 +141,9 @@ function normalizeEvmAddress(value: string | null | undefined): string | null {
   return trimmed.toLowerCase();
 }
 
-function buildAddressSet(values: Array<string | null | undefined>): Set<string> {
+function buildAddressSet(
+  values: Array<string | null | undefined>,
+): Set<string> {
   return new Set(
     values
       .map((value) => normalizeEvmAddress(value))
@@ -457,7 +459,8 @@ export async function handlePrivyDepositWebhook(
 
   const insertedRow = await insertDepositEvent(db, {
     status,
-    userId: wallet?.user_id ?? bridgeOrder?.user_id ?? execution?.user_id ?? null,
+    userId:
+      wallet?.user_id ?? bridgeOrder?.user_id ?? execution?.user_id ?? null,
     walletAddress: wallet?.wallet_address ?? recipient,
     walletType: wallet?.wallet_type ?? walletType,
     bridgeOrderId: bridgeOrder?.id ?? null,

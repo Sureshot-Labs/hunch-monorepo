@@ -42,7 +42,10 @@ function buildTokenRows(market: MarketRow): TokenRow[] {
   const tokens: TokenRow[] = [];
   const seen = new Set<string>();
 
-  const pushToken = (token_id: string | null, outcome_side: "YES" | "NO" | null) => {
+  const pushToken = (
+    token_id: string | null,
+    outcome_side: "YES" | "NO" | null,
+  ) => {
     if (!token_id) return;
     if (seen.has(token_id)) return;
     seen.add(token_id);
@@ -154,7 +157,9 @@ async function main() {
       const chunks = chunkArray(marketIds, 1000);
       for (const chunk of chunks) {
         const chunkSet = new Set(chunk);
-        const chunkTokens = tokenRows.filter((row) => chunkSet.has(row.market_id));
+        const chunkTokens = tokenRows.filter((row) =>
+          chunkSet.has(row.market_id),
+        );
         await upsertTokens(chunk, chunkTokens);
       }
       updated += markets.length;

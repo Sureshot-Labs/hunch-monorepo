@@ -3,10 +3,7 @@ import { ethers } from "ethers";
 
 import type { User } from "../auth.js";
 import { env } from "../env.js";
-import {
-  type PrivyWalletProfile,
-  PrivyService,
-} from "../privy-service.js";
+import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
@@ -104,7 +101,9 @@ function normalizeHex(value: string | null | undefined): `0x${string}` | null {
   return trimmed as `0x${string}`;
 }
 
-function normalizeValueHex(value: string | null | undefined): `0x${string}` | null {
+function normalizeValueHex(
+  value: string | null | undefined,
+): `0x${string}` | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -219,9 +218,10 @@ async function executePreparedPrivyAuthorizationRequest(
     headers: buildPrivyWalletHeaders(request.input, authorizationSignature),
     body: JSON.stringify(request.input.body),
   });
-  const payload = (await response.json().catch(() => null)) as
-    | Record<string, unknown>
-    | null;
+  const payload = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
   if (!response.ok) {
     const message =
       (payload &&
@@ -250,7 +250,9 @@ function findAuthorizationSignature(
   return trimmed;
 }
 
-function parsePrivyRpcTransactionHashResponse(payload: Record<string, unknown>): {
+function parsePrivyRpcTransactionHashResponse(
+  payload: Record<string, unknown>,
+): {
   hash: string | null;
   transactionId: string | null;
   userOperationHash: string | null;
@@ -286,9 +288,7 @@ function parsePrivyRpcTransactionHashResponse(payload: Record<string, unknown>):
   return { hash, transactionId, userOperationHash };
 }
 
-function getRequestTransaction(
-  request: EmbeddedPrivyAuthorizationRequest,
-): {
+function getRequestTransaction(request: EmbeddedPrivyAuthorizationRequest): {
   from: string;
   to: string;
   data: string;
@@ -416,7 +416,9 @@ async function isTokenPostconditionSatisfied(
   const recipientBalance = BigInt(
     (await token.balanceOf(condition.recipient)).toString(),
   );
-  return recipientBalance >= condition.recipientBalanceBefore + condition.amount;
+  return (
+    recipientBalance >= condition.recipientBalanceBefore + condition.amount
+  );
 }
 
 async function waitForTokenPostcondition(
@@ -449,9 +451,10 @@ async function waitForPrivyTransaction(
         headers: buildPrivyAppAuthHeaders(),
       },
     );
-    const payload = (await response.json().catch(() => null)) as
-      | Record<string, unknown>
-      | null;
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
     if (!response.ok) {
       const message =
         (payload &&

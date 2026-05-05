@@ -22,11 +22,7 @@ export type PayoutSummary = {
   redeemable: boolean;
 };
 
-function decodeBigInt(
-  iface: Interface,
-  fn: string,
-  data: string,
-): bigint {
+function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
@@ -70,24 +66,23 @@ export async function fetchConditionalTokensPayouts(inputs: {
   const calls = inputs.conditionIds.flatMap((conditionId) => [
     {
       target: contractAddress,
-      callData: conditionalTokensIface.encodeFunctionData(
-        "payoutDenominator",
-        [conditionId],
-      ),
+      callData: conditionalTokensIface.encodeFunctionData("payoutDenominator", [
+        conditionId,
+      ]),
     },
     {
       target: contractAddress,
-      callData: conditionalTokensIface.encodeFunctionData(
-        "payoutNumerators",
-        [conditionId, 0],
-      ),
+      callData: conditionalTokensIface.encodeFunctionData("payoutNumerators", [
+        conditionId,
+        0,
+      ]),
     },
     {
       target: contractAddress,
-      callData: conditionalTokensIface.encodeFunctionData(
-        "payoutNumerators",
-        [conditionId, 1],
-      ),
+      callData: conditionalTokensIface.encodeFunctionData("payoutNumerators", [
+        conditionId,
+        1,
+      ]),
     },
   ]);
 

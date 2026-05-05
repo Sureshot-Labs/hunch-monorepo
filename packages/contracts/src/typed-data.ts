@@ -56,10 +56,7 @@ export const FEE_AUTH_TYPES_V3 = {
   ],
 } as const;
 
-export function buildPolymarketOrderDomain(
-  chainId: number,
-  exchange: Address
-) {
+export function buildPolymarketOrderDomain(chainId: number, exchange: Address) {
   return {
     name: "Polymarket CTF Exchange",
     version: "1",
@@ -70,7 +67,7 @@ export function buildPolymarketOrderDomain(
 
 export function buildPolymarketOrderDomainV2(
   chainId: number,
-  exchange: Address
+  exchange: Address,
 ) {
   return {
     name: "Polymarket CTF Exchange",
@@ -80,10 +77,7 @@ export function buildPolymarketOrderDomainV2(
   };
 }
 
-export function buildFeeAuthDomain(
-  chainId: number,
-  feeCollector: Address
-) {
+export function buildFeeAuthDomain(chainId: number, feeCollector: Address) {
   return {
     name: "Polymarket Aggregator FeeCollector",
     version: "2",
@@ -92,10 +86,7 @@ export function buildFeeAuthDomain(
   };
 }
 
-export function buildFeeAuthDomainV3(
-  chainId: number,
-  feeCollector: Address
-) {
+export function buildFeeAuthDomainV3(chainId: number, feeCollector: Address) {
   return {
     name: "Polymarket Aggregator FeeCollector",
     version: "3",

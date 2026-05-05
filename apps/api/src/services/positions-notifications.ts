@@ -54,12 +54,8 @@ export async function notifyResolvedPositions(
     if (!resolved || !side) continue;
     const won = resolved === side;
 
-    const title = won
-      ? "Position resolved (win)"
-      : "Position resolved (loss)";
-    const body = won
-      ? "Claim available"
-      : "Resolved with no payout";
+    const title = won ? "Position resolved (win)" : "Position resolved (loss)";
+    const body = won ? "Claim available" : "Resolved with no payout";
 
     const result = await createNotificationSafe(pool, {
       userId: inputs.userId,

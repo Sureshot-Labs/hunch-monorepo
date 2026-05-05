@@ -164,7 +164,9 @@ function connect() {
       const now = Date.now();
       const elapsed = (now - msgCountStartTime) / 1000;
       const rps = (msgCount / Math.max(1, elapsed)).toFixed(2);
-      console.log(`[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`);
+      console.log(
+        `[WS] msgs=${msgCount} in ${Math.floor(elapsed)}s ~ ${rps}/s`,
+      );
       msgCount = 0;
       msgCountStartTime = now;
     }, 10_000);
@@ -214,9 +216,7 @@ function connect() {
         );
       }
       if (publishNo) {
-        writes.push(
-          publishKalshiTopNow(noTokenId, top.noBid, top.noAsk, tsMs),
-        );
+        writes.push(publishKalshiTopNow(noTokenId, top.noBid, top.noAsk, tsMs));
       }
 
       await Promise.all(writes);

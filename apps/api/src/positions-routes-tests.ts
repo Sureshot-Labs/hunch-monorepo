@@ -67,7 +67,9 @@ async function createTestContext(
     "polymarket",
     `test-key-${crypto.randomUUID()}`,
     `test-secret-${crypto.randomUUID()}`,
-    options.persistFunderAddress === false ? undefined : { funderAddress: funderWallet },
+    options.persistFunderAddress === false
+      ? undefined
+      : { funderAddress: funderWallet },
   );
 
   const token = AuthService.generateToken(userId);
@@ -93,12 +95,18 @@ async function createTestContext(
 }
 
 async function cleanup(context: TestContext): Promise<void> {
-  await pool.query("delete from positions where user_id = $1", [context.userId]);
-  await pool.query("delete from user_sessions where user_id = $1", [context.userId]);
+  await pool.query("delete from positions where user_id = $1", [
+    context.userId,
+  ]);
+  await pool.query("delete from user_sessions where user_id = $1", [
+    context.userId,
+  ]);
   await pool.query("delete from user_venue_credentials where user_id = $1", [
     context.userId,
   ]);
-  await pool.query("delete from user_wallets where user_id = $1", [context.userId]);
+  await pool.query("delete from user_wallets where user_id = $1", [
+    context.userId,
+  ]);
   await pool.query("delete from users where id = $1", [context.userId]);
 }
 
@@ -171,10 +179,9 @@ async function main() {
 
     const persistedResponse = await app.inject({
       method: "GET",
-      url:
-        `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
-          persistedContext.funderWallet,
-        )}&minSize=0.01`,
+      url: `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
+        persistedContext.funderWallet,
+      )}&minSize=0.01`,
       headers: persistedContext.authHeaders,
     });
 
@@ -186,10 +193,9 @@ async function main() {
 
     const derivedResponse = await app.inject({
       method: "GET",
-      url:
-        `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
-          derivedContext.funderWallet,
-        )}&minSize=0.01`,
+      url: `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(
+        derivedContext.funderWallet,
+      )}&minSize=0.01`,
       headers: derivedContext.authHeaders,
     });
 
@@ -201,10 +207,9 @@ async function main() {
 
     const persistedSyncResponse = await app.inject({
       method: "POST",
-      url:
-        `/positions/sync?venue=polymarket&wallets=${encodeURIComponent(
-          persistedContext.funderWallet,
-        )}&force=true`,
+      url: `/positions/sync?venue=polymarket&wallets=${encodeURIComponent(
+        persistedContext.funderWallet,
+      )}&force=true`,
       headers: persistedContext.authHeaders,
     });
 
@@ -222,12 +227,11 @@ async function main() {
 
     const limitlessResponse = await app.inject({
       method: "GET",
-      url:
-        `/positions/by-token?tokenIds=${encodeURIComponent(
-          limitlessRawTokenId,
-        )}&venue=limitless&wallets=${encodeURIComponent(
-          limitlessContext.signerWallet,
-        )}&minSize=0.01`,
+      url: `/positions/by-token?tokenIds=${encodeURIComponent(
+        limitlessRawTokenId,
+      )}&venue=limitless&wallets=${encodeURIComponent(
+        limitlessContext.signerWallet,
+      )}&minSize=0.01`,
       headers: limitlessContext.authHeaders,
     });
 

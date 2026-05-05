@@ -127,33 +127,35 @@ const polymarketFeeAuthSchema = z.union([
   polymarketFeeAuthSchemaV3,
 ]);
 
-export const polymarketPlaceOrderBodySchema = z.object({
-  order: polymarketOrderSchema,
-  orderType: zOrderType.default("GTC"),
-  deferExec: z.boolean().optional(),
-  exchangeAddress: zEthAddress.optional(),
-  negRisk: z.boolean().optional(),
-  feeCollectorAddress: zEthAddress.optional(),
-  feeAuth: polymarketFeeAuthSchema.optional(),
-  feeAuthSig: z.string().optional(),
-}).superRefine((value, ctx) => {
-  if (value.feeAuth || value.feeAuthSig) {
-    if (!value.feeAuth) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "feeAuth is required when feeAuthSig is provided",
-        path: ["feeAuth"],
-      });
+export const polymarketPlaceOrderBodySchema = z
+  .object({
+    order: polymarketOrderSchema,
+    orderType: zOrderType.default("GTC"),
+    deferExec: z.boolean().optional(),
+    exchangeAddress: zEthAddress.optional(),
+    negRisk: z.boolean().optional(),
+    feeCollectorAddress: zEthAddress.optional(),
+    feeAuth: polymarketFeeAuthSchema.optional(),
+    feeAuthSig: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.feeAuth || value.feeAuthSig) {
+      if (!value.feeAuth) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "feeAuth is required when feeAuthSig is provided",
+          path: ["feeAuth"],
+        });
+      }
+      if (!value.feeAuthSig) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "feeAuthSig is required when feeAuth is provided",
+          path: ["feeAuthSig"],
+        });
+      }
     }
-    if (!value.feeAuthSig) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "feeAuthSig is required when feeAuth is provided",
-        path: ["feeAuthSig"],
-      });
-    }
-  }
-});
+  });
 
 export const polymarketOrderHashBodySchema = z.object({
   order: polymarketOrderSchema,
@@ -213,33 +215,44 @@ export const polymarketFunderDeriveBatchBodySchema = z.object({
   refresh: z.boolean().optional(),
 });
 
-export const polymarketQuoteBodySchema = z.object({
-  tokenId: zRequiredString("tokenId is required"),
-  side: z.enum(["BUY", "SELL"], {
-    message: "Valid side (BUY/SELL) is required",
-  }),
-  amountUsd: z.coerce.number().positive("amountUsd must be > 0").optional(),
-  amount: z.coerce.number().positive("amount must be > 0").optional(),
-  amountType: zAmountType.optional(),
-  orderType: zOrderType.optional(),
-  limitPrice: z.coerce.number().positive("limitPrice must be > 0").optional(),
-  slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
-}).refine((value) => {
-  const amountType = value.amountType ?? "usd";
-  if (amountType === "shares") {
-    return value.amount != null;
-  }
-  return value.amountUsd != null || value.amount != null;
-}, {
-  message: "amountUsd (or amount) is required",
-}).refine((value) => {
-  const orderType =
-    typeof value.orderType === "string" ? value.orderType.toUpperCase() : "FOK";
-  if (orderType === "FOK" || orderType === "FAK") return true;
-  return value.limitPrice != null;
-}, {
-  message: "limitPrice is required for limit orders",
-});
+export const polymarketQuoteBodySchema = z
+  .object({
+    tokenId: zRequiredString("tokenId is required"),
+    side: z.enum(["BUY", "SELL"], {
+      message: "Valid side (BUY/SELL) is required",
+    }),
+    amountUsd: z.coerce.number().positive("amountUsd must be > 0").optional(),
+    amount: z.coerce.number().positive("amount must be > 0").optional(),
+    amountType: zAmountType.optional(),
+    orderType: zOrderType.optional(),
+    limitPrice: z.coerce.number().positive("limitPrice must be > 0").optional(),
+    slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
+  })
+  .refine(
+    (value) => {
+      const amountType = value.amountType ?? "usd";
+      if (amountType === "shares") {
+        return value.amount != null;
+      }
+      return value.amountUsd != null || value.amount != null;
+    },
+    {
+      message: "amountUsd (or amount) is required",
+    },
+  )
+  .refine(
+    (value) => {
+      const orderType =
+        typeof value.orderType === "string"
+          ? value.orderType.toUpperCase()
+          : "FOK";
+      if (orderType === "FOK" || orderType === "FAK") return true;
+      return value.limitPrice != null;
+    },
+    {
+      message: "limitPrice is required for limit orders",
+    },
+  );
 
 export const polymarketEmbeddedEnsureReadyBodySchema = z.object({
   funderAddress: zEthAddress.optional(),
@@ -262,15 +275,11 @@ export const polymarketEmbeddedEnsureReadyExecuteBodySchema = z.object({
 export const polymarketEmbeddedSignOrderBodySchema = z.object({
   order: polymarketUnsignedOrderSchema,
   exchangeAddress: zEthAddressRequired,
-  authorizationSignature: zRequiredString(
-    "authorizationSignature is required",
-  ),
+  authorizationSignature: zRequiredString("authorizationSignature is required"),
 });
 
 export const polymarketEmbeddedSignFeeAuthBodySchema = z.object({
   feeAuth: polymarketFeeAuthSchema,
   feeCollectorAddress: zEthAddressRequired,
-  authorizationSignature: zRequiredString(
-    "authorizationSignature is required",
-  ),
+  authorizationSignature: zRequiredString("authorizationSignature is required"),
 });

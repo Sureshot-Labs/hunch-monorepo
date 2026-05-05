@@ -143,7 +143,9 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
             ? (error as { statusCode: number }).statusCode
             : 500;
         const message =
-          error instanceof Error ? error.message : "Failed to set referral code";
+          error instanceof Error
+            ? error.message
+            : "Failed to set referral code";
         reply.code(statusCode);
         return reply.send({ error: message });
       }
@@ -160,7 +162,9 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const referral = await getReferralAttachmentStatus(pool, { userId: user.id });
+      const referral = await getReferralAttachmentStatus(pool, {
+        userId: user.id,
+      });
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, referral });
     },
@@ -363,8 +367,7 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
-      const targetWallet =
-        body.walletAddress?.trim() || walletAddress.trim();
+      const targetWallet = body.walletAddress?.trim() || walletAddress.trim();
       if (!targetWallet) {
         reply.code(400);
         return reply.send({ error: "Missing wallet address" });
@@ -433,7 +436,8 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
             throw error;
           }
 
-          const requestedAmountUsd = usdcMicroToDecimalString(requestedAmountMicro);
+          const requestedAmountUsd =
+            usdcMicroToDecimalString(requestedAmountMicro);
 
           const claim = await createRewardClaim(client, {
             userId: user.id,

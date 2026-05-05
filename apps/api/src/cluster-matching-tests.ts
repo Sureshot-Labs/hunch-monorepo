@@ -149,8 +149,10 @@ test("rejects Chelsea vs Port Vale against unrelated Italy halftime match", () =
 
 test("rejects Thorin analyst market vs Team Vitality results", () => {
   const thorin = buildSignature({
-    eventTitle: "Will Thorin appear as an analyst at an S-Tier CS tournament in 2026?",
-    marketTitle: "Will Thorin appear as an analyst at an S-Tier CS tournament in 2026?",
+    eventTitle:
+      "Will Thorin appear as an analyst at an S-Tier CS tournament in 2026?",
+    marketTitle:
+      "Will Thorin appear as an analyst at an S-Tier CS tournament in 2026?",
     eventCategory: "sports",
     marketCategory: "sports",
     dates: ["2026-12-31T00:00:00Z"],
@@ -168,7 +170,8 @@ test("rejects Thorin analyst market vs Team Vitality results", () => {
 
 test("rejects mention market vs unrelated event-final outcome market", () => {
   const blastQuote = buildSignature({
-    eventTitle: "What will be said during the BLAST Premier Open Rotterdam 2026 Grand Final?",
+    eventTitle:
+      "What will be said during the BLAST Premier Open Rotterdam 2026 Grand Final?",
     marketTitle: "IGL",
     eventCategory: "sports",
     marketCategory: "sports",
@@ -232,7 +235,8 @@ test("rejects match result vs yellow-card prop for the same fixture", () => {
     dates: ["2026-03-26T00:00:00Z"],
   });
   const yellowCards = buildSignature({
-    eventTitle: "Will either team receive 3+ yellow cards in Italy vs N. Ireland?",
+    eventTitle:
+      "Will either team receive 3+ yellow cards in Italy vs N. Ireland?",
     marketTitle:
       "Will either team receive 3+ yellow cards in Italy vs N. Ireland?",
     eventCategory: "sports",
@@ -252,7 +256,8 @@ test("rejects match result vs red-card prop for the same fixture", () => {
     dates: ["2026-04-04T00:00:00Z"],
   });
   const redCard = buildSignature({
-    eventTitle: "Will any player get a red card in Southampton vs Arsenal on April 4?",
+    eventTitle:
+      "Will any player get a red card in Southampton vs Arsenal on April 4?",
     marketTitle:
       "Will any player get a red card in Southampton vs Arsenal on April 4?",
     eventCategory: "sports",
@@ -312,10 +317,8 @@ test("rejects match result vs same-fixture possession prop", () => {
     dates: ["2026-03-26T00:00:00Z"],
   });
   const possession = buildSignature({
-    eventTitle:
-      "Will Denmark have 60%+ possession vs N. Macedonia on Mar 26?",
-    marketTitle:
-      "Will Denmark have 60%+ possession vs N. Macedonia on Mar 26?",
+    eventTitle: "Will Denmark have 60%+ possession vs N. Macedonia on Mar 26?",
+    marketTitle: "Will Denmark have 60%+ possession vs N. Macedonia on Mar 26?",
     eventCategory: "sports",
     marketCategory: "sports",
     dates: ["2026-03-26T00:00:00Z"],
@@ -483,7 +486,10 @@ test("rejects season champion vs conference champion", () => {
     dates: ["2026-06-01T00:00:00Z"],
   });
 
-  assert.equal(isSignatureCompatible(seasonChampion, conferenceChampion), false);
+  assert.equal(
+    isSignatureCompatible(seasonChampion, conferenceChampion),
+    false,
+  );
 });
 
 test("rejects tournament winner vs group winner", () => {
@@ -521,7 +527,10 @@ test("rejects drivers champion vs constructors champion", () => {
     dates: ["2026-12-06T00:00:00Z"],
   });
 
-  assert.equal(isSignatureCompatible(driversChampion, constructorsChampion), false);
+  assert.equal(
+    isSignatureCompatible(driversChampion, constructorsChampion),
+    false,
+  );
 });
 
 test("rejects stanley cup winner vs division winner for same team", () => {
@@ -769,7 +778,8 @@ test("rejects actual nominee markets vs candidate-entry markets", () => {
     dates: ["2028-11-07T00:00:00Z"],
   });
   const entry = buildSignature({
-    eventTitle: "Who will run for the Republican presidential nomination in 2028?",
+    eventTitle:
+      "Who will run for the Republican presidential nomination in 2028?",
     marketTitle: "Byron Donalds",
     eventCategory: "politics",
     marketCategory: "politics",

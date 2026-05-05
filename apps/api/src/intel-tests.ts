@@ -63,7 +63,10 @@ import {
   resolveUnusualTier,
 } from "./services/wallet-activity-summary.js";
 import { fetchEvmBalance } from "./services/polygon-rpc.js";
-import { fetchWalletPerformanceSeries, resolveSparklineBucketHours } from "./services/wallet-intel-series.js";
+import {
+  fetchWalletPerformanceSeries,
+  resolveSparklineBucketHours,
+} from "./services/wallet-intel-series.js";
 import { fetchMarketHolderData } from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
@@ -106,7 +109,9 @@ type TestCase = {
 const testErc1155Iface = new Interface([
   "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
 ]);
-const testAttributionPolicy = getIntelPolicyDefaults("wallet_intel_attribution");
+const testAttributionPolicy = getIntelPolicyDefaults(
+  "wallet_intel_attribution",
+);
 
 function createTestCandidateWalletRow(
   overrides: Partial<Parameters<typeof buildWalletSummaryItem>[0]> = {},
@@ -169,7 +174,9 @@ function createTestSummaryStats(
 }
 
 function createTestSignalRow(
-  overrides: Partial<Parameters<typeof buildWalletSignalItemFromSignalRow>[0]["signalRow"]> = {},
+  overrides: Partial<
+    Parameters<typeof buildWalletSignalItemFromSignalRow>[0]["signalRow"]
+  > = {},
 ): Parameters<typeof buildWalletSignalItemFromSignalRow>[0]["signalRow"] {
   return {
     walletId: "wallet-1",
@@ -246,7 +253,10 @@ const tests: TestCase[] = [
       };
       const provider = extractProviderCostUsd(payload);
       assert.equal(provider.providerCostUsdTicks, 264000);
-      assert.equal(Number((provider.providerCostUsd ?? 0).toFixed(10)), 0.0000264);
+      assert.equal(
+        Number((provider.providerCostUsd ?? 0).toFixed(10)),
+        0.0000264,
+      );
     },
   },
   {
@@ -257,7 +267,9 @@ const tests: TestCase[] = [
       const gpt54 = getOpenRouterModelPricingPerM("openai/gpt-5.4");
       const gpt54mini = getOpenRouterModelPricingPerM("openai/gpt-5.4-mini");
       const gpt54nano = getOpenRouterModelPricingPerM("openai/gpt-5.4-nano");
-      const embed = getOpenRouterEmbeddingPricingPerM("openai/text-embedding-3-small");
+      const embed = getOpenRouterEmbeddingPricingPerM(
+        "openai/text-embedding-3-small",
+      );
       assert.equal(gpt52?.inputPerM, 1.75);
       assert.equal(gpt52?.outputPerM, 14);
       assert.equal(gpt5nano?.inputPerM, 0.05);
@@ -328,7 +340,8 @@ const tests: TestCase[] = [
       assert.equal(resolved.effective.minSpread, 0.07);
       assert.equal(resolved.effective.minQualityScore, 0.7);
       assert.equal(
-        "minAnalysisConfidence" in (resolved.effective as Record<string, unknown>),
+        "minAnalysisConfidence" in
+          (resolved.effective as Record<string, unknown>),
         false,
       );
       assert.equal(
@@ -349,7 +362,10 @@ const tests: TestCase[] = [
       assert.equal(resolveSignalWindowHours(12, policy), 12);
       assert.equal(resolveSignalWindowHours(200, policy), 48);
       assert.equal(
-        resolveSignalWindowHours(24, { windowHoursDefault: 72, windowHoursMax: 24 }),
+        resolveSignalWindowHours(24, {
+          windowHoursDefault: 72,
+          windowHoursMax: 24,
+        }),
         24,
       );
     },
@@ -497,11 +513,7 @@ const tests: TestCase[] = [
           { key: "specialist", score: 1 },
           { key: "whale", score: 1 },
         ],
-        secondary: [
-          "macro_specialist",
-          "high_conviction",
-          "market_mover",
-        ],
+        secondary: ["macro_specialist", "high_conviction", "market_mover"],
         supporting: ["unusual_behavior"],
         display: {
           listPrimary: ["whale"],
@@ -567,7 +579,14 @@ const tests: TestCase[] = [
           reasons: [],
           version: "v1",
         },
-        tags: [{ slug: "whale", label: "Whale", tag_type: "system", is_system: true }],
+        tags: [
+          {
+            slug: "whale",
+            label: "Whale",
+            tag_type: "system",
+            is_system: true,
+          },
+        ],
         unusualTier: "very_unusual",
         metrics: { pnl_usd: "2500", roi: "0.18" },
         lastActivityAt: new Date("2026-03-10T00:00:00.000Z"),
@@ -866,7 +885,10 @@ const tests: TestCase[] = [
         new Date(asOf.getTime() - 168 * 60 * 60 * 1000).toISOString(),
       );
       assert.equal(calls[0]?.params[3], 1);
-      assert.equal((calls[0]?.params[4] as Date).toISOString(), asOf.toISOString());
+      assert.equal(
+        (calls[0]?.params[4] as Date).toISOString(),
+        asOf.toISOString(),
+      );
     },
   },
   {
@@ -1002,7 +1024,8 @@ const tests: TestCase[] = [
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.enabled, true);
       assert.equal(
-        "projectionAlgo" in ((resolved.override ?? {}) as Record<string, unknown>),
+        "projectionAlgo" in
+          ((resolved.override ?? {}) as Record<string, unknown>),
         false,
       );
       assert.equal(
@@ -1117,7 +1140,9 @@ const tests: TestCase[] = [
         "example.com",
         "api.x.com",
       ]);
-      assert.deepEqual(resolved.effective.sourceDenyDomains, ["polymarket.com"]);
+      assert.deepEqual(resolved.effective.sourceDenyDomains, [
+        "polymarket.com",
+      ]);
     },
   },
   {
@@ -1306,7 +1331,10 @@ const tests: TestCase[] = [
             },
           },
           sensitiveLabels: { insiderEnabled: false, botEnabled: true },
-          queryControls: { whalesBatchSize: 100, whalesMaxScanCandidates: 3000 },
+          queryControls: {
+            whalesBatchSize: 100,
+            whalesMaxScanCandidates: 3000,
+          },
           venueCapabilities: {
             polymarket: { specialistEnabled: true },
             kalshi: { specialistEnabled: true },
@@ -1413,7 +1441,10 @@ const tests: TestCase[] = [
             },
           },
           sensitiveLabels: { insiderEnabled: false, botEnabled: true },
-          queryControls: { whalesBatchSize: 100, whalesMaxScanCandidates: 3000 },
+          queryControls: {
+            whalesBatchSize: 100,
+            whalesMaxScanCandidates: 3000,
+          },
           venueCapabilities: {
             polymarket: { specialistEnabled: true },
             kalshi: { specialistEnabled: true },
@@ -1554,10 +1585,10 @@ const tests: TestCase[] = [
         "active-a",
         "active-b",
       ]);
-      assert.deepEqual(
-        mergeWalletIdsForScope("following", ["a", "b"], ["c"]),
-        ["a", "b"],
-      );
+      assert.deepEqual(mergeWalletIdsForScope("following", ["a", "b"], ["c"]), [
+        "a",
+        "b",
+      ]);
       assert.deepEqual(mergeWalletIdsForScope("active", ["a"], ["b", "c"]), [
         "b",
         "c",
@@ -1571,7 +1602,9 @@ const tests: TestCase[] = [
       const funder = "0x0000000000000000000000000000000000000002";
 
       assert.deepEqual(resolvePolymarketOwnerAddresses(signer, null), [signer]);
-      assert.deepEqual(resolvePolymarketOwnerAddresses(signer, signer), [signer]);
+      assert.deepEqual(resolvePolymarketOwnerAddresses(signer, signer), [
+        signer,
+      ]);
       assert.deepEqual(resolvePolymarketOwnerAddresses(signer, funder), [
         funder,
         signer,
@@ -1613,7 +1646,11 @@ const tests: TestCase[] = [
           params?: Array<{ data?: string } | string>;
         };
         const call = body.params?.[0];
-        if (!call || typeof call === "string" || typeof call.data !== "string") {
+        if (
+          !call ||
+          typeof call === "string" ||
+          typeof call.data !== "string"
+        ) {
           throw new Error("Expected ERC1155 eth_call payload");
         }
         const [owners, ids] = testErc1155Iface.decodeFunctionData(
@@ -1659,11 +1696,15 @@ const tests: TestCase[] = [
         assert.equal(prefetched.rpcCallEstimate, 2);
         assert.equal(prefetched.rpcCallCount, 2);
         assert.deepEqual(
-          prefetched.balancesByOwner.get(funder.toLowerCase())?.map((row) => row.tokenId),
+          prefetched.balancesByOwner
+            .get(funder.toLowerCase())
+            ?.map((row) => row.tokenId),
           ["9"],
         );
         assert.deepEqual(
-          prefetched.balancesByOwner.get(signer.toLowerCase())?.map((row) => row.tokenId),
+          prefetched.balancesByOwner
+            .get(signer.toLowerCase())
+            ?.map((row) => row.tokenId),
           ["1", "10"],
         );
       } finally {
@@ -1741,7 +1782,10 @@ const tests: TestCase[] = [
       assert.equal(item.openMarketsCount, 3);
       assert.equal(item.avgOpenEntryPrice, 0.42);
       assert.equal(item.avgOpenEntryApprox, true);
-      assert.deepEqual(item.topChanges.map((change) => change.marketId), ["market-1"]);
+      assert.deepEqual(
+        item.topChanges.map((change) => change.marketId),
+        ["market-1"],
+      );
     },
   },
   {
@@ -1777,7 +1821,10 @@ const tests: TestCase[] = [
 
       assert.equal(fallbackItem.marketId, fastPathItem.marketId);
       assert.deepEqual(fallbackItem.reasonCodes, fastPathItem.reasonCodes);
-      assert.deepEqual(fallbackItem.displayReasons, fastPathItem.displayReasons);
+      assert.deepEqual(
+        fallbackItem.displayReasons,
+        fastPathItem.displayReasons,
+      );
       assert.equal(fallbackItem.severity, fastPathItem.severity);
       const walletInput = attributionInputs.get("wallet-1");
       assert.deepEqual(walletInput?.topChanges, []);
@@ -1953,7 +2000,9 @@ const tests: TestCase[] = [
         netCost: ledger.remainingBasisUsd,
         markPrice: 0.5,
       });
-      assert.ok(Math.abs((ledger.realizedPnlUsd + (openLegPnl ?? 0)) - 1.5) < 1e-9);
+      assert.ok(
+        Math.abs(ledger.realizedPnlUsd + (openLegPnl ?? 0) - 1.5) < 1e-9,
+      );
     },
   },
   {
@@ -2093,8 +2142,12 @@ const tests: TestCase[] = [
 
       assert.equal(metrics.rows.length, 2);
 
-      const active = metrics.rows.find((row) => row.walletId === "wallet-active");
-      const dormant = metrics.rows.find((row) => row.walletId === "wallet-dormant");
+      const active = metrics.rows.find(
+        (row) => row.walletId === "wallet-active",
+      );
+      const dormant = metrics.rows.find(
+        (row) => row.walletId === "wallet-dormant",
+      );
 
       assert.ok(active);
       assert.equal(active?.tradesCount, 3);
@@ -2218,10 +2271,7 @@ const tests: TestCase[] = [
     run: () => {
       assert.equal(
         shouldSuppressLegacySideTransitionDelta({
-          currentRows: [
-            { outcome_side: "YES" },
-            { outcome_side: "NO" },
-          ],
+          currentRows: [{ outcome_side: "YES" }, { outcome_side: "NO" }],
           previousRows: [{ outcome_side: "" }],
         }),
         true,
@@ -2236,10 +2286,7 @@ const tests: TestCase[] = [
       assert.equal(
         shouldSuppressLegacySideTransitionDelta({
           currentRows: [{ outcome_side: "YES" }],
-          previousRows: [
-            { outcome_side: "" },
-            { outcome_side: "YES" },
-          ],
+          previousRows: [{ outcome_side: "" }, { outcome_side: "YES" }],
         }),
         false,
       );
@@ -2630,7 +2677,10 @@ const tests: TestCase[] = [
           typeof init?.body === "string" ? JSON.parse(init.body) : null;
         const method = body?.method;
         const params = body?.params;
-        if (method === "getTokenLargestAccounts" && params?.[0] === "mint-yes") {
+        if (
+          method === "getTokenLargestAccounts" &&
+          params?.[0] === "mint-yes"
+        ) {
           return new Response("rpc failure", {
             status: 500,
             statusText: "Internal Server Error",
@@ -2975,9 +3025,16 @@ const tests: TestCase[] = [
       assert.equal(summary.currentPortfolio.top_markets_gross_usd, 840);
       assert.equal(summary.currentPortfolio.omitted_market_count, 1);
       assert.equal(summary.currentPortfolio.omitted_gross_usd, 63);
-      assert.ok(Math.abs((summary.currentPortfolio.largest_position_share ?? 0) - (840 / 903)) < 1e-9);
+      assert.ok(
+        Math.abs(
+          (summary.currentPortfolio.largest_position_share ?? 0) - 840 / 903,
+        ) < 1e-9,
+      );
       assert.equal(summary.summary.side_bias_label, "mostly_no");
-      assert.equal(summary.topEvents[0]?.event_title, "Iran regime fall by March 31?");
+      assert.equal(
+        summary.topEvents[0]?.event_title,
+        "Iran regime fall by March 31?",
+      );
       assert.equal(summary.topEvents[0]?.gross_usd, 840);
     },
   },
@@ -3011,7 +3068,10 @@ const tests: TestCase[] = [
           theme_focus: ["fed", "elections"],
           risk_style: "Broad NO-side exposure",
           confidence: 0.72,
-          evidence: ["Fed decision in March?", "Republican Presidential Nominee 2028"],
+          evidence: [
+            "Fed decision in March?",
+            "Republican Presidential Nominee 2028",
+          ],
           notes: "- Current exposure is broad and mostly NO-side.",
         }),
       );

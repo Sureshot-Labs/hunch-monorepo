@@ -3,6 +3,7 @@
 Short operational notes for the Fastify API and wallet intel tooling.
 
 ## Wallet intel refresh
+
 Runs market holder scans, wallet snapshots, delta inference, and whale tagging.
 
 ```bash
@@ -10,11 +11,13 @@ pnpm -C hunch-monorepo -F api run wallets:intel:refresh
 ```
 
 Key behavior:
+
 - Scans markets from global volume, per-venue caps, watchlist, and whale-held markets.
 - Backfills Limitless prices for missing `best_bid/best_ask/last_price` when possible.
 - Writes wallet position snapshots + activity events.
 
 ## Kalshi mint audit
+
 Audits Kalshi outcome mints against Solana RPC and updates `is_initialized` plus
 `metadata.mint_exists*` fields.
 
@@ -23,6 +26,7 @@ pnpm -C hunch-monorepo -F api run kalshi:mint-audit
 ```
 
 Common flags:
+
 - `--limit=50000` total rows to check
 - `--batch=500` batch size
 - `--delay=50` per-mint delay (ms)
@@ -34,6 +38,7 @@ Common flags:
 - `--include-audited` recheck everything (use until legacy rows are converted)
 
 ## Solana RPC coverage check
+
 Spot-check Solana mint existence or holders for a sample of markets.
 
 ```bash
@@ -42,10 +47,12 @@ pnpm -C hunch-monorepo -F api exec -- tsx src/solana-rpc-check.ts \
 ```
 
 ## Environment
+
 Wallet intel limits and thresholds are set in `hunch-monorepo/.env`.
 See `apps/api/src/env.ts` for defaults.
 
 ## Deploy (self-hosted)
+
 Ops scripts live in `hunch-monorepo/ops`:
 
 - **Server build (simple):**
@@ -57,6 +64,7 @@ The prebuilt flow builds the Docker image locally for `linux/arm64`,
 ships it via SCP, then deploys with `--no-build` and still runs migrations.
 
 Cleanup flags:
+
 - `DOCKER_PRUNE=1` (default) prunes unused images older than 24h on the server.
 - `LOCAL_IMAGE_CLEANUP=1` (default) removes the just-built local image in prebuilt deploys.
 - `LOCAL_BUILDER_PRUNE=0` (opt-in) prunes local build cache after prebuilt deploys.

@@ -16,9 +16,9 @@ const tests: TestCase[] = [
     name: "resolveRequestedWalletAddresses rejects polymarket funder without explicit opt-in",
     run: async () => {
       const authAny = AuthService as unknown as {
-        getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string; walletType: string }>
-        >;
+        getUserWallets: (
+          userId: string,
+        ) => Promise<Array<{ walletAddress: string; walletType: string }>>;
       };
       const poolAny = pool as unknown as {
         query: (
@@ -60,9 +60,9 @@ const tests: TestCase[] = [
     name: "resolveRequestedWalletAddresses accepts active polymarket funder when opted in",
     run: async () => {
       const authAny = AuthService as unknown as {
-        getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string; walletType: string }>
-        >;
+        getUserWallets: (
+          userId: string,
+        ) => Promise<Array<{ walletAddress: string; walletType: string }>>;
       };
       const poolAny = pool as unknown as {
         query: (
@@ -130,9 +130,9 @@ const tests: TestCase[] = [
       assert.ok(safeCandidate);
 
       const authAny = AuthService as unknown as {
-        getUserWallets: (userId: string) => Promise<
-          Array<{ walletAddress: string; walletType: string }>
-        >;
+        getUserWallets: (
+          userId: string,
+        ) => Promise<Array<{ walletAddress: string; walletType: string }>>;
       };
       const poolAny = pool as unknown as {
         query: (

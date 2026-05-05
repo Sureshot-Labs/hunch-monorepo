@@ -74,7 +74,11 @@ function parsePositiveFloat(
   return Math.max(0, parsed);
 }
 
-function isEqualPrice(a: NullablePrice, b: NullablePrice, epsilon: number): boolean {
+function isEqualPrice(
+  a: NullablePrice,
+  b: NullablePrice,
+  epsilon: number,
+): boolean {
   if (a == null && b == null) return true;
   if (a == null || b == null) return false;
   return Math.abs(a - b) <= epsilon;
@@ -130,7 +134,11 @@ function createEntry(
   };
 }
 
-function touchEntry(cache: Map<string, GateEntry>, tokenId: string, entry: GateEntry): void {
+function touchEntry(
+  cache: Map<string, GateEntry>,
+  tokenId: string,
+  entry: GateEntry,
+): void {
   cache.delete(tokenId);
   cache.set(tokenId, entry);
 }
@@ -157,7 +165,9 @@ export type TopTickGate = {
   clear: () => void;
 };
 
-export function createTopTickGate(options: TopTickGateOptions = {}): TopTickGate {
+export function createTopTickGate(
+  options: TopTickGateOptions = {},
+): TopTickGate {
   const defaults = resolveTopTickGateOptionsFromEnv();
   const minIntervalMs =
     options.minIntervalMs != null
@@ -186,40 +196,52 @@ export function createTopTickGate(options: TopTickGateOptions = {}): TopTickGate
     entry.flushTimer = null;
   };
 
-  const schedulePendingFlush = (tokenId: string, entry: GateEntry, delayMs: number): void => {
+  const schedulePendingFlush = (
+    tokenId: string,
+    entry: GateEntry,
+    delayMs: number,
+  ): void => {
     clearTimer(entry);
-    entry.flushTimer = setTimeout(() => {
-      entry.flushTimer = null;
-      const current = cache.get(tokenId);
-      if (!current || !current.hasPending) return;
+    entry.flushTimer = setTimeout(
+      () => {
+        entry.flushTimer = null;
+        const current = cache.get(tokenId);
+        if (!current || !current.hasPending) return;
 
-      const now = Date.now();
-      const elapsedSincePublishMs = now - current.lastPublishedAtMs;
-      if (minIntervalMs > 0 && elapsedSincePublishMs < minIntervalMs) {
-        schedulePendingFlush(tokenId, current, minIntervalMs - elapsedSincePublishMs);
+        const now = Date.now();
+        const elapsedSincePublishMs = now - current.lastPublishedAtMs;
+        if (minIntervalMs > 0 && elapsedSincePublishMs < minIntervalMs) {
+          schedulePendingFlush(
+            tokenId,
+            current,
+            minIntervalMs - elapsedSincePublishMs,
+          );
+          touchEntry(cache, tokenId, current);
+          return;
+        }
+
+        const pendingTs = current.pendingTsMs ?? now;
+        current.publishedBid = current.pendingBid;
+        current.publishedAsk = current.pendingAsk;
+        current.lastPublishedAtMs = now;
+        current.lastPublishedTsMs = pendingTs;
+        current.pendingBid = null;
+        current.pendingAsk = null;
+        current.pendingTsMs = null;
+        current.hasPending = false;
         touchEntry(cache, tokenId, current);
-        return;
-      }
 
-      const pendingTs = current.pendingTsMs ?? now;
-      current.publishedBid = current.pendingBid;
-      current.publishedAsk = current.pendingAsk;
-      current.lastPublishedAtMs = now;
-      current.lastPublishedTsMs = pendingTs;
-      current.pendingBid = null;
-      current.pendingAsk = null;
-      current.pendingTsMs = null;
-      current.hasPending = false;
-      touchEntry(cache, tokenId, current);
-
-      if (current.publishedBid == null && current.publishedAsk == null) return;
-      onDeferredPublish?.({
-        tokenId,
-        bestBid: current.publishedBid,
-        bestAsk: current.publishedAsk,
-        tsMs: pendingTs,
-      });
-    }, Math.max(0, Math.trunc(delayMs)));
+        if (current.publishedBid == null && current.publishedAsk == null)
+          return;
+        onDeferredPublish?.({
+          tokenId,
+          bestBid: current.publishedBid,
+          bestAsk: current.publishedAsk,
+          tsMs: pendingTs,
+        });
+      },
+      Math.max(0, Math.trunc(delayMs)),
+    );
     if (typeof entry.flushTimer.unref === "function") {
       entry.flushTimer.unref();
     }
@@ -236,7 +258,10 @@ export function createTopTickGate(options: TopTickGateOptions = {}): TopTickGate
       if (!tokenId) return false;
       if (bestBid == null && bestAsk == null) return false;
 
-      const now = nowMs != null && Number.isFinite(nowMs) ? Math.trunc(nowMs) : Date.now();
+      const now =
+        nowMs != null && Number.isFinite(nowMs)
+          ? Math.trunc(nowMs)
+          : Date.now();
       const ts = normalizeTsMs(tsMs, now);
       const prev = cache.get(tokenId);
       if (!prev) {
@@ -260,7 +285,11 @@ export function createTopTickGate(options: TopTickGateOptions = {}): TopTickGate
           prev.pendingAsk = bestAsk;
           prev.pendingTsMs = ts;
           prev.hasPending = true;
-          schedulePendingFlush(tokenId, prev, minIntervalMs - elapsedSincePublishMs);
+          schedulePendingFlush(
+            tokenId,
+            prev,
+            minIntervalMs - elapsedSincePublishMs,
+          );
           touchEntry(cache, tokenId, prev);
           return false;
         }

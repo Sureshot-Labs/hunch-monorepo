@@ -1,179 +1,270 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>FeeCollector Deploy (MetaMask)</title>
-  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
-  <script>
-    if (typeof ethers === "undefined") {
-      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"><\/script>');
-    }
-  </script>
-  <style>
-    body { background:#0f1115; color:#e6e8ec; font-family: sans-serif; padding:16px; }
-    h2 { margin: 8px 0 12px; }
-    input, textarea, button { width:100%; margin:6px 0; padding:10px; border-radius:8px; border:1px solid #2a2d36; background:#1b1e25; color:#e6e8ec; }
-    textarea { min-height:80px; resize:vertical; }
-    button { cursor:pointer; background:#2f6fed; border:none; color:#fff; font-weight:600; }
-    .card { border:1px solid #2a2d36; border-radius:10px; padding:14px; margin-bottom:14px; background:#13161d; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .muted { color:#9aa0aa; font-size:12px; }
-    .ok { color:#24b47e; }
-    .warn { color:#f5a623; }
-    .err { color:#ff6b6b; }
-    pre { background:#11141b; padding:10px; border-radius:6px; overflow:auto; }
-  </style>
-</head>
-<body>
-  <h2>FeeCollector Deploy (MetaMask)</h2>
+  <head>
+    <meta charset="UTF-8" />
+    <title>FeeCollector Deploy (MetaMask)</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script>
+      if (typeof ethers === "undefined") {
+        document.write(
+          '<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"><\/script>',
+        );
+      }
+    </script>
+    <style>
+      body {
+        background: #0f1115;
+        color: #e6e8ec;
+        font-family: sans-serif;
+        padding: 16px;
+      }
+      h2 {
+        margin: 8px 0 12px;
+      }
+      input,
+      textarea,
+      button {
+        width: 100%;
+        margin: 6px 0;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #2a2d36;
+        background: #1b1e25;
+        color: #e6e8ec;
+      }
+      textarea {
+        min-height: 80px;
+        resize: vertical;
+      }
+      button {
+        cursor: pointer;
+        background: #2f6fed;
+        border: none;
+        color: #fff;
+        font-weight: 600;
+      }
+      .card {
+        border: 1px solid #2a2d36;
+        border-radius: 10px;
+        padding: 14px;
+        margin-bottom: 14px;
+        background: #13161d;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .muted {
+        color: #9aa0aa;
+        font-size: 12px;
+      }
+      .ok {
+        color: #24b47e;
+      }
+      .warn {
+        color: #f5a623;
+      }
+      .err {
+        color: #ff6b6b;
+      }
+      pre {
+        background: #11141b;
+        padding: 10px;
+        border-radius: 6px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>FeeCollector Deploy (MetaMask)</h2>
 
-  <div class="card">
-    <button id="connectBtn">Connect MetaMask</button>
-    <div id="account" class="muted"></div>
-    <div id="network" class="muted"></div>
-  </div>
-
-  <div class="card">
-    <h3>Constructor Params</h3>
-    <label>Treasury (required)</label>
-    <input id="treasury" placeholder="0x..." />
-    <label>Collateral (USDC)</label>
-    <input id="collateral" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" />
-    <label>Allowed exchanges (comma or newline separated)</label>
-    <textarea id="exchanges">0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E,0xC5d563A36AE78145C45a50134d48A1215220f80a</textarea>
-    <div class="row">
-      <button id="fillDefaults" type="button">Fill defaults</button>
-      <button id="deployBtn" type="button">Deploy FeeCollector</button>
+    <div class="card">
+      <button id="connectBtn">Connect MetaMask</button>
+      <div id="account" class="muted"></div>
+      <div id="network" class="muted"></div>
     </div>
-    <div id="deployStatus" class="muted"></div>
-  </div>
 
-  <div class="card">
-    <h3>Result</h3>
-    <div id="deployAddress" class="muted">Not deployed yet.</div>
-    <button id="copyBtn" type="button">Copy address</button>
-  </div>
+    <div class="card">
+      <h3>Constructor Params</h3>
+      <label>Treasury (required)</label>
+      <input id="treasury" placeholder="0x..." />
+      <label>Collateral (USDC)</label>
+      <input
+        id="collateral"
+        value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+      />
+      <label>Allowed exchanges (comma or newline separated)</label>
+      <textarea id="exchanges">
+0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E,0xC5d563A36AE78145C45a50134d48A1215220f80a</textarea
+      >
+      <div class="row">
+        <button id="fillDefaults" type="button">Fill defaults</button>
+        <button id="deployBtn" type="button">Deploy FeeCollector</button>
+      </div>
+      <div id="deployStatus" class="muted"></div>
+    </div>
 
-  <div class="card">
-    <h3>Logs</h3>
-    <pre id="log"></pre>
-  </div>
+    <div class="card">
+      <h3>Result</h3>
+      <div id="deployAddress" class="muted">Not deployed yet.</div>
+      <button id="copyBtn" type="button">Copy address</button>
+    </div>
 
-  <script>
-    let provider, signer;
-    const POLYGON_CHAIN_ID = 137;
-    const DEFAULTS = {
-      collateral: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-      exchanges: [
-        "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-        "0xC5d563A36AE78145C45a50134d48A1215220f80a",
-      ],
-    };
+    <div class="card">
+      <h3>Logs</h3>
+      <pre id="log"></pre>
+    </div>
 
-    const logEl = document.getElementById("log");
-    const log = (m) => { logEl.textContent += m + "\n"; console.log(m); };
-    const logErr = (m) => { logEl.textContent += "[ERR] " + m + "\n"; console.error(m); };
+    <script>
+      let provider, signer;
+      const POLYGON_CHAIN_ID = 137;
+      const DEFAULTS = {
+        collateral: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        exchanges: [
+          "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+          "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+        ],
+      };
 
-    function getMetaMaskProvider() {
-      const eth = window.ethereum;
-      if (!eth) return null;
-      if (eth.providers && Array.isArray(eth.providers)) {
-        const mm = eth.providers.find((p) => p.isMetaMask);
-        if (mm) return mm;
-      }
-      return eth.isMetaMask ? eth : eth;
-    }
+      const logEl = document.getElementById("log");
+      const log = (m) => {
+        logEl.textContent += m + "\n";
+        console.log(m);
+      };
+      const logErr = (m) => {
+        logEl.textContent += "[ERR] " + m + "\n";
+        console.error(m);
+      };
 
-    async function ensurePolygon(eth) {
-      try {
-        const current = parseInt(await eth.request({ method: "eth_chainId" }), 16);
-        if (current === POLYGON_CHAIN_ID) return true;
-        await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x89" }] });
-        return true;
-      } catch (e) {
-        logErr("Chain switch failed: " + (e?.message || e));
-        return false;
-      }
-    }
-
-    function requireAddr(value, label) {
-      if (!value || !ethers.utils.isAddress(value)) {
-        throw new Error(`Invalid ${label} address`);
-      }
-      return ethers.utils.getAddress(value);
-    }
-
-    function parseExchanges(raw) {
-      const items = (raw || "")
-        .split(/[\n,]/)
-        .map((v) => v.trim())
-        .filter(Boolean);
-      if (!items.length) throw new Error("At least one exchange is required");
-      return items.map((addr) => requireAddr(addr, "exchange"));
-    }
-
-    async function connect() {
-      const eth = getMetaMaskProvider();
-      if (!eth) return alert("MetaMask required");
-      const ok = await ensurePolygon(eth);
-      if (!ok) return;
-      provider = new ethers.providers.Web3Provider(eth);
-      await provider.send("eth_requestAccounts", []);
-      signer = provider.getSigner();
-      const account = await signer.getAddress();
-      const net = await provider.getNetwork();
-      document.getElementById("account").textContent = "Account: " + account;
-      document.getElementById("network").textContent = "Chain: " + net.chainId;
-      log("Connected " + account + " on chain " + net.chainId);
-    }
-
-    async function deployFeeCollector() {
-      if (!signer) await connect();
-      try {
-        const status = document.getElementById("deployStatus");
-        status.textContent = "Loading artifacts...";
-        const artRes = await fetch("/artifacts/src/PolymarketFeeCollector.sol/PolymarketFeeCollector.json");
-        if (!artRes.ok) {
-          throw new Error("Artifacts missing. Run compile first.");
+      function getMetaMaskProvider() {
+        const eth = window.ethereum;
+        if (!eth) return null;
+        if (eth.providers && Array.isArray(eth.providers)) {
+          const mm = eth.providers.find((p) => p.isMetaMask);
+          if (mm) return mm;
         }
-        const art = await artRes.json();
-
-        const treasury = requireAddr(document.getElementById("treasury").value.trim(), "treasury");
-        const collateral = requireAddr(document.getElementById("collateral").value.trim(), "collateral");
-        const exchanges = parseExchanges(document.getElementById("exchanges").value);
-
-        status.textContent = "Deploying...";
-        const factory = new ethers.ContractFactory(art.abi, art.bytecode, signer);
-        const contract = await factory.deploy(treasury, collateral, exchanges);
-        log("Deploy tx: " + contract.deployTransaction.hash);
-        await contract.deployed();
-        const addr = contract.address;
-        document.getElementById("deployAddress").textContent = "Deployed at: " + addr;
-        status.textContent = "Deployed";
-        log("Deployed at: " + addr);
-      } catch (e) {
-        document.getElementById("deployStatus").textContent = "Error: " + (e?.message || e);
-        logErr("Deploy error: " + (e?.message || e));
+        return eth.isMetaMask ? eth : eth;
       }
-    }
 
-    function fillDefaults() {
-      document.getElementById("collateral").value = DEFAULTS.collateral;
-      document.getElementById("exchanges").value = DEFAULTS.exchanges.join(",");
-    }
+      async function ensurePolygon(eth) {
+        try {
+          const current = parseInt(
+            await eth.request({ method: "eth_chainId" }),
+            16,
+          );
+          if (current === POLYGON_CHAIN_ID) return true;
+          await eth.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: "0x89" }],
+          });
+          return true;
+        } catch (e) {
+          logErr("Chain switch failed: " + (e?.message || e));
+          return false;
+        }
+      }
 
-    async function copyAddress() {
-      const text = document.getElementById("deployAddress").textContent;
-      const match = text.match(/0x[a-fA-F0-9]{40}/);
-      if (!match) return alert("No address to copy.");
-      await navigator.clipboard.writeText(match[0]);
-      log("Copied " + match[0]);
-    }
+      function requireAddr(value, label) {
+        if (!value || !ethers.utils.isAddress(value)) {
+          throw new Error(`Invalid ${label} address`);
+        }
+        return ethers.utils.getAddress(value);
+      }
 
-    document.getElementById("connectBtn").onclick = connect;
-    document.getElementById("deployBtn").onclick = deployFeeCollector;
-    document.getElementById("fillDefaults").onclick = fillDefaults;
-    document.getElementById("copyBtn").onclick = copyAddress;
-  </script>
-</body>
+      function parseExchanges(raw) {
+        const items = (raw || "")
+          .split(/[\n,]/)
+          .map((v) => v.trim())
+          .filter(Boolean);
+        if (!items.length) throw new Error("At least one exchange is required");
+        return items.map((addr) => requireAddr(addr, "exchange"));
+      }
+
+      async function connect() {
+        const eth = getMetaMaskProvider();
+        if (!eth) return alert("MetaMask required");
+        const ok = await ensurePolygon(eth);
+        if (!ok) return;
+        provider = new ethers.providers.Web3Provider(eth);
+        await provider.send("eth_requestAccounts", []);
+        signer = provider.getSigner();
+        const account = await signer.getAddress();
+        const net = await provider.getNetwork();
+        document.getElementById("account").textContent = "Account: " + account;
+        document.getElementById("network").textContent =
+          "Chain: " + net.chainId;
+        log("Connected " + account + " on chain " + net.chainId);
+      }
+
+      async function deployFeeCollector() {
+        if (!signer) await connect();
+        try {
+          const status = document.getElementById("deployStatus");
+          status.textContent = "Loading artifacts...";
+          const artRes = await fetch(
+            "/artifacts/src/PolymarketFeeCollector.sol/PolymarketFeeCollector.json",
+          );
+          if (!artRes.ok) {
+            throw new Error("Artifacts missing. Run compile first.");
+          }
+          const art = await artRes.json();
+
+          const treasury = requireAddr(
+            document.getElementById("treasury").value.trim(),
+            "treasury",
+          );
+          const collateral = requireAddr(
+            document.getElementById("collateral").value.trim(),
+            "collateral",
+          );
+          const exchanges = parseExchanges(
+            document.getElementById("exchanges").value,
+          );
+
+          status.textContent = "Deploying...";
+          const factory = new ethers.ContractFactory(
+            art.abi,
+            art.bytecode,
+            signer,
+          );
+          const contract = await factory.deploy(
+            treasury,
+            collateral,
+            exchanges,
+          );
+          log("Deploy tx: " + contract.deployTransaction.hash);
+          await contract.deployed();
+          const addr = contract.address;
+          document.getElementById("deployAddress").textContent =
+            "Deployed at: " + addr;
+          status.textContent = "Deployed";
+          log("Deployed at: " + addr);
+        } catch (e) {
+          document.getElementById("deployStatus").textContent =
+            "Error: " + (e?.message || e);
+          logErr("Deploy error: " + (e?.message || e));
+        }
+      }
+
+      function fillDefaults() {
+        document.getElementById("collateral").value = DEFAULTS.collateral;
+        document.getElementById("exchanges").value =
+          DEFAULTS.exchanges.join(",");
+      }
+
+      async function copyAddress() {
+        const text = document.getElementById("deployAddress").textContent;
+        const match = text.match(/0x[a-fA-F0-9]{40}/);
+        if (!match) return alert("No address to copy.");
+        await navigator.clipboard.writeText(match[0]);
+        log("Copied " + match[0]);
+      }
+
+      document.getElementById("connectBtn").onclick = connect;
+      document.getElementById("deployBtn").onclick = deployFeeCollector;
+      document.getElementById("fillDefaults").onclick = fillDefaults;
+      document.getElementById("copyBtn").onclick = copyAddress;
+    </script>
+  </body>
 </html>

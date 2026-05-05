@@ -302,7 +302,10 @@ async function getSessionDbFeatures(): Promise<SessionDbFeatures> {
   if (sessionDbFeaturesPromise) return sessionDbFeaturesPromise;
 
   sessionDbFeaturesPromise = (async () => {
-    const result = await pool.query<{ column_name: string; is_nullable: string }>(
+    const result = await pool.query<{
+      column_name: string;
+      is_nullable: string;
+    }>(
       `SELECT column_name, is_nullable
        FROM information_schema.columns
        WHERE table_schema = 'public'
@@ -781,8 +784,7 @@ export class AuthService {
       const walletIdsToDelete: string[] = [];
       for (const wallet of existingWallets.rows) {
         const normalized = normalizeWalletAddress(wallet.wallet_address);
-        if (!linkedWalletSet.has(normalized))
-          walletIdsToDelete.push(wallet.id);
+        if (!linkedWalletSet.has(normalized)) walletIdsToDelete.push(wallet.id);
       }
 
       if (walletIdsToDelete.length > 0) {
@@ -1801,9 +1803,9 @@ export class AuthService {
                 expiresAt,
               ],
             )
-        : dbFeatures.hasSessionTokenHash
-        ? await pool.query<AuthSessionRow>(
-            `INSERT INTO user_sessions (
+          : dbFeatures.hasSessionTokenHash
+            ? await pool.query<AuthSessionRow>(
+                `INSERT INTO user_sessions (
                user_id,
                session_token,
                session_token_hash,
@@ -1824,18 +1826,18 @@ export class AuthService {
                created_at,
                last_accessed_at,
                csrf_token`,
-            [
-              userId,
-              sessionToken,
-              sessionTokenHash,
-              walletAddress,
-              ipAddress,
-              userAgent,
-              expiresAt,
-            ],
-          )
-      : await pool.query<AuthSessionRow>(
-          `INSERT INTO user_sessions (
+                [
+                  userId,
+                  sessionToken,
+                  sessionTokenHash,
+                  walletAddress,
+                  ipAddress,
+                  userAgent,
+                  expiresAt,
+                ],
+              )
+            : await pool.query<AuthSessionRow>(
+                `INSERT INTO user_sessions (
              user_id,
              session_token,
              wallet_address,
@@ -1855,8 +1857,15 @@ export class AuthService {
              created_at,
              last_accessed_at,
              csrf_token`,
-          [userId, sessionToken, walletAddress, ipAddress, userAgent, expiresAt],
-        );
+                [
+                  userId,
+                  sessionToken,
+                  walletAddress,
+                  ipAddress,
+                  userAgent,
+                  expiresAt,
+                ],
+              );
 
     const row = result.rows[0];
 
@@ -2025,7 +2034,9 @@ function readHeaderValue(
   return undefined;
 }
 
-function readRequestUserAgent(headers: FastifyRequest["headers"]): string | undefined {
+function readRequestUserAgent(
+  headers: FastifyRequest["headers"],
+): string | undefined {
   return (
     readHeaderValue(headers, "x-hunch-user-agent") ??
     readHeaderValue(headers, "user-agent")
@@ -2061,7 +2072,9 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
 
     if (!decoded) {
       if (allowAnonymous) {
-        request.log.debug("Ignoring invalid bearer token for optional auth route");
+        request.log.debug(
+          "Ignoring invalid bearer token for optional auth route",
+        );
         return;
       }
       reply.code(401);
@@ -2080,7 +2093,11 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     }
 
     const requestAgent = readRequestUserAgent(request.headers);
-    if (session.userAgent && requestAgent && session.userAgent !== requestAgent) {
+    if (
+      session.userAgent &&
+      requestAgent &&
+      session.userAgent !== requestAgent
+    ) {
       request.log.warn(
         { sessionAgent: session.userAgent, requestAgent },
         "Session user-agent mismatch",

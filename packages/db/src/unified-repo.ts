@@ -640,11 +640,16 @@ function parseClobTokenIds(raw?: string | null): string[] {
   }
 }
 
-function buildMarketTokenRows(market: MarketTokenSource): UnifiedMarketTokenRow[] {
+function buildMarketTokenRows(
+  market: MarketTokenSource,
+): UnifiedMarketTokenRow[] {
   const tokens: UnifiedMarketTokenRow[] = [];
   const seen = new Set<string>();
 
-  const pushToken = (token_id: string | null | undefined, outcome_side: "YES" | "NO" | null) => {
+  const pushToken = (
+    token_id: string | null | undefined,
+    outcome_side: "YES" | "NO" | null,
+  ) => {
     if (!token_id) return;
     if (seen.has(token_id)) return;
     seen.add(token_id);
@@ -908,7 +913,9 @@ export async function writeUnifiedBookTop(
     const mid =
       bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
     const spread =
-      bestBid != null && bestAsk != null ? Math.max(0, bestAsk - bestBid) : null;
+      bestBid != null && bestAsk != null
+        ? Math.max(0, bestAsk - bestBid)
+        : null;
 
     await pool.query(
       `

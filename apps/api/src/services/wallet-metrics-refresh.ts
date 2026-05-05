@@ -1,8 +1,6 @@
 import type { PoolClient } from "pg";
 
-import {
-  buildSnapshotDeltaTrackableActivitySql,
-} from "./wallet-intel-market-eligibility.js";
+import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
 import { AGGREGATE_WALLET_METRICS_VENUE } from "./wallet-metrics-constants.js";
 import {
   makeWalletPositionLedgerKey,
@@ -392,8 +390,7 @@ async function refreshLedgerWindowMetrics(
         upsertRows.map((row) => ({
           wallet_id: row.walletId,
           trades_count: row.tradesCount,
-          volume_usd:
-            row.volumeUsd != null ? String(row.volumeUsd) : null,
+          volume_usd: row.volumeUsd != null ? String(row.volumeUsd) : null,
           pnl_usd: row.pnlUsd != null ? String(row.pnlUsd) : null,
           roi: row.roi != null ? String(row.roi) : null,
           win_rate: row.winRate != null ? String(row.winRate) : null,

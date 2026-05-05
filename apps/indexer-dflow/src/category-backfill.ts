@@ -76,19 +76,24 @@ function parseArgs(argv: string[]): Args {
 }
 
 function toMetadata(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function readSeriesCategory(metadata: unknown): string | null {
   const record = toMetadata(metadata);
-  return typeof record.seriesCategory === "string" ? record.seriesCategory : null;
+  return typeof record.seriesCategory === "string"
+    ? record.seriesCategory
+    : null;
 }
 
 function readSeriesTags(metadata: unknown): string[] | null {
   const record = toMetadata(metadata);
   if (!Array.isArray(record.seriesTags)) return null;
   const tags = record.seriesTags.filter(
-    (value): value is string => typeof value === "string" && value.trim().length > 0,
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
   );
   return tags.length ? tags : null;
 }

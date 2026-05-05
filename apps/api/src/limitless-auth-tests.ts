@@ -116,9 +116,8 @@ test("loadLimitlessProfileForWallet merges stored and base profile fields", asyn
 });
 
 test("resolveLimitlessAuthContext does not upgrade legacy auth rows implicitly", async () => {
-  const { resolveLimitlessAuthContext } = await import(
-    "./services/limitless-auth.js"
-  );
+  const { resolveLimitlessAuthContext } =
+    await import("./services/limitless-auth.js");
   const { AuthService } = await import("./auth.js");
 
   const originalGetVenueCredentials = AuthService.getVenueCredentials;
@@ -146,7 +145,7 @@ test("resolveLimitlessAuthContext does not upgrade legacy auth rows implicitly",
   try {
     const result = await resolveLimitlessAuthContext(
       "user-1",
-      "0xd829f31579e3129a551c9ab3980efa8e5e041131"
+      "0xd829f31579e3129a551c9ab3980efa8e5e041131",
     );
     assert.equal(result, null);
   } finally {

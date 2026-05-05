@@ -1,6 +1,10 @@
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 
-import type { TDflowEvent, TDflowMarket, TDflowMarketAccount } from "./types.js";
+import type {
+  TDflowEvent,
+  TDflowMarket,
+  TDflowMarketAccount,
+} from "./types.js";
 import type { DflowSeriesInfo } from "./seriesClient.js";
 
 export type DflowCategory =
@@ -55,10 +59,15 @@ function s(v: unknown): string | undefined {
   return trimmed.length ? trimmed : undefined;
 }
 
-function normalizeCategoryKey(value: string | null | undefined): string | undefined {
+function normalizeCategoryKey(
+  value: string | null | undefined,
+): string | undefined {
   const trimmed = s(value);
   if (!trimmed) return undefined;
-  return trimmed.toLowerCase().replace(/\s*&\s*/g, " and ").replace(/\s+/g, " ");
+  return trimmed
+    .toLowerCase()
+    .replace(/\s*&\s*/g, " and ")
+    .replace(/\s+/g, " ");
 }
 
 function compactMetadata(
@@ -173,13 +182,7 @@ export function mapDflowStatusToUnified(
 
   if (["archived"].includes(s)) return "ARCHIVED";
   if (
-    [
-      "finalized",
-      "finalised",
-      "determined",
-      "settled",
-      "resolved",
-    ].includes(s)
+    ["finalized", "finalised", "determined", "settled", "resolved"].includes(s)
   )
     return "SETTLED";
   if (
@@ -279,8 +282,7 @@ export function mapToUnifiedEvent(
     pickNumber([extra], ["liquidity", "liquidityNum"]) ??
     (derivedLiquidityCents > 0 ? derivedLiquidityCents : undefined);
   const liquidity =
-    liquidityUsd ??
-    (liquidityCents != null ? liquidityCents / 100 : undefined);
+    liquidityUsd ?? (liquidityCents != null ? liquidityCents / 100 : undefined);
   const open_interest =
     pickNumber([extra], ["openInterest", "open_interest", "openInterestNum"]) ??
     (derivedOpenInterest > 0 ? derivedOpenInterest : undefined);
@@ -302,7 +304,7 @@ export function mapToUnifiedEvent(
     extra.seriesTags.every((value) => typeof value === "string")
       ? (extra.seriesTags as string[])
       : Array.isArray(extra.series_tags) &&
-            extra.series_tags.every((value) => typeof value === "string")
+          extra.series_tags.every((value) => typeof value === "string")
         ? (extra.series_tags as string[])
         : seriesInfo?.tags;
   const eventCategory = resolveDflowEventCategory({
@@ -311,7 +313,8 @@ export function mapToUnifiedEvent(
     seriesTags,
   });
   const competition = s(extra.competition);
-  const competitionScope = s(extra.competitionScope) ?? s(extra.competition_scope);
+  const competitionScope =
+    s(extra.competitionScope) ?? s(extra.competition_scope);
   const strikeDate = s(extra.strikeDate) ?? s(extra.strike_date);
   const strikePeriod = s(extra.strikePeriod) ?? s(extra.strike_period);
   const settlementSources =

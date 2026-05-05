@@ -147,7 +147,12 @@ const tests: TestCase[] = [
           ],
         );
         assert.deepEqual(
-          [submit.deduped, success.deduped, error.deduped, duplicateSuccess.deduped],
+          [
+            submit.deduped,
+            success.deduped,
+            error.deduped,
+            duplicateSuccess.deduped,
+          ],
           [false, false, false, true],
         );
       } finally {
@@ -162,7 +167,11 @@ const tests: TestCase[] = [
       const pool = createMockDbQuery();
 
       try {
-        const statuses = ["cancel_submit", "cancel_success", "cancel_error"] as const;
+        const statuses = [
+          "cancel_submit",
+          "cancel_success",
+          "cancel_error",
+        ] as const;
         for (const status of statuses) {
           const result = await collectAnalyticsEvent(pool, {
             event: "hf_portfolio_order_cancel",

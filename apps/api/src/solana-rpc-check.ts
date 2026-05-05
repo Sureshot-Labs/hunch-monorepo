@@ -48,8 +48,7 @@ async function main() {
 
   const client = await pool.connect();
   try {
-    const statusFilter =
-      statusArg === "ANY" ? "" : "and status = $2";
+    const statusFilter = statusArg === "ANY" ? "" : "and status = $2";
     const orderClause =
       orderBy === "updated"
         ? "order by updated_at desc nulls last, id"
@@ -78,9 +77,7 @@ async function main() {
     );
 
     if (rows.length === 0) {
-      console.log(
-        `[solana-rpc-check] no ${venue} markets with sol mints`,
-      );
+      console.log(`[solana-rpc-check] no ${venue} markets with sol mints`);
       return;
     }
 
@@ -105,8 +102,7 @@ async function main() {
     }
 
     const allMints = Array.from(mintToMarkets.keys());
-    const targets =
-      sample > 0 ? allMints.slice(0, sample) : allMints;
+    const targets = sample > 0 ? allMints.slice(0, sample) : allMints;
 
     const results: MintCheckResult[] = [];
     for (const mint of targets) {
@@ -142,9 +138,7 @@ async function main() {
     }
 
     const okCount = results.filter((r) => r.ok).length;
-    const notFound = results.filter(
-      (r) => r.error && isMintNotFound(r.error),
-    );
+    const notFound = results.filter((r) => r.error && isMintNotFound(r.error));
     const otherErrors = results.filter(
       (r) => !r.ok && !isMintNotFound(r.error),
     );

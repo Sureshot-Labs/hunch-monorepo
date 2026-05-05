@@ -72,7 +72,10 @@ async function getSharedSubscriber(): Promise<RedisClient | null> {
     return sub;
   })()
     .catch((err: unknown) => {
-      console.warn("[notify-sse] failed to create redis subscriber", String(err));
+      console.warn(
+        "[notify-sse] failed to create redis subscriber",
+        String(err),
+      );
       return null;
     })
     .finally(() => {
@@ -105,7 +108,10 @@ async function ensureChannelSubscribed(
   await state.inFlight;
 }
 
-async function maybeUnsubscribe(sub: RedisClient, userId: string): Promise<void> {
+async function maybeUnsubscribe(
+  sub: RedisClient,
+  userId: string,
+): Promise<void> {
   const channel = channelName(userId);
   const state = getOrCreateChannelState(channel);
 

@@ -53,7 +53,9 @@ function parseArgs(argv: string[]): Args {
         .filter(Boolean)
         .filter(
           (entry): entry is Venue =>
-            entry === "polymarket" || entry === "kalshi" || entry === "limitless",
+            entry === "polymarket" ||
+            entry === "kalshi" ||
+            entry === "limitless",
         );
     }
     if (key === "--json") {
@@ -472,7 +474,10 @@ async function evaluateSelection(
     let tradeVol24h: number | null = null;
     let tradeTrades24h: number | null = null;
     if (venue === "polymarket") {
-      const trade = await client.query<{ vol: string | null; trades: string | null }>(
+      const trade = await client.query<{
+        vol: string | null;
+        trades: string | null;
+      }>(
         `
           with recent as (
             select token_id, sum(volume) as vol, sum(trades) as trades
@@ -498,7 +503,10 @@ async function evaluateSelection(
     }
 
     if (venue === "kalshi") {
-      const trade = await client.query<{ vol: string | null; trades: string | null }>(
+      const trade = await client.query<{
+        vol: string | null;
+        trades: string | null;
+      }>(
         `
           with recent as (
             select token_id, sum(volume) as vol, sum(trades) as trades
@@ -645,7 +653,9 @@ async function main() {
     },
   ];
 
-  const activeHeuristics = heuristics.filter((h) => args.venues.includes(h.venue));
+  const activeHeuristics = heuristics.filter((h) =>
+    args.venues.includes(h.venue),
+  );
   const results: ExperimentResult[] = [];
 
   for (const heuristic of activeHeuristics) {

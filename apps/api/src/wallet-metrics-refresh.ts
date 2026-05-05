@@ -68,7 +68,7 @@ function parseArgs(argvInput: string[]): Args {
   const tag =
     all || walletIds.length > 0 || walletAddresses.length > 0
       ? explicitTag
-      : explicitTag ?? "whale";
+      : (explicitTag ?? "whale");
   const asOfRaw = readValues(argv, "as-of")[0];
   const asOf = asOfRaw ? new Date(asOfRaw) : new Date();
 

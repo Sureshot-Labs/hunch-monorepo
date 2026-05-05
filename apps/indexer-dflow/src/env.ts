@@ -2,7 +2,10 @@ import { config } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true }); // load repo .env
 
 // 🧹 Prevent pg from mixing PG* env with your connectionString
@@ -229,16 +232,21 @@ const allowedSweepStatuses = new Set([
   "archived",
   "resolved",
 ]);
-const nonActiveSweepStatuses =
-  parseCsvLowercase(process.env.DFLOW_NON_ACTIVE_SWEEP_STATUSES)?.filter(
-    (status) => allowedSweepStatuses.has(status),
-  ) ?? ["closed", "inactive"];
+const nonActiveSweepStatuses = parseCsvLowercase(
+  process.env.DFLOW_NON_ACTIVE_SWEEP_STATUSES,
+)?.filter((status) => allowedSweepStatuses.has(status)) ?? [
+  "closed",
+  "inactive",
+];
 
-const hotTokensTtlSec = clampInt(parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC), {
-  min: 60,
-  max: 7 * 24 * 60 * 60,
-  fallback: 1800,
-});
+const hotTokensTtlSec = clampInt(
+  parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC),
+  {
+    min: 60,
+    max: 7 * 24 * 60 * 60,
+    fallback: 1800,
+  },
+);
 const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
   min: 10,
   max: 50_000,

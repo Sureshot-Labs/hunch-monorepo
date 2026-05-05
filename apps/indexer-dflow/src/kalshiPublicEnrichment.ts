@@ -14,7 +14,10 @@ export type KalshiPublicEnrichmentResult = {
   updatedLiquidity: number;
 };
 
-function differs(a: number | null | undefined, b: number | null | undefined): boolean {
+function differs(
+  a: number | null | undefined,
+  b: number | null | undefined,
+): boolean {
   const left = a ?? null;
   const right = b ?? null;
   if (left === right) return false;

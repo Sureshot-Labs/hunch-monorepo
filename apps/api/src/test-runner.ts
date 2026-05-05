@@ -21,9 +21,7 @@ async function collectTestFiles(dir: string): Promise<string[]> {
 }
 
 function parseFilters(argv: string[]): string[] {
-  return argv
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
+  return argv.map((value) => value.trim().toLowerCase()).filter(Boolean);
 }
 
 const srcDir = path.resolve(import.meta.dirname);
@@ -71,4 +69,3 @@ for (const file of selected) {
 }
 
 console.log(`[test-runner] passed ${passed}/${selected.length}`);
-

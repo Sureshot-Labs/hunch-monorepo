@@ -17,7 +17,9 @@ function test(name: string, fn: () => void) {
   }
 }
 
-function buildMarket(overrides: Partial<ClusterMarketSummary>): ClusterMarketSummary {
+function buildMarket(
+  overrides: Partial<ClusterMarketSummary>,
+): ClusterMarketSummary {
   return {
     marketId: overrides.marketId ?? "market-1",
     eventId: overrides.eventId ?? "event-1",

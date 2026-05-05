@@ -57,7 +57,8 @@ function buildJobs(): ScheduledJob[] {
       run: () =>
         runFeesCollectJob({
           archiveLegacy: true,
-          dryRun: env.feesCollectDryRun || env.feesCollectReadOnly || !allowExecute,
+          dryRun:
+            env.feesCollectDryRun || env.feesCollectReadOnly || !allowExecute,
           readOnly: env.feesCollectReadOnly || !allowExecute,
         }),
     },

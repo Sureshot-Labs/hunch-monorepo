@@ -390,7 +390,10 @@ async function getDebridgeConfig(): Promise<DebridgeConfig> {
           ? Number(row.referral_code)
           : env.debridgeReferralCode,
     };
-    cachedDebridgeConfig = { value: config, expiresAt: now + DEBRIDGE_CONFIG_TTL_MS };
+    cachedDebridgeConfig = {
+      value: config,
+      expiresAt: now + DEBRIDGE_CONFIG_TTL_MS,
+    };
     return config;
   };
 
@@ -537,7 +540,9 @@ function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
   }
 }
 
-function getSolanaTransactionRequiredSigners(payload: unknown): string[] | null {
+function getSolanaTransactionRequiredSigners(
+  payload: unknown,
+): string[] | null {
   if (!isRecord(payload) || !isRecord(payload.tx)) return null;
   const txData = readStringField(payload.tx, "data");
   if (!txData) return null;
@@ -548,7 +553,7 @@ function getSolanaTransactionRequiredSigners(payload: unknown): string[] | null 
     const tx = VersionedTransaction.deserialize(raw);
     return tx.message.staticAccountKeys
       .slice(0, tx.message.header.numRequiredSignatures)
-      .map(key => key.toBase58());
+      .map((key) => key.toBase58());
   } catch {
     return null;
   }
@@ -560,10 +565,7 @@ function validateDebridgeSameChainSolanaSigner(inputs: {
   senderAddress: string;
   payload: unknown;
 }): { message: string; requiredSigners: string[] } | null {
-  if (
-    inputs.swapType !== "same_chain" ||
-    inputs.chainId !== SOLANA_CHAIN_ID
-  ) {
+  if (inputs.swapType !== "same_chain" || inputs.chainId !== SOLANA_CHAIN_ID) {
     return null;
   }
 
@@ -617,7 +619,8 @@ async function fetchSourceReceiptStatus(inputs: {
   txHash: string;
 }): Promise<{ status: "submitted" | "fulfilled" | "failed" } | null> {
   return (
-    (await fetchEvmReceiptStatus(inputs)) ?? (await fetchSolanaReceiptStatus(inputs))
+    (await fetchEvmReceiptStatus(inputs)) ??
+    (await fetchSolanaReceiptStatus(inputs))
   );
 }
 
@@ -724,7 +727,8 @@ async function isAuthorizedBridgeSender(
   const linkedWallets = await AuthService.getUserWallets(userId);
   for (const wallet of linkedWallets) {
     const isEvmWallet =
-      wallet.walletType === "ethereum" || ethers.isAddress(wallet.walletAddress);
+      wallet.walletType === "ethereum" ||
+      ethers.isAddress(wallet.walletAddress);
     if (!isEvmWallet) continue;
     const creds = await AuthService.getVenueCredentialsInfo(
       userId,
@@ -763,7 +767,10 @@ function isAcrossFallbackEligible(inputs: {
   status?: number;
   payload?: unknown;
 }): boolean {
-  if (inputs.requestedProvider !== "auto" || inputs.resolvedProvider !== "across") {
+  if (
+    inputs.requestedProvider !== "auto" ||
+    inputs.resolvedProvider !== "across"
+  ) {
     return false;
   }
   // Solana Across routes avoid deBridge's source-native fixed fee. Falling back
@@ -804,7 +811,9 @@ type AcrossSwapDiscoveryCache = {
 let acrossSwapDiscoveryCache: AcrossSwapDiscoveryCache | null = null;
 const ACROSS_SWAP_DISCOVERY_TTL_MS = 5 * 60 * 1000;
 
-async function getAcrossSwapDiscovery(config: ReturnType<typeof getAcrossConfig>) {
+async function getAcrossSwapDiscovery(
+  config: ReturnType<typeof getAcrossConfig>,
+) {
   const now = Date.now();
   if (acrossSwapDiscoveryCache && acrossSwapDiscoveryCache.expiresAt > now) {
     return acrossSwapDiscoveryCache;
@@ -834,7 +843,9 @@ async function getAcrossSwapDiscovery(config: ReturnType<typeof getAcrossConfig>
       ok: false as const,
       status: chainsRes.status,
       payload: chainsRes.payload,
-      message: extractAcrossErrorMessage(chainsRes.payload) || "Across chain discovery failed",
+      message:
+        extractAcrossErrorMessage(chainsRes.payload) ||
+        "Across chain discovery failed",
     };
   }
   if (!tokensRes.ok) {
@@ -842,12 +853,16 @@ async function getAcrossSwapDiscovery(config: ReturnType<typeof getAcrossConfig>
       ok: false as const,
       status: tokensRes.status,
       payload: tokensRes.payload,
-      message: extractAcrossErrorMessage(tokensRes.payload) || "Across token discovery failed",
+      message:
+        extractAcrossErrorMessage(tokensRes.payload) ||
+        "Across token discovery failed",
     };
   }
 
   const chains = new Set<string>();
-  for (const entry of Array.isArray(chainsRes.payload) ? chainsRes.payload : []) {
+  for (const entry of Array.isArray(chainsRes.payload)
+    ? chainsRes.payload
+    : []) {
     if (!isRecord(entry)) continue;
     const chainId =
       typeof entry.chainId === "number" || typeof entry.chainId === "string"
@@ -857,14 +872,18 @@ async function getAcrossSwapDiscovery(config: ReturnType<typeof getAcrossConfig>
   }
 
   const tokens = new Set<string>();
-  for (const entry of Array.isArray(tokensRes.payload) ? tokensRes.payload : []) {
+  for (const entry of Array.isArray(tokensRes.payload)
+    ? tokensRes.payload
+    : []) {
     if (!isRecord(entry)) continue;
     const chainId =
       typeof entry.chainId === "number" || typeof entry.chainId === "string"
         ? String(entry.chainId)
         : "";
     const address =
-      typeof entry.address === "string" ? entry.address.trim().toLowerCase() : "";
+      typeof entry.address === "string"
+        ? entry.address.trim().toLowerCase()
+        : "";
     if (chainId && address) tokens.add(`${chainId}:${address}`);
   }
 
@@ -883,13 +902,19 @@ async function validateAcrossSwapApiSupport(inputs: {
   dstChainId: string;
   srcToken: string;
   dstToken: string;
-}): Promise<{ ok: true } | { ok: false; status: number; payload: unknown; message: string }> {
+}): Promise<
+  | { ok: true }
+  | { ok: false; status: number; payload: unknown; message: string }
+> {
   const discovery = await getAcrossSwapDiscovery(inputs.config);
   if (!discovery.ok) return discovery;
 
   const srcAcrossChain = acrossChainIdForHunch(inputs.srcChainId);
   const dstAcrossChain = acrossChainIdForHunch(inputs.dstChainId);
-  if (!discovery.chains.has(srcAcrossChain) || !discovery.chains.has(dstAcrossChain)) {
+  if (
+    !discovery.chains.has(srcAcrossChain) ||
+    !discovery.chains.has(dstAcrossChain)
+  ) {
     return {
       ok: false,
       status: 400,
@@ -903,7 +928,10 @@ async function validateAcrossSwapApiSupport(inputs: {
 
   const srcTokenKey = `${srcAcrossChain}:${inputs.srcToken.toLowerCase()}`;
   const dstTokenKey = `${dstAcrossChain}:${inputs.dstToken.toLowerCase()}`;
-  if (!discovery.tokens.has(srcTokenKey) || !discovery.tokens.has(dstTokenKey)) {
+  if (
+    !discovery.tokens.has(srcTokenKey) ||
+    !discovery.tokens.has(dstTokenKey)
+  ) {
     return {
       ok: false,
       status: 400,
@@ -1056,7 +1084,9 @@ async function fetchAcrossBridgePayload(
     return { ok: true, payload, providerPayload: upstream.payload };
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Across response normalization failed";
+      error instanceof Error
+        ? error.message
+        : "Across response normalization failed";
     return {
       ok: false,
       status: 502,
@@ -1256,9 +1286,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       const payload = {
         status: pendingStatus,
         source:
-          sourceStatus === "fulfilled"
-            ? "source_confirmed"
-            : "indexer_pending",
+          sourceStatus === "fulfilled" ? "source_confirmed" : "indexer_pending",
         sourceTxStatus: sourceStatus,
         error: extractAcrossErrorMessage(upstream.payload),
       };
@@ -1493,9 +1521,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: query.deBridgeApp,
                 prependOperatingExpenses: query.prependOperatingExpenses,
-                srcChainOrderAuthorityAddress: query.srcChainOrderAuthorityAddress,
+                srcChainOrderAuthorityAddress:
+                  query.srcChainOrderAuthorityAddress,
                 srcChainRefundAddress: query.srcChainRefundAddress,
-                dstChainOrderAuthorityAddress: query.dstChainOrderAuthorityAddress,
+                dstChainOrderAuthorityAddress:
+                  query.dstChainOrderAuthorityAddress,
               }),
             });
 
@@ -1639,28 +1669,29 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         });
 
         if (acrossResult.ok) {
-            const normalizedPayload = acrossResult.payload;
-            const providerPayload = isRecord(acrossResult.providerPayload)
-              ? acrossResult.providerPayload
-              : {};
-            const txMeta =
-              isRecord(normalizedPayload.tx) && normalizedPayload.tx.kind === "evm"
-                ? {
-                    to:
-                      typeof normalizedPayload.tx.to === "string"
-                        ? normalizedPayload.tx.to
-                        : null,
-                    value:
-                      typeof normalizedPayload.tx.value === "string"
-                        ? normalizedPayload.tx.value
-                        : null,
-                    kind: normalizedPayload.tx.kind,
-                  }
-                : isRecord(normalizedPayload.tx)
-                  ? { kind: normalizedPayload.tx.kind ?? null }
-                  : null;
-            const insertResult = await pool.query<{ id: string }>(
-              `
+          const normalizedPayload = acrossResult.payload;
+          const providerPayload = isRecord(acrossResult.providerPayload)
+            ? acrossResult.providerPayload
+            : {};
+          const txMeta =
+            isRecord(normalizedPayload.tx) &&
+            normalizedPayload.tx.kind === "evm"
+              ? {
+                  to:
+                    typeof normalizedPayload.tx.to === "string"
+                      ? normalizedPayload.tx.to
+                      : null,
+                  value:
+                    typeof normalizedPayload.tx.value === "string"
+                      ? normalizedPayload.tx.value
+                      : null,
+                  kind: normalizedPayload.tx.kind,
+                }
+              : isRecord(normalizedPayload.tx)
+                ? { kind: normalizedPayload.tx.kind ?? null }
+                : null;
+          const insertResult = await pool.query<{ id: string }>(
+            `
                 insert into bridge_orders (
                   user_id,
                   provider,
@@ -1695,48 +1726,46 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 )
                 returning id
               `,
-              [
-                user.id,
-                "across",
-                swapType,
-                body.srcChainId,
-                body.dstChainId,
-                body.srcToken,
-                body.dstToken,
-                body.amountIn,
-                body.slippage != null ? Math.round(body.slippage * 100) : null,
-                typeof normalizedPayload.id === "string"
-                  ? normalizedPayload.id
-                  : null,
-                null,
-                "created",
-                normalizedPayload.fees ?? null,
-                {
-                  tx: txMeta,
-                  estimation: normalizedPayload.estimation ?? null,
-                  tokenIn: null,
-                  tokenOut: null,
-                  across: {
-                    approvalTxns:
-                      normalizedPayload.approvalTxns ?? null,
-                    checks: normalizedPayload.checks ?? null,
-                    warnings: normalizedPayload.warnings ?? null,
-                    inputAmount: normalizedPayload.inputAmount ?? null,
-                    expectedOutputAmount:
-                      normalizedPayload.expectedOutputAmount ?? null,
-                    minOutputAmount:
-                      normalizedPayload.minOutputAmount ?? null,
-                    providerPayload,
-                  },
+            [
+              user.id,
+              "across",
+              swapType,
+              body.srcChainId,
+              body.dstChainId,
+              body.srcToken,
+              body.dstToken,
+              body.amountIn,
+              body.slippage != null ? Math.round(body.slippage * 100) : null,
+              typeof normalizedPayload.id === "string"
+                ? normalizedPayload.id
+                : null,
+              null,
+              "created",
+              normalizedPayload.fees ?? null,
+              {
+                tx: txMeta,
+                estimation: normalizedPayload.estimation ?? null,
+                tokenIn: null,
+                tokenOut: null,
+                across: {
+                  approvalTxns: normalizedPayload.approvalTxns ?? null,
+                  checks: normalizedPayload.checks ?? null,
+                  warnings: normalizedPayload.warnings ?? null,
+                  inputAmount: normalizedPayload.inputAmount ?? null,
+                  expectedOutputAmount:
+                    normalizedPayload.expectedOutputAmount ?? null,
+                  minOutputAmount: normalizedPayload.minOutputAmount ?? null,
+                  providerPayload,
                 },
-              ],
-            );
-            const bridgeOrderId = insertResult.rows[0]?.id ?? null;
-            reply.header("Content-Type", "application/json; charset=utf-8");
-            return reply.send({
-              ...normalizedPayload,
-              bridgeOrderId,
-            });
+              },
+            ],
+          );
+          const bridgeOrderId = insertResult.rows[0]?.id ?? null;
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ...normalizedPayload,
+            bridgeOrderId,
+          });
         }
 
         if (
@@ -1815,9 +1844,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 affiliateFeeRecipient: affiliateDefaults.affiliateFeeRecipient,
                 deBridgeApp: body.deBridgeApp,
                 prependOperatingExpenses: body.prependOperatingExpenses,
-                srcChainOrderAuthorityAddress: body.srcChainOrderAuthorityAddress,
+                srcChainOrderAuthorityAddress:
+                  body.srcChainOrderAuthorityAddress,
                 srcChainRefundAddress: body.srcChainRefundAddress,
-                dstChainOrderAuthorityAddress: body.dstChainOrderAuthorityAddress,
+                dstChainOrderAuthorityAddress:
+                  body.dstChainOrderAuthorityAddress,
               }),
             });
 
@@ -2031,8 +2062,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "orderId or txHash is required" });
       }
 
-      let resolvedSwapType: BridgeSwapType | null =
-        query.swapType ?? null;
+      let resolvedSwapType: BridgeSwapType | null = query.swapType ?? null;
       let resolvedChainId = query.chainId?.trim() || null;
       let resolvedTxHash = txHash || null;
       let resolvedStoredStatus: BridgeOrderStatus | null = null;
@@ -2057,7 +2087,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             `,
             [failedStatus, inputs.orderId, inputs.txHash],
           );
-          await notifyBridgeStatusByOrder("debridge", inputs.orderId, failedStatus);
+          await notifyBridgeStatusByOrder(
+            "debridge",
+            inputs.orderId,
+            failedStatus,
+          );
           return failedStatus;
         }
         if (!inputs.txHash) return null;
@@ -2102,7 +2136,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             resolvedTxHash = rows[0].tx_hash_src?.trim() || null;
           }
           if (!resolvedStoredStatus && rows[0].status) {
-            resolvedStoredStatus = canonicalizeBridgeOrderStatus(rows[0].status);
+            resolvedStoredStatus = canonicalizeBridgeOrderStatus(
+              rows[0].status,
+            );
           }
         }
       }
@@ -2304,7 +2340,10 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         }
 
         txLookup = lookup.payload;
-        if (isRecord(lookup.payload) && Array.isArray(lookup.payload.orderIds)) {
+        if (
+          isRecord(lookup.payload) &&
+          Array.isArray(lookup.payload.orderIds)
+        ) {
           orderIds = lookup.payload.orderIds
             .map((id) => (typeof id === "string" ? id : null))
             .filter((id): id is string => Boolean(id));
@@ -2419,7 +2458,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               });
               if (failedStatus) {
                 status = failedStatus;
-                payload = { ...orderRes.payload, status: failedStatus, source: "rpc" };
+                payload = {
+                  ...orderRes.payload,
+                  status: failedStatus,
+                  source: "rpc",
+                };
               }
             }
           } else {
@@ -2434,7 +2477,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             });
             if (failedStatus) {
               status = failedStatus;
-              payload = { ...orderRes.payload, status: failedStatus, source: "rpc" };
+              payload = {
+                ...orderRes.payload,
+                status: failedStatus,
+                source: "rpc",
+              };
             }
           }
           if (!status && dbStatus && isTerminalBridgeOrderStatus(dbStatus)) {
@@ -2456,7 +2503,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         orders.push({ orderId: id, payload });
       }
 
-      if (!orders.length && resolvedStoredStatus && isTerminalBridgeOrderStatus(resolvedStoredStatus)) {
+      if (
+        !orders.length &&
+        resolvedStoredStatus &&
+        isTerminalBridgeOrderStatus(resolvedStoredStatus)
+      ) {
         const syntheticOrderId = orderId ?? resolvedTxHash ?? "status";
         orders.push({
           orderId: syntheticOrderId,
@@ -2624,7 +2675,10 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         const isTerminalStatus = (value: BridgeOrderStatus) => {
           return isTerminalBridgeOrderStatus(value);
         };
-        const updateOrderStatus = async (status: BridgeOrderStatus, id: string) => {
+        const updateOrderStatus = async (
+          status: BridgeOrderStatus,
+          id: string,
+        ) => {
           await pool.query(
             `
               update bridge_orders
@@ -2662,27 +2716,50 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 orderId: row.order_id,
               });
             } catch (error) {
-              request.log.warn({ error, orderId: row.id }, "Across sync failed");
+              request.log.warn(
+                { error, orderId: row.id },
+                "Across sync failed",
+              );
             }
           }
         } else {
           for (const row of pendingRows) {
-          try {
-            if (row.swap_type === "same_chain") {
-              if (!row.tx_hash_src) continue;
-              const orderRes = await debridgeRequest({
-                baseUrl: debridgeConfig.statsBase,
-                timeoutMs: 15_000,
-                method: "GET",
-                requestPath: `/SameChainSwap/${row.src_chain_id}/tx/${row.tx_hash_src}`,
-              });
+            try {
+              if (row.swap_type === "same_chain") {
+                if (!row.tx_hash_src) continue;
+                const orderRes = await debridgeRequest({
+                  baseUrl: debridgeConfig.statsBase,
+                  timeoutMs: 15_000,
+                  method: "GET",
+                  requestPath: `/SameChainSwap/${row.src_chain_id}/tx/${row.tx_hash_src}`,
+                });
 
-              if (orderRes.ok) {
-                const status = extractStatus(orderRes.payload);
-                if (status && isTerminalStatus(status)) {
-                  await updateOrderStatus(status, row.id);
+                if (orderRes.ok) {
+                  const status = extractStatus(orderRes.payload);
+                  if (status && isTerminalStatus(status)) {
+                    await updateOrderStatus(status, row.id);
+                    continue;
+                  }
+                  const fallback =
+                    (await fetchEvmReceiptStatus({
+                      chainId: row.src_chain_id,
+                      txHash: row.tx_hash_src,
+                    })) ??
+                    (await fetchSolanaReceiptStatus({
+                      chainId: row.src_chain_id,
+                      txHash: row.tx_hash_src,
+                    }));
+                  if (fallback?.status) {
+                    const canonicalStatus = toCanonicalReceiptStatus(
+                      fallback.status,
+                    );
+                    if (canonicalStatus) {
+                      await updateOrderStatus(canonicalStatus, row.id);
+                    }
+                  }
                   continue;
                 }
+
                 const fallback =
                   (await fetchEvmReceiptStatus({
                     chainId: row.src_chain_id,
@@ -2703,53 +2780,44 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 continue;
               }
 
-              const fallback =
-                (await fetchEvmReceiptStatus({
-                  chainId: row.src_chain_id,
-                  txHash: row.tx_hash_src,
-                })) ??
-                (await fetchSolanaReceiptStatus({
-                  chainId: row.src_chain_id,
-                txHash: row.tx_hash_src,
-                }));
-              if (fallback?.status) {
-                const canonicalStatus = toCanonicalReceiptStatus(
-                  fallback.status,
-                );
-                if (canonicalStatus) {
-                  await updateOrderStatus(canonicalStatus, row.id);
-                }
-              }
-              continue;
-            }
-
-            let resolvedOrderId = row.order_id;
-            if (!resolvedOrderId && row.tx_hash_src) {
-              const lookup = await debridgeRequest({
-                baseUrl: debridgeConfig.statsBase,
-                timeoutMs: 15_000,
-                method: "GET",
-                requestPath: `/Transaction/${row.tx_hash_src}/orderIds`,
-              });
-              if (lookup.ok) {
-                const ids = isRecord(lookup.payload) &&
-                  Array.isArray(lookup.payload.orderIds)
-                  ? lookup.payload.orderIds
-                      .map((id) => (typeof id === "string" ? id : null))
-                      .filter((id): id is string => Boolean(id))
-                  : [];
-                if (ids[0]) {
-                  resolvedOrderId = ids[0];
-                  await pool.query(
-                    `
+              let resolvedOrderId = row.order_id;
+              if (!resolvedOrderId && row.tx_hash_src) {
+                const lookup = await debridgeRequest({
+                  baseUrl: debridgeConfig.statsBase,
+                  timeoutMs: 15_000,
+                  method: "GET",
+                  requestPath: `/Transaction/${row.tx_hash_src}/orderIds`,
+                });
+                if (lookup.ok) {
+                  const ids =
+                    isRecord(lookup.payload) &&
+                    Array.isArray(lookup.payload.orderIds)
+                      ? lookup.payload.orderIds
+                          .map((id) => (typeof id === "string" ? id : null))
+                          .filter((id): id is string => Boolean(id))
+                      : [];
+                  if (ids[0]) {
+                    resolvedOrderId = ids[0];
+                    await pool.query(
+                      `
                       update bridge_orders
                       set order_id = $1, updated_at = now()
                       where id = $2
                     `,
-                    [resolvedOrderId, row.id],
-                  );
+                      [resolvedOrderId, row.id],
+                    );
+                  }
+                } else {
+                  const fallbackStatus =
+                    await resolveCrossChainFailedBySourceReceipt(row);
+                  if (fallbackStatus) {
+                    await updateOrderStatus(fallbackStatus, row.id);
+                  }
+                  continue;
                 }
-              } else {
+              }
+
+              if (!resolvedOrderId) {
                 const fallbackStatus =
                   await resolveCrossChainFailedBySourceReceipt(row);
                 if (fallbackStatus) {
@@ -2757,51 +2825,44 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 }
                 continue;
               }
-            }
-
-            if (!resolvedOrderId) {
-              const fallbackStatus =
-                await resolveCrossChainFailedBySourceReceipt(row);
-              if (fallbackStatus) {
-                await updateOrderStatus(fallbackStatus, row.id);
-              }
-              continue;
-            }
-            const orderRes = await debridgeRequest({
-              baseUrl: debridgeConfig.statsBase,
-              timeoutMs: 15_000,
-              method: "GET",
-              requestPath: `/Orders/${resolvedOrderId}`,
-            });
-            if (!orderRes.ok) {
-              const fallbackStatus =
-                await resolveCrossChainFailedBySourceReceipt(row);
-              if (fallbackStatus) {
-                await updateOrderStatus(fallbackStatus, row.id);
-              }
-              continue;
-            }
-
-            const status = extractStatus(orderRes.payload);
-            if (status && isTerminalStatus(status)) {
-              await updateOrderStatus(status, row.id);
-              continue;
-            }
-            if (!isTerminalStatus(status ?? "submitted")) {
-              const fallbackStatus =
-                await resolveCrossChainFailedBySourceReceipt(row);
-              if (fallbackStatus) {
-                await updateOrderStatus(fallbackStatus, row.id);
+              const orderRes = await debridgeRequest({
+                baseUrl: debridgeConfig.statsBase,
+                timeoutMs: 15_000,
+                method: "GET",
+                requestPath: `/Orders/${resolvedOrderId}`,
+              });
+              if (!orderRes.ok) {
+                const fallbackStatus =
+                  await resolveCrossChainFailedBySourceReceipt(row);
+                if (fallbackStatus) {
+                  await updateOrderStatus(fallbackStatus, row.id);
+                }
                 continue;
               }
+
+              const status = extractStatus(orderRes.payload);
+              if (status && isTerminalStatus(status)) {
+                await updateOrderStatus(status, row.id);
+                continue;
+              }
+              if (!isTerminalStatus(status ?? "submitted")) {
+                const fallbackStatus =
+                  await resolveCrossChainFailedBySourceReceipt(row);
+                if (fallbackStatus) {
+                  await updateOrderStatus(fallbackStatus, row.id);
+                  continue;
+                }
+              }
+              if (status) {
+                await updateOrderStatus(status, row.id);
+              }
+            } catch (error) {
+              request.log.warn(
+                { error, orderId: row.id },
+                "Bridge sync failed",
+              );
             }
-            if (status) {
-              await updateOrderStatus(status, row.id);
-            }
-          } catch (error) {
-            request.log.warn({ error, orderId: row.id }, "Bridge sync failed");
           }
-        }
         }
       }
 
@@ -2906,9 +2967,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const enrichedRows = rows.map((row) => {
-        const metadata = isRecord(row.metadata)
-          ? { ...row.metadata }
-          : {};
+        const metadata = isRecord(row.metadata) ? { ...row.metadata } : {};
         const tokenIn =
           metadata.tokenIn && isRecord(metadata.tokenIn)
             ? metadata.tokenIn
@@ -3053,9 +3112,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           );
           return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${
             offset + 4
-          }, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${
-            offset + 8
-          })`;
+          }, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`;
         });
 
         await pool.query(

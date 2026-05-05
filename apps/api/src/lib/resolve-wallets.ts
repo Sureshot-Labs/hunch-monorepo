@@ -31,10 +31,7 @@ async function loadAllowedPolymarketFunderMap(
   );
 
   return new Map(
-    rows.map((row) => [
-      row.funder_address.toLowerCase(),
-      row.funder_address,
-    ]),
+    rows.map((row) => [row.funder_address.toLowerCase(), row.funder_address]),
   );
 }
 
@@ -54,11 +51,12 @@ function loadAllowedDerivedPolymarketWalletMap(
   return new Map(
     linkedWallets
       .filter((wallet) => wallet.walletType === "ethereum")
-      .flatMap((wallet) =>
-        derivePolymarketFunderAddresses({
-          signer: wallet.walletAddress,
-          includeMagicProxy: true,
-        }).candidates,
+      .flatMap(
+        (wallet) =>
+          derivePolymarketFunderAddresses({
+            signer: wallet.walletAddress,
+            includeMagicProxy: true,
+          }).candidates,
       )
       .filter((address) => normalizedRequested.has(address.toLowerCase()))
       .map((address) => [address.toLowerCase(), address]),

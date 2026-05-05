@@ -50,7 +50,10 @@ function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
 }
 
-function ensureDflowReady(reply: { code: (status: number) => void; send: (payload: unknown) => void }): boolean {
+function ensureDflowReady(reply: {
+  code: (status: number) => void;
+  send: (payload: unknown) => void;
+}): boolean {
   if (!env.dflowRequireApiKey) return true;
   if (env.dflowApiKey && env.dflowApiKey.trim().length > 0) return true;
   reply.code(400);
@@ -66,10 +69,13 @@ function isProofBypassed(user: { kalshiProofBypass: boolean }): boolean {
   return user.kalshiProofBypass;
 }
 
-function sendProofRequired(reply: {
-  code: (status: number) => void;
-  send: (payload: unknown) => void;
-}, walletAddress: string) {
+function sendProofRequired(
+  reply: {
+    code: (status: number) => void;
+    send: (payload: unknown) => void;
+  },
+  walletAddress: string,
+) {
   reply.code(403);
   reply.send({
     error: "Kalshi buy requires identity verification",
@@ -92,7 +98,9 @@ function sendProofUnavailable(reply: {
   });
 }
 
-function readMintPairFromRecord(record: Record<string, unknown>): MintPair | null {
+function readMintPairFromRecord(
+  record: Record<string, unknown>,
+): MintPair | null {
   const inputRaw = record.inputMint ?? record.input_mint;
   const outputRaw = record.outputMint ?? record.output_mint;
   if (typeof inputRaw !== "string" || typeof outputRaw !== "string") {
@@ -324,8 +332,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!ensureDflowReady(reply)) return;
 
       const query = request.query;
-      const userPublicKey =
-        query.userPublicKey?.trim() || walletAddress.trim();
+      const userPublicKey = query.userPublicKey?.trim() || walletAddress.trim();
       if (userPublicKey !== walletAddress.trim()) {
         reply.code(400);
         return reply.send({
@@ -535,7 +542,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           ...(query.platformFeeScale != null
             ? { platformFeeScale: query.platformFeeScale }
             : {}),
-          ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+          ...(query.platformFeeMode
+            ? { platformFeeMode: query.platformFeeMode }
+            : {}),
           ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
         },
       });
@@ -707,7 +716,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
-      const requestedWalletAddress = body.walletAddress?.trim() || walletAddress;
+      const requestedWalletAddress =
+        body.walletAddress?.trim() || walletAddress;
       const resolvedWalletAddresses = await resolveRequestedWalletAddresses(
         user.id,
         walletAddress,
@@ -717,7 +727,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!executionWalletAddress || !isSolanaWallet(executionWalletAddress)) {
         reply.code(400);
         return reply.send({
-          error: "DFlow execution tracking requires a linked Solana wallet address",
+          error:
+            "DFlow execution tracking requires a linked Solana wallet address",
         });
       }
       const executionStatus = normalizeKalshiExecutionStatus(body.status);
@@ -766,7 +777,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             amountIn:
               execution.amount_in != null ? Number(execution.amount_in) : null,
             amountOut:
-              execution.amount_out != null ? Number(execution.amount_out) : null,
+              execution.amount_out != null
+                ? Number(execution.amount_out)
+                : null,
             inputDecimals: execution.input_decimals ?? null,
             outputDecimals: execution.output_decimals ?? null,
             quoteId: execution.quote_id,

@@ -157,7 +157,10 @@ function parseRunEntries(rawMembers: string[]): RunEntry[] {
 function sumCost(entries: RunEntry[]): number {
   return entries.reduce(
     (acc, item) =>
-      acc + (typeof item.chargedCostUsd === "number" ? item.chargedCostUsd : item.costUsd),
+      acc +
+      (typeof item.chargedCostUsd === "number"
+        ? item.chargedCostUsd
+        : item.costUsd),
     0,
   );
 }
@@ -235,7 +238,10 @@ async function main() {
   }
 
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: "map-build-runner" });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "map-build-runner",
+  });
   const lockValue = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const runId = lockValue;
   const nowMs = Date.now();
@@ -264,7 +270,9 @@ async function main() {
   const detachSignalHandlers = installSignalHandlers(async (signal) => {
     if (shuttingDownBySignal) return;
     shuttingDownBySignal = true;
-    console.warn(`[map-build-runner] received ${signal}, releasing lock and exiting`);
+    console.warn(
+      `[map-build-runner] received ${signal}, releasing lock and exiting`,
+    );
     try {
       await setStatus(redis, {
         state: "aborted",
@@ -306,7 +314,10 @@ async function main() {
   const startHeartbeat = () => {
     const intervalSec = Math.max(
       5,
-      Math.min(config.lockHeartbeatSec, Math.max(5, Math.floor(config.lockTtlSec / 2))),
+      Math.min(
+        config.lockHeartbeatSec,
+        Math.max(5, Math.floor(config.lockTtlSec / 2)),
+      ),
     );
     heartbeatTimer = setInterval(() => {
       void renewLock();
@@ -334,7 +345,11 @@ async function main() {
 
     await redis.zRemRangeByScore(RUNS_KEY, 0, nowMs - RUN_HISTORY_TTL_MS);
 
-    const historyRaw = await redis.zRangeByScore(RUNS_KEY, nowMs - RUN_HISTORY_TTL_MS, nowMs);
+    const historyRaw = await redis.zRangeByScore(
+      RUNS_KEY,
+      nowMs - RUN_HISTORY_TTL_MS,
+      nowMs,
+    );
     const history = parseRunEntries(historyRaw);
     const lastRunMs = history.reduce((max, item) => Math.max(max, item.ts), 0);
     const windowStartMs = nowMs - config.runWindowMinutes * 60_000;
@@ -343,7 +358,9 @@ async function main() {
 
     const runsInWindow = history.filter((item) => item.ts >= windowStartMs);
     const runsInDay = history.filter((item) => item.ts >= dayStartMs);
-    const runsInBudgetWindow = history.filter((item) => item.ts >= budgetWindowStartMs);
+    const runsInBudgetWindow = history.filter(
+      (item) => item.ts >= budgetWindowStartMs,
+    );
     const budgetWindowSpentUsd = sumCost(runsInBudgetWindow);
     const daySpentUsd = sumCost(runsInDay);
     const estimatedCostUsd = args.dryRun ? 0 : config.estimatedRunCostUsd;
@@ -460,13 +477,15 @@ async function main() {
       const providerReportedCostCalls = args.dryRun
         ? 0
         : buildResult.labelCostSummary.providerReportedCostCalls;
-      const costSource: "estimated" | "provider_reported" | "mixed" = args.dryRun
-        ? "estimated"
-        : providerReportedCostCalls <= 0
+      const costSource: "estimated" | "provider_reported" | "mixed" =
+        args.dryRun
           ? "estimated"
-          : providerReportedCostCalls >= buildResult.labelCostSummary.attempted
-            ? "provider_reported"
-            : "mixed";
+          : providerReportedCostCalls <= 0
+            ? "estimated"
+            : providerReportedCostCalls >=
+                buildResult.labelCostSummary.attempted
+              ? "provider_reported"
+              : "mixed";
       const finishedAt = Date.now();
       const runEntry: RunEntry = {
         runId,
@@ -496,7 +515,9 @@ async function main() {
       const postRunsInWindow = historyAfter.filter(
         (item) => item.ts >= postWindowStartMs,
       );
-      const postRunsInDay = historyAfter.filter((item) => item.ts >= postDayStartMs);
+      const postRunsInDay = historyAfter.filter(
+        (item) => item.ts >= postDayStartMs,
+      );
       const postRunsInBudgetWindow = historyAfter.filter(
         (item) => item.ts >= postBudgetWindowStartMs,
       );
@@ -523,7 +544,10 @@ async function main() {
         budgetWindowUsd: config.budgetWindowUsd,
         budgetWindowSpentUsd: Number(postBudgetWindowSpentUsd.toFixed(6)),
         budgetWindowRemainingUsd: Number(
-          Math.max(0, config.budgetWindowUsd - postBudgetWindowSpentUsd).toFixed(6),
+          Math.max(
+            0,
+            config.budgetWindowUsd - postBudgetWindowSpentUsd,
+          ).toFixed(6),
         ),
         dayBudgetUsd: config.dayBudgetUsd,
         daySpentUsd: Number(postDaySpentUsd.toFixed(6)),
@@ -531,7 +555,9 @@ async function main() {
           Math.max(0, config.dayBudgetUsd - postDaySpentUsd).toFixed(6),
         ),
         providerReportedCostShare: Number(
-          (buildResult.labelCostSummary.providerReportedCostShare ?? 0).toFixed(4),
+          (buildResult.labelCostSummary.providerReportedCostShare ?? 0).toFixed(
+            4,
+          ),
         ),
         providerCostMissing:
           !args.dryRun && providerReportedCostCalls === 0 ? "true" : "false",
@@ -564,7 +590,9 @@ async function main() {
       const postRunsInWindow = historyAfter.filter(
         (item) => item.ts >= postWindowStartMs,
       );
-      const postRunsInDay = historyAfter.filter((item) => item.ts >= postDayStartMs);
+      const postRunsInDay = historyAfter.filter(
+        (item) => item.ts >= postDayStartMs,
+      );
       const postRunsInBudgetWindow = historyAfter.filter(
         (item) => item.ts >= postBudgetWindowStartMs,
       );
@@ -590,7 +618,10 @@ async function main() {
         budgetWindowUsd: config.budgetWindowUsd,
         budgetWindowSpentUsd: Number(postBudgetWindowSpentUsd.toFixed(6)),
         budgetWindowRemainingUsd: Number(
-          Math.max(0, config.budgetWindowUsd - postBudgetWindowSpentUsd).toFixed(6),
+          Math.max(
+            0,
+            config.budgetWindowUsd - postBudgetWindowSpentUsd,
+          ).toFixed(6),
         ),
         dayBudgetUsd: config.dayBudgetUsd,
         daySpentUsd: Number(postDaySpentUsd.toFixed(6)),

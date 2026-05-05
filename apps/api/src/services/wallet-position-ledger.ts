@@ -117,11 +117,9 @@ export function makeWalletPositionLedgerKey(
   marketId: string,
   outcomeSide: string | null | undefined,
 ): string {
-  return [
-    walletId,
-    marketId,
-    normalizeOutcomeSideForStorage(outcomeSide),
-  ].join("::");
+  return [walletId, marketId, normalizeOutcomeSideForStorage(outcomeSide)].join(
+    "::",
+  );
 }
 
 export function sharesApproximatelyMatch(

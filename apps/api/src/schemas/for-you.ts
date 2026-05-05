@@ -72,10 +72,7 @@ export const forYouQuerySchema = z.object({
   min_volume24hr: z.coerce.number().catch(1e-9),
   min_liquidity: z.coerce.number().catch(0),
   q: z
-    .preprocess(
-      (v) => (typeof v === "string" ? v.trim() : v),
-      z.string(),
-    )
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
     .optional()
     .transform((v) => (v && v.length ? v : undefined)),
   venue: zVenueQuery,
@@ -102,9 +99,7 @@ export const forYouQuerySchema = z.object({
       "newest",
     ])
     .optional(),
-  sort_dir: z
-    .enum(["asc", "desc"])
-    .optional(),
+  sort_dir: z.enum(["asc", "desc"]).optional(),
   end_within_hours: z.coerce
     .number()
     .int()

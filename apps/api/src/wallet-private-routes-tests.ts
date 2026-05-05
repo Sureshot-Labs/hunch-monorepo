@@ -86,7 +86,9 @@ async function assertPrivateWalletTablesExist(): Promise<void> {
 }
 
 async function cleanup(context: TestContext): Promise<void> {
-  await pool.query("delete from user_sessions where user_id = $1", [context.userId]);
+  await pool.query("delete from user_sessions where user_id = $1", [
+    context.userId,
+  ]);
   await pool.query("delete from users where id = $1", [context.userId]);
   for (const wallet of context.createdWallets) {
     await pool.query("delete from wallets where address = $1 and chain = $2", [
@@ -170,7 +172,10 @@ async function main() {
       assert.equal(body.userLabelColor, null);
       labeledWalletId = body.wallet.walletId;
       assert.ok(labeledWalletId);
-      context.createdWallets.push({ address: labeledAddress, chain: "polygon" });
+      context.createdWallets.push({
+        address: labeledAddress,
+        chain: "polygon",
+      });
     }
 
     {
@@ -205,10 +210,10 @@ async function main() {
 
     {
       const forcedLastSeen = new Date("2024-01-02T03:04:05.000Z");
-      await pool.query(
-        "update wallets set last_seen_at = $2 where id = $1",
-        [labeledWalletId, forcedLastSeen],
-      );
+      await pool.query("update wallets set last_seen_at = $2 where id = $1", [
+        labeledWalletId,
+        forcedLastSeen,
+      ]);
 
       const response = await app.inject({
         method: "PATCH",
@@ -366,7 +371,10 @@ async function main() {
         url: "/wallets/activity/summary?scope=following&limit=5&offset=0",
       });
       assert.equal(response.statusCode, 401);
-      assert.match(response.body, /Authentication required for following scope/);
+      assert.match(
+        response.body,
+        /Authentication required for following scope/,
+      );
     }
 
     {
@@ -384,7 +392,10 @@ async function main() {
         url: "/wallets/activity/signals?limit=5&offset=0",
       });
       assert.equal(response.statusCode, 401);
-      assert.match(response.body, /Authentication required for following scope/);
+      assert.match(
+        response.body,
+        /Authentication required for following scope/,
+      );
     }
 
     {

@@ -145,7 +145,9 @@ async function subscribeToChannels(
   }
 
   await Promise.all(
-    uniqueTokenIds.map((id) => ensureChannelSubscribed(sub, channelName(prefix, id))),
+    uniqueTokenIds.map((id) =>
+      ensureChannelSubscribed(sub, channelName(prefix, id)),
+    ),
   );
 
   return () => {
@@ -157,7 +159,9 @@ async function subscribeToChannels(
     }
 
     void Promise.all(
-      uniqueTokenIds.map((id) => maybeUnsubscribe(sub, channelName(prefix, id))),
+      uniqueTokenIds.map((id) =>
+        maybeUnsubscribe(sub, channelName(prefix, id)),
+      ),
     );
   };
 }

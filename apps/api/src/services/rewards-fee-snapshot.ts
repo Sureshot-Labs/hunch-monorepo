@@ -16,25 +16,26 @@ type ReferralBonus = {
   bonusBps: number;
 };
 
-const DEFAULT_POLICY: { tiers: RewardsTier[]; referralBonus: ReferralBonus[] } = {
-  tiers: [
-    { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
-    { tier: 1, name: "Observer", points: 500, cashbackBps: 2500 },
-    { tier: 2, name: "Seeker", points: 5000, cashbackBps: 3000 },
-    { tier: 3, name: "Analyst", points: 30000, cashbackBps: 3500 },
-    { tier: 4, name: "Forecaster", points: 120000, cashbackBps: 4000 },
-    { tier: 5, name: "Sage", points: 350000, cashbackBps: 4500 },
-    { tier: 6, name: "Ascendant", points: 1000000, cashbackBps: 5000 },
-    { tier: 7, name: "Oracle", points: 2500000, cashbackBps: 5500 },
-  ],
-  referralBonus: [
-    { minReferrals: 3, bonusBps: 500 },
-    { minReferrals: 5, bonusBps: 1000 },
-    { minReferrals: 10, bonusBps: 1500 },
-    { minReferrals: 20, bonusBps: 2000 },
-    { minReferrals: 25, bonusBps: 2500 },
-  ],
-};
+const DEFAULT_POLICY: { tiers: RewardsTier[]; referralBonus: ReferralBonus[] } =
+  {
+    tiers: [
+      { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
+      { tier: 1, name: "Observer", points: 500, cashbackBps: 2500 },
+      { tier: 2, name: "Seeker", points: 5000, cashbackBps: 3000 },
+      { tier: 3, name: "Analyst", points: 30000, cashbackBps: 3500 },
+      { tier: 4, name: "Forecaster", points: 120000, cashbackBps: 4000 },
+      { tier: 5, name: "Sage", points: 350000, cashbackBps: 4500 },
+      { tier: 6, name: "Ascendant", points: 1000000, cashbackBps: 5000 },
+      { tier: 7, name: "Oracle", points: 2500000, cashbackBps: 5500 },
+    ],
+    referralBonus: [
+      { minReferrals: 3, bonusBps: 500 },
+      { minReferrals: 5, bonusBps: 1000 },
+      { minReferrals: 10, bonusBps: 1500 },
+      { minReferrals: 20, bonusBps: 2000 },
+      { minReferrals: 25, bonusBps: 2500 },
+    ],
+  };
 
 function clampBps(value: number, max = 10_000): number {
   if (!Number.isFinite(value)) return 0;
@@ -94,7 +95,8 @@ function parsePolicy(raw: {
   tiers: unknown;
   referral_bonus: unknown;
 }): { tiers: RewardsTier[]; referralBonus: ReferralBonus[] } | null {
-  if (!Array.isArray(raw.tiers) || !Array.isArray(raw.referral_bonus)) return null;
+  if (!Array.isArray(raw.tiers) || !Array.isArray(raw.referral_bonus))
+    return null;
 
   const tiers = raw.tiers.map(normalizeTier).filter(Boolean) as RewardsTier[];
   const referralBonus = raw.referral_bonus
@@ -251,8 +253,8 @@ export async function resolveFeeEventSnapshotAtWrite(
   let referralBpsApplied = 0;
   const hasQualifiedReferralLink = Boolean(
     referrerUserId &&
-      referredPoints >= OBSERVER_THRESHOLD &&
-      referrerPoints >= OBSERVER_THRESHOLD,
+    referredPoints >= OBSERVER_THRESHOLD &&
+    referrerPoints >= OBSERVER_THRESHOLD,
   );
   if (hasQualifiedReferralLink && referrerUserId) {
     await markReferralQualified(client, inputs.userId, inputs.eventTime);
@@ -262,10 +264,12 @@ export async function resolveFeeEventSnapshotAtWrite(
       inputs.eventTime,
     );
     referralBpsApplied = clampBps(
-      resolveReferralBonus(qualifiedReferrals, policy.referralBonus)?.bonusBps ?? 0,
+      resolveReferralBonus(qualifiedReferrals, policy.referralBonus)
+        ?.bonusBps ?? 0,
       Math.max(
         0,
-        10_000 - Math.max(...policy.tiers.map((entry) => clampBps(entry.cashbackBps))),
+        10_000 -
+          Math.max(...policy.tiers.map((entry) => clampBps(entry.cashbackBps))),
       ),
     );
   }

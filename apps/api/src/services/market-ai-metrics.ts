@@ -16,7 +16,9 @@ function numericOrZero(value: number | null | undefined): number {
   return Number.isFinite(value) ? Number(value) : 0;
 }
 
-function normalizePositiveOrNull(value: number | null | undefined): number | null {
+function normalizePositiveOrNull(
+  value: number | null | undefined,
+): number | null {
   return numericOrZero(value) > 0 ? numericOrZero(value) : null;
 }
 
@@ -29,8 +31,7 @@ export function normalizeAiMarketMetrics(
   const rawLiquidity = normalizePositiveOrNull(input.liquidity);
   const rawOpenInterest = normalizePositiveOrNull(input.openInterest);
   const activityVolume =
-    rawVolume24h ??
-    (venue === "limitless" ? (rawVolumeTotal ?? 0) : 0);
+    rawVolume24h ?? (venue === "limitless" ? (rawVolumeTotal ?? 0) : 0);
   const depthProxy = rawLiquidity ?? rawOpenInterest ?? 0;
 
   return {

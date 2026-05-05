@@ -163,8 +163,13 @@ function buildFeedSearchContext(args: {
   nowCloseParam?: string;
   renderableMarketExpr: string;
 }): FeedSearchContext {
-  const { add, q, nowParam, nowCloseParam = nowParam, renderableMarketExpr } =
-    args;
+  const {
+    add,
+    q,
+    nowParam,
+    nowCloseParam = nowParam,
+    renderableMarketExpr,
+  } = args;
   const hasSearch = Boolean(q);
   const searchParam = hasSearch ? add(`%${q}%`) : null;
   const searchCte = hasSearch
@@ -204,7 +209,9 @@ function buildFeedSearchContext(args: {
     hasSearch,
     searchCte,
     searchEventJoin: hasSearch ? "join search_events se on se.id = e.id" : "",
-    searchMarketJoin: hasSearch ? "join search_events se on se.id = m.event_id" : "",
+    searchMarketJoin: hasSearch
+      ? "join search_events se on se.id = m.event_id"
+      : "",
   };
 }
 
@@ -215,8 +222,13 @@ function buildFeedEventWhere(args: {
   hasSearch: boolean;
   requireNamedCategory?: boolean;
 }): string[] {
-  const { add, inputs, nowParam, hasSearch, requireNamedCategory = false } =
-    args;
+  const {
+    add,
+    inputs,
+    nowParam,
+    hasSearch,
+    requireNamedCategory = false,
+  } = args;
   const where: string[] = [
     "e.status = 'ACTIVE'",
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
@@ -270,7 +282,12 @@ function buildFeedEventJoinHaving(args: {
   add: PgParamAdder;
   inputs: Pick<
     FeedInputs,
-    "minVol" | "minLiquidity" | "minProb" | "maxProb" | "maxSpread" | "eventScope"
+    | "minVol"
+    | "minLiquidity"
+    | "minProb"
+    | "maxProb"
+    | "maxSpread"
+    | "eventScope"
   >;
   eventVolumeSortExpr: string;
   marketLiquidityDisplayExpr: string;
@@ -286,7 +303,9 @@ function buildFeedEventJoinHaving(args: {
   const marketQual: string[] = [];
 
   if (inputs.minLiquidity > 0) {
-    marketQual.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
+    marketQual.push(
+      `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
+    );
   }
   if (inputs.minProb != null) {
     marketQual.push(`(${yesMidExpr}) >= ${add(inputs.minProb)}`);
@@ -351,7 +370,9 @@ function buildFeedMarketViewContext(args: {
     renderableMarketExpr,
     yesMidExpr,
   } = expressions;
-  const marketIdsParam = inputs.marketIds?.length ? add(inputs.marketIds) : null;
+  const marketIdsParam = inputs.marketIds?.length
+    ? add(inputs.marketIds)
+    : null;
   const search = buildFeedSearchContext({
     add,
     q: inputs.q,
@@ -593,7 +614,8 @@ export async function fetchFeedCategoryFacetRows(
 
     const withParts: string[] = [];
     if (marketContext.searchCte) withParts.push(marketContext.searchCte);
-    if (marketContext.needsMarketCount) withParts.push(marketContext.marketCountCte);
+    if (marketContext.needsMarketCount)
+      withParts.push(marketContext.marketCountCte);
     const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
     const marketCountJoin = marketContext.needsMarketCount
       ? "join market_count emc on emc.event_id = m.event_id"
@@ -662,9 +684,7 @@ export async function fetchFeedCategoryFacetRows(
       )`,
     );
     if (inputs.minVol > 1e-9) {
-      eventOnlyWhere.push(
-        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
-      );
+      eventOnlyWhere.push(`${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
     }
     if (inputs.minLiquidity > 0) {
       eventOnlyWhere.push(
@@ -835,9 +855,7 @@ export async function fetchFeedEventIds(
       )`,
     );
     if (inputs.minVol > 1e-9) {
-      eventOnlyWhere.push(
-        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
-      );
+      eventOnlyWhere.push(`${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
     }
     if (inputs.minLiquidity > 0) {
       eventOnlyWhere.push(
@@ -845,8 +863,7 @@ export async function fetchFeedEventIds(
       );
     }
 
-    const eventOpenInterestSortExpr =
-      "coalesce(nullif(e.open_interest, 0), 0)";
+    const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
     let eventOnlyOrder = "";
     if (inputs.sort === "totalvol")
       eventOnlyOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
@@ -1182,7 +1199,9 @@ export async function fetchFeedMarkets(
     end
   `;
   const change24hExpr =
-    inputs.sort === "change24h" ? "mc.change_24h" : `
+    inputs.sort === "change24h"
+      ? "mc.change_24h"
+      : `
     case
       when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
@@ -1287,14 +1306,19 @@ export async function fetchFeedMarkets(
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
-  return await queryRowsWithLocalSettings<FeedMarketRow>(pool, marketSql, params, {
-    workMem:
-      inputs.sort === "change24h" ||
-      inputs.sort === "trending" ||
-      inputs.sort === "trending_v2"
-        ? FEED_HEAVY_QUERY_WORK_MEM
-        : null,
-  });
+  return await queryRowsWithLocalSettings<FeedMarketRow>(
+    pool,
+    marketSql,
+    params,
+    {
+      workMem:
+        inputs.sort === "change24h" ||
+        inputs.sort === "trending" ||
+        inputs.sort === "trending_v2"
+          ? FEED_HEAVY_QUERY_WORK_MEM
+          : null,
+    },
+  );
 }
 
 export async function fetchFeedMarketsDirect(
@@ -1444,10 +1468,14 @@ export async function fetchFeedMarketsDirect(
     end
   `;
   const change24hExpr = `
-    ${inputs.sort === "change24h" ? "m.change_24h" : `case
+    ${
+      inputs.sort === "change24h"
+        ? "m.change_24h"
+        : `case
       when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
       else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
-    end`}
+    end`
+    }
   `;
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
@@ -1545,14 +1573,19 @@ export async function fetchFeedMarketsDirect(
     order by m.ord, m.venue_market_id
   `;
 
-  return await queryRowsWithLocalSettings<FeedMarketRow>(pool, marketSql, params, {
-    workMem:
-      inputs.sort === "change24h" ||
-      inputs.sort === "trending" ||
-      inputs.sort === "trending_v2"
-        ? FEED_HEAVY_QUERY_WORK_MEM
-        : null,
-  });
+  return await queryRowsWithLocalSettings<FeedMarketRow>(
+    pool,
+    marketSql,
+    params,
+    {
+      workMem:
+        inputs.sort === "change24h" ||
+        inputs.sort === "trending" ||
+        inputs.sort === "trending_v2"
+          ? FEED_HEAVY_QUERY_WORK_MEM
+          : null,
+    },
+  );
 }
 
 export async function fetchFavoriteFeedEventPage(
@@ -1666,9 +1699,7 @@ export async function fetchFavoriteFeedEventPage(
     where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
   }
   if (inputs.categories?.length) {
-    where.push(
-      `lower(e.category) = ANY(${add(inputs.categories)}::text[])`,
-    );
+    where.push(`lower(e.category) = ANY(${add(inputs.categories)}::text[])`);
   } else if (inputs.category) {
     where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
   }
@@ -2347,8 +2378,7 @@ export async function fetchMarketsByTokenIds(
     ) no_top on true`
     : "";
 
-  const negRiskParentSelect =
-    `pm_parent.condition_id as pm_neg_risk_parent_condition_id,`;
+  const negRiskParentSelect = `pm_parent.condition_id as pm_neg_risk_parent_condition_id,`;
   const negRiskParentJoin = `left join polymarket_markets pm_parent
       on pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')`;
 

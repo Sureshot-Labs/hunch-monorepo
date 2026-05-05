@@ -29,7 +29,11 @@ type ForwardedAnalyticsTelemetry = {
 };
 
 type AnalyticsEventCollectionResult =
-  | { accepted: false; reason: "disabled" | "invalid" | "unsupported"; error?: string }
+  | {
+      accepted: false;
+      reason: "disabled" | "invalid" | "unsupported";
+      error?: string;
+    }
   | { accepted: true; deduped: boolean; stored: boolean };
 
 type ValidationSuccess = {
@@ -86,7 +90,8 @@ function resolveTerminalDedupeKey(
   status: string | null,
 ): string {
   if (
-    (event === "hf_portfolio_order_cancel" || event === "hf_rewards_claim_action") &&
+    (event === "hf_portfolio_order_cancel" ||
+      event === "hf_rewards_claim_action") &&
     status
   ) {
     return `${event}:${attemptId}:${status}`;
@@ -176,8 +181,8 @@ function validateCollectedAnalyticsPayload(
 
   const schemaVersion =
     origin === "backend"
-      ? readTrimmedString(payload, "analytics_schema_version") ??
-        BACKEND_ANALYTICS_SCHEMA_VERSION
+      ? (readTrimmedString(payload, "analytics_schema_version") ??
+        BACKEND_ANALYTICS_SCHEMA_VERSION)
       : readTrimmedString(payload, "analytics_schema_version");
   if (!schemaVersion) {
     return { ok: false, error: "analytics_schema_version is required" };
@@ -185,7 +190,9 @@ function validateCollectedAnalyticsPayload(
 
   const attemptId = readTrimmedString(payload, "attempt_id");
   const referredUserKey = readTrimmedString(payload, "referred_user_key");
-  const eventSlug = normalizeReferralCode(readTrimmedString(payload, "event_slug"));
+  const eventSlug = normalizeReferralCode(
+    readTrimmedString(payload, "event_slug"),
+  );
   const source = readTrimmedString(payload, "source");
   const status = readTrimmedString(payload, "status");
   const venue = readTrimmedString(payload, "venue");
@@ -198,7 +205,10 @@ function validateCollectedAnalyticsPayload(
       };
     }
     if (!attemptId) {
-      return { ok: false, error: "attempt_id is required for terminal analytics events" };
+      return {
+        ok: false,
+        error: "attempt_id is required for terminal analytics events",
+      };
     }
     return {
       analyticsSchemaVersion: schemaVersion,
@@ -331,7 +341,11 @@ export async function collectAnalyticsEvent(
 
   if (!isRecord(inputs.payload)) {
     runtimeTelemetry.droppedInvalid += 1;
-    return { accepted: false, reason: "invalid", error: "payload must be an object" };
+    return {
+      accepted: false,
+      reason: "invalid",
+      error: "payload must be an object",
+    };
   }
 
   const validated = validateCollectedAnalyticsPayload(
@@ -397,16 +411,15 @@ export async function fetchAnalyticsForwardingTelemetry(
     { rows: versionRows },
     { rows: eventRows },
     { rows: originRows },
-  ] =
-    await Promise.all([
-      pool.query<{ stored: string }>(
-        `
+  ] = await Promise.all([
+    pool.query<{ stored: string }>(
+      `
           select count(*)::text as stored
           from analytics_server_events
         `,
-      ),
-      pool.query<{ count: string; version: string }>(
-        `
+    ),
+    pool.query<{ count: string; version: string }>(
+      `
           select
             analytics_schema_version as version,
             count(*)::text as count
@@ -415,9 +428,9 @@ export async function fetchAnalyticsForwardingTelemetry(
           order by count(*) desc, analytics_schema_version desc
           limit 20
         `,
-      ),
-      pool.query<{ count: string; event: string }>(
-        `
+    ),
+    pool.query<{ count: string; event: string }>(
+      `
           select
             event_name as event,
             count(*)::text as count
@@ -426,9 +439,9 @@ export async function fetchAnalyticsForwardingTelemetry(
           order by count(*) desc, event_name asc
           limit 20
         `,
-      ),
-      pool.query<{ count: string; origin: AnalyticsEventOrigin }>(
-        `
+    ),
+    pool.query<{ count: string; origin: AnalyticsEventOrigin }>(
+      `
           select
             origin,
             count(*)::text as count
@@ -436,8 +449,8 @@ export async function fetchAnalyticsForwardingTelemetry(
           group by origin
           order by count(*) desc, origin asc
         `,
-      ),
-    ]);
+    ),
+  ]);
 
   const collectorRow = collectorRows[0];
   return {

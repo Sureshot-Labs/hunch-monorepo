@@ -191,7 +191,10 @@ export async function fetchKalshiPublicEvents(
     uniqueTickers.push(trimmed);
   }
 
-  const limitedTickers = uniqueTickers.slice(0, env.kalshiPublicMaxEventsPerCycle);
+  const limitedTickers = uniqueTickers.slice(
+    0,
+    env.kalshiPublicMaxEventsPerCycle,
+  );
   const eventsByTicker = new Map<string, KalshiPublicEventData>();
   const errors: Array<{ eventTicker: string; error: string }> = [];
   let fetchedEvents = 0;

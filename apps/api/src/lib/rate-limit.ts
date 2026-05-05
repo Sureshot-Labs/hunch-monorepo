@@ -93,7 +93,9 @@ function compactKey(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function resolveOnErrorMode(options?: CheckRateLimitOptions): RateLimitErrorMode {
+function resolveOnErrorMode(
+  options?: CheckRateLimitOptions,
+): RateLimitErrorMode {
   return options?.onError ?? "fail_open";
 }
 
@@ -109,13 +111,7 @@ async function evalLuaNumber(
   const { redis } = await getRedisStatus();
   if (!redis) return null;
   try {
-    const reply = await redis.sendCommand([
-      "EVAL",
-      script,
-      "1",
-      key,
-      ...args,
-    ]);
+    const reply = await redis.sendCommand(["EVAL", script, "1", key, ...args]);
     const parsed = Number(reply);
     return Number.isFinite(parsed) ? parsed : null;
   } catch {

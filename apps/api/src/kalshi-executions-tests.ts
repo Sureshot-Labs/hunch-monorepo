@@ -65,7 +65,10 @@ const tests: TestCase[] = [
   {
     name: "normalizes stored execution status values",
     run: () => {
-      assert.equal(normalizeKalshiExecutionStatus("pending_close"), "pending_close");
+      assert.equal(
+        normalizeKalshiExecutionStatus("pending_close"),
+        "pending_close",
+      );
       assert.equal(normalizeKalshiExecutionStatus("fulfilled"), "fulfilled");
       assert.equal(normalizeKalshiExecutionStatus("unknown"), null);
     },

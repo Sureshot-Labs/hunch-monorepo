@@ -93,10 +93,7 @@ function encodeBorshBytes(bytes: Buffer): Buffer {
 }
 
 function anchorDiscriminator(name: string): Buffer {
-  return createHash("sha256")
-    .update(`global:${name}`)
-    .digest()
-    .subarray(0, 8);
+  return createHash("sha256").update(`global:${name}`).digest().subarray(0, 8);
 }
 
 function deriveDepositSeedHash(inputs: {
@@ -193,23 +190,43 @@ const tests: TestCase[] = [
       withAcrossEnv(
         () => {
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("solana_source", HUNCH_SOLANA_CHAIN_ID, "137"),
+            resolveAcrossAppFeeForRoute(
+              "solana_source",
+              HUNCH_SOLANA_CHAIN_ID,
+              "137",
+            ),
             { ok: true },
           );
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("evm_to_solana", "137", HUNCH_SOLANA_CHAIN_ID),
+            resolveAcrossAppFeeForRoute(
+              "evm_to_solana",
+              "137",
+              HUNCH_SOLANA_CHAIN_ID,
+            ),
             { ok: true },
           );
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("swap_api", "137", HUNCH_SOLANA_CHAIN_ID),
+            resolveAcrossAppFeeForRoute(
+              "swap_api",
+              "137",
+              HUNCH_SOLANA_CHAIN_ID,
+            ),
             { ok: true },
           );
           assert.deepEqual(
-            resolveAcrossAppFeeForRoute("swap_api", HUNCH_SOLANA_CHAIN_ID, "137"),
+            resolveAcrossAppFeeForRoute(
+              "swap_api",
+              HUNCH_SOLANA_CHAIN_ID,
+              "137",
+            ),
             { ok: true },
           );
 
-          const missingRecipient = resolveAcrossAppFeeForRoute("swap_api", "137", "8453");
+          const missingRecipient = resolveAcrossAppFeeForRoute(
+            "swap_api",
+            "137",
+            "8453",
+          );
           assert.equal(missingRecipient.ok, false);
 
           env.acrossAppFeeRecipients =
@@ -282,7 +299,10 @@ const tests: TestCase[] = [
             recipientAddress: "0x1111111111111111111111111111111111111111",
           });
           assert.equal(solanaSourceSwapApprovalQuery.appFee, undefined);
-          assert.equal(solanaSourceSwapApprovalQuery.appFeeRecipient, undefined);
+          assert.equal(
+            solanaSourceSwapApprovalQuery.appFeeRecipient,
+            undefined,
+          );
           assert.equal(
             solanaSourceSwapApprovalQuery.originChainId,
             ACROSS_SOLANA_CHAIN_ID,
@@ -290,8 +310,7 @@ const tests: TestCase[] = [
         },
         {
           appFee: 0.001,
-          appFeeRecipients:
-            "8453:0x3B5EdF27853C5E521D2419508AAfcf9A1DB2b493",
+          appFeeRecipients: "8453:0x3B5EdF27853C5E521D2419508AAfcf9A1DB2b493",
         },
       );
     },
@@ -378,7 +397,9 @@ const tests: TestCase[] = [
   {
     name: "normalizeAcrossSolanaSourceQuoteResponse builds expected SVM deposit transaction",
     run: async () => {
-      const signer = new PublicKey("7GyRwj3RfmWAFM5mPHcrREEiTVasmHvSWQoCGQ9heAAr");
+      const signer = new PublicKey(
+        "7GyRwj3RfmWAFM5mPHcrREEiTVasmHvSWQoCGQ9heAAr",
+      );
       const recipient = evmAddressToPublicKey(
         "0x1111111111111111111111111111111111111111",
       );
@@ -411,7 +432,10 @@ const tests: TestCase[] = [
         [Buffer.from("delegate"), seedHash],
         programId,
       );
-      const depositorTokenAccount = getAssociatedTokenAddressSync(inputToken, signer);
+      const depositorTokenAccount = getAssociatedTokenAddressSync(
+        inputToken,
+        signer,
+      );
       const vault = getAssociatedTokenAddressSync(inputToken, statePda, true);
       const [eventAuthority] = PublicKey.findProgramAddressSync(
         [Buffer.from("__event_authority")],
@@ -454,9 +478,15 @@ const tests: TestCase[] = [
 
       const [approveIx, depositIx, memoIx] = tx.instructions;
       assert.equal(approveIx.programId.toBase58(), TOKEN_PROGRAM_ID.toBase58());
-      assert.equal(approveIx.keys[0]?.pubkey.toBase58(), depositorTokenAccount.toBase58());
+      assert.equal(
+        approveIx.keys[0]?.pubkey.toBase58(),
+        depositorTokenAccount.toBase58(),
+      );
       assert.equal(approveIx.keys[1]?.pubkey.toBase58(), inputToken.toBase58());
-      assert.equal(approveIx.keys[2]?.pubkey.toBase58(), delegatePda.toBase58());
+      assert.equal(
+        approveIx.keys[2]?.pubkey.toBase58(),
+        delegatePda.toBase58(),
+      );
       assert.equal(approveIx.keys[3]?.pubkey.toBase58(), signer.toBase58());
 
       assert.equal(depositIx.programId.toBase58(), programId.toBase58());

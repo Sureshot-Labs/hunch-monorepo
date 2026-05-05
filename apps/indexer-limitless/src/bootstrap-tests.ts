@@ -69,9 +69,15 @@ test("buildWsTargets reserves room for AMM addresses instead of starving them", 
   for (let i = 0; i < 20; i += 1) {
     rows.push(makeWsRow(i));
   }
-  rows.push(makeWsRow(100, { trade_type: "amm", slug: null, address: "0x101" }));
-  rows.push(makeWsRow(101, { trade_type: "amm", slug: null, address: "0x102" }));
-  rows.push(makeWsRow(102, { trade_type: "amm", slug: null, address: "0x103" }));
+  rows.push(
+    makeWsRow(100, { trade_type: "amm", slug: null, address: "0x101" }),
+  );
+  rows.push(
+    makeWsRow(101, { trade_type: "amm", slug: null, address: "0x102" }),
+  );
+  rows.push(
+    makeWsRow(102, { trade_type: "amm", slug: null, address: "0x103" }),
+  );
 
   const targets = buildWsTargets(rows, 10);
 

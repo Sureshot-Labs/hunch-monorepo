@@ -5,7 +5,9 @@ function normalizeDecimalString(value: string): string {
   return value.trim().replace(/_/g, "");
 }
 
-function splitDecimal(value: string): { whole: string; fraction: string } | null {
+function splitDecimal(
+  value: string,
+): { whole: string; fraction: string } | null {
   const normalized = normalizeDecimalString(value);
   if (!/^\d+(\.\d+)?$/.test(normalized)) return null;
   const parts = normalized.split(".");

@@ -14,47 +14,44 @@ const walletLabelColorSchema = z.enum([
 ]);
 
 const csvStringArraySchema = z.preprocess(
-  value => {
+  (value) => {
     if (Array.isArray(value)) return value;
     if (typeof value === "string") {
       return value
         .split(",")
-        .map(item => item.trim())
+        .map((item) => item.trim())
         .filter(Boolean);
     }
     return undefined;
   },
-  z.array(z.string().min(1)).optional()
+  z.array(z.string().min(1)).optional(),
 );
 
 const categoriesCsvSchema = z.preprocess(
-  value => {
+  (value) => {
     if (Array.isArray(value)) return value;
     if (typeof value === "string") {
       return value
         .split(",")
-        .map(item => item.trim())
+        .map((item) => item.trim())
         .filter(Boolean);
     }
     return undefined;
   },
-  z.array(z.string().min(1)).optional()
+  z.array(z.string().min(1)).optional(),
 );
 
-const queryBooleanSchema = z.preprocess(
-  value => {
-    if (value == null || value === "") return undefined;
-    if (typeof value === "boolean") return value;
-    if (typeof value === "number") return value !== 0;
-    if (typeof value === "string") {
-      const normalized = value.trim().toLowerCase();
-      if (["1", "true", "yes", "on"].includes(normalized)) return true;
-      if (["0", "false", "no", "off"].includes(normalized)) return false;
-    }
-    return value;
-  },
-  z.boolean()
-);
+const queryBooleanSchema = z.preprocess((value) => {
+  if (value == null || value === "") return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  return value;
+}, z.boolean());
 
 export const walletFollowBodySchema = z.object({
   address: z.string().min(4),
@@ -73,27 +70,21 @@ export const walletFollowChainQuerySchema = z.object({
 export const walletFollowDeleteQuerySchema = walletFollowChainQuerySchema;
 
 export const walletFollowPatchBodySchema = z.object({
-  label: z.preprocess(
-    value => {
-      if (value == null) return null;
-      if (typeof value !== "string") return value;
-      const trimmed = value.trim();
-      return trimmed.length ? trimmed : null;
-    },
-    z.string().max(120).nullable()
-  ),
-});
-
-const nullableTrimmedStringSchema = z.preprocess(
-  value => {
-    if (value === undefined) return undefined;
+  label: z.preprocess((value) => {
     if (value == null) return null;
     if (typeof value !== "string") return value;
     const trimmed = value.trim();
     return trimmed.length ? trimmed : null;
-  },
-  z.string().max(120).nullable().optional()
-);
+  }, z.string().max(120).nullable()),
+});
+
+const nullableTrimmedStringSchema = z.preprocess((value) => {
+  if (value === undefined) return undefined;
+  if (value == null) return null;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}, z.string().max(120).nullable().optional());
 
 export const walletPrivateMetaPatchBodySchema = z
   .object({
@@ -102,24 +93,21 @@ export const walletPrivateMetaPatchBodySchema = z
     labelColor: walletLabelColorSchema.nullable().optional(),
   })
   .refine(
-    value =>
+    (value) =>
       value.name !== undefined ||
       value.label !== undefined ||
       value.labelColor !== undefined,
     {
       message: "At least one field must be provided",
-    }
+    },
   );
 
 export const walletPrivateNoteBodySchema = z.object({
-  note: z.preprocess(
-    value => {
-      if (typeof value !== "string") return value;
-      const trimmed = value.trim();
-      return trimmed.length ? trimmed : undefined;
-    },
-    z.string().max(500)
-  ),
+  note: z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : undefined;
+  }, z.string().max(500)),
 });
 
 export const walletPrivateNoteParamsSchema = z.object({
@@ -197,19 +185,16 @@ export const walletActivitySignalsQuerySchema = z.object({
   labelMode: filterModeSchema,
   excludeMmLike: queryBooleanSchema.default(false),
   severity: z
-    .preprocess(
-      value => {
-        if (Array.isArray(value)) return value;
-        if (typeof value === "string") {
-          return value
-            .split(",")
-            .map(item => item.trim())
-            .filter(Boolean);
-        }
-        return undefined;
-      },
-      z.array(signalSeveritySchema).optional()
-    )
+    .preprocess((value) => {
+      if (Array.isArray(value)) return value;
+      if (typeof value === "string") {
+        return value
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+      return undefined;
+    }, z.array(signalSeveritySchema).optional())
     .optional(),
   displayReasons: csvStringArraySchema.optional(),
   signalReasonMode: filterModeSchema,
@@ -241,21 +226,26 @@ export const walletWhalesQuerySchema = z.object({
   marketLimit: z.coerce.number().int().min(1).max(20).default(5),
   windowDays: z.coerce.number().int().min(1).max(365).default(30),
   includeSummary: queryBooleanSchema.default(false),
-  windowHours: z.coerce.number().int().min(1).max(24 * 14).default(24),
+  windowHours: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 14)
+    .default(24),
   topChanges: z.coerce.number().int().min(1).max(10).default(3),
   categories: z
     .preprocess(
-      value => {
+      (value) => {
         if (Array.isArray(value)) return value;
         if (typeof value === "string") {
           return value
             .split(",")
-            .map(item => item.trim())
+            .map((item) => item.trim())
             .filter(Boolean);
         }
         return undefined;
       },
-      z.array(z.string().min(1)).optional()
+      z.array(z.string().min(1)).optional(),
     )
     .optional(),
   sort: z
@@ -280,8 +270,18 @@ export const walletWhalesQuerySchema = z.object({
 });
 
 export const walletSeriesQuerySchema = z.object({
-  windowHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
-  bucketHours: z.coerce.number().int().min(1).max(24 * 14).optional(),
+  windowHours: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 30)
+    .optional(),
+  bucketHours: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 14)
+    .optional(),
   period: z.enum(["1d", "7d", "30d", "all"]).default("30d"),
   limit: z.coerce.number().int().min(1).max(240).default(120),
 });

@@ -3,22 +3,19 @@ import { z } from "zod";
 const zIsoDatetime = z
   .string()
   .min(1)
-  .refine(value => !Number.isNaN(Date.parse(value)), {
+  .refine((value) => !Number.isNaN(Date.parse(value)), {
     message: "Expected ISO datetime string",
   });
 
-const zNormalizedPublishedAt = z.preprocess(
-  value => {
-    if (value == null) return null;
-    if (typeof value !== "string") return value;
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const parsed = Date.parse(trimmed);
-    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
-    return null;
-  },
-  zIsoDatetime.nullable(),
-);
+const zNormalizedPublishedAt = z.preprocess((value) => {
+  if (value == null) return null;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+  return null;
+}, zIsoDatetime.nullable());
 
 const zProb = z.number().min(0).max(1);
 
@@ -39,13 +36,16 @@ function normalizeForComparison(value: string): string {
     .trim();
 }
 
-function isSummaryTooCloseToHeadline(summary: string, headline: string): boolean {
+function isSummaryTooCloseToHeadline(
+  summary: string,
+  headline: string,
+): boolean {
   const s = normalizeForComparison(summary);
   const h = normalizeForComparison(headline);
   if (!s || !h) return false;
   if (s === h) return true;
-  const sTokens = new Set(s.split(" ").filter(token => token.length > 2));
-  const hTokens = new Set(h.split(" ").filter(token => token.length > 2));
+  const sTokens = new Set(s.split(" ").filter((token) => token.length > 2));
+  const hTokens = new Set(h.split(" ").filter((token) => token.length > 2));
   if (sTokens.size === 0 || hTokens.size === 0) return false;
   let overlap = 0;
   for (const token of hTokens) {
@@ -103,7 +103,9 @@ export const mapSearchAgentOutputV2Schema = z
 export type MapSearchEvidenceItemV2 = z.infer<
   typeof mapSearchEvidenceItemV2Schema
 >;
-export type MapSearchAgentOutputV2 = z.infer<typeof mapSearchAgentOutputV2Schema>;
+export type MapSearchAgentOutputV2 = z.infer<
+  typeof mapSearchAgentOutputV2Schema
+>;
 
 export const MAP_SEARCH_AGENT_OUTPUT_V2_JSON_SCHEMA = z.toJSONSchema(
   mapSearchAgentOutputV2Schema,
@@ -171,8 +173,8 @@ export function buildMapSearchSystemPromptV2(
     ? "Prefer evidence from multiple distinct source domains."
     : "Domain diversity is preferred but not required.";
   const disallowedDomains = (config.disallowedSourceDomains ?? [])
-    .map(value => value.trim().toLowerCase())
-    .filter(value => value.length > 0);
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
   const disallowedRule =
     disallowedDomains.length > 0
       ? `Do not use prediction-market/operator pages as evidence. Disallowed source domains: ${disallowedDomains.join(", ")}.`

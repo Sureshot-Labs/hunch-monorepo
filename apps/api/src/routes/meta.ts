@@ -224,7 +224,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           venues: {},
         };
         entry.events += Number(row.events) || 0;
-        entry.venues[row.venue] = (entry.venues[row.venue] ?? 0) + (row.events || 0);
+        entry.venues[row.venue] =
+          (entry.venues[row.venue] ?? 0) + (row.events || 0);
         categoriesMap.set(row.category, entry);
       }
 
@@ -300,14 +301,11 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const withVolume = Number(row.markets_with_volume) || 0;
       const withLiquidity = Number(row.markets_with_liquidity) || 0;
       const withPrice = Number(row.markets_with_price) || 0;
-      const volumeCoverage =
-        activeMarkets > 0 ? withVolume / activeMarkets : 0;
+      const volumeCoverage = activeMarkets > 0 ? withVolume / activeMarkets : 0;
       const liquidityCoverage =
         activeMarkets > 0 ? withLiquidity / activeMarkets : 0;
-      const priceCoverage =
-        activeMarkets > 0 ? withPrice / activeMarkets : 0;
-      const score =
-        (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
+      const priceCoverage = activeMarkets > 0 ? withPrice / activeMarkets : 0;
+      const score = (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
 
       return {
         venue: row.venue,

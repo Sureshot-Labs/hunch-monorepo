@@ -1,5 +1,8 @@
 import crypto from "crypto";
-import { BuilderSigner, type BuilderApiKeyCreds } from "@polymarket/builder-signing-sdk";
+import {
+  BuilderSigner,
+  type BuilderApiKeyCreds,
+} from "@polymarket/builder-signing-sdk";
 import { isRecord } from "../lib/type-guards.js";
 import {
   fetchWithWalletIntelRetry,
@@ -22,19 +25,16 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 function toBase64Url(input: Buffer): string {
-  return input
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    // Keep `=` padding to match Polymarket demo + maximize compatibility.
-    // Many base64url decoders accept both padded and unpadded inputs.
-    ;
+  return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+  // Keep `=` padding to match Polymarket demo + maximize compatibility.
+  // Many base64url decoders accept both padded and unpadded inputs.
 }
 
 function decodeBase64OrBase64Url(value: string): Buffer {
   const trimmed = value.trim();
   const normalized = trimmed.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  const pad =
+    normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
   return Buffer.from(`${normalized}${pad}`, "base64");
 }
 
@@ -46,8 +46,7 @@ export function createPolymarketL2Headers(inputs: {
   body?: string;
   timestampSec?: number;
 }): Record<string, string> {
-  const timestampSec =
-    inputs.timestampSec ?? Math.floor(Date.now() / 1000);
+  const timestampSec = inputs.timestampSec ?? Math.floor(Date.now() / 1000);
   const method = inputs.method.toUpperCase();
   const requestPath = inputs.requestPath.startsWith("/")
     ? inputs.requestPath
@@ -159,14 +158,17 @@ export async function polymarketL2Request(inputs: {
   requestPath: string;
   body?: unknown;
   telemetry?: WalletIntelRetryTelemetry | null;
-}): Promise<{ ok: true; payload: unknown } | { ok: false; status: number; payload: unknown }> {
+}): Promise<
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown }
+> {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl);
   const requestPath = inputs.requestPath.startsWith("/")
     ? inputs.requestPath
     : `/${inputs.requestPath}`;
   const requestPathForSignature =
     STRIP_QUERY_FROM_SIGNATURE && requestPath.includes("?")
-      ? requestPath.split("?")[0] ?? requestPath
+      ? (requestPath.split("?")[0] ?? requestPath)
       : requestPath;
 
   const bodyString =
@@ -259,7 +261,8 @@ export function extractOrderId(order: unknown): string | null {
 
 export function extractTokenId(order: unknown): string | null {
   if (!isRecord(order)) return null;
-  const raw = order.tokenId ?? order.token_id ?? order.asset_id ?? order.assetId;
+  const raw =
+    order.tokenId ?? order.token_id ?? order.asset_id ?? order.assetId;
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed.length ? trimmed : null;
@@ -421,7 +424,9 @@ export function normalizeTrade(trade: unknown): PolymarketTrade | null {
     outcome: readString(trade.outcome),
     makerAddress: readString(trade.maker_address ?? trade.maker),
     owner: readString(trade.owner),
-    transactionHash: readString(trade.transaction_hash ?? trade.transactionHash),
+    transactionHash: readString(
+      trade.transaction_hash ?? trade.transactionHash,
+    ),
     bucketIndex,
     makerOrders,
     type: readString(trade.type),

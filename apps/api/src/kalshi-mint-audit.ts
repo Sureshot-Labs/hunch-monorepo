@@ -106,7 +106,9 @@ async function main() {
             ? row.token_no.slice(4)
             : null;
 
-        const checkMint = async (mint: string | null): Promise<boolean | null> => {
+        const checkMint = async (
+          mint: string | null,
+        ): Promise<boolean | null> => {
           if (!mint) return null;
           let attempt = 0;
           while (true) {
@@ -157,8 +159,7 @@ async function main() {
         if (mintYes == null && mintNo == null) continue;
         if (dryRun) continue;
 
-        const mintExists =
-          (mintYes ?? true) && (mintNo ?? true);
+        const mintExists = (mintYes ?? true) && (mintNo ?? true);
 
         await client.query(
           `

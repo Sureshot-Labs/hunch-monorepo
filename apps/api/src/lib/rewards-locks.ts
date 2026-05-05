@@ -12,7 +12,10 @@ function normalizeLockTargets(chainIds: string[]): string[] {
   return [...unique].sort((a, b) => a.localeCompare(b));
 }
 
-async function tryAcquireLock(client: PoolClient, lockKey: string): Promise<void> {
+async function tryAcquireLock(
+  client: PoolClient,
+  lockKey: string,
+): Promise<void> {
   const { rows } = await client.query<{ locked: boolean }>(
     "select pg_try_advisory_lock(hashtext($1)::bigint) as locked",
     [lockKey],
@@ -22,7 +25,9 @@ async function tryAcquireLock(client: PoolClient, lockKey: string): Promise<void
 }
 
 async function releaseLock(client: PoolClient, lockKey: string): Promise<void> {
-  await client.query("select pg_advisory_unlock(hashtext($1)::bigint)", [lockKey]);
+  await client.query("select pg_advisory_unlock(hashtext($1)::bigint)", [
+    lockKey,
+  ]);
 }
 
 export async function withRewardsChainLocks<T>(
@@ -34,7 +39,9 @@ export async function withRewardsChainLocks<T>(
   if (!targets.length) return run();
 
   const client = await pool.connect();
-  const lockKeys = targets.map((chainId) => `${REWARDS_CHAIN_LOCK_PREFIX}${chainId}`);
+  const lockKeys = targets.map(
+    (chainId) => `${REWARDS_CHAIN_LOCK_PREFIX}${chainId}`,
+  );
   try {
     for (const lockKey of lockKeys) {
       await tryAcquireLock(client, lockKey);

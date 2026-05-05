@@ -1,7 +1,11 @@
 import { chunkArray } from "@hunch/shared";
 import { createHash } from "crypto";
 import { setTimeout as delay } from "timers/promises";
-import { createRedisClient, ensureRedis, isRedisRetryableError } from "@hunch/infra";
+import {
+  createRedisClient,
+  ensureRedis,
+  isRedisRetryableError,
+} from "@hunch/infra";
 import { env } from "./env.js";
 
 const INDEX_MARKET = "idx:ai:embed:market";
@@ -134,8 +138,7 @@ async function flushStats(
     stats.lastLogAt = now;
     return;
   }
-  const ratePerSec =
-    intervalMs > 0 ? stats.received / (intervalMs / 1000) : 0;
+  const ratePerSec = intervalMs > 0 ? stats.received / (intervalMs / 1000) : 0;
   const lag = await getGroupLag(redis);
   const etaSec =
     lag != null && ratePerSec > 0 ? Math.ceil(lag / ratePerSec) : null;
@@ -175,7 +178,10 @@ function normalizeText(value: string | undefined): string | undefined {
   return trimmed.length ? trimmed : undefined;
 }
 
-function truncate(value: string | undefined, maxChars: number): string | undefined {
+function truncate(
+  value: string | undefined,
+  maxChars: number,
+): string | undefined {
   if (!value) return undefined;
   if (value.length <= maxChars) return value;
   return value.slice(0, maxChars).trim();
@@ -203,8 +209,7 @@ function normalizeOutcomes(value: string | undefined): string | undefined {
     .filter((part): part is string => Boolean(part));
   if (!parts.length) return undefined;
   const lowers = new Set(parts.map((part) => part.toLowerCase()));
-  const isYesNo =
-    lowers.size <= 2 && lowers.has("yes") && lowers.has("no");
+  const isYesNo = lowers.size <= 2 && lowers.has("yes") && lowers.has("no");
   const isTrueFalse =
     lowers.size <= 2 && lowers.has("true") && lowers.has("false");
   if (isYesNo || isTrueFalse) return undefined;
@@ -227,7 +232,12 @@ function normalizeTopMarkets(
   for (const part of parts) {
     const lower = part.toLowerCase();
     if (eventLower && lower === eventLower) continue;
-    if (lower === "yes" || lower === "no" || lower === "true" || lower === "false")
+    if (
+      lower === "yes" ||
+      lower === "no" ||
+      lower === "true" ||
+      lower === "false"
+    )
       continue;
     if (seen.has(lower)) continue;
     seen.add(lower);
@@ -305,8 +315,7 @@ function parsePayload(fields: Record<string, string>): EmbedPayload | null {
   const entityType = (fields.entity_type ?? "").toLowerCase();
   if (entityType !== "market" && entityType !== "event") return null;
 
-  const entityId =
-    entityType === "market" ? fields.market_id : fields.event_id;
+  const entityId = entityType === "market" ? fields.market_id : fields.event_id;
   if (!entityId) return null;
 
   return {
@@ -340,7 +349,9 @@ function vectorToBuffer(values: number[]): Buffer {
   return Buffer.from(arr.buffer);
 }
 
-async function ensureConsumerGroup(redis: ReturnType<typeof createRedisClient>) {
+async function ensureConsumerGroup(
+  redis: ReturnType<typeof createRedisClient>,
+) {
   try {
     await redis.xGroupCreate(STREAM_KEY, env.group, "0", { MKSTREAM: true });
   } catch (err) {
@@ -362,14 +373,7 @@ async function ensureIndex(
     // continue to create
   }
 
-  const schema = [
-    "venue",
-    "TAG",
-    "status",
-    "TAG",
-    "updated_at",
-    "NUMERIC",
-  ];
+  const schema = ["venue", "TAG", "status", "TAG", "updated_at", "NUMERIC"];
   if (includeMarketType) {
     schema.push("market_type", "TAG");
   }
@@ -440,7 +444,8 @@ async function deleteEmbedding(
   redis: ReturnType<typeof createRedisClient>,
   payload: EmbedPayload,
 ): Promise<void> {
-  const keyPrefix = payload.entityType === "market" ? "ai:embed:market:" : "ai:embed:event:";
+  const keyPrefix =
+    payload.entityType === "market" ? "ai:embed:market:" : "ai:embed:event:";
   const key = `${keyPrefix}${payload.entityId}`;
   const multi = redis.multi();
   multi.del(key);
@@ -571,7 +576,7 @@ async function processStreamBatch(
               source_id: item.messageId,
             });
             multi.xAck(STREAM_KEY, env.group, item.messageId);
-              continue;
+            continue;
           }
           embedded += 1;
           const keyPrefix =
@@ -656,7 +661,10 @@ async function readLoop() {
         console.warn("[ai-worker] redis read failed, retrying", String(err));
         await delay(1000);
         try {
-          await ensureRedis(redis, { waitForReady: true, logLabel: "ai-worker" });
+          await ensureRedis(redis, {
+            waitForReady: true,
+            logLabel: "ai-worker",
+          });
         } catch (connectErr) {
           console.warn(
             "[ai-worker] redis reconnect failed",

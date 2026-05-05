@@ -271,9 +271,9 @@ function parseModelEvidenceRefs(modelMeta: unknown): Array<{
 
   return refsRaw
     .map((entry) => {
-      const ref = (entry && typeof entry === "object"
-        ? (entry as ModelEvidenceRef)
-        : {}) as ModelEvidenceRef;
+      const ref = (
+        entry && typeof entry === "object" ? (entry as ModelEvidenceRef) : {}
+      ) as ModelEvidenceRef;
       return {
         evidenceId: asTrimmedString(ref.evidence_id) ?? "",
         relevance: toNumber(ref.relevance),
@@ -357,11 +357,15 @@ async function fetchSignals(params: {
   forcedTargetId?: string;
 }): Promise<SignalListResponse> {
   const scope = params.forcedScope ?? params.query.scope ?? "all";
-  const targetId = (params.forcedTargetId ?? params.query.targetId ?? "").trim() || null;
+  const targetId =
+    (params.forcedTargetId ?? params.query.targetId ?? "").trim() || null;
   const limit = Math.min(100, Math.max(1, params.query.limit ?? 20));
   const offset = Math.max(0, params.query.offset ?? 0);
   const includeSimilarMarkets = params.query.includeSimilarMarkets ?? false;
-  const similarLimit = Math.min(12, Math.max(1, params.query.similarLimit ?? 4));
+  const similarLimit = Math.min(
+    12,
+    Math.max(1, params.query.similarLimit ?? 4),
+  );
 
   const statusFilter = params.query.status ?? "active";
   const { whereSql, values } = buildSignalsWhereClause({
@@ -576,11 +580,12 @@ async function fetchSignals(params: {
 
     const eventId = row.target_event_id;
     const primaryMarketId = row.target_market_id;
-    const similarRows = includeSimilarMarkets && eventId
-      ? (similarByEventId.get(eventId) ?? [])
-          .filter((candidate) => candidate.market_id !== primaryMarketId)
-          .slice(0, similarLimit)
-      : [];
+    const similarRows =
+      includeSimilarMarkets && eventId
+        ? (similarByEventId.get(eventId) ?? [])
+            .filter((candidate) => candidate.market_id !== primaryMarketId)
+            .slice(0, similarLimit)
+        : [];
 
     return {
       id: row.id,

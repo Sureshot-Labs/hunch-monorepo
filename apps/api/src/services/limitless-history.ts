@@ -158,7 +158,9 @@ function extractHistoryMarketId(entry: Record<string, unknown>): string | null {
   return normalizeOrderId(raw);
 }
 
-function extractHistoryMarketSlug(entry: Record<string, unknown>): string | null {
+function extractHistoryMarketSlug(
+  entry: Record<string, unknown>,
+): string | null {
   const market = isRecord(entry.market) ? entry.market : null;
   const raw =
     (market && (market.slug ?? market.marketSlug ?? market.market_slug)) ??
@@ -178,7 +180,9 @@ function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
 
 type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
 
-function normalizeRawLimitlessTokenIdFromUnknown(value: unknown): string | null {
+function normalizeRawLimitlessTokenIdFromUnknown(
+  value: unknown,
+): string | null {
   return typeof value === "string" ||
     typeof value === "number" ||
     typeof value === "bigint"
@@ -211,13 +215,17 @@ function extractLimitlessTokenPairFromMarket(
       tokensRecord
         ? (tokensRecord.yes ?? tokensRecord.YES ?? tokensRecord[0])
         : null,
-    ) ?? positionIds[0] ?? null;
+    ) ??
+    positionIds[0] ??
+    null;
   const tokenNo =
     normalizeRawLimitlessTokenIdFromUnknown(
       tokensRecord
         ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1])
         : null,
-    ) ?? positionIds[1] ?? null;
+    ) ??
+    positionIds[1] ??
+    null;
 
   if (!tokenYes && !tokenNo) return null;
   return { tokenYes, tokenNo };
@@ -275,7 +283,8 @@ function buildHistoryVenueOrderId(
   if (txHash) {
     return `history:${txHash}:${suffix}:${strat}`;
   }
-  const marketKey = extractHistoryMarketId(entry) ?? extractHistoryMarketSlug(entry);
+  const marketKey =
+    extractHistoryMarketId(entry) ?? extractHistoryMarketSlug(entry);
   const ts = parseNumberish(
     entry.blockTimestamp ?? entry.block_timestamp ?? entry.timestamp,
   );

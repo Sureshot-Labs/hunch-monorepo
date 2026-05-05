@@ -154,7 +154,8 @@ export const notificationsRoutes: FastifyPluginAsync = async (app) => {
       if (!redis) {
         reply.code(503);
         return reply.send({
-          error: status === "loading" ? "Redis loading, retry" : "Redis unavailable",
+          error:
+            status === "loading" ? "Redis loading, retry" : "Redis unavailable",
         });
       }
 

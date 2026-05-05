@@ -42,14 +42,18 @@ type PolymarketRedemptionPlanInputs = {
   isNegRisk: boolean;
 };
 
-function normalizeBytes32(value: string | null | undefined): `0x${string}` | null {
+function normalizeBytes32(
+  value: string | null | undefined,
+): `0x${string}` | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!/^0x[a-fA-F0-9]{64}$/.test(trimmed)) return null;
   return trimmed as `0x${string}`;
 }
 
-function normalizeOptionalAddress(value: string | null | undefined): string | null {
+function normalizeOptionalAddress(
+  value: string | null | undefined,
+): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
   try {
@@ -131,16 +135,13 @@ async function readConditionPayout(inputs: {
     }),
   ]);
 
-  const resolvedOutcome =
-    yesRaw > noRaw ? "YES" : noRaw > yesRaw ? "NO" : null;
+  const resolvedOutcome = yesRaw > noRaw ? "YES" : noRaw > yesRaw ? "NO" : null;
   const pctBasisPoints = Number((yesRaw * 10_000n) / payoutDenominator);
 
   return {
     conditionResolved: true,
     resolvedOutcome,
-    resolvedOutcomePct: Number.isFinite(pctBasisPoints)
-      ? pctBasisPoints
-      : null,
+    resolvedOutcomePct: Number.isFinite(pctBasisPoints) ? pctBasisPoints : null,
   };
 }
 
@@ -213,8 +214,12 @@ async function buildStandardConditionalRedemptionPlan(inputs: {
 export async function buildPolymarketRedemptionPlan(
   inputs: PolymarketRedemptionPlanInputs,
 ): Promise<RedemptionPlan> {
-  const conditionalTokensAddress = ethers.getAddress(inputs.conditionalTokensAddress);
-  const collateralTokenAddress = ethers.getAddress(inputs.collateralTokenAddress);
+  const conditionalTokensAddress = ethers.getAddress(
+    inputs.conditionalTokensAddress,
+  );
+  const collateralTokenAddress = ethers.getAddress(
+    inputs.collateralTokenAddress,
+  );
   const legacyCollateralTokenAddress = normalizeOptionalAddress(
     inputs.legacyCollateralTokenAddress,
   );
@@ -435,9 +440,7 @@ export async function buildPolymarketRedemptionPlan(
     }
 
     const amounts =
-      inputs.outcome === "YES"
-        ? [selectedBalance, 0n]
-        : [0n, selectedBalance];
+      inputs.outcome === "YES" ? [selectedBalance, 0n] : [0n, selectedBalance];
     const data = negRiskAdapterIface.encodeFunctionData("redeemPositions", [
       selectedConditionId,
       amounts,

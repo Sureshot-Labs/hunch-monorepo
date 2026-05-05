@@ -162,7 +162,9 @@ async function reconcileOneExecution(
 
   return {
     updated: true,
-    finalStatus: isTerminalStatus(settlement.status) ? settlement.status : undefined,
+    finalStatus: isTerminalStatus(settlement.status)
+      ? settlement.status
+      : undefined,
     skipped: false,
   };
 }

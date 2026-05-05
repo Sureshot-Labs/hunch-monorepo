@@ -39,11 +39,21 @@ export function createWalletIntelRetryTelemetry(
   };
 }
 
-function computeBackoffMs(attempt: number, retryAfterMs: number | null): number {
-  if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+function computeBackoffMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
+  if (
+    retryAfterMs != null &&
+    Number.isFinite(retryAfterMs) &&
+    retryAfterMs >= 0
+  ) {
     return Math.min(
       retryAfterMs,
-      Math.max(env.walletIntelRetryBaseBackoffMs, env.walletIntelRetryMaxBackoffMs),
+      Math.max(
+        env.walletIntelRetryBaseBackoffMs,
+        env.walletIntelRetryMaxBackoffMs,
+      ),
     );
   }
   const exponential =
@@ -78,7 +88,9 @@ export async function fetchWithWalletIntelRetry(inputs: {
         return response;
       }
 
-      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      const retryAfterMs = parseRetryAfterMs(
+        response.headers.get("retry-after"),
+      );
       const retryable =
         allowRetry &&
         attempt < maxAttempts - 1 &&

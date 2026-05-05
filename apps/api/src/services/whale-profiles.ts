@@ -392,7 +392,9 @@ type WhaleProfileOptions = {
 const clampNumber = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
-const parseNumber = (value: string | number | null | undefined): number | null => {
+const parseNumber = (
+  value: string | number | null | undefined,
+): number | null => {
   if (value == null) return null;
   const num = typeof value === "string" ? Number(value) : value;
   return Number.isFinite(num) ? num : null;
@@ -561,9 +563,7 @@ function isGenericProfileLabelShort(
   return false;
 }
 
-function resolveFallbackProfileLabelShort(
-  input: WhaleProfileInput,
-): string {
+function resolveFallbackProfileLabelShort(input: WhaleProfileInput): string {
   const focusCandidates = [
     ...input.signals.examples.flatMap((example) => [
       example.event_title,
@@ -589,7 +589,10 @@ function resolveFallbackProfileLabelShort(
           : "Mixed";
   const noun =
     input.current_portfolio.market_count_total >= 20 ? "Portfolio" : "Trader";
-  return truncateText(`${focus} ${stance} ${noun}`.replace(/\s+/g, " ").trim(), 56);
+  return truncateText(
+    `${focus} ${stance} ${noun}`.replace(/\s+/g, " ").trim(),
+    56,
+  );
 }
 
 function deriveProfileNamingCategories(input: WhaleProfileInput): string[] {
@@ -638,13 +641,11 @@ function computeProfileNamingSignature(input: WhaleProfileInput): string {
   ].join("|");
 }
 
-function parseStoredWhaleProfileState(
-  row: {
-    features_hash: string;
-    version: string;
-    profile: unknown;
-  },
-): ExistingWhaleProfileState {
+function parseStoredWhaleProfileState(row: {
+  features_hash: string;
+  version: string;
+  profile: unknown;
+}): ExistingWhaleProfileState {
   const profile = normalizeWhaleProfile(row.profile);
   const namingSignature =
     isRecord(row.profile) && typeof row.profile._naming_signature === "string"
@@ -672,34 +673,20 @@ function shouldPreserveExistingProfileLabelShort(
 }
 
 const USD_BUCKETS = [
-  100,
-  1_000,
-  10_000,
-  100_000,
-  1_000_000,
-  10_000_000,
-  100_000_000,
+  100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000,
   1_000_000_000,
 ] as const;
 
 const COUNT_BUCKETS = [
-  1,
-  2,
-  5,
-  10,
-  25,
-  50,
-  100,
-  250,
-  500,
-  1_000,
-  2_500,
-  5_000,
+  1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000,
 ] as const;
 
 const UNUSUAL_BUCKETS = [1, 2, 5, 10, 20, 50] as const;
 
-function bucketRate(value: number | null | undefined, step = 0.05): number | null {
+function bucketRate(
+  value: number | null | undefined,
+  step = 0.05,
+): number | null {
   if (value == null || !Number.isFinite(value)) return null;
   return clampNumber(Math.round(value / step) * step, 0, 1);
 }
@@ -714,7 +701,9 @@ function bucketSignedDecimal(
   return clampNumber(rounded, -maxAbs, maxAbs);
 }
 
-function normalizeBulletNotes(value: string | null | undefined): string | undefined {
+function normalizeBulletNotes(
+  value: string | null | undefined,
+): string | undefined {
   const normalized = normalizeText(value);
   if (!normalized) return undefined;
   const lines = normalized
@@ -729,7 +718,10 @@ function normalizeBulletNotes(value: string | null | undefined): string | undefi
     )
     .filter(Boolean);
   if (lines.length === 0) return undefined;
-  return lines.slice(0, 5).map((line) => `- ${line}`).join("\n");
+  return lines
+    .slice(0, 5)
+    .map((line) => `- ${line}`)
+    .join("\n");
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -863,21 +855,32 @@ export function summarizeProfileMarkets(
     (sum, market) => sum + (market.no_position_value_usd ?? 0),
     0,
   );
-  const largestGrossUsd = topMarkets[0] ? resolveMarketGrossUsd(topMarkets[0]) : 0;
+  const largestGrossUsd = topMarkets[0]
+    ? resolveMarketGrossUsd(topMarkets[0])
+    : 0;
   const topMarketsGrossUsd = topMarkets.reduce(
     (sum, market) => sum + resolveMarketGrossUsd(market),
     0,
   );
-  const omittedMarketCount = Math.max(0, sortedMarkets.length - topMarkets.length);
+  const omittedMarketCount = Math.max(
+    0,
+    sortedMarkets.length - topMarkets.length,
+  );
   const omittedGrossUsd = Math.max(0, grossUsdTotal - topMarketsGrossUsd);
 
   const eventKeys = new Set<string>();
-  const eventRollup = new Map<string, { title: string; grossUsd: number; count: number }>();
-  const categoryCounts = sortedMarkets.reduce<Record<string, number>>((acc, market) => {
-    const category = market.category?.trim();
-    if (category) acc[category] = (acc[category] ?? 0) + 1;
-    return acc;
-  }, {});
+  const eventRollup = new Map<
+    string,
+    { title: string; grossUsd: number; count: number }
+  >();
+  const categoryCounts = sortedMarkets.reduce<Record<string, number>>(
+    (acc, market) => {
+      const category = market.category?.trim();
+      if (category) acc[category] = (acc[category] ?? 0) + 1;
+      return acc;
+    },
+    {},
+  );
   const snapshotAt = sortedMarkets.reduce<string | null>((latest, market) => {
     if (!market.snapshot_at) return latest;
     if (!latest) return market.snapshot_at;
@@ -903,7 +906,9 @@ export function summarizeProfileMarkets(
   const { yesValue, noValue, sideRatio, sideBiasLabel } =
     computeProfileSideBias(sortedMarkets);
   const concentration =
-    grossUsdTotal > 0 ? clampNumber(largestGrossUsd / grossUsdTotal, 0, 1) : null;
+    grossUsdTotal > 0
+      ? clampNumber(largestGrossUsd / grossUsdTotal, 0, 1)
+      : null;
   const concentrationLabel: WhaleProfileInput["summary"]["concentration_label"] =
     concentration == null
       ? "unknown"
@@ -977,7 +982,9 @@ function buildPositioningContext(input: {
 
   return {
     avg_open_position_usd:
-      grossExposureUsd > 0 && marketCount > 0 ? grossExposureUsd / marketCount : null,
+      grossExposureUsd > 0 && marketCount > 0
+        ? grossExposureUsd / marketCount
+        : null,
     largest_position_usd: largestPositionUsd > 0 ? largestPositionUsd : null,
     weighted_avg_held_odds:
       heldOddsWeightUsd > 0 ? weightedHeldOddsTotal / heldOddsWeightUsd : null,
@@ -1054,7 +1061,9 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
     start_marked_pnl_30d: bucketSignedUsd(
       input.performance_context.start_marked_pnl_30d,
     ),
-    current_marked_pnl: bucketSignedUsd(input.performance_context.current_marked_pnl),
+    current_marked_pnl: bucketSignedUsd(
+      input.performance_context.current_marked_pnl,
+    ),
     portfolio_change_30d: bucketSignedUsd(
       input.performance_context.portfolio_change_30d,
     ),
@@ -1090,9 +1099,14 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
   const signalsHash: WhaleProfileInput["signals"] = {
     summary: input.signals.summary
       ? {
-          criticalSignals30d: bucketCount(input.signals.summary.criticalSignals30d),
-          avgSignalScore30d: bucketRate(input.signals.summary.avgSignalScore30d),
-          hasReactivatedAfterIdle: input.signals.summary.hasReactivatedAfterIdle,
+          criticalSignals30d: bucketCount(
+            input.signals.summary.criticalSignals30d,
+          ),
+          avgSignalScore30d: bucketRate(
+            input.signals.summary.avgSignalScore30d,
+          ),
+          hasReactivatedAfterIdle:
+            input.signals.summary.hasReactivatedAfterIdle,
           hasLateEntry: input.signals.summary.hasLateEntry,
           hasVeryLateEntry: input.signals.summary.hasVeryLateEntry,
           hasUnusualBehavior: input.signals.summary.hasUnusualBehavior,
@@ -1130,12 +1144,14 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
     })),
     performance_30d: performanceHash,
     signals: signalsHash,
-    closed_positions_sample: input.closed_positions_sample.slice(0, 4).map((item) => ({
-      ...item,
-      sizeUsd: bucketSignedUsd(item.sizeUsd),
-      entryPrice: bucketRate(item.entryPrice),
-      snapshotAt: truncateIsoToHour(item.snapshotAt),
-    })),
+    closed_positions_sample: input.closed_positions_sample
+      .slice(0, 4)
+      .map((item) => ({
+        ...item,
+        sizeUsd: bucketSignedUsd(item.sizeUsd),
+        entryPrice: bucketRate(item.entryPrice),
+        snapshotAt: truncateIsoToHour(item.snapshotAt),
+      })),
     recent_window: recentHash,
   };
 }
@@ -1268,9 +1284,7 @@ async function loadTrackerSurfaceIds(
   );
 
   return Array.from(summaryStatsMap.values())
-    .filter(
-      (row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt),
-    )
+    .filter((row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt))
     .sort((left, right) =>
       compareWalletActivitySummaryStats(left, right, "last_activity"),
     )
@@ -1728,11 +1742,7 @@ async function loadWhaleRowsByIds(
       ) inferred on true
       order by sw.ordinality asc
     `,
-    [
-      params.walletIds,
-      params.windowDays,
-      params.signalsWindowHours,
-    ],
+    [params.walletIds, params.windowDays, params.signalsWindowHours],
   );
 
   const byId = new Map<string, Omit<WhaleRow, keyof WhaleSelectableRow>>();
@@ -1772,9 +1782,9 @@ export function normalizeWhaleProfile(raw: unknown): WhaleProfile | null {
     .replace(/^_+|_+$/g, "")
     .slice(0, 80);
   if (!archetype) return null;
-  const categories = normalizeCategoryList(parsed.data.categories ?? []).filter(
-    (entry) => categorySchema.safeParse(entry).success,
-  ).slice(0, 3);
+  const categories = normalizeCategoryList(parsed.data.categories ?? [])
+    .filter((entry) => categorySchema.safeParse(entry).success)
+    .slice(0, 3);
   const themeFocus = Array.from(
     new Set(
       (parsed.data.theme_focus ?? [])
@@ -1812,7 +1822,8 @@ export function normalizeWhaleProfile(raw: unknown): WhaleProfile | null {
 function mapCategory(raw: string): WhaleCategory | null {
   const key = raw.trim().toLowerCase();
   if (!key) return null;
-  if (CATEGORY_VALUES.includes(key as WhaleCategory)) return key as WhaleCategory;
+  if (CATEGORY_VALUES.includes(key as WhaleCategory))
+    return key as WhaleCategory;
   if (key.includes("sport")) return "sports";
   if (
     key.includes("politic") ||
@@ -1822,7 +1833,11 @@ function mapCategory(raw: string): WhaleCategory | null {
   ) {
     return "politics";
   }
-  if (key.includes("crypto") || key.includes("blockchain") || key.includes("web3")) {
+  if (
+    key.includes("crypto") ||
+    key.includes("blockchain") ||
+    key.includes("web3")
+  ) {
     return "crypto";
   }
   if (key.includes("weather") || key.includes("climate")) {
@@ -1842,7 +1857,12 @@ function mapCategory(raw: string): WhaleCategory | null {
   ) {
     return "economics";
   }
-  if (key.includes("entertain") || key.includes("culture") || key.includes("celebrity") || key.includes("music")) {
+  if (
+    key.includes("entertain") ||
+    key.includes("culture") ||
+    key.includes("celebrity") ||
+    key.includes("music")
+  ) {
     return "entertainment";
   }
   if (
@@ -1857,7 +1877,11 @@ function mapCategory(raw: string): WhaleCategory | null {
     return "health";
   }
   if (key.includes("mention")) return "mentions";
-  if (key.includes("social") || key.includes("twitter") || key.includes("tweets")) {
+  if (
+    key.includes("social") ||
+    key.includes("twitter") ||
+    key.includes("tweets")
+  ) {
     return "other";
   }
   return null;
@@ -1910,7 +1934,8 @@ function resolveHeldOdds(
   if (positionPrice != null && Number.isFinite(positionPrice)) {
     return positionPrice;
   }
-  if (lastYesPrice == null || !Number.isFinite(lastYesPrice) || !side) return null;
+  if (lastYesPrice == null || !Number.isFinite(lastYesPrice) || !side)
+    return null;
   const normalized = side.toUpperCase();
   if (normalized === "YES") return lastYesPrice;
   if (normalized === "NO") return 1 - lastYesPrice;
@@ -1932,7 +1957,9 @@ export function mapWhaleMarketToProfileMarket(
   market: WhaleMarketRow,
   nowMs: number = Date.now(),
 ): ProfileTopMarket {
-  const snapshotAt = market.snapshot_at ? market.snapshot_at.toISOString() : null;
+  const snapshotAt = market.snapshot_at
+    ? market.snapshot_at.toISOString()
+    : null;
   const closeTime = market.close_time ? market.close_time.toISOString() : null;
   const expirationTime = market.expiration_time
     ? market.expiration_time.toISOString()
@@ -2026,17 +2053,13 @@ export function computeProfileSideBias(markets: ProfileTopMarket[]): {
       market.yes_position_value_usd ??
       market.yes_position_shares ??
       (market.position_side?.toUpperCase() === "YES"
-        ? (market.position_value_usd ??
-            market.position_shares ??
-            0)
+        ? (market.position_value_usd ?? market.position_shares ?? 0)
         : 0);
     noValue +=
       market.no_position_value_usd ??
       market.no_position_shares ??
       (market.position_side?.toUpperCase() === "NO"
-        ? (market.position_value_usd ??
-            market.position_shares ??
-            0)
+        ? (market.position_value_usd ?? market.position_shares ?? 0)
         : 0);
   }
   const totalSide = yesValue + noValue;
@@ -2061,22 +2084,25 @@ async function callOpenRouter(
     throw new Error("OPENROUTER_API_KEY missing");
   }
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.openRouterKey}`,
-      "Content-Type": "application/json",
-      "X-Title": "Hunch Whale Profiles",
+  const response = await fetch(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.openRouterKey}`,
+        "Content-Type": "application/json",
+        "X-Title": "Hunch Whale Profiles",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0,
+        max_tokens: maxTokens,
+        reasoning: { effort: "low" },
+        response_format: { type: "json_object" },
+      }),
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0,
-      max_tokens: maxTokens,
-      reasoning: { effort: "low" },
-      response_format: { type: "json_object" },
-    }),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -2155,12 +2181,8 @@ function buildProfileInput(
   const allCurrentMarkets = currentMarkets.map((market) =>
     mapWhaleMarketToProfileMarket(market),
   );
-  const {
-    topMarkets,
-    currentPortfolio,
-    topEvents,
-    summary,
-  } = summarizeProfileMarkets(allCurrentMarkets, context.marketLimit);
+  const { topMarkets, currentPortfolio, topEvents, summary } =
+    summarizeProfileMarkets(allCurrentMarkets, context.marketLimit);
   const grossExposureUsd = parseNumber(wallet.exposure_usd);
   const portfolioGrossUsd = currentPortfolio.gross_usd_total;
   const effectiveGrossUsd =
@@ -2227,8 +2249,9 @@ function buildProfileInput(
     unusual_score: recentSummary?.unusualScore ?? null,
     top_changes: recentTopChanges,
   };
-  const walletKind: WhaleProfileInput["wallet"]["kind"] =
-    wallet.is_safe ? "safe" : "eoa";
+  const walletKind: WhaleProfileInput["wallet"]["kind"] = wallet.is_safe
+    ? "safe"
+    : "eoa";
   const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
   const sourceLabel = normalizeText(wallet.label);
   const volume30d = parseNumber(wallet.metrics_volume);
@@ -2262,7 +2285,10 @@ function buildProfileInput(
     wallet: {
       chain: wallet.chain,
       source_label: sourceLabel,
-      source_label_quality: resolveWalletLabelQuality(sourceLabel, wallet.address),
+      source_label_quality: resolveWalletLabelQuality(
+        sourceLabel,
+        wallet.address,
+      ),
       owner_label: normalizeText(wallet.owner_label),
       kind: walletKind,
       role: walletRole,
@@ -2323,7 +2349,8 @@ function buildProfileInput(
         currentPortfolio.gross_usd_total > 0 &&
         currentPortfolio.yes_gross_usd > 0
           ? clampNumber(
-              (currentPortfolio.yes_gross_usd / currentPortfolio.gross_usd_total) *
+              (currentPortfolio.yes_gross_usd /
+                currentPortfolio.gross_usd_total) *
                 effectiveGrossUsd,
               0,
               effectiveGrossUsd,
@@ -2334,7 +2361,8 @@ function buildProfileInput(
         currentPortfolio.gross_usd_total > 0 &&
         currentPortfolio.no_gross_usd > 0
           ? clampNumber(
-              (currentPortfolio.no_gross_usd / currentPortfolio.gross_usd_total) *
+              (currentPortfolio.no_gross_usd /
+                currentPortfolio.gross_usd_total) *
                 effectiveGrossUsd,
               0,
               effectiveGrossUsd,
@@ -2357,7 +2385,8 @@ function buildProfileInput(
         currentPortfolio.gross_usd_total > 0 &&
         currentPortfolio.omitted_gross_usd > 0
           ? clampNumber(
-              (currentPortfolio.omitted_gross_usd / currentPortfolio.gross_usd_total) *
+              (currentPortfolio.omitted_gross_usd /
+                currentPortfolio.gross_usd_total) *
                 effectiveGrossUsd,
               0,
               effectiveGrossUsd,
@@ -2410,7 +2439,8 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       env.aiWhaleProfileSelectionTrackerWinRateLimit,
     selectionSignalsLimit: env.aiWhaleProfileSelectionSignalsLimit,
     selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
-    selectionTrackerSurfaceLimit: env.aiWhaleProfileSelectionTrackerSurfaceLimit,
+    selectionTrackerSurfaceLimit:
+      env.aiWhaleProfileSelectionTrackerSurfaceLimit,
     selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
     model: env.aiWhaleProfileModel,
     styleGuide: env.aiWhaleProfileStyleGuide,
@@ -2445,7 +2475,10 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   );
   let selectRecentLimit = Math.max(0, Math.trunc(policy.selectionRecentLimit));
   let selectPnlLimit = Math.max(0, Math.trunc(policy.selectionPnlLimit));
-  let selectSignalsLimit = Math.max(0, Math.trunc(policy.selectionSignalsLimit));
+  let selectSignalsLimit = Math.max(
+    0,
+    Math.trunc(policy.selectionSignalsLimit),
+  );
   if (policy.selectionMode === "recent") {
     selectTrackerRecentLimit = 0;
     selectTrackerPnlLimit = 0;
@@ -2519,7 +2552,8 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       key: "trackerWinRate" as const,
       targetLimit: selectTrackerWinRateLimit,
       fetchLimit: trackerWinRateFetchLimit,
-      rankOf: (row: WhaleSelectableRow) => coerceRank(row.rank_tracker_win_rate),
+      rankOf: (row: WhaleSelectableRow) =>
+        coerceRank(row.rank_tracker_win_rate),
     },
     {
       key: "recent" as const,
@@ -2611,10 +2645,8 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       signalsFetchLimit,
       candidateFetchLimit,
     });
-    const {
-      rows: selectedWhaleSelectionRows,
-      pinnedCoverage,
-    } = selectWhaleProfileRows(whaleSelectionRows, limit, sourceDefs);
+    const { rows: selectedWhaleSelectionRows, pinnedCoverage } =
+      selectWhaleProfileRows(whaleSelectionRows, limit, sourceDefs);
     const sourceCoverage = {
       trackerRecent: selectedWhaleSelectionRows.filter(
         (row) =>
@@ -2646,8 +2678,9 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
           (coerceRank(row.rank_signal) ?? Number.MAX_SAFE_INTEGER) <=
           selectSignalsLimit,
       ).length,
-      multiSource: selectedWhaleSelectionRows.filter((row) => row.source_hits >= 2)
-        .length,
+      multiSource: selectedWhaleSelectionRows.filter(
+        (row) => row.source_hits >= 2,
+      ).length,
     };
     console.log("[whale-profile] selected wallets", {
       candidates: whaleSelectionRows.length,
@@ -2693,15 +2726,11 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     const whaleIds = selectedWhaleRows.map((row) => row.id);
     let recentSummaryMap = new Map<string, WalletActivitySummary>();
     try {
-      recentSummaryMap = await fetchWalletActivitySummaries(
-        client,
-        whaleIds,
-        {
-          windowHours: recentWindowHours,
-          topChanges: recentTopChanges,
-          baselineDays: windowDays,
-        },
-      );
+      recentSummaryMap = await fetchWalletActivitySummaries(client, whaleIds, {
+        windowHours: recentWindowHours,
+        topChanges: recentTopChanges,
+        baselineDays: windowDays,
+      });
       console.log("[whale-profile] recent summary loaded", {
         wallets: whaleIds.length,
         summarized: recentSummaryMap.size,
@@ -3239,7 +3268,9 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
       ) {
         normalized = {
           ...normalized,
-          label_short: normalizeText(existing?.profile?.label_short) ?? normalized.label_short,
+          label_short:
+            normalizeText(existing?.profile?.label_short) ??
+            normalized.label_short,
         };
       }
 

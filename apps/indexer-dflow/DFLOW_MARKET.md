@@ -3,6 +3,7 @@
 This document summarizes what the DFlow indexer stores in the unified DB tables and what is ignored, based on current mapping logic.
 
 Sources:
+
 - `hunch-monorepo/apps/indexer-dflow/src/mappers.ts`
 - `hunch-monorepo/apps/indexer-dflow/src/bootstrap.ts`
 - `hunch-monorepo/apps/indexer-dflow/src/types.ts`
@@ -23,6 +24,7 @@ Sources:
 ## Unified Events
 
 Fields stored in `unified_events`:
+
 - `id`: `kalshi:${event_ticker}`
 - `venue`: `kalshi`
 - `venue_event_id`: event ticker (from `event_ticker`, `eventTicker`, `ticker`, or `id`)
@@ -42,6 +44,7 @@ Fields stored in `unified_events`:
 ## Unified Markets
 
 Identity + linkage:
+
 - `id`: `kalshi:${market.ticker}`
 - `venue`: `kalshi`
 - `venue_market_id`: `market.ticker`
@@ -49,52 +52,61 @@ Identity + linkage:
 - `market_type`: forced to `binary`
 
 Status + timing:
+
 - `status`: mapped from DFlow status (ACTIVE/CLOSED/SETTLED/ARCHIVED)
 - `open_time`, `close_time`, `expiration_time`: parsed from DFlow timestamps
 
 Prices:
+
 - `best_bid`: `yesBid`
 - `best_ask`: `yesAsk`
 - `last_price`: mid of yes bid/ask if both are present
 - Note: `noBid` / `noAsk` are not stored on `unified_markets`
 
 Metrics:
+
 - `volume_total`: from `volume` / `volumeTotal` / `volume_total` / `volumeNum`
 - `volume_24h`: from `volume24h` (normalized to `0` when missing)
 - `liquidity`: from `liquidity` (cents → USD by `/100`, normalized to `0` when missing)
 - `open_interest`: from `openInterest`
 
 Outcomes + tokens:
+
 - `outcomes`: `["YES", "NO"]`
 - `token_yes`: `sol:${yesMint}`
 - `token_no`: `sol:${noMint}`
 - `unified_tokens`: YES/NO tokens are also inserted into `unified_tokens`
 
 DFlow execution fields (Solana):
+
 - `market_ledger`: from account `marketLedger`
 - `settlement_mint`: the USDC mint used for the account
 - `is_initialized`: from account `isInitialized`
 - `redemption_status`: from account `redemptionStatus`
 
 Metadata + media:
+
 - `metadata`: JSONB with `subtitle`, `yesSubTitle`, `noSubTitle`, `rulesPrimary`, `rulesSecondary`, `earlyCloseCondition`, `canCloseEarly`, `result`, `marketType`
 - `slug`, `image`, `icon`: pulled from market payload if present
 
 ## What is NOT stored
 
 The following values in the DFlow API response are currently ignored:
+
 - Market account info for non-USDC settlements (only the USDC account is used).
 - `noBid` / `noAsk` in `unified_markets` (they are only used in book-top snapshots).
 
 ## Book-top snapshots (Redis + unified_book_top)
 
 During hot refresh, the indexer publishes best bid/ask for YES/NO tokens:
+
 - Redis: `book:<tokenId>`, `top:<tokenId>`, `prices:<tokenId>`
 - DB timeseries: `unified_book_top` via `writeUnifiedBookTop` (token_id, best_bid, best_ask, mid, spread)
 
 ## Implications vs sample API response
 
 From a typical DFlow event response, these metrics are stored:
+
 - Event: `volume`, `volume24h`, `liquidity`, `openInterest` (or derived sums)
 - Market: `volume`, `volume24h`, `liquidity`, `openInterest`, `yesBid`, `yesAsk`
 

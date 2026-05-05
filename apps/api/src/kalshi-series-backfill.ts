@@ -1,7 +1,10 @@
 import { chunkArray, sleep } from "@hunch/shared";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { dflowRequest, extractDflowErrorMessage } from "./services/dflow-client.js";
+import {
+  dflowRequest,
+  extractDflowErrorMessage,
+} from "./services/dflow-client.js";
 
 type SeriesRow = {
   series_key: string;
@@ -61,9 +64,7 @@ async function fetchSeriesPage(cursor?: number | null, limit?: number | null) {
 
   if (!res.ok) {
     const err = extractDflowErrorMessage(res.payload);
-    throw new Error(
-      `DFlow series ${res.status}${err ? `: ${err}` : ""}`,
-    );
+    throw new Error(`DFlow series ${res.status}${err ? `: ${err}` : ""}`);
   }
 
   const payload = res.payload as Record<string, unknown> | null;

@@ -12,7 +12,10 @@ import {
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
 import { PrivyService, type PrivyUser } from "./privy-service.js";
-import { MAX_WALLET_NAME_LENGTH, normalizeWalletNameInput } from "./lib/wallet-name.js";
+import {
+  MAX_WALLET_NAME_LENGTH,
+  normalizeWalletNameInput,
+} from "./lib/wallet-name.js";
 
 type TestCase = {
   name: string;
@@ -45,10 +48,7 @@ const tests: TestCase[] = [
     name: "normalize wallet name rejects invalid input",
     run: () => {
       assert.throws(
-        () =>
-          normalizeWalletNameInput(
-            "a".repeat(MAX_WALLET_NAME_LENGTH + 1),
-          ),
+        () => normalizeWalletNameInput("a".repeat(MAX_WALLET_NAME_LENGTH + 1)),
         /too long/i,
       );
       assert.throws(() => normalizeWalletNameInput("bad\nname"), /invalid/i);
@@ -58,7 +58,10 @@ const tests: TestCase[] = [
     name: "updateWalletName updates and maps row for evm wallet",
     run: async () => {
       const poolAny = pool as unknown as {
-        query: (sql: string, params?: unknown[]) => Promise<{ rows: UserWalletRow[] }>;
+        query: (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: UserWalletRow[] }>;
       };
       const originalQuery = poolAny.query;
       const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -92,7 +95,10 @@ const tests: TestCase[] = [
         assert.equal(wallet.walletType, "ethereum");
         assert.equal(wallet.name, "Main wallet");
         assert.equal(calls.length, 1);
-        assert.match(calls[0].sql, /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i);
+        assert.match(
+          calls[0].sql,
+          /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
+        );
         assert.deepEqual(calls[0].params, [
           "u-1",
           "0xAbC0000000000000000000000000000000000000",
@@ -108,7 +114,10 @@ const tests: TestCase[] = [
     name: "updateWalletName throws WalletNotFoundError when no row is updated",
     run: async () => {
       const poolAny = pool as unknown as {
-        query: (sql: string, params?: unknown[]) => Promise<{ rows: UserWalletRow[] }>;
+        query: (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: UserWalletRow[] }>;
       };
       const originalQuery = poolAny.query;
       try {
@@ -168,10 +177,16 @@ const tests: TestCase[] = [
         );
 
         assert.ok(info);
-        assert.equal(info.walletAddress, "0xabc0000000000000000000000000000000000000");
+        assert.equal(
+          info.walletAddress,
+          "0xabc0000000000000000000000000000000000000",
+        );
         const queryCall = calls.at(-1);
         assert.ok(queryCall);
-        assert.match(queryCall.sql, /lower\(wallet_address\)\s*=\s*lower\(\$3\)/i);
+        assert.match(
+          queryCall.sql,
+          /lower\(wallet_address\)\s*=\s*lower\(\$3\)/i,
+        );
         assert.deepEqual(queryCall.params, [
           "u-1",
           "polymarket",
@@ -221,10 +236,16 @@ const tests: TestCase[] = [
         );
 
         assert.equal(rows.length, 1);
-        assert.equal(rows[0]?.walletAddress, "0xabc0000000000000000000000000000000000000");
+        assert.equal(
+          rows[0]?.walletAddress,
+          "0xabc0000000000000000000000000000000000000",
+        );
         const queryCall = calls.at(-1);
         assert.ok(queryCall);
-        assert.match(queryCall.sql, /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i);
+        assert.match(
+          queryCall.sql,
+          /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
+        );
         assert.deepEqual(queryCall.params, [
           "u-1",
           "0xAbC0000000000000000000000000000000000000",
@@ -438,10 +459,7 @@ const tests: TestCase[] = [
       assert.equal(result.userId, "user-wallet-match");
       assert.equal(result.consumeBindGrant, false);
       assert.equal(calls.length, 2);
-      assert.match(
-        calls[1].sql,
-        /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i,
-      );
+      assert.match(calls[1].sql, /lower\(wallet_address\)\s*=\s*lower\(\$2\)/i);
     },
   },
   {
@@ -461,7 +479,7 @@ const tests: TestCase[] = [
                 {
                   id: "user-email-only",
                   privy_bind_grant_expires_at: new Date(
-                    Date.now() + 60 * 60 * 1000
+                    Date.now() + 60 * 60 * 1000,
                   ),
                 },
               ],
@@ -596,7 +614,11 @@ const tests: TestCase[] = [
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [{ id: "user-1" }] };
           }
-          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(sql)) {
+          if (
+            /FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(
+              sql,
+            )
+          ) {
             return { rows: [{ id: "user-2" }] };
           }
           throw new Error(`unexpected query: ${sql}`);
@@ -641,7 +663,11 @@ const tests: TestCase[] = [
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [{ id: "user-1" }] };
           }
-          if (/FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(sql)) {
+          if (
+            /FROM users\s+WHERE lower\(email\) = lower\(\$1\)\s+AND id <> \$2/i.test(
+              sql,
+            )
+          ) {
             return { rows: [] };
           }
           if (/FROM user_wallets/i.test(sql)) {

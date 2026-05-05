@@ -10,7 +10,8 @@ import { dirname, resolve } from "node:path";
 const DEFAULT_SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const DEFAULT_POLYGON_USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const DEFAULT_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const DEFAULT_POLYMARKET_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+const DEFAULT_POLYMARKET_EXCHANGE =
+  "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 const DEFAULT_POLYMARKET_NEG_RISK_EXCHANGE =
   "0xC5d563A36AE78145C45a50134d48A1215220f80a";
 
@@ -39,7 +40,8 @@ function parseArgs(args: string[]): CliOptions {
     return next && !next.startsWith("--") ? next : undefined;
   };
 
-  const solanaUsdcMint = getValue("--solana-usdc-mint") ?? DEFAULT_SOLANA_USDC_MINT;
+  const solanaUsdcMint =
+    getValue("--solana-usdc-mint") ?? DEFAULT_SOLANA_USDC_MINT;
   const outJsonPath = getValue("--out-json");
   const outEnvPath = getValue("--out-env");
 
@@ -223,7 +225,10 @@ async function main() {
   console.log(envSnippet);
 
   if (options.outJsonPath) {
-    const abs = writeText(options.outJsonPath, `${JSON.stringify(output, null, 2)}\n`);
+    const abs = writeText(
+      options.outJsonPath,
+      `${JSON.stringify(output, null, 2)}\n`,
+    );
     console.log(`\nWrote JSON output: ${abs}`);
   }
   if (options.outEnvPath) {

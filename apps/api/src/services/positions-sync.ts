@@ -49,7 +49,9 @@ function parseNumber(value: string | number | null | undefined): number | null {
   return n;
 }
 
-function normalizeFillSide(value: string | null | undefined): "BUY" | "SELL" | null {
+function normalizeFillSide(
+  value: string | null | undefined,
+): "BUY" | "SELL" | null {
   if (!value) return null;
   const normalized = value.trim().toUpperCase();
   if (normalized === "BUY" || normalized === "SELL") return normalized;
@@ -298,9 +300,9 @@ export function filterPrefetchedPolymarketOwnerBalances(inputs: {
   const tokenIdSet = new Set(normalizeNumericTokenIds(inputs.tokenIds));
   return inputs.owners.map((owner) => ({
     owner,
-    held: (inputs.prefetched.balancesByOwner.get(owner.toLowerCase()) ?? []).filter(
-      (balance) => tokenIdSet.has(balance.tokenId),
-    ),
+    held: (
+      inputs.prefetched.balancesByOwner.get(owner.toLowerCase()) ?? []
+    ).filter((balance) => tokenIdSet.has(balance.tokenId)),
   }));
 }
 
@@ -337,7 +339,10 @@ export async function prefetchFollowedPolymarketOwnerBalances(
       candidateTokenIds,
       trackedTokenIds,
     );
-    rpcCallEstimate = estimateErc1155BalanceRpcCalls(owners.length, unionTokenIds);
+    rpcCallEstimate = estimateErc1155BalanceRpcCalls(
+      owners.length,
+      unionTokenIds,
+    );
 
     const balancesByOwner = new Map<string, WalletTokenBalance[]>();
     if (unionTokenIds.length > 0) {
@@ -522,7 +527,13 @@ function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
       continue;
     }
     if (isRecord(tokenBalances)) {
-      extractTokenBalancesFromMap(output, seen, tokenBalances, yesToken, noToken);
+      extractTokenBalancesFromMap(
+        output,
+        seen,
+        tokenBalances,
+        yesToken,
+        noToken,
+      );
     }
   }
 
@@ -847,7 +858,10 @@ async function syncPolymarketStoredPositionsFromPolygon(
     };
   }
 
-  const heldByOwner = new Map<string, Array<{ tokenId: string; size: string }>>();
+  const heldByOwner = new Map<
+    string,
+    Array<{ tokenId: string; size: string }>
+  >();
   const allHeldTokens = new Set<string>();
 
   const ownerHeldResults =
@@ -1071,7 +1085,8 @@ export async function syncPolymarketTradesForSigner(
 
   for (const trade of trades) {
     const tradeId = trade.id;
-    const matchTime = parseNumber(trade.matchTime) ?? parseNumber(trade.lastUpdate);
+    const matchTime =
+      parseNumber(trade.matchTime) ?? parseNumber(trade.lastUpdate);
     if (!tradeId || matchTime == null) continue;
     const filledAt = new Date(matchTime * 1000);
 
@@ -1388,7 +1403,10 @@ async function syncKalshiPositionsFromSolana(
       }),
     ]);
     if (kalshiMetrics.status === "rejected") {
-      console.error("Kalshi position metrics update failed", kalshiMetrics.reason);
+      console.error(
+        "Kalshi position metrics update failed",
+        kalshiMetrics.reason,
+      );
     }
     if (kalshiNotifications.status === "rejected") {
       console.error(
@@ -1419,14 +1437,18 @@ async function syncPolymarketPositionsFromPolygon(
 ): Promise<PositionsSyncResult> {
   if (inputs.positionScope !== "followed") {
     try {
-      await syncPolymarketTradesForSigner(pool, {
-        userId: inputs.userId,
-        signerAddress: inputs.walletAddress,
-      }, {
-        syncPositionsOnFill: false,
-        positionScope: inputs.positionScope,
-        prefetchedBalances: inputs.prefetchedBalances ?? null,
-      });
+      await syncPolymarketTradesForSigner(
+        pool,
+        {
+          userId: inputs.userId,
+          signerAddress: inputs.walletAddress,
+        },
+        {
+          syncPositionsOnFill: false,
+          positionScope: inputs.positionScope,
+          prefetchedBalances: inputs.prefetchedBalances ?? null,
+        },
+      );
     } catch (error) {
       console.error("Polymarket trade sync failed", error);
     }
@@ -1437,7 +1459,11 @@ async function syncPolymarketPositionsFromPolygon(
 
 async function syncLimitlessPositionsFromPortfolio(
   pool: Pool,
-  inputs: { userId: string; walletAddress: string; positionScope: PositionScope },
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+  },
 ): Promise<PositionsSyncResult> {
   const creds = await AuthService.getVenueCredentials(
     inputs.userId,
@@ -1449,7 +1475,9 @@ async function syncLimitlessPositionsFromPortfolio(
     inputs.walletAddress,
   );
   if (!authContext || !creds) {
-    throw new Error("Connect Limitless for this wallet before syncing positions.");
+    throw new Error(
+      "Connect Limitless for this wallet before syncing positions.",
+    );
   }
 
   const upstream = await limitlessRequest({

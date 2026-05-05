@@ -41,7 +41,10 @@ function safePositiveNumber(value: unknown, fallback: number): number {
   return parsed;
 }
 
-function parseRuleMin(raw: Record<string, unknown>, keys: string[]): number | null {
+function parseRuleMin(
+  raw: Record<string, unknown>,
+  keys: string[],
+): number | null {
   for (const key of keys) {
     const value = raw[key];
     const parsed = Number(value);
@@ -202,7 +205,12 @@ export async function resolveRewardsMultiplierAtEvent(
   const referralMultiplier = resolveRulesMaxMultiplier(
     policy?.referral_rules ?? [],
     qualifiedReferrals,
-    ["minReferrals", "minQualifiedReferrals", "min_referrals", "min_qualified_referrals"],
+    [
+      "minReferrals",
+      "minQualifiedReferrals",
+      "min_referrals",
+      "min_qualified_referrals",
+    ],
   );
   const tierMultiplier = resolveRulesMaxMultiplier(
     policy?.tier_rules ?? [],

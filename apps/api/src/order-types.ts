@@ -209,12 +209,7 @@ export interface PolymarketOrderResponse {
 
 export interface PolymarketOrderStatus {
   orderId: string;
-  status:
-    | "matched"
-    | "live"
-    | "delayed"
-    | "unconfirmed"
-    | "unmatched";
+  status: "matched" | "live" | "delayed" | "unconfirmed" | "unmatched";
   filledSize?: number;
   averageFillPrice?: number;
 }

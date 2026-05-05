@@ -38,8 +38,7 @@ function parseArgs(): ScriptOptions {
         ? sourceType
         : undefined,
     venue: getValue("--venue"),
-    walletType:
-      getValue("--wallet-type") === "solana" ? "solana" : "ethereum",
+    walletType: getValue("--wallet-type") === "solana" ? "solana" : "ethereum",
     dryRun: hasFlag("--dry-run"),
   };
 }
@@ -138,7 +137,7 @@ async function main() {
       : [];
     const user = targetUserId
       ? await fetchUserById(targetUserId)
-      : users[0] ?? null;
+      : (users[0] ?? null);
 
     if (targetWallet && users.length > 1 && !targetUserId) {
       console.error("Multiple users found for wallet. Use --user-id:");

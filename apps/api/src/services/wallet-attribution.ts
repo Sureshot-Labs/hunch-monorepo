@@ -181,18 +181,20 @@ type SpecialistFamily =
   | "culture"
   | "mentions";
 
-const SPECIALIST_LABEL_BY_FAMILY: Record<SpecialistFamily, WalletAttributionLabelKey> =
-  {
-    sports: "sports_specialist",
-    politics: "politics_specialist",
-    crypto: "crypto_specialist",
-    macro: "macro_specialist",
-    technology: "tech_specialist",
-    weather: "weather_specialist",
-    health: "health_specialist",
-    culture: "culture_specialist",
-    mentions: "mentions_specialist",
-  };
+const SPECIALIST_LABEL_BY_FAMILY: Record<
+  SpecialistFamily,
+  WalletAttributionLabelKey
+> = {
+  sports: "sports_specialist",
+  politics: "politics_specialist",
+  crypto: "crypto_specialist",
+  macro: "macro_specialist",
+  technology: "tech_specialist",
+  weather: "weather_specialist",
+  health: "health_specialist",
+  culture: "culture_specialist",
+  mentions: "mentions_specialist",
+};
 
 const FAMILY_ALIASES: Record<SpecialistFamily, Set<string>> = {
   sports: new Set([
@@ -368,7 +370,9 @@ function normalizeCategoryAlias(raw: string | null | undefined): string | null {
   return normalized.replace(/_/g, " ");
 }
 
-function mapCategoryToFamily(raw: string | null | undefined): SpecialistFamily | null {
+function mapCategoryToFamily(
+  raw: string | null | undefined,
+): SpecialistFamily | null {
   const normalized = normalizeCategoryAlias(raw);
   if (!normalized) return null;
   if (UNMAPPED_CATEGORY_ALIASES.has(normalized)) return null;
@@ -491,15 +495,17 @@ function buildDisplayReasons(
   const sorted = sortReasonCodes(reasonCodes);
   const hideGateReasons =
     policy.signalsDisplay.hideRedundantReasonsWhenGateImplies &&
-    sorted.some(
-      (reason) => !SIGNAL_TRIGGER_REASONS.has(reason),
-    );
+    sorted.some((reason) => !SIGNAL_TRIGGER_REASONS.has(reason));
   if (!hideGateReasons) {
     return sorted.slice(0, policy.signalsDisplay.maxDisplayReasons);
   }
 
-  const triggerReasons = sorted.filter((reason) => SIGNAL_TRIGGER_REASONS.has(reason));
-  const contextReasons = sorted.filter((reason) => !SIGNAL_TRIGGER_REASONS.has(reason));
+  const triggerReasons = sorted.filter((reason) =>
+    SIGNAL_TRIGGER_REASONS.has(reason),
+  );
+  const contextReasons = sorted.filter(
+    (reason) => !SIGNAL_TRIGGER_REASONS.has(reason),
+  );
   const selected: string[] = [];
 
   if (contextReasons.length > 0) {
@@ -719,7 +725,8 @@ async function loadVenueStats(
   for (const row of statsResult.rows) {
     const venue = parseVenue(row.venue);
     if (!venue) continue;
-    const walletMap = byWallet.get(row.wallet_id) ?? new Map<VenueKey, WalletVenueStats>();
+    const walletMap =
+      byWallet.get(row.wallet_id) ?? new Map<VenueKey, WalletVenueStats>();
     walletMap.set(venue, {
       volume30dUsd: toNumber(row.volume_30d_usd) ?? 0,
       trades30d: Math.max(0, Number(row.trades_30d ?? 0)),
@@ -755,7 +762,10 @@ async function loadVenueStats(
     bucket.totals += volume;
     const family = mapCategoryToFamily(row.raw_category);
     if (family) {
-      bucket.familyTotals.set(family, (bucket.familyTotals.get(family) ?? 0) + volume);
+      bucket.familyTotals.set(
+        family,
+        (bucket.familyTotals.get(family) ?? 0) + volume,
+      );
     }
     categoryVolume.set(key, bucket);
   }
@@ -786,7 +796,9 @@ async function loadVenueStats(
     const walletMap = byWallet.get(row.wallet_id);
     const stats = walletMap?.get(venue);
     if (!stats) continue;
-    stats.maxStakeToMarketVolRatio = toNumber(row.max_stake_to_market_vol_ratio);
+    stats.maxStakeToMarketVolRatio = toNumber(
+      row.max_stake_to_market_vol_ratio,
+    );
   }
 
   return byWallet;
@@ -845,7 +857,10 @@ async function loadComputedStats(
     });
   }
 
-  const inferredByWallet = new Map<string, { winRate: number | null; resolved: number | null }>();
+  const inferredByWallet = new Map<
+    string,
+    { winRate: number | null; resolved: number | null }
+  >();
   for (const row of inferredResult.rows) {
     const resolved = Math.max(0, Number(row.total ?? 0));
     const wins = Math.max(0, Number(row.wins ?? 0));
@@ -862,17 +877,17 @@ async function loadComputedStats(
     const exposure =
       exposureFromInput != null
         ? Math.max(0, exposureFromInput)
-        : exposureRecord?.exposureUsd ?? 0;
+        : (exposureRecord?.exposureUsd ?? 0);
     const resolvedFromInput = toNumber(wallet.inferredResolvedCount);
     const winRateFromInput = toNumber(wallet.inferredWinRate);
     const inferredResolvedCount =
       resolvedFromInput != null
         ? Math.max(0, Math.trunc(resolvedFromInput))
-        : inferred?.resolved ?? null;
+        : (inferred?.resolved ?? null);
     const inferredWinRate =
       winRateFromInput != null
         ? clamp(winRateFromInput, 0, 1)
-        : inferred?.winRate ?? null;
+        : (inferred?.winRate ?? null);
     const pnl30dUsd =
       toNumber(wallet.portfolioPnl30dUsd) ?? toNumber(wallet.metrics?.pnl_usd);
     const trades30dTotal = Math.max(
@@ -979,7 +994,8 @@ function scoreVenueCandidate(inputs: {
       );
       candidates.push({
         key: "specialist",
-        score: specialistScore * Math.max(0, inputs.policy.ruleWeights.specialist),
+        score:
+          specialistScore * Math.max(0, inputs.policy.ruleWeights.specialist),
         reasons: [
           `top_category=${inputs.stats.topCategoryFamily}`,
           "category_share>=specialist_min",
@@ -1024,7 +1040,8 @@ function scoreVenueCandidate(inputs: {
           : 0;
       candidates.push({
         key: "bot",
-        score: clamp(botScore + hourlyCoverageBoost, 0, 1) *
+        score:
+          clamp(botScore + hourlyCoverageBoost, 0, 1) *
           Math.max(0, inputs.policy.ruleWeights.bot),
         reasons: [
           "trades30d>=bot_hf_min",
@@ -1047,23 +1064,27 @@ function scoreVenueCandidate(inputs: {
     const insiderQualified =
       inputs.criticalSignals30d >= thresholds.insiderCriticalSignals30dMin &&
       (inputs.avgSignalScore30d ?? 0) >= thresholds.insiderAvgSignalScoreMin &&
-      (inputs.computed.inferredResolvedCount ?? 0) >= thresholds.insiderMinResolvedBets &&
+      (inputs.computed.inferredResolvedCount ?? 0) >=
+        thresholds.insiderMinResolvedBets &&
       (inputs.computed.inferredWinRate ?? 0) >= thresholds.insiderWinRateMin;
     if (insiderQualified) {
       const insiderScore = clamp(
         Math.max(
           thresholds.insiderCriticalSignals30dMin > 0
-            ? inputs.criticalSignals30d / thresholds.insiderCriticalSignals30dMin
+            ? inputs.criticalSignals30d /
+                thresholds.insiderCriticalSignals30dMin
             : 1,
           thresholds.insiderAvgSignalScoreMin > 0
-            ? (inputs.avgSignalScore30d ?? 0) / thresholds.insiderAvgSignalScoreMin
+            ? (inputs.avgSignalScore30d ?? 0) /
+                thresholds.insiderAvgSignalScoreMin
             : 1,
           thresholds.insiderMinResolvedBets > 0
             ? (inputs.computed.inferredResolvedCount ?? 0) /
                 thresholds.insiderMinResolvedBets
             : 1,
           thresholds.insiderWinRateMin > 0
-            ? (inputs.computed.inferredWinRate ?? 0) / thresholds.insiderWinRateMin
+            ? (inputs.computed.inferredWinRate ?? 0) /
+                thresholds.insiderWinRateMin
             : 1,
         ),
         0,
@@ -1117,7 +1138,11 @@ function deriveSecondaryAndSupportingLabels(inputs: {
   venueStatsMap: Map<VenueKey, WalletVenueStats>;
   hasWhaleTag: boolean;
   signalSummary: WalletActivitySignalSummary;
-}): { secondary: WalletAttributionLabelKey[]; supporting: WalletAttributionLabelKey[]; reasons: string[] } {
+}): {
+  secondary: WalletAttributionLabelKey[];
+  supporting: WalletAttributionLabelKey[];
+  reasons: string[];
+} {
   const secondary = new Set<WalletAttributionLabelKey>();
   const supporting = new Set<WalletAttributionLabelKey>();
   const reasons = new Set<string>();
@@ -1153,7 +1178,8 @@ function deriveSecondaryAndSupportingLabels(inputs: {
       isPositiveThreshold(thresholds.volumeTraderVolume30dUsd) &&
       isPositiveThreshold(thresholds.highFrequencyTrades30d) &&
       stats.volume30dUsd >= thresholds.volumeTraderVolume30dUsd &&
-      stats.trades30d >= Math.max(10, Math.floor(thresholds.highFrequencyTrades30d / 4))
+      stats.trades30d >=
+        Math.max(10, Math.floor(thresholds.highFrequencyTrades30d / 4))
     ) {
       secondary.add("volume_trader");
       reasons.add(`volume_trader:${venue}`);
@@ -1165,7 +1191,8 @@ function deriveSecondaryAndSupportingLabels(inputs: {
       if (
         !isPositiveThreshold(thresholds.marketMoverStakeToMarketVolRatio) ||
         stats.maxStakeToMarketVolRatio == null ||
-        stats.maxStakeToMarketVolRatio >= thresholds.marketMoverStakeToMarketVolRatio
+        stats.maxStakeToMarketVolRatio >=
+          thresholds.marketMoverStakeToMarketVolRatio
       ) {
         secondary.add("market_mover");
         reasons.add(
@@ -1179,7 +1206,12 @@ function deriveSecondaryAndSupportingLabels(inputs: {
 
   const winRate = inputs.computed.inferredWinRate;
   const resolvedCount = inputs.computed.inferredResolvedCount;
-  if (winRate != null && resolvedCount != null && resolvedCount >= 20 && winRate >= 0.75) {
+  if (
+    winRate != null &&
+    resolvedCount != null &&
+    resolvedCount >= 20 &&
+    winRate >= 0.75
+  ) {
     secondary.add("high_win_rate");
     reasons.add("high_win_rate");
   }
@@ -1267,7 +1299,9 @@ export async function buildWalletAttributionMap(
 
   const tieBreak = normalizeTieBreakOrder(policy);
   for (const wallet of wallets) {
-    const venueStatsMap = venueStatsByWallet.get(wallet.walletId) ?? new Map<VenueKey, WalletVenueStats>();
+    const venueStatsMap =
+      venueStatsByWallet.get(wallet.walletId) ??
+      new Map<VenueKey, WalletVenueStats>();
     const computed =
       computedStatsByWallet.get(wallet.walletId) ??
       ({
@@ -1290,9 +1324,15 @@ export async function buildWalletAttributionMap(
     const criticalSignals30d = signalSummary.criticalSignals30d;
     const avgSignalScore30d = signalSummary.avgSignalScore30d;
 
-    const candidateByKey = new Map<WalletAttributionPrimaryKey, CandidateScore>();
+    const candidateByKey = new Map<
+      WalletAttributionPrimaryKey,
+      CandidateScore
+    >();
     for (const [venue, stats] of venueStatsMap.entries()) {
-      computed.maxStakeUsdAnyVenue = Math.max(computed.maxStakeUsdAnyVenue, stats.maxStakeUsd);
+      computed.maxStakeUsdAnyVenue = Math.max(
+        computed.maxStakeUsdAnyVenue,
+        stats.maxStakeUsd,
+      );
       const ratio = stats.maxStakeToMarketVolRatio;
       if (ratio != null) {
         computed.maxStakeToMarketVolRatioAnyVenue =
@@ -1433,7 +1473,9 @@ export function walletMatchesFilters(
     labelMode?: "any" | "all";
   },
 ): boolean {
-  const tagsFilter = (filters.tags ?? []).map((value) => value.trim()).filter(Boolean);
+  const tagsFilter = (filters.tags ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean);
   if (tagsFilter.length > 0) {
     const walletTagSet = new Set((walletTags ?? []).map((tag) => tag.slug));
     const mode = filters.tagMode ?? "any";
@@ -1463,8 +1505,12 @@ export function walletMatchesFilters(
     const mode = filters.labelMode ?? "any";
     const matched =
       mode === "all"
-        ? labelsFilter.every((label) => labels.has(label as WalletAttributionLabelKey))
-        : labelsFilter.some((label) => labels.has(label as WalletAttributionLabelKey));
+        ? labelsFilter.every((label) =>
+            labels.has(label as WalletAttributionLabelKey),
+          )
+        : labelsFilter.some((label) =>
+            labels.has(label as WalletAttributionLabelKey),
+          );
     if (!matched) return false;
   }
 

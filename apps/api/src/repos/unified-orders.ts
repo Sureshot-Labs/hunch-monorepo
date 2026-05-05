@@ -119,7 +119,9 @@ const buildWhereClause = (
   }
 
   if (filterParams.statusIndex) {
-    conditions.push(`${alias}.status = ANY($${filterParams.statusIndex}::text[])`);
+    conditions.push(
+      `${alias}.status = ANY($${filterParams.statusIndex}::text[])`,
+    );
   }
 
   if (filterParams.marketListIndex && columns.market) {

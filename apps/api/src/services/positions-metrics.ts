@@ -4,11 +4,7 @@ import { updatePositionMetrics } from "../repos/positions-repo.js";
 
 const USDC_DECIMALS = 6;
 const RAW_DECIMALS = 1_000_000;
-const EXECUTED_STATUSES = new Set([
-  "matched",
-  "filled",
-  "partially_filled",
-]);
+const EXECUTED_STATUSES = new Set(["matched", "filled", "partially_filled"]);
 
 type PositionSnapshot = {
   tokenId: string;
@@ -82,7 +78,10 @@ function parseBigInt(value: unknown): bigint | null {
   return null;
 }
 
-function parseRawAmount(value: unknown, decimals = USDC_DECIMALS): number | null {
+function parseRawAmount(
+  value: unknown,
+  decimals = USDC_DECIMALS,
+): number | null {
   const raw = parseBigInt(value);
   if (raw == null) return null;
   const scale = Math.pow(10, decimals);
@@ -293,7 +292,9 @@ export function buildLimitlessFill(row: {
 
   const status = row.status?.toLowerCase() ?? "";
   const isExecuted =
-    row.filled_at != null || EXECUTED_STATUSES.has(status) || status === "filled";
+    row.filled_at != null ||
+    EXECUTED_STATUSES.has(status) ||
+    status === "filled";
   if (!isExecuted) {
     return null;
   }
@@ -663,11 +664,11 @@ export async function recomputePositionMetricsForWallet(
             walletAddress: inputs.walletAddress,
             tokenIds,
           })
-      : fetchDflowFills(pool, {
-          userId: inputs.userId,
-          walletAddress: inputs.walletAddress,
-          tokenIds,
-        }),
+        : fetchDflowFills(pool, {
+            userId: inputs.userId,
+            walletAddress: inputs.walletAddress,
+            tokenIds,
+          }),
   ]);
 
   const fillsByToken = new Map<string, TradeFill[]>();

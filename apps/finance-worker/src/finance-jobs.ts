@@ -71,7 +71,10 @@ let modulePromise: Promise<FinanceJobsModule> | null = null;
 async function loadFinanceJobsModule(): Promise<FinanceJobsModule> {
   const isTsxRuntime = import.meta.url.endsWith(".ts");
   if (isTsxRuntime) {
-    const sourceUrl = new URL("../../api/src/jobs/finance-jobs.ts", import.meta.url);
+    const sourceUrl = new URL(
+      "../../api/src/jobs/finance-jobs.ts",
+      import.meta.url,
+    );
     return (await import(sourceUrl.href)) as FinanceJobsModule;
   }
 

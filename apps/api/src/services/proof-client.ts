@@ -87,7 +87,8 @@ async function readJsonOrText(res: Response): Promise<unknown> {
 }
 
 function extractErrorMessage(payload: unknown): string {
-  if (!payload || typeof payload !== "object") return "Proof verification failed";
+  if (!payload || typeof payload !== "object")
+    return "Proof verification failed";
   const record = payload as Record<string, unknown>;
   const message =
     (typeof record.error === "string" && record.error) ||
@@ -143,7 +144,8 @@ async function fetchProofVerify(args: {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Proof verification failed",
+      error:
+        error instanceof Error ? error.message : "Proof verification failed",
     };
   } finally {
     clearTimeout(timeout);

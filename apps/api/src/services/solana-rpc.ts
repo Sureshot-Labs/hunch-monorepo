@@ -43,9 +43,7 @@ type ParsedTokenAccount = {
   decimals: number;
 };
 
-function parseTokenAccount(
-  entry: unknown,
-): ParsedTokenAccount | null {
+function parseTokenAccount(entry: unknown): ParsedTokenAccount | null {
   if (!isRecord(entry)) return null;
   const pubkey = entry.pubkey;
   if (typeof pubkey !== "string" || pubkey.trim().length === 0) return null;
@@ -211,7 +209,11 @@ export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
   owner: string;
   mint: string;
   timeoutMs: number;
-}): Promise<{ amount: bigint; decimals: number; uiAmountString: string } | null> {
+}): Promise<{
+  amount: bigint;
+  decimals: number;
+  uiAmountString: string;
+} | null> {
   const result = await solanaRpcRequest<{ value: unknown[] }>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
@@ -487,14 +489,11 @@ export async function fetchSolanaSignatureStatus(inputs: {
   timeoutMs: number;
 }): Promise<{ status: "submitted" | "fulfilled" | "failed" } | null> {
   const result = await solanaRpcRequest<{
-    value?: Array<
-      | {
-          confirmationStatus?: string | null;
-          confirmations?: number | null;
-          err?: unknown;
-        }
-      | null
-    >;
+    value?: Array<{
+      confirmationStatus?: string | null;
+      confirmations?: number | null;
+      err?: unknown;
+    } | null>;
   }>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
@@ -525,14 +524,11 @@ export async function waitForSolanaSignatureConfirmation(inputs: {
 
   while (Date.now() < deadline) {
     const result = await solanaRpcRequest<{
-      value?: Array<
-        | {
-            confirmationStatus?: string | null;
-            confirmations?: number | null;
-            err?: unknown;
-          }
-        | null
-      >;
+      value?: Array<{
+        confirmationStatus?: string | null;
+        confirmations?: number | null;
+        err?: unknown;
+      } | null>;
     }>({
       rpcUrls: inputs.rpcUrls,
       timeoutMs: inputs.timeoutMs,
@@ -577,7 +573,9 @@ type ParsedTransactionTokenBalance = {
   decimals: number;
 };
 
-function parseTransactionAccountKey(value: unknown): ParsedTransactionAccountKey | null {
+function parseTransactionAccountKey(
+  value: unknown,
+): ParsedTransactionAccountKey | null {
   if (typeof value === "string" && value.trim().length > 0) {
     return { pubkey: value };
   }
@@ -607,8 +605,10 @@ function parseTransactionTokenBalance(
   if (!isRecord(uiTokenAmount)) return null;
   const amountRaw = uiTokenAmount.amount;
   const decimalsRaw = uiTokenAmount.decimals;
-  if (typeof amountRaw !== "string" || amountRaw.trim().length === 0) return null;
-  if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw)) return null;
+  if (typeof amountRaw !== "string" || amountRaw.trim().length === 0)
+    return null;
+  if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw))
+    return null;
 
   try {
     return {
@@ -771,10 +771,12 @@ export async function fetchSolanaTokenLargestAccounts(inputs: {
     if (typeof address !== "string" || address.trim().length === 0) continue;
 
     const amountRaw = entry.amount;
-    if (typeof amountRaw !== "string" || amountRaw.trim().length === 0) continue;
+    if (typeof amountRaw !== "string" || amountRaw.trim().length === 0)
+      continue;
 
     const decimalsRaw = entry.decimals;
-    if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw)) continue;
+    if (typeof decimalsRaw !== "number" || !Number.isFinite(decimalsRaw))
+      continue;
 
     let amount: bigint;
     try {

@@ -20,8 +20,7 @@ export function summarizePolymarketOnchainOrderExecution(inputs: {
 }): PolymarketOnchainOrderExecutionSummary {
   const makerAmount = inputs.makerAmount >= 0n ? inputs.makerAmount : 0n;
   const remainingRaw = inputs.remaining >= 0n ? inputs.remaining : 0n;
-  const remaining =
-    remainingRaw > makerAmount ? makerAmount : remainingRaw;
+  const remaining = remainingRaw > makerAmount ? makerAmount : remainingRaw;
   const makerFilled = makerAmount > remaining ? makerAmount - remaining : 0n;
 
   return {

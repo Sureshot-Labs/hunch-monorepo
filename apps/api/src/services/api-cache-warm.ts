@@ -187,6 +187,10 @@ export function resolveApiCacheWarmBaseUrlCandidates(): string[] {
     `http://localhost:${env.port}`,
   ];
   return Array.from(
-    new Set(candidates.map((value) => value.trim()).filter((value) => value.length > 0)),
+    new Set(
+      candidates
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+    ),
   );
 }

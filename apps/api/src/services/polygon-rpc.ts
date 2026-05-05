@@ -93,11 +93,21 @@ function createTimedCache<T>(ttlMs: number) {
 const codeCache = createTimedCache<string>(CODE_CACHE_TTL_MS);
 const approvalCache = createTimedCache<boolean>(APPROVAL_CACHE_TTL_MS);
 
-function computeBackoffMs(attempt: number, retryAfterMs: number | null): number {
-  if (retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+function computeBackoffMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
+  if (
+    retryAfterMs != null &&
+    Number.isFinite(retryAfterMs) &&
+    retryAfterMs >= 0
+  ) {
     return Math.min(
       retryAfterMs,
-      Math.max(env.walletIntelRetryBaseBackoffMs, env.walletIntelRetryMaxBackoffMs),
+      Math.max(
+        env.walletIntelRetryBaseBackoffMs,
+        env.walletIntelRetryMaxBackoffMs,
+      ),
     );
   }
   const exponential =
@@ -136,7 +146,9 @@ async function ethRpcRequest<T>(inputs: {
           `Polygon RPC error: ${response.status} ${response.statusText}`,
         );
         lastError = error;
-        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        const retryAfterMs = parseRetryAfterMs(
+          response.headers.get("retry-after"),
+        );
         const retryable =
           attempt < maxAttempts - 1 && isRetryableHttpStatus(response.status);
         if (retryable) {
@@ -157,7 +169,9 @@ async function ethRpcRequest<T>(inputs: {
           typeof rpc.error.message === "string"
             ? rpc.error.message
             : "Unknown Polygon RPC error";
-        const error = new Error(`Polygon RPC ${inputs.method} error: ${message}`);
+        const error = new Error(
+          `Polygon RPC ${inputs.method} error: ${message}`,
+        );
         lastError = error;
         const retryable = attempt < maxAttempts - 1 && isRpcRateLimit(error);
         if (retryable) {
@@ -562,29 +576,30 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
   const contractAddress = ethers.getAddress(inputs.contractAddress);
   const owner = ethers.getAddress(inputs.owner);
   const operator = ethers.getAddress(inputs.operator);
-  const cacheKey = `${inputs.rpcUrl}:${contractAddress}:${owner}:${operator}`.toLowerCase();
+  const cacheKey =
+    `${inputs.rpcUrl}:${contractAddress}:${owner}:${operator}`.toLowerCase();
   return approvalCache.load(
     cacheKey,
     async () => {
-    const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
-      owner,
-      operator,
-    ]);
-    const result = await ethRpcRequest<string>({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      method: "eth_call",
-      params: [{ to: contractAddress, data }, "latest"],
-    });
+      const data = erc1155Iface.encodeFunctionData("isApprovedForAll", [
+        owner,
+        operator,
+      ]);
+      const result = await ethRpcRequest<string>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        method: "eth_call",
+        params: [{ to: contractAddress, data }, "latest"],
+      });
 
-    const decoded = erc1155Iface.decodeFunctionResult(
-      "isApprovedForAll",
-      result,
-    ) as unknown;
-    const value = Array.isArray(decoded) ? decoded[0] : null;
-    if (typeof value !== "boolean") {
-      throw new Error("Polygon RPC: invalid isApprovedForAll result");
-    }
+      const decoded = erc1155Iface.decodeFunctionResult(
+        "isApprovedForAll",
+        result,
+      ) as unknown;
+      const value = Array.isArray(decoded) ? decoded[0] : null;
+      if (typeof value !== "boolean") {
+        throw new Error("Polygon RPC: invalid isApprovedForAll result");
+      }
       return value;
     },
     { bypass: inputs.bypassCache === true },

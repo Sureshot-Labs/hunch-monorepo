@@ -38,10 +38,7 @@ export async function fetchTradesByMint(inputs: {
   if (inputs.cursor) params.set("cursor", inputs.cursor);
 
   const base = env.dflowPredictionMarketsBase.replace(/\/+$/, "");
-  const url = new URL(
-    `/api/v1/trades/by-mint/${inputs.mint}`,
-    `${base}/`,
-  );
+  const url = new URL(`/api/v1/trades/by-mint/${inputs.mint}`, `${base}/`);
   if (params.toString()) url.search = params.toString();
 
   const headers: Record<string, string> = {};

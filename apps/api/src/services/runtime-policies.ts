@@ -865,10 +865,7 @@ const attributionVenueCapabilitiesSchema = z
       .object({ specialistEnabled: strictBoolean })
       .strict()
       .partial(),
-    kalshi: z
-      .object({ specialistEnabled: strictBoolean })
-      .strict()
-      .partial(),
+    kalshi: z.object({ specialistEnabled: strictBoolean }).strict().partial(),
     limitless: z
       .object({ specialistEnabled: strictBoolean })
       .strict()
@@ -1052,10 +1049,17 @@ function getWalletIntelAttributionDefaults(): WalletIntelAttributionPolicy {
 
 export function resolveSignalWindowHours(
   queryWindowHours: number | undefined,
-  policy: Pick<WalletIntelSignalsPolicy, "windowHoursDefault" | "windowHoursMax">,
+  policy: Pick<
+    WalletIntelSignalsPolicy,
+    "windowHoursDefault" | "windowHoursMax"
+  >,
 ): number {
   const windowMax = Math.max(1, Math.trunc(policy.windowHoursMax));
-  const windowDefault = clamp(Math.trunc(policy.windowHoursDefault), 1, windowMax);
+  const windowDefault = clamp(
+    Math.trunc(policy.windowHoursDefault),
+    1,
+    windowMax,
+  );
   if (queryWindowHours == null) return windowDefault;
   const requested = Math.trunc(queryWindowHours);
   if (!Number.isFinite(requested)) return windowDefault;
@@ -1140,10 +1144,12 @@ function getDefaults(): IntelPolicyMap {
       selectionTrackerWinRateLimit:
         env.aiWhaleProfileSelectionTrackerWinRateLimit,
       selectionSignalsLimit: env.aiWhaleProfileSelectionSignalsLimit,
-      selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
+      selectionTrackerWindowHours:
+        env.aiWhaleProfileSelectionTrackerWindowHours,
       selectionTrackerSurfaceLimit:
         env.aiWhaleProfileSelectionTrackerSurfaceLimit,
-      selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
+      selectionSignalsWindowHours:
+        env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
       styleGuide: env.aiWhaleProfileStyleGuide,
       maxTokens: env.aiWhaleProfileMaxTokens,
@@ -1387,7 +1393,10 @@ function normalizeSignalsPolicy(
 function normalizeRefreshPolicy(
   policy: WalletIntelRefreshPolicy,
 ): WalletIntelRefreshPolicy {
-  const marketLimitPerVenue = Math.max(0, Math.trunc(policy.marketLimitPerVenue));
+  const marketLimitPerVenue = Math.max(
+    0,
+    Math.trunc(policy.marketLimitPerVenue),
+  );
   const marketLimitKalshi = Math.max(
     0,
     Math.trunc(policy.marketLimitKalshi || marketLimitPerVenue),
@@ -1408,8 +1417,14 @@ function normalizeRefreshPolicy(
     snapshotHours: Math.max(1, Math.trunc(policy.snapshotHours)),
     backfillSnapshots: Math.max(0, Math.trunc(policy.backfillSnapshots)),
     backfillMaxSteps: Math.max(1, Math.trunc(policy.backfillMaxSteps)),
-    retentionDaysSnapshots: Math.max(0, Math.trunc(policy.retentionDaysSnapshots)),
-    retentionDaysActivity: Math.max(0, Math.trunc(policy.retentionDaysActivity)),
+    retentionDaysSnapshots: Math.max(
+      0,
+      Math.trunc(policy.retentionDaysSnapshots),
+    ),
+    retentionDaysActivity: Math.max(
+      0,
+      Math.trunc(policy.retentionDaysActivity),
+    ),
     retentionDaysMetrics: Math.max(0, Math.trunc(policy.retentionDaysMetrics)),
     minVolume24h: Math.max(0, policy.minVolume24h),
     minActivityUsd: Math.max(0, policy.minActivityUsd),
@@ -1451,7 +1466,10 @@ function normalizeAttributionVenueThresholds(
       0,
       1,
     ),
-    highFrequencyTrades30d: Math.max(0, Math.trunc(value.highFrequencyTrades30d)),
+    highFrequencyTrades30d: Math.max(
+      0,
+      Math.trunc(value.highFrequencyTrades30d),
+    ),
     botMinActiveDays30d: clamp(Math.trunc(value.botMinActiveDays30d), 0, 31),
     botMinActiveUtcHourSlots30d: clamp(
       Math.trunc(value.botMinActiveUtcHourSlots30d),
@@ -1466,7 +1484,10 @@ function normalizeAttributionVenueThresholds(
       Math.trunc(value.insiderCriticalSignals30dMin),
     ),
     insiderAvgSignalScoreMin: clamp(value.insiderAvgSignalScoreMin, 0, 1),
-    insiderMinResolvedBets: Math.max(0, Math.trunc(value.insiderMinResolvedBets)),
+    insiderMinResolvedBets: Math.max(
+      0,
+      Math.trunc(value.insiderMinResolvedBets),
+    ),
     insiderWinRateMin: clamp(value.insiderWinRateMin, 0, 1),
   };
 }
@@ -1498,8 +1519,16 @@ function normalizeAttributionPolicy(
   return {
     enabled: Boolean(policy.enabled),
     display: {
-      listPrimaryCount: clamp(Math.trunc(policy.display.listPrimaryCount), 1, 5),
-      listSecondaryCount: clamp(Math.trunc(policy.display.listSecondaryCount), 0, 10),
+      listPrimaryCount: clamp(
+        Math.trunc(policy.display.listPrimaryCount),
+        1,
+        5,
+      ),
+      listSecondaryCount: clamp(
+        Math.trunc(policy.display.listSecondaryCount),
+        0,
+        10,
+      ),
       detailsSecondaryMax: clamp(
         Math.trunc(policy.display.detailsSecondaryMax),
         0,
@@ -1515,7 +1544,9 @@ function normalizeAttributionPolicy(
       polymarket: normalizeAttributionVenueThresholds(
         policy.venueThresholds.polymarket,
       ),
-      kalshi: normalizeAttributionVenueThresholds(policy.venueThresholds.kalshi),
+      kalshi: normalizeAttributionVenueThresholds(
+        policy.venueThresholds.kalshi,
+      ),
       limitless: normalizeAttributionVenueThresholds(
         policy.venueThresholds.limitless,
       ),
@@ -1556,7 +1587,11 @@ function normalizeAttributionPolicy(
       botEnabled: Boolean(policy.sensitiveLabels.botEnabled),
     },
     queryControls: {
-      whalesBatchSize: clamp(Math.trunc(policy.queryControls.whalesBatchSize), 10, 1_000),
+      whalesBatchSize: clamp(
+        Math.trunc(policy.queryControls.whalesBatchSize),
+        10,
+        1_000,
+      ),
       whalesMaxScanCandidates: clamp(
         Math.trunc(policy.queryControls.whalesMaxScanCandidates),
         100,
@@ -1565,13 +1600,19 @@ function normalizeAttributionPolicy(
     },
     venueCapabilities: {
       polymarket: {
-        specialistEnabled: Boolean(policy.venueCapabilities.polymarket.specialistEnabled),
+        specialistEnabled: Boolean(
+          policy.venueCapabilities.polymarket.specialistEnabled,
+        ),
       },
       kalshi: {
-        specialistEnabled: Boolean(policy.venueCapabilities.kalshi.specialistEnabled),
+        specialistEnabled: Boolean(
+          policy.venueCapabilities.kalshi.specialistEnabled,
+        ),
       },
       limitless: {
-        specialistEnabled: Boolean(policy.venueCapabilities.limitless.specialistEnabled),
+        specialistEnabled: Boolean(
+          policy.venueCapabilities.limitless.specialistEnabled,
+        ),
       },
     },
     multiVenueMerge: {
@@ -1607,7 +1648,10 @@ function normalizeAiWhaleProfilesPolicy(
       0,
       Math.trunc(policy.selectionTrackerWinRateLimit),
     ),
-    selectionSignalsLimit: Math.max(0, Math.trunc(policy.selectionSignalsLimit)),
+    selectionSignalsLimit: Math.max(
+      0,
+      Math.trunc(policy.selectionSignalsLimit),
+    ),
     selectionTrackerWindowHours: clamp(
       Math.trunc(policy.selectionTrackerWindowHours),
       1,
@@ -1639,7 +1683,11 @@ function normalizeApiCacheWarmPolicy(
 ): ApiCacheWarmPolicy {
   return {
     enabled: Boolean(policy.enabled),
-    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 15, 60 * 60 * 24),
+    pollIntervalSec: clamp(
+      Math.trunc(policy.pollIntervalSec),
+      15,
+      60 * 60 * 24,
+    ),
     requestTimeoutMs: clamp(Math.trunc(policy.requestTimeoutMs), 250, 60_000),
     warmFeed: Boolean(policy.warmFeed),
     warmWalletIntel: Boolean(policy.warmWalletIntel),
@@ -1661,7 +1709,11 @@ function normalizeAiClustersPolicy(policy: AiClustersPolicy): AiClustersPolicy {
     maxOutlierRatio: clamp(policy.maxOutlierRatio, 0, 1),
     analysisMinSpread: clamp(policy.analysisMinSpread, 0, 1),
     analysisMinQuality: clamp(policy.analysisMinQuality, 0, 1),
-    analysisMinVenueCount: clamp(Math.trunc(policy.analysisMinVenueCount), 1, 20),
+    analysisMinVenueCount: clamp(
+      Math.trunc(policy.analysisMinVenueCount),
+      1,
+      20,
+    ),
     analysisConcurrency: clamp(Math.trunc(policy.analysisConcurrency), 1, 20),
     debugLogs: Boolean(policy.debugLogs),
     maxClustersPerRun: Math.max(1, Math.trunc(policy.maxClustersPerRun)),
@@ -1690,9 +1742,14 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
       policy.triggerMode === "cron" || policy.triggerMode === "interval"
         ? policy.triggerMode
         : "interval",
-    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    pollIntervalSec: clamp(
+      Math.trunc(policy.pollIntervalSec),
+      60,
+      60 * 60 * 24,
+    ),
     scheduleCron:
-      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+      typeof policy.scheduleCron === "string" &&
+      policy.scheduleCron.trim().length > 0
         ? policy.scheduleCron.trim()
         : null,
     runWindowMinutes: clamp(
@@ -1700,11 +1757,7 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
       1,
       60 * 24 * 30,
     ),
-    maxRunsPerWindow: clamp(
-      Math.trunc(policy.maxRunsPerWindow ?? 1),
-      1,
-      1_000,
-    ),
+    maxRunsPerWindow: clamp(Math.trunc(policy.maxRunsPerWindow ?? 1), 1, 1_000),
     maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay ?? 24), 1, 1_000),
     budgetWindowMinutes: clamp(
       Math.trunc(policy.budgetWindowMinutes ?? 1_440),
@@ -1795,7 +1848,11 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
       new Set(
         (domains ?? [])
           .map((value) =>
-            value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, ""),
+            value
+              .trim()
+              .toLowerCase()
+              .replace(/^https?:\/\//, "")
+              .replace(/^www\./, ""),
           )
           .filter((value) => value.length > 0),
       ),
@@ -1808,21 +1865,42 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
       policy.triggerMode === "cron" || policy.triggerMode === "interval"
         ? policy.triggerMode
         : "interval",
-    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    pollIntervalSec: clamp(
+      Math.trunc(policy.pollIntervalSec),
+      60,
+      60 * 60 * 24,
+    ),
     scheduleCron:
-      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+      typeof policy.scheduleCron === "string" &&
+      policy.scheduleCron.trim().length > 0
         ? policy.scheduleCron.trim()
         : null,
-    runWindowMinutes: clamp(Math.trunc(policy.runWindowMinutes), 1, 60 * 24 * 30),
+    runWindowMinutes: clamp(
+      Math.trunc(policy.runWindowMinutes),
+      1,
+      60 * 24 * 30,
+    ),
     maxRunsPerWindow: clamp(Math.trunc(policy.maxRunsPerWindow), 1, 1_000),
     maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
-    budgetWindowMinutes: clamp(Math.trunc(policy.budgetWindowMinutes), 1, 60 * 24 * 30),
+    budgetWindowMinutes: clamp(
+      Math.trunc(policy.budgetWindowMinutes),
+      1,
+      60 * 24 * 30,
+    ),
     budgetWindowUsd: clamp(policy.budgetWindowUsd, 0, 1_000_000),
     dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
     estimatedRunCostUsd: clamp(policy.estimatedRunCostUsd, 0, 100_000),
     lockTtlSec: clamp(Math.trunc(policy.lockTtlSec), 30, 60 * 60 * 24),
-    lockHeartbeatSec: clamp(Math.trunc(policy.lockHeartbeatSec), 10, 60 * 60 * 24),
-    artifactTtlSec: clamp(Math.trunc(policy.artifactTtlSec), 60, 60 * 60 * 24 * 30),
+    lockHeartbeatSec: clamp(
+      Math.trunc(policy.lockHeartbeatSec),
+      10,
+      60 * 60 * 24,
+    ),
+    artifactTtlSec: clamp(
+      Math.trunc(policy.artifactTtlSec),
+      60,
+      60 * 60 * 24 * 30,
+    ),
     stateTtlSec: clamp(Math.trunc(policy.stateTtlSec), 60, 60 * 60 * 24 * 30),
     statusTtlSec: clamp(Math.trunc(policy.statusTtlSec), 60, 60 * 60 * 24 * 30),
     reuseMode:
@@ -1856,10 +1934,26 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
     timeoutSec: clamp(Math.trunc(policy.timeoutSec), 5, 60 * 10),
     maxRetries: clamp(Math.trunc(policy.maxRetries), 0, 10),
     retryBaseMs: clamp(Math.trunc(policy.retryBaseMs), 100, 60_000),
-    maxTotalInputTokens: clamp(Math.trunc(policy.maxTotalInputTokens), 1_000, 10_000_000),
-    maxTotalOutputTokens: clamp(Math.trunc(policy.maxTotalOutputTokens), 1_000, 10_000_000),
-    maxTotalToolAttempts: clamp(Math.trunc(policy.maxTotalToolAttempts), 1, 100_000),
-    maxToolAttemptsPerCall: clamp(Math.trunc(policy.maxToolAttemptsPerCall), 1, 1_000),
+    maxTotalInputTokens: clamp(
+      Math.trunc(policy.maxTotalInputTokens),
+      1_000,
+      10_000_000,
+    ),
+    maxTotalOutputTokens: clamp(
+      Math.trunc(policy.maxTotalOutputTokens),
+      1_000,
+      10_000_000,
+    ),
+    maxTotalToolAttempts: clamp(
+      Math.trunc(policy.maxTotalToolAttempts),
+      1,
+      100_000,
+    ),
+    maxToolAttemptsPerCall: clamp(
+      Math.trunc(policy.maxToolAttemptsPerCall),
+      1,
+      1_000,
+    ),
     maxEvidencePerCall: clamp(Math.trunc(policy.maxEvidencePerCall), 1, 100),
     maxEvidenceTotal: clamp(Math.trunc(policy.maxEvidenceTotal), 1, 10_000),
     windowHoursL1: clamp(Math.trunc(policy.windowHoursL1), 1, 24 * 30),
@@ -1899,7 +1993,11 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
     enforceFreshness: Boolean(policy.enforceFreshness),
     reportTopLeaves: clamp(Math.trunc(policy.reportTopLeaves), 1, 200),
     reportTopEvidence: clamp(Math.trunc(policy.reportTopEvidence), 1, 200),
-    warmStartEvidenceLimit: clamp(Math.trunc(policy.warmStartEvidenceLimit), 1, 5_000),
+    warmStartEvidenceLimit: clamp(
+      Math.trunc(policy.warmStartEvidenceLimit),
+      1,
+      5_000,
+    ),
     warmStartMinSimilarity: clamp(policy.warmStartMinSimilarity, 0, 1),
     warmStartQueueBoost: clamp(policy.warmStartQueueBoost, 0, 10),
     sameRunNoveltyAlpha: clamp(policy.sameRunNoveltyAlpha, 0, 20),
@@ -1920,21 +2018,42 @@ function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
       policy.triggerMode === "cron" || policy.triggerMode === "interval"
         ? policy.triggerMode
         : "interval",
-    pollIntervalSec: clamp(Math.trunc(policy.pollIntervalSec), 60, 60 * 60 * 24),
+    pollIntervalSec: clamp(
+      Math.trunc(policy.pollIntervalSec),
+      60,
+      60 * 60 * 24,
+    ),
     scheduleCron:
-      typeof policy.scheduleCron === "string" && policy.scheduleCron.trim().length > 0
+      typeof policy.scheduleCron === "string" &&
+      policy.scheduleCron.trim().length > 0
         ? policy.scheduleCron.trim()
         : null,
-    runWindowMinutes: clamp(Math.trunc(policy.runWindowMinutes), 1, 60 * 24 * 30),
+    runWindowMinutes: clamp(
+      Math.trunc(policy.runWindowMinutes),
+      1,
+      60 * 24 * 30,
+    ),
     maxRunsPerWindow: clamp(Math.trunc(policy.maxRunsPerWindow), 1, 1_000),
     maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
-    budgetWindowMinutes: clamp(Math.trunc(policy.budgetWindowMinutes), 1, 60 * 24 * 30),
+    budgetWindowMinutes: clamp(
+      Math.trunc(policy.budgetWindowMinutes),
+      1,
+      60 * 24 * 30,
+    ),
     budgetWindowUsd: clamp(policy.budgetWindowUsd, 0, 1_000_000),
     dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
     estimatedRunCostUsd: clamp(policy.estimatedRunCostUsd, 0, 100_000),
     lockTtlSec: clamp(Math.trunc(policy.lockTtlSec), 30, 60 * 60 * 24),
-    lockHeartbeatSec: clamp(Math.trunc(policy.lockHeartbeatSec), 10, 60 * 60 * 24),
-    artifactTtlSec: clamp(Math.trunc(policy.artifactTtlSec), 60, 60 * 60 * 24 * 30),
+    lockHeartbeatSec: clamp(
+      Math.trunc(policy.lockHeartbeatSec),
+      10,
+      60 * 60 * 24,
+    ),
+    artifactTtlSec: clamp(
+      Math.trunc(policy.artifactTtlSec),
+      60,
+      60 * 60 * 24 * 30,
+    ),
     statusTtlSec: clamp(Math.trunc(policy.statusTtlSec), 60, 60 * 60 * 24 * 30),
     inputDigestEnabled: Boolean(policy.inputDigestEnabled),
     model: policy.model.trim(),
@@ -1990,11 +2109,17 @@ function normalizeMerged<K extends IntelPolicyKey>(
 ): IntelPolicyMap[K] {
   switch (key) {
     case "auth_access":
-      return normalizeAuthAccessPolicy(merged as AuthAccessPolicy) as IntelPolicyMap[K];
+      return normalizeAuthAccessPolicy(
+        merged as AuthAccessPolicy,
+      ) as IntelPolicyMap[K];
     case "wallet_intel_signals":
-      return normalizeSignalsPolicy(merged as WalletIntelSignalsPolicy) as IntelPolicyMap[K];
+      return normalizeSignalsPolicy(
+        merged as WalletIntelSignalsPolicy,
+      ) as IntelPolicyMap[K];
     case "wallet_intel_refresh":
-      return normalizeRefreshPolicy(merged as WalletIntelRefreshPolicy) as IntelPolicyMap[K];
+      return normalizeRefreshPolicy(
+        merged as WalletIntelRefreshPolicy,
+      ) as IntelPolicyMap[K];
     case "wallet_intel_attribution":
       return normalizeAttributionPolicy(
         merged as WalletIntelAttributionPolicy,
@@ -2004,17 +2129,29 @@ function normalizeMerged<K extends IntelPolicyKey>(
         merged as ApiCacheWarmPolicy,
       ) as IntelPolicyMap[K];
     case "ai_whale_profiles":
-      return normalizeAiWhaleProfilesPolicy(merged as AiWhaleProfilesPolicy) as IntelPolicyMap[K];
+      return normalizeAiWhaleProfilesPolicy(
+        merged as AiWhaleProfilesPolicy,
+      ) as IntelPolicyMap[K];
     case "ai_clusters":
-      return normalizeAiClustersPolicy(merged as AiClustersPolicy) as IntelPolicyMap[K];
+      return normalizeAiClustersPolicy(
+        merged as AiClustersPolicy,
+      ) as IntelPolicyMap[K];
     case "market_map":
-      return normalizeMarketMapPolicy(merged as MarketMapPolicy) as IntelPolicyMap[K];
+      return normalizeMarketMapPolicy(
+        merged as MarketMapPolicy,
+      ) as IntelPolicyMap[K];
     case "map_search":
-      return normalizeMapSearchPolicy(merged as MapSearchPolicy) as IntelPolicyMap[K];
+      return normalizeMapSearchPolicy(
+        merged as MapSearchPolicy,
+      ) as IntelPolicyMap[K];
     case "map_signals":
-      return normalizeMapSignalsPolicy(merged as MapSignalsPolicy) as IntelPolicyMap[K];
+      return normalizeMapSignalsPolicy(
+        merged as MapSignalsPolicy,
+      ) as IntelPolicyMap[K];
     case "arbitrage_defaults":
-      return normalizeArbitrageDefaultsPolicy(merged as ArbitrageDefaultsPolicy) as IntelPolicyMap[K];
+      return normalizeArbitrageDefaultsPolicy(
+        merged as ArbitrageDefaultsPolicy,
+      ) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -2096,9 +2233,7 @@ export function getIntelPolicyDefaults<K extends IntelPolicyKey>(
   return getDefaults()[key];
 }
 
-export function getIntelPolicySchema<K extends IntelPolicyKey>(
-  key: K,
-) {
+export function getIntelPolicySchema<K extends IntelPolicyKey>(key: K) {
   return policySchemas[key];
 }
 
@@ -2199,14 +2334,8 @@ export async function resolveAllIntelPolicies(
       "ai_clusters",
       byKey.get("ai_clusters") ?? null,
     ),
-    market_map: resolveFromRow(
-      "market_map",
-      byKey.get("market_map") ?? null,
-    ),
-    map_search: resolveFromRow(
-      "map_search",
-      byKey.get("map_search") ?? null,
-    ),
+    market_map: resolveFromRow("market_map", byKey.get("market_map") ?? null),
+    map_search: resolveFromRow("map_search", byKey.get("map_search") ?? null),
     map_signals: resolveFromRow(
       "map_signals",
       byKey.get("map_signals") ?? null,

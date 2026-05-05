@@ -45,7 +45,9 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
-export function parseIntervalMinutes(interval: string | undefined): number | null {
+export function parseIntervalMinutes(
+  interval: string | undefined,
+): number | null {
   if (!interval) return null;
   const trimmed = interval.trim();
   if (!trimmed) return null;
@@ -102,15 +104,18 @@ export function resolveBaseIntervalWithCap(inputs: {
       ? [...inputs.supportedMinutes].sort((a, b) => a - b)
       : null;
   const baseMinutes = supported
-    ? supported.find((minutes) => minutes >= minIntervalMinutes) ??
-      supported[supported.length - 1]
+    ? (supported.find((minutes) => minutes >= minIntervalMinutes) ??
+      supported[supported.length - 1])
     : minIntervalMinutes;
 
   const requestedMinutes =
     inputs.requestedMinutes && inputs.requestedMinutes > 0
       ? Math.floor(inputs.requestedMinutes)
       : null;
-  const normalizedMinutes = Math.max(requestedMinutes ?? baseMinutes, baseMinutes);
+  const normalizedMinutes = Math.max(
+    requestedMinutes ?? baseMinutes,
+    baseMinutes,
+  );
 
   return {
     baseMinutes,
@@ -223,9 +228,10 @@ export function resolveKalshiBaseInterval(
   return 1440;
 }
 
-export function resolveLimitlessBaseInterval(
-  periodIntervalMinutes: number,
-): { interval: LimitlessInterval; minutes: number } {
+export function resolveLimitlessBaseInterval(periodIntervalMinutes: number): {
+  interval: LimitlessInterval;
+  minutes: number;
+} {
   const requested = Number.isFinite(periodIntervalMinutes)
     ? Math.max(1, periodIntervalMinutes)
     : 1;
@@ -313,9 +319,7 @@ export function parseLimitlessCandlesticks(
       parseTimestampSeconds(entry.ts) ??
       parseTimestampSeconds(entry.t);
     const price =
-      toNumber(entry.price) ??
-      toNumber(entry.p) ??
-      toNumber(entry.value);
+      toNumber(entry.price) ?? toNumber(entry.p) ?? toNumber(entry.value);
     if (t == null || price == null) continue;
     candles.push({ t, o: price, h: price, l: price, c: price });
   }

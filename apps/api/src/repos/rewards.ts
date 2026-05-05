@@ -270,7 +270,10 @@ export async function listRewardsMultiplierOverrides(
     ) w on true
     ${whereSql}
   `;
-  const { rows: countRows } = await pool.query<{ total: string }>(countSql, params);
+  const { rows: countRows } = await pool.query<{ total: string }>(
+    countSql,
+    params,
+  );
 
   const dataParams: PgParams = [...params, inputs.limit, inputs.offset];
   const rowsSql = `
@@ -472,7 +475,10 @@ export async function lockUserReferralCodeByUserId(
   pool: DbQuery,
   userId: string,
 ): Promise<{ id: string; referral_code: string | null } | null> {
-  const { rows } = await pool.query<{ id: string; referral_code: string | null }>(
+  const { rows } = await pool.query<{
+    id: string;
+    referral_code: string | null;
+  }>(
     `
       select id, referral_code
       from users
@@ -666,11 +672,15 @@ export async function fetchFeeTotalsByChain(
   for (const row of rows) {
     const canonicalChainId = normalizeRewardsChainId(row.chain_id);
     if (!canonicalChainId) continue;
-    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const existing = totals[canonicalChainId] ?? {
+      pending: "0",
+      collected: "0",
+    };
     const pendingMicro =
       decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
     const collectedMicro =
-      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+      decimalToMicroFloor(existing.collected) +
+      decimalToMicroFloor(row.collected);
     totals[canonicalChainId] = {
       pending: microToDecimalString(pendingMicro),
       collected: microToDecimalString(collectedMicro),
@@ -767,11 +777,15 @@ export async function fetchReferralFeeTotalsByChain(
   for (const row of rows) {
     const canonicalChainId = normalizeRewardsChainId(row.chain_id);
     if (!canonicalChainId) continue;
-    const existing = totals[canonicalChainId] ?? { pending: "0", collected: "0" };
+    const existing = totals[canonicalChainId] ?? {
+      pending: "0",
+      collected: "0",
+    };
     const pendingMicro =
       decimalToMicroFloor(existing.pending) + decimalToMicroFloor(row.pending);
     const collectedMicro =
-      decimalToMicroFloor(existing.collected) + decimalToMicroFloor(row.collected);
+      decimalToMicroFloor(existing.collected) +
+      decimalToMicroFloor(row.collected);
     totals[canonicalChainId] = {
       pending: microToDecimalString(pendingMicro),
       collected: microToDecimalString(collectedMicro),
@@ -832,7 +846,9 @@ export async function fetchClaimedTotalsByChain(
     if (!canonicalChainId) continue;
     const existingMicro = decimalToMicroFloor(totals[canonicalChainId]);
     const currentMicro = decimalToMicroFloor(row.total);
-    totals[canonicalChainId] = microToDecimalString(existingMicro + currentMicro);
+    totals[canonicalChainId] = microToDecimalString(
+      existingMicro + currentMicro,
+    );
   }
   return totals;
 }
@@ -1141,7 +1157,9 @@ type RewardsLeaderboardRowDb = {
   wallet_address: string | null;
 };
 
-function mapLeaderboardRow(row: RewardsLeaderboardRowDb): RewardsLeaderboardRow {
+function mapLeaderboardRow(
+  row: RewardsLeaderboardRowDb,
+): RewardsLeaderboardRow {
   return {
     userId: row.user_id,
     rank: Number(row.rank ?? 0),

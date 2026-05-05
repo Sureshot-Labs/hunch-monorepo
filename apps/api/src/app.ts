@@ -28,7 +28,10 @@ function sanitizeErrorEnvelope(
   delete sanitized.details;
   delete sanitized.payload;
   delete sanitized.cause;
-  if (typeof sanitized.error !== "string" || sanitized.error.trim().length === 0) {
+  if (
+    typeof sanitized.error !== "string" ||
+    sanitized.error.trim().length === 0
+  ) {
     sanitized.error = "Internal server error";
   }
   return sanitized;

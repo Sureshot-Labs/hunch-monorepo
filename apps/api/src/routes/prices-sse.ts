@@ -74,7 +74,8 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         await releaseDistributedSlot(activeSlotKey, slotTtlMs);
         reply.code(503);
         return reply.send({
-          error: status === "loading" ? "Redis loading, retry" : "Redis unavailable",
+          error:
+            status === "loading" ? "Redis loading, retry" : "Redis unavailable",
         });
       }
 
@@ -177,9 +178,12 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        unsubscribeMarketState = await subscribeToMarketStates(ids, (payload) => {
-          send("market_state", payload);
-        });
+        unsubscribeMarketState = await subscribeToMarketStates(
+          ids,
+          (payload) => {
+            send("market_state", payload);
+          },
+        );
       } catch (err) {
         request.log.warn({ err }, "market-state SSE subscribe failed");
       }
@@ -194,7 +198,8 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       }, 20000);
 
       // Keep currently subscribed tokens sticky while the stream is open.
-      const stickyMarkIntervalMs = Math.max(5, env.hotStreamMarkIntervalSec) * 1000;
+      const stickyMarkIntervalMs =
+        Math.max(5, env.hotStreamMarkIntervalSec) * 1000;
       sticky = setInterval(() => {
         void markStreamHotTokens({ tokenIds: ids });
       }, stickyMarkIntervalMs);
@@ -211,7 +216,6 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       if (typeof sessionTimeout.unref === "function") {
         sessionTimeout.unref();
       }
-
     },
   );
 };

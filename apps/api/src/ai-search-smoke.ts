@@ -4,7 +4,10 @@ import { fileURLToPath } from "url";
 import { config } from "dotenv";
 import { createHash } from "crypto";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 console.log(`[ai-search-smoke] Loading env from ${envPath}`);
 config({ path: envPath, override: false });
 
@@ -276,7 +279,7 @@ const ZERO_COST: CostEstimate = {
 };
 
 function parseFlag(argv: string[], name: string): string | undefined {
-  const idx = argv.findIndex(value => value === name);
+  const idx = argv.findIndex((value) => value === name);
   if (idx === -1) return undefined;
   return argv[idx + 1];
 }
@@ -292,7 +295,10 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-function parseNonNegativeFloat(value: string | undefined, fallback: number): number {
+function parseNonNegativeFloat(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (!value) return fallback;
   const parsed = Number.parseFloat(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
@@ -334,8 +340,10 @@ function parseTiers(value: string | undefined): Set<Tier> {
   if (!value) return new Set<Tier>(["A", "B", "C"]);
   const parsed = value
     .split(",")
-    .map(entry => entry.trim().toUpperCase())
-    .filter(entry => entry === "A" || entry === "B" || entry === "C") as Tier[];
+    .map((entry) => entry.trim().toUpperCase())
+    .filter(
+      (entry) => entry === "A" || entry === "B" || entry === "C",
+    ) as Tier[];
   if (parsed.length === 0) return new Set<Tier>(["A", "B", "C"]);
   return new Set(parsed);
 }
@@ -407,7 +415,10 @@ function resolveArgs(argv: string[]): Args {
     mode: parseMode(parseFlag(argv, "--mode")),
     tiers: parseTiers(parseFlag(argv, "--tiers")),
     maxTopics: parsePositiveInt(parseFlag(argv, "--max-topics"), 8),
-    maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 600),
+    maxOutputTokens: parsePositiveInt(
+      parseFlag(argv, "--max-output-tokens"),
+      600,
+    ),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 120),
     concurrency: Math.max(
       1,
@@ -419,27 +430,41 @@ function resolveArgs(argv: string[]): Args {
     ),
     retryBaseMs: Math.max(
       100,
-      Math.min(5_000, parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 800)),
+      Math.min(
+        5_000,
+        parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 800),
+      ),
     ),
     maxTurns,
     stage1Turns,
     maxCallsPerTopic: Math.max(
       1,
-      Math.min(3, parsePositiveInt(parseFlag(argv, "--max-calls-per-topic"), 2)),
+      Math.min(
+        3,
+        parsePositiveInt(parseFlag(argv, "--max-calls-per-topic"), 2),
+      ),
     ),
     maxToolAttemptsPerTopic: Math.max(
       1,
-      Math.min(200, parsePositiveInt(parseFlag(argv, "--max-tool-attempts"), 20)),
+      Math.min(
+        200,
+        parsePositiveInt(parseFlag(argv, "--max-tool-attempts"), 20),
+      ),
     ),
-    strictProvenance: parseBoolean(parseFlag(argv, "--strict-provenance"), true),
+    strictProvenance: parseBoolean(
+      parseFlag(argv, "--strict-provenance"),
+      true,
+    ),
     sampleSeed: parseInteger(parseFlag(argv, "--sample-seed")),
     saveRaw: hasFlag(argv, "--save-raw"),
     priceInputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-input-per-m") ?? process.env.XAI_PRICE_INPUT_PER_M,
+      parseFlag(argv, "--price-input-per-m") ??
+        process.env.XAI_PRICE_INPUT_PER_M,
       0.2,
     ),
     priceOutputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-output-per-m") ?? process.env.XAI_PRICE_OUTPUT_PER_M,
+      parseFlag(argv, "--price-output-per-m") ??
+        process.env.XAI_PRICE_OUTPUT_PER_M,
       0.5,
     ),
     priceWebPer1k: parseNonNegativeFloat(
@@ -502,9 +527,9 @@ function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
   if (!payload || typeof payload !== "object") return [];
   const output = (payload as Record<string, unknown>).output;
   if (!Array.isArray(output)) return [];
-  return output.filter(
-    item => item && typeof item === "object",
-  ) as Array<Record<string, unknown>>;
+  return output.filter((item) => item && typeof item === "object") as Array<
+    Record<string, unknown>
+  >;
 }
 
 function extractCitationsCount(payload: unknown): number {
@@ -542,7 +567,9 @@ function extractCitationsCount(payload: unknown): number {
   return urls.size;
 }
 
-function extractServerSideToolUsage(payload: unknown): Record<string, unknown> | null {
+function extractServerSideToolUsage(
+  payload: unknown,
+): Record<string, unknown> | null {
   if (!payload || typeof payload !== "object") return null;
   const top = (payload as Record<string, unknown>).server_side_tool_usage;
   if (top && typeof top === "object" && !Array.isArray(top)) {
@@ -550,7 +577,8 @@ function extractServerSideToolUsage(payload: unknown): Record<string, unknown> |
   }
   const usage = (payload as Record<string, unknown>).usage;
   if (!usage || typeof usage !== "object") return null;
-  const details = (usage as Record<string, unknown>).server_side_tool_usage_details;
+  const details = (usage as Record<string, unknown>)
+    .server_side_tool_usage_details;
   if (details && typeof details === "object" && !Array.isArray(details)) {
     return details as Record<string, unknown>;
   }
@@ -586,7 +614,8 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
   const inputDetails =
     obj.input_tokens_details && typeof obj.input_tokens_details === "object"
       ? (obj.input_tokens_details as Record<string, unknown>)
-      : obj.prompt_tokens_details && typeof obj.prompt_tokens_details === "object"
+      : obj.prompt_tokens_details &&
+          typeof obj.prompt_tokens_details === "object"
         ? (obj.prompt_tokens_details as Record<string, unknown>)
         : null;
   const outputDetails =
@@ -601,7 +630,8 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
   const numServerSideToolsUsed = Number(obj.num_server_side_tools_used ?? 0);
   const providerCostUsdTicksRaw = obj.cost_in_usd_ticks;
   const providerCostUsdTicks =
-    typeof providerCostUsdTicksRaw === "number" && Number.isFinite(providerCostUsdTicksRaw)
+    typeof providerCostUsdTicksRaw === "number" &&
+    Number.isFinite(providerCostUsdTicksRaw)
       ? providerCostUsdTicksRaw
       : null;
   const detailsRaw = obj.server_side_tool_usage_details;
@@ -633,7 +663,9 @@ function extractUsageMetrics(payload: unknown): UsageMetrics {
     outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
     totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
     reasoningTokens: Number.isFinite(reasoningTokens) ? reasoningTokens : 0,
-    cachedInputTokens: Number.isFinite(cachedInputTokens) ? cachedInputTokens : 0,
+    cachedInputTokens: Number.isFinite(cachedInputTokens)
+      ? cachedInputTokens
+      : 0,
     numServerSideToolsUsed: Number.isFinite(numServerSideToolsUsed)
       ? numServerSideToolsUsed
       : 0,
@@ -663,7 +695,7 @@ function extractToolAttemptCount(payload: unknown): number {
   const topToolCalls = (payload as Record<string, unknown>).tool_calls;
   if (Array.isArray(topToolCalls)) return topToolCalls.length;
   const outputItems = extractOutputItems(payload);
-  return outputItems.filter(output => {
+  return outputItems.filter((output) => {
     const type = output.type;
     if (typeof type !== "string") return false;
     return (
@@ -685,7 +717,7 @@ function normalizeDomain(raw: string): string {
 function isTrustedWebDomain(raw: string): boolean {
   const domain = normalizeDomain(raw);
   return TRUSTED_WEB_DOMAINS.some(
-    trusted => domain === trusted || domain.endsWith(`.${trusted}`),
+    (trusted) => domain === trusted || domain.endsWith(`.${trusted}`),
   );
 }
 
@@ -711,12 +743,12 @@ function extractJsonCandidate(raw: string): string | null {
         escaped = false;
       } else if (ch === "\\") {
         escaped = true;
-      } else if (ch === "\"") {
+      } else if (ch === '"') {
         inString = false;
       }
       continue;
     }
-    if (ch === "\"") {
+    if (ch === '"') {
       inString = true;
       continue;
     }
@@ -790,19 +822,22 @@ function parseStructuredOutput(raw: string): ParsedStructuredResult {
       ? rawStatus
       : "INVALID";
   const evidence = Array.isArray(obj.evidence)
-    ? obj.evidence.filter(item => item && typeof item === "object")
+    ? obj.evidence.filter((item) => item && typeof item === "object")
     : [];
-  const supportsTopicCount = evidence.filter(item => {
+  const supportsTopicCount = evidence.filter((item) => {
     const value = (item as Record<string, unknown>).supports_topic;
     return value === true;
   }).length;
-  const claimsCount = evidence.filter(item => {
+  const claimsCount = evidence.filter((item) => {
     const claim = (item as Record<string, unknown>).claim;
     return typeof claim === "string" && claim.trim().length > 0;
   }).length;
   const domains = evidence
-    .map(item => (item as Record<string, unknown>).source_domain)
-    .filter((domain): domain is string => typeof domain === "string" && domain.trim().length > 0)
+    .map((item) => (item as Record<string, unknown>).source_domain)
+    .filter(
+      (domain): domain is string =>
+        typeof domain === "string" && domain.trim().length > 0,
+    )
     .map(normalizeDomain);
   const uniqueDomainCount = new Set(domains).size;
   const trustedEvidenceCount = domains.filter(isTrustedWebDomain).length;
@@ -830,9 +865,15 @@ function resolveTopicPrompt(topic: QueryExample): string {
 function promptForMode(prompt: string, mode: SearchMode): string {
   if (mode === "combined") return prompt;
   if (mode === "web_only") {
-    return prompt.replaceAll("web_search and x_search together", "web_search only");
+    return prompt.replaceAll(
+      "web_search and x_search together",
+      "web_search only",
+    );
   }
-  return prompt.replaceAll("web_search and x_search together", "internal context only");
+  return prompt.replaceAll(
+    "web_search and x_search together",
+    "internal context only",
+  );
 }
 
 function resolveMinEvidence(topic: QueryExample): number {
@@ -858,7 +899,7 @@ function stableStringify(value: unknown): string {
   }
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort((a, b) => a.localeCompare(b));
-  return `{${keys.map(key => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(",")}}`;
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(",")}}`;
 }
 
 function buildCallId(call: Omit<PlannedCall, "callId">): string {
@@ -876,7 +917,10 @@ function buildPlannedCalls(topics: QueryExample[], args: Args): PlannedCall[] {
   const seen = new Set<string>();
   for (const topic of topics) {
     if (!args.tiers.has(topic.tier)) continue;
-    if (!Number.isFinite(topic.pack.combinedCount) || topic.pack.combinedCount <= 0) {
+    if (
+      !Number.isFinite(topic.pack.combinedCount) ||
+      topic.pack.combinedCount <= 0
+    ) {
       continue;
     }
     const minEvidence = resolveMinEvidence(topic);
@@ -919,7 +963,9 @@ function validateTopicsContract(summary: TopicsSummary): void {
     );
   }
   if (!summary.searchPlan || !Array.isArray(summary.searchPlan.queryExamples)) {
-    throw new Error("Invalid topics file: expected searchPlan.queryExamples array");
+    throw new Error(
+      "Invalid topics file: expected searchPlan.queryExamples array",
+    );
   }
 }
 
@@ -929,12 +975,8 @@ function deterministicTopicOrder(
 ): QueryExample[] {
   if (seed == null) return topics;
   return [...topics].sort((a, b) => {
-    const ha = createHash("sha1")
-      .update(`${seed}|${a.topicKey}`)
-      .digest("hex");
-    const hb = createHash("sha1")
-      .update(`${seed}|${b.topicKey}`)
-      .digest("hex");
+    const ha = createHash("sha1").update(`${seed}|${a.topicKey}`).digest("hex");
+    const hb = createHash("sha1").update(`${seed}|${b.topicKey}`).digest("hex");
     return ha.localeCompare(hb);
   });
 }
@@ -1111,7 +1153,7 @@ function computeBackoffMs(baseMs: number, attempt: number): number {
 }
 
 async function sleep(ms: number): Promise<void> {
-  await new Promise(resolveSleep => setTimeout(resolveSleep, ms));
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 async function callXaiWithRetry(
@@ -1200,7 +1242,11 @@ function extractToolCallCount(usage: unknown): number {
   return 0;
 }
 
-function evaluateProvenance(raw: XaiCallRaw): { ok: boolean; reason: string; toolCallCount: number } {
+function evaluateProvenance(raw: XaiCallRaw): {
+  ok: boolean;
+  reason: string;
+  toolCallCount: number;
+} {
   const toolCallCount = Math.max(
     extractToolCallCount(raw.serverSideToolUsage),
     raw.successfulToolCount,
@@ -1293,8 +1339,13 @@ async function main(): Promise<void> {
   const summary = JSON.parse(raw) as TopicsSummary;
   validateTopicsContract(summary);
   const queryExamples = summary.searchPlan.queryExamples;
-  const eligibleTopics = queryExamples.filter(topic => args.tiers.has(topic.tier));
-  const orderedTopics = deterministicTopicOrder(eligibleTopics, args.sampleSeed);
+  const eligibleTopics = queryExamples.filter((topic) =>
+    args.tiers.has(topic.tier),
+  );
+  const orderedTopics = deterministicTopicOrder(
+    eligibleTopics,
+    args.sampleSeed,
+  );
   const selectedTopics = orderedTopics.slice(0, args.maxTopics);
   const plannedCalls = buildPlannedCalls(selectedTopics, args);
   if (plannedCalls.length === 0) {
@@ -1305,7 +1356,7 @@ async function main(): Promise<void> {
   }
 
   if (args.dryRun) {
-    const dry = plannedCalls.map(item => ({
+    const dry = plannedCalls.map((item) => ({
       callId: item.callId,
       topicKey: item.topicKey,
       tier: item.tier,
@@ -1340,7 +1391,7 @@ async function main(): Promise<void> {
   const results = await runWithConcurrency(
     plannedCalls,
     args.concurrency,
-    async call => {
+    async (call) => {
       const topicStartedAt = Date.now();
       const stageTurns: number[] = [];
       const firstTurns = Math.max(1, Math.min(args.stage1Turns, args.maxTurns));
@@ -1424,11 +1475,13 @@ async function main(): Promise<void> {
           raw.usage.toolUsageDetails.code_interpreter_calls;
         usageAcc.toolUsageDetails.file_search_calls +=
           raw.usage.toolUsageDetails.file_search_calls;
-        usageAcc.toolUsageDetails.mcp_calls += raw.usage.toolUsageDetails.mcp_calls;
+        usageAcc.toolUsageDetails.mcp_calls +=
+          raw.usage.toolUsageDetails.mcp_calls;
         usageAcc.toolUsageDetails.document_search_calls +=
           raw.usage.toolUsageDetails.document_search_calls;
         usageAcc.providerCostUsdTicks =
-          (usageAcc.providerCostUsdTicks ?? 0) + (raw.usage.providerCostUsdTicks ?? 0);
+          (usageAcc.providerCostUsdTicks ?? 0) +
+          (raw.usage.providerCostUsdTicks ?? 0);
 
         costAcc.inputCostUsd += raw.costEstimate.inputCostUsd;
         costAcc.outputCostUsd += raw.costEstimate.outputCostUsd;
@@ -1474,17 +1527,16 @@ async function main(): Promise<void> {
             (current.provenance.ok ? 20 : 0) +
             Math.min(19, current.parsed.supportsTopicCount);
           if (currentScore > bestScore) return current;
-          if (currentScore === bestScore && current.raw.ok && !best.raw.ok) return current;
+          if (currentScore === bestScore && current.raw.ok && !best.raw.ok)
+            return current;
           return best;
         },
-        null as
-          | {
-              turns: number;
-              raw: XaiCallRaw;
-              parsed: ParsedStructuredResult;
-              provenance: { ok: boolean; reason: string; toolCallCount: number };
-            }
-          | null,
+        null as {
+          turns: number;
+          raw: XaiCallRaw;
+          parsed: ParsedStructuredResult;
+          provenance: { ok: boolean; reason: string; toolCallCount: number };
+        } | null,
       );
 
       if (!selected) {
@@ -1524,7 +1576,7 @@ async function main(): Promise<void> {
         provenanceOk: selected.provenance.ok,
         provenanceReason: selected.provenance.reason,
         stagesExecuted: stageRuns.length,
-        stageTurns: stageRuns.map(run => run.turns),
+        stageTurns: stageRuns.map((run) => run.turns),
         earlyStop,
         earlyStopReason,
         toolBudgetExceeded,
@@ -1544,27 +1596,30 @@ async function main(): Promise<void> {
     },
   );
 
-  const success = results.filter(row => row.ok).length;
+  const success = results.filter((row) => row.ok).length;
   const failed = results.length - success;
   const averageMs =
     results.length === 0
       ? 0
-      : Math.round(results.reduce((acc, row) => acc + row.durationMs, 0) / results.length);
+      : Math.round(
+          results.reduce((acc, row) => acc + row.durationMs, 0) /
+            results.length,
+        );
 
   const qaViolations = {
     missingProvenanceForSupported: results.filter(
-      row =>
+      (row) =>
         (row.parsed.status === "OK" || row.parsed.status === "PARTIAL") &&
         row.parsed.supportsTopicCount >= row.minEvidence &&
         !row.provenanceOk,
     ).length,
     belowEvidenceThresholdForOkPartial: results.filter(
-      row =>
+      (row) =>
         (row.parsed.status === "OK" || row.parsed.status === "PARTIAL") &&
         row.parsed.supportsTopicCount < row.minEvidence,
     ).length,
     okWithoutEvidence: results.filter(
-      row => row.parsed.status === "OK" && row.parsed.evidenceCount === 0,
+      (row) => row.parsed.status === "OK" && row.parsed.evidenceCount === 0,
     ).length,
   };
   const qaViolationTotal =
@@ -1627,37 +1682,58 @@ async function main(): Promise<void> {
       callsExecuted: results.length,
       success,
       failed,
-      successRate: results.length > 0 ? Number((success / results.length).toFixed(4)) : 0,
+      successRate:
+        results.length > 0 ? Number((success / results.length).toFixed(4)) : 0,
       averageMs,
-      retried: results.filter(row => row.retried).length,
-      earlyStopped: results.filter(row => row.earlyStop).length,
-      toolBudgetExceeded: results.filter(row => row.toolBudgetExceeded).length,
-      toolAttemptsTotal: results.reduce((sum, row) => sum + row.toolAttemptCount, 0),
+      retried: results.filter((row) => row.retried).length,
+      earlyStopped: results.filter((row) => row.earlyStop).length,
+      toolBudgetExceeded: results.filter((row) => row.toolBudgetExceeded)
+        .length,
+      toolAttemptsTotal: results.reduce(
+        (sum, row) => sum + row.toolAttemptCount,
+        0,
+      ),
       toolAttemptsP95: percentile(
-        results.map(row => row.toolAttemptCount),
+        results.map((row) => row.toolAttemptCount),
         95,
       ),
-      stageCallsTotal: results.reduce((sum, row) => sum + row.stagesExecuted, 0),
+      stageCallsTotal: results.reduce(
+        (sum, row) => sum + row.stagesExecuted,
+        0,
+      ),
       stageCallsP95: percentile(
-        results.map(row => row.stagesExecuted),
+        results.map((row) => row.stagesExecuted),
         95,
       ),
       inputTokens: results.reduce((sum, row) => sum + row.usage.inputTokens, 0),
-      outputTokens: results.reduce((sum, row) => sum + row.usage.outputTokens, 0),
+      outputTokens: results.reduce(
+        (sum, row) => sum + row.usage.outputTokens,
+        0,
+      ),
       estimatedInputCostUsd: Number(
-        results.reduce((sum, row) => sum + row.costEstimate.inputCostUsd, 0).toFixed(6),
+        results
+          .reduce((sum, row) => sum + row.costEstimate.inputCostUsd, 0)
+          .toFixed(6),
       ),
       estimatedOutputCostUsd: Number(
-        results.reduce((sum, row) => sum + row.costEstimate.outputCostUsd, 0).toFixed(6),
+        results
+          .reduce((sum, row) => sum + row.costEstimate.outputCostUsd, 0)
+          .toFixed(6),
       ),
       estimatedTokenCostUsd: Number(
-        results.reduce((sum, row) => sum + row.costEstimate.tokenCostUsd, 0).toFixed(6),
+        results
+          .reduce((sum, row) => sum + row.costEstimate.tokenCostUsd, 0)
+          .toFixed(6),
       ),
       estimatedToolCostUsd: Number(
-        results.reduce((sum, row) => sum + row.costEstimate.toolCostUsd, 0).toFixed(6),
+        results
+          .reduce((sum, row) => sum + row.costEstimate.toolCostUsd, 0)
+          .toFixed(6),
       ),
       estimatedTotalCostUsd: Number(
-        results.reduce((sum, row) => sum + row.costEstimate.totalCostUsd, 0).toFixed(6),
+        results
+          .reduce((sum, row) => sum + row.costEstimate.totalCostUsd, 0)
+          .toFixed(6),
       ),
       providerCostUsdTicks: results.reduce(
         (sum, row) => sum + (row.usage.providerCostUsdTicks ?? 0),
@@ -1665,17 +1741,19 @@ async function main(): Promise<void> {
       ),
     },
     byQueryType: {
-      combined: results.filter(row => row.queryType === "combined").length,
-      web_only: results.filter(row => row.queryType === "web_only").length,
-      internal_only: results.filter(row => row.queryType === "internal_only").length,
+      combined: results.filter((row) => row.queryType === "combined").length,
+      web_only: results.filter((row) => row.queryType === "web_only").length,
+      internal_only: results.filter((row) => row.queryType === "internal_only")
+        .length,
     },
     parsedSummary: {
-      ok: results.filter(row => row.parsed.status === "OK").length,
-      partial: results.filter(row => row.parsed.status === "PARTIAL").length,
-      noEvidence: results.filter(row => row.parsed.status === "NO_EVIDENCE").length,
-      invalid: results.filter(row => row.parsed.status === "INVALID").length,
-      provenanceOk: results.filter(row => row.provenanceOk).length,
-      provenanceMissing: results.filter(row => !row.provenanceOk).length,
+      ok: results.filter((row) => row.parsed.status === "OK").length,
+      partial: results.filter((row) => row.parsed.status === "PARTIAL").length,
+      noEvidence: results.filter((row) => row.parsed.status === "NO_EVIDENCE")
+        .length,
+      invalid: results.filter((row) => row.parsed.status === "INVALID").length,
+      provenanceOk: results.filter((row) => row.provenanceOk).length,
+      provenanceMissing: results.filter((row) => !row.provenanceOk).length,
     },
     outcomeSummary,
     qa: {
@@ -1703,7 +1781,7 @@ async function main(): Promise<void> {
     `[ai-search-smoke] outcomes ok=${outcomeSummary.OK} no_evidence=${outcomeSummary.NO_EVIDENCE} schema_invalid=${outcomeSummary.SCHEMA_INVALID} provider_limit=${outcomeSummary.PROVIDER_LIMIT} provider_error=${outcomeSummary.PROVIDER_ERROR} timeout=${outcomeSummary.TIMEOUT}`,
   );
   console.table(
-    results.map(row => ({
+    results.map((row) => ({
       tier: row.tier,
       type: row.queryType,
       outcome: row.outcomeClass,
@@ -1737,7 +1815,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(error => {
+main().catch((error) => {
   console.error("[ai-search-smoke] failed", error);
   process.exit(1);
 });

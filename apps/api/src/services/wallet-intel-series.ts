@@ -206,7 +206,10 @@ export async function fetchWalletActivitySparklines(
   const bucketMs = bucketHours * 60 * 60 * 1000;
   const startBucketMs = Math.floor(start.getTime() / bucketMs) * bucketMs;
   const endBucketMs = Math.floor(asOf.getTime() / bucketMs) * bucketMs;
-  const rowsByWallet = new Map<string, Map<number, WalletActivitySparklinePoint>>();
+  const rowsByWallet = new Map<
+    string,
+    Map<number, WalletActivitySparklinePoint>
+  >();
 
   for (const row of rows.rows) {
     const bucketStart = new Date(row.bucket_start);
@@ -324,10 +327,7 @@ export async function loadWalletPortfolioPerformanceMap(
   );
 
   for (const row of rows.rows) {
-    byWallet.set(
-      row.wallet_id,
-      resolvePortfolioPerformance(row, rangeHours),
-    );
+    byWallet.set(row.wallet_id, resolvePortfolioPerformance(row, rangeHours));
   }
 
   return byWallet;
@@ -555,9 +555,7 @@ export async function fetchWalletPortfolioPnlSeries(
     }));
 
   const syntheticStart =
-    performance?.baselineApprox === true
-      ? performance.startAsOf
-      : windowStart;
+    performance?.baselineApprox === true ? performance.startAsOf : windowStart;
 
   if (syntheticStart) {
     const firstPoint = points[0] ?? null;

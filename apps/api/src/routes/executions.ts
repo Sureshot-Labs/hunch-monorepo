@@ -46,10 +46,8 @@ export const executionsRoutes: FastifyPluginAsync = async (app) => {
           outcome: row.outcome,
           inputMint: row.input_mint,
           outputMint: row.output_mint,
-          amountIn:
-            row.amount_in != null ? Number(row.amount_in) : null,
-          amountOut:
-            row.amount_out != null ? Number(row.amount_out) : null,
+          amountIn: row.amount_in != null ? Number(row.amount_in) : null,
+          amountOut: row.amount_out != null ? Number(row.amount_out) : null,
           inputDecimals: row.input_decimals ?? null,
           outputDecimals: row.output_decimals ?? null,
           quoteId: row.quote_id,

@@ -83,10 +83,7 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
     url.search = params.toString();
 
     const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      POLY_TRADE_TIMEOUT_MS,
-    );
+    const timeout = setTimeout(() => controller.abort(), POLY_TRADE_TIMEOUT_MS);
 
     try {
       const response = await fetch(url.toString(), {

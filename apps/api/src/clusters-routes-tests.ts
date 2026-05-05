@@ -246,7 +246,12 @@ async function main() {
 
   await redis.set(
     INDEX_KEY,
-    JSON.stringify([clusterLowVolume, clusterAlphaTie, clusterHighScore, clusterId]),
+    JSON.stringify([
+      clusterLowVolume,
+      clusterAlphaTie,
+      clusterHighScore,
+      clusterId,
+    ]),
   );
   await redis.hSet(META_KEY, {
     generated_at: new Date().toISOString(),
@@ -267,7 +272,8 @@ async function main() {
     expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
     analysis: JSON.stringify({
       label: `Cluster route label ${suiteId}`,
-      summary: "- Shared Theme: test\n- Key Difference: test\n- Why It May Be Mispriced: test\n- What to Watch: test",
+      summary:
+        "- Shared Theme: test\n- Key Difference: test\n- Why It May Be Mispriced: test\n- What to Watch: test",
       category: "politics",
       outliers: [marketB],
       confidence: 0.9,
@@ -387,7 +393,10 @@ async function main() {
     const summary = listPayload.items.find((item) => item.id === clusterId);
     assert.ok(summary, "expected seeded cluster in list response");
     assert.equal(summary.matchDiagnostics?.exactMatchRatio, 1);
-    assert.equal(summary.markets[0]?.marketImage, `https://example.com/market-alpha-${suiteId}.png`);
+    assert.equal(
+      summary.markets[0]?.marketImage,
+      `https://example.com/market-alpha-${suiteId}.png`,
+    );
 
     const sortedDescResponse = await app.inject({
       method: "GET",
@@ -419,9 +428,16 @@ async function main() {
     });
     assert.equal(detailResponse.statusCode, 200, detailResponse.body);
     const detailPayload = detailResponse.json<ClusterDetailPayload>();
-    assert.equal(detailPayload.markets.length, 1, "expected outlier market to be hidden");
+    assert.equal(
+      detailPayload.markets.length,
+      1,
+      "expected outlier market to be hidden",
+    );
     assert.equal(detailPayload.markets[0]?.marketId, marketA);
-    assert.equal(detailPayload.markets[0]?.marketSlug, `alpha-market-${suiteId}`);
+    assert.equal(
+      detailPayload.markets[0]?.marketSlug,
+      `alpha-market-${suiteId}`,
+    );
     assert.equal(
       detailPayload.markets[0]?.eventSlug,
       `cluster-route-alpha-${suiteId}`,

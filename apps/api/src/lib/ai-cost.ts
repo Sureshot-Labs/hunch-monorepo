@@ -76,7 +76,8 @@ function pickCostField(
       toFiniteNonNegative(nested.usd) ??
       toFiniteNonNegative(nested.value) ??
       toFiniteNonNegative(nested.amount);
-    if (nestedDirect != null) return { value: nestedDirect, field: `${key}.usd` };
+    if (nestedDirect != null)
+      return { value: nestedDirect, field: `${key}.usd` };
   }
   return null;
 }
@@ -157,7 +158,8 @@ export function computeEstimatedCostUsd(params: EstimateParams): EstimatedCost {
 export function resolveAiCost(params: ResolveParams): ResolvedCost {
   const estimated = computeEstimatedCostUsd(params);
   const providerCostUsd =
-    typeof params.providerCostUsd === "number" && Number.isFinite(params.providerCostUsd)
+    typeof params.providerCostUsd === "number" &&
+    Number.isFinite(params.providerCostUsd)
       ? Math.max(0, params.providerCostUsd)
       : null;
   const providerCostUsdTicks =

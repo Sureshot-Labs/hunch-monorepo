@@ -174,12 +174,12 @@ type LatestSearchMeta = {
 };
 
 function hasFlag(args: string[], flag: string): boolean {
-  return args.some(arg => arg === flag);
+  return args.some((arg) => arg === flag);
 }
 
 function parseFlag(args: string[], flag: string): string | undefined {
   const inlinePrefix = `${flag}=`;
-  const inlineValue = args.find(arg => arg.startsWith(inlinePrefix));
+  const inlineValue = args.find((arg) => arg.startsWith(inlinePrefix));
   if (inlineValue) return inlineValue.slice(inlinePrefix.length);
   const idx = args.indexOf(flag);
   if (idx === -1) return undefined;
@@ -187,7 +187,7 @@ function parseFlag(args: string[], flag: string): string | undefined {
 }
 
 function hasOption(args: string[], flag: string): boolean {
-  return args.some(arg => arg === flag || arg.startsWith(`${flag}=`));
+  return args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
 }
 
 function addArgIfMissing(args: string[], flag: string, value: string): void {
@@ -284,7 +284,8 @@ function parseRunEntries(rawMembers: string[]): RunEntry[] {
         mapRunId: parsed.mapRunId,
         searchRunId:
           typeof parsed.searchRunId === "string" ? parsed.searchRunId : null,
-        inputDigest: typeof parsed.inputDigest === "string" ? parsed.inputDigest : "",
+        inputDigest:
+          typeof parsed.inputDigest === "string" ? parsed.inputDigest : "",
         ts: parsed.ts,
         costUsd: parsed.costUsd,
         result: parsed.result,
@@ -300,7 +301,9 @@ function sumCost(entries: RunEntry[]): number {
   return entries.reduce(
     (acc, item) =>
       acc +
-      (typeof item.chargedCostUsd === "number" ? item.chargedCostUsd : item.costUsd),
+      (typeof item.chargedCostUsd === "number"
+        ? item.chargedCostUsd
+        : item.costUsd),
     0,
   );
 }
@@ -316,7 +319,7 @@ function extractSignalsReport(raw: string): SignalsReportLike {
   if (result.success) return result.data;
   const issues = result.error.issues
     .slice(0, 5)
-    .map(issue => `${issue.path.join(".") || "root"}:${issue.message}`)
+    .map((issue) => `${issue.path.join(".") || "root"}:${issue.message}`)
     .join("; ");
   throw new Error(`invalid_signals_report:${issues}`);
 }
@@ -325,7 +328,10 @@ function toNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function normalizeText(value: string | null | undefined, maxLen: number): string {
+function normalizeText(
+  value: string | null | undefined,
+  maxLen: number,
+): string {
   const normalized = (value ?? "").replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLen) return normalized;
   return normalized.slice(0, maxLen);
@@ -369,7 +375,9 @@ function buildInputDigest(
   searchArtifactRaw: string,
 ): string {
   return createHash("sha1")
-    .update(`map=${mapRunId}|search=${searchRunId ?? ""}|artifact=${searchArtifactRaw}`)
+    .update(
+      `map=${mapRunId}|search=${searchRunId ?? ""}|artifact=${searchArtifactRaw}`,
+    )
     .digest("hex");
 }
 
@@ -399,9 +407,16 @@ async function persistSignalNotes(params: {
   inputDigest: string;
   maxPublishPerRun: number;
 }): Promise<PersistStats> {
-  const { report, runnerRunId, mapRunId, searchRunId, inputDigest, maxPublishPerRun } = params;
+  const {
+    report,
+    runnerRunId,
+    mapRunId,
+    searchRunId,
+    inputDigest,
+    maxPublishPerRun,
+  } = params;
   const signals = ensureArray<SignalsReportSignal>(report.signals)
-    .filter(signal => signal.decision === "publish_candidate")
+    .filter((signal) => signal.decision === "publish_candidate")
     .slice(0, maxPublishPerRun);
 
   const stats: PersistStats = {
@@ -591,9 +606,9 @@ async function persistSignalNotes(params: {
           );
         }
 
-        for (const ref of ensureArray<SignalsReportSignal["evidenceRefs"][number]>(
-          signal.evidenceRefs,
-        )) {
+        for (const ref of ensureArray<
+          SignalsReportSignal["evidenceRefs"][number]
+        >(signal.evidenceRefs)) {
           if (!ref.evidenceId) continue;
           await client.query(
             `
@@ -745,7 +760,10 @@ async function main() {
   }
 
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: "map-signals-runner" });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "map-signals-runner",
+  });
   const lockValue = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const runnerRunId = lockValue;
   const nowMs = Date.now();
@@ -772,10 +790,12 @@ async function main() {
     }
   };
 
-  const detachSignalHandlers = installSignalHandlers(async signal => {
+  const detachSignalHandlers = installSignalHandlers(async (signal) => {
     if (shuttingDownBySignal) return;
     shuttingDownBySignal = true;
-    console.warn(`[map-signals-runner] received ${signal}, releasing lock and exiting`);
+    console.warn(
+      `[map-signals-runner] received ${signal}, releasing lock and exiting`,
+    );
     try {
       await setStatus(redis, config.statusTtlSec, {
         state: "aborted",
@@ -785,13 +805,18 @@ async function main() {
         at: new Date().toISOString(),
       });
       if (activeMapRunIdForSignal) {
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "aborted",
-          reason: `aborted_${signal.toLowerCase()}`,
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date().toISOString(),
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "aborted",
+            reason: `aborted_${signal.toLowerCase()}`,
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date().toISOString(),
+          },
+        );
       }
     } catch {
       // best effort
@@ -827,7 +852,10 @@ async function main() {
   const startHeartbeat = () => {
     const intervalSec = Math.max(
       5,
-      Math.min(config.lockHeartbeatSec, Math.max(5, Math.floor(config.lockTtlSec / 2))),
+      Math.min(
+        config.lockHeartbeatSec,
+        Math.max(5, Math.floor(config.lockTtlSec / 2)),
+      ),
     );
     heartbeatTimer = setInterval(() => {
       void renewLock();
@@ -857,8 +885,10 @@ async function main() {
 
     startHeartbeat();
 
-    const requestedMapRunId = parseFlag(args.passthroughArgs, "--run-id")?.trim() || null;
-    const activeMapRunId = requestedMapRunId ?? (await redis.get(marketMapActiveKey()));
+    const requestedMapRunId =
+      parseFlag(args.passthroughArgs, "--run-id")?.trim() || null;
+    const activeMapRunId =
+      requestedMapRunId ?? (await redis.get(marketMapActiveKey()));
     if (!activeMapRunId || activeMapRunId.trim().length === 0) {
       console.log("[map-signals-runner] skipped (no active map run)");
       await setStatus(redis, config.statusTtlSec, {
@@ -873,16 +903,22 @@ async function main() {
     activeMapRunIdForSignal = activeMapRunId.trim();
 
     await redis.zRemRangeByScore(RUNS_KEY, 0, nowMs - RUN_HISTORY_TTL_MS);
-    const historyRaw = await redis.zRangeByScore(RUNS_KEY, nowMs - RUN_HISTORY_TTL_MS, nowMs);
+    const historyRaw = await redis.zRangeByScore(
+      RUNS_KEY,
+      nowMs - RUN_HISTORY_TTL_MS,
+      nowMs,
+    );
     const history = parseRunEntries(historyRaw);
     const lastRunMs = history.reduce((max, item) => Math.max(max, item.ts), 0);
     const windowStartMs = nowMs - config.runWindowMinutes * 60_000;
     const dayStartMs = nowMs - 24 * 60 * 60 * 1_000;
     const budgetWindowStartMs = nowMs - config.budgetWindowMinutes * 60_000;
 
-    const runsInWindow = history.filter(item => item.ts >= windowStartMs);
-    const runsInDay = history.filter(item => item.ts >= dayStartMs);
-    const runsInBudgetWindow = history.filter(item => item.ts >= budgetWindowStartMs);
+    const runsInWindow = history.filter((item) => item.ts >= windowStartMs);
+    const runsInDay = history.filter((item) => item.ts >= dayStartMs);
+    const runsInBudgetWindow = history.filter(
+      (item) => item.ts >= budgetWindowStartMs,
+    );
     const budgetWindowSpentUsd = sumCost(runsInBudgetWindow);
     const daySpentUsd = sumCost(runsInDay);
     const estimatedCostUsd = args.dryRun ? 0 : config.estimatedRunCostUsd;
@@ -897,13 +933,18 @@ async function main() {
           mapRunId: activeMapRunIdForSignal,
           at: new Date(nowMs).toISOString(),
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_poll_interval",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date(nowMs).toISOString(),
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_poll_interval",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date(nowMs).toISOString(),
+          },
+        );
         return;
       }
       if (runsInWindow.length >= config.maxRunsPerWindow) {
@@ -917,15 +958,20 @@ async function main() {
           runsInWindow: runsInWindow.length,
           maxRunsPerWindow: config.maxRunsPerWindow,
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_run_rate_window",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date(nowMs).toISOString(),
-          runsInWindow: runsInWindow.length,
-          maxRunsPerWindow: config.maxRunsPerWindow,
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_run_rate_window",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date(nowMs).toISOString(),
+            runsInWindow: runsInWindow.length,
+            maxRunsPerWindow: config.maxRunsPerWindow,
+          },
+        );
         return;
       }
       if (runsInDay.length >= config.maxRunsPerDay) {
@@ -939,15 +985,20 @@ async function main() {
           runsInDay: runsInDay.length,
           maxRunsPerDay: config.maxRunsPerDay,
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_run_rate_day",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date(nowMs).toISOString(),
-          runsInDay: runsInDay.length,
-          maxRunsPerDay: config.maxRunsPerDay,
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_run_rate_day",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date(nowMs).toISOString(),
+            runsInDay: runsInDay.length,
+            maxRunsPerDay: config.maxRunsPerDay,
+          },
+        );
         return;
       }
     }
@@ -965,16 +1016,21 @@ async function main() {
           budgetWindowUsd: config.budgetWindowUsd,
           estimatedCostUsd,
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_budget_window",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date(nowMs).toISOString(),
-          budgetWindowSpentUsd,
-          budgetWindowUsd: config.budgetWindowUsd,
-          estimatedCostUsd,
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_budget_window",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date(nowMs).toISOString(),
+            budgetWindowSpentUsd,
+            budgetWindowUsd: config.budgetWindowUsd,
+            estimatedCostUsd,
+          },
+        );
         return;
       }
       if (daySpentUsd + estimatedCostUsd > config.dayBudgetUsd) {
@@ -989,21 +1045,28 @@ async function main() {
           dayBudgetUsd: config.dayBudgetUsd,
           estimatedCostUsd,
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_budget_day",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          at: new Date(nowMs).toISOString(),
-          daySpentUsd,
-          dayBudgetUsd: config.dayBudgetUsd,
-          estimatedCostUsd,
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_budget_day",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            at: new Date(nowMs).toISOString(),
+            daySpentUsd,
+            dayBudgetUsd: config.dayBudgetUsd,
+            estimatedCostUsd,
+          },
+        );
         return;
       }
     }
 
-    const searchArtifactRaw = await redis.get(searchArtifactKey(activeMapRunIdForSignal));
+    const searchArtifactRaw = await redis.get(
+      searchArtifactKey(activeMapRunIdForSignal),
+    );
     if (!searchArtifactRaw || searchArtifactRaw.trim().length === 0) {
       console.log("[map-signals-runner] skipped (no search artifact)");
       await setStatus(redis, config.statusTtlSec, {
@@ -1023,7 +1086,9 @@ async function main() {
       return;
     }
 
-    const latestSearchRaw = await redis.get(latestSearchForMapRunKey(activeMapRunIdForSignal));
+    const latestSearchRaw = await redis.get(
+      latestSearchForMapRunKey(activeMapRunIdForSignal),
+    );
     let searchRunId: string | null = null;
     if (latestSearchRaw) {
       try {
@@ -1043,7 +1108,9 @@ async function main() {
     );
 
     if (config.inputDigestEnabled && !args.ignoreInputDigest) {
-      const priorDigest = await redis.get(runInputDigestKey(activeMapRunIdForSignal));
+      const priorDigest = await redis.get(
+        runInputDigestKey(activeMapRunIdForSignal),
+      );
       if (priorDigest && priorDigest === inputDigest) {
         console.log("[map-signals-runner] skipped (input digest unchanged)");
         await setStatus(redis, config.statusTtlSec, {
@@ -1055,15 +1122,20 @@ async function main() {
           inputDigest,
           at: new Date(nowMs).toISOString(),
         });
-        await setRunStatus(redis, activeMapRunIdForSignal, config.statusTtlSec, {
-          state: "skipped",
-          reason: "skipped_no_input_change",
-          runnerRunId,
-          mapRunId: activeMapRunIdForSignal,
-          searchRunId: searchRunId ?? "",
-          inputDigest,
-          at: new Date(nowMs).toISOString(),
-        });
+        await setRunStatus(
+          redis,
+          activeMapRunIdForSignal,
+          config.statusTtlSec,
+          {
+            state: "skipped",
+            reason: "skipped_no_input_change",
+            runnerRunId,
+            mapRunId: activeMapRunIdForSignal,
+            searchRunId: searchRunId ?? "",
+            inputDigest,
+            at: new Date(nowMs).toISOString(),
+          },
+        );
         return;
       }
     }
@@ -1157,7 +1229,11 @@ async function main() {
       String(config.minAffinityForPublish),
     );
     addArgIfMissing(searchArgs, "--concurrency", String(config.concurrency));
-    addArgIfMissing(searchArgs, "--max-output-tokens", String(config.maxOutputTokens));
+    addArgIfMissing(
+      searchArgs,
+      "--max-output-tokens",
+      String(config.maxOutputTokens),
+    );
     addArgIfMissing(searchArgs, "--timeout-sec", String(config.timeoutSec));
     addArgIfMissing(searchArgs, "--max-retries", String(config.maxRetries));
     addArgIfMissing(searchArgs, "--retry-base-ms", String(config.retryBaseMs));
@@ -1165,7 +1241,10 @@ async function main() {
     if ((args.dryRun || config.dryRun) && !hasOption(searchArgs, "--dry-run")) {
       searchArgs.push("--dry-run");
     }
-    if ((args.verbose || config.verbose) && !hasOption(searchArgs, "--verbose")) {
+    if (
+      (args.verbose || config.verbose) &&
+      !hasOption(searchArgs, "--verbose")
+    ) {
       searchArgs.push("--verbose");
     }
 
@@ -1179,14 +1258,20 @@ async function main() {
       const outputRaw = await readFile(tmpOutPath, "utf8");
       const report = extractSignalsReport(outputRaw);
       const mapRunId = report.source?.runId?.trim() || activeMapRunIdForSignal;
-      const generatedSignals = Math.trunc(toNumber(report.totals?.generatedSignals));
-      const publishCandidates = Math.trunc(toNumber(report.totals?.publishCandidates));
+      const generatedSignals = Math.trunc(
+        toNumber(report.totals?.generatedSignals),
+      );
+      const publishCandidates = Math.trunc(
+        toNumber(report.totals?.publishCandidates),
+      );
       const actualEstimatedCostUsd = toNumber(report.totals?.estimatedCostUsd);
       const actualChargedCostUsd = toNumber(
         report.totals?.chargedCostUsd,
         actualEstimatedCostUsd,
       );
-      const providerReportedCostUsd = toNumber(report.totals?.providerReportedCostUsd);
+      const providerReportedCostUsd = toNumber(
+        report.totals?.providerReportedCostUsd,
+      );
       const providerReportedCostCalls = Math.trunc(
         toNumber(report.totals?.providerReportedCostCalls),
       );
@@ -1198,8 +1283,7 @@ async function main() {
             : "mixed";
 
       const shouldPersistNotes =
-        config.persistNotes &&
-        !hasTruthyOverride(searchArgs, "--dry-run");
+        config.persistNotes && !hasTruthyOverride(searchArgs, "--dry-run");
       const persistStats = shouldPersistNotes
         ? await persistSignalNotes({
             report,
@@ -1269,12 +1353,17 @@ async function main() {
 
       const postWindowStartMs = finishedAt - config.runWindowMinutes * 60_000;
       const postDayStartMs = finishedAt - 24 * 60 * 60 * 1_000;
-      const postBudgetWindowStartMs = finishedAt - config.budgetWindowMinutes * 60_000;
+      const postBudgetWindowStartMs =
+        finishedAt - config.budgetWindowMinutes * 60_000;
       const historyAfter = [...history, runEntry];
-      const postRunsInWindow = historyAfter.filter(item => item.ts >= postWindowStartMs);
-      const postRunsInDay = historyAfter.filter(item => item.ts >= postDayStartMs);
+      const postRunsInWindow = historyAfter.filter(
+        (item) => item.ts >= postWindowStartMs,
+      );
+      const postRunsInDay = historyAfter.filter(
+        (item) => item.ts >= postDayStartMs,
+      );
       const postRunsInBudgetWindow = historyAfter.filter(
-        item => item.ts >= postBudgetWindowStartMs,
+        (item) => item.ts >= postBudgetWindowStartMs,
       );
       const postBudgetWindowSpentUsd = sumCost(postRunsInBudgetWindow);
       const postDaySpentUsd = sumCost(postRunsInDay);
@@ -1311,7 +1400,10 @@ async function main() {
         budgetWindowUsd: config.budgetWindowUsd,
         budgetWindowSpentUsd: Number(postBudgetWindowSpentUsd.toFixed(6)),
         budgetWindowRemainingUsd: Number(
-          Math.max(0, config.budgetWindowUsd - postBudgetWindowSpentUsd).toFixed(6),
+          Math.max(
+            0,
+            config.budgetWindowUsd - postBudgetWindowSpentUsd,
+          ).toFixed(6),
         ),
         dayBudgetUsd: config.dayBudgetUsd,
         daySpentUsd: Number(postDaySpentUsd.toFixed(6)),
@@ -1360,12 +1452,17 @@ async function main() {
 
       const postWindowStartMs = finishedAt - config.runWindowMinutes * 60_000;
       const postDayStartMs = finishedAt - 24 * 60 * 60 * 1_000;
-      const postBudgetWindowStartMs = finishedAt - config.budgetWindowMinutes * 60_000;
+      const postBudgetWindowStartMs =
+        finishedAt - config.budgetWindowMinutes * 60_000;
       const historyAfter = [...history, runEntry];
-      const postRunsInWindow = historyAfter.filter(item => item.ts >= postWindowStartMs);
-      const postRunsInDay = historyAfter.filter(item => item.ts >= postDayStartMs);
+      const postRunsInWindow = historyAfter.filter(
+        (item) => item.ts >= postWindowStartMs,
+      );
+      const postRunsInDay = historyAfter.filter(
+        (item) => item.ts >= postDayStartMs,
+      );
       const postRunsInBudgetWindow = historyAfter.filter(
-        item => item.ts >= postBudgetWindowStartMs,
+        (item) => item.ts >= postBudgetWindowStartMs,
       );
       const postBudgetWindowSpentUsd = sumCost(postRunsInBudgetWindow);
       const postDaySpentUsd = sumCost(postRunsInDay);
@@ -1390,7 +1487,10 @@ async function main() {
         budgetWindowUsd: config.budgetWindowUsd,
         budgetWindowSpentUsd: Number(postBudgetWindowSpentUsd.toFixed(6)),
         budgetWindowRemainingUsd: Number(
-          Math.max(0, config.budgetWindowUsd - postBudgetWindowSpentUsd).toFixed(6),
+          Math.max(
+            0,
+            config.budgetWindowUsd - postBudgetWindowSpentUsd,
+          ).toFixed(6),
         ),
         dayBudgetUsd: config.dayBudgetUsd,
         daySpentUsd: Number(postDaySpentUsd.toFixed(6)),
@@ -1420,7 +1520,10 @@ async function main() {
         // best effort cleanup
       }
     }
-    if (tmpOutPath && tmpOutPath.includes(`ai-map-signals-runner-${runnerRunId}`)) {
+    if (
+      tmpOutPath &&
+      tmpOutPath.includes(`ai-map-signals-runner-${runnerRunId}`)
+    ) {
       try {
         await rm(tmpOutPath, { force: true });
       } catch {
@@ -1432,7 +1535,7 @@ async function main() {
   }
 }
 
-main().catch(error => {
+main().catch((error) => {
   console.error("[map-signals-runner] failed", error);
   process.exit(1);
 });

@@ -208,7 +208,9 @@ export async function fetchEventsByIds(
   return out;
 }
 
-function extractFirstMarketPayload(payload: unknown): Record<string, unknown> | null {
+function extractFirstMarketPayload(
+  payload: unknown,
+): Record<string, unknown> | null {
   if (Array.isArray(payload)) {
     const first = payload[0];
     return isRecord(first) ? first : null;

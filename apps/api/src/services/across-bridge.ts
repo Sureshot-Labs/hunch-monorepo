@@ -115,7 +115,10 @@ export function isAcrossSolanaRoute(inputs: {
   );
 }
 
-function isAcrossSupportedToken(chainId: string, tokenAddress: string): boolean {
+function isAcrossSupportedToken(
+  chainId: string,
+  tokenAddress: string,
+): boolean {
   const supported = ACROSS_USDC_ADDRESSES[chainId];
   if (!supported) return false;
   return supported.has(normalizeAddress(tokenAddress));
@@ -135,8 +138,10 @@ function isAcrossAllowlistedRoute(inputs: {
   if (!env.acrossRouteAllowlist.length) return true;
   const exactPair = `${inputs.srcChainId}:${inputs.dstChainId}`;
   const usdcPair = `${inputs.srcChainId}:${inputs.dstChainId}:USDC`;
-  return env.acrossRouteAllowlist.includes(exactPair) ||
-    env.acrossRouteAllowlist.includes(usdcPair);
+  return (
+    env.acrossRouteAllowlist.includes(exactPair) ||
+    env.acrossRouteAllowlist.includes(usdcPair)
+  );
 }
 
 export function resolveAcrossRoute(inputs: {
@@ -392,7 +397,8 @@ function evmAddressToBytes32(address: string): Buffer {
 }
 
 function bytes32ToPublicKey(bytes: Buffer): PublicKey {
-  if (bytes.length !== 32) throw new Error("bytes32 public key buffer required");
+  if (bytes.length !== 32)
+    throw new Error("bytes32 public key buffer required");
   return new PublicKey(bytes);
 }
 
@@ -410,10 +416,7 @@ function addressOrBase58ToPublicKey(address: string): PublicKey {
 }
 
 function anchorDiscriminator(name: string): Buffer {
-  return createHash("sha256")
-    .update(`global:${name}`)
-    .digest()
-    .subarray(0, 8);
+  return createHash("sha256").update(`global:${name}`).digest().subarray(0, 8);
 }
 
 function encodeBorshBytes(bytes: Buffer): Buffer {
@@ -496,12 +499,16 @@ function parseAcrossSuggestedFeeFields(payload: unknown): {
   const fillDeadlineRaw = readNumberishString(record.fillDeadline);
   const outputAmount = readBigIntString(record.outputAmount);
   if (!timestampRaw || !fillDeadlineRaw || !outputAmount) {
-    throw new Error("Across suggested-fees response is missing executable quote fields");
+    throw new Error(
+      "Across suggested-fees response is missing executable quote fields",
+    );
   }
   const timestamp = Math.trunc(Number(timestampRaw));
   const fillDeadline = Math.trunc(Number(fillDeadlineRaw));
   if (!Number.isFinite(timestamp) || !Number.isFinite(fillDeadline)) {
-    throw new Error("Across suggested-fees response has invalid quote timestamps");
+    throw new Error(
+      "Across suggested-fees response has invalid quote timestamps",
+    );
   }
 
   const exclusiveRelayerRaw = readString(record.exclusiveRelayer);
@@ -517,7 +524,9 @@ function parseAcrossSuggestedFeeFields(payload: unknown): {
     fillDeadline,
     exclusivityParameter,
     exclusiveRelayerRaw:
-      exclusiveRelayerRaw && exclusivityParameter > 0 ? exclusiveRelayerRaw : null,
+      exclusiveRelayerRaw && exclusivityParameter > 0
+        ? exclusiveRelayerRaw
+        : null,
     spokePoolAddress: readString(record.spokePoolAddress),
     outputAmount,
   };
@@ -641,7 +650,9 @@ function buildAcrossSuggestedFeesBase(inputs: {
   const payload = isRecord(inputs.payload) ? inputs.payload : {};
   const fields = parseAcrossSuggestedFeeFields(payload);
   const inputToken = isRecord(payload.inputToken) ? payload.inputToken : null;
-  const outputToken = isRecord(payload.outputToken) ? payload.outputToken : null;
+  const outputToken = isRecord(payload.outputToken)
+    ? payload.outputToken
+    : null;
 
   return {
     fields,
@@ -694,7 +705,9 @@ export function normalizeAcrossEvmToSolanaQuoteResponse(inputs: {
   const { fields, quote } = buildAcrossSuggestedFeesBase(inputs);
   const spokePoolAddress = fields.spokePoolAddress;
   if (!spokePoolAddress || !ethers.isAddress(spokePoolAddress)) {
-    throw new Error("Across suggested-fees response is missing EVM SpokePool address");
+    throw new Error(
+      "Across suggested-fees response is missing EVM SpokePool address",
+    );
   }
 
   const inputAmount = BigInt(inputs.amountIn);
@@ -926,10 +939,14 @@ export function normalizeAcrossQuoteResponse(inputs: {
     inputs.srcChainId,
   );
   const inputAmount = readNumberishString(payload.inputAmount);
-  const expectedOutputAmount = readNumberishString(payload.expectedOutputAmount);
+  const expectedOutputAmount = readNumberishString(
+    payload.expectedOutputAmount,
+  );
   const minOutputAmount = readNumberishString(payload.minOutputAmount);
   const inputToken = isRecord(payload.inputToken) ? payload.inputToken : null;
-  const outputToken = isRecord(payload.outputToken) ? payload.outputToken : null;
+  const outputToken = isRecord(payload.outputToken)
+    ? payload.outputToken
+    : null;
 
   return {
     provider: "across",
@@ -967,9 +984,12 @@ export function normalizeAcrossQuoteResponse(inputs: {
   };
 }
 
-export function getAcrossExecutionError(payload: Record<string, unknown>): string | null {
+export function getAcrossExecutionError(
+  payload: Record<string, unknown>,
+): string | null {
   const tx = payload.tx;
-  if (!isRecord(tx)) return "Across response did not include an executable transaction";
+  if (!isRecord(tx))
+    return "Across response did not include an executable transaction";
   const kind = tx.kind;
   if (kind === "solana") {
     return typeof tx.data === "string" && tx.data.trim().length > 0
@@ -988,7 +1008,9 @@ export function getAcrossExecutionError(payload: Record<string, unknown>): strin
   return "Across response returned an unsupported transaction kind";
 }
 
-export function normalizeAcrossStatus(status: string | null | undefined): string | null {
+export function normalizeAcrossStatus(
+  status: string | null | undefined,
+): string | null {
   const normalized = status?.trim().toLowerCase();
   if (!normalized) return null;
   if (normalized === "filled") return "fulfilled";
@@ -999,7 +1021,9 @@ export function normalizeAcrossStatus(status: string | null | undefined): string
   return normalized;
 }
 
-export function normalizeAcrossStatusPayload(payload: unknown): Record<string, unknown> {
+export function normalizeAcrossStatusPayload(
+  payload: unknown,
+): Record<string, unknown> {
   const record = isRecord(payload) ? { ...payload } : {};
   const providerStatus = readString(record.status);
   const normalizedStatus = normalizeAcrossStatus(providerStatus);

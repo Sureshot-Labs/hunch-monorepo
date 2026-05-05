@@ -70,9 +70,8 @@ type RetryableFailureSummary = {
 let walletIntelRefreshPolicy: WalletIntelRefreshPolicy = getIntelPolicyDefaults(
   "wallet_intel_refresh",
 );
-let aiWhaleProfilesPolicy: AiWhaleProfilesPolicy = getIntelPolicyDefaults(
-  "ai_whale_profiles",
-);
+let aiWhaleProfilesPolicy: AiWhaleProfilesPolicy =
+  getIntelPolicyDefaults("ai_whale_profiles");
 
 const VENUE_CHAIN: Record<string, Chain | null> = {
   polymarket: "polygon",
@@ -130,7 +129,9 @@ function createRefreshTelemetry(): WalletIntelRefreshTelemetry {
     followedSnapshotPolygon: createWalletIntelRetryTelemetry(
       "followed_snapshot_polygon",
     ),
-    followedSnapshotBase: createWalletIntelRetryTelemetry("followed_snapshot_base"),
+    followedSnapshotBase: createWalletIntelRetryTelemetry(
+      "followed_snapshot_base",
+    ),
     followedSnapshotSolana: createWalletIntelRetryTelemetry(
       "followed_snapshot_solana",
     ),
@@ -190,7 +191,10 @@ function recordRetryableFailure(
   summary.count += 1;
   if (rateLimited) summary.rateLimited += 1;
   if (aborted) summary.aborted += 1;
-  if (summary.sampleWallets.length < 3 && !summary.sampleWallets.includes(wallet)) {
+  if (
+    summary.sampleWallets.length < 3 &&
+    !summary.sampleWallets.includes(wallet)
+  ) {
     summary.sampleWallets.push(wallet);
   }
   return true;
@@ -302,8 +306,12 @@ async function fetchLimitlessOrderbook(
   if (!isRecord(payload)) return null;
   const data = isRecord(payload.data) ? payload.data : payload;
   return {
-    bids: Array.isArray(data.bids) ? (data.bids as LimitlessOrderbook["bids"]) : [],
-    asks: Array.isArray(data.asks) ? (data.asks as LimitlessOrderbook["asks"]) : [],
+    bids: Array.isArray(data.bids)
+      ? (data.bids as LimitlessOrderbook["bids"])
+      : [],
+    asks: Array.isArray(data.asks)
+      ? (data.asks as LimitlessOrderbook["asks"])
+      : [],
     lastTradePrice: data.lastTradePrice,
   };
 }
@@ -322,7 +330,9 @@ async function fetchLimitlessMarketDetail(
   if (!isRecord(payload)) return null;
   const data = isRecord(payload.data) ? payload.data : payload;
   return {
-    prices: Array.isArray(data.prices) ? (data.prices as LimitlessMarketDetail["prices"]) : [],
+    prices: Array.isArray(data.prices)
+      ? (data.prices as LimitlessMarketDetail["prices"])
+      : [],
     tradeType: data.tradeType,
   };
 }
@@ -372,7 +382,10 @@ async function backfillLimitlessPrices(
     let bestAsk: number | null = null;
     let lastPrice: number | null = null;
 
-    const orderbook = await fetchLimitlessOrderbook(row.slug, telemetry ?? null);
+    const orderbook = await fetchLimitlessOrderbook(
+      row.slug,
+      telemetry ?? null,
+    );
     if (orderbook) {
       bestBid = parseLimitlessNumber(orderbook.bids?.[0]?.price ?? null);
       bestAsk = parseLimitlessNumber(orderbook.asks?.[0]?.price ?? null);
@@ -380,10 +393,15 @@ async function backfillLimitlessPrices(
     }
 
     if (bestBid == null && bestAsk == null && lastPrice == null) {
-      const detail = await fetchLimitlessMarketDetail(row.slug, telemetry ?? null);
+      const detail = await fetchLimitlessMarketDetail(
+        row.slug,
+        telemetry ?? null,
+      );
       if (detail) {
         const tradeType =
-          typeof detail.tradeType === "string" ? detail.tradeType : row.trade_type;
+          typeof detail.tradeType === "string"
+            ? detail.tradeType
+            : row.trade_type;
         const yesPrice = normalizeLimitlessPrice(detail.prices?.[0], tradeType);
         if (yesPrice != null) {
           bestBid = yesPrice;
@@ -413,9 +431,9 @@ async function backfillLimitlessPrices(
   return updated;
 }
 
-
 function isLimitlessSessionMissing(error: unknown): boolean {
-  if (!error || typeof error !== "object" || !("message" in error)) return false;
+  if (!error || typeof error !== "object" || !("message" in error))
+    return false;
   return String((error as { message?: string }).message).includes(
     "Limitless session not found",
   );
@@ -470,7 +488,9 @@ function parseOptionalArgInt(prefix: string): number | undefined {
   return Math.trunc(parsed);
 }
 
-function normalizeRetentionDays(value: number | undefined | null): number | null {
+function normalizeRetentionDays(
+  value: number | undefined | null,
+): number | null {
   if (value == null) return null;
   const asInt = Math.trunc(value);
   return asInt > 0 ? asInt : null;
@@ -600,9 +620,7 @@ async function ensureSystemTags(
   const params: string[] = [];
 
   for (let i = 0; i < SYSTEM_TAGS.length; i += 1) {
-    params.push(
-      `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3}, true)`,
-    );
+    params.push(`($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3}, true)`);
   }
 
   await client.query(
@@ -999,26 +1017,26 @@ async function collectFollowedWalletSnapshotRows(
     followedByChain[followed.chain] += 1;
   }
 
-  const estPolygonHoldingsRpcCalls =
-    estimateErc1155BalanceRpcCalls(
-      followedByChain.polygon,
-      inputs.tokenIdsByVenue.polymarket,
-    );
-  const estBaseHoldingsRpcCalls =
-    estimateErc1155BalanceRpcCalls(
-      followedByChain.base,
-      inputs.tokenIdsByVenue.limitless,
-    );
+  const estPolygonHoldingsRpcCalls = estimateErc1155BalanceRpcCalls(
+    followedByChain.polygon,
+    inputs.tokenIdsByVenue.polymarket,
+  );
+  const estBaseHoldingsRpcCalls = estimateErc1155BalanceRpcCalls(
+    followedByChain.base,
+    inputs.tokenIdsByVenue.limitless,
+  );
   const estSolanaHoldingsRpcCalls =
     inputs.tokenIdsByVenue.kalshi.length > 0 ? followedByChain.solana : 0;
   inputs.telemetry.followedSnapshotPolygon.estimatedCalls +=
     followedByChain.polygon;
-  inputs.telemetry.followedSnapshotBase.estimatedCalls += estBaseHoldingsRpcCalls;
+  inputs.telemetry.followedSnapshotBase.estimatedCalls +=
+    estBaseHoldingsRpcCalls;
   inputs.telemetry.followedSnapshotSolana.estimatedCalls +=
     estSolanaHoldingsRpcCalls;
   inputs.telemetry.followedPositionsPolymarket.estimatedCalls +=
     followedByChain.polygon;
-  inputs.telemetry.followedPositionsLimitless.estimatedCalls += followedByChain.base;
+  inputs.telemetry.followedPositionsLimitless.estimatedCalls +=
+    followedByChain.base;
   inputs.telemetry.followedPositionsKalshi.estimatedCalls +=
     followedByChain.solana;
 
@@ -1045,7 +1063,10 @@ async function collectFollowedWalletSnapshotRows(
     },
   });
 
-  const prefetchedSolanaBalances = new Map<string, SolanaTokenBalance[] | null>();
+  const prefetchedSolanaBalances = new Map<
+    string,
+    SolanaTokenBalance[] | null
+  >();
   const prefetchedPolymarketBalances = new Map<
     string,
     PrefetchedPolymarketOwnerBalances | null
@@ -1319,17 +1340,15 @@ async function collectFollowedWalletSnapshotRows(
 
     if (followed.chain === "solana") {
       try {
-        await runWithTelemetry(
-          inputs.telemetry.followedPositionsKalshi,
-          () =>
-            syncPositionsForUserWallet(inputs.poolClient, {
-              userId: followed.user_id,
-              walletAddress: followed.address,
-              venue: "kalshi",
-              positionScope: "followed",
-              prefetchedSolanaBalances:
-                prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-            }),
+        await runWithTelemetry(inputs.telemetry.followedPositionsKalshi, () =>
+          syncPositionsForUserWallet(inputs.poolClient, {
+            userId: followed.user_id,
+            walletAddress: followed.address,
+            venue: "kalshi",
+            positionScope: "followed",
+            prefetchedSolanaBalances:
+              prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+          }),
         );
       } catch (error) {
         console.error(
@@ -1433,10 +1452,7 @@ async function refreshTouchedWalletArtifacts(
     `,
   );
   const aggregateWalletIds = Array.from(
-    new Set([
-      ...walletIds,
-      ...whaleRows.rows.map((row) => row.wallet_id),
-    ]),
+    new Set([...walletIds, ...whaleRows.rows.map((row) => row.wallet_id)]),
   );
 
   const activityLookbackDays = 365;
@@ -1631,8 +1647,7 @@ async function snapshotFollowedWalletPositions(
     const size = Number(row.size);
     if (!Number.isFinite(size) || size <= 0) continue;
     const price = markMap.get(row.token_id) ?? null;
-    const sizeUsd =
-      price != null ? Number((size * price).toFixed(6)) : null;
+    const sizeUsd = price != null ? Number((size * price).toFixed(6)) : null;
 
     await upsertWalletVenue(client, inputs.walletId, inputs.venue);
 
@@ -1749,13 +1764,16 @@ async function applySnapshotDeltas(
   );
 
   const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
-  const currentMap = new Map<string, typeof currentRows.rows[number]>();
-  const prevMap = new Map<string, typeof prevRows.rows[number]>();
+  const currentMap = new Map<string, (typeof currentRows.rows)[number]>();
+  const prevMap = new Map<string, (typeof prevRows.rows)[number]>();
   const currentRowsByMarket = new Map<
     string,
-    Array<typeof currentRows.rows[number]>
+    Array<(typeof currentRows.rows)[number]>
   >();
-  const prevRowsByMarket = new Map<string, Array<typeof prevRows.rows[number]>>();
+  const prevRowsByMarket = new Map<
+    string,
+    Array<(typeof prevRows.rows)[number]>
+  >();
 
   const makeKey = (row: {
     wallet_id: string;
@@ -1785,10 +1803,7 @@ async function applySnapshotDeltas(
     prevRowsByMarket.set(marketKey, list);
   }
 
-  const keys = new Set<string>([
-    ...currentMap.keys(),
-    ...prevMap.keys(),
-  ]);
+  const keys = new Set<string>([...currentMap.keys(), ...prevMap.keys()]);
   const marketKeys = new Set<string>([
     ...currentRowsByMarket.keys(),
     ...prevRowsByMarket.keys(),
@@ -1812,11 +1827,17 @@ async function applySnapshotDeltas(
       (row) => normalizeOutcomeSideForStorage(row.outcome_side) === "",
     );
     if (!legacyPrevious) continue;
-    const prevShares = legacyPrevious.shares ? Number(legacyPrevious.shares) : 0;
+    const prevShares = legacyPrevious.shares
+      ? Number(legacyPrevious.shares)
+      : 0;
     if (!Number.isFinite(prevShares) || prevShares <= 0) continue;
 
     const snapshotSource = parseMetadataSource(legacyPrevious.metadata);
-    await upsertWalletVenue(client, legacyPrevious.wallet_id, legacyPrevious.venue as Venue);
+    await upsertWalletVenue(
+      client,
+      legacyPrevious.wallet_id,
+      legacyPrevious.venue as Venue,
+    );
     await upsertWalletPositionSnapshot(client, {
       walletId: legacyPrevious.wallet_id,
       venue: legacyPrevious.venue,
@@ -1825,7 +1846,8 @@ async function applySnapshotDeltas(
       shares: 0,
       sizeUsd: 0,
       price:
-        legacyPrevious.price != null && Number.isFinite(Number(legacyPrevious.price))
+        legacyPrevious.price != null &&
+        Number.isFinite(Number(legacyPrevious.price))
           ? Number(legacyPrevious.price)
           : null,
       metadata: {
@@ -2439,7 +2461,10 @@ async function refreshSystemTags(
 
   const tagAssignments: Array<{ slug: string; walletIds: string[] }> = [
     { slug: "fresh", walletIds: freshRows.rows.map((row) => row.id) },
-    { slug: "dormant", walletIds: dormantRows.rows.map((row) => row.wallet_id) },
+    {
+      slug: "dormant",
+      walletIds: dormantRows.rows.map((row) => row.wallet_id),
+    },
     { slug: "whale", walletIds: whaleRows.rows.map((row) => row.wallet_id) },
   ];
 
@@ -2828,29 +2853,97 @@ async function selectMarketsPerVenue(
 
   if (limitPoly > 0) {
     if (polyMode === "trade_1h") {
-      rows.push(...(await selectPolymarketByTrade(client, 1, limitPoly, asOf, "trade_1h")));
+      rows.push(
+        ...(await selectPolymarketByTrade(
+          client,
+          1,
+          limitPoly,
+          asOf,
+          "trade_1h",
+        )),
+      );
     } else if (polyMode === "trade_24h") {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "trade_24h")));
+      rows.push(
+        ...(await selectPolymarketByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitPoly,
+          asOf,
+          "trade_24h",
+        )),
+      );
     } else if (polyMode === "hybrid") {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "hybrid")));
+      rows.push(
+        ...(await selectPolymarketByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitPoly,
+          asOf,
+          "hybrid",
+        )),
+      );
     } else if (polyMode === "volume_24h" || polyMode === "liquidity") {
-      rows.push(...(await selectPolymarketByMetric(client, limitPoly, asOf, polyMode)));
+      rows.push(
+        ...(await selectPolymarketByMetric(client, limitPoly, asOf, polyMode)),
+      );
     } else {
-      rows.push(...(await selectPolymarketByTrade(client, TRADE_WINDOW_HOURS, limitPoly, asOf, "trade_24h")));
+      rows.push(
+        ...(await selectPolymarketByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitPoly,
+          asOf,
+          "trade_24h",
+        )),
+      );
     }
   }
 
   if (limitKalshi > 0) {
     if (kalshiMode === "trade_1h") {
-      rows.push(...(await selectKalshiByTrade(client, 1, limitKalshi, asOf, "trade_1h")));
+      rows.push(
+        ...(await selectKalshiByTrade(
+          client,
+          1,
+          limitKalshi,
+          asOf,
+          "trade_1h",
+        )),
+      );
     } else if (kalshiMode === "trade_24h") {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "trade_24h")));
+      rows.push(
+        ...(await selectKalshiByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitKalshi,
+          asOf,
+          "trade_24h",
+        )),
+      );
     } else if (kalshiMode === "hybrid") {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "hybrid")));
+      rows.push(
+        ...(await selectKalshiByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitKalshi,
+          asOf,
+          "hybrid",
+        )),
+      );
     } else if (kalshiMode === "open_interest" || kalshiMode === "updated") {
-      rows.push(...(await selectKalshiByMetric(client, limitKalshi, asOf, kalshiMode)));
+      rows.push(
+        ...(await selectKalshiByMetric(client, limitKalshi, asOf, kalshiMode)),
+      );
     } else {
-      rows.push(...(await selectKalshiByTrade(client, TRADE_WINDOW_HOURS, limitKalshi, asOf, "trade_24h")));
+      rows.push(
+        ...(await selectKalshiByTrade(
+          client,
+          TRADE_WINDOW_HOURS,
+          limitKalshi,
+          asOf,
+          "trade_24h",
+        )),
+      );
     }
   }
 
@@ -2861,9 +2954,23 @@ async function selectMarketsPerVenue(
       limitlessMode === "book" ||
       limitlessMode === "hybrid"
     ) {
-      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, asOf, limitlessMode)));
+      rows.push(
+        ...(await selectLimitlessByMetric(
+          client,
+          limitLimitless,
+          asOf,
+          limitlessMode,
+        )),
+      );
     } else {
-      rows.push(...(await selectLimitlessByMetric(client, limitLimitless, asOf, "liquidity")));
+      rows.push(
+        ...(await selectLimitlessByMetric(
+          client,
+          limitLimitless,
+          asOf,
+          "liquidity",
+        )),
+      );
     }
   }
 
@@ -2892,7 +2999,11 @@ async function runSnapshot(snapshotAt: Date) {
     await client.query("SET statement_timeout = '120s'");
     const tagIds = await ensureSystemTags(client);
 
-    const markets = await client.query<{ id: string; venue: string; volume_24h: number | null }>(
+    const markets = await client.query<{
+      id: string;
+      venue: string;
+      volume_24h: number | null;
+    }>(
       `
         select m.id, m.venue, m.volume_24h
         from unified_markets m
@@ -2989,7 +3100,10 @@ async function runSnapshot(snapshotAt: Date) {
           )
         : { rows: [] };
 
-    const marketMap = new Map<string, { id: string; venue: string; volume_24h: number | null }>();
+    const marketMap = new Map<
+      string,
+      { id: string; venue: string; volume_24h: number | null }
+    >();
     for (const row of markets.rows) {
       marketMap.set(row.id, row);
     }
@@ -3004,16 +3118,13 @@ async function runSnapshot(snapshotAt: Date) {
     }
 
     const marketRows = Array.from(marketMap.values());
-    console.log(
-      "[wallets:intel:refresh] market selection",
-      {
-        selected: marketRows.length,
-        base: markets.rows.length,
-        perVenue: marketsPerVenueRows.length,
-        watchlist: watchlistMarkets.rows.length,
-        whale: whaleMarkets.rows.length,
-      },
-    );
+    console.log("[wallets:intel:refresh] market selection", {
+      selected: marketRows.length,
+      base: markets.rows.length,
+      perVenue: marketsPerVenueRows.length,
+      watchlist: watchlistMarkets.rows.length,
+      whale: whaleMarkets.rows.length,
+    });
     const selectedMarketIds = marketRows.map((row) => row.id);
     const limitlessPriceBackfills = await backfillLimitlessPrices(
       client,
@@ -3102,10 +3213,7 @@ async function runSnapshot(snapshotAt: Date) {
       const data = result.data;
       if (!data) continue;
 
-      const maybeAddToken = (
-        tokenId: string | null,
-        side: "YES" | "NO",
-      ) => {
+      const maybeAddToken = (tokenId: string | null, side: "YES" | "NO") => {
         if (!tokenId) return;
         const onchainTokenId = normalizeOnchainTokenId(venue, tokenId);
         if (!onchainTokenId) return;
@@ -3155,10 +3263,7 @@ async function runSnapshot(snapshotAt: Date) {
 
         await upsertWalletVenue(client, walletId, market.venue);
 
-        const upsertHolderSide = async (
-          side: "YES" | "NO",
-          shares: number,
-        ) => {
+        const upsertHolderSide = async (side: "YES" | "NO", shares: number) => {
           if (!Number.isFinite(shares) || shares <= 0) return;
           const price = data.priceBySide[side] ?? null;
           const sizeUsd =
@@ -3313,7 +3418,10 @@ async function main() {
     aiWhaleProfilesPolicy = whalePolicy.effective;
 
     const runAt = new Date();
-    const baseSnapshot = bucketDate(runAt, walletIntelRefreshPolicy.snapshotHours);
+    const baseSnapshot = bucketDate(
+      runAt,
+      walletIntelRefreshPolicy.snapshotHours,
+    );
     const backfillSteps = parseBackfillSnapshots();
     const retention = parseRetentionConfig();
     const snapshots: Date[] = [];
@@ -3326,11 +3434,15 @@ async function main() {
 
     if (retention.cleanupOnly) {
       if (retention.skipCleanup) {
-        console.log("[wallets:intel:refresh] cleanup-only skipped (--skip-cleanup)");
+        console.log(
+          "[wallets:intel:refresh] cleanup-only skipped (--skip-cleanup)",
+        );
         return;
       }
       if (!retentionEnabled(retention)) {
-        console.log("[wallets:intel:refresh] cleanup-only skipped (no retention)");
+        console.log(
+          "[wallets:intel:refresh] cleanup-only skipped (no retention)",
+        );
         return;
       }
       console.log(

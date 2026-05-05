@@ -131,7 +131,10 @@ function buildEvent(input: SeedEventInput): MarketMapEventSummary {
   };
 }
 
-function buildNode(nodeId: string, events: MarketMapEventSummary[]): MarketMapNode {
+function buildNode(
+  nodeId: string,
+  events: MarketMapEventSummary[],
+): MarketMapNode {
   const venueBreakdown: Record<MarketMapVenue, MarketMapNodeVenueMetrics> = {};
   for (const event of events) {
     const metrics = venueBreakdown[event.venue] ?? {
@@ -195,7 +198,9 @@ function ids(payload: NodeEventsPayload): string[] {
   return payload.items.map((item) => item.eventId);
 }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(
+  params: Record<string, string | number | undefined>,
+): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value == null) continue;
@@ -536,7 +541,10 @@ async function main() {
     await redis.set(marketMapActiveKey(), runId);
     await redis.set(nodeKey, JSON.stringify(node));
     await redis.set(nodeEventsKey, JSON.stringify(events));
-    await redis.set(nodesGlobalKey, JSON.stringify([rootNode, previewChildNode]));
+    await redis.set(
+      nodesGlobalKey,
+      JSON.stringify([rootNode, previewChildNode]),
+    );
     await insertUnifiedEventForSignal({
       eventId: `event-a-${suiteId}`,
       venue: "polymarket",
@@ -712,7 +720,7 @@ async function main() {
       query: { sort_by: "volume24h", sort_dir: "desc" },
     });
     const signaledEvent = withSignals.items.find(
-      item => item.eventId === `event-a-${suiteId}`,
+      (item) => item.eventId === `event-a-${suiteId}`,
     );
     assert.ok(signaledEvent?.topSignal, "expected topSignal on event-a");
     assert.equal(signaledEvent?.topSignal?.title, "Alpha signal");
@@ -721,11 +729,11 @@ async function main() {
       signaledEvent?.topSignal?.targetMarketTitle,
       "Alpha alternate line",
     );
+    assert.equal(signaledEvent?.topSignal?.targetEventId, `event-a-${suiteId}`);
     assert.equal(
-      signaledEvent?.topSignal?.targetEventId,
-      `event-a-${suiteId}`,
+      signaledEvent?.topSignal?.targetMarket?.marketId,
+      signalMarketId,
     );
-    assert.equal(signaledEvent?.topSignal?.targetMarket?.marketId, signalMarketId);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestAsk, 0.55);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesBid, 0.45);
@@ -767,13 +775,16 @@ async function main() {
 
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
-    await pool.query("delete from ai_note_targets where note_id = any($1::uuid[])", [
-      [signalNoteId, signalNoteIdTwo],
-    ]);
+    await pool.query(
+      "delete from ai_note_targets where note_id = any($1::uuid[])",
+      [[signalNoteId, signalNoteIdTwo]],
+    );
     await pool.query("delete from ai_notes where id = any($1::uuid[])", [
       [signalNoteId, signalNoteIdTwo],
     ]);
-    await pool.query("delete from unified_markets where id = $1", [signalMarketId]);
+    await pool.query("delete from unified_markets where id = $1", [
+      signalMarketId,
+    ]);
     await pool.query("delete from unified_events where id = $1", [
       `event-a-${suiteId}`,
     ]);

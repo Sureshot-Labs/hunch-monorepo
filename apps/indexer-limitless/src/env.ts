@@ -2,7 +2,10 @@ import { config } from "dotenv";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true });
 
 // nuke pg envs so Pool uses connectionString you provided
@@ -45,7 +48,7 @@ function parseOptionalInt(value: string | undefined): number | undefined {
 
 function clampInt(
   value: number | undefined,
-  opts: { min: number; max: number; fallback: number }
+  opts: { min: number; max: number; fallback: number },
 ): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return opts.fallback;
@@ -61,7 +64,7 @@ function parseOptionalFloat(value: string | undefined): number | undefined {
 
 function clampFloat(
   value: number | undefined,
-  opts: { min: number; max: number; fallback: number }
+  opts: { min: number; max: number; fallback: number },
 ): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return opts.fallback;
@@ -91,7 +94,8 @@ const refreshMinutes = Math.max(
   Number.isFinite(refreshMinutesRaw) ? refreshMinutesRaw : 5,
 );
 const fullRefreshMinutesRaw = Number(
-  process.env.LIMITLESS_FULL_REFRESH_MIN ?? String(Math.max(refreshMinutes * 6, 30)),
+  process.env.LIMITLESS_FULL_REFRESH_MIN ??
+    String(Math.max(refreshMinutes * 6, 30)),
 );
 const fullRefreshMinutes = Math.max(
   refreshMinutes,
@@ -139,7 +143,7 @@ const limitlessHttpTimeoutMs = Math.max(
 
 const hotTokensTtlSec = clampInt(
   parseOptionalInt(process.env.HOT_TOKENS_TTL_SEC),
-  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 }
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 },
 );
 const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
   min: 10,
@@ -148,15 +152,15 @@ const hotTokensMax = clampInt(parseOptionalInt(process.env.HOT_TOKENS_MAX), {
 });
 const hotStreamTokensTtlSec = clampInt(
   parseOptionalInt(process.env.HOT_STREAM_TOKENS_TTL_SEC),
-  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 }
+  { min: 60, max: 7 * 24 * 60 * 60, fallback: 1800 },
 );
 const hotStreamTokensMax = clampInt(
   parseOptionalInt(process.env.HOT_STREAM_TOKENS_MAX),
   {
     min: 10,
     max: 50_000,
-    fallback: 5000
-  }
+    fallback: 5000,
+  },
 );
 
 const wsHotShareRaw = parseOptionalFloat(
@@ -193,8 +197,7 @@ export const env = {
   limitlessEnabled: limitlessEnabledSetting ?? true,
 
   limitlessBase: process.env.LIMITLESS_BASE ?? "https://api.limitless.exchange",
-  limitlessWsUrl:
-    process.env.LIMITLESS_WS ?? "wss://ws.limitless.exchange",
+  limitlessWsUrl: process.env.LIMITLESS_WS ?? "wss://ws.limitless.exchange",
   limitlessWsSession: process.env.LIMITLESS_WS_SESSION ?? "",
   // how many markets we’ll pull per bootstrap tick
   bootstrapPageSize,

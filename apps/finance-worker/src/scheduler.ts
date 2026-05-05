@@ -29,7 +29,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutSec: number): Promise<T> {
       const timer = setTimeout(() => {
         reject(new Error(`job timeout after ${timeoutSec}s`));
       }, timeoutSec * 1000);
-      promise.finally(() => clearTimeout(timer)).catch(() => clearTimeout(timer));
+      promise
+        .finally(() => clearTimeout(timer))
+        .catch(() => clearTimeout(timer));
     }),
   ]);
 }
@@ -54,7 +56,9 @@ export class IntervalScheduler {
     const scheduleNext = () => {
       if (this.shuttingDown) return;
       const jitterMs =
-        job.jitterSec > 0 ? Math.floor(Math.random() * job.jitterSec * 1000) : 0;
+        job.jitterSec > 0
+          ? Math.floor(Math.random() * job.jitterSec * 1000)
+          : 0;
       const delayMs = job.intervalSec * 1000 + jitterMs;
       const timer = setTimeout(() => {
         this.timers.delete(timer);

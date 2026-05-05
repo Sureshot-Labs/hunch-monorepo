@@ -191,8 +191,15 @@ function stageList(options: RunnerOptions): Stage[] {
 }
 
 async function runStage(stage: Stage, options: RunnerOptions): Promise<void> {
-  const args = ["run", stage.script, "--", ...buildStageArgs(options, stage.extraArgs)];
-  console.log(`[ai-map-runner] stage_start ${stage.name} pnpm ${args.join(" ")}`);
+  const args = [
+    "run",
+    stage.script,
+    "--",
+    ...buildStageArgs(options, stage.extraArgs),
+  ];
+  console.log(
+    `[ai-map-runner] stage_start ${stage.name} pnpm ${args.join(" ")}`,
+  );
 
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
@@ -203,14 +210,16 @@ async function runStage(stage: Stage, options: RunnerOptions): Promise<void> {
     });
 
     child.on("error", rejectPromise);
-    child.on("exit", code => {
+    child.on("exit", (code) => {
       if (code === 0) {
         console.log(`[ai-map-runner] stage_done ${stage.name}`);
         resolvePromise();
         return;
       }
       rejectPromise(
-        new Error(`[ai-map-runner] stage_failed ${stage.name} exit_code=${code ?? "null"}`),
+        new Error(
+          `[ai-map-runner] stage_failed ${stage.name} exit_code=${code ?? "null"}`,
+        ),
       );
     });
   });
@@ -226,7 +235,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[ai-map-runner] start stages=${stages.map(stage => stage.name).join(",")} force=${options.force} dry_run=${options.dryRun} verbose=${options.verbose}`,
+    `[ai-map-runner] start stages=${stages.map((stage) => stage.name).join(",")} force=${options.force} dry_run=${options.dryRun} verbose=${options.verbose}`,
   );
 
   for (const stage of stages) {
@@ -236,7 +245,7 @@ async function main(): Promise<void> {
   console.log("[ai-map-runner] done");
 }
 
-main().catch(error => {
+main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
   process.exit(1);

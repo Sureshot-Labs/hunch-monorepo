@@ -5,12 +5,18 @@ import { fileURLToPath } from "url";
 import { config } from "dotenv";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 const envLoaded = config({ path: envPath });
 if (envLoaded.error) {
   const err = envLoaded.error as NodeJS.ErrnoException;
   if (err.code !== "ENOENT") {
-    console.warn(`[ai-e2e-smoke] Failed loading env from ${envPath}:`, envLoaded.error.message);
+    console.warn(
+      `[ai-e2e-smoke] Failed loading env from ${envPath}:`,
+      envLoaded.error.message,
+    );
   }
 } else {
   console.log(`[ai-e2e-smoke] Loading env from ${envPath}`);
@@ -24,7 +30,11 @@ type Args = {
   maxTopics: number;
   limit: number;
   sampling: "per-venue" | "global";
-  launchProfile: "custom" | "top50_per_venue" | "top100_per_venue" | "stress500_global";
+  launchProfile:
+    | "custom"
+    | "top50_per_venue"
+    | "top100_per_venue"
+    | "stress500_global";
   mode: "combined" | "web_only" | "internal_only";
   tiers: string;
   searchConcurrency: number;
@@ -43,7 +53,7 @@ type ChildResult = {
 };
 
 function parseFlag(argv: string[], name: string): string | undefined {
-  const idx = argv.findIndex(value => value === name);
+  const idx = argv.findIndex((value) => value === name);
   if (idx === -1) return undefined;
   return argv[idx + 1];
 }
@@ -70,9 +80,7 @@ function parseSampling(raw: string | undefined): "per-venue" | "global" {
   return raw === "global" ? "global" : "per-venue";
 }
 
-function parseLaunchProfile(
-  raw: string | undefined,
-): Args["launchProfile"] {
+function parseLaunchProfile(raw: string | undefined): Args["launchProfile"] {
   if (raw === "top50_per_venue") return "top50_per_venue";
   if (raw === "top100_per_venue") return "top100_per_venue";
   if (raw === "stress500_global") return "stress500_global";
@@ -86,10 +94,8 @@ function parseMode(raw: string | undefined): Args["mode"] {
 
 function parseArgs(argv: string[]): Args {
   return {
-    topicsOut:
-      parseFlag(argv, "--topics-out") ?? "/tmp/ai-e2e-topics.json",
-    searchOut:
-      parseFlag(argv, "--search-out") ?? "/tmp/ai-e2e-search.json",
+    topicsOut: parseFlag(argv, "--topics-out") ?? "/tmp/ai-e2e-topics.json",
+    searchOut: parseFlag(argv, "--search-out") ?? "/tmp/ai-e2e-search.json",
     synthesisOut:
       parseFlag(argv, "--synthesis-out") ?? "/tmp/ai-e2e-synthesis.json",
     out: parseFlag(argv, "--out") ?? null,
@@ -159,7 +165,7 @@ function runCommand(
     });
 
     child.on("error", reject);
-    child.on("close", code => {
+    child.on("close", (code) => {
       const exitCode = code ?? 1;
       const durationMs = Date.now() - startedAt;
       if (exitCode !== 0) {
@@ -274,7 +280,9 @@ async function main(): Promise<void> {
       searchMs: searchStage.durationMs,
       synthesisMs: synthesisStage.durationMs,
       totalMs:
-        topicsStage.durationMs + searchStage.durationMs + synthesisStage.durationMs,
+        topicsStage.durationMs +
+        searchStage.durationMs +
+        synthesisStage.durationMs,
     },
     artifacts: {
       topicsOut: resolve(args.topicsOut),
@@ -287,8 +295,11 @@ async function main(): Promise<void> {
           (topicsJson as { totals?: { uniqueSearchTopics?: number } }).totals
             ?.uniqueSearchTopics ?? null,
         tierCounts:
-          (topicsJson as { searchPlan?: { tierCounts?: Record<string, number> } })
-            .searchPlan?.tierCounts ?? null,
+          (
+            topicsJson as {
+              searchPlan?: { tierCounts?: Record<string, number> };
+            }
+          ).searchPlan?.tierCounts ?? null,
       },
       search: {
         totals:
@@ -299,7 +310,8 @@ async function main(): Promise<void> {
       },
       synthesis: {
         totals:
-          (synthesisJson as { totals?: Record<string, unknown> }).totals ?? null,
+          (synthesisJson as { totals?: Record<string, unknown> }).totals ??
+          null,
         gateSummary:
           (synthesisJson as { gateSummary?: Record<string, unknown> })
             .gateSummary ?? null,
@@ -317,7 +329,7 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch(error => {
+main().catch((error) => {
   console.error("[ai-e2e-smoke] failed", error);
   process.exit(1);
 });

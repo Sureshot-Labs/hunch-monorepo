@@ -229,9 +229,7 @@ async function fetchAlchemyOwners(inputs: {
   telemetry?: WalletIntelRetryTelemetry | null;
 }): Promise<{ wallet: string; shares: number }[]> {
   if (!inputs.baseUrl) return [];
-  const url = new URL(
-    `${inputs.baseUrl.replace(/\/$/, "")}/getOwnersForNFT`,
-  );
+  const url = new URL(`${inputs.baseUrl.replace(/\/$/, "")}/getOwnersForNFT`);
   url.searchParams.set("contractAddress", inputs.contractAddress);
   url.searchParams.set("tokenId", inputs.tokenId);
   url.searchParams.set("pageSize", String(inputs.limit));
@@ -307,8 +305,7 @@ async function fetchSolanaHolders(inputs: {
 
 function isSolanaMintNotFound(error: unknown): boolean {
   if (!error) return false;
-  const message =
-    error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes("could not find mint") ||
     message.includes("Invalid param: could not find mint") ||
@@ -355,8 +352,8 @@ export async function fetchMarketHolderData(inputs: {
   const tokenIdsBySide = resolveTokenIds(tokens, market);
   const yesToken = tokenIdsBySide.YES ?? null;
   const noToken = tokenIdsBySide.NO ?? null;
-  const tokenIds = [yesToken, noToken].filter(
-    (token): token is string => Boolean(token),
+  const tokenIds = [yesToken, noToken].filter((token): token is string =>
+    Boolean(token),
   );
 
   const priceBySide: Record<"YES" | "NO", number | null> = {
@@ -409,8 +406,7 @@ export async function fetchMarketHolderData(inputs: {
       );
 
       for (const row of lastRows) {
-        const price =
-          row.price != null ? Number(row.price) : null;
+        const price = row.price != null ? Number(row.price) : null;
         if (row.token_id === yesToken && priceBySide.YES == null) {
           priceBySide.YES = price;
         }

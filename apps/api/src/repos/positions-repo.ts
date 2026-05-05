@@ -489,7 +489,7 @@ export async function setPositionHidden(
     `,
     [
       inputs.hidden,
-      inputs.hidden ? inputs.reason ?? "user" : null,
+      inputs.hidden ? (inputs.reason ?? "user") : null,
       inputs.userId,
       inputs.venue,
       inputs.tokenId,

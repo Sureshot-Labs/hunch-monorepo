@@ -26,7 +26,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
   const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
-  const isEthAddress = (address: string): boolean => ETH_ADDRESS_RE.test(address);
+  const isEthAddress = (address: string): boolean =>
+    ETH_ADDRESS_RE.test(address);
 
   const allowedVenues = new Set(["polymarket", "kalshi", "limitless"] as const);
   type AllowedVenue = "polymarket" | "kalshi" | "limitless";
@@ -199,7 +200,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (responseVenue) return reply.send({ positions, venue: responseVenue });
+        if (responseVenue)
+          return reply.send({ positions, venue: responseVenue });
         return reply.send({ positions });
       } catch (error) {
         app.log.error(
@@ -335,7 +337,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (responseVenue) return reply.send({ positions, venue: responseVenue });
+        if (responseVenue)
+          return reply.send({ positions, venue: responseVenue });
         return reply.send({ positions });
       } catch (error) {
         app.log.error(
@@ -430,9 +433,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           if (usingVenueList) {
             // Fall through to multi-venue sync below.
           } else {
-            let result:
-              | Awaited<ReturnType<typeof syncPositionsForUserWallet>>
-              | null = null;
+            let result: Awaited<
+              ReturnType<typeof syncPositionsForUserWallet>
+            > | null = null;
             let skippedReason: string | undefined;
             try {
               result = await syncPositionsForUserWallet(pool, {
@@ -487,7 +490,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         const r = cooldownSec > 0 ? await getRedis() : null;
 
         const evmConcurrency = Math.max(1, env.positionsSyncConcurrencyEvm);
-        const solanaConcurrency = Math.max(1, env.positionsSyncConcurrencySolana);
+        const solanaConcurrency = Math.max(
+          1,
+          env.positionsSyncConcurrencySolana,
+        );
 
         const results: Array<{
           walletAddress: string;

@@ -56,7 +56,9 @@ export function computeApproxLegMarkValueUsd(
   return (1 - mark) * input.netShares;
 }
 
-export function computeApproxLegPnlUsd(input: ApproxPnlLegInput): number | null {
+export function computeApproxLegPnlUsd(
+  input: ApproxPnlLegInput,
+): number | null {
   const markValue = computeApproxLegMarkValueUsd(input);
   if (markValue == null) return null;
   if (!isFiniteNumber(input.netCost)) return null;

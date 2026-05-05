@@ -31,9 +31,18 @@ import {
   shouldAggregateKalshiCandles,
   shouldAggregateLimitlessCandles,
 } from "../lib/candlesticks.js";
-import { fetchEventDetails, type EventDetailsRow } from "../repos/unified-read.js";
-import { dflowRequest, extractDflowErrorMessage } from "../services/dflow-client.js";
-import { extractLimitlessMessage, limitlessRequest } from "../services/limitless-client.js";
+import {
+  fetchEventDetails,
+  type EventDetailsRow,
+} from "../repos/unified-read.js";
+import {
+  dflowRequest,
+  extractDflowErrorMessage,
+} from "../services/dflow-client.js";
+import {
+  extractLimitlessMessage,
+  limitlessRequest,
+} from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
@@ -143,7 +152,8 @@ function extractLimitlessMeta(
   return {
     negRiskRequestId: pickString(market, "negRiskRequestId"),
     negRiskMarketId:
-      pickString(market, "negRiskMarketId") ?? pickString(event, "negRiskMarketId"),
+      pickString(market, "negRiskMarketId") ??
+      pickString(event, "negRiskMarketId"),
     venueAdapter:
       pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
     venueExchange,
@@ -214,9 +224,7 @@ function selectPolymarketRepresentative(
     side === "NO" ? candidate.tokens.no : candidate.tokens.yes,
   );
   const eligible = sideCandidates.length ? sideCandidates : candidates;
-  const active = eligible.find((candidate) =>
-    isAcceptingOrders(candidate.row),
-  );
+  const active = eligible.find((candidate) => isAcceptingOrders(candidate.row));
 
   return active ?? eligible[0];
 }
@@ -464,17 +472,17 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               : null;
           const isLimitlessNegRisk = Boolean(
             limitlessMeta?.negRiskRequestId ||
-              limitlessMeta?.negRiskMarketId ||
-              limitlessMeta?.venueAdapter ||
-              limitlessMeta?.venueExchange,
+            limitlessMeta?.negRiskMarketId ||
+            limitlessMeta?.venueAdapter ||
+            limitlessMeta?.venueExchange,
           );
           const tradeType =
             row.market_venue === "limitless"
-              ? pickString(marketMeta, "tradeType") ?? null
+              ? (pickString(marketMeta, "tradeType") ?? null)
               : null;
           const marketAddress =
             row.market_venue === "limitless"
-              ? pickString(marketMeta, "address") ?? null
+              ? (pickString(marketMeta, "address") ?? null)
               : null;
 
           // Parse token IDs based on venue
@@ -565,8 +573,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketSlug: row.market_slug || null,
             marketImage: row.market_image || null,
             marketIcon: row.market_icon || null,
-            acceptingOrders:
-              acceptingOrders,
+            acceptingOrders: acceptingOrders,
             negRisk:
               row.market_venue === "polymarket"
                 ? row.pm_neg_risk != null
@@ -577,7 +584,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                   : null,
             negRiskMarketId:
               row.market_venue === "limitless"
-                ? limitlessMeta?.negRiskMarketId ?? null
+                ? (limitlessMeta?.negRiskMarketId ?? null)
                 : row.pm_neg_risk_market_id || null,
             negRiskParentConditionId:
               row.market_venue === "polymarket"
@@ -585,15 +592,15 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 : null,
             negRiskRequestId:
               row.market_venue === "limitless"
-                ? limitlessMeta?.negRiskRequestId ?? null
+                ? (limitlessMeta?.negRiskRequestId ?? null)
                 : row.pm_neg_risk_request_id || null,
             negRiskAdapter:
               row.market_venue === "limitless"
-                ? limitlessMeta?.venueAdapter ?? null
+                ? (limitlessMeta?.venueAdapter ?? null)
                 : null,
             negRiskExchange:
               row.market_venue === "limitless"
-                ? limitlessMeta?.venueExchange ?? null
+                ? (limitlessMeta?.venueExchange ?? null)
                 : null,
             marketAddress,
             top: {
@@ -665,7 +672,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/events/:eventId/series",
-    { schema: { params: eventParamsSchema, querystring: eventSeriesQuerySchema } },
+    {
+      schema: {
+        params: eventParamsSchema,
+        querystring: eventSeriesQuerySchema,
+      },
+    },
     async (request, reply) => {
       const { eventId } = request.params;
       const { statuses } = request.query;
@@ -733,7 +745,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const statusFilter = (requested.length ? requested : ["ACTIVE"]) as string[];
+      const statusFilter = (
+        requested.length ? requested : ["ACTIVE"]
+      ) as string[];
 
       const seriesRows = await pool.query(
         `
@@ -782,7 +796,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/events/:eventId/similar",
-    { schema: { params: eventParamsSchema, querystring: eventSimilarQuerySchema } },
+    {
+      schema: {
+        params: eventParamsSchema,
+        querystring: eventSimilarQuerySchema,
+      },
+    },
     async (request, reply) => {
       const { eventId } = request.params;
       const {
@@ -835,7 +854,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           baseSeriesKey = rows[0].series_key ?? null;
         }
       } catch (err) {
-        app.log.warn({ err, eventId }, "Similar events base series lookup failed");
+        app.log.warn(
+          { err, eventId },
+          "Similar events base series lookup failed",
+        );
       }
 
       const textHash = textHashRaw
@@ -904,9 +926,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       try {
         const baseMarketEmbeddingRaw =
           marketId != null
-            ? (await bufferClient.hmGet(`ai:embed:market:${marketId}`, [
-                "embedding",
-              ]))[0]
+            ? (
+                await bufferClient.hmGet(`ai:embed:market:${marketId}`, [
+                  "embedding",
+                ])
+              )[0]
             : null;
         const baseMarketBuffer = Buffer.isBuffer(baseMarketEmbeddingRaw)
           ? baseMarketEmbeddingRaw
@@ -1038,7 +1062,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             if (!venue && eventItems.length > 0) {
               const byVenue = new Map<
                 string,
-                Array<{ eventId: string; marketId: string; score: number; venue: string }>
+                Array<{
+                  eventId: string;
+                  marketId: string;
+                  score: number;
+                  venue: string;
+                }>
               >();
               for (const item of eventItems) {
                 const list = byVenue.get(item.venue) ?? [];
@@ -1075,11 +1104,13 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               eventItems.sort((a, b) => a.score - b.score);
             }
 
-            const responseItems = eventItems.slice(0, cappedLimit).map((item) => ({
-              eventId: item.eventId,
-              marketId: item.marketId,
-              score: item.score,
-            }));
+            const responseItems = eventItems
+              .slice(0, cappedLimit)
+              .map((item) => ({
+                eventId: item.eventId,
+                marketId: item.marketId,
+                score: item.score,
+              }));
 
             const markets = withDetails
               ? await fetchSimilarMarketSummaries(
@@ -1221,7 +1252,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         }
 
         if (!venue && filteredItems.length > 0) {
-          const byVenue = new Map<string, Array<{ eventId: string; score: number }>>();
+          const byVenue = new Map<
+            string,
+            Array<{ eventId: string; score: number }>
+          >();
           for (const item of filteredItems) {
             const meta = eventMeta.get(item.eventId);
             const v = meta?.venue ?? "unknown";
@@ -1293,7 +1327,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           const marketVectorParams = active
             ? [finalEventIds, now]
             : [finalEventIds];
-          const { rows } = await pool.query(marketVectorSql, marketVectorParams);
+          const { rows } = await pool.query(
+            marketVectorSql,
+            marketVectorParams,
+          );
           const embeddings = await Promise.all(
             rows.map((row) =>
               bufferClient.hmGet(`ai:embed:market:${row.market_id}`, [
@@ -1521,7 +1558,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           const requestedSides = sides ?? side ?? "YES";
           const includeYes =
             requestedSides === "YES" || requestedSides === "BOTH";
-          const includeNo = requestedSides === "NO" || requestedSides === "BOTH";
+          const includeNo =
+            requestedSides === "NO" || requestedSides === "BOTH";
           const resolvedLimit = Math.min(Math.max(limit ?? 5, 1), 10);
 
           const fallbackStartTs = parseTimestampSeconds(event.start_date);
@@ -1862,7 +1900,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           }
 
           const requestedInterval = periodInterval;
-          const shouldAggregate = shouldAggregateKalshiCandles(requestedInterval);
+          const shouldAggregate =
+            shouldAggregateKalshiCandles(requestedInterval);
           const baseInterval = shouldAggregate
             ? resolveKalshiBaseInterval(requestedInterval)
             : requestedInterval;
@@ -2043,9 +2082,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           }
 
           const tokenId =
-            resolvedSide === "NO"
-              ? candidate.tokens.no
-              : candidate.tokens.yes;
+            resolvedSide === "NO" ? candidate.tokens.no : candidate.tokens.yes;
           if (!tokenId) {
             reply.code(400);
             return reply.send({

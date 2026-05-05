@@ -64,4 +64,6 @@ for (const test of tests) {
   console.log(`[polymarket-order-execution-tests] ok ${test.name}`);
 }
 
-console.log(`[polymarket-order-execution-tests] passed ${passed}/${tests.length}`);
+console.log(
+  `[polymarket-order-execution-tests] passed ${passed}/${tests.length}`,
+);

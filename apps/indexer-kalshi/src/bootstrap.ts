@@ -159,7 +159,8 @@ export async function bootstrapKalshi() {
           category: unifiedMarketRow.category,
           outcomes: unifiedMarketRow.outcomes,
           market_type: unifiedMarketRow.market_type,
-          updated_at: unifiedMarketRow.updated_at ?? unifiedMarketRow.created_at,
+          updated_at:
+            unifiedMarketRow.updated_at ?? unifiedMarketRow.created_at,
           source: "kalshi",
         });
 

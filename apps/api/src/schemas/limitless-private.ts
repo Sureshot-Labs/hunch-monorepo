@@ -36,10 +36,7 @@ const zLimitlessSlug = z
   .trim()
   .min(1, "slug is required")
   .max(128, "slug is too long")
-  .regex(
-    LIMITLESS_SLUG_RE,
-    "slug must use letters, numbers, and dashes only",
-  );
+  .regex(LIMITLESS_SLUG_RE, "slug must use letters, numbers, and dashes only");
 
 const limitlessOrderSchema = z
   .object({
@@ -127,7 +124,9 @@ export const limitlessSlugParamsSchema = z.object({
 });
 
 export const limitlessCancelBatchBodySchema = z.object({
-  orderIds: z.array(z.string().min(1, "orderId is required")).min(1, "orderIds is required"),
+  orderIds: z
+    .array(z.string().min(1, "orderId is required"))
+    .min(1, "orderIds is required"),
 });
 
 export const limitlessAmmOrderBodySchema = z.object({

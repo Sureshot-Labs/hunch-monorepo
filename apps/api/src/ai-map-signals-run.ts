@@ -8,7 +8,11 @@ import {
   getOpenRouterEmbeddingPricingPerM,
   getOpenRouterModelPricingPerM,
 } from "./lib/ai-pricing.js";
-import { extractProviderCostUsd, resolveAiCost, type CostSource } from "./lib/ai-cost.js";
+import {
+  extractProviderCostUsd,
+  resolveAiCost,
+  type CostSource,
+} from "./lib/ai-cost.js";
 import {
   buildMapSignalsSystemPromptV2,
   buildMapSignalsUserPromptV2,
@@ -29,9 +33,7 @@ import {
   eventVenueKey,
   selectRankedRepresentativeMarketsForEvents,
 } from "./services/market-map-representative.js";
-import {
-  isMarketMapUsable,
-} from "./services/market-map-quality.js";
+import { isMarketMapUsable } from "./services/market-map-quality.js";
 import { normalizeAiMarketMetrics } from "./services/market-ai-metrics.js";
 import {
   scoreSignalMarketContractMatch,
@@ -283,7 +285,7 @@ type SignalCandidate = {
 
 function parseFlag(argv: string[], flag: string): string | undefined {
   const inlinePrefix = `${flag}=`;
-  const inlineValue = argv.find(arg => arg.startsWith(inlinePrefix));
+  const inlineValue = argv.find((arg) => arg.startsWith(inlinePrefix));
   if (inlineValue) return inlineValue.slice(inlinePrefix.length);
   const idx = argv.indexOf(flag);
   if (idx === -1) return undefined;
@@ -301,21 +303,30 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return n;
 }
 
-function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+function parseNonNegativeInt(
+  raw: string | undefined,
+  fallback: number,
+): number {
   if (!raw) return fallback;
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return n;
 }
 
-function parsePositiveNumber(raw: string | undefined, fallback: number): number {
+function parsePositiveNumber(
+  raw: string | undefined,
+  fallback: number,
+): number {
   if (!raw) return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
 }
 
-function parseNonNegativeNumber(raw: string | undefined, fallback: number): number {
+function parseNonNegativeNumber(
+  raw: string | undefined,
+  fallback: number,
+): number {
   if (!raw) return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return fallback;
@@ -326,7 +337,7 @@ function parseMessageContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .map(part => {
+      .map((part) => {
         if (typeof part === "string") return part;
         if (!part || typeof part !== "object") return "";
         if ("text" in part) {
@@ -372,7 +383,7 @@ function formatUsd(value: number): string {
 }
 
 async function sleep(ms: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms));
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function computeBackoffMs(baseMs: number, attempt: number): number {
@@ -392,7 +403,9 @@ function extractHttpStatusFromErrorMessage(message: string): number | null {
 function isTransientOpenRouterError(error: unknown): boolean {
   if (error instanceof Error && error.name === "AbortError") return true;
   const message =
-    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
   const status = extractHttpStatusFromErrorMessage(message);
   if (status === 429) return true;
   if (status != null && status >= 500 && status < 600) return true;
@@ -431,12 +444,24 @@ function resolveArgs(argv: string[]): Args {
     model,
     embedModel,
     maxNodes: parsePositiveInt(parseFlag(argv, "--max-nodes"), 20),
-    maxEvidencePerNode: parsePositiveInt(parseFlag(argv, "--max-evidence-per-node"), 12),
-    topMarketsPerEvent: parsePositiveInt(parseFlag(argv, "--top-markets-per-event"), 5),
-    maxMarketsPerNode: parsePositiveInt(parseFlag(argv, "--max-markets-per-node"), 12),
+    maxEvidencePerNode: parsePositiveInt(
+      parseFlag(argv, "--max-evidence-per-node"),
+      12,
+    ),
+    topMarketsPerEvent: parsePositiveInt(
+      parseFlag(argv, "--top-markets-per-event"),
+      5,
+    ),
+    maxMarketsPerNode: parsePositiveInt(
+      parseFlag(argv, "--max-markets-per-node"),
+      12,
+    ),
     minEvidence: parsePositiveInt(parseFlag(argv, "--min-evidence"), 1),
     minConfirmed: parsePositiveInt(parseFlag(argv, "--min-confirmed"), 1),
-    minDistinctDomains: parsePositiveInt(parseFlag(argv, "--min-distinct-domains"), 1),
+    minDistinctDomains: parsePositiveInt(
+      parseFlag(argv, "--min-distinct-domains"),
+      1,
+    ),
     minEvidenceIdsForPublish: parsePositiveInt(
       parseFlag(argv, "--min-evidence-ids-for-publish"),
       1,
@@ -447,7 +472,10 @@ function resolveArgs(argv: string[]): Args {
     ),
     maxSignals: parsePositiveInt(parseFlag(argv, "--max-signals"), 20),
     concurrency: parsePositiveInt(parseFlag(argv, "--concurrency"), 3),
-    maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 900),
+    maxOutputTokens: parsePositiveInt(
+      parseFlag(argv, "--max-output-tokens"),
+      900,
+    ),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 90),
     maxRetries: parseNonNegativeInt(parseFlag(argv, "--max-retries"), 1),
     retryBaseMs: parsePositiveInt(parseFlag(argv, "--retry-base-ms"), 1200),
@@ -555,22 +583,56 @@ function normalizeEvidenceQuality(
 ): number {
   const evidenceScore = clamp01(evidenceCount / Math.max(minEvidence, 1));
   const confirmedScore = clamp01(confirmedCount / Math.max(minConfirmed, 1));
-  const domainScore = clamp01(distinctDomains / Math.max(minDistinctDomains, 1));
-  return clamp01(0.45 * evidenceScore + 0.35 * confirmedScore + 0.2 * domainScore);
+  const domainScore = clamp01(
+    distinctDomains / Math.max(minDistinctDomains, 1),
+  );
+  return clamp01(
+    0.45 * evidenceScore + 0.35 * confirmedScore + 0.2 * domainScore,
+  );
 }
 
-function sortEvidenceByQuality(items: MapSearchEvidence[]): MapSearchEvidence[] {
-  const sorted = items
-    .slice()
-    .sort((a, b) => {
-      const aq = 0.5 * clamp01((a.relevance + a.confidence) / 2) +
-        0.25 * (a.confirmation === "confirmed" ? 1 : a.confirmation === "developing" ? 0.7 : 0.4) +
-        0.25 * (a.sourceTier === "official" ? 1 : a.sourceTier === "wire" ? 0.95 : a.sourceTier === "major_media" ? 0.9 : a.sourceTier === "specialist" ? 0.8 : 0.65);
-      const bq = 0.5 * clamp01((b.relevance + b.confidence) / 2) +
-        0.25 * (b.confirmation === "confirmed" ? 1 : b.confirmation === "developing" ? 0.7 : 0.4) +
-        0.25 * (b.sourceTier === "official" ? 1 : b.sourceTier === "wire" ? 0.95 : b.sourceTier === "major_media" ? 0.9 : b.sourceTier === "specialist" ? 0.8 : 0.65);
-      return bq - aq;
-    });
+function sortEvidenceByQuality(
+  items: MapSearchEvidence[],
+): MapSearchEvidence[] {
+  const sorted = items.slice().sort((a, b) => {
+    const aq =
+      0.5 * clamp01((a.relevance + a.confidence) / 2) +
+      0.25 *
+        (a.confirmation === "confirmed"
+          ? 1
+          : a.confirmation === "developing"
+            ? 0.7
+            : 0.4) +
+      0.25 *
+        (a.sourceTier === "official"
+          ? 1
+          : a.sourceTier === "wire"
+            ? 0.95
+            : a.sourceTier === "major_media"
+              ? 0.9
+              : a.sourceTier === "specialist"
+                ? 0.8
+                : 0.65);
+    const bq =
+      0.5 * clamp01((b.relevance + b.confidence) / 2) +
+      0.25 *
+        (b.confirmation === "confirmed"
+          ? 1
+          : b.confirmation === "developing"
+            ? 0.7
+            : 0.4) +
+      0.25 *
+        (b.sourceTier === "official"
+          ? 1
+          : b.sourceTier === "wire"
+            ? 0.95
+            : b.sourceTier === "major_media"
+              ? 0.9
+              : b.sourceTier === "specialist"
+                ? 0.8
+                : 0.65);
+    return bq - aq;
+  });
 
   // Keep high-quality ordering, but aggressively collapse near-duplicate social items.
   const deduped: MapSearchEvidence[] = [];
@@ -613,7 +675,7 @@ function normalizeVector(values: readonly number[]): number[] {
   for (const value of values) norm += value * value;
   if (!Number.isFinite(norm) || norm <= 0) return Array.from(values, () => 0);
   const mag = Math.sqrt(norm);
-  return values.map(value => value / mag);
+  return values.map((value) => value / mag);
 }
 
 function parseEmbeddingBuffer(buffer: Buffer): number[] | null {
@@ -632,7 +694,11 @@ function dot(a: readonly number[], b: readonly number[]): number {
 }
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function tokenSet(value: string): Set<string> {
@@ -698,7 +764,9 @@ function hasTargetIntentMismatch(
   if (!targetIsWinnerLike) return false;
 
   const evidenceText = normalizeText(
-    selectedEvidence.map(item => `${item.headline} ${item.summary}`).join(" "),
+    selectedEvidence
+      .map((item) => `${item.headline} ${item.summary}`)
+      .join(" "),
   );
   if (!evidenceText) return false;
 
@@ -741,7 +809,9 @@ function isCircularSourceEvidence(
     if (!headlineNorm) continue;
 
     const sim = lexicalSimilarity(headline, target);
-    const questionLike = /[?]/.test(headline) || /\b(who|what|when|how many|will)\b/i.test(headline);
+    const questionLike =
+      /[?]/.test(headline) ||
+      /\b(who|what|when|how many|will)\b/i.test(headline);
     const mirror = headlineNorm === targetNorm || sim >= 0.9;
     if (mirror) return true;
     if (questionLike && sim >= 0.75) return true;
@@ -803,7 +873,7 @@ function toParseErrorMessage(error: unknown): string {
 
 function shouldAttemptSummaryTruncate(error: unknown): boolean {
   const message = toParseErrorMessage(error).toLowerCase();
-  return message.includes("\"summary\"") && message.includes("too_big");
+  return message.includes('"summary"') && message.includes("too_big");
 }
 
 function truncateSummaryInPayload(payload: unknown, maxChars: number): unknown {
@@ -857,7 +927,8 @@ function extractNodeBuckets(
   }
 
   buckets.sort((a, b) => {
-    if (b.evidence.length !== a.evidence.length) return b.evidence.length - a.evidence.length;
+    if (b.evidence.length !== a.evidence.length)
+      return b.evidence.length - a.evidence.length;
     if (a.level !== b.level) return a.level - b.level;
     return a.nodeId.localeCompare(b.nodeId);
   });
@@ -898,28 +969,34 @@ async function callOpenRouter(
   const totalAttempts = args.maxRetries + 1;
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      args.timeoutSec * 1000,
+    );
     try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.openRouterKey}`,
-          "Content-Type": "application/json",
-          "X-Title": "Hunch AI Map Signals",
+      const response = await fetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.openRouterKey}`,
+            "Content-Type": "application/json",
+            "X-Title": "Hunch AI Map Signals",
+          },
+          body: JSON.stringify({
+            model: args.model,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0,
+            max_tokens: args.maxOutputTokens,
+            response_format: { type: "json_object" },
+            reasoning: { effort: "low" },
+          }),
+          signal: controller.signal,
         },
-        body: JSON.stringify({
-          model: args.model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0,
-          max_tokens: args.maxOutputTokens,
-          response_format: { type: "json_object" },
-          reasoning: { effort: "low" },
-        }),
-        signal: controller.signal,
-      });
+      );
 
       if (!response.ok) {
         const text = await response.text();
@@ -936,13 +1013,19 @@ async function callOpenRouter(
         };
       };
 
-      const content = parseMessageContent(payload.choices?.[0]?.message?.content);
+      const content = parseMessageContent(
+        payload.choices?.[0]?.message?.content,
+      );
       const promptTokens = safeNumber(payload.usage?.prompt_tokens) ?? 0;
-      const completionTokens = safeNumber(payload.usage?.completion_tokens) ?? 0;
+      const completionTokens =
+        safeNumber(payload.usage?.completion_tokens) ?? 0;
       const totalTokens =
-        safeNumber(payload.usage?.total_tokens) ?? promptTokens + completionTokens;
+        safeNumber(payload.usage?.total_tokens) ??
+        promptTokens + completionTokens;
       const reasoningTokens =
-        safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+        safeNumber(
+          payload.usage?.completion_tokens_details?.reasoning_tokens,
+        ) ?? 0;
       const providerCost = extractProviderCostUsd(payload);
       const resolvedCost = resolveAiCost({
         inputTokens: promptTokens,
@@ -978,7 +1061,8 @@ async function callOpenRouter(
         },
       };
     } catch (error) {
-      const canRetry = attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
+      const canRetry =
+        attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
       if (!canRetry) throw error;
       const backoffMs = computeBackoffMs(args.retryBaseMs, attempt);
       if (args.verbose) {
@@ -1028,7 +1112,10 @@ async function callOpenRouterEmbeddings(
   const totalAttempts = args.maxRetries + 1;
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      args.timeoutSec * 1000,
+    );
     try {
       const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
         method: "POST",
@@ -1046,7 +1133,9 @@ async function callOpenRouterEmbeddings(
       });
       if (!response.ok) {
         const body = await response.text();
-        throw new Error(`OpenRouter embeddings failed: ${response.status} ${body}`);
+        throw new Error(
+          `OpenRouter embeddings failed: ${response.status} ${body}`,
+        );
       }
       const json = (await response.json()) as {
         data?: Array<{ embedding?: number[]; index?: number }>;
@@ -1057,7 +1146,8 @@ async function callOpenRouterEmbeddings(
           completion_tokens_details?: { reasoning_tokens?: unknown } | null;
         };
       };
-      if (!Array.isArray(json.data)) throw new Error("OpenRouter embeddings missing data");
+      if (!Array.isArray(json.data))
+        throw new Error("OpenRouter embeddings missing data");
       const out: Array<number[] | null> = new Array(texts.length).fill(null);
       for (const item of json.data) {
         const idx = typeof item.index === "number" ? item.index : -1;
@@ -1070,7 +1160,8 @@ async function callOpenRouterEmbeddings(
       const totalTokens =
         safeNumber(json.usage?.total_tokens) ?? promptTokens + completionTokens;
       const reasoningTokens =
-        safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+        safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ??
+        0;
       const providerCost = extractProviderCostUsd(json);
       const resolvedCost = resolveAiCost({
         inputTokens: promptTokens,
@@ -1105,7 +1196,8 @@ async function callOpenRouterEmbeddings(
         },
       };
     } catch (error) {
-      const canRetry = attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
+      const canRetry =
+        attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
       if (!canRetry) throw error;
       const backoffMs = computeBackoffMs(args.retryBaseMs, attempt);
       if (args.verbose) {
@@ -1141,11 +1233,15 @@ async function toMarketCandidates(
   const candidates: MarketCandidate[] = [];
   const seen = new Set<string>();
   const marketRows: MarketEmbeddingInput[] = [];
-  const evidenceText = evidence.map(item => `${item.headline} ${item.summary}`).join(" ").trim();
+  const evidenceText = evidence
+    .map((item) => `${item.headline} ${item.summary}`)
+    .join(" ")
+    .trim();
 
   for (const event of events) {
     const topMarkets =
-      topMarketsByEventVenue.get(eventVenueKey(event.eventId, event.venue)) ?? [];
+      topMarketsByEventVenue.get(eventVenueKey(event.eventId, event.venue)) ??
+      [];
     for (const market of topMarkets) {
       const marketId = market.marketId;
       if (seen.has(marketId)) continue;
@@ -1184,7 +1280,7 @@ async function toMarketCandidates(
     });
   }
 
-  const evidenceRows = evidence.map(item => ({
+  const evidenceRows = evidence.map((item) => ({
     evidenceId: item.id,
     text: `${item.headline} ${item.summary}`,
   }));
@@ -1200,10 +1296,9 @@ async function toMarketCandidates(
 
   for (const candidate of candidates) {
     const marketText = `${candidate.eventTitle} ${candidate.marketTitle ?? ""}`;
-    const marketEmbedding =
-      options.includeSemanticAffinity
-        ? (marketEmbeddings.get(candidate.marketId) ?? null)
-        : null;
+    const marketEmbedding = options.includeSemanticAffinity
+      ? (marketEmbeddings.get(candidate.marketId) ?? null)
+      : null;
     const affinityScore = options.includeSemanticAffinity
       ? evidenceMarketAffinityHybrid(
           evidence,
@@ -1228,7 +1323,10 @@ async function toMarketCandidates(
 
   for (const candidate of out) {
     candidate.selectionScore = Number(
-      (0.8 * candidate.affinityScore + 0.2 * candidate.contractMatchScore).toFixed(6),
+      (
+        0.8 * candidate.affinityScore +
+        0.2 * candidate.contractMatchScore
+      ).toFixed(6),
     );
   }
 
@@ -1267,8 +1365,11 @@ function summarizeDeterministic(
 ): SignalCandidate {
   const evidence = bucket.evidence.slice(0, args.maxEvidencePerNode);
   const evidenceCount = evidence.length;
-  const confirmedCount = evidence.filter(item => item.confirmation === "confirmed").length;
-  const distinctDomains = new Set(evidence.map(item => item.sourceDomain)).size;
+  const confirmedCount = evidence.filter(
+    (item) => item.confirmation === "confirmed",
+  ).length;
+  const distinctDomains = new Set(evidence.map((item) => item.sourceDomain))
+    .size;
 
   const evidenceQuality = normalizeEvidenceQuality(
     evidenceCount,
@@ -1296,7 +1397,8 @@ function summarizeDeterministic(
 
   if (evidenceCount < args.minEvidence) reasonCodes.push("LOW_EVIDENCE");
   if (confirmedCount < args.minConfirmed) reasonCodes.push("LOW_CONFIRMED");
-  if (distinctDomains < args.minDistinctDomains) reasonCodes.push("LOW_DOMAIN_DIVERSITY");
+  if (distinctDomains < args.minDistinctDomains)
+    reasonCodes.push("LOW_DOMAIN_DIVERSITY");
   if (candidateMarkets.length === 0) reasonCodes.push("NO_MARKET_CANDIDATES");
   if (reasonCodes.length === 0) reasonCodes.push("PASS");
 
@@ -1313,15 +1415,21 @@ function summarizeDeterministic(
     headline: topEvidence
       ? `${bucket.nodeLabel}: ${topEvidence.headline}`.slice(0, 140)
       : `${bucket.nodeLabel}: context update`.slice(0, 140),
-    summary: topEvidence?.summary ?? `${bucket.nodeLabel}: no model call (dry-run).`,
+    summary:
+      topEvidence?.summary ?? `${bucket.nodeLabel}: no model call (dry-run).`,
     rationale: "deterministic dry-run fallback",
-    targetMarketId: decision === "publish_candidate" ? (topMarket?.marketId ?? null) : null,
-    targetEventId: decision === "publish_candidate" ? (topMarket?.eventId ?? null) : null,
+    targetMarketId:
+      decision === "publish_candidate" ? (topMarket?.marketId ?? null) : null,
+    targetEventId:
+      decision === "publish_candidate" ? (topMarket?.eventId ?? null) : null,
     targetMarketTitle:
-      decision === "publish_candidate" ? (topMarket?.marketTitle ?? null) : null,
+      decision === "publish_candidate"
+        ? (topMarket?.marketTitle ?? null)
+        : null,
     targetEventTitle:
       decision === "publish_candidate" ? (topMarket?.eventTitle ?? null) : null,
-    targetVenue: decision === "publish_candidate" ? (topMarket?.venue ?? null) : null,
+    targetVenue:
+      decision === "publish_candidate" ? (topMarket?.venue ?? null) : null,
     reasonCodes,
     metrics: {
       evidenceCount,
@@ -1331,7 +1439,7 @@ function summarizeDeterministic(
       selectedMarketAffinity: topMarket?.affinityScore ?? null,
       bestMarketAffinity,
     },
-    evidenceRefs: evidence.slice(0, 6).map(item => ({
+    evidenceRefs: evidence.slice(0, 6).map((item) => ({
       evidenceId: item.id,
       headline: item.headline,
       sourceUrl: item.sourceUrl,
@@ -1365,7 +1473,9 @@ function summarizeDeterministic(
   };
 }
 
-function mapStatusToDecision(status: MapSignalsAgentOutputV2["status"]): SignalDecision {
+function mapStatusToDecision(
+  status: MapSignalsAgentOutputV2["status"],
+): SignalDecision {
   if (status === "PUBLISH") return "publish_candidate";
   if (status === "CONTEXT") return "context_only";
   return "skip";
@@ -1380,17 +1490,22 @@ async function evaluateNodeWithModel(params: {
   const { args, runId, bucket, candidateMarkets } = params;
   const evidence = bucket.evidence.slice(0, args.maxEvidencePerNode);
   const evidenceCount = evidence.length;
-  const confirmedCount = evidence.filter(item => item.confirmation === "confirmed").length;
-  const distinctDomains = new Set(evidence.map(item => item.sourceDomain)).size;
+  const confirmedCount = evidence.filter(
+    (item) => item.confirmation === "confirmed",
+  ).length;
+  const distinctDomains = new Set(evidence.map((item) => item.sourceDomain))
+    .size;
 
   const baseReasonCodes: string[] = [];
   if (evidenceCount < args.minEvidence) baseReasonCodes.push("LOW_EVIDENCE");
   if (confirmedCount < args.minConfirmed) baseReasonCodes.push("LOW_CONFIRMED");
-  if (distinctDomains < args.minDistinctDomains) baseReasonCodes.push("LOW_DOMAIN_DIVERSITY");
-  if (candidateMarkets.length === 0) baseReasonCodes.push("NO_MARKET_CANDIDATES");
+  if (distinctDomains < args.minDistinctDomains)
+    baseReasonCodes.push("LOW_DOMAIN_DIVERSITY");
+  if (candidateMarkets.length === 0)
+    baseReasonCodes.push("NO_MARKET_CANDIDATES");
 
   const signalId = buildSignalId(runId, bucket.nodeId);
-  const baseRefs = evidence.slice(0, 6).map(item => ({
+  const baseRefs = evidence.slice(0, 6).map((item) => ({
     evidenceId: item.id,
     headline: item.headline,
     sourceUrl: item.sourceUrl,
@@ -1409,7 +1524,10 @@ async function evaluateNodeWithModel(params: {
     args.minDistinctDomains,
   );
 
-  if (baseReasonCodes.includes("NO_MARKET_CANDIDATES") || evidence.length === 0) {
+  if (
+    baseReasonCodes.includes("NO_MARKET_CANDIDATES") ||
+    evidence.length === 0
+  ) {
     return {
       signalId,
       runId,
@@ -1420,8 +1538,14 @@ async function evaluateNodeWithModel(params: {
       signalType: "update",
       direction: "mixed",
       confidence: Number((evidenceQuality * 0.9).toFixed(4)),
-      headline: `${bucket.nodeLabel}: insufficient target market candidates`.slice(0, 140),
-      summary: evidence[0]?.summary ?? "No market candidates available for model targeting.",
+      headline:
+        `${bucket.nodeLabel}: insufficient target market candidates`.slice(
+          0,
+          140,
+        ),
+      summary:
+        evidence[0]?.summary ??
+        "No market candidates available for model targeting.",
       rationale: "gated before model call",
       targetMarketId: null,
       targetEventId: null,
@@ -1471,7 +1595,7 @@ async function evaluateNodeWithModel(params: {
     level: bucket.level,
     evidenceCount,
     confirmedCount,
-    evidence: evidence.map(item => ({
+    evidence: evidence.map((item) => ({
       id: item.id,
       headline: item.headline,
       summary: item.summary,
@@ -1619,16 +1743,23 @@ async function evaluateNodeWithModel(params: {
     };
   }
 
-  const allowedMarketIds = new Set(candidateMarkets.map(item => item.marketId));
-  const marketById = new Map(candidateMarkets.map(item => [item.marketId, item]));
-  const evidenceById = new Map(evidence.map(item => [item.id, item]));
-  const selectedEvidenceIds = new Set(evidence.map(item => item.id));
+  const allowedMarketIds = new Set(
+    candidateMarkets.map((item) => item.marketId),
+  );
+  const marketById = new Map(
+    candidateMarkets.map((item) => [item.marketId, item]),
+  );
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+  const selectedEvidenceIds = new Set(evidence.map((item) => item.id));
   const modelReasonCodes = [...baseReasonCodes];
 
   const targetMarketId = parsed.target_market_id;
   const targetEventId = parsed.target_event_id;
-  const marketIsValid = targetMarketId != null && allowedMarketIds.has(targetMarketId);
-  const selectedMarket = targetMarketId ? marketById.get(targetMarketId) ?? null : null;
+  const marketIsValid =
+    targetMarketId != null && allowedMarketIds.has(targetMarketId);
+  const selectedMarket = targetMarketId
+    ? (marketById.get(targetMarketId) ?? null)
+    : null;
   const selectedMarketAffinity = selectedMarket?.affinityScore ?? null;
   const bestMarketAffinity = candidateMarkets[0]?.affinityScore ?? null;
 
@@ -1636,9 +1767,11 @@ async function evaluateNodeWithModel(params: {
     pushUniqueReason(modelReasonCodes, "INVALID_TARGET_MARKET");
   }
 
-  const filteredEvidenceIds = parsed.evidence_ids.filter(id => selectedEvidenceIds.has(id));
+  const filteredEvidenceIds = parsed.evidence_ids.filter((id) =>
+    selectedEvidenceIds.has(id),
+  );
   const selectedEvidence = filteredEvidenceIds
-    .map(id => evidenceById.get(id))
+    .map((id) => evidenceById.get(id))
     .filter((item): item is MapSearchEvidence => item != null);
   if (filteredEvidenceIds.length === 0) {
     pushUniqueReason(modelReasonCodes, "NO_VALID_EVIDENCE_IDS");
@@ -1659,7 +1792,10 @@ async function evaluateNodeWithModel(params: {
       decision = "context_only";
       pushUniqueReason(modelReasonCodes, "INSUFFICIENT_EVIDENCE_LINKS");
     }
-    if (selectedMarketAffinity == null || selectedMarketAffinity < args.minAffinityForPublish) {
+    if (
+      selectedMarketAffinity == null ||
+      selectedMarketAffinity < args.minAffinityForPublish
+    ) {
       decision = "context_only";
       pushUniqueReason(modelReasonCodes, "LOW_MARKET_AFFINITY");
     }
@@ -1675,7 +1811,7 @@ async function evaluateNodeWithModel(params: {
     }
     const targetAnchorAlignment = scoreSignalTargetAnchorAlignment({
       evidenceText: selectedEvidence
-        .map(item => `${item.headline} ${item.summary}`)
+        .map((item) => `${item.headline} ${item.summary}`)
         .join(" ")
         .trim(),
       eventTitle: selectedMarket?.eventTitle ?? null,
@@ -1701,18 +1837,23 @@ async function evaluateNodeWithModel(params: {
   }
 
   const downgradedFromPublish =
-    originalModelDecision === "publish_candidate" && decision !== "publish_candidate";
+    originalModelDecision === "publish_candidate" &&
+    decision !== "publish_candidate";
   if (downgradedFromPublish && modelReasonCodes.length === 0) {
     pushUniqueReason(modelReasonCodes, "DOWNGRADED_POST_GATES");
   }
 
   const confidence = clamp01(
-    parsed.confidence * (0.7 + 0.3 * evidenceQuality) * (decision === "publish_candidate" ? 1 : 0.9),
+    parsed.confidence *
+      (0.7 + 0.3 * evidenceQuality) *
+      (decision === "publish_candidate" ? 1 : 0.9),
   );
 
-  const evidenceRefMap = new Map(baseRefs.map(item => [item.evidenceId, item]));
+  const evidenceRefMap = new Map(
+    baseRefs.map((item) => [item.evidenceId, item]),
+  );
   const selectedRefs = filteredEvidenceIds
-    .map(id => evidenceRefMap.get(id))
+    .map((id) => evidenceRefMap.get(id))
     .filter((item): item is NonNullable<typeof item> => item != null)
     .slice(0, 6);
 
@@ -1732,10 +1873,15 @@ async function evaluateNodeWithModel(params: {
     targetMarketId: decision === "publish_candidate" ? targetMarketId : null,
     targetEventId: decision === "publish_candidate" ? targetEventId : null,
     targetMarketTitle:
-      decision === "publish_candidate" ? (selectedMarket?.marketTitle ?? null) : null,
+      decision === "publish_candidate"
+        ? (selectedMarket?.marketTitle ?? null)
+        : null,
     targetEventTitle:
-      decision === "publish_candidate" ? (selectedMarket?.eventTitle ?? null) : null,
-    targetVenue: decision === "publish_candidate" ? (selectedMarket?.venue ?? null) : null,
+      decision === "publish_candidate"
+        ? (selectedMarket?.eventTitle ?? null)
+        : null,
+    targetVenue:
+      decision === "publish_candidate" ? (selectedMarket?.venue ?? null) : null,
     reasonCodes: modelReasonCodes.length > 0 ? modelReasonCodes : ["PASS"],
     metrics: {
       evidenceCount,
@@ -1752,7 +1898,9 @@ async function evaluateNodeWithModel(params: {
     estimatedCostUsd: Number(estimatedCostUsd.toFixed(6)),
     chargedCostUsd: Number(chargedCostUsd.toFixed(6)),
     providerCostUsd:
-      usage.providerCostUsd == null ? null : Number(usage.providerCostUsd.toFixed(6)),
+      usage.providerCostUsd == null
+        ? null
+        : Number(usage.providerCostUsd.toFixed(6)),
     providerCostField: usage.providerCostField,
     providerCostUsdTicks: usage.providerCostUsdTicks,
     costSource,
@@ -1781,16 +1929,19 @@ function buildMarkdown(
   },
 ): string {
   const modelPublishCount = signals.filter(
-    item => item.modelStatus === "PUBLISH",
+    (item) => item.modelStatus === "PUBLISH",
   ).length;
   const downgradedPublishCount = signals.filter(
-    item => item.downgradedFromPublish,
+    (item) => item.downgradedFromPublish,
   ).length;
   const downgradeReasonCounts = new Map<string, number>();
   for (const signal of signals) {
     if (!signal.downgradedFromPublish) continue;
     for (const code of signal.reasonCodes) {
-      downgradeReasonCounts.set(code, (downgradeReasonCounts.get(code) ?? 0) + 1);
+      downgradeReasonCounts.set(
+        code,
+        (downgradeReasonCounts.get(code) ?? 0) + 1,
+      );
     }
   }
 
@@ -1801,15 +1952,23 @@ function buildMarkdown(
   lines.push(`- map_generated_at: ${input.run.mapGeneratedAt}`);
   lines.push(`- source_calls: ${input.totals.callsExecuted}`);
   lines.push(`- source_evidence: ${input.totals.evidenceTotal}`);
-  lines.push(`- source_spent_usd_estimated: $${input.totals.estimatedTotalCostUsd.toFixed(6)}`);
+  lines.push(
+    `- source_spent_usd_estimated: $${input.totals.estimatedTotalCostUsd.toFixed(6)}`,
+  );
   lines.push(
     `- source_spent_usd_charged: $${(input.totals.chargedTotalCostUsd ?? input.totals.estimatedTotalCostUsd).toFixed(6)}`,
   );
   lines.push(`- model: ${args.model}`);
   lines.push(`- generated_signals: ${signals.length}`);
-  lines.push(`- publish_candidates: ${signals.filter(item => item.decision === "publish_candidate").length}`);
-  lines.push(`- context_only: ${signals.filter(item => item.decision === "context_only").length}`);
-  lines.push(`- skipped: ${signals.filter(item => item.decision === "skip").length}`);
+  lines.push(
+    `- publish_candidates: ${signals.filter((item) => item.decision === "publish_candidate").length}`,
+  );
+  lines.push(
+    `- context_only: ${signals.filter((item) => item.decision === "context_only").length}`,
+  );
+  lines.push(
+    `- skipped: ${signals.filter((item) => item.decision === "skip").length}`,
+  );
   lines.push(`- model_publish_count: ${modelPublishCount}`);
   lines.push(`- downgraded_publish_count: ${downgradedPublishCount}`);
   const modelEstimatedCostUsd = signals.reduce(
@@ -1821,23 +1980,35 @@ function buildMarkdown(
     0,
   );
   const modelProviderReportedCostCalls = signals.filter(
-    item => item.providerCostUsd != null,
+    (item) => item.providerCostUsd != null,
   ).length;
   const modelProviderReportedCostUsd = signals.reduce(
     (sum, item) => sum + (item.providerCostUsd ?? 0),
     0,
   );
-  lines.push(`- model_cost_usd_estimated: $${modelEstimatedCostUsd.toFixed(6)}`);
+  lines.push(
+    `- model_cost_usd_estimated: $${modelEstimatedCostUsd.toFixed(6)}`,
+  );
   lines.push(`- model_cost_usd_charged: $${modelChargedCostUsd.toFixed(6)}`);
-  lines.push(`- model_provider_reported_calls: ${modelProviderReportedCostCalls}`);
-  lines.push(`- model_provider_reported_cost_usd: $${modelProviderReportedCostUsd.toFixed(6)}`);
+  lines.push(
+    `- model_provider_reported_calls: ${modelProviderReportedCostCalls}`,
+  );
+  lines.push(
+    `- model_provider_reported_cost_usd: $${modelProviderReportedCostUsd.toFixed(6)}`,
+  );
   lines.push(`- embed_calls: ${embeddingTotals.calls}`);
   lines.push(`- embed_tokens_prompt: ${embeddingTotals.promptTokens}`);
   lines.push(`- embed_tokens_completion: ${embeddingTotals.completionTokens}`);
   lines.push(`- embed_tokens_total: ${embeddingTotals.totalTokens}`);
-  lines.push(`- embed_cost_usd_estimated: $${embeddingTotals.estimatedCostUsd.toFixed(6)}`);
-  lines.push(`- embed_cost_usd_charged: $${embeddingTotals.chargedCostUsd.toFixed(6)}`);
-  lines.push(`- embed_provider_reported_calls: ${embeddingTotals.providerReportedCostCalls}`);
+  lines.push(
+    `- embed_cost_usd_estimated: $${embeddingTotals.estimatedCostUsd.toFixed(6)}`,
+  );
+  lines.push(
+    `- embed_cost_usd_charged: $${embeddingTotals.chargedCostUsd.toFixed(6)}`,
+  );
+  lines.push(
+    `- embed_provider_reported_calls: ${embeddingTotals.providerReportedCostCalls}`,
+  );
   lines.push(
     `- embed_provider_reported_cost_usd: $${embeddingTotals.providerReportedCostUsd.toFixed(6)}`,
   );
@@ -1892,7 +2063,9 @@ function buildMarkdown(
     lines.push(
       `- best_market_affinity: ${signal.metrics.bestMarketAffinity == null ? "-" : signal.metrics.bestMarketAffinity.toFixed(6)}`,
     );
-    lines.push(`- token_cost_usd_estimated: $${signal.tokenCostUsd.toFixed(6)}`);
+    lines.push(
+      `- token_cost_usd_estimated: $${signal.tokenCostUsd.toFixed(6)}`,
+    );
     lines.push(`- cost_usd_charged: $${signal.chargedCostUsd.toFixed(6)}`);
     lines.push(`- cost_source: ${signal.costSource}`);
     lines.push("- evidence:");
@@ -1912,14 +2085,18 @@ export async function runMapSignals(
   context: Partial<MapSignalsRunContext> = {},
 ): Promise<void> {
   activeRunContext = { ...DEFAULT_RUN_CONTEXT, ...context };
-  if (hasFlag(argv, "--help") || hasFlag(argv, "-h")) usage(activeRunContext, 0);
+  if (hasFlag(argv, "--help") || hasFlag(argv, "-h"))
+    usage(activeRunContext, 0);
   const args = resolveArgs(argv);
 
   const input = await readInput(args.inputPath);
   const runId = input.run.runId;
 
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: activeRunContext.scriptTag });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: activeRunContext.scriptTag,
+  });
 
   try {
     const startedAt = Date.now();
@@ -1960,11 +2137,20 @@ export async function runMapSignals(
       throw new Error(`missing_market_map_meta_for_run:${runId}`);
     }
 
-    const nodeLabelById = new Map(nodes.map(node => [node.id, node.labelAi ?? node.labelRepresentative ?? node.label]));
-    const nodeLevelById = new Map(nodes.map(node => [node.id, node.level]));
+    const nodeLabelById = new Map(
+      nodes.map((node) => [
+        node.id,
+        node.labelAi ?? node.labelRepresentative ?? node.label,
+      ]),
+    );
+    const nodeLevelById = new Map(nodes.map((node) => [node.id, node.level]));
 
-    const callLabelByNode = new Map(input.calls.map(call => [call.nodeId, call.nodeLabel]));
-    const callLevelByNode = new Map(input.calls.map(call => [call.nodeId, call.level]));
+    const callLabelByNode = new Map(
+      input.calls.map((call) => [call.nodeId, call.nodeLabel]),
+    );
+    const callLevelByNode = new Map(
+      input.calls.map((call) => [call.nodeId, call.level]),
+    );
     for (const [nodeId, label] of callLabelByNode) {
       if (!nodeLabelById.has(nodeId)) nodeLabelById.set(nodeId, label);
     }
@@ -1972,7 +2158,11 @@ export async function runMapSignals(
       if (!nodeLevelById.has(nodeId)) nodeLevelById.set(nodeId, level);
     }
 
-    const buckets = extractNodeBuckets(input, nodeLabelById, nodeLevelById).slice(0, args.maxNodes);
+    const buckets = extractNodeBuckets(
+      input,
+      nodeLabelById,
+      nodeLevelById,
+    ).slice(0, args.maxNodes);
     console.log(`${logPrefix()} plan`, {
       bucketCount: buckets.length,
       sourceEvidenceTotal: input.evidence.length,
@@ -2003,11 +2193,14 @@ export async function runMapSignals(
       embeddingCostTotals.estimatedCostUsd += result.cost.estimatedCostUsd;
       embeddingCostTotals.chargedCostUsd += result.cost.chargedCostUsd;
       if (result.cost.providerCostUsd != null) {
-        embeddingCostTotals.providerReportedCostUsd += result.cost.providerCostUsd;
+        embeddingCostTotals.providerReportedCostUsd +=
+          result.cost.providerCostUsd;
         embeddingCostTotals.providerReportedCostCalls += 1;
       }
     }
-    async function getNodeEvents(nodeId: string): Promise<MarketMapEventSummary[]> {
+    async function getNodeEvents(
+      nodeId: string,
+    ): Promise<MarketMapEventSummary[]> {
       if (nodeEventsCache.has(nodeId)) return nodeEventsCache.get(nodeId) ?? [];
       const raw = await redis.get(marketMapRunNodeEventsKey(runId, nodeId));
       const rows = safeJsonParse<MarketMapEventSummary[]>(raw) ?? [];
@@ -2126,8 +2319,11 @@ export async function runMapSignals(
       return out;
     }
 
-    async function getEventEmbedding(eventId: string): Promise<number[] | null> {
-      if (eventEmbeddingCache.has(eventId)) return eventEmbeddingCache.get(eventId) ?? null;
+    async function getEventEmbedding(
+      eventId: string,
+    ): Promise<number[] | null> {
+      if (eventEmbeddingCache.has(eventId))
+        return eventEmbeddingCache.get(eventId) ?? null;
       const raw = await redis.hGet(`ai:embed:event:${eventId}`, "embedding");
       const vec = Buffer.isBuffer(raw) ? parseEmbeddingBuffer(raw) : null;
       eventEmbeddingCache.set(eventId, vec);
@@ -2139,7 +2335,8 @@ export async function runMapSignals(
       eventId: string,
       fallbackText: string,
     ): Promise<number[] | null> {
-      if (marketEmbeddingCache.has(marketId)) return marketEmbeddingCache.get(marketId) ?? null;
+      if (marketEmbeddingCache.has(marketId))
+        return marketEmbeddingCache.get(marketId) ?? null;
 
       let vec: number[] | null = null;
       const raw = await redis.hGet(`ai:embed:market:${marketId}`, "embedding");
@@ -2176,7 +2373,10 @@ export async function runMapSignals(
       const missing: EvidenceEmbeddingInput[] = [];
       for (const row of rows) {
         if (evidenceEmbeddingCache.has(row.evidenceId)) {
-          out.set(row.evidenceId, evidenceEmbeddingCache.get(row.evidenceId) ?? null);
+          out.set(
+            row.evidenceId,
+            evidenceEmbeddingCache.get(row.evidenceId) ?? null,
+          );
         } else {
           missing.push(row);
         }
@@ -2185,7 +2385,7 @@ export async function runMapSignals(
         try {
           const result = await callOpenRouterEmbeddings(
             args,
-            missing.map(item => item.text),
+            missing.map((item) => item.text),
           );
           accountEmbeddingCost(result);
           for (let i = 0; i < missing.length; i += 1) {
@@ -2209,8 +2409,12 @@ export async function runMapSignals(
     ): Promise<Map<string, number[] | null>> {
       const out = new Map<string, number[] | null>();
       await Promise.all(
-        rows.map(async row => {
-          const vec = await getMarketEmbedding(row.marketId, row.eventId, row.text);
+        rows.map(async (row) => {
+          const vec = await getMarketEmbedding(
+            row.marketId,
+            row.eventId,
+            row.text,
+          );
           out.set(row.marketId, vec);
         }),
       );
@@ -2277,63 +2481,72 @@ export async function runMapSignals(
     let runningContext = 0;
     let runningSkip = 0;
 
-    const signals = await runParallel(buckets, args.concurrency, async (bucket, idx) => {
-      const callIndex = idx + 1;
-      inFlight += 1;
-      console.log(
-        `${logPrefix()} call_start #${callIndex} node="${bucket.nodeLabel}" level=${bucket.level} queue=${Math.max(buckets.length - callIndex, 0)} evidence=${bucket.evidence.length} in_flight=${inFlight}`,
-      );
-
-      const events = await getNodeEvents(bucket.nodeId);
-      const topMarketsByEventVenue = await getTopMarketsForEvents(events);
-      const candidateMarkets = await toMarketCandidates(
-        events,
-        topMarketsByEventVenue,
-        args.maxMarketsPerNode,
-        bucket.evidence.slice(0, args.maxEvidencePerNode),
-        {
-          includeSemanticAffinity: !args.dryRun,
-          getEvidenceEmbeddings,
-          getMarketEmbeddings,
-        },
-      );
-      await enrichCandidateMarketTitles(candidateMarkets);
-
-      if (args.verbose) {
+    const signals = await runParallel(
+      buckets,
+      args.concurrency,
+      async (bucket, idx) => {
+        const callIndex = idx + 1;
+        inFlight += 1;
         console.log(
-          `${logPrefix()} call_ctx #${callIndex} candidates=${candidateMarkets.length} first_market=${candidateMarkets[0]?.marketId ?? "-"}`,
+          `${logPrefix()} call_start #${callIndex} node="${bucket.nodeLabel}" level=${bucket.level} queue=${Math.max(buckets.length - callIndex, 0)} evidence=${bucket.evidence.length} in_flight=${inFlight}`,
         );
-      }
 
-      let signal: SignalCandidate;
-      if (args.dryRun) {
-        signal = summarizeDeterministic(bucket, candidateMarkets, args, runId);
-      } else {
-        signal = await evaluateNodeWithModel({
-          args,
-          runId,
-          bucket,
-          candidateMarkets,
-        });
-      }
+        const events = await getNodeEvents(bucket.nodeId);
+        const topMarketsByEventVenue = await getTopMarketsForEvents(events);
+        const candidateMarkets = await toMarketCandidates(
+          events,
+          topMarketsByEventVenue,
+          args.maxMarketsPerNode,
+          bucket.evidence.slice(0, args.maxEvidencePerNode),
+          {
+            includeSemanticAffinity: !args.dryRun,
+            getEvidenceEmbeddings,
+            getMarketEmbeddings,
+          },
+        );
+        await enrichCandidateMarketTitles(candidateMarkets);
 
-      completed += 1;
-      inFlight = Math.max(0, inFlight - 1);
-      runningCostUsd += signal.chargedCostUsd;
-      if (signal.decision === "publish_candidate") runningPublish += 1;
-      else if (signal.decision === "context_only") runningContext += 1;
-      else runningSkip += 1;
+        if (args.verbose) {
+          console.log(
+            `${logPrefix()} call_ctx #${callIndex} candidates=${candidateMarkets.length} first_market=${candidateMarkets[0]?.marketId ?? "-"}`,
+          );
+        }
 
-      const parseStatus = args.dryRun
-        ? "dry_run"
-        : signal.modelOutput
-          ? "valid"
-          : "invalid";
-      console.log(
-        `${logPrefix()} call_done #${callIndex} parse=${parseStatus} model_status=${signal.modelStatus} decision=${signal.decision} downgraded=${signal.downgradedFromPublish} conf=${signal.confidence.toFixed(3)} evidence=${signal.metrics.evidenceCount} markets=${signal.metrics.candidateMarkets} affinity=${signal.metrics.selectedMarketAffinity == null ? "-" : signal.metrics.selectedMarketAffinity.toFixed(3)} target=${signal.targetMarketId ?? "-"} cost=${formatUsd(signal.chargedCostUsd)} est=${formatUsd(signal.estimatedCostUsd)} src=${signal.costSource} total_cost=${formatUsd(runningCostUsd)} completed=${completed}/${buckets.length} pub=${runningPublish} ctx=${runningContext} skip=${runningSkip} err=${signal.error ? preview(signal.error, 80) : "-"}`,
-      );
-      return signal;
-    });
+        let signal: SignalCandidate;
+        if (args.dryRun) {
+          signal = summarizeDeterministic(
+            bucket,
+            candidateMarkets,
+            args,
+            runId,
+          );
+        } else {
+          signal = await evaluateNodeWithModel({
+            args,
+            runId,
+            bucket,
+            candidateMarkets,
+          });
+        }
+
+        completed += 1;
+        inFlight = Math.max(0, inFlight - 1);
+        runningCostUsd += signal.chargedCostUsd;
+        if (signal.decision === "publish_candidate") runningPublish += 1;
+        else if (signal.decision === "context_only") runningContext += 1;
+        else runningSkip += 1;
+
+        const parseStatus = args.dryRun
+          ? "dry_run"
+          : signal.modelOutput
+            ? "valid"
+            : "invalid";
+        console.log(
+          `${logPrefix()} call_done #${callIndex} parse=${parseStatus} model_status=${signal.modelStatus} decision=${signal.decision} downgraded=${signal.downgradedFromPublish} conf=${signal.confidence.toFixed(3)} evidence=${signal.metrics.evidenceCount} markets=${signal.metrics.candidateMarkets} affinity=${signal.metrics.selectedMarketAffinity == null ? "-" : signal.metrics.selectedMarketAffinity.toFixed(3)} target=${signal.targetMarketId ?? "-"} cost=${formatUsd(signal.chargedCostUsd)} est=${formatUsd(signal.estimatedCostUsd)} src=${signal.costSource} total_cost=${formatUsd(runningCostUsd)} completed=${completed}/${buckets.length} pub=${runningPublish} ctx=${runningContext} skip=${runningSkip} err=${signal.error ? preview(signal.error, 80) : "-"}`,
+        );
+        return signal;
+      },
+    );
 
     signals.sort((a, b) => {
       if (a.decision !== b.decision) {
@@ -2348,7 +2561,10 @@ export async function runMapSignals(
 
     const limitedSignals = signals.slice(0, args.maxSignals);
     const durationMs = Date.now() - startedAt;
-    const totalTokenCostUsd = limitedSignals.reduce((sum, item) => sum + item.tokenCostUsd, 0);
+    const totalTokenCostUsd = limitedSignals.reduce(
+      (sum, item) => sum + item.tokenCostUsd,
+      0,
+    );
     const modelEstimatedCostUsd = limitedSignals.reduce(
       (sum, item) => sum + item.estimatedCostUsd,
       0,
@@ -2362,22 +2578,35 @@ export async function runMapSignals(
       0,
     );
     const modelProviderReportedCostCalls = limitedSignals.filter(
-      item => item.providerCostUsd != null,
+      (item) => item.providerCostUsd != null,
     ).length;
-    const promptTokens = limitedSignals.reduce((sum, item) => sum + item.usage.promptTokens, 0);
-    const completionTokens = limitedSignals.reduce((sum, item) => sum + item.usage.completionTokens, 0);
-    const totalTokens = limitedSignals.reduce((sum, item) => sum + item.usage.totalTokens, 0);
-    const totalEstimatedCostUsd = modelEstimatedCostUsd + embeddingCostTotals.estimatedCostUsd;
-    const totalChargedCostUsd = modelChargedCostUsd + embeddingCostTotals.chargedCostUsd;
+    const promptTokens = limitedSignals.reduce(
+      (sum, item) => sum + item.usage.promptTokens,
+      0,
+    );
+    const completionTokens = limitedSignals.reduce(
+      (sum, item) => sum + item.usage.completionTokens,
+      0,
+    );
+    const totalTokens = limitedSignals.reduce(
+      (sum, item) => sum + item.usage.totalTokens,
+      0,
+    );
+    const totalEstimatedCostUsd =
+      modelEstimatedCostUsd + embeddingCostTotals.estimatedCostUsd;
+    const totalChargedCostUsd =
+      modelChargedCostUsd + embeddingCostTotals.chargedCostUsd;
     const totalProviderReportedCostUsd =
-      modelProviderReportedCostUsd + embeddingCostTotals.providerReportedCostUsd;
+      modelProviderReportedCostUsd +
+      embeddingCostTotals.providerReportedCostUsd;
     const totalProviderReportedCostCalls =
-      modelProviderReportedCostCalls + embeddingCostTotals.providerReportedCostCalls;
+      modelProviderReportedCostCalls +
+      embeddingCostTotals.providerReportedCostCalls;
     const modelPublishCount = limitedSignals.filter(
-      item => item.modelStatus === "PUBLISH",
+      (item) => item.modelStatus === "PUBLISH",
     ).length;
     const downgradedPublishCount = limitedSignals.filter(
-      item => item.downgradedFromPublish,
+      (item) => item.downgradedFromPublish,
     ).length;
     const downgradeReasonCounts: Record<string, number> = {};
     for (const signal of limitedSignals) {
@@ -2401,9 +2630,12 @@ export async function runMapSignals(
         evidenceTotal: input.totals.evidenceTotal,
         estimatedSearchCostUsd: input.totals.estimatedTotalCostUsd,
         chargedSearchCostUsd:
-          input.totals.chargedTotalCostUsd ?? input.totals.estimatedTotalCostUsd,
-        providerReportedSearchCostUsd: input.totals.providerReportedCostUsd ?? 0,
-        providerReportedSearchCostCalls: input.totals.providerReportedCostCalls ?? 0,
+          input.totals.chargedTotalCostUsd ??
+          input.totals.estimatedTotalCostUsd,
+        providerReportedSearchCostUsd:
+          input.totals.providerReportedCostUsd ?? 0,
+        providerReportedSearchCostCalls:
+          input.totals.providerReportedCostCalls ?? 0,
         inputPath: args.inputPath,
       },
       config: {
@@ -2425,9 +2657,14 @@ export async function runMapSignals(
       },
       totals: {
         generatedSignals: limitedSignals.length,
-        publishCandidates: limitedSignals.filter(item => item.decision === "publish_candidate").length,
-        contextOnly: limitedSignals.filter(item => item.decision === "context_only").length,
-        skipped: limitedSignals.filter(item => item.decision === "skip").length,
+        publishCandidates: limitedSignals.filter(
+          (item) => item.decision === "publish_candidate",
+        ).length,
+        contextOnly: limitedSignals.filter(
+          (item) => item.decision === "context_only",
+        ).length,
+        skipped: limitedSignals.filter((item) => item.decision === "skip")
+          .length,
         promptTokens,
         completionTokens,
         totalTokens,
@@ -2454,7 +2691,9 @@ export async function runMapSignals(
           embeddingCostTotals.providerReportedCostCalls,
         estimatedCostUsd: Number(totalEstimatedCostUsd.toFixed(6)),
         chargedCostUsd: Number(totalChargedCostUsd.toFixed(6)),
-        providerReportedCostUsd: Number(totalProviderReportedCostUsd.toFixed(6)),
+        providerReportedCostUsd: Number(
+          totalProviderReportedCostUsd.toFixed(6),
+        ),
         providerReportedCostCalls: totalProviderReportedCostCalls,
         modelPublishCount,
         downgradedPublishCount,
@@ -2465,7 +2704,11 @@ export async function runMapSignals(
     };
 
     if (args.outPath) {
-      await writeFile(args.outPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      await writeFile(
+        args.outPath,
+        `${JSON.stringify(payload, null, 2)}\n`,
+        "utf8",
+      );
       console.log(`${logPrefix()} wrote ${args.outPath}`);
     }
 
@@ -2500,7 +2743,7 @@ const isDirectRun = (() => {
 })();
 
 if (isDirectRun) {
-  runMapSignals().catch(async error => {
+  runMapSignals().catch(async (error) => {
     console.error(`${logPrefix()} failed`, error);
     process.exit(1);
   });

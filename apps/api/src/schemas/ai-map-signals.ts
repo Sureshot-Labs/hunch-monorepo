@@ -81,7 +81,9 @@ export const mapSignalsInputArtifactSchema = z
   })
   .passthrough();
 
-export type MapSignalsInputArtifact = z.infer<typeof mapSignalsInputArtifactSchema>;
+export type MapSignalsInputArtifact = z.infer<
+  typeof mapSignalsInputArtifactSchema
+>;
 
 export function parseMapSignalsInputArtifactV1(
   payload: unknown,
@@ -155,18 +157,17 @@ export type MapSignalsPromptInput = {
 function formatEvidenceList(input: MapSignalsPromptInput["evidence"]): string {
   if (input.length === 0) return "- none";
   return input
-    .map(
-      item =>
-        [
-          `- id: ${item.id}`,
-          `  headline: ${item.headline}`,
-          `  summary: ${item.summary}`,
-          `  source_domain: ${item.sourceDomain}`,
-          `  published_at: ${item.publishedAt ?? "-"}`,
-          `  confirmation: ${item.confirmation}`,
-          `  relevance: ${item.relevance.toFixed(3)}`,
-          `  confidence: ${item.confidence.toFixed(3)}`,
-        ].join("\n"),
+    .map((item) =>
+      [
+        `- id: ${item.id}`,
+        `  headline: ${item.headline}`,
+        `  summary: ${item.summary}`,
+        `  source_domain: ${item.sourceDomain}`,
+        `  published_at: ${item.publishedAt ?? "-"}`,
+        `  confirmation: ${item.confirmation}`,
+        `  relevance: ${item.relevance.toFixed(3)}`,
+        `  confidence: ${item.confidence.toFixed(3)}`,
+      ].join("\n"),
     )
     .join("\n");
 }
@@ -176,22 +177,21 @@ function formatMarketList(
 ): string {
   if (input.length === 0) return "- none";
   return input
-    .map(
-      item =>
-        [
-          `- market_id: ${item.marketId}`,
-          `  event_id: ${item.eventId}`,
-          `  venue: ${item.venue}`,
-          `  event_title: ${item.eventTitle}`,
-          `  market_title: ${item.marketTitle ?? "-"}`,
-          `  close_time: ${item.closeTime ?? "-"}`,
-          `  activity_volume: ${item.activityVolume.toFixed(2)}`,
-          `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
-          `  open_interest: ${item.openInterest == null ? "-" : item.openInterest.toFixed(2)}`,
-          `  affinity_score: ${item.affinityScore.toFixed(6)}`,
-          `  contract_match: ${item.contractMatchScore.toFixed(6)}`,
-          `  affinity_rank: ${item.affinityRank}`,
-        ].join("\n"),
+    .map((item) =>
+      [
+        `- market_id: ${item.marketId}`,
+        `  event_id: ${item.eventId}`,
+        `  venue: ${item.venue}`,
+        `  event_title: ${item.eventTitle}`,
+        `  market_title: ${item.marketTitle ?? "-"}`,
+        `  close_time: ${item.closeTime ?? "-"}`,
+        `  activity_volume: ${item.activityVolume.toFixed(2)}`,
+        `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
+        `  open_interest: ${item.openInterest == null ? "-" : item.openInterest.toFixed(2)}`,
+        `  affinity_score: ${item.affinityScore.toFixed(6)}`,
+        `  contract_match: ${item.contractMatchScore.toFixed(6)}`,
+        `  affinity_rank: ${item.affinityRank}`,
+      ].join("\n"),
     )
     .join("\n");
 }
@@ -262,7 +262,9 @@ export function buildMapSignalsSystemPromptV2(): string {
   ].join("\n");
 }
 
-export function buildMapSignalsUserPromptV2(input: MapSignalsPromptInput): string {
+export function buildMapSignalsUserPromptV2(
+  input: MapSignalsPromptInput,
+): string {
   return [
     "Generate one signal for this map node.",
     "",

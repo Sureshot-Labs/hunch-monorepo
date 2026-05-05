@@ -14,8 +14,7 @@ import minimist from "minimist";
 
 const DEFAULT_PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 const DEFAULT_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B";
-const DEFAULT_NEG_RISK_EXCHANGE =
-  "0xe2222d279d744050d28e00520010520000310F59";
+const DEFAULT_NEG_RISK_EXCHANGE = "0xe2222d279d744050d28e00520010520000310F59";
 
 async function main() {
   const argv = minimist(process.argv.slice(2));
@@ -63,7 +62,11 @@ async function main() {
   const FeeCollector = await ethers.getContractFactory(
     "PolymarketFeeCollectorClobV2",
   );
-  const feeCollector = await FeeCollector.deploy(treasury, collateral, exchanges);
+  const feeCollector = await FeeCollector.deploy(
+    treasury,
+    collateral,
+    exchanges,
+  );
   await feeCollector.waitForDeployment();
 
   console.log(

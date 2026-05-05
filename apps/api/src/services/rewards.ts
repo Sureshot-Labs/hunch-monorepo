@@ -110,7 +110,9 @@ function clampBps(value: number, max = 10_000): number {
 
 function maxBps(values: number[]): number {
   if (!values.length) return 0;
-  return Math.max(...values.map((value) => (Number.isFinite(value) ? value : 0)));
+  return Math.max(
+    ...values.map((value) => (Number.isFinite(value) ? value : 0)),
+  );
 }
 
 export function resolveEffectiveBps(
@@ -134,7 +136,9 @@ export type RewardsPolicy = {
   referralBonus: ReferralBonus[];
 };
 
-export type RewardsLeaderboardEntry = RewardsLeaderboardRow & { isYou: boolean };
+export type RewardsLeaderboardEntry = RewardsLeaderboardRow & {
+  isYou: boolean;
+};
 
 export type RewardsLeaderboard = {
   metric: RewardsLeaderboardMetric;
@@ -219,7 +223,8 @@ function parsePolicy(raw: {
   tiers: unknown;
   referral_bonus: unknown;
 }): { tiers: RewardsTier[]; referralBonus: ReferralBonus[] } | null {
-  if (!Array.isArray(raw.tiers) || !Array.isArray(raw.referral_bonus)) return null;
+  if (!Array.isArray(raw.tiers) || !Array.isArray(raw.referral_bonus))
+    return null;
 
   const tiers = raw.tiers.map(normalizeTier).filter(Boolean) as RewardsTier[];
   const referralBonus = raw.referral_bonus
@@ -300,7 +305,9 @@ async function buildReferralAttachmentState(
   const row = await fetchInboundReferralForUser(pool, userId);
   if (!row) return emptyReferralAttachmentState();
   const status =
-    row.status === "pending" || row.status === "qualified" || row.status === "blocked"
+    row.status === "pending" ||
+    row.status === "qualified" ||
+    row.status === "blocked"
       ? row.status
       : null;
   return {
@@ -531,7 +538,10 @@ export async function setReferralCodeForUser(
   const targetId = inputs.userId;
   const preOwner = await findUserByReferralCode(pool, normalized);
   const lockIds = Array.from(
-    new Set([targetId, ...(preOwner?.id && preOwner.id !== targetId ? [preOwner.id] : [])]),
+    new Set([
+      targetId,
+      ...(preOwner?.id && preOwner.id !== targetId ? [preOwner.id] : []),
+    ]),
   ).sort((a, b) => a.localeCompare(b));
 
   let targetExists = false;
@@ -562,7 +572,11 @@ export async function setReferralCodeForUser(
 
   let transferredFromUserId: string | null = null;
   if (ownerId && ownerId !== targetId) {
-    const cleared = await clearUserReferralCodeIfMatches(pool, ownerId, normalized);
+    const cleared = await clearUserReferralCodeIfMatches(
+      pool,
+      ownerId,
+      normalized,
+    );
     if (cleared) {
       transferredFromUserId = ownerId;
     }
@@ -619,7 +633,9 @@ export function computeCashbackBreakdown(inputs: {
     bucket.feeCollected += parseMicro(values.collected);
   }
 
-  for (const [chainId, values] of Object.entries(inputs.referralFeeTotalsByChain)) {
+  for (const [chainId, values] of Object.entries(
+    inputs.referralFeeTotalsByChain,
+  )) {
     const canonicalChainId = normalizeRewardsChainId(chainId);
     if (!canonicalChainId) continue;
     const bucket = ensureChain(canonicalChainId);
@@ -627,7 +643,9 @@ export function computeCashbackBreakdown(inputs: {
     bucket.referralCollected += parseMicro(values.collected);
   }
 
-  for (const [chainId, claimed] of Object.entries(inputs.claimedTotalsByChain)) {
+  for (const [chainId, claimed] of Object.entries(
+    inputs.claimedTotalsByChain,
+  )) {
     const canonicalChainId = normalizeRewardsChainId(chainId);
     if (!canonicalChainId) continue;
     const bucket = ensureChain(canonicalChainId);
@@ -638,8 +656,10 @@ export function computeCashbackBreakdown(inputs: {
     string,
     { pending: number; collected: number; claimable: number }
   > = {};
-  const referralByChain: Record<string, { pending: number; collected: number }> =
-    {};
+  const referralByChain: Record<
+    string,
+    { pending: number; collected: number }
+  > = {};
   const claimableByChainMicro: Record<string, bigint> = {};
 
   let totalCashbackPendingMicro = 0n;
@@ -686,7 +706,9 @@ export function computeCashbackBreakdown(inputs: {
     cashbackByChain,
     referralByChain,
     claimableByChainMicro,
-    totalPending: microToNumber(totalCashbackPendingMicro + totalReferralPendingMicro),
+    totalPending: microToNumber(
+      totalCashbackPendingMicro + totalReferralPendingMicro,
+    ),
     totalCollected: microToNumber(
       totalCashbackCollectedMicro + totalReferralCollectedMicro,
     ),
@@ -710,7 +732,10 @@ export async function getRewardsSummary(
     collected: number;
     claimable: number;
     bps: number;
-    byChain: Record<string, { pending: number; collected: number; claimable: number }>;
+    byChain: Record<
+      string,
+      { pending: number; collected: number; claimable: number }
+    >;
   };
   referralBonus: {
     qualifiedCount: number;
@@ -737,10 +762,7 @@ export async function getRewardsSummary(
   const progressPct = nextTier
     ? Math.min(
         1,
-        Math.max(
-          0,
-          (points - tier.points) / (nextTier.points - tier.points),
-        ),
+        Math.max(0, (points - tier.points) / (nextTier.points - tier.points)),
       )
     : 1;
   const remaining = nextTier ? Math.max(0, nextTier.points - points) : null;
@@ -898,8 +920,7 @@ export async function getRewardsLeaderboard(
     excludeManual: boolean;
   },
 ): Promise<RewardsLeaderboard> {
-  const intervalApplied =
-    inputs.metric === "pnl" ? "alltime" : inputs.interval;
+  const intervalApplied = inputs.metric === "pnl" ? "alltime" : inputs.interval;
   const startAt = resolveLeaderboardStart(intervalApplied);
   const manualMode: RewardsManualFilterMode = inputs.excludeManual
     ? "exclude_all"

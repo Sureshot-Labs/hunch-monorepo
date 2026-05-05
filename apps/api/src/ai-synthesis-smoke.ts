@@ -79,9 +79,7 @@ type SearchResultFile = {
   }>;
 };
 
-type MetricSource = NonNullable<
-  SynthesisInputV1["event"]["volume_24h_source"]
->;
+type MetricSource = NonNullable<SynthesisInputV1["event"]["volume_24h_source"]>;
 
 type MarketRow = {
   id: string;
@@ -268,7 +266,7 @@ function validateUserFacingSummary(output: SynthesisOutputV1): void {
 }
 
 function parseFlag(argv: string[], name: string): string | undefined {
-  const idx = argv.findIndex(token => token === name);
+  const idx = argv.findIndex((token) => token === name);
   if (idx === -1) return undefined;
   return argv[idx + 1];
 }
@@ -284,7 +282,10 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return n;
 }
 
-function parseNonNegativeFloat(value: string | undefined, fallback: number): number {
+function parseNonNegativeFloat(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (!value) return fallback;
   const n = Number.parseFloat(value);
   if (!Number.isFinite(n) || n < 0) return fallback;
@@ -296,13 +297,18 @@ function parseCsvSet(raw: string | undefined): Set<string> {
   return new Set(
     raw
       .split(",")
-      .map(v => v.trim())
+      .map((v) => v.trim())
       .filter(Boolean),
   );
 }
 
 function parseStatusSet(raw: string | undefined): Set<SearchStatus> {
-  const allowed = new Set<SearchStatus>(["OK", "PARTIAL", "NO_EVIDENCE", "INVALID"]);
+  const allowed = new Set<SearchStatus>([
+    "OK",
+    "PARTIAL",
+    "NO_EVIDENCE",
+    "INVALID",
+  ]);
   const parsed = parseCsvSet(raw);
   const out = new Set<SearchStatus>();
   for (const item of parsed) {
@@ -328,9 +334,7 @@ function parseArgs(argv: string[]): Args {
     searchResultsFile: parseFlag(argv, "--search-results-file") ?? null,
     out: parseFlag(argv, "--out") ?? null,
     model:
-      parseFlag(argv, "--model") ??
-      env.aiClusterModelFinal ??
-      "openai/gpt-5.4",
+      parseFlag(argv, "--model") ?? env.aiClusterModelFinal ?? "openai/gpt-5.4",
     maxTopics: parsePositiveInt(parseFlag(argv, "--max-topics"), 3),
     maxContextMarkets: Math.min(
       10,
@@ -343,10 +347,19 @@ function parseArgs(argv: string[]): Args {
     topicKeys: parseCsvSet(parseFlag(argv, "--topic-keys")),
     includeStatuses: parseStatusSet(parseFlag(argv, "--statuses")),
     concurrency: parsePositiveInt(parseFlag(argv, "--concurrency"), 2),
-    maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens"), 1200),
+    maxOutputTokens: parsePositiveInt(
+      parseFlag(argv, "--max-output-tokens"),
+      1200,
+    ),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 120),
-    priceInputPerM: parseNonNegativeFloat(parseFlag(argv, "--price-input-per-m"), 0.2),
-    priceOutputPerM: parseNonNegativeFloat(parseFlag(argv, "--price-output-per-m"), 0.5),
+    priceInputPerM: parseNonNegativeFloat(
+      parseFlag(argv, "--price-input-per-m"),
+      0.2,
+    ),
+    priceOutputPerM: parseNonNegativeFloat(
+      parseFlag(argv, "--price-output-per-m"),
+      0.5,
+    ),
     dryRun: hasFlag(argv, "--dry-run"),
     verbose: hasFlag(argv, "--verbose"),
   };
@@ -388,7 +401,9 @@ function toIsoOrNull(value: unknown): string | null {
   return date.toISOString();
 }
 
-function normalizeEvidenceItems(raw: unknown): Array<SynthesisInputV1["external_evidence"]["items"][number]> {
+function normalizeEvidenceItems(
+  raw: unknown,
+): Array<SynthesisInputV1["external_evidence"]["items"][number]> {
   if (!raw || typeof raw !== "object") return [];
   const evidence = (raw as { evidence?: unknown }).evidence;
   if (!Array.isArray(evidence)) return [];
@@ -428,9 +443,7 @@ function normalizeEvidenceItems(raw: unknown): Array<SynthesisInputV1["external_
       };
     })
     .filter(
-      (
-        item,
-      ): item is SynthesisInputV1["external_evidence"]["items"][number] =>
+      (item): item is SynthesisInputV1["external_evidence"]["items"][number] =>
         item != null,
     );
 }
@@ -441,7 +454,11 @@ function safeNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function deriveImpliedMid(bid: number | null, ask: number | null, last: number | null): number | null {
+function deriveImpliedMid(
+  bid: number | null,
+  ask: number | null,
+  last: number | null,
+): number | null {
   if (bid != null && ask != null) return (bid + ask) / 2;
   if (last != null) return last;
   return null;
@@ -455,23 +472,32 @@ function normalizeDomain(raw: string): string {
 function isTrustedWebDomain(raw: string): boolean {
   const domain = normalizeDomain(raw);
   return TRUSTED_WEB_DOMAINS.some(
-    trusted => domain === trusted || domain.endsWith(`.${trusted}`),
+    (trusted) => domain === trusted || domain.endsWith(`.${trusted}`),
   );
 }
 
-function computeDataCompletenessScore(event: EventRow, markets: MarketRow[]): number {
+function computeDataCompletenessScore(
+  event: EventRow,
+  markets: MarketRow[],
+): number {
   const requiredValues = [
     event.volume_24h,
     event.liquidity,
-    ...markets.flatMap(m => [m.best_bid, m.best_ask, m.last_price, m.volume_24h, m.liquidity]),
+    ...markets.flatMap((m) => [
+      m.best_bid,
+      m.best_ask,
+      m.last_price,
+      m.volume_24h,
+      m.liquidity,
+    ]),
   ];
-  const valid = requiredValues.filter(value => value != null).length;
+  const valid = requiredValues.filter((value) => value != null).length;
   if (requiredValues.length === 0) return 0;
   return Number((valid / requiredValues.length).toFixed(4));
 }
 
 function chooseRepresentativePrice(input: SynthesisInputV1): number | null {
-  const sample = input.markets.find(m => m.role === "sample");
+  const sample = input.markets.find((m) => m.role === "sample");
   const first = sample ?? input.markets[0];
   if (!first) return null;
   return (
@@ -488,8 +514,13 @@ function isEventClosed(input: SynthesisInputV1): boolean {
   return endTs <= Date.now();
 }
 
-function evaluatePublishGate(input: SynthesisInputV1, output: SynthesisOutputV1): GateResult {
-  const reasonCodes = new Set<string>(output.publish_recommendation.reason_codes);
+function evaluatePublishGate(
+  input: SynthesisInputV1,
+  output: SynthesisOutputV1,
+): GateResult {
+  const reasonCodes = new Set<string>(
+    output.publish_recommendation.reason_codes,
+  );
   const representativePrice = chooseRepresentativePrice(input);
 
   let decision = output.publish_recommendation.decision;
@@ -503,13 +534,18 @@ function evaluatePublishGate(input: SynthesisInputV1, output: SynthesisOutputV1)
     decision = "store_weak_signal";
     reasonCodes.add("LOW_LINK_CONF");
   }
-  if (input.external_evidence.supports_topic_count < input.policy.min_evidence) {
+  if (
+    input.external_evidence.supports_topic_count < input.policy.min_evidence
+  ) {
     decision = "skip_external_publish";
     reasonCodes.add("WEAK_EVIDENCE");
   }
   if (
     input.gate_primitives.independent_sources_count < 2 &&
-    !(input.gate_primitives.high_trust_source && input.gate_primitives.strong_internal_corroboration)
+    !(
+      input.gate_primitives.high_trust_source &&
+      input.gate_primitives.strong_internal_corroboration
+    )
   ) {
     if (decision === "publish_candidate") decision = "publish_context_only";
     reasonCodes.add("LOW_SOURCE_INDEPENDENCE");
@@ -518,7 +554,10 @@ function evaluatePublishGate(input: SynthesisInputV1, output: SynthesisOutputV1)
     if (decision === "publish_candidate") decision = "publish_context_only";
     reasonCodes.add("WEAK_INTERNAL_CORROBORATION");
   }
-  if (input.gate_primitives.data_completeness_score < input.policy.min_data_completeness) {
+  if (
+    input.gate_primitives.data_completeness_score <
+    input.policy.min_data_completeness
+  ) {
     if (decision === "publish_candidate") decision = "publish_context_only";
     reasonCodes.add("LOW_DATA_COMPLETENESS");
   }
@@ -570,7 +609,7 @@ function parseMessageContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .map(part => {
+      .map((part) => {
         if (typeof part === "string") return part;
         if (!part || typeof part !== "object") return "";
         if ("text" in part) {
@@ -611,26 +650,29 @@ async function callOpenRouter(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), args.timeoutSec * 1000);
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openRouterKey}`,
-        "Content-Type": "application/json",
-        "X-Title": "Hunch AI Synthesis Smoke",
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.openRouterKey}`,
+          "Content-Type": "application/json",
+          "X-Title": "Hunch AI Synthesis Smoke",
+        },
+        body: JSON.stringify({
+          model: args.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0,
+          max_tokens: args.maxOutputTokens,
+          response_format: { type: "json_object" },
+          reasoning: { effort: "low" },
+        }),
+        signal: controller.signal,
       },
-      body: JSON.stringify({
-        model: args.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0,
-        max_tokens: args.maxOutputTokens,
-        response_format: { type: "json_object" },
-        reasoning: { effort: "low" },
-      }),
-      signal: controller.signal,
-    });
+    );
 
     if (!response.ok) {
       const text = await response.text();
@@ -651,9 +693,11 @@ async function callOpenRouter(
     const promptTokens = safeNumber(payload.usage?.prompt_tokens) ?? 0;
     const completionTokens = safeNumber(payload.usage?.completion_tokens) ?? 0;
     const totalTokens =
-      safeNumber(payload.usage?.total_tokens) ?? promptTokens + completionTokens;
+      safeNumber(payload.usage?.total_tokens) ??
+      promptTokens + completionTokens;
     const reasoningTokens =
-      safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ?? 0;
+      safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ??
+      0;
 
     return {
       content,
@@ -681,8 +725,13 @@ function validateTopicsContract(file: TopicsDryRunFile): void {
       `Invalid topics contract: expected ${QA_CONTRACT_VERSION}, got ${version}`,
     );
   }
-  if (!file.searchPlan?.queryExamples || !Array.isArray(file.searchPlan.queryExamples)) {
-    throw new Error("Invalid topics file: expected searchPlan.queryExamples array");
+  if (
+    !file.searchPlan?.queryExamples ||
+    !Array.isArray(file.searchPlan.queryExamples)
+  ) {
+    throw new Error(
+      "Invalid topics file: expected searchPlan.queryExamples array",
+    );
   }
 }
 
@@ -811,7 +860,10 @@ async function fetchMarketById(marketId: string): Promise<MarketRow | null> {
   return result.rows[0] ?? null;
 }
 
-async function fetchMarketByTitle(eventId: string, title: string): Promise<MarketRow | null> {
+async function fetchMarketByTitle(
+  eventId: string,
+  title: string,
+): Promise<MarketRow | null> {
   const sql = `
     ${MARKET_SELECT_SQL}
     where m.event_id = $1
@@ -826,7 +878,10 @@ async function fetchMarketByTitle(eventId: string, title: string): Promise<Marke
   return result.rows[0] ?? null;
 }
 
-async function fetchTopMarkets(eventId: string, limit: number): Promise<MarketRow[]> {
+async function fetchTopMarkets(
+  eventId: string,
+  limit: number,
+): Promise<MarketRow[]> {
   const sql = `
     ${MARKET_SELECT_SQL}
     where m.event_id = $1
@@ -839,7 +894,10 @@ async function fetchTopMarkets(eventId: string, limit: number): Promise<MarketRo
       coalesce(m.updated_at_db, m.updated_at) desc nulls last
     limit $2
   `;
-  const result = await pool.query<MarketRow>(sql, [eventId, Math.max(1, limit)]);
+  const result = await pool.query<MarketRow>(sql, [
+    eventId,
+    Math.max(1, limit),
+  ]);
   return result.rows;
 }
 
@@ -852,7 +910,7 @@ function buildContextIndex(
   maxSampleMarketAgeHours: number,
 ): Map<string, ResolvedTopicContext> {
   const topByKey = new Map(
-    (file.topTopics ?? []).map(item => [item.topicKey, item]),
+    (file.topTopics ?? []).map((item) => [item.topicKey, item]),
   );
   const out = new Map<string, ResolvedTopicContext>();
   for (const query of file.searchPlan?.queryExamples ?? []) {
@@ -892,7 +950,7 @@ function enrichWithSearchResults(
   includeStatuses: Set<SearchStatus>,
 ): void {
   if (!search) return;
-  const byKey = new Map(search.results.map(item => [item.topicKey, item]));
+  const byKey = new Map(search.results.map((item) => [item.topicKey, item]));
   for (const [topicKey, context] of contextByKey.entries()) {
     const hit = byKey.get(topicKey);
     if (!hit) continue;
@@ -959,29 +1017,32 @@ function buildSynthesisInput(
     throw new Error("No market snapshots available for synthesis input");
   }
 
-  const evidenceItems = normalizeEvidenceItems(context.searchResult?.parsed?.json);
+  const evidenceItems = normalizeEvidenceItems(
+    context.searchResult?.parsed?.json,
+  );
   const supportsTopicCount =
     context.searchResult?.parsed.supportsTopicCount ??
-    evidenceItems.filter(item => item.supports_topic).length;
-  const evidenceCount = context.searchResult?.parsed.evidenceCount ?? evidenceItems.length;
+    evidenceItems.filter((item) => item.supports_topic).length;
+  const evidenceCount =
+    context.searchResult?.parsed.evidenceCount ?? evidenceItems.length;
   const uniqueSourceDomains = new Set(
     evidenceItems
-      .map(item => normalizeDomain(item.source_domain))
-      .filter(domain => domain !== "unknown"),
+      .map((item) => normalizeDomain(item.source_domain))
+      .filter((domain) => domain !== "unknown"),
   );
   const independentSourcesCount = uniqueSourceDomains.size;
-  const highTrustSource = evidenceItems.some(item =>
+  const highTrustSource = evidenceItems.some((item) =>
     isTrustedWebDomain(item.source_domain),
   );
 
   const ageCandidates = [
-    ...selectedMarkets.map(market =>
+    ...selectedMarkets.map((market) =>
       estimateAgeSec(market.market_updated_at ?? null),
     ),
     estimateAgeSec(event.event_updated_at),
   ].filter((value): value is number => value != null);
   const tradeAgeCandidates = [
-    ...selectedMarkets.map(market =>
+    ...selectedMarkets.map((market) =>
       estimateAgeSec(market.trade_updated_at ?? null),
     ),
     estimateAgeSec(event.trade_updated_at),
@@ -998,7 +1059,8 @@ function buildSynthesisInput(
   const isFreshTierB = marketFreshTierB || tradeFreshTierB;
   const freshnessReasons: string[] = [];
   if (bestAgeSec == null) freshnessReasons.push("missing_market_update_ts");
-  if (bestTradeAgeSec == null) freshnessReasons.push("missing_trade_rollup_update_ts");
+  if (bestTradeAgeSec == null)
+    freshnessReasons.push("missing_trade_rollup_update_ts");
   if (!isFreshTierA) freshnessReasons.push("stale_market_and_trade_data");
 
   const linkConfidence = (() => {
@@ -1007,12 +1069,15 @@ function buildSynthesisInput(
     if (status === "PARTIAL") return 0.65;
     return 0.55;
   })();
-  const dataCompletenessScore = computeDataCompletenessScore(event, selectedMarkets);
+  const dataCompletenessScore = computeDataCompletenessScore(
+    event,
+    selectedMarkets,
+  );
   const strongInternalCorroboration =
     isFreshTierA &&
     (event.volume_24h != null ||
       marketItems.some(
-        market => market.volume_24h != null || market.implied_mid != null,
+        (market) => market.volume_24h != null || market.implied_mid != null,
       ));
 
   return parseSynthesisInputV1({
@@ -1080,7 +1145,10 @@ function buildSynthesisInput(
   });
 }
 
-async function runOne(args: Args, context: ResolvedTopicContext): Promise<SynthesisRunResult> {
+async function runOne(
+  args: Args,
+  context: ResolvedTopicContext,
+): Promise<SynthesisRunResult> {
   const started = Date.now();
   let event: EventRow | null = null;
   let mappingReason = "sample_event_title_match";
@@ -1120,7 +1188,10 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
     }
   }
   if (!sampleMarket && context.sampleMarketTitle) {
-    sampleMarket = await fetchMarketByTitle(event.id, context.sampleMarketTitle);
+    sampleMarket = await fetchMarketByTitle(
+      event.id,
+      context.sampleMarketTitle,
+    );
     if (mappingReason === "sample_event_id_match") {
       mappingReason = "sample_event_id_and_market_title_match";
     } else {
@@ -1141,7 +1212,7 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
     if (selectedMarkets.length >= args.maxContextMarkets) break;
   }
   const topByVolumeMarketId =
-    topMarkets.find(market => market.id !== sampleMarket?.id)?.id ??
+    topMarkets.find((market) => market.id !== sampleMarket?.id)?.id ??
     topMarkets[0]?.id ??
     null;
 
@@ -1219,7 +1290,9 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
           systemPrompt,
           buildSynthesisRepairPromptWithReason(
             rawOutputText,
-            firstError instanceof Error ? firstError.message : String(firstError),
+            firstError instanceof Error
+              ? firstError.message
+              : String(firstError),
           ),
         );
         usage = mergeUsage(usage, repairRaw.usage);
@@ -1230,7 +1303,9 @@ async function runOne(args: Args, context: ResolvedTopicContext): Promise<Synthe
         schemaRepairSuccess = true;
       } catch (repairError) {
         schemaRepairError =
-          repairError instanceof Error ? repairError.message : String(repairError);
+          repairError instanceof Error
+            ? repairError.message
+            : String(repairError);
         throw repairError;
       }
     }
@@ -1363,13 +1438,13 @@ async function main() {
 
   let filteredTopicKeys = orderedTopicKeys;
   if (args.topicKeys.size > 0) {
-    filteredTopicKeys = filteredTopicKeys.filter(topicKey =>
+    filteredTopicKeys = filteredTopicKeys.filter((topicKey) =>
       args.topicKeys.has(topicKey),
     );
   }
 
   const contexts = filteredTopicKeys
-    .map(topicKey => contextByKey.get(topicKey))
+    .map((topicKey) => contextByKey.get(topicKey))
     .filter((item): item is ResolvedTopicContext => item != null)
     .slice(0, args.maxTopics);
 
@@ -1430,12 +1505,15 @@ async function main() {
       schemaRepairSuccess: 0,
     },
   );
-  const gateReasonCounts = results.reduce<Record<string, number>>((acc, item) => {
-    for (const reason of item.gate?.reasonCodes ?? []) {
-      acc[reason] = (acc[reason] ?? 0) + 1;
-    }
-    return acc;
-  }, {});
+  const gateReasonCounts = results.reduce<Record<string, number>>(
+    (acc, item) => {
+      for (const reason of item.gate?.reasonCodes ?? []) {
+        acc[reason] = (acc[reason] ?? 0) + 1;
+      }
+      return acc;
+    },
+    {},
+  );
 
   const report = {
     qaContract: {
@@ -1479,7 +1557,7 @@ async function main() {
 }
 
 main()
-  .catch(error => {
+  .catch((error) => {
     console.error("[ai-synthesis-smoke] failed", error);
     process.exitCode = 1;
   })
