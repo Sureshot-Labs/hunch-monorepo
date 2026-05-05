@@ -6,9 +6,7 @@ import { RESP_TYPES } from "redis";
 import { UMAP } from "umap-js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import {
-  getOpenRouterModelPricingPerM,
-} from "./lib/ai-pricing.js";
+import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import { buildRenderableMarketSql } from "./lib/market-renderability.js";
 import {
@@ -61,8 +59,10 @@ function buildMarketMapActivityVolumeSql(alias: "e" | "m"): string {
   `;
 }
 
-const MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL = buildMarketMapActivityVolumeSql("e");
-const MARKET_MAP_MARKET_ACTIVITY_VOLUME_SQL = buildMarketMapActivityVolumeSql("m");
+const MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL =
+  buildMarketMapActivityVolumeSql("e");
+const MARKET_MAP_MARKET_ACTIVITY_VOLUME_SQL =
+  buildMarketMapActivityVolumeSql("m");
 
 type EventCandidateRow = {
   event_id: string;
@@ -75,6 +75,17 @@ type EventCandidateRow = {
   volume24h: unknown;
   liquidity: unknown;
   open_interest: unknown;
+  volume_last_24h: unknown;
+  volume_prev_24h: unknown;
+  volume_last_24h_change: unknown;
+  volume_last_24h_change_pct: unknown;
+  liquidity_now: unknown;
+  liquidity_change_24h: unknown;
+  liquidity_change_pct_24h: unknown;
+  open_interest_now: unknown;
+  open_interest_change_24h: unknown;
+  open_interest_change_pct_24h: unknown;
+  activity_metrics_updated_at: Date | string | null;
   score: unknown;
   representative_market_id: string | null;
   representative_market_title: string | null;
@@ -125,6 +136,17 @@ type EventPoint = {
   volume24h: number;
   liquidity: number;
   openInterest: number;
+  volumeLast24h: number | null;
+  volumePrev24h: number | null;
+  volumeLast24hChange: number | null;
+  volumeLast24hChangePct: number | null;
+  liquidityNow: number | null;
+  liquidityChange24h: number | null;
+  liquidityChangePct24h: number | null;
+  openInterestNow: number | null;
+  openInterestChange24h: number | null;
+  openInterestChangePct24h: number | null;
+  activityMetricsUpdatedAt: string | null;
   score: number;
   oddsSource: "representative" | "fallback" | null;
   tokenYes: string | null;
@@ -264,20 +286,10 @@ function parseBoolean(value: string | undefined): boolean | undefined {
     .split(/[\s,]+/)[0]
     .replace(/^['"]+/, "")
     .replace(/['"]+$/, "");
-  if (
-    token === "1" ||
-    token === "true" ||
-    token === "yes" ||
-    token === "on"
-  ) {
+  if (token === "1" || token === "true" || token === "yes" || token === "on") {
     return true;
   }
-  if (
-    token === "0" ||
-    token === "false" ||
-    token === "no" ||
-    token === "off"
-  ) {
+  if (token === "0" || token === "false" || token === "no" || token === "off") {
     return false;
   }
   return undefined;
@@ -333,6 +345,12 @@ function toNumber(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function toNullableNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function normalizeOptionalUrl(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -340,7 +358,9 @@ function normalizeOptionalUrl(value: unknown): string | null {
   return trimmed;
 }
 
-function toIsoStringOrNull(value: Date | string | null | undefined): string | null {
+function toIsoStringOrNull(
+  value: Date | string | null | undefined,
+): string | null {
   if (value == null) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
@@ -431,7 +451,10 @@ function projectUmap(
   >,
 ): number[][] {
   if (matrix.length === 0) return [];
-  const dims = Math.max(2, Math.min(config.projectionPcaDims, matrix[0].length));
+  const dims = Math.max(
+    2,
+    Math.min(config.projectionPcaDims, matrix[0].length),
+  );
   const pca = new PCA(matrix, { center: true, scale: false });
   const reduced = pca.predict(matrix, { nComponents: dims }).to2DArray();
   const neighbors = Math.max(
@@ -468,6 +491,17 @@ function summarizeEvent(point: EventPoint): MarketMapEventSummary {
     volume24h: point.volume24h,
     liquidity: point.liquidity,
     openInterest: point.openInterest,
+    volumeLast24h: point.volumeLast24h,
+    volumePrev24h: point.volumePrev24h,
+    volumeLast24hChange: point.volumeLast24hChange,
+    volumeLast24hChangePct: point.volumeLast24hChangePct,
+    liquidityNow: point.liquidityNow,
+    liquidityChange24h: point.liquidityChange24h,
+    liquidityChangePct24h: point.liquidityChangePct24h,
+    openInterestNow: point.openInterestNow,
+    openInterestChange24h: point.openInterestChange24h,
+    openInterestChangePct24h: point.openInterestChangePct24h,
+    activityMetricsUpdatedAt: point.activityMetricsUpdatedAt,
     oddsSource: point.oddsSource,
     tokenYes: point.tokenYes,
     tokenNo: point.tokenNo,
@@ -534,11 +568,16 @@ function partitionCluster(points: EventPoint[], k: number): EventPoint[][] {
   const effectiveK = Math.max(1, Math.min(k, points.length));
   if (effectiveK <= 1) return [points.slice()];
 
-  let centroids = pickSeedItems(points, effectiveK).map((point) => point.vector);
+  let centroids = pickSeedItems(points, effectiveK).map(
+    (point) => point.vector,
+  );
   let prevAssignment: string | null = null;
 
   for (let iter = 0; iter < 6; iter += 1) {
-    const buckets = Array.from({ length: centroids.length }, () => [] as EventPoint[]);
+    const buckets = Array.from(
+      { length: centroids.length },
+      () => [] as EventPoint[],
+    );
     for (const point of points) {
       let bestIdx = 0;
       let bestDist = Number.POSITIVE_INFINITY;
@@ -553,7 +592,12 @@ function partitionCluster(points: EventPoint[], k: number): EventPoint[][] {
     }
 
     const assignment = buckets
-      .map((bucket) => bucket.map((point) => point.eventId).sort().join(","))
+      .map((bucket) =>
+        bucket
+          .map((point) => point.eventId)
+          .sort()
+          .join(","),
+      )
       .join("|");
     if (prevAssignment && prevAssignment === assignment) break;
     prevAssignment = assignment;
@@ -563,7 +607,10 @@ function partitionCluster(points: EventPoint[], k: number): EventPoint[][] {
     );
   }
 
-  const out = Array.from({ length: centroids.length }, () => [] as EventPoint[]);
+  const out = Array.from(
+    { length: centroids.length },
+    () => [] as EventPoint[],
+  );
   for (const point of points) {
     let bestIdx = 0;
     let bestDist = Number.POSITIVE_INFINITY;
@@ -582,7 +629,9 @@ function partitionCluster(points: EventPoint[], k: number): EventPoint[][] {
     .map((bucket) =>
       bucket
         .slice()
-        .sort((a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId)),
+        .sort(
+          (a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId),
+        ),
     );
 }
 
@@ -642,15 +691,20 @@ function buildTreeGlobal(params: {
       const eventCount = bucket.length;
       const sumVolume24h = bucket.reduce((sum, row) => sum + row.volume24h, 0);
       const sumLiquidity = bucket.reduce((sum, row) => sum + row.liquidity, 0);
-      const sumOpenInterest = bucket.reduce((sum, row) => sum + row.openInterest, 0);
-      const score = bucket.reduce((sum, row) => sum + row.score, 0) / eventCount;
+      const sumOpenInterest = bucket.reduce(
+        (sum, row) => sum + row.openInterest,
+        0,
+      );
+      const score =
+        bucket.reduce((sum, row) => sum + row.score, 0) / eventCount;
       const x =
         bucket.reduce((sum, row) => sum + row.x * Math.max(row.score, 1), 0) /
         bucket.reduce((sum, row) => sum + Math.max(row.score, 1), 0);
       const y =
         bucket.reduce((sum, row) => sum + row.y * Math.max(row.score, 1), 0) /
         bucket.reduce((sum, row) => sum + Math.max(row.score, 1), 0);
-      const venueBreakdown: Record<MarketMapVenue, MarketMapNodeVenueMetrics> = {};
+      const venueBreakdown: Record<MarketMapVenue, MarketMapNodeVenueMetrics> =
+        {};
       for (const row of bucket) {
         const venue = row.venue;
         if (!venueBreakdown[venue]) {
@@ -675,18 +729,20 @@ function buildTreeGlobal(params: {
       const venueCount = Object.values(venueBreakdown).filter(
         (entry) => entry.eventCount > 0,
       ).length;
-      const normalizedVenueBreakdown: Record<MarketMapVenue, MarketMapNodeVenueMetrics> =
-        Object.fromEntries(
-          Object.entries(venueBreakdown).map(([venue, entry]) => [
-            venue,
-            {
-              eventCount: entry.eventCount,
-              sumVolume24h: formatCoord(entry.sumVolume24h),
-              sumLiquidity: formatCoord(entry.sumLiquidity),
-              sumOpenInterest: formatCoord(entry.sumOpenInterest),
-            },
-          ]),
-        );
+      const normalizedVenueBreakdown: Record<
+        MarketMapVenue,
+        MarketMapNodeVenueMetrics
+      > = Object.fromEntries(
+        Object.entries(venueBreakdown).map(([venue, entry]) => [
+          venue,
+          {
+            eventCount: entry.eventCount,
+            sumVolume24h: formatCoord(entry.sumVolume24h),
+            sumLiquidity: formatCoord(entry.sumLiquidity),
+            sumOpenInterest: formatCoord(entry.sumOpenInterest),
+          },
+        ]),
+      );
 
       const node: MarketMapNode = {
         id: nodeId,
@@ -721,7 +777,9 @@ function buildTreeGlobal(params: {
         nodeId,
         bucket
           .slice()
-          .sort((a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId))
+          .sort(
+            (a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId),
+          )
           .map(summarizeEvent),
       );
 
@@ -750,12 +808,15 @@ function asFiniteNumber(value: unknown): number | undefined {
   return Number.isFinite(num) ? num : undefined;
 }
 
-function extractUsage(payload: unknown): Pick<
+function extractUsage(
+  payload: unknown,
+): Pick<
   AiLabelResult,
   "promptTokens" | "completionTokens" | "totalTokens" | "reasoningTokens"
 > {
   if (!payload || typeof payload !== "object") return {};
-  const usage = "usage" in payload ? (payload as { usage?: unknown }).usage : null;
+  const usage =
+    "usage" in payload ? (payload as { usage?: unknown }).usage : null;
   if (!usage || typeof usage !== "object") return {};
   const usageObj = usage as {
     prompt_tokens?: unknown;
@@ -1003,9 +1064,7 @@ function parseLabelFromRawOutput(raw: string): {
     ) {
       continue;
     }
-    const candidate = labelPrefixMatch
-      ? labelPrefixMatch[1]
-      : withoutBullet;
+    const candidate = labelPrefixMatch ? labelPrefixMatch[1] : withoutBullet;
     const sanitized = sanitizeLabelCandidate(candidate);
     if (sanitized) {
       return { label: sanitized, parseIssue: null };
@@ -1027,7 +1086,7 @@ const AI_LABEL_TRANSIENT_MAX_RETRIES = 2;
 const AI_LABEL_RETRY_BASE_MS = 800;
 
 async function sleepMs(ms: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms));
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function computeRetryBackoffMs(baseMs: number, attempt: number): number {
@@ -1047,7 +1106,9 @@ function isTransientLabelResult(result: AiLabelResult): boolean {
 
 function isTransientLabelError(error: unknown): boolean {
   const message =
-    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
   return (
     message.includes("timeout") ||
     message.includes("timed out") ||
@@ -1090,7 +1151,11 @@ async function callOpenRouterLabel(params: {
     });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      return { label: null, reason: "timeout", promptChars: params.prompt.promptChars };
+      return {
+        label: null,
+        reason: "timeout",
+        promptChars: params.prompt.promptChars,
+      };
     }
     throw error;
   } finally {
@@ -1140,7 +1205,9 @@ async function callOpenRouterLabel(params: {
         messageKeys:
           payload.choices?.[0]?.message &&
           typeof payload.choices?.[0]?.message === "object"
-            ? Object.keys(payload.choices?.[0]?.message as Record<string, unknown>)
+            ? Object.keys(
+                payload.choices?.[0]?.message as Record<string, unknown>,
+              )
             : [],
         payloadSample: JSON.stringify(payload).slice(0, 240),
       }).slice(0, 240),
@@ -1265,10 +1332,13 @@ async function applyAiLabels(params: {
     0,
   );
   if (requiredParentLabels > config.maxAiLabelsPerRun) {
-    console.log("[market-map] ai labels budget raised to include parent levels", {
-      configuredMaxAiLabels: config.maxAiLabelsPerRun,
-      requiredParentLabels,
-    });
+    console.log(
+      "[market-map] ai labels budget raised to include parent levels",
+      {
+        configuredMaxAiLabels: config.maxAiLabelsPerRun,
+        requiredParentLabels,
+      },
+    );
   }
   const targetBudget = Math.max(config.maxAiLabelsPerRun, requiredParentLabels);
   for (const level of parentLevels) {
@@ -1276,7 +1346,10 @@ async function applyAiLabels(params: {
   }
   const deepestAvailable = bucketsByLevel.get(deepestLevel)?.length ?? 0;
   const remainingForDeepest = Math.max(0, targetBudget - requiredParentLabels);
-  quotasByLevel.set(deepestLevel, Math.min(deepestAvailable, remainingForDeepest));
+  quotasByLevel.set(
+    deepestLevel,
+    Math.min(deepestAvailable, remainingForDeepest),
+  );
 
   const maxAttempts = targetBudget;
   const plannedAttempts = levelsDesc.reduce(
@@ -1288,7 +1361,8 @@ async function applyAiLabels(params: {
     return emptyLabelCostSummary();
   }
   const pricing = getOpenRouterModelPricingPerM(config.labelModel);
-  const labelPriceInputPerM = pricing?.inputPerM ?? DEFAULT_LABEL_PRICE_INPUT_PER_M;
+  const labelPriceInputPerM =
+    pricing?.inputPerM ?? DEFAULT_LABEL_PRICE_INPUT_PER_M;
   const labelPriceOutputPerM =
     pricing?.outputPerM ?? DEFAULT_LABEL_PRICE_OUTPUT_PER_M;
   const concurrency = clamp(
@@ -1296,7 +1370,9 @@ async function applyAiLabels(params: {
     1,
     Math.max(1, plannedAttempts),
   );
-  const plannedLevels = levelsDesc.filter((level) => (quotasByLevel.get(level) ?? 0) > 0);
+  const plannedLevels = levelsDesc.filter(
+    (level) => (quotasByLevel.get(level) ?? 0) > 0,
+  );
   console.log("[market-map] ai labels start", {
     candidateNodes: candidates.length,
     maxAttempts,
@@ -1311,7 +1387,10 @@ async function applyAiLabels(params: {
     labelSampleMaxChars: config.labelSampleMaxChars,
     levels: levelsDesc,
     candidateCountsByLevel: Object.fromEntries(
-      levelsDesc.map((level) => [level, bucketsByLevel.get(level)?.length ?? 0]),
+      levelsDesc.map((level) => [
+        level,
+        bucketsByLevel.get(level)?.length ?? 0,
+      ]),
     ),
     selectedCountsByLevel: Object.fromEntries(
       levelsDesc.map((level) => [level, quotasByLevel.get(level) ?? 0]),
@@ -1415,7 +1494,8 @@ async function applyAiLabels(params: {
       const callStartedAt = Date.now();
 
       const siblingNodes = nodes.filter(
-        (entry) => entry.level === node.level && entry.parentId === node.parentId,
+        (entry) =>
+          entry.level === node.level && entry.parentId === node.parentId,
       );
       const siblingCandidates = siblingNodes
         .filter((entry) => entry.id !== node.id)
@@ -1432,8 +1512,7 @@ async function applyAiLabels(params: {
         .filter((entry) => entry.normalized.length > 0)
         .sort(
           (a, b) =>
-            a.dist2 - b.dist2 ||
-            a.normalized.localeCompare(b.normalized),
+            a.dist2 - b.dist2 || a.normalized.localeCompare(b.normalized),
         );
       const siblingSamples: string[] = [];
       const siblingSeen = new Set<string>();
@@ -1450,7 +1529,9 @@ async function applyAiLabels(params: {
           if (!child) return "";
           return child.label?.trim() || child.labelRepresentative;
         })
-        .map((value) => normalizeLabelSampleText(value, config.labelSampleMaxChars))
+        .map((value) =>
+          normalizeLabelSampleText(value, config.labelSampleMaxChars),
+        )
         .filter((value) => value.length > 0);
       const childSamples: string[] = [];
       const childSeen = new Set<string>();
@@ -1601,7 +1682,7 @@ async function applyAiLabels(params: {
             : 0,
         outputTokens:
           typeof completionTokens === "number" &&
-            Number.isFinite(completionTokens)
+          Number.isFinite(completionTokens)
             ? completionTokens
             : 0,
         priceInputPerM: labelPriceInputPerM,
@@ -1645,7 +1726,10 @@ async function applyAiLabels(params: {
         noLabelReason === "json_parse_failed" ||
         noLabelReason === "invalid_schema";
       if (isIssue) {
-        const reason = status === "error" ? "unexpected_error" : (noLabelReason ?? "unknown");
+        const reason =
+          status === "error"
+            ? "unexpected_error"
+            : (noLabelReason ?? "unknown");
         const durationMs = Date.now() - callStartedAt;
         console.error("[market-map] ai label issue", {
           attempt,
@@ -1799,7 +1883,10 @@ async function fetchVenueCandidates(
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const queryLimit = Math.max(config.maxEventsPerVenue, config.maxEventsPerVenue * 2);
+  const queryLimit = Math.max(
+    config.maxEventsPerVenue,
+    config.maxEventsPerVenue * 2,
+  );
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const { rows } = await pool.query<EventCandidateRow>(
     `
@@ -1843,9 +1930,22 @@ async function fetchVenueCandidates(
             nullif(amo.sum_open_interest, 0),
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
             0
-          )::double precision as open_interest
+          )::double precision as open_interest,
+          eam.volume_last_24h,
+          eam.volume_prev_24h,
+          eam.volume_last_24h_change,
+          eam.volume_last_24h_change_pct,
+          eam.liquidity_now,
+          eam.liquidity_change_24h,
+          eam.liquidity_change_pct_24h,
+          eam.open_interest_now,
+          eam.open_interest_change_24h,
+          eam.open_interest_change_pct_24h,
+          eam.updated_at as activity_metrics_updated_at
         from unified_events e
         join active_market_oi amo on amo.event_id = e.id
+        left join unified_event_activity_metrics_24h eam
+          on eam.event_id = e.id
         where e.status = 'ACTIVE'
           and e.venue = $1
           and (e.end_date is null or e.end_date > $2)
@@ -1931,6 +2031,17 @@ async function fetchVenueCandidates(
         em.volume24h,
         em.liquidity,
         em.open_interest,
+        em.volume_last_24h,
+        em.volume_prev_24h,
+        em.volume_last_24h_change,
+        em.volume_last_24h_change_pct,
+        em.liquidity_now,
+        em.liquidity_change_24h,
+        em.liquidity_change_pct_24h,
+        em.open_interest_now,
+        em.open_interest_change_24h,
+        em.open_interest_change_pct_24h,
+        em.activity_metrics_updated_at,
         (
           coalesce(em.volume24h, 0) * 2 +
           coalesce(em.liquidity, 0) +
@@ -1971,13 +2082,16 @@ function applyRepresentativeToCandidate(
         : "fallback";
   return {
     ...row,
-    representative_market_id: selected?.marketId ?? row.representative_market_id,
+    representative_market_id:
+      selected?.marketId ?? row.representative_market_id,
     representative_market_title:
       selected?.marketTitle ?? row.representative_market_title,
     representative_market_image:
-      normalizeOptionalUrl(selected?.marketImage) ?? row.representative_market_image,
+      normalizeOptionalUrl(selected?.marketImage) ??
+      row.representative_market_image,
     representative_market_icon:
-      normalizeOptionalUrl(selected?.marketIcon) ?? row.representative_market_icon,
+      normalizeOptionalUrl(selected?.marketIcon) ??
+      row.representative_market_icon,
     odds_source: oddsSource,
     trade_type: selected?.tradeType ?? null,
     market_address: selected?.marketAddress ?? null,
@@ -2002,7 +2116,10 @@ function applyRepresentativeToCandidate(
 async function filterCandidatesByRepresentativeQuality(params: {
   venue: MarketMapVenue;
   candidates: EventCandidateRow[];
-}): Promise<{ rows: EnrichedEventCandidateRow[]; summary: CandidateQualitySummary }> {
+}): Promise<{
+  rows: EnrichedEventCandidateRow[];
+  summary: CandidateQualitySummary;
+}> {
   const { venue, candidates } = params;
   const summary: CandidateQualitySummary = {
     before: candidates.length,
@@ -2097,17 +2214,28 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
   const enabledOverride = parseBoolean(parseFlag(args, "--enabled"));
 
   return {
-    enabled:
-      enabledOverride ?? (forceEnabled ? true : policy.enabled),
+    enabled: enabledOverride ?? (forceEnabled ? true : policy.enabled),
     venues: venues.length > 0 ? venues : [...MARKET_MAP_DEFAULT_VENUES],
     depth: clamp(
       Math.trunc(parseNumber(parseFlag(args, "--depth")) ?? policy.depth),
       2,
       4,
     ),
-    k1: clamp(Math.trunc(parseNumber(parseFlag(args, "--k1")) ?? policy.k1), 2, 24),
-    k2: clamp(Math.trunc(parseNumber(parseFlag(args, "--k2")) ?? policy.k2), 2, 24),
-    k3: clamp(Math.trunc(parseNumber(parseFlag(args, "--k3")) ?? policy.k3), 2, 24),
+    k1: clamp(
+      Math.trunc(parseNumber(parseFlag(args, "--k1")) ?? policy.k1),
+      2,
+      24,
+    ),
+    k2: clamp(
+      Math.trunc(parseNumber(parseFlag(args, "--k2")) ?? policy.k2),
+      2,
+      24,
+    ),
+    k3: clamp(
+      Math.trunc(parseNumber(parseFlag(args, "--k3")) ?? policy.k3),
+      2,
+      24,
+    ),
     maxEventsPerVenue: clamp(
       Math.trunc(
         parseNumber(parseFlag(args, "--max-events-per-venue")) ??
@@ -2127,17 +2255,17 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
     minEventLiquidity:
       parseNumber(parseFlag(args, "--min-event-liquidity")) ??
       policy.minEventLiquidity,
-    labelAiEnabled:
-      withoutAiLabels
-        ? false
-        : withAiLabels
-          ? true
-          : policy.labelAiEnabled,
+    labelAiEnabled: withoutAiLabels
+      ? false
+      : withAiLabels
+        ? true
+        : policy.labelAiEnabled,
     labelLevels: policy.labelLevels,
     labelModel: policy.labelModel,
     labelMaxTokens: clamp(
       Math.trunc(
-        parseNumber(parseFlag(args, "--label-max-tokens")) ?? policy.labelMaxTokens,
+        parseNumber(parseFlag(args, "--label-max-tokens")) ??
+          policy.labelMaxTokens,
       ),
       64,
       8_000,
@@ -2236,7 +2364,10 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
   > = {};
 
   const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: "market-map-build" });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "market-map-build",
+  });
   const bufferClient = redis.withTypeMapping({
     [RESP_TYPES.BLOB_STRING]: Buffer,
   });
@@ -2245,14 +2376,14 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       const queryStartedAt = Date.now();
       const candidates = await fetchVenueCandidates(venue, config);
       const candidateQueryMs = Date.now() - queryStartedAt;
-      const {
-        rows: qualityCandidates,
-        summary: qualitySummary,
-      } = await filterCandidatesByRepresentativeQuality({
-        venue,
-        candidates,
-      });
-      const sampleCandidateIds = candidates.slice(0, 8).map((row) => row.event_id);
+      const { rows: qualityCandidates, summary: qualitySummary } =
+        await filterCandidatesByRepresentativeQuality({
+          venue,
+          candidates,
+        });
+      const sampleCandidateIds = candidates
+        .slice(0, 8)
+        .map((row) => row.event_id);
       let sampleKeyHits = 0;
       let sampleEmbeddingFieldHits = 0;
       let sampleEmbeddingBufferHits = 0;
@@ -2264,8 +2395,10 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           sampleExists.exists(key);
           sampleFields.hExists(key, "embedding");
         }
-        const existsRaw = (await sampleExists.exec()) as unknown as Array<number>;
-        const fieldRaw = (await sampleFields.exec()) as unknown as Array<number>;
+        const existsRaw =
+          (await sampleExists.exec()) as unknown as Array<number>;
+        const fieldRaw =
+          (await sampleFields.exec()) as unknown as Array<number>;
         const sampleRaw = await Promise.all(
           sampleCandidateIds.map((eventId) =>
             bufferClient.hGet(`ai:embed:event:${eventId}`, "embedding"),
@@ -2319,7 +2452,8 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           endTime: toIsoStringOrNull(row.end_time),
           closeTime: row.close_time ?? null,
           representativeMarketId: row.representative_market_id ?? null,
-          representativeMarketTitle: row.representative_market_title?.trim() || null,
+          representativeMarketTitle:
+            row.representative_market_title?.trim() || null,
           image:
             normalizeOptionalUrl(row.representative_market_image) ??
             normalizeOptionalUrl(row.event_image),
@@ -2329,6 +2463,23 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           volume24h: toNumber(row.volume24h),
           liquidity: toNumber(row.liquidity),
           openInterest: toNumber(row.open_interest),
+          volumeLast24h: toNullableNumber(row.volume_last_24h),
+          volumePrev24h: toNullableNumber(row.volume_prev_24h),
+          volumeLast24hChange: toNullableNumber(row.volume_last_24h_change),
+          volumeLast24hChangePct: toNullableNumber(
+            row.volume_last_24h_change_pct,
+          ),
+          liquidityNow: toNullableNumber(row.liquidity_now),
+          liquidityChange24h: toNullableNumber(row.liquidity_change_24h),
+          liquidityChangePct24h: toNullableNumber(row.liquidity_change_pct_24h),
+          openInterestNow: toNullableNumber(row.open_interest_now),
+          openInterestChange24h: toNullableNumber(row.open_interest_change_24h),
+          openInterestChangePct24h: toNullableNumber(
+            row.open_interest_change_pct_24h,
+          ),
+          activityMetricsUpdatedAt: toIsoStringOrNull(
+            row.activity_metrics_updated_at,
+          ),
           score: toNumber(row.score),
           oddsSource: row.odds_source,
           tokenYes: row.token_yes,
@@ -2474,7 +2625,10 @@ async function storeSnapshot(
 ): Promise<string> {
   const runId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const redis = createRedisClient({ url: redisUrl });
-  await ensureRedis(redis, { waitForReady: true, logLabel: "market-map-store" });
+  await ensureRedis(redis, {
+    waitForReady: true,
+    logLabel: "market-map-store",
+  });
   try {
     const totalNodes = result.nodes.length;
     console.log("[market-map] storing snapshot", {

@@ -30,6 +30,17 @@ type SelectionRow = {
   market_volume_total: unknown;
   market_liquidity: unknown;
   market_open_interest: unknown;
+  market_volume_last_24h: unknown;
+  market_volume_prev_24h: unknown;
+  market_volume_last_24h_change: unknown;
+  market_volume_last_24h_change_pct: unknown;
+  market_liquidity_now: unknown;
+  market_liquidity_change_24h: unknown;
+  market_liquidity_change_pct_24h: unknown;
+  market_open_interest_now: unknown;
+  market_open_interest_change_24h: unknown;
+  market_open_interest_change_pct_24h: unknown;
+  market_activity_metrics_updated_at: Date | string | null;
   preferred_market_id: string | null;
   market_rank: unknown;
 };
@@ -69,6 +80,17 @@ export type RankedRepresentativeMarket = {
   volumeTotal: number;
   liquidity: number;
   openInterest: number;
+  volumeLast24h: number | null;
+  volumePrev24h: number | null;
+  volumeLast24hChange: number | null;
+  volumeLast24hChangePct: number | null;
+  liquidityNow: number | null;
+  liquidityChange24h: number | null;
+  liquidityChangePct24h: number | null;
+  openInterestNow: number | null;
+  openInterestChange24h: number | null;
+  openInterestChangePct24h: number | null;
+  activityMetricsUpdatedAt: string | null;
   preferredMarketId: string | null;
   rank: number;
 };
@@ -94,7 +116,8 @@ function toNumberOrZero(value: unknown): number {
 
 function toBoolean(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value === 1 ? true : value === 0 ? false : null;
+  if (typeof value === "number")
+    return value === 1 ? true : value === 0 ? false : null;
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
     if (normalized === "true" || normalized === "1") return true;
@@ -103,11 +126,18 @@ function toBoolean(value: unknown): boolean | null {
   return null;
 }
 
-function normalizeInput(
-  inputs: RepresentativeEventInput[],
-): Array<Required<Pick<RepresentativeEventInput, "eventId" | "venue">> & {
-  preferredMarketId: string | null;
-}> {
+function toIsoStringOrNull(value: Date | string | null): string | null {
+  if (value == null) return null;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+function normalizeInput(inputs: RepresentativeEventInput[]): Array<
+  Required<Pick<RepresentativeEventInput, "eventId" | "venue">> & {
+    preferredMarketId: string | null;
+  }
+> {
   const normalized = new Map<
     string,
     Required<Pick<RepresentativeEventInput, "eventId" | "venue">> & {
@@ -172,6 +202,19 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
     volumeTotal: toNumberOrZero(row.market_volume_total),
     liquidity: toNumberOrZero(row.market_liquidity),
     openInterest: toNumberOrZero(row.market_open_interest),
+    volumeLast24h: toNumber(row.market_volume_last_24h),
+    volumePrev24h: toNumber(row.market_volume_prev_24h),
+    volumeLast24hChange: toNumber(row.market_volume_last_24h_change),
+    volumeLast24hChangePct: toNumber(row.market_volume_last_24h_change_pct),
+    liquidityNow: toNumber(row.market_liquidity_now),
+    liquidityChange24h: toNumber(row.market_liquidity_change_24h),
+    liquidityChangePct24h: toNumber(row.market_liquidity_change_pct_24h),
+    openInterestNow: toNumber(row.market_open_interest_now),
+    openInterestChange24h: toNumber(row.market_open_interest_change_24h),
+    openInterestChangePct24h: toNumber(row.market_open_interest_change_pct_24h),
+    activityMetricsUpdatedAt: toIsoStringOrNull(
+      row.market_activity_metrics_updated_at,
+    ),
     preferredMarketId: row.preferred_market_id ?? null,
     rank: Math.max(1, Math.trunc(toNumber(row.market_rank) ?? 1)),
   };
@@ -293,6 +336,17 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.volume_total as market_volume_total,
         m.liquidity as market_liquidity,
         coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) as market_open_interest,
+        mam.volume_last_24h as market_volume_last_24h,
+        mam.volume_prev_24h as market_volume_prev_24h,
+        mam.volume_last_24h_change as market_volume_last_24h_change,
+        mam.volume_last_24h_change_pct as market_volume_last_24h_change_pct,
+        mam.liquidity_now as market_liquidity_now,
+        mam.liquidity_change_24h as market_liquidity_change_24h,
+        mam.liquidity_change_pct_24h as market_liquidity_change_pct_24h,
+        mam.open_interest_now as market_open_interest_now,
+        mam.open_interest_change_24h as market_open_interest_change_24h,
+        mam.open_interest_change_pct_24h as market_open_interest_change_pct_24h,
+        mam.updated_at as market_activity_metrics_updated_at,
         m.input_preferred_market_id as preferred_market_id,
         row_number() over (
           partition by m.input_event_id, m.input_event_venue
@@ -475,6 +529,8 @@ export async function selectRankedRepresentativeMarketsForEvents(
         on m.venue = 'kalshi' and km.id = m.venue_market_id
       left join unified_market_change_24h mc
         on mc.market_id = m.id
+      left join unified_market_activity_metrics_24h mam
+        on mam.market_id = m.id
       cross join lateral (
         select
           case
@@ -572,6 +628,17 @@ export async function selectRankedRepresentativeMarketsForEvents(
       market_volume_total,
       market_liquidity,
       market_open_interest,
+      market_volume_last_24h,
+      market_volume_prev_24h,
+      market_volume_last_24h_change,
+      market_volume_last_24h_change_pct,
+      market_liquidity_now,
+      market_liquidity_change_24h,
+      market_liquidity_change_pct_24h,
+      market_open_interest_now,
+      market_open_interest_change_24h,
+      market_open_interest_change_pct_24h,
+      market_activity_metrics_updated_at,
       preferred_market_id,
       market_rank
     from ranked

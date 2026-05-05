@@ -56,6 +56,42 @@ export type MarketMapSignalTargetMarket = {
   resolvedOutcomePct: number | null;
 };
 
+export type MarketMapActivityMetricFields = {
+  volumeLast24h?: number | null;
+  volumePrev24h?: number | null;
+  volumeLast24hChange?: number | null;
+  volumeLast24hChangePct?: number | null;
+  liquidityNow?: number | null;
+  liquidityChange24h?: number | null;
+  liquidityChangePct24h?: number | null;
+  openInterestNow?: number | null;
+  openInterestChange24h?: number | null;
+  openInterestChangePct24h?: number | null;
+  activityMetricsUpdatedAt?: string | null;
+};
+
+export type MarketMapSparklineMetric = "volume" | "liquidity" | "movement";
+
+export type MarketMapSparklinePoint = {
+  bucketStart: string;
+  value: number | null;
+  delta: number | null;
+  changePct: number | null;
+};
+
+export type MarketMapMetricSparkline = {
+  metric: MarketMapSparklineMetric;
+  windowHours: number;
+  bucketHours: number;
+  points: MarketMapSparklinePoint[];
+};
+
+export type MarketMapActivitySparklines = {
+  volume?: MarketMapMetricSparkline;
+  liquidity?: MarketMapMetricSparkline;
+  movement?: MarketMapMetricSparkline;
+};
+
 export type MarketMapNodePreview = {
   id: string;
   venue: MarketMapVenue;
@@ -122,7 +158,7 @@ export type MarketMapNode = {
   updatedAt: string;
 };
 
-export type MarketMapEventMarketPreview = {
+export type MarketMapEventMarketPreview = MarketMapActivityMetricFields & {
   marketId: string;
   marketTitle: string | null;
   marketImage: string | null;
@@ -150,7 +186,7 @@ export type MarketMapEventMarketPreview = {
   openInterest: number;
 };
 
-export type MarketMapEventSummary = {
+export type MarketMapEventSummary = MarketMapActivityMetricFields & {
   eventId: string;
   title: string;
   venue: MarketMapVenue;
@@ -181,6 +217,7 @@ export type MarketMapEventSummary = {
   marketsPreview?: MarketMapEventMarketPreview[];
   signalCount?: number;
   topSignal?: MarketMapSignalSummary | null;
+  activitySparklines?: MarketMapActivitySparklines;
   volume24h: number;
   liquidity: number;
   openInterest: number;
@@ -214,7 +251,10 @@ export function marketMapRunNodesGlobalKey(runId: string): string {
   return `${MARKET_MAP_KEY_PREFIX}:run:${runId}:nodes`;
 }
 
-export function marketMapRunNodesKey(runId: string, venue: MarketMapVenue): string {
+export function marketMapRunNodesKey(
+  runId: string,
+  venue: MarketMapVenue,
+): string {
   return `${MARKET_MAP_KEY_PREFIX}:run:${runId}:nodes:${venue}`;
 }
 
@@ -222,7 +262,10 @@ export function marketMapRunNodeKey(runId: string, nodeId: string): string {
   return `${MARKET_MAP_KEY_PREFIX}:run:${runId}:node:${nodeId}`;
 }
 
-export function marketMapRunNodeEventsKey(runId: string, nodeId: string): string {
+export function marketMapRunNodeEventsKey(
+  runId: string,
+  nodeId: string,
+): string {
   return `${MARKET_MAP_KEY_PREFIX}:run:${runId}:events:${nodeId}`;
 }
 
@@ -279,7 +322,9 @@ export function parseMarketMapParentsQuery(
   return out;
 }
 
-export function parseMarketMapParentIdQuery(raw: string | undefined): string | null {
+export function parseMarketMapParentIdQuery(
+  raw: string | undefined,
+): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -305,7 +350,10 @@ export function parseMarketMapSizeBy(
   return isMarketMapSizeBy(normalized) ? normalized : fallback;
 }
 
-export function metricForNode(node: MarketMapNode, sizeBy: MarketMapSizeBy): number {
+export function metricForNode(
+  node: MarketMapNode,
+  sizeBy: MarketMapSizeBy,
+): number {
   switch (sizeBy) {
     case "count":
       return node.eventCount;
@@ -387,10 +435,12 @@ export function applyVenueFilterToNode(
   } else if (!venues || venues.size === 0 || venues.has(node.venue)) {
     dominantVenue = node.venue;
   }
-  const venueCount = Object.entries(breakdown).filter(
-    ([venue, stats]) =>
-      (!venues || venues.size === 0 || venues.has(venue)) && stats.eventCount > 0,
-  ).length || ((dominantVenue && metrics.eventCount > 0) ? 1 : 0);
+  const venueCount =
+    Object.entries(breakdown).filter(
+      ([venue, stats]) =>
+        (!venues || venues.size === 0 || venues.has(venue)) &&
+        stats.eventCount > 0,
+    ).length || (dominantVenue && metrics.eventCount > 0 ? 1 : 0);
   return {
     ...node,
     venue: dominantVenue ?? node.venue,

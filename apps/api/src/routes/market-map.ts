@@ -7,6 +7,7 @@ import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchMarketSignalPricingByIds } from "../repos/unified-read.js";
 import {
+  marketMapSidebarsQuerySchema,
   marketMapNodeEventsQuerySchema,
   marketMapNodeParamsSchema,
   marketMapQuerySchema,
@@ -37,6 +38,10 @@ import {
   selectRankedRepresentativeMarketsForEvents,
   type RankedRepresentativeMarket,
 } from "../services/market-map-representative.js";
+import {
+  fetchMarketMapEventSparklines,
+  type MarketMapSparklineOptions,
+} from "../services/market-map-sparklines.js";
 import {
   getMarketMapDropReason,
   type MarketMapDropReason,
@@ -85,7 +90,9 @@ function compareNodeEventsBySort(params: {
   const leftMetric = metricForEvent(left, sortBy);
   const rightMetric = metricForEvent(right, sortBy);
   if (leftMetric !== rightMetric) {
-    return sortDir === "asc" ? leftMetric - rightMetric : rightMetric - leftMetric;
+    return sortDir === "asc"
+      ? leftMetric - rightMetric
+      : rightMetric - leftMetric;
   }
   if (right.score !== left.score) return right.score - left.score;
   return left.eventId.localeCompare(right.eventId);
@@ -130,6 +137,17 @@ type MarketMapLiveMarketData = {
   volume24h: number;
   liquidity: number;
   openInterest: number;
+  volumeLast24h: number | null;
+  volumePrev24h: number | null;
+  volumeLast24hChange: number | null;
+  volumeLast24hChangePct: number | null;
+  liquidityNow: number | null;
+  liquidityChange24h: number | null;
+  liquidityChangePct24h: number | null;
+  openInterestNow: number | null;
+  openInterestChange24h: number | null;
+  openInterestChangePct24h: number | null;
+  activityMetricsUpdatedAt: string | null;
   oddsSource: "representative" | "fallback";
 };
 
@@ -173,6 +191,60 @@ type MarketMapEventSignalRow = {
   target_venue: string | null;
 };
 
+type MarketMapEventActivityMetricsRow = {
+  event_id: string;
+  volume_last_24h: unknown;
+  volume_prev_24h: unknown;
+  volume_last_24h_change: unknown;
+  volume_last_24h_change_pct: unknown;
+  liquidity_now: unknown;
+  liquidity_change_24h: unknown;
+  liquidity_change_pct_24h: unknown;
+  open_interest_now: unknown;
+  open_interest_change_24h: unknown;
+  open_interest_change_pct_24h: unknown;
+  updated_at: Date | string | null;
+};
+
+type MarketMapEventActivityMetrics = {
+  volumeLast24h: number | null;
+  volumePrev24h: number | null;
+  volumeLast24hChange: number | null;
+  volumeLast24hChangePct: number | null;
+  liquidityNow: number | null;
+  liquidityChange24h: number | null;
+  liquidityChangePct24h: number | null;
+  openInterestNow: number | null;
+  openInterestChange24h: number | null;
+  openInterestChangePct24h: number | null;
+  activityMetricsUpdatedAt: string | null;
+};
+
+type MarketMapSidebarKind =
+  | "trendingNow"
+  | "volumeMovers24h"
+  | "volumeMoversAbsolute24h"
+  | "liquidityMovers24h"
+  | "liquidityMoversAbsolute24h"
+  | "topMovers24h";
+
+type MarketMapSidebarMoverSortBy = "percent" | "absolute";
+
+type MarketMapSidebarEventRow = MarketMapEventActivityMetricsRow & {
+  event_id: string;
+  title: string | null;
+  venue: string;
+  start_time: Date | string | null;
+  end_time: Date | string | null;
+  event_image: string | null;
+  event_icon: string | null;
+  event_volume_24h: unknown;
+  event_liquidity: unknown;
+  event_open_interest: unknown;
+  change_24h: unknown;
+  score: unknown;
+};
+
 type MarketMapSignalPreviewSummary = {
   signalCount: number;
   signalsPreview: MarketMapSignalSummary[];
@@ -180,6 +252,15 @@ type MarketMapSignalPreviewSummary = {
 };
 
 const MARKET_MAP_SIGNALS_PREVIEW_LIMIT = 8;
+
+type MarketMapSidebarQualityFloors = {
+  minVolumeBase: number;
+  minVolumeChangePct: number;
+  minVolumeChangeAbs: number;
+  minLiquidityBase: number;
+  minLiquidityChangePct: number;
+  minLiquidityChangeAbs: number;
+};
 
 type MarketMapDropReasonCounts = Record<MarketMapDropReason, number>;
 
@@ -198,6 +279,451 @@ function toIsoString(value: Date | string): string {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return new Date().toISOString();
   return new Date(parsed).toISOString();
+}
+
+function toIsoStringOrNull(value: Date | string | null): string | null {
+  if (value == null) return null;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+function normalizeEventActivityMetrics(
+  row: MarketMapEventActivityMetricsRow,
+): MarketMapEventActivityMetrics {
+  return {
+    volumeLast24h: toNumber(row.volume_last_24h),
+    volumePrev24h: toNumber(row.volume_prev_24h),
+    volumeLast24hChange: toNumber(row.volume_last_24h_change),
+    volumeLast24hChangePct: toNumber(row.volume_last_24h_change_pct),
+    liquidityNow: toNumber(row.liquidity_now),
+    liquidityChange24h: toNumber(row.liquidity_change_24h),
+    liquidityChangePct24h: toNumber(row.liquidity_change_pct_24h),
+    openInterestNow: toNumber(row.open_interest_now),
+    openInterestChange24h: toNumber(row.open_interest_change_24h),
+    openInterestChangePct24h: toNumber(row.open_interest_change_pct_24h),
+    activityMetricsUpdatedAt: toIsoStringOrNull(row.updated_at),
+  };
+}
+
+async function loadEventActivityMetricsByEventId(
+  eventIds: string[],
+): Promise<Map<string, MarketMapEventActivityMetrics>> {
+  const normalized = Array.from(
+    new Set(eventIds.map((eventId) => eventId.trim()).filter(Boolean)),
+  );
+  const byEventId = new Map<string, MarketMapEventActivityMetrics>();
+  if (normalized.length === 0) return byEventId;
+
+  const { rows } = await pool.query<MarketMapEventActivityMetricsRow>(
+    `
+      select
+        event_id,
+        volume_last_24h,
+        volume_prev_24h,
+        volume_last_24h_change,
+        volume_last_24h_change_pct,
+        liquidity_now,
+        liquidity_change_24h,
+        liquidity_change_pct_24h,
+        open_interest_now,
+        open_interest_change_24h,
+        open_interest_change_pct_24h,
+        updated_at
+      from unified_event_activity_metrics_24h
+      where event_id = any($1::text[])
+    `,
+    [normalized],
+  );
+
+  for (const row of rows) {
+    byEventId.set(row.event_id, normalizeEventActivityMetrics(row));
+  }
+  return byEventId;
+}
+
+function applyEventActivityMetricsToEvents(
+  events: MarketMapEventSummary[],
+  byEventId: ReadonlyMap<string, MarketMapEventActivityMetrics>,
+): MarketMapEventSummary[] {
+  if (byEventId.size === 0) return events;
+  return events.map((event) => {
+    const metrics = byEventId.get(event.eventId);
+    return metrics ? { ...event, ...metrics } : event;
+  });
+}
+
+function normalizeSidebarEventRow(
+  row: MarketMapSidebarEventRow,
+): MarketMapEventSummary {
+  return {
+    ...normalizeEventActivityMetrics(row),
+    eventId: row.event_id,
+    title: row.title?.trim() || row.event_id,
+    venue: row.venue,
+    startTime: toIsoStringOrNull(row.start_time),
+    endTime: toIsoStringOrNull(row.end_time),
+    closeTime: null,
+    representativeMarketId: null,
+    representativeMarketTitle: null,
+    oddsSource: null,
+    tokenYes: null,
+    tokenNo: null,
+    yesBid: null,
+    yesAsk: null,
+    noBid: null,
+    noAsk: null,
+    marketBestBid: null,
+    marketBestAsk: null,
+    lastPrice: null,
+    change24h: toNumber(row.change_24h),
+    tradeType: null,
+    marketAddress: null,
+    marketStatus: null,
+    acceptingOrders: null,
+    resolvedOutcome: null,
+    resolvedOutcomePct: null,
+    image: row.event_image,
+    icon: row.event_icon,
+    volume24h: toNumber(row.event_volume_24h) ?? 0,
+    liquidity: toNumber(row.event_liquidity) ?? 0,
+    openInterest: toNumber(row.event_open_interest) ?? 0,
+    score: toNumber(row.score) ?? 0,
+    x: 0,
+    y: 0,
+  };
+}
+
+function resolveMarketMapSidebarQualityFloors(policy: {
+  minEventVolume24h: number;
+  minEventLiquidity: number;
+  minVolume24h?: number;
+  minLiquidity?: number;
+  minVolumeChange24h?: number;
+  minVolumeChangePct24h?: number;
+  minLiquidityChange24h?: number;
+  minLiquidityChangePct24h?: number;
+}): MarketMapSidebarQualityFloors {
+  const minVolumeBase = Math.max(
+    0,
+    policy.minVolume24h ?? policy.minEventVolume24h,
+  );
+  const minLiquidityBase = Math.max(
+    0,
+    policy.minLiquidity ?? policy.minEventLiquidity,
+  );
+  return {
+    minVolumeBase,
+    minVolumeChangePct: Math.max(0, policy.minVolumeChangePct24h ?? 0),
+    minVolumeChangeAbs: Math.max(0, policy.minVolumeChange24h ?? 0),
+    minLiquidityBase,
+    minLiquidityChangePct: Math.max(0, policy.minLiquidityChangePct24h ?? 0),
+    minLiquidityChangeAbs: Math.max(0, policy.minLiquidityChange24h ?? 0),
+  };
+}
+
+function volumeSidebarKindForSort(
+  sortBy: MarketMapSidebarMoverSortBy,
+): MarketMapSidebarKind {
+  return sortBy === "absolute" ? "volumeMoversAbsolute24h" : "volumeMovers24h";
+}
+
+function liquiditySidebarKindForSort(
+  sortBy: MarketMapSidebarMoverSortBy,
+): MarketMapSidebarKind {
+  return sortBy === "absolute"
+    ? "liquidityMoversAbsolute24h"
+    : "liquidityMovers24h";
+}
+
+function resolveMarketMapSidebarLimit(
+  value: number | undefined,
+  fallback: number,
+): number {
+  return Math.max(0, Math.min(25, Math.trunc(value ?? fallback)));
+}
+
+function marketMapSidebarCandidateLimit(limit: number): number {
+  return limit <= 0 ? 0 : Math.min(100, Math.max(limit * 5, limit));
+}
+
+function marketMapSparklinesEnabled(
+  options: Pick<
+    MarketMapSparklineOptions,
+    "includeVolume" | "includeLiquidity" | "includeMovement"
+  >,
+): boolean {
+  return (
+    options.includeVolume || options.includeLiquidity || options.includeMovement
+  );
+}
+
+function sidebarSqlParts(kind: MarketMapSidebarKind): {
+  fromSql: string;
+  filterSql: string;
+  orderSql: string;
+} {
+  switch (kind) {
+    case "volumeMovers24h":
+      return {
+        fromSql: `
+          from unified_event_activity_metrics_24h eam
+          join unified_events e
+            on e.id = eam.event_id
+           and e.venue = eam.venue
+          left join unified_event_change_24h ec
+            on ec.event_id = e.id
+        `,
+        filterSql: `
+          and eam.venue = any($1::text[])
+          and eam.volume_valid is true
+          and eam.volume_last_24h_change_pct is not null
+          and eam.volume_last_24h >= $3::numeric
+          and eam.volume_prev_24h >= $3::numeric
+          and eam.volume_last_24h_change_pct >= $4::numeric
+        `,
+        orderSql: `
+          eam.volume_last_24h_change_pct desc nulls last,
+          eam.volume_last_24h desc nulls last
+        `,
+      };
+    case "volumeMoversAbsolute24h":
+      return {
+        fromSql: `
+          from unified_event_activity_metrics_24h eam
+          join unified_events e
+            on e.id = eam.event_id
+           and e.venue = eam.venue
+          left join unified_event_change_24h ec
+            on ec.event_id = e.id
+        `,
+        filterSql: `
+          and eam.venue = any($1::text[])
+          and eam.volume_valid is true
+          and eam.volume_last_24h_change is not null
+          and greatest(
+            coalesce(eam.volume_last_24h, 0),
+            coalesce(eam.volume_prev_24h, 0)
+          ) >= $3::numeric
+          and abs(eam.volume_last_24h_change) >= $5::numeric
+        `,
+        orderSql: `
+          abs(eam.volume_last_24h_change) desc nulls last,
+          eam.volume_last_24h desc nulls last
+        `,
+      };
+    case "liquidityMovers24h":
+      return {
+        fromSql: `
+          from unified_event_activity_metrics_24h eam
+          join unified_events e
+            on e.id = eam.event_id
+           and e.venue = eam.venue
+          left join unified_event_change_24h ec
+            on ec.event_id = e.id
+        `,
+        filterSql: `
+          and eam.venue = any($1::text[])
+          and eam.liquidity_valid is true
+          and eam.liquidity_change_pct_24h is not null
+          and eam.liquidity_now >= $6::numeric
+          and eam.liquidity_24h_ago >= $6::numeric
+          and eam.liquidity_change_pct_24h >= $7::numeric
+        `,
+        orderSql: `
+          eam.liquidity_change_pct_24h desc nulls last,
+          eam.liquidity_now desc nulls last
+        `,
+      };
+    case "liquidityMoversAbsolute24h":
+      return {
+        fromSql: `
+          from unified_event_activity_metrics_24h eam
+          join unified_events e
+            on e.id = eam.event_id
+           and e.venue = eam.venue
+          left join unified_event_change_24h ec
+            on ec.event_id = e.id
+        `,
+        filterSql: `
+          and eam.venue = any($1::text[])
+          and eam.liquidity_valid is true
+          and eam.liquidity_change_24h is not null
+          and greatest(
+            coalesce(eam.liquidity_now, 0),
+            coalesce(eam.liquidity_24h_ago, 0)
+          ) >= $6::numeric
+          and abs(eam.liquidity_change_24h) >= $8::numeric
+        `,
+        orderSql: `
+          abs(eam.liquidity_change_24h) desc nulls last,
+          eam.liquidity_now desc nulls last
+        `,
+      };
+    case "topMovers24h":
+      return {
+        fromSql: `
+          from unified_event_change_24h ec
+          join unified_events e
+            on e.id = ec.event_id
+          left join unified_event_activity_metrics_24h eam
+            on eam.event_id = e.id
+           and eam.venue = e.venue
+        `,
+        filterSql: "and ec.change_24h is not null",
+        orderSql: "ec.change_24h desc nulls last",
+      };
+    case "trendingNow":
+    default:
+      return {
+        fromSql: `
+          from unified_events e
+          left join unified_event_activity_metrics_24h eam
+            on eam.event_id = e.id
+           and eam.venue = e.venue
+          left join unified_event_change_24h ec
+            on ec.event_id = e.id
+        `,
+        filterSql: "",
+        orderSql: `
+          coalesce(
+            case when eam.volume_valid is true then eam.volume_last_24h else null end,
+            e.volume_24h,
+            0
+          ) desc
+        `,
+      };
+  }
+}
+
+async function loadMarketMapSidebarCandidates(params: {
+  kind: MarketMapSidebarKind;
+  venues: string[];
+  limit: number;
+  quality: MarketMapSidebarQualityFloors;
+}): Promise<MarketMapEventSummary[]> {
+  const { kind, venues, limit, quality } = params;
+  if (venues.length === 0 || limit <= 0) return [];
+  const { fromSql, filterSql, orderSql } = sidebarSqlParts(kind);
+  const { rows } = await pool.query<MarketMapSidebarEventRow>(
+    `
+      select
+        e.id as event_id,
+        e.title,
+        e.venue::text as venue,
+        e.start_date as start_time,
+        e.end_date as end_time,
+        e.image as event_image,
+        e.icon as event_icon,
+        coalesce(e.volume_24h, 0) as event_volume_24h,
+        coalesce(
+          nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+          0
+        ) as event_liquidity,
+        coalesce(
+          nullif(e.open_interest, 0),
+          nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+          0
+        ) as event_open_interest,
+        ec.change_24h,
+        eam.volume_last_24h,
+        eam.volume_prev_24h,
+        eam.volume_last_24h_change,
+        eam.volume_last_24h_change_pct,
+        eam.liquidity_now,
+        eam.liquidity_change_24h,
+        eam.liquidity_change_pct_24h,
+        eam.open_interest_now,
+        eam.open_interest_change_24h,
+        eam.open_interest_change_pct_24h,
+        eam.updated_at,
+        coalesce(
+          case when eam.volume_valid is true then eam.volume_last_24h else null end,
+          e.volume_24h,
+          0
+        )::double precision as score
+      ${fromSql}
+      where e.status = 'ACTIVE'
+        and e.venue = any($1::text[])
+        and (e.end_date is null or e.end_date > now())
+        and $3::numeric >= 0
+        and $4::numeric >= 0
+        and $5::numeric >= 0
+        and $6::numeric >= 0
+        and $7::numeric >= 0
+        and $8::numeric >= 0
+        and (
+          $3::numeric <= 0
+          or coalesce(
+            case when eam.volume_valid is true then eam.volume_last_24h else null end,
+            e.volume_24h,
+            0
+          ) >= $3::numeric
+        )
+        and (
+          $6::numeric <= 0
+          or coalesce(
+            eam.liquidity_now,
+            nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
+            0
+          ) >= $6::numeric
+        )
+        and exists (
+          select 1
+          from unified_markets m
+          where m.event_id = e.id
+            and m.venue = e.venue
+            and m.status = 'ACTIVE'
+            and (m.expiration_time is null or m.expiration_time > now())
+            and (m.close_time is null or m.close_time > now())
+        )
+        ${filterSql}
+      order by
+        ${orderSql},
+        e.id
+      limit $2
+    `,
+    [
+      venues,
+      Math.max(1, Math.trunc(limit)),
+      quality.minVolumeBase,
+      quality.minVolumeChangePct,
+      quality.minVolumeChangeAbs,
+      quality.minLiquidityBase,
+      quality.minLiquidityChangePct,
+      quality.minLiquidityChangeAbs,
+    ],
+  );
+  return rows.map(normalizeSidebarEventRow);
+}
+
+function dedupeEventsForLiveLookup(
+  groups: ReadonlyArray<ReadonlyArray<MarketMapEventSummary>>,
+): MarketMapEventSummary[] {
+  const byKey = new Map<string, MarketMapEventSummary>();
+  for (const group of groups) {
+    for (const event of group) {
+      const key = eventVenueKey(event.eventId, event.venue);
+      if (!byKey.has(key)) byKey.set(key, event);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function applyMarketMapSparklinesToEvents(
+  events: MarketMapEventSummary[],
+  sparklinesByEvent: ReadonlyMap<
+    string,
+    MarketMapEventSummary["activitySparklines"]
+  >,
+): MarketMapEventSummary[] {
+  if (sparklinesByEvent.size === 0) return events;
+  return events.map((event) => {
+    const sparklines = sparklinesByEvent.get(
+      eventVenueKey(event.eventId, event.venue),
+    );
+    return sparklines ? { ...event, activitySparklines: sparklines } : event;
+  });
 }
 
 function signalPreviewKey(signal: MarketMapSignalSummary): string {
@@ -363,6 +889,17 @@ function normalizeLiveRow(
     volume24h: row.volume24h,
     liquidity: row.liquidity,
     openInterest: row.openInterest,
+    volumeLast24h: row.volumeLast24h,
+    volumePrev24h: row.volumePrev24h,
+    volumeLast24hChange: row.volumeLast24hChange,
+    volumeLast24hChangePct: row.volumeLast24hChangePct,
+    liquidityNow: row.liquidityNow,
+    liquidityChange24h: row.liquidityChange24h,
+    liquidityChangePct24h: row.liquidityChangePct24h,
+    openInterestNow: row.openInterestNow,
+    openInterestChange24h: row.openInterestChange24h,
+    openInterestChangePct24h: row.openInterestChangePct24h,
+    activityMetricsUpdatedAt: row.activityMetricsUpdatedAt,
     oddsSource,
   };
 }
@@ -396,6 +933,17 @@ function normalizePreviewMarketRow(
     volumeTotal: row.volumeTotal,
     liquidity: row.liquidity,
     openInterest: row.openInterest,
+    volumeLast24h: row.volumeLast24h,
+    volumePrev24h: row.volumePrev24h,
+    volumeLast24hChange: row.volumeLast24hChange,
+    volumeLast24hChangePct: row.volumeLast24hChangePct,
+    liquidityNow: row.liquidityNow,
+    liquidityChange24h: row.liquidityChange24h,
+    liquidityChangePct24h: row.liquidityChangePct24h,
+    openInterestNow: row.openInterestNow,
+    openInterestChange24h: row.openInterestChange24h,
+    openInterestChangePct24h: row.openInterestChangePct24h,
+    activityMetricsUpdatedAt: row.activityMetricsUpdatedAt,
   };
 }
 
@@ -590,7 +1138,10 @@ async function loadNodeSignalSummaryByNodeId(params: {
 
   const signalsToEnrich: MarketMapSignalSummary[] = [];
   for (const row of rows) {
-    const directCount = Math.max(0, Math.trunc(toNumber(row.direct_count) ?? 0));
+    const directCount = Math.max(
+      0,
+      Math.trunc(toNumber(row.direct_count) ?? 0),
+    );
     directCountByNodeId.set(row.node_id, directCount);
     const signal: MarketMapSignalSummary = {
       title: row.title?.trim() || "AI signal",
@@ -641,7 +1192,10 @@ function computeNodeSignalSubtreeCounts(
     const cached = memo.get(nodeId);
     if (cached != null) return cached;
     if (inProgress.has(nodeId)) {
-      const fallback = Math.max(0, Math.trunc(directCountByNodeId.get(nodeId) ?? 0));
+      const fallback = Math.max(
+        0,
+        Math.trunc(directCountByNodeId.get(nodeId) ?? 0),
+      );
       memo.set(nodeId, fallback);
       return fallback;
     }
@@ -815,12 +1369,11 @@ async function loadEventSignalSummaryByEventId(params: {
 
   const signalsToEnrich: MarketMapSignalSummary[] = [];
   for (const row of rows) {
-    const current =
-      byEventId.get(row.event_id) ?? {
-        signalCount: Math.max(0, Math.trunc(toNumber(row.signal_count) ?? 0)),
-        signalsPreview: [],
-        topSignal: null,
-      };
+    const current = byEventId.get(row.event_id) ?? {
+      signalCount: Math.max(0, Math.trunc(toNumber(row.signal_count) ?? 0)),
+      signalsPreview: [],
+      topSignal: null,
+    };
     const signal: MarketMapSignalSummary = {
       title: row.title?.trim() || "AI signal",
       description: row.description?.trim() || null,
@@ -881,7 +1434,8 @@ async function loadLeafSignalSummaryByNodeId(params: {
 
   for (let index = 0; index < nodeIds.length; index += 1) {
     const nodeId = nodeIds[index];
-    const events = safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? [];
+    const events =
+      safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? [];
     const ids: string[] = [];
     const seen = new Set<string>();
     for (const event of events) {
@@ -1017,7 +1571,8 @@ function applyLiveMarketDataToEvents(
     return {
       ...event,
       representativeMarketId: live.marketId,
-      representativeMarketTitle: live.marketTitle ?? event.representativeMarketTitle ?? null,
+      representativeMarketTitle:
+        live.marketTitle ?? event.representativeMarketTitle ?? null,
       image: event.image ?? live.marketImage,
       icon: event.icon ?? live.marketIcon,
       marketsPreview,
@@ -1034,7 +1589,7 @@ function applyLiveMarketDataToEvents(
       marketBestBid: live.marketBestBid,
       marketBestAsk: live.marketBestAsk,
       lastPrice: live.lastPrice,
-      change24h: live.change24h,
+      change24h: live.change24h ?? event.change24h,
       tradeType: live.tradeType,
       marketAddress: live.marketAddress,
       marketStatus: live.marketStatus,
@@ -1090,10 +1645,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      if (
-        level === 1 &&
-        parentId != null
-      ) {
+      if (level === 1 && parentId != null) {
         return reply.code(400).send({
           error: "Parent params are not allowed for level=1",
         });
@@ -1107,15 +1659,17 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const sizeBy = parseMarketMapSizeBy(query.sizeBy, effective.sizeByDefault);
+      const sizeBy = parseMarketMapSizeBy(
+        query.sizeBy,
+        effective.sizeByDefault,
+      );
       const limit = query.limit ?? effective.mergeLimitDefault;
-      const perVenueMin = query.perVenueMin ?? effective.mergePerVenueMinDefault;
+      const perVenueMin =
+        query.perVenueMin ?? effective.mergePerVenueMinDefault;
       const includeChildrenPreview = query.includeChildrenPreview ?? false;
       const childrenPreviewLimit = query.childrenPreviewLimit ?? 8;
       const includeEventsPreview =
-        query.includeEventsPreview ??
-        query.includeLeafEventsPreview ??
-        false;
+        query.includeEventsPreview ?? query.includeLeafEventsPreview ?? false;
       const eventsPreviewLimit =
         query.eventsPreviewLimit ?? query.leafEventsPreviewLimit ?? 10;
       const marketsPreviewLimit = query.marketsPreviewLimit ?? 8;
@@ -1160,7 +1714,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v1",
+        "market-map:v2",
         runId,
         policyCacheVersion,
         String(level),
@@ -1204,8 +1758,12 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         for (const venue of effective.venuesEnabled) {
           legacy.get(marketMapRunNodesKey(runId, venue));
         }
-        const legacyRaw = (await legacy.exec()) as unknown as Array<string | null>;
-        allNodes = legacyRaw.flatMap((value) => safeJsonParse<MarketMapNode[]>(value) ?? []);
+        const legacyRaw = (await legacy.exec()) as unknown as Array<
+          string | null
+        >;
+        allNodes = legacyRaw.flatMap(
+          (value) => safeJsonParse<MarketMapNode[]>(value) ?? [],
+        );
       }
       if (allNodes.length > 0) {
         const nodeSignalSummary = await loadNodeSignalSummaryByNodeId({
@@ -1227,7 +1785,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       }
       const selectedVenueSet = new Set<MarketMapVenue>(venues);
       const parentNode = parentId
-        ? allNodes.find((node) => node.id === parentId) ?? null
+        ? (allNodes.find((node) => node.id === parentId) ?? null)
         : null;
       if (level > 1) {
         if (!parentNode) {
@@ -1270,7 +1828,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             })
           : {
               directCountByNodeId: new Map<string, number>(),
-              signalsPreviewByNodeId: new Map<string, MarketMapSignalSummary[]>(),
+              signalsPreviewByNodeId: new Map<
+                string,
+                MarketMapSignalSummary[]
+              >(),
               topSignalByNodeId: new Map<string, MarketMapSignalSummary>(),
             };
 
@@ -1280,7 +1841,9 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           itemNodeSignalPreviewSummary.signalsPreviewByNodeId.get(node.id) ??
           node.signalsPreview,
         topSignal:
-          itemNodeSignalPreviewSummary.signalsPreviewByNodeId.get(node.id)?.[0] ??
+          itemNodeSignalPreviewSummary.signalsPreviewByNodeId.get(
+            node.id,
+          )?.[0] ??
           itemNodeSignalPreviewSummary.topSignalByNodeId.get(node.id) ??
           node.topSignal ??
           null,
@@ -1301,7 +1864,9 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                   0,
                   Math.max(
                     Math.trunc(node.signalCountSubtree ?? 0),
-                    Math.trunc(leafSignalSummary.countByNodeId.get(node.id) ?? 0),
+                    Math.trunc(
+                      leafSignalSummary.countByNodeId.get(node.id) ?? 0,
+                    ),
                   ),
                 ),
                 signalsPreview:
@@ -1319,7 +1884,9 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const itemsWithPreview =
         includeChildrenPreview && level < 3
           ? (() => {
-              const parentIds = new Set(itemsWithLeafSignals.map((node) => node.id));
+              const parentIds = new Set(
+                itemsWithLeafSignals.map((node) => node.id),
+              );
               const byParent = new Map<string, MarketMapNode[]>();
               for (const node of allNodes) {
                 if (node.level !== level + 1) continue;
@@ -1363,7 +1930,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             })
           : {
               countByNodeId: new Map<string, number>(),
-              signalsPreviewByNodeId: new Map<string, MarketMapSignalSummary[]>(),
+              signalsPreviewByNodeId: new Map<
+                string,
+                MarketMapSignalSummary[]
+              >(),
               topSignalByNodeId: new Map<string, MarketMapSignalSummary>(),
             };
 
@@ -1384,7 +1954,9 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
             previewLeafSignalSummary.signalsPreviewByNodeId.get(childNode.id) ??
             childNode.signalsPreview,
           topSignal:
-            previewLeafSignalSummary.signalsPreviewByNodeId.get(childNode.id)?.[0] ??
+            previewLeafSignalSummary.signalsPreviewByNodeId.get(
+              childNode.id,
+            )?.[0] ??
             childNode.topSignal ??
             previewLeafSignalSummary.topSignalByNodeId.get(childNode.id) ??
             null,
@@ -1431,8 +2003,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       eventIds: previewEventIds,
                     })
                   : new Map();
+              const eventActivityMetricsByEventId =
+                await loadEventActivityMetricsByEventId(previewEventIds);
               const eventsByNodeWithSignals = eventsByNode.map((events) =>
-                applySignalSummaryToEvents(events, eventSignalSummaryByEventId),
+                applyEventActivityMetricsToEvents(
+                  applySignalSummaryToEvents(
+                    events,
+                    eventSignalSummaryByEventId,
+                  ),
+                  eventActivityMetricsByEventId,
+                ),
               );
 
               const previewEvents = eventsByNodeWithSignals.flat();
@@ -1460,33 +2040,35 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
 
               let droppedPreviewEvents = 0;
               const droppedReasons = emptyDropReasonCounts();
-              const previewItems = itemsWithPreviewSignals.map((node, index) => {
-                const withLive =
-                  liveBundle == null
-                    ? eventsByNodeWithSignals[index]
-                    : applyLiveMarketDataToEvents(
-                        eventsByNodeWithSignals[index],
-                        liveBundle.primaryByEventVenue,
-                        liveBundle.marketsByEventVenue,
-                      );
-                if (liveBundle == null) {
+              const previewItems = itemsWithPreviewSignals.map(
+                (node, index) => {
+                  const withLive =
+                    liveBundle == null
+                      ? eventsByNodeWithSignals[index]
+                      : applyLiveMarketDataToEvents(
+                          eventsByNodeWithSignals[index],
+                          liveBundle.primaryByEventVenue,
+                          liveBundle.marketsByEventVenue,
+                        );
+                  if (liveBundle == null) {
+                    return {
+                      ...node,
+                      eventsPreview: withLive,
+                    };
+                  }
+                  const filtered = filterUsableEvents(withLive);
+                  droppedPreviewEvents += filtered.dropped;
+                  for (const reason of Object.keys(
+                    filtered.droppedReasons,
+                  ) as MarketMapDropReason[]) {
+                    droppedReasons[reason] += filtered.droppedReasons[reason];
+                  }
                   return {
                     ...node,
-                    eventsPreview: withLive,
+                    eventsPreview: filtered.items,
                   };
-                }
-                const filtered = filterUsableEvents(withLive);
-                droppedPreviewEvents += filtered.dropped;
-                for (const reason of Object.keys(
-                  filtered.droppedReasons,
-                ) as MarketMapDropReason[]) {
-                  droppedReasons[reason] += filtered.droppedReasons[reason];
-                }
-                return {
-                  ...node,
-                  eventsPreview: filtered.items,
-                };
-              });
+                },
+              );
               if (liveBundle != null && droppedPreviewEvents > 0) {
                 request.log.info(
                   {
@@ -1554,6 +2136,267 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/market-map/sidebars",
+    { schema: { querystring: marketMapSidebarsQuerySchema } },
+    async (request, reply) => {
+      const generatedAt = new Date().toISOString();
+      const policy = await resolveMarketMapPolicy(pool);
+      const emptyPayload = {
+        trendingNow: [] as MarketMapEventSummary[],
+        volumeMovers24h: [] as MarketMapEventSummary[],
+        liquidityMovers24h: [] as MarketMapEventSummary[],
+        topMovers24h: [] as MarketMapEventSummary[],
+        generatedAt,
+      };
+
+      if (!policy.effective.enabled) {
+        return emptyPayload;
+      }
+
+      const requestedVenues = parseMarketMapVenuesQuery(request.query.venues);
+      const allowedVenueSet = new Set(policy.effective.venuesEnabled);
+      const venues =
+        requestedVenues.length > 0
+          ? requestedVenues.filter((venue) => allowedVenueSet.has(venue))
+          : policy.effective.venuesEnabled;
+      if (venues.length === 0) {
+        return reply.code(400).send({
+          error: "No enabled venues selected for market map sidebars",
+        });
+      }
+
+      const defaultLimit = request.query.limit ?? 5;
+      const sidebarLimits = {
+        trendingNow: resolveMarketMapSidebarLimit(
+          request.query.trendingLimit,
+          defaultLimit,
+        ),
+        volumeMovers24h: resolveMarketMapSidebarLimit(
+          request.query.volumeMoversLimit,
+          defaultLimit,
+        ),
+        liquidityMovers24h: resolveMarketMapSidebarLimit(
+          request.query.liquidityMoversLimit,
+          defaultLimit,
+        ),
+        topMovers24h: resolveMarketMapSidebarLimit(
+          request.query.topMoversLimit,
+          defaultLimit,
+        ),
+      };
+      const volumeMoversSortBy = request.query.volumeMoversSortBy ?? "percent";
+      const liquidityMoversSortBy =
+        request.query.liquidityMoversSortBy ?? "percent";
+      const sparklineOptions: MarketMapSparklineOptions = {
+        includeVolume: request.query.includeVolumeSparkline,
+        includeLiquidity: request.query.includeLiquiditySparkline,
+        includeMovement: request.query.includeMovementSparkline,
+        windowHours: request.query.sparklineWindowHours ?? 48,
+        bucketHours: request.query.sparklineBucketHours,
+      };
+      const quality = resolveMarketMapSidebarQualityFloors({
+        ...policy.effective,
+        minVolume24h: request.query.minVolume24h,
+        minLiquidity: request.query.minLiquidity,
+        minVolumeChange24h: request.query.minVolumeChange24h,
+        minVolumeChangePct24h: request.query.minVolumeChangePct24h,
+        minLiquidityChange24h: request.query.minLiquidityChange24h,
+        minLiquidityChangePct24h: request.query.minLiquidityChangePct24h,
+      });
+      const cacheEnabled = env.marketMapTtlSec > 0;
+      const cacheTtl = cacheEnabled ? Math.min(env.marketMapTtlSec, 60) : 0;
+      const policyCacheVersion = [
+        policy.source,
+        policy.effectiveAt?.toISOString() ?? "none",
+        String(policy.effective.enabled),
+        policy.effective.venuesEnabled.join(","),
+        String(quality.minVolumeBase),
+        String(quality.minVolumeChangePct),
+        String(quality.minVolumeChangeAbs),
+        String(quality.minLiquidityBase),
+        String(quality.minLiquidityChangePct),
+        String(quality.minLiquidityChangeAbs),
+        String(sidebarLimits.trendingNow),
+        String(sidebarLimits.volumeMovers24h),
+        String(sidebarLimits.liquidityMovers24h),
+        String(sidebarLimits.topMovers24h),
+        volumeMoversSortBy,
+        liquidityMoversSortBy,
+        String(sparklineOptions.includeVolume),
+        String(sparklineOptions.includeLiquidity),
+        String(sparklineOptions.includeMovement),
+        String(sparklineOptions.windowHours),
+        String(sparklineOptions.bucketHours ?? "auto"),
+      ].join(":");
+      const cacheKey = [
+        "market-map:sidebars:v2",
+        policyCacheVersion,
+        venues.slice().sort().join(","),
+        String(defaultLimit),
+      ].join(":");
+      let sidebarRedis: Awaited<ReturnType<typeof getRedisStatus>>["redis"] =
+        null;
+      let skipCacheWrite = false;
+
+      if (cacheEnabled) {
+        const { redis } = await getRedisStatus();
+        sidebarRedis = redis;
+        if (sidebarRedis) {
+          const cachedBody = await sidebarRedis.get(cacheKey);
+          if (cachedBody) {
+            const etag = buildWeakEtag(cachedBody);
+            if (request.headers["if-none-match"] === etag) {
+              reply.header("ETag", etag);
+              reply.code(304);
+              return reply.send();
+            }
+            reply.header("x-cache", "hit");
+            reply.header("ETag", etag);
+            reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            return reply.send(cachedBody);
+          }
+        }
+      }
+
+      const [
+        trendingCandidates,
+        volumeMoverCandidates,
+        liquidityMoverCandidates,
+        topMoverCandidates,
+      ] = await Promise.all([
+        loadMarketMapSidebarCandidates({
+          kind: "trendingNow",
+          venues,
+          limit: marketMapSidebarCandidateLimit(sidebarLimits.trendingNow),
+          quality,
+        }),
+        loadMarketMapSidebarCandidates({
+          kind: volumeSidebarKindForSort(volumeMoversSortBy),
+          venues,
+          limit: marketMapSidebarCandidateLimit(sidebarLimits.volumeMovers24h),
+          quality,
+        }),
+        loadMarketMapSidebarCandidates({
+          kind: liquiditySidebarKindForSort(liquidityMoversSortBy),
+          venues,
+          limit: marketMapSidebarCandidateLimit(
+            sidebarLimits.liquidityMovers24h,
+          ),
+          quality,
+        }),
+        loadMarketMapSidebarCandidates({
+          kind: "topMovers24h",
+          venues,
+          limit: marketMapSidebarCandidateLimit(sidebarLimits.topMovers24h),
+          quality,
+        }),
+      ]);
+
+      const allCandidates = dedupeEventsForLiveLookup([
+        trendingCandidates,
+        volumeMoverCandidates,
+        liquidityMoverCandidates,
+        topMoverCandidates,
+      ]);
+
+      let liveBundle: MarketMapLiveMarketBundle | null = null;
+      if (allCandidates.length > 0) {
+        try {
+          liveBundle = await loadLiveMarketDataForEvents(allCandidates, 1);
+        } catch (error) {
+          skipCacheWrite = true;
+          request.log.warn(
+            { err: error, itemCount: allCandidates.length },
+            "market-map sidebars live market enrichment failed",
+          );
+        }
+      }
+
+      const hydrate = (
+        events: MarketMapEventSummary[],
+        limit: number,
+      ): MarketMapEventSummary[] => {
+        const withLive =
+          liveBundle == null
+            ? events
+            : applyLiveMarketDataToEvents(
+                events,
+                liveBundle.primaryByEventVenue,
+                liveBundle.marketsByEventVenue,
+              );
+        const filtered =
+          liveBundle == null ? withLive : filterUsableEvents(withLive).items;
+        return filtered.slice(0, limit);
+      };
+
+      let payload = {
+        trendingNow: hydrate(trendingCandidates, sidebarLimits.trendingNow),
+        volumeMovers24h: hydrate(
+          volumeMoverCandidates,
+          sidebarLimits.volumeMovers24h,
+        ),
+        liquidityMovers24h: hydrate(
+          liquidityMoverCandidates,
+          sidebarLimits.liquidityMovers24h,
+        ),
+        topMovers24h: hydrate(topMoverCandidates, sidebarLimits.topMovers24h),
+        generatedAt,
+      };
+
+      if (marketMapSparklinesEnabled(sparklineOptions)) {
+        const returnedEvents = dedupeEventsForLiveLookup([
+          payload.trendingNow,
+          payload.volumeMovers24h,
+          payload.liquidityMovers24h,
+          payload.topMovers24h,
+        ]);
+        const sparklinesByEvent = await fetchMarketMapEventSparklines(
+          pool,
+          returnedEvents,
+          sparklineOptions,
+        );
+        payload = {
+          ...payload,
+          trendingNow: applyMarketMapSparklinesToEvents(
+            payload.trendingNow,
+            sparklinesByEvent,
+          ),
+          volumeMovers24h: applyMarketMapSparklinesToEvents(
+            payload.volumeMovers24h,
+            sparklinesByEvent,
+          ),
+          liquidityMovers24h: applyMarketMapSparklinesToEvents(
+            payload.liquidityMovers24h,
+            sparklinesByEvent,
+          ),
+          topMovers24h: applyMarketMapSparklinesToEvents(
+            payload.topMovers24h,
+            sparklinesByEvent,
+          ),
+        };
+      }
+      const body = JSON.stringify(payload);
+      const etag = buildWeakEtag(body);
+      if (request.headers["if-none-match"] === etag) {
+        reply.header("ETag", etag);
+        reply.code(304);
+        return reply.send();
+      }
+      if (cacheEnabled && sidebarRedis && !skipCacheWrite) {
+        await sidebarRedis.setEx(cacheKey, cacheTtl, body);
+        reply.header("x-cache", "miss");
+      } else if (cacheEnabled && sidebarRedis && skipCacheWrite) {
+        reply.header("x-cache", "bypass");
+      }
+      reply.header("ETag", etag);
+      reply.header("Cache-Control", buildPrivateCacheControl(cacheTtl));
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send(body);
+    },
+  );
+
+  z.get(
     "/market-map/node/:id",
     { schema: { params: marketMapNodeParamsSchema } },
     async (request, reply) => {
@@ -1574,7 +2417,9 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: "No active market map snapshot" });
       }
 
-      const raw = await redis.get(marketMapRunNodeKey(runId, request.params.id));
+      const raw = await redis.get(
+        marketMapRunNodeKey(runId, request.params.id),
+      );
       const node = safeJsonParse<MarketMapNode>(raw);
       if (!node) {
         return reply.code(404).send({ error: "Market map node not found" });
@@ -1630,7 +2475,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         policy.effective.venuesEnabled.join(","),
       ].join(":");
       const cacheKey = [
-        "market-map:node-events:v1",
+        "market-map:node-events:v2",
         runId,
         policyCacheVersion,
         nodeId,
@@ -1667,9 +2512,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       if (!node) {
         return reply.code(404).send({ error: "Market map node not found" });
       }
-      const events = (safeJsonParse<MarketMapEventSummary[]>(eventsRaw) ?? []).filter(
-        (event) =>
-          selectedVenueSet.size === 0 ? true : selectedVenueSet.has(event.venue),
+      const events = (
+        safeJsonParse<MarketMapEventSummary[]>(eventsRaw) ?? []
+      ).filter((event) =>
+        selectedVenueSet.size === 0 ? true : selectedVenueSet.has(event.venue),
       );
       const sortedEvents = sortNodeEvents({
         events,
@@ -1687,6 +2533,14 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       let itemsWithLiveMarket = applySignalSummaryToEvents(
         items,
         eventSignalSummaryByEventId,
+      );
+      const eventActivityMetricsByEventId =
+        await loadEventActivityMetricsByEventId(
+          items.map((item) => item.eventId),
+        );
+      itemsWithLiveMarket = applyEventActivityMetricsToEvents(
+        itemsWithLiveMarket,
+        eventActivityMetricsByEventId,
       );
       let qualityGateApplied = false;
       if (items.length > 0) {
