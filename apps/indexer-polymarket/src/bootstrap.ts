@@ -4,22 +4,17 @@ import { env } from "./env.js";
 import { fetchEventsByIds, iterateEventPages } from "./gammaClient.js";
 import { postBooksOnce } from "./clobClient.js";
 import {
-  upsertPolymarketEvents,
-  upsertPolymarketMarkets,
-} from "./polymarket-repo.js";
-import {
   mapPolymarketEventRow,
   mapPolymarketMarketRow,
   mapTokens,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
+import { upsertUnifiedTokens, writeUnifiedBookTop } from "@hunch/db";
 import {
-  upsertUnifiedEvents,
-  upsertUnifiedMarkets,
-  upsertUnifiedTokens,
-  writeUnifiedBookTop,
-} from "@hunch/db";
+  upsertEventsConsistently,
+  upsertMarketsConsistently,
+} from "./consistentUpserts.js";
 import {
   buildTopMarketsText,
   enqueueEmbedItems,
@@ -119,15 +114,15 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     }),
   );
 
-  await Promise.all([
-    upsertPolymarketEvents(polymarketEventRows),
-    upsertUnifiedEvents(pool, unifiedEventRows),
-  ]);
+  await upsertEventsConsistently(pool, {
+    unified: unifiedEventRows,
+    polymarket: polymarketEventRows,
+  });
 
-  await Promise.all([
-    upsertPolymarketMarkets(polymarketMarketRows),
-    upsertUnifiedMarkets(pool, unifiedMarketRows),
-  ]);
+  await upsertMarketsConsistently(pool, {
+    unified: unifiedMarketRows,
+    polymarket: polymarketMarketRows,
+  });
   if (unifiedTokenRows.length) {
     await upsertUnifiedTokens(pool, unifiedTokenRows);
   }
@@ -380,7 +375,10 @@ function parseJsonStringArray(raw: unknown): string[] {
 
 function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   const clampedShare = Math.max(0, Math.min(1, hotShare));
-  const hotBudget = Math.max(0, Math.min(total, Math.round(total * clampedShare)));
+  const hotBudget = Math.max(
+    0,
+    Math.min(total, Math.round(total * clampedShare)),
+  );
   return { hotBudget };
 }
 
@@ -417,7 +415,11 @@ async function fetchHotTokenIds(limit?: number): Promise<string[]> {
         env.hotStreamTokensMax,
         env.hotStreamTokensTtlSec,
       ),
-      readHotSet("hot:tokens:polymarket", env.hotTokensMax, env.hotTokensTtlSec),
+      readHotSet(
+        "hot:tokens:polymarket",
+        env.hotTokensMax,
+        env.hotTokensTtlSec,
+      ),
     ]);
 
     const maxOut = Math.min(mergedCap, resolvedLimit);
@@ -537,13 +539,20 @@ async function fetchTopTokens(
     if (out.length >= limitTokens) return out;
   }
 
-  const fallback = await fetchTopTokensFromSourceScan(limitMarkets, limitTokens, exclude);
+  const fallback = await fetchTopTokensFromSourceScan(
+    limitMarkets,
+    limitTokens,
+    exclude,
+  );
   if (fallback.length < limitTokens) {
-    log.warn("Polymarket top token shortlist underfilled; broad scan fallback still short", {
-      limitTokens,
-      returned: fallback.length,
-      limitMarkets,
-    });
+    log.warn(
+      "Polymarket top token shortlist underfilled; broad scan fallback still short",
+      {
+        limitTokens,
+        returned: fallback.length,
+        limitMarkets,
+      },
+    );
   }
   return fallback;
 }
@@ -686,7 +695,9 @@ export async function syncHotEventStatuses(): Promise<void> {
 
 export async function selectWsTokenIds(): Promise<string[]> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
-  const probeLimit = clampHotProbeLimit(Math.max(env.wsSubset * 10, hotBudget * 20));
+  const probeLimit = clampHotProbeLimit(
+    Math.max(env.wsSubset * 10, hotBudget * 20),
+  );
   const hotTokenIds = await fetchHotTokenIds(probeLimit);
   const hotTokens = await buildHotTokenList(hotTokenIds, hotBudget);
 

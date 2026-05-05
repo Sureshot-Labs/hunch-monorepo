@@ -1,6 +1,4 @@
 import {
-  upsertUnifiedEvents,
-  upsertUnifiedMarkets,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedLastTrade,
@@ -18,7 +16,10 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
-import { upsertPolymarketEvents, upsertPolymarketMarkets } from "./polymarket-repo.js";
+import {
+  upsertEventsConsistently,
+  upsertMarketsConsistently,
+} from "./consistentUpserts.js";
 import { ensureRedis, redis } from "./redis.js";
 import { pool } from "./db.js";
 import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
@@ -284,7 +285,9 @@ function setTokenMarketRefCache(tokenId: string, ref: TokenMarketRef): void {
   }
 }
 
-async function resolveTokenMarketRef(tokenId: string): Promise<TokenMarketRef | null> {
+async function resolveTokenMarketRef(
+  tokenId: string,
+): Promise<TokenMarketRef | null> {
   const nowMs = Date.now();
   const cached = tokenMarketRefCache.get(tokenId);
   if (cached && cached.expiresAtMs > nowMs) {
@@ -336,7 +339,9 @@ async function resolveTokenMarketRef(tokenId: string): Promise<TokenMarketRef | 
   return ref;
 }
 
-async function resolveTokensByVenueMarketId(venueMarketId: string): Promise<string[]> {
+async function resolveTokensByVenueMarketId(
+  venueMarketId: string,
+): Promise<string[]> {
   const { rows } = await pool.query<{ token_id: string }>(
     `
       select mt.token_id
@@ -367,6 +372,42 @@ async function setPolymarketAcceptingOrders(
   acceptingOrders: boolean,
   tsMs: number,
 ): Promise<void> {
+  if (!acceptingOrders) {
+    await pool.query(
+      `
+        update unified_markets
+        set
+          status = 'CLOSED',
+          updated_at = greatest(
+            coalesce(updated_at, to_timestamp(0)),
+            to_timestamp($2 / 1000.0)
+          ),
+          updated_at_db = now()
+        where id = $1
+          and venue = 'polymarket'
+          and status = 'ACTIVE'
+      `,
+      [ref.marketId, tsMs],
+    );
+  } else {
+    await pool.query(
+      `
+        update unified_markets
+        set
+          status = 'ACTIVE',
+          updated_at = greatest(
+            coalesce(updated_at, to_timestamp(0)),
+            to_timestamp($2 / 1000.0)
+          ),
+          updated_at_db = now()
+        where id = $1
+          and venue = 'polymarket'
+          and status = 'CLOSED'
+      `,
+      [ref.marketId, tsMs],
+    );
+  }
+
   await pool.query(
     `
       update polymarket_markets pm
@@ -382,7 +423,13 @@ async function setPolymarketAcceptingOrders(
     `,
     [ref.marketId, acceptingOrders, tsMs],
   );
+}
 
+async function setPolymarketAcceptingOrdersByVenueMarketId(
+  venueMarketId: string,
+  acceptingOrders: boolean,
+  tsMs: number,
+): Promise<void> {
   if (!acceptingOrders) {
     await pool.query(
       `
@@ -394,11 +441,11 @@ async function setPolymarketAcceptingOrders(
             to_timestamp($2 / 1000.0)
           ),
           updated_at_db = now()
-        where id = $1
-          and venue = 'polymarket'
+        where venue = 'polymarket'
+          and venue_market_id = $1
           and status = 'ACTIVE'
       `,
-      [ref.marketId, tsMs],
+      [venueMarketId, tsMs],
     );
   } else {
     await pool.query(
@@ -411,20 +458,14 @@ async function setPolymarketAcceptingOrders(
             to_timestamp($2 / 1000.0)
           ),
           updated_at_db = now()
-        where id = $1
-          and venue = 'polymarket'
+        where venue = 'polymarket'
+          and venue_market_id = $1
           and status = 'CLOSED'
       `,
-      [ref.marketId, tsMs],
+      [venueMarketId, tsMs],
     );
   }
-}
 
-async function setPolymarketAcceptingOrdersByVenueMarketId(
-  venueMarketId: string,
-  acceptingOrders: boolean,
-  tsMs: number,
-): Promise<void> {
   await pool.query(
     `
       update polymarket_markets
@@ -437,42 +478,6 @@ async function setPolymarketAcceptingOrdersByVenueMarketId(
     `,
     [venueMarketId, acceptingOrders, tsMs],
   );
-
-  if (!acceptingOrders) {
-    await pool.query(
-      `
-        update unified_markets
-        set
-          status = 'CLOSED',
-          updated_at = greatest(
-            coalesce(updated_at, to_timestamp(0)),
-            to_timestamp($2 / 1000.0)
-          ),
-          updated_at_db = now()
-        where venue = 'polymarket'
-          and venue_market_id = $1
-          and status = 'ACTIVE'
-      `,
-      [venueMarketId, tsMs],
-    );
-  } else {
-    await pool.query(
-      `
-        update unified_markets
-        set
-          status = 'ACTIVE',
-          updated_at = greatest(
-            coalesce(updated_at, to_timestamp(0)),
-            to_timestamp($2 / 1000.0)
-          ),
-          updated_at_db = now()
-        where venue = 'polymarket'
-          and venue_market_id = $1
-          and status = 'CLOSED'
-      `,
-      [venueMarketId, tsMs],
-    );
-  }
 }
 
 async function setPolymarketResolved(
@@ -644,7 +649,13 @@ async function publishTopTickNow(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBidValue, bestAskValue, new Date(tsMs)),
+    writeUnifiedBookTop(
+      pool,
+      tokenId,
+      bestBidValue,
+      bestAskValue,
+      new Date(tsMs),
+    ),
     multi.exec(),
   ]);
 }
@@ -668,10 +679,18 @@ async function publishTopTick(
     return;
   }
 
-  await publishTopTickNow(tokenId, bestBidValue, bestAskValue, tsMs, bookPayload);
+  await publishTopTickNow(
+    tokenId,
+    bestBidValue,
+    bestAskValue,
+    tsMs,
+    bookPayload,
+  );
 }
 
-async function publishMarketState(stateUpdate: ParsedMarketState): Promise<void> {
+async function publishMarketState(
+  stateUpdate: ParsedMarketState,
+): Promise<void> {
   const payload = {
     schema_version: 1,
     venue: "polymarket",
@@ -734,8 +753,8 @@ function parsePriceChangeEntries(
   message: Record<string, unknown>,
 ): Array<Record<string, unknown>> {
   if (!Array.isArray(message.price_changes)) return [];
-  return message.price_changes.filter((entry): entry is Record<string, unknown> =>
-    isRecord(entry),
+  return message.price_changes.filter(
+    (entry): entry is Record<string, unknown> => isRecord(entry),
   );
 }
 
@@ -823,10 +842,14 @@ async function handleLastTradePrice(
   if (price == null || price < 0 || price > 1) return;
 
   const size =
-    parseSize(message.size ?? message.amount ?? message.quantity ?? message.count) ??
-    1;
+    parseSize(
+      message.size ?? message.amount ?? message.quantity ?? message.count,
+    ) ?? 1;
   const side = normalizeSide(
-    message.side ?? message.taker_side ?? message.takerSide ?? message.direction,
+    message.side ??
+      message.taker_side ??
+      message.takerSide ??
+      message.direction,
   );
 
   await writeUnifiedLastTrade(pool, {
@@ -929,7 +952,9 @@ function enqueueEventRefresh(eventId: string): void {
         const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
         const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
         const polymarketMarketRows = parsedEvents.flatMap((event) =>
-          event.markets.map((market) => mapPolymarketMarketRow(event.id, market)),
+          event.markets.map((market) =>
+            mapPolymarketMarketRow(event.id, market),
+          ),
         );
         const unifiedMarketRows = parsedEvents.flatMap((event) =>
           event.markets.map((market) =>
@@ -941,18 +966,22 @@ function enqueueEventRefresh(eventId: string): void {
             const [yes, no] = Array.isArray(market.clobTokenIds)
               ? market.clobTokenIds
               : [];
-            return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
+            return mapTokens(
+              `polymarket:${market.id}`,
+              yes ?? null,
+              no ?? null,
+            );
           }),
         );
 
-        await Promise.all([
-          upsertPolymarketEvents(polymarketEventRows),
-          upsertUnifiedEvents(pool, unifiedEventRows),
-        ]);
-        await Promise.all([
-          upsertPolymarketMarkets(polymarketMarketRows),
-          upsertUnifiedMarkets(pool, unifiedMarketRows),
-        ]);
+        await upsertEventsConsistently(pool, {
+          unified: unifiedEventRows,
+          polymarket: polymarketEventRows,
+        });
+        await upsertMarketsConsistently(pool, {
+          unified: unifiedMarketRows,
+          polymarket: polymarketMarketRows,
+        });
         if (unifiedTokenRows.length) {
           await upsertUnifiedTokens(pool, unifiedTokenRows);
         }
@@ -1000,7 +1029,8 @@ async function handleMarketResolved(
     message.winning_outcome ?? message.resolved_outcome ?? message.outcome,
   );
   const winningAssetId =
-    parseString(message.winning_asset_id) ?? parseString(message.winningAssetId);
+    parseString(message.winning_asset_id) ??
+    parseString(message.winningAssetId);
 
   let tokenIds = Array.from(
     new Set([

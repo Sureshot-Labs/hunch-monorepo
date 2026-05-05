@@ -5,6 +5,16 @@ const numish = z
   .union([z.number(), z.string()])
   .transform((v) => (typeof v === "string" ? (v.trim() ? Number(v) : NaN) : v));
 
+const optionalBool = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  z.boolean().optional(),
+);
+
+const boolDefaultFalse = z.preprocess(
+  (value) => (value == null ? false : value),
+  z.boolean(),
+);
+
 // Collateral token schema
 const CollateralToken = z.object({
   symbol: z.string(),
@@ -31,10 +41,10 @@ const Trends = z
 
 // Metadata schema
 const Metadata = z.object({
-  fee: z.boolean().optional(),
-  isBannered: z.boolean().optional(),
-  isPolyArbitrage: z.boolean().optional(),
-  shouldMarketMake: z.boolean().optional(),
+  fee: optionalBool,
+  isBannered: optionalBool,
+  isPolyArbitrage: optionalBool,
+  shouldMarketMake: optionalBool,
 });
 
 // Settings schema
@@ -60,7 +70,9 @@ const Venue = z
   .nullable()
   .optional();
 
-const PositionIds = z.array(z.union([z.string(), z.array(z.string())])).nullable();
+const PositionIds = z
+  .array(z.union([z.string(), z.array(z.string())]))
+  .nullable();
 
 const FeedEvent = z
   .object({
@@ -101,7 +113,7 @@ const LimitlessMarketItem = z
     proxyTitle: z.string().nullable().optional(),
     conditionId: z.string(),
     description: z.string(),
-    isRewardable: z.boolean(),
+    isRewardable: boolDefaultFalse,
     priorityIndex: z.number(),
     expirationDate: z.string(),
     collateralToken: CollateralToken,
@@ -146,7 +158,7 @@ export const LimitlessMarket = z
     proxyTitle: z.string().nullable().optional(),
     conditionId: z.string().optional(),
     description: z.string().optional(),
-    isRewardable: z.boolean().optional(),
+    isRewardable: optionalBool,
     priorityIndex: z.number().optional(),
     expirationDate: z.string().optional(),
     collateralToken: CollateralToken.optional(),

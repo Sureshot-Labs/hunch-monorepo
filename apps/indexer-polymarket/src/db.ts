@@ -3,7 +3,10 @@ import { env } from "./env.js";
 import { createPgPool, tx as runTx } from "@hunch/infra";
 import { log } from "./log.js";
 
-export const pool = createPgPool({ connectionString: env.dbUrl });
+export const pool = createPgPool({
+  connectionString: env.dbUrl,
+  statement_timeout: env.dbStatementTimeoutMs,
+});
 pool.on("error", (err: unknown) => {
   log.err("pg pool error", err);
 });

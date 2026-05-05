@@ -2,7 +2,10 @@ import { config } from "dotenv";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+const envPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../.env",
+);
 config({ path: envPath, override: true }); // load repo .env
 
 // 🧹 Prevent pg from mixing PG* env with your connectionString
@@ -31,10 +34,7 @@ function parseOptionalFloat(v: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function parseBoolean(
-  v: string | undefined,
-  fallback: boolean,
-): boolean {
+function parseBoolean(v: string | undefined, fallback: boolean): boolean {
   if (v == null || v.trim() === "") return fallback;
   const normalized = v.trim().toLowerCase();
   if (
@@ -167,7 +167,9 @@ const hotStreamTokensTtlSec = clampInt(hotStreamTokensTtlSecRaw, {
   fallback: 1800,
 });
 
-const hotStreamTokensMaxRaw = parseOptionalInt(process.env.HOT_STREAM_TOKENS_MAX);
+const hotStreamTokensMaxRaw = parseOptionalInt(
+  process.env.HOT_STREAM_TOKENS_MAX,
+);
 const hotStreamTokensMax = clampInt(hotStreamTokensMaxRaw, {
   min: 10,
   max: 50_000,
@@ -186,6 +188,15 @@ const wsCustomFeatureEnabled = parseBoolean(
   process.env.POLYMARKET_WS_CUSTOM_FEATURE_ENABLED,
   true,
 );
+const dbStatementTimeoutMsRaw = parseOptionalInt(
+  process.env.POLYMARKET_DB_STATEMENT_TIMEOUT_MS ??
+    process.env.INDEXER_DB_STATEMENT_TIMEOUT_MS,
+);
+const dbStatementTimeoutMs = clampInt(dbStatementTimeoutMsRaw, {
+  min: 0,
+  max: 10 * 60_000,
+  fallback: 120_000,
+});
 
 export const env = {
   dbUrl: req("DATABASE_URL"),
@@ -215,4 +226,5 @@ export const env = {
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
   wsHotShare,
   wsCustomFeatureEnabled,
+  dbStatementTimeoutMs,
 };

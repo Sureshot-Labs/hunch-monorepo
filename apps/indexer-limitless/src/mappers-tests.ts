@@ -5,6 +5,7 @@ import {
   resolveLimitlessCategory,
 } from "./mappers.js";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
+import { LimitlessActiveResponse } from "./types.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 
 function test(name: string, fn: () => void) {
@@ -66,6 +67,66 @@ function makeMarket(
     ...overrides,
   } as TLimitlessMarketItem;
 }
+
+test("Limitless active response accepts null rewardable flags", () => {
+  const parsed = LimitlessActiveResponse.parse({
+    data: [
+      {
+        id: 1,
+        slug: "group-market",
+        title: "Group market",
+        tags: [],
+        status: "ACTIVE",
+        creator: { name: "Limitless", imageURI: "", link: "" },
+        expired: false,
+        metadata: { fee: null },
+        createdAt: "2026-03-12T00:00:00Z",
+        tradeType: "clob",
+        updatedAt: "2026-03-12T00:00:00Z",
+        categories: [],
+        marketType: "group",
+        volume: "0",
+        volumeFormatted: "0",
+        venue: null,
+        isRewardable: null,
+        markets: [
+          {
+            id: 11,
+            slug: "child-market",
+            title: "Child market",
+            tags: [],
+            status: "ACTIVE",
+            creator: { name: "Limitless", imageURI: "", link: "" },
+            expired: false,
+            metadata: {},
+            createdAt: "2026-03-12T00:00:00Z",
+            updatedAt: "2026-03-12T00:00:00Z",
+            categories: [],
+            marketType: "single",
+            conditionId: "0xcondition",
+            description: "",
+            isRewardable: null,
+            priorityIndex: 0,
+            expirationDate: "2026-03-13T00:00:00Z",
+            collateralToken: {
+              symbol: "USDC",
+              address: "0x0000000000000000000000000000000000000000",
+              decimals: 6,
+            },
+            volume: "0",
+            volumeFormatted: "0",
+            venue: null,
+            expirationTimestamp: 1773360000,
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(parsed.data[0]?.isRewardable, undefined);
+  assert.equal(parsed.data[0]?.metadata.fee, undefined);
+  assert.equal(parsed.data[0]?.markets?.[0]?.isRewardable, false);
+});
 
 test("resolveLimitlessCategory prefers structured crypto domain over 15 min", () => {
   const category = resolveLimitlessCategory({
@@ -208,8 +269,8 @@ test("normalizeLimitlessPricePair scales percent-style AMM prices", () => {
 });
 
 test("normalizeLimitlessPricePair preserves decimal-style AMM prices", () => {
-  assert.deepEqual(normalizeLimitlessPricePair([0.65, 0.35], "amm"), [
-    0.65,
-    0.35,
-  ]);
+  assert.deepEqual(
+    normalizeLimitlessPricePair([0.65, 0.35], "amm"),
+    [0.65, 0.35],
+  );
 });
