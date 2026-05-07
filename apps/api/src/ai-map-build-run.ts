@@ -1928,7 +1928,6 @@ async function fetchVenueCandidates(
           coalesce(
             nullif(e.open_interest, 0),
             nullif(amo.sum_open_interest, 0),
-            nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
             0
           )::double precision as open_interest,
           eam.volume_last_24h,

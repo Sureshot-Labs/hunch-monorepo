@@ -62,15 +62,13 @@ function metricForEvent(
   event: MarketMapEventSummary,
   sizeBy: "count" | "volume24h" | "liquidity" | "openInterest",
 ): number {
-  const openInterestFallback =
-    event.openInterest > 0 ? event.openInterest : Math.max(0, event.liquidity);
   switch (sizeBy) {
     case "count":
       return 1;
     case "liquidity":
       return event.liquidity;
     case "openInterest":
-      return openInterestFallback;
+      return event.openInterest;
     case "volume24h":
     default:
       return event.volume24h;
@@ -251,8 +249,6 @@ type MarketMapSignalPreviewSummary = {
   topSignal: MarketMapSignalSummary | null;
 };
 
-const MARKET_MAP_SIGNALS_PREVIEW_LIMIT = 8;
-
 type MarketMapSidebarQualityFloors = {
   minVolumeBase: number;
   minVolumeChangePct: number;
@@ -261,6 +257,20 @@ type MarketMapSidebarQualityFloors = {
   minLiquidityChangePct: number;
   minLiquidityChangeAbs: number;
 };
+
+const MARKET_MAP_SIGNALS_PREVIEW_LIMIT = 8;
+const MARKET_MAP_COMPARABLE_LIQUIDITY_VENUES = new Set<string>(["polymarket"]);
+
+function emptyMarketMapSidebarQualityFloors(): MarketMapSidebarQualityFloors {
+  return {
+    minVolumeBase: 0,
+    minVolumeChangePct: 0,
+    minVolumeChangeAbs: 0,
+    minLiquidityBase: 0,
+    minLiquidityChangePct: 0,
+    minLiquidityChangeAbs: 0,
+  };
+}
 
 type MarketMapDropReasonCounts = Record<MarketMapDropReason, number>;
 
@@ -420,6 +430,57 @@ function resolveMarketMapSidebarQualityFloors(policy: {
     minLiquidityChangePct: Math.max(0, policy.minLiquidityChangePct24h ?? 0),
     minLiquidityChangeAbs: Math.max(0, policy.minLiquidityChange24h ?? 0),
   };
+}
+
+function marketMapSidebarQualityForKind(
+  kind: MarketMapSidebarKind,
+  quality: MarketMapSidebarQualityFloors,
+): MarketMapSidebarQualityFloors {
+  const scoped = emptyMarketMapSidebarQualityFloors();
+  switch (kind) {
+    case "volumeMovers24h":
+    case "volumeMoversAbsolute24h":
+      return {
+        ...scoped,
+        minVolumeBase: quality.minVolumeBase,
+        minVolumeChangePct: quality.minVolumeChangePct,
+        minVolumeChangeAbs: quality.minVolumeChangeAbs,
+      };
+    case "liquidityMovers24h":
+    case "liquidityMoversAbsolute24h":
+      return {
+        ...scoped,
+        minLiquidityBase: quality.minLiquidityBase,
+        minLiquidityChangePct: quality.minLiquidityChangePct,
+        minLiquidityChangeAbs: quality.minLiquidityChangeAbs,
+      };
+    case "topMovers24h":
+    case "trendingNow":
+    default:
+      return {
+        ...scoped,
+        minVolumeBase: quality.minVolumeBase,
+      };
+  }
+}
+
+function marketMapSidebarVenuesForKind(
+  kind: MarketMapSidebarKind,
+  venues: string[],
+): string[] {
+  switch (kind) {
+    case "liquidityMovers24h":
+    case "liquidityMoversAbsolute24h":
+      return venues.filter((venue) =>
+        MARKET_MAP_COMPARABLE_LIQUIDITY_VENUES.has(venue),
+      );
+    case "trendingNow":
+    case "volumeMovers24h":
+    case "volumeMoversAbsolute24h":
+    case "topMovers24h":
+    default:
+      return venues;
+  }
 }
 
 function volumeSidebarKindForSort(
@@ -657,11 +718,7 @@ async function loadMarketMapSidebarCandidates(params: {
             nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
             0
           ) as event_liquidity,
-          coalesce(
-            nullif(e.open_interest, 0),
-            nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0),
-            0
-          ) as event_open_interest,
+          coalesce(e.open_interest, 0) as event_open_interest,
           ec.change_24h,
           eam.volume_last_24h,
           eam.volume_prev_24h,
@@ -1607,12 +1664,18 @@ function applyLiveMarketDataToEvents(
           : live.openInterest > 0
             ? live.openInterest
             : 0;
-    const openInterestFallback =
-      event.openInterest > 0
-        ? event.openInterest
+    const eventOpenInterest =
+      event.venue === "limitless" &&
+      event.openInterest === event.liquidity &&
+      live.openInterest <= 0
+        ? 0
+        : event.openInterest;
+    const openInterestValue =
+      eventOpenInterest > 0
+        ? eventOpenInterest
         : live.openInterest > 0
           ? live.openInterest
-          : liquidityFallback;
+          : 0;
     return {
       ...event,
       representativeMarketId: live.marketId,
@@ -1624,7 +1687,7 @@ function applyLiveMarketDataToEvents(
       oddsSource: live.oddsSource,
       closeTime: live.closeTime ?? event.closeTime ?? null,
       liquidity: liquidityFallback,
-      openInterest: openInterestFallback,
+      openInterest: openInterestValue,
       tokenYes: live.tokenYes,
       tokenNo: live.tokenNo,
       yesBid: live.yesBid,
@@ -2232,6 +2295,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const volumeMoversSortBy = request.query.volumeMoversSortBy ?? "percent";
       const liquidityMoversSortBy =
         request.query.liquidityMoversSortBy ?? "percent";
+      const volumeMoverKind = volumeSidebarKindForSort(volumeMoversSortBy);
+      const liquidityMoverKind = liquiditySidebarKindForSort(
+        liquidityMoversSortBy,
+      );
       const sparklineOptions: MarketMapSparklineOptions = {
         includeVolume: request.query.includeVolumeSparkline,
         includeLiquidity: request.query.includeLiquiditySparkline,
@@ -2274,7 +2341,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v2",
+        "market-map:sidebars:v3",
         policyCacheVersion,
         venues.slice().sort().join(","),
         String(defaultLimit),
@@ -2312,29 +2379,29 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       ] = await Promise.all([
         loadMarketMapSidebarCandidates({
           kind: "trendingNow",
-          venues,
+          venues: marketMapSidebarVenuesForKind("trendingNow", venues),
           limit: marketMapSidebarCandidateLimit(sidebarLimits.trendingNow),
-          quality,
+          quality: marketMapSidebarQualityForKind("trendingNow", quality),
         }),
         loadMarketMapSidebarCandidates({
-          kind: volumeSidebarKindForSort(volumeMoversSortBy),
-          venues,
+          kind: volumeMoverKind,
+          venues: marketMapSidebarVenuesForKind(volumeMoverKind, venues),
           limit: marketMapSidebarCandidateLimit(sidebarLimits.volumeMovers24h),
-          quality,
+          quality: marketMapSidebarQualityForKind(volumeMoverKind, quality),
         }),
         loadMarketMapSidebarCandidates({
-          kind: liquiditySidebarKindForSort(liquidityMoversSortBy),
-          venues,
+          kind: liquidityMoverKind,
+          venues: marketMapSidebarVenuesForKind(liquidityMoverKind, venues),
           limit: marketMapSidebarCandidateLimit(
             sidebarLimits.liquidityMovers24h,
           ),
-          quality,
+          quality: marketMapSidebarQualityForKind(liquidityMoverKind, quality),
         }),
         loadMarketMapSidebarCandidates({
           kind: "topMovers24h",
-          venues,
+          venues: marketMapSidebarVenuesForKind("topMovers24h", venues),
           limit: marketMapSidebarCandidateLimit(sidebarLimits.topMovers24h),
-          quality,
+          quality: marketMapSidebarQualityForKind("topMovers24h", quality),
         }),
       ]);
 

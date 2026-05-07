@@ -2885,8 +2885,7 @@ export async function runMapSearch(
           : event.openInterest > 0
             ? event.openInterest
             : 0;
-      const openInterest =
-        event.openInterest > 0 ? event.openInterest : liquidity;
+      const openInterest = event.openInterest > 0 ? event.openInterest : 0;
       return {
         ...event,
         liquidity,

@@ -650,12 +650,12 @@ async function main() {
       query: { sort_by: "openInterest", sort_dir: "desc" },
     });
     assert.deepEqual(ids(interestDesc), [
-      `event-d-${suiteId}`,
-      `event-a-${suiteId}`,
       `event-e-${suiteId}`,
       `event-b-${suiteId}`,
       `event-c-${suiteId}`,
       `event-f-${suiteId}`,
+      `event-a-${suiteId}`,
+      `event-d-${suiteId}`,
     ]);
 
     const interestAsc = await requestNodeEvents({
@@ -664,12 +664,12 @@ async function main() {
       query: { sort_by: "openInterest", sort_dir: "asc" },
     });
     assert.deepEqual(ids(interestAsc), [
+      `event-a-${suiteId}`,
+      `event-d-${suiteId}`,
       `event-f-${suiteId}`,
       `event-b-${suiteId}`,
       `event-c-${suiteId}`,
       `event-e-${suiteId}`,
-      `event-a-${suiteId}`,
-      `event-d-${suiteId}`,
     ]);
 
     const repeatedInterestAsc = await requestNodeEvents({
@@ -723,7 +723,7 @@ async function main() {
       (item) => item.eventId === `event-a-${suiteId}`,
     );
     assert.ok(signaledEvent?.topSignal, "expected topSignal on event-a");
-    assert.equal(signaledEvent?.topSignal?.title, "Alpha signal");
+    assert.equal(signaledEvent?.topSignal?.title, "Alpha follow-up signal");
     assert.equal(signaledEvent?.topSignal?.targetMarketId, signalMarketId);
     assert.equal(
       signaledEvent?.topSignal?.targetMarketTitle,

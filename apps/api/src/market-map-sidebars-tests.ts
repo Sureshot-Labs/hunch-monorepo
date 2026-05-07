@@ -57,6 +57,7 @@ type SidebarSparkline = {
 
 type SeedEvent = {
   key: string;
+  venue?: string;
   volume24h: number;
   volumeLast24h: number | null;
   volumePrev24h: number | null;
@@ -75,6 +76,7 @@ function makeToken(label: string): string {
 
 async function insertUnifiedEvent(params: {
   eventId: string;
+  venue?: string;
   venueEventId: string;
   title: string;
   volume24h: number;
@@ -100,9 +102,9 @@ async function insertUnifiedEvent(params: {
         updated_at
       )
       values (
-        $1, 'polymarket', $2, $3, null, null, 'ACTIVE',
+        $1, $5, $2, $3, null, null, 'ACTIVE',
         now() - interval '1 hour', now() + interval '1 day',
-        1000, $4, 100, 120, $5, now(), now()
+        1000, $4, 100, 120, $6, now(), now()
       )
     `,
     [
@@ -110,6 +112,7 @@ async function insertUnifiedEvent(params: {
       params.venueEventId,
       params.title,
       params.volume24h,
+      params.venue ?? "polymarket",
       makeToken(`slug-${params.eventId}`),
     ],
   );
@@ -117,6 +120,7 @@ async function insertUnifiedEvent(params: {
 
 async function insertUnifiedMarket(params: {
   marketId: string;
+  venue?: string;
   venueMarketId: string;
   eventId: string;
   title: string;
@@ -152,7 +156,7 @@ async function insertUnifiedMarket(params: {
         updated_at
       )
       values (
-        $1, 'polymarket', $2, $3, $4, null, null, 'ACTIVE', 'binary',
+        $1, $9, $2, $3, $4, null, null, 'ACTIVE', 'binary',
         now() - interval '1 hour', now() + interval '1 day', now() + interval '1 day',
         0.45, 0.55, 0.5, 1000, $5, 100, 120,
         '["Yes","No"]', $6, $7, $8, now(), now()
@@ -167,12 +171,14 @@ async function insertUnifiedMarket(params: {
       makeToken(`yes-${params.marketId}`),
       makeToken(`no-${params.marketId}`),
       makeToken(`slug-${params.marketId}`),
+      params.venue ?? "polymarket",
     ],
   );
 }
 
 async function insertEventActivityMetric(params: {
   eventId: string;
+  venue?: string;
   volumeLast24h: number | null;
   volumePrev24h: number | null;
   volumeChangePct: number | null;
@@ -204,7 +210,7 @@ async function insertEventActivityMetric(params: {
         updated_at
       )
       values (
-        $1, 'polymarket', $2, $3,
+        $1, $11, $2, $3,
         case when $2::numeric is not null and $3::numeric is not null then $2::numeric - $3::numeric else null end,
         $4, $5,
         $6,
@@ -223,6 +229,7 @@ async function insertEventActivityMetric(params: {
       params.volumeValid,
       params.liquidityValid,
       params.updatedAt,
+      params.venue ?? "polymarket",
     ],
   );
 }
@@ -230,6 +237,7 @@ async function insertEventActivityMetric(params: {
 async function insertMarketActivityMetric(params: {
   marketId: string;
   eventId: string;
+  venue?: string;
   volumeLast24h: number | null;
   volumePrev24h: number | null;
   liquidityNow: number | null;
@@ -251,7 +259,7 @@ async function insertMarketActivityMetric(params: {
         open_interest_valid,
         updated_at
       )
-      values ($1, $2, 'polymarket', $3, $4, $5, true, true, true, true, false, $6::timestamptz)
+      values ($1, $2, $7, $3, $4, $5, true, true, true, true, false, $6::timestamptz)
     `,
     [
       params.marketId,
@@ -260,6 +268,7 @@ async function insertMarketActivityMetric(params: {
       params.volumePrev24h,
       params.liquidityNow,
       params.updatedAt,
+      params.venue ?? "polymarket",
     ],
   );
 }
@@ -267,6 +276,7 @@ async function insertMarketActivityMetric(params: {
 async function insertMarketActivitySnapshots(params: {
   marketId: string;
   eventId: string;
+  venue?: string;
   volumeTotal: number;
   liquidity: number | null;
 }): Promise<void> {
@@ -292,7 +302,7 @@ async function insertMarketActivitySnapshots(params: {
         values (
           $1,
           $2,
-          'polymarket',
+          $8,
           date_trunc('hour', now() - ($3::text || ' hours')::interval),
           greatest($4::numeric + $5::numeric, 0),
           case when $6::numeric is null then null else greatest($6::numeric + $7::numeric, 0) end,
@@ -316,6 +326,7 @@ async function insertMarketActivitySnapshots(params: {
         bucket.volumeOffset,
         params.liquidity,
         bucket.liquidityOffset,
+        params.venue ?? "polymarket",
       ],
     );
   }
@@ -414,6 +425,20 @@ async function main() {
       liquidityValid: true,
       change24h: 10_000_000_000.1,
     },
+    {
+      key: "limitless",
+      venue: "limitless",
+      volume24h: 1_000_000_000_700,
+      volumeLast24h: 3_000_000_000_000,
+      volumePrev24h: 1_000_000_000_000,
+      volumeChangePct: 2,
+      volumeValid: true,
+      liquidityNow: 5_000_000_000_000,
+      liquidity24hAgo: 1_000_000_000_000,
+      liquidityChangePct: 4,
+      liquidityValid: true,
+      change24h: 30_000_000_000,
+    },
   ];
   const eventIds = seeds.map(
     (seed) => `mm-sidebars-event-${seed.key}-${suiteId}`,
@@ -438,12 +463,14 @@ async function main() {
       const marketId = marketIds[index];
       await insertUnifiedEvent({
         eventId,
+        venue: seed.venue,
         venueEventId: `venue-${eventId}`,
         title: `Sidebar ${seed.key}`,
         volume24h: seed.volume24h,
       });
       await insertUnifiedMarket({
         marketId,
+        venue: seed.venue,
         venueMarketId: `venue-${marketId}`,
         eventId,
         title: `Sidebar market ${seed.key}`,
@@ -452,6 +479,7 @@ async function main() {
       await insertMarketActivityMetric({
         marketId,
         eventId,
+        venue: seed.venue,
         volumeLast24h: seed.volumeLast24h,
         volumePrev24h: seed.volumePrev24h,
         liquidityNow: seed.liquidityNow,
@@ -460,6 +488,7 @@ async function main() {
       await insertMarketActivitySnapshots({
         marketId,
         eventId,
+        venue: seed.venue,
         volumeTotal: seed.volume24h,
         liquidity: seed.liquidityNow,
       });
@@ -471,6 +500,7 @@ async function main() {
       ) {
         await insertEventActivityMetric({
           eventId,
+          venue: seed.venue,
           volumeLast24h: seed.volumeLast24h,
           volumePrev24h: seed.volumePrev24h,
           volumeChangePct: seed.volumeChangePct,
@@ -519,7 +549,7 @@ async function main() {
 
     assert.deepEqual(
       payload.trendingNow.map((item) => item.eventId),
-      [eventIds[1], eventIds[0], eventIds[5]],
+      [eventIds[1], eventIds[2], eventIds[0]],
     );
     assert.deepEqual(
       payload.volumeMovers24h.map((item) => item.eventId),
@@ -631,6 +661,66 @@ async function main() {
       false,
     );
     assert.deepEqual(absolutePayload.topMovers24h, []);
+
+    const mixedVenueResponse = await app.inject({
+      method: "GET",
+      url:
+        "/market-map/sidebars?venues=polymarket,limitless&limit=9" +
+        "&trendingLimit=3" +
+        "&volumeMoversLimit=3" +
+        "&liquidityMoversLimit=3" +
+        "&topMoversLimit=0" +
+        "&volumeMoversSortBy=absolute" +
+        "&liquidityMoversSortBy=absolute" +
+        "&minVolume24h=1000000000" +
+        "&minLiquidity=1000000000" +
+        "&minVolumeChange24h=100000000000" +
+        "&minLiquidityChange24h=100000000000",
+    });
+    assert.equal(mixedVenueResponse.statusCode, 200, mixedVenueResponse.body);
+    const mixedVenuePayload = mixedVenueResponse.json<SidebarPayload>();
+    assert.deepEqual(
+      mixedVenuePayload.volumeMovers24h.map((item) => item.eventId),
+      [eventIds[6], eventIds[1], eventIds[0]],
+    );
+    assert.equal(mixedVenuePayload.volumeMovers24h[0]?.venue, "limitless");
+    assert.deepEqual(
+      mixedVenuePayload.liquidityMovers24h.map((item) => item.eventId),
+      [eventIds[5], eventIds[1]],
+    );
+    assert.equal(
+      mixedVenuePayload.liquidityMovers24h.some(
+        (item) => item.venue === "limitless",
+      ),
+      false,
+    );
+
+    const limitlessOnlyResponse = await app.inject({
+      method: "GET",
+      url:
+        "/market-map/sidebars?venues=limitless&limit=9" +
+        "&trendingLimit=0" +
+        "&volumeMoversLimit=2" +
+        "&liquidityMoversLimit=2" +
+        "&topMoversLimit=0" +
+        "&volumeMoversSortBy=absolute" +
+        "&liquidityMoversSortBy=absolute" +
+        "&minVolume24h=1000000000" +
+        "&minLiquidity=1000000000" +
+        "&minVolumeChange24h=100000000000" +
+        "&minLiquidityChange24h=100000000000",
+    });
+    assert.equal(
+      limitlessOnlyResponse.statusCode,
+      200,
+      limitlessOnlyResponse.body,
+    );
+    const limitlessOnlyPayload = limitlessOnlyResponse.json<SidebarPayload>();
+    assert.deepEqual(
+      limitlessOnlyPayload.volumeMovers24h.map((item) => item.eventId),
+      [eventIds[6]],
+    );
+    assert.deepEqual(limitlessOnlyPayload.liquidityMovers24h, []);
 
     console.log("[market-map-sidebars-tests] ok");
   } finally {

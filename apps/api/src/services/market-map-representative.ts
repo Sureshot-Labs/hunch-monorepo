@@ -335,7 +335,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.volume_24h as market_volume_24h,
         m.volume_total as market_volume_total,
         m.liquidity as market_liquidity,
-        coalesce(nullif(m.open_interest, 0), nullif(m.liquidity, 0), 0) as market_open_interest,
+        coalesce(m.open_interest, 0) as market_open_interest,
         mam.volume_last_24h as market_volume_last_24h,
         mam.volume_prev_24h as market_volume_prev_24h,
         mam.volume_last_24h_change as market_volume_last_24h_change,
