@@ -169,6 +169,29 @@ services:
         "apps/indexer-dflow/dist/main.js"
       ]
 
+  indexer-hyperliquid:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-indexer-hyperliquid
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      [
+        "node",
+        "apps/indexer-hyperliquid/dist/main.js"
+      ]
+
   ai-worker:
     build:
       context: .

@@ -7,6 +7,8 @@ services:
     image: ${HUNCH_BACKEND_IMAGE}
   indexer-dflow:
     image: ${HUNCH_BACKEND_IMAGE}
+  indexer-hyperliquid:
+    image: ${HUNCH_BACKEND_IMAGE}
   ai-worker:
     image: ${HUNCH_BACKEND_IMAGE}
   finance-worker:

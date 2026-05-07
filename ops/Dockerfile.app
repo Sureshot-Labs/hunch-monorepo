@@ -14,6 +14,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/ai-worker/package.json apps/ai-worker/package.json
 COPY apps/finance-worker/package.json apps/finance-worker/package.json
 COPY apps/indexer-dflow/package.json apps/indexer-dflow/package.json
+COPY apps/indexer-hyperliquid/package.json apps/indexer-hyperliquid/package.json
 COPY apps/indexer-kalshi/package.json apps/indexer-kalshi/package.json
 COPY apps/indexer-limitless/package.json apps/indexer-limitless/package.json
 COPY apps/indexer-polymarket/package.json apps/indexer-polymarket/package.json
@@ -33,6 +34,7 @@ RUN pnpm --filter api... build \
   && pnpm --filter ai-worker... build \
   && pnpm --filter finance-worker... build \
   && pnpm --filter indexer-dflow... build \
+  && pnpm --filter indexer-hyperliquid... build \
   && pnpm --filter indexer-kalshi... build \
   && pnpm --filter indexer-limitless... build \
   && pnpm --filter indexer-polymarket... build

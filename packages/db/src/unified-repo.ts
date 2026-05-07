@@ -1,5 +1,31 @@
 import { chunkArray } from "@hunch/shared";
-import { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
+
+type Queryable = Pick<Pool | PoolClient, "query">;
+
+function isPool(queryable: Queryable): queryable is Pool {
+  return "connect" in queryable;
+}
+
+async function withTransactionIfPool<T>(
+  queryable: Queryable,
+  fn: (client: Queryable) => Promise<T>,
+): Promise<T> {
+  if (!isPool(queryable)) return fn(queryable);
+
+  const client = await queryable.connect();
+  try {
+    await client.query("begin");
+    const result = await fn(client);
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 type BookTopCacheEntry = {
   bestBid: number | null;
@@ -142,7 +168,7 @@ export interface UnifiedMarketRow {
 
 // Repository functions for unified tables
 export async function upsertUnifiedEvent(
-  pool: Pool,
+  pool: Queryable,
   eventRow: UnifiedEventRow,
 ): Promise<string> {
   const query = `
@@ -206,7 +232,7 @@ export async function upsertUnifiedEvent(
 }
 
 export async function upsertUnifiedEvents(
-  pool: Pool,
+  pool: Queryable,
   eventRows: UnifiedEventRow[],
 ): Promise<void> {
   if (eventRows.length === 0) return;
@@ -293,7 +319,7 @@ export async function upsertUnifiedEvents(
 }
 
 export async function upsertUnifiedMarket(
-  pool: Pool,
+  pool: Queryable,
   marketRow: UnifiedMarketRow,
 ): Promise<string> {
   const existingTokenSources = await loadUnifiedMarketTokenSources(pool, [
@@ -434,7 +460,7 @@ export async function upsertUnifiedMarket(
 }
 
 export async function upsertUnifiedMarkets(
-  pool: Pool,
+  pool: Queryable,
   marketRows: UnifiedMarketRow[],
 ): Promise<void> {
   if (marketRows.length === 0) return;
@@ -676,7 +702,7 @@ function buildMarketTokenRows(
 }
 
 async function loadUnifiedMarketTokenSources(
-  pool: Pool,
+  pool: Queryable,
   marketIds: string[],
 ): Promise<Map<string, MarketTokenSource>> {
   const ids = Array.from(new Set(marketIds)).filter(Boolean);
@@ -748,7 +774,7 @@ function shouldSyncUnifiedMarketTokens(
 }
 
 export async function syncUnifiedMarketTokens(
-  pool: Pool,
+  pool: Queryable,
   marketIds: string[],
 ): Promise<void> {
   const ids = Array.from(new Set(marketIds)).filter(Boolean);
@@ -767,9 +793,18 @@ export async function syncUnifiedMarketTokens(
 
     const tokenRows = markets.rows.flatMap(buildMarketTokenRows);
 
-    await pool.query("begin");
-    try {
-      await pool.query(
+    await withTransactionIfPool(pool, async (client) => {
+      if (tokenRows.length > 0) {
+        await client.query(
+          `
+            delete from unified_market_tokens
+            where token_id = any($1::text[])
+          `,
+          [tokenRows.map((row) => row.token_id)],
+        );
+      }
+
+      await client.query(
         `
           delete from unified_market_tokens
           where market_id = any($1::text[])
@@ -778,7 +813,7 @@ export async function syncUnifiedMarketTokens(
       );
 
       if (tokenRows.length > 0) {
-        await pool.query(
+        await client.query(
           `
             insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
             select x.market_id, x.token_id, x.venue, x.outcome_side
@@ -796,11 +831,7 @@ export async function syncUnifiedMarketTokens(
           [JSON.stringify(tokenRows)],
         );
       }
-      await pool.query("commit");
-    } catch (err) {
-      await pool.query("rollback");
-      throw err;
-    }
+    });
   }
 }
 
@@ -808,17 +839,27 @@ function venueFromUnifiedTokenId(tokenId: string): string {
   if (tokenId.startsWith("kalshi:")) return "kalshi";
   if (tokenId.startsWith("sol:")) return "kalshi";
   if (tokenId.startsWith("limitless:")) return "limitless";
+  if (tokenId.startsWith("hyperliquid:")) return "hyperliquid";
   return "polymarket";
 }
 
 export async function upsertUnifiedToken(
-  pool: Pool,
+  pool: Queryable,
   token: {
     token_id: string;
     market_id: string;
     side: "YES" | "NO";
   },
 ): Promise<void> {
+  await pool.query(
+    `
+      delete from unified_tokens
+      where token_id = $1
+        and (market_id, side) is distinct from ($2, $3)
+    `,
+    [token.token_id, token.market_id, token.side],
+  );
+
   await pool.query(
     `
     insert into unified_tokens(token_id, venue, market_id, side)
@@ -850,7 +891,7 @@ export async function upsertUnifiedToken(
 }
 
 export async function upsertUnifiedTokens(
-  pool: Pool,
+  pool: Queryable,
   tokens: Array<{
     token_id: string;
     market_id: string;
@@ -879,13 +920,32 @@ export async function upsertUnifiedTokens(
       select *
       from json_to_recordset($1::json)
         as x(token_id text, venue text, market_id text, side text)
+    ),
+    deleted as (
+      delete from unified_tokens ut
+      using input
+      where ut.token_id = input.token_id
+        and (ut.market_id, ut.side) is distinct from (input.market_id, input.side)
+      returning 1
     )
     insert into unified_tokens(token_id, venue, market_id, side)
     select token_id, venue, market_id, side
     from input
     on conflict (market_id, side) do update
-      set token_id = excluded.token_id,
-          venue = excluded.venue,
+      set token_id = CASE
+            WHEN unified_tokens.venue = 'kalshi'
+              AND unified_tokens.token_id like 'sol:%'
+              AND excluded.token_id like 'kalshi:%'
+            THEN unified_tokens.token_id
+            ELSE excluded.token_id
+          END,
+          venue = CASE
+            WHEN unified_tokens.venue = 'kalshi'
+              AND unified_tokens.token_id like 'sol:%'
+              AND excluded.token_id like 'kalshi:%'
+            THEN unified_tokens.venue
+            ELSE excluded.venue
+          END,
           updated_at = now()
   `;
 
@@ -896,7 +956,7 @@ export async function upsertUnifiedTokens(
 }
 
 export async function writeUnifiedBookTop(
-  pool: Pool,
+  pool: Queryable,
   tokenId: string,
   bestBid: number | null,
   bestAsk: number | null,
@@ -994,7 +1054,7 @@ export async function writeUnifiedBookTop(
 }
 
 export async function writeUnifiedLastTrade(
-  pool: Pool,
+  pool: Queryable,
   inputs: {
     tokenId: string;
     venue: string;
