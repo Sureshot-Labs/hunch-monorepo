@@ -50,15 +50,17 @@ fi
 "${compose[@]}" run --rm api node /app/packages/db/dist/migrate.js
 
 "${compose[@]}" up -d
+if [[ -n "${ARCHIVE}" ]]; then
+  rm -f "${ARCHIVE}" || true
+fi
+
 echo "Deploy complete."
 
 # Optional cleanup to reclaim disk (keeps images used in last 3h by default).
+# Run it detached so a slow prune cannot turn a successful deploy into an SSH failure.
 if [[ "${DOCKER_PRUNE:-1}" == "1" ]]; then
   DOCKER_PRUNE_UNTIL="${DOCKER_PRUNE_UNTIL:-3h}"
-  echo "Pruning unused Docker images (older than ${DOCKER_PRUNE_UNTIL})..."
-  docker image prune -af --filter "until=${DOCKER_PRUNE_UNTIL}" || true
-fi
-
-if [[ -n "${ARCHIVE}" ]]; then
-  rm -f "${ARCHIVE}" || true
+  DOCKER_PRUNE_LOG="${DOCKER_PRUNE_LOG:-/tmp/hunch-backend-docker-prune.log}"
+  echo "Scheduling Docker image prune (older than ${DOCKER_PRUNE_UNTIL}); log: ${DOCKER_PRUNE_LOG}"
+  nohup docker image prune -af --filter "until=${DOCKER_PRUNE_UNTIL}" >"${DOCKER_PRUNE_LOG}" 2>&1 &
 fi

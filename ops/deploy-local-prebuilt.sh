@@ -59,7 +59,9 @@ ssh "${REMOTE_HOST}" \
   "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' IMAGE_ARCHIVE='${REMOTE_IMAGE_ARCHIVE}' HUNCH_BACKEND_IMAGE='${HUNCH_BACKEND_IMAGE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
 
 echo "Cleaning up remote archives"
-ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_IMAGE_ARCHIVE}' '${REMOTE_SCRIPT}'"
+if ! ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_IMAGE_ARCHIVE}' '${REMOTE_SCRIPT}'"; then
+  echo "Warning: remote archive cleanup failed; deploy already completed." >&2
+fi
 
 # Optional local cleanup (remove the image we just built).
 if [[ "${LOCAL_IMAGE_CLEANUP:-1}" == "1" ]]; then

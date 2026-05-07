@@ -39,6 +39,8 @@ ssh "${REMOTE_HOST}" \
   "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
 
 echo "Cleaning up remote archive"
-ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_SCRIPT}'"
+if ! ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_SCRIPT}'"; then
+  echo "Warning: remote archive cleanup failed; deploy already completed." >&2
+fi
 
 echo "Deploy complete."
