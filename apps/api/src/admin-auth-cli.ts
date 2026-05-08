@@ -39,11 +39,12 @@ Options:
 }
 
 function parseArgs(argv: string[]): Options {
-  const command = (argv[0] ?? "help") as Command;
+  const args = argv[0] === "--" ? argv.slice(1) : argv;
+  const command = (args[0] ?? "help") as Command;
   const getValue = (flag: string): string | undefined => {
-    const idx = argv.indexOf(flag);
+    const idx = args.indexOf(flag);
     if (idx === -1) return undefined;
-    const next = argv[idx + 1];
+    const next = args[idx + 1];
     return next && !next.startsWith("--") ? next : undefined;
   };
   const roleRaw = getValue("--role");
@@ -53,7 +54,7 @@ function parseArgs(argv: string[]): Options {
     command,
     email: getValue("--email"),
     role,
-    json: argv.includes("--json"),
+    json: args.includes("--json"),
   };
 }
 
