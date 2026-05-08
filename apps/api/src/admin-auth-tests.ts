@@ -3,6 +3,7 @@ import {
   adminRoleAllowed,
   buildTotpUri,
   hashAdminPassword,
+  resolveAdminManagementLockout,
   verifyAdminPassword,
   verifyTotpCode,
 } from "./services/admin-auth.js";
@@ -62,4 +63,99 @@ await test("enforces sadmin-only role gates", () => {
   assert.equal(adminRoleAllowed("sadmin", "admin"), true);
   assert.equal(adminRoleAllowed("admin", "sadmin"), false);
   assert.equal(adminRoleAllowed("sadmin", "sadmin"), true);
+});
+
+await test("prevents admin-management lockouts", () => {
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-a",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "disable",
+      otherActiveSadminCount: 1,
+    }),
+    "admin_self_action_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-a",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "set_role",
+      nextRole: "admin",
+      otherActiveSadminCount: 1,
+    }),
+    "admin_self_action_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-b",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "disable",
+      otherActiveSadminCount: 0,
+    }),
+    "admin_last_sadmin_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-a",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "rotate_link",
+      otherActiveSadminCount: 1,
+    }),
+    "admin_self_action_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-b",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "rotate_link",
+      otherActiveSadminCount: 0,
+    }),
+    "admin_last_sadmin_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-b",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "set_role",
+      nextRole: "admin",
+      otherActiveSadminCount: 0,
+    }),
+    "admin_last_sadmin_forbidden",
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-b",
+      targetStatus: "active",
+      targetRole: "sadmin",
+      action: "set_role",
+      nextRole: "admin",
+      otherActiveSadminCount: 1,
+    }),
+    null,
+  );
+  assert.equal(
+    resolveAdminManagementLockout({
+      actorAdminId: "admin-a",
+      targetAdminId: "admin-b",
+      targetStatus: "active",
+      targetRole: "admin",
+      action: "set_role",
+      nextRole: "sadmin",
+      otherActiveSadminCount: 0,
+    }),
+    null,
+  );
 });

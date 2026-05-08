@@ -27,6 +27,18 @@ const loginBodySchema = z.object({
   totpCode: z.string().min(6).max(16),
 });
 
+const adminIdParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+const inviteAdminBodySchema = z.object({
+  email: z.string().email(),
+});
+
+const adminRoleBodySchema = z.object({
+  role: z.enum(["admin", "sadmin"]),
+});
+
 function readRequestUserAgent(request: FastifyRequest): string | null {
   const raw = request.headers["user-agent"];
   if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
@@ -85,6 +97,7 @@ async function enforceRateLimit(
 
 export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
   const r = app.withTypeProvider<ZodTypeProvider>();
+  const sadminOnly = createAdminSessionMiddleware({ minRole: "sadmin" });
 
   r.post(
     "/admin-auth/enroll/start",
@@ -242,6 +255,154 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
         ? await AdminAuthService.revokeAllSessions(adminId)
         : 0;
       return reply.send({ ok: true, revoked });
+    },
+  );
+
+  r.get(
+    "/admin-auth/admins",
+    { preHandler: sadminOnly },
+    async (_request, reply) => {
+      const admins = await AdminAuthService.listAdmins();
+      return reply.send({
+        ok: true,
+        admins: admins.map(adminPayload),
+      });
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/invite",
+    {
+      preHandler: sadminOnly,
+      schema: { body: inviteAdminBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        const result = await AdminAuthService.inviteAdmin(request.body.email);
+        return reply.send({
+          ok: true,
+          admin: adminPayload(result.admin),
+          enrollmentUrl: result.enrollmentUrl,
+          expiresAt: result.expiresAt.toISOString(),
+        });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/:id/activate",
+    {
+      preHandler: sadminOnly,
+      schema: { params: adminIdParamsSchema, body: adminRoleBodySchema },
+    },
+    async (request, reply) => {
+      try {
+        const admin = await AdminAuthService.activateAdminById(
+          request.params.id,
+          request.body.role,
+        );
+        return reply.send({ ok: true, admin: adminPayload(admin) });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/:id/role",
+    {
+      preHandler: sadminOnly,
+      schema: { params: adminIdParamsSchema, body: adminRoleBodySchema },
+    },
+    async (request, reply) => {
+      const actorAdminId = request.adminAccount?.id;
+      if (!actorAdminId) {
+        reply.code(401);
+        return reply.send({ error: "admin_access_required" });
+      }
+      try {
+        const admin = await AdminAuthService.setAdminRoleById({
+          actorAdminId,
+          targetAdminId: request.params.id,
+          role: request.body.role,
+        });
+        return reply.send({ ok: true, admin: adminPayload(admin) });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/:id/disable",
+    {
+      preHandler: sadminOnly,
+      schema: { params: adminIdParamsSchema },
+    },
+    async (request, reply) => {
+      const actorAdminId = request.adminAccount?.id;
+      if (!actorAdminId) {
+        reply.code(401);
+        return reply.send({ error: "admin_access_required" });
+      }
+      try {
+        const admin = await AdminAuthService.disableAdminById({
+          actorAdminId,
+          targetAdminId: request.params.id,
+        });
+        return reply.send({ ok: true, admin: adminPayload(admin) });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/:id/rotate-link",
+    {
+      preHandler: sadminOnly,
+      schema: { params: adminIdParamsSchema },
+    },
+    async (request, reply) => {
+      const actorAdminId = request.adminAccount?.id;
+      if (!actorAdminId) {
+        reply.code(401);
+        return reply.send({ error: "admin_access_required" });
+      }
+      try {
+        const result = await AdminAuthService.rotateEnrollmentLinkById({
+          actorAdminId,
+          targetAdminId: request.params.id,
+        });
+        return reply.send({
+          ok: true,
+          admin: adminPayload(result.admin),
+          enrollmentUrl: result.enrollmentUrl,
+          expiresAt: result.expiresAt.toISOString(),
+        });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/admin-auth/admins/:id/revoke-sessions",
+    {
+      preHandler: sadminOnly,
+      schema: { params: adminIdParamsSchema },
+    },
+    async (request, reply) => {
+      try {
+        const revoked = await AdminAuthService.revokeSessionsById(
+          request.params.id,
+        );
+        return reply.send({ ok: true, revoked });
+      } catch (error) {
+        return handleAdminAuthError(error, reply);
+      }
     },
   );
 };

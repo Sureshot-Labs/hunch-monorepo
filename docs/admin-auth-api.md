@@ -257,6 +257,167 @@ Success:
 { "ok": true, "revoked": 3 }
 ```
 
+## Sadmin Admin Management APIs
+
+These routes are for the future separate admin panel. They require a new admin
+session with role `sadmin`.
+
+Headers for every route:
+
+```text
+Authorization: Bearer <session.token>
+```
+
+Headers for every mutating route:
+
+```text
+X-CSRF-Token: <csrfToken>
+```
+
+### List Admins
+
+`GET /admin-auth/admins`
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admins": [
+    {
+      "id": "uuid",
+      "email": "admin@example.com",
+      "status": "active",
+      "role": "sadmin",
+      "createdAt": "2026-05-08T12:00:00.000Z",
+      "invitedAt": "2026-05-08T12:00:00.000Z",
+      "enrolledAt": "2026-05-08T12:05:00.000Z",
+      "activatedAt": "2026-05-08T12:10:00.000Z",
+      "disabledAt": null,
+      "lastLoginAt": "2026-05-08T12:15:00.000Z"
+    }
+  ]
+}
+```
+
+### Invite Admin
+
+`POST /admin-auth/admins/invite`
+
+Request:
+
+```json
+{ "email": "new-admin@example.com" }
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admin": {
+    "id": "uuid",
+    "email": "new-admin@example.com",
+    "status": "invited",
+    "role": null,
+    "createdAt": "2026-05-08T12:00:00.000Z",
+    "invitedAt": "2026-05-08T12:00:00.000Z",
+    "enrolledAt": null,
+    "activatedAt": null,
+    "disabledAt": null,
+    "lastLoginAt": null
+  },
+  "enrollmentUrl": "https://admin.hunch.trade/enroll?token=<opaque-token>",
+  "expiresAt": "2026-05-11T12:00:00.000Z"
+}
+```
+
+### Activate Admin
+
+`POST /admin-auth/admins/:id/activate`
+
+Request:
+
+```json
+{ "role": "admin" }
+```
+
+Success:
+
+```json
+{ "ok": true, "admin": { "id": "uuid", "status": "active", "role": "admin" } }
+```
+
+The account must already be `enrolled`.
+
+### Change Admin Role
+
+`POST /admin-auth/admins/:id/role`
+
+Request:
+
+```json
+{ "role": "sadmin" }
+```
+
+Success:
+
+```json
+{ "ok": true, "admin": { "id": "uuid", "status": "active", "role": "sadmin" } }
+```
+
+The account must already be `active`.
+
+### Disable Admin
+
+`POST /admin-auth/admins/:id/disable`
+
+Success:
+
+```json
+{ "ok": true, "admin": { "id": "uuid", "status": "disabled", "role": null } }
+```
+
+Disabling an admin revokes all of that admin's sessions.
+
+### Rotate Enrollment Link
+
+`POST /admin-auth/admins/:id/rotate-link`
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admin": { "id": "uuid", "status": "invited", "role": null },
+  "enrollmentUrl": "https://admin.hunch.trade/enroll?token=<opaque-token>",
+  "expiresAt": "2026-05-11T12:00:00.000Z"
+}
+```
+
+This resets the target account back to enrollment, clears password/TOTP state,
+and revokes existing sessions. Use it for lost authenticator/password recovery.
+
+### Revoke Admin Sessions
+
+`POST /admin-auth/admins/:id/revoke-sessions`
+
+Success:
+
+```json
+{ "ok": true, "revoked": 2 }
+```
+
+### Lockout Rules
+
+The backend prevents these operations:
+
+- A `sadmin` cannot disable their own account.
+- A `sadmin` cannot demote their own account from `sadmin` to `admin`.
+- A `sadmin` cannot rotate their own enrollment link.
+- The last active `sadmin` cannot be disabled or demoted.
+- The last active `sadmin` cannot have their enrollment link rotated.
+
 ## Existing Admin APIs
 
 Existing backend `/admin/*` routes keep their current paths and payloads.
@@ -299,6 +460,10 @@ Known error codes:
 - `admin_csrf_invalid`
 - `admin_access_required`
 - `sadmin_access_required`
+- `admin_invalid_role`
+- `admin_not_found`
+- `admin_self_action_forbidden`
+- `admin_last_sadmin_forbidden`
 - `rate_limit_exceeded`
 
 Recommended frontend handling:
@@ -308,6 +473,8 @@ Recommended frontend handling:
 - `admin_disabled`: show “Account disabled”.
 - `admin_session_expired`: clear admin cookies and show login.
 - `admin_csrf_invalid`: refresh session state; if repeated, clear cookies and log in again.
+- `admin_self_action_forbidden`: block the action and explain that admins must use another `sadmin` account for self-demotion or disable.
+- `admin_last_sadmin_forbidden`: require creating or promoting another `sadmin` first.
 
 ## Environment
 

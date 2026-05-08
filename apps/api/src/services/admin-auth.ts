@@ -60,6 +60,8 @@ export type AdminAuthErrorCode =
   | "admin_not_enrolled"
   | "admin_pending_activation"
   | "admin_disabled"
+  | "admin_self_action_forbidden"
+  | "admin_last_sadmin_forbidden"
   | "admin_invalid_role"
   | "invalid_email"
   | "invalid_credentials"
@@ -94,6 +96,10 @@ function adminAuthErrorMessage(code: AdminAuthErrorCode): string {
       return "Admin account is not enrolled";
     case "admin_pending_activation":
       return "Admin account is pending activation";
+    case "admin_self_action_forbidden":
+      return "Admins cannot perform this action on their own account";
+    case "admin_last_sadmin_forbidden":
+      return "Cannot remove the last active sadmin";
     case "invalid_credentials":
       return "Invalid email, password, or TOTP code";
     case "invalid_totp":
@@ -487,6 +493,54 @@ async function fetchAdminByEmail(
     [email],
   );
   return rows[0] ?? null;
+}
+
+async function fetchAdminById(
+  adminId: string,
+  db: Queryable = pool,
+): Promise<AdminAccountRow | null> {
+  const { rows } = await db.query<AdminAccountRow>(
+    `
+      select
+        id,
+        email,
+        password_hash,
+        totp_secret_enc,
+        totp_enabled,
+        last_totp_counter,
+        status,
+        role,
+        created_at,
+        updated_at,
+        invited_at,
+        enrolled_at,
+        activated_at,
+        disabled_at,
+        last_login_at
+      from admin_accounts
+      where id = $1
+      limit 1
+    `,
+    [adminId],
+  );
+  return rows[0] ?? null;
+}
+
+async function countActiveSadminsExcluding(
+  adminId: string,
+  db: Queryable = pool,
+): Promise<number> {
+  const { rows } = await db.query<{ count: string }>(
+    `
+      select count(*)::text as count
+      from admin_accounts
+      where status = 'active'
+        and role = 'sadmin'
+        and id <> $1
+    `,
+    [adminId],
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 async function issueEnrollmentToken(
@@ -1073,6 +1127,333 @@ export class AdminAuthService {
     return rows.map(toAdminAccount);
   }
 
+  static async activateAdminById(
+    adminId: string,
+    role: AdminRole,
+  ): Promise<AdminAccount> {
+    if (!isAdminRole(role)) {
+      throw new AdminAuthError("admin_invalid_role", "Invalid admin role", 400);
+    }
+    const { rows } = await pool.query<AdminAccountRow>(
+      `
+        update admin_accounts
+        set
+          status = 'active',
+          role = $2,
+          activated_at = now(),
+          disabled_at = null
+        where id = $1
+          and status = 'enrolled'
+          and password_hash is not null
+          and totp_secret_enc is not null
+          and totp_enabled = true
+        returning
+          id,
+          email,
+          password_hash,
+          totp_secret_enc,
+          totp_enabled,
+          last_totp_counter,
+          status,
+          role,
+          created_at,
+          updated_at,
+          invited_at,
+          enrolled_at,
+          activated_at,
+          disabled_at,
+          last_login_at
+      `,
+      [adminId, role],
+    );
+    if (!rows.length) {
+      const existing = await fetchAdminById(adminId);
+      if (!existing) {
+        throw new AdminAuthError("admin_not_found", "Admin not found", 404);
+      }
+      throw new AdminAuthError(
+        "admin_not_enrolled",
+        "Admin must complete enrollment before activation",
+        400,
+      );
+    }
+    await recordAttempt({
+      adminId: rows[0].id,
+      email: rows[0].email,
+      attemptType: "activate",
+      success: true,
+    });
+    return toAdminAccount(rows[0]);
+  }
+
+  static async setAdminRoleById(args: {
+    actorAdminId: string;
+    targetAdminId: string;
+    role: AdminRole;
+  }): Promise<AdminAccount> {
+    if (!isAdminRole(args.role)) {
+      throw new AdminAuthError("admin_invalid_role", "Invalid admin role", 400);
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        "lock table admin_accounts in share row exclusive mode",
+      );
+      const target = await fetchAdminById(args.targetAdminId, client);
+      if (!target) {
+        throw new AdminAuthError("admin_not_found", "Admin not found", 404);
+      }
+      if (target.status !== "active") {
+        throw new AdminAuthError(
+          "admin_pending_activation",
+          "Admin account must be active before changing role",
+          400,
+        );
+      }
+      const otherActiveSadminCount = await countActiveSadminsExcluding(
+        target.id,
+        client,
+      );
+      const lockout = resolveAdminManagementLockout({
+        actorAdminId: args.actorAdminId,
+        targetAdminId: target.id,
+        targetStatus: target.status,
+        targetRole: target.role,
+        action: "set_role",
+        nextRole: args.role,
+        otherActiveSadminCount,
+      });
+      if (lockout) {
+        throw new AdminAuthError(lockout, adminAuthErrorMessage(lockout), 400);
+      }
+
+      const { rows } = await client.query<AdminAccountRow>(
+        `
+          update admin_accounts
+          set role = $2
+          where id = $1
+          returning
+            id,
+            email,
+            password_hash,
+            totp_secret_enc,
+            totp_enabled,
+            last_totp_counter,
+            status,
+            role,
+            created_at,
+            updated_at,
+            invited_at,
+            enrolled_at,
+            activated_at,
+            disabled_at,
+            last_login_at
+        `,
+        [target.id, args.role],
+      );
+      await recordAttempt({
+        db: client,
+        adminId: target.id,
+        email: target.email,
+        attemptType: "set_role",
+        success: true,
+      });
+      await client.query("commit");
+      return toAdminAccount(rows[0]);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async disableAdminById(args: {
+    actorAdminId: string;
+    targetAdminId: string;
+  }): Promise<AdminAccount> {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        "lock table admin_accounts in share row exclusive mode",
+      );
+      const target = await fetchAdminById(args.targetAdminId, client);
+      if (!target) {
+        throw new AdminAuthError("admin_not_found", "Admin not found", 404);
+      }
+      const otherActiveSadminCount = await countActiveSadminsExcluding(
+        target.id,
+        client,
+      );
+      const lockout = resolveAdminManagementLockout({
+        actorAdminId: args.actorAdminId,
+        targetAdminId: target.id,
+        targetStatus: target.status,
+        targetRole: target.role,
+        action: "disable",
+        otherActiveSadminCount,
+      });
+      if (lockout) {
+        throw new AdminAuthError(lockout, adminAuthErrorMessage(lockout), 400);
+      }
+
+      const { rows } = await client.query<AdminAccountRow>(
+        `
+          update admin_accounts
+          set
+            status = 'disabled',
+            role = null,
+            disabled_at = now()
+          where id = $1
+          returning
+            id,
+            email,
+            password_hash,
+            totp_secret_enc,
+            totp_enabled,
+            last_totp_counter,
+            status,
+            role,
+            created_at,
+            updated_at,
+            invited_at,
+            enrolled_at,
+            activated_at,
+            disabled_at,
+            last_login_at
+        `,
+        [target.id],
+      );
+      await revokeAdminSessions(target.id, client);
+      await recordAttempt({
+        db: client,
+        adminId: target.id,
+        email: target.email,
+        attemptType: "disable",
+        success: true,
+      });
+      await client.query("commit");
+      return toAdminAccount(rows[0]);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async rotateEnrollmentLinkById(args: {
+    actorAdminId: string;
+    targetAdminId: string;
+  }): Promise<{
+    admin: AdminAccount;
+    token: string;
+    enrollmentUrl: string;
+    expiresAt: Date;
+  }> {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        "lock table admin_accounts in share row exclusive mode",
+      );
+      const row = await fetchAdminById(args.targetAdminId, client);
+      if (!row) {
+        throw new AdminAuthError("admin_not_found", "Admin not found", 404);
+      }
+      const otherActiveSadminCount = await countActiveSadminsExcluding(
+        row.id,
+        client,
+      );
+      const lockout = resolveAdminManagementLockout({
+        actorAdminId: args.actorAdminId,
+        targetAdminId: row.id,
+        targetStatus: row.status,
+        targetRole: row.role,
+        action: "rotate_link",
+        otherActiveSadminCount,
+      });
+      if (lockout) {
+        throw new AdminAuthError(lockout, adminAuthErrorMessage(lockout), 400);
+      }
+
+      const updated = await client.query<AdminAccountRow>(
+        `
+          update admin_accounts
+          set
+            status = 'invited',
+            role = null,
+            password_hash = null,
+            totp_secret_enc = null,
+            totp_enabled = false,
+            last_totp_counter = null,
+            invited_at = now(),
+            enrolled_at = null,
+            activated_at = null,
+            disabled_at = null,
+            password_changed_at = null,
+            totp_confirmed_at = null
+          where id = $1
+          returning
+            id,
+            email,
+            password_hash,
+            totp_secret_enc,
+            totp_enabled,
+            last_totp_counter,
+            status,
+            role,
+            created_at,
+            updated_at,
+            invited_at,
+            enrolled_at,
+            activated_at,
+            disabled_at,
+            last_login_at
+        `,
+        [row.id],
+      );
+      await revokeAdminSessions(row.id, client);
+      const issued = await issueEnrollmentToken(row.id, client);
+      await recordAttempt({
+        db: client,
+        adminId: row.id,
+        email: row.email,
+        attemptType: "rotate_link",
+        success: true,
+      });
+      await client.query("commit");
+
+      return {
+        admin: toAdminAccount(updated.rows[0]),
+        token: issued.token,
+        enrollmentUrl: buildEnrollmentUrl(issued.token),
+        expiresAt: issued.expiresAt,
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async revokeSessionsById(adminId: string): Promise<number> {
+    const row = await fetchAdminById(adminId);
+    if (!row)
+      throw new AdminAuthError("admin_not_found", "Admin not found", 404);
+    const revoked = await revokeAdminSessions(row.id, pool);
+    await recordAttempt({
+      adminId: row.id,
+      email: row.email,
+      attemptType: "revoke_sessions",
+      success: true,
+    });
+    return revoked;
+  }
+
   static async revokeSessionsByEmail(emailInput: string): Promise<number> {
     const row = await fetchAdminByEmail(emailInput);
     if (!row)
@@ -1377,6 +1758,36 @@ export function adminRoleAllowed(
 ): boolean {
   if (minimum === "admin") return actual === "admin" || actual === "sadmin";
   return actual === "sadmin";
+}
+
+export function resolveAdminManagementLockout(args: {
+  actorAdminId: string;
+  targetAdminId: string;
+  targetStatus: AdminStatus;
+  targetRole: AdminRole | null;
+  action: "disable" | "set_role" | "rotate_link";
+  nextRole?: AdminRole;
+  otherActiveSadminCount: number;
+}): AdminAuthErrorCode | null {
+  const isSelf = args.actorAdminId === args.targetAdminId;
+  if (isSelf && (args.action === "disable" || args.action === "rotate_link")) {
+    return "admin_self_action_forbidden";
+  }
+  if (isSelf && args.action === "set_role" && args.nextRole !== "sadmin") {
+    return "admin_self_action_forbidden";
+  }
+
+  const removesSadmin =
+    args.targetStatus === "active" &&
+    args.targetRole === "sadmin" &&
+    (args.action === "disable" ||
+      args.action === "rotate_link" ||
+      (args.action === "set_role" && args.nextRole !== "sadmin"));
+  if (removesSadmin && args.otherActiveSadminCount === 0) {
+    return "admin_last_sadmin_forbidden";
+  }
+
+  return null;
 }
 
 export async function attachAdminSessionToRequest(
