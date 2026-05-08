@@ -12,3 +12,7 @@ export const pool: Pool = createPgPool({ connectionString: env.dbUrl });
 pool.on("error", (err: unknown) => {
   log.err("pg pool error", err);
 });
+
+export async function closePool(): Promise<void> {
+  await pool.end();
+}

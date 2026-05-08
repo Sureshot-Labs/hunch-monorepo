@@ -11,3 +11,12 @@ export const redis = createRedisClient({ url: env.redisUrl });
 export async function ensureRedis(): Promise<void> {
   await ensure(redis, { waitForReady: true, logLabel: "indexer-hyperliquid" });
 }
+
+export async function closeRedis(): Promise<void> {
+  if (!redis.isOpen) return;
+  try {
+    await redis.quit();
+  } catch {
+    redis.disconnect();
+  }
+}

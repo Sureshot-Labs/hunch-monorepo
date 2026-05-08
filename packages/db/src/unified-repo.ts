@@ -4,7 +4,10 @@ import type { Pool, PoolClient } from "pg";
 type Queryable = Pick<Pool | PoolClient, "query">;
 
 function isPool(queryable: Queryable): queryable is Pool {
-  return "connect" in queryable;
+  return (
+    typeof (queryable as Pool).connect === "function" &&
+    typeof (queryable as PoolClient).release !== "function"
+  );
 }
 
 async function withTransactionIfPool<T>(

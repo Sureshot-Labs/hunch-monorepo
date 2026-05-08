@@ -64,6 +64,25 @@ async function loadDbAndRedis() {
   return { pool, redis };
 }
 
+async function closeOneShotResources(): Promise<void> {
+  const tasks: Promise<void>[] = [];
+
+  if (env.writeDb) {
+    tasks.push(import("./db.js").then(({ closePool }) => closePool()));
+  }
+  if (env.writeDb && env.syncTopBooks) {
+    tasks.push(import("./redis.js").then(({ closeRedis }) => closeRedis()));
+  }
+
+  await Promise.all(
+    tasks.map((task) =>
+      task.catch((error) => {
+        log.warn("Hyperliquid one-shot resource cleanup failed", error);
+      }),
+    ),
+  );
+}
+
 async function safeFetchHotTokenIds(
   redis: Awaited<ReturnType<typeof loadDbAndRedis>>["redis"],
 ): Promise<string[]> {
@@ -135,6 +154,7 @@ async function runOnce(params: {
   dryRun: boolean;
   network: HyperliquidNetwork;
   topBookDryRun: boolean;
+  startWs: boolean;
 }) {
   const shouldWrite = !params.dryRun && env.writeDb;
   const pool = shouldWrite ? (await import("./db.js")).pool : undefined;
@@ -172,7 +192,9 @@ async function runOnce(params: {
       concurrency: env.topBookSyncConcurrency,
     });
     log.info("Hyperliquid top-book sync complete", topResult);
-    await refreshWsSubscriptions({ network: params.network });
+    if (params.startWs) {
+      await refreshWsSubscriptions({ network: params.network });
+    }
   }
 
   log.info("Hyperliquid metadata sync complete", {
@@ -187,6 +209,7 @@ async function periodicRun(params: {
   dryRun: boolean;
   network: HyperliquidNetwork;
   topBookDryRun: boolean;
+  startWs: boolean;
 }) {
   if (metadataRunning) return;
   metadataRunning = true;
@@ -218,7 +241,13 @@ async function main() {
   }
 
   try {
-    await periodicRun({ fixtureDir, dryRun, network, topBookDryRun });
+    await periodicRun({
+      fixtureDir,
+      dryRun,
+      network,
+      topBookDryRun,
+      startWs: !once,
+    });
   } catch (error) {
     if (once) throw error;
     log.warn(
@@ -227,13 +256,17 @@ async function main() {
     );
     await refreshWsSubscriptions({ network });
   }
-  if (once) return;
+  if (once) {
+    await closeOneShotResources();
+    return;
+  }
 
   setInterval(() => {
     void periodicRun({
       dryRun,
       network,
       topBookDryRun,
+      startWs: true,
     }).catch((error) => {
       log.warn("periodic Hyperliquid metadata sync failed", error);
     });
