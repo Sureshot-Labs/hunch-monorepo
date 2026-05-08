@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
+    "test": "pnpm run build && node dist/unified-repo-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

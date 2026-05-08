@@ -9,26 +9,12 @@ import {
 } from "./bootstrap.js";
 import { env } from "./env.js";
 import { log } from "./log.js";
+import { parseHyperliquidRunMode } from "./run-mode.js";
 import {
   startHyperliquidMarketWS,
   updateHyperliquidMarketWSSubscriptions,
 } from "./wsMarket.js";
 import type { HyperliquidMappedSnapshot, HyperliquidNetwork } from "./types.js";
-
-function readFlag(name: string): boolean {
-  return process.argv.includes(name);
-}
-
-function readArg(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
-  if (index < 0) return undefined;
-  return process.argv[index + 1];
-}
-
-function readNetwork(): HyperliquidNetwork {
-  const raw = readArg("--network");
-  return raw === "testnet" ? "testnet" : "mainnet";
-}
 
 function infoUrlForNetwork(network: HyperliquidNetwork): string {
   return network === "testnet" ? env.testnetInfoUrl : env.mainnetInfoUrl;
@@ -221,12 +207,8 @@ async function periodicRun(params: {
 }
 
 async function main() {
-  const fixtureDir = readArg("--fixture-dir");
-  const topBookDryRun = readFlag("--dry-run-top-books");
-  const dryRun = readFlag("--dry-run") || topBookDryRun || fixtureDir != null;
-  const watch = readFlag("--watch");
-  const once = readFlag("--once") || fixtureDir != null || (dryRun && !watch);
-  const network = readNetwork();
+  const { fixtureDir, topBookDryRun, dryRun, once, network, startWs } =
+    parseHyperliquidRunMode(process.argv);
 
   if (!fixtureDir && !env.hyperliquidEnabled) {
     log.warn("Hyperliquid indexer disabled (HYPERLIQUID_ENABLED=false)");
@@ -246,7 +228,7 @@ async function main() {
       dryRun,
       network,
       topBookDryRun,
-      startWs: !once,
+      startWs,
     });
   } catch (error) {
     if (once) throw error;
