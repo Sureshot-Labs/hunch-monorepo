@@ -1,0 +1,324 @@
+# Admin Auth API Handoff
+
+This document describes the backend contract for the separate admin frontend.
+The public Hunch app and Privy user auth remain unchanged.
+
+## Overview
+
+Admin accounts are independent from normal `users` records. Operators create an
+admin invite with the backend CLI, send the one-time enrollment URL manually,
+then activate the enrolled account with a role.
+
+Supported roles:
+
+- `admin`: can use existing `/admin/*` panel APIs except admin-management
+  endpoints.
+- `sadmin`: can use all `admin` APIs and admin-management endpoints such as
+  changing legacy user admin status.
+
+Account statuses:
+
+- `invited`: enrollment link exists; cannot log in.
+- `enrolled`: password and TOTP are configured; cannot log in until activated.
+- `active`: can log in.
+- `disabled`: cannot enroll or log in; sessions are revoked.
+
+## CLI Ops
+
+Run inside the API package:
+
+```bash
+pnpm -F api run admin:auth -- invite --email admin@example.com
+pnpm -F api run admin:auth -- activate --email admin@example.com --role admin
+pnpm -F api run admin:auth -- activate --email owner@example.com --role sadmin
+pnpm -F api run admin:auth -- disable --email admin@example.com
+pnpm -F api run admin:auth -- rotate-link --email admin@example.com
+pnpm -F api run admin:auth -- revoke-sessions --email admin@example.com
+pnpm -F api run admin:auth -- list
+```
+
+On prod, run the same script inside the `hunch-api` container after migrations:
+
+```bash
+/usr/bin/docker exec hunch-api node /app/apps/api/dist/admin-auth-cli.js invite --email admin@example.com
+```
+
+`invite` and `rotate-link` print a one-time URL using `ADMIN_APP_BASE_URL`, for
+example:
+
+```text
+https://admin.hunch.trade/enroll?token=<opaque-token>
+```
+
+The token is stored only as a SHA-256 hash server-side.
+
+## Enrollment Flow
+
+The frontend receives `/enroll?token=...`.
+
+### Start Enrollment
+
+`POST /admin-auth/enroll/start`
+
+Request:
+
+```json
+{
+  "token": "one-time-token-from-url"
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "email": "admin@example.com",
+  "otpauthUri": "otpauth://totp/...",
+  "manualSecret": "BASE32SECRET",
+  "expiresAt": "2026-05-08T12:00:00.000Z"
+}
+```
+
+Frontend behavior:
+
+- Render a QR code from `otpauthUri`.
+- Also show `manualSecret` for manual authenticator setup.
+- Ask the admin to enter a password and the current 6-digit TOTP code.
+
+Calling start again before completion rotates the TOTP secret for that invite.
+
+### Complete Enrollment
+
+`POST /admin-auth/enroll/complete`
+
+Request:
+
+```json
+{
+  "token": "one-time-token-from-url",
+  "password": "long-password-123",
+  "totpCode": "123456"
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admin": {
+    "id": "uuid",
+    "email": "admin@example.com",
+    "status": "enrolled",
+    "role": null,
+    "createdAt": "2026-05-08T12:00:00.000Z",
+    "invitedAt": "2026-05-08T12:00:00.000Z",
+    "enrolledAt": "2026-05-08T12:05:00.000Z",
+    "activatedAt": null,
+    "disabledAt": null,
+    "lastLoginAt": null
+  }
+}
+```
+
+After this, show a pending activation message. Enrollment does not create a
+session. The operator must run:
+
+```bash
+pnpm -F api run admin:auth -- activate --email admin@example.com --role admin
+```
+
+The enrollment TOTP code is consumed. If activation happens immediately, the
+admin may need to wait for the next authenticator code before logging in.
+
+## Login Flow
+
+`POST /admin-auth/login`
+
+Request:
+
+```json
+{
+  "email": "admin@example.com",
+  "password": "long-password-123",
+  "totpCode": "123456"
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admin": {
+    "id": "uuid",
+    "email": "admin@example.com",
+    "status": "active",
+    "role": "admin",
+    "createdAt": "2026-05-08T12:00:00.000Z",
+    "invitedAt": "2026-05-08T12:00:00.000Z",
+    "enrolledAt": "2026-05-08T12:05:00.000Z",
+    "activatedAt": "2026-05-08T12:10:00.000Z",
+    "disabledAt": null,
+    "lastLoginAt": "2026-05-08T12:15:00.000Z"
+  },
+  "session": {
+    "token": "opaque-session-token",
+    "csrfToken": "opaque-csrf-token",
+    "expiresAt": "2026-05-08T20:15:00.000Z"
+  }
+}
+```
+
+Frontend proxy requirements:
+
+- Call this endpoint from a server route/proxy, not directly from browser
+  client code.
+- Store `session.token` in an httpOnly cookie, recommended name
+  `hunch_admin_session`.
+- Store `session.csrfToken` in a readable cookie, recommended name
+  `hunch_admin_csrf`.
+- For admin API calls, send `Authorization: Bearer <session.token>`.
+- For mutating admin API calls, also send `X-CSRF-Token: <csrfToken>`.
+
+The browser should not expose `session.token` to client-side JS.
+
+Login intentionally masks account status until credentials are proven. Unknown
+emails, unconfigured accounts, and wrong passwords return generic
+`invalid_credentials`.
+
+## Session APIs
+
+### Current Admin
+
+`GET /admin-auth/me`
+
+Headers:
+
+```text
+Authorization: Bearer <session.token>
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "admin": {
+    "id": "uuid",
+    "email": "admin@example.com",
+    "status": "active",
+    "role": "admin",
+    "createdAt": "2026-05-08T12:00:00.000Z",
+    "invitedAt": "2026-05-08T12:00:00.000Z",
+    "enrolledAt": "2026-05-08T12:05:00.000Z",
+    "activatedAt": "2026-05-08T12:10:00.000Z",
+    "disabledAt": null,
+    "lastLoginAt": "2026-05-08T12:15:00.000Z"
+  },
+  "session": {
+    "expiresAt": "2026-05-08T20:15:00.000Z"
+  }
+}
+```
+
+### Logout
+
+`POST /admin-auth/logout`
+
+Headers:
+
+```text
+Authorization: Bearer <session.token>
+X-CSRF-Token: <csrfToken>
+```
+
+Success:
+
+```json
+{ "ok": true }
+```
+
+### Logout All
+
+`POST /admin-auth/logout-all`
+
+Headers:
+
+```text
+Authorization: Bearer <session.token>
+X-CSRF-Token: <csrfToken>
+```
+
+Success:
+
+```json
+{ "ok": true, "revoked": 3 }
+```
+
+## Existing Admin APIs
+
+Existing backend `/admin/*` routes keep their current paths and payloads.
+During compatibility, they accept either:
+
+- New admin session: `Authorization: Bearer <admin-session-token>`.
+- Legacy app admin session, if `ADMIN_AUTH_LEGACY_FALLBACK=true`.
+
+The new admin frontend should use only the new admin session path.
+
+For new admin sessions, endpoints that grant or revoke admin powers require
+`sadmin`. During compatibility, legacy app admin sessions keep their current
+behavior while `ADMIN_AUTH_LEGACY_FALLBACK=true`.
+
+## Error Codes
+
+Errors use this shape:
+
+```json
+{
+  "error": "invalid_totp",
+  "message": "Invalid TOTP code"
+}
+```
+
+Known error codes:
+
+- `admin_auth_disabled`
+- `invalid_enrollment_token`
+- `expired_enrollment_token`
+- `used_enrollment_token`
+- `weak_password`
+- `invalid_totp`
+- `totp_replay`
+- `invalid_credentials`
+- `admin_not_enrolled`
+- `admin_pending_activation`
+- `admin_disabled`
+- `admin_session_expired`
+- `admin_csrf_invalid`
+- `admin_access_required`
+- `sadmin_access_required`
+- `rate_limit_exceeded`
+
+Recommended frontend handling:
+
+- `admin_not_enrolled`: ask operator for a fresh enrollment link.
+- `admin_pending_activation`: show “Pending activation”.
+- `admin_disabled`: show “Account disabled”.
+- `admin_session_expired`: clear admin cookies and show login.
+- `admin_csrf_invalid`: refresh session state; if repeated, clear cookies and log in again.
+
+## Environment
+
+Backend envs:
+
+- `ADMIN_AUTH_ENABLED=true`
+- `ADMIN_AUTH_LEGACY_FALLBACK=true`
+- `ADMIN_APP_BASE_URL=https://admin.hunch.trade`
+- `ADMIN_ENROLLMENT_TTL_MS=259200000`
+- `ADMIN_SESSION_TTL_MS=28800000`
+- `ADMIN_TOTP_ISSUER="Hunch Admin"`
+
+`CREDENTIALS_ENCRYPTION_KEY` is required because TOTP secrets are encrypted with
+the existing credentials encryption helper.

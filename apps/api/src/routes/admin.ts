@@ -1948,7 +1948,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/:id/admin",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({ minAdminRole: "sadmin" }),
       schema: { params: adminUserParamsSchema, body: adminUserAdminSchema },
     },
     async (request, reply) => {
