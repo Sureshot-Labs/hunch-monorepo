@@ -72,6 +72,14 @@ function adminPayload(admin: {
   };
 }
 
+function adminAuditActor(request: FastifyRequest) {
+  return {
+    actorAdminId: request.adminAccount?.id ?? null,
+    actorEmail: request.adminAccount?.email ?? null,
+    actorRole: request.adminAccount?.role ?? null,
+  };
+}
+
 function handleAdminAuthError(error: unknown, reply: FastifyReply) {
   if (error instanceof AdminAuthError) {
     reply.code(error.statusCode);
@@ -278,7 +286,10 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       try {
-        const result = await AdminAuthService.inviteAdmin(request.body.email);
+        const result = await AdminAuthService.inviteAdmin(
+          request.body.email,
+          adminAuditActor(request),
+        );
         return reply.send({
           ok: true,
           admin: adminPayload(result.admin),
@@ -302,6 +313,7 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
         const admin = await AdminAuthService.activateAdminById(
           request.params.id,
           request.body.role,
+          adminAuditActor(request),
         );
         return reply.send({ ok: true, admin: adminPayload(admin) });
       } catch (error) {
@@ -398,6 +410,7 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
       try {
         const revoked = await AdminAuthService.revokeSessionsById(
           request.params.id,
+          adminAuditActor(request),
         );
         return reply.send({ ok: true, revoked });
       } catch (error) {

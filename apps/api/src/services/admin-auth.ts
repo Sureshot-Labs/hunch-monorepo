@@ -150,6 +150,12 @@ type AdminSessionRow = {
   last_login_at: Date | null;
 };
 
+export type AdminAuditActor = {
+  actorAdminId?: string | null;
+  actorEmail?: string | null;
+  actorRole?: AdminRole | null;
+};
+
 type EnrollmentTokenRow = {
   token_id: string;
   admin_id: string;
@@ -225,6 +231,29 @@ function safeCompareString(a: string, b: string): boolean {
   const right = Buffer.from(b, "utf8");
   if (left.length !== right.length) return false;
   return crypto.timingSafeEqual(left, right);
+}
+
+let adminAuthAttemptActorColumnsAvailable: boolean | null = null;
+
+async function adminAuthAttemptActorColumnsEnabled(
+  db: Queryable,
+): Promise<boolean> {
+  if (adminAuthAttemptActorColumnsAvailable != null) {
+    return adminAuthAttemptActorColumnsAvailable;
+  }
+  const { rows } = await db.query<{ exists: boolean }>(
+    `
+      select exists (
+        select 1
+        from pg_attribute
+        where attrelid = to_regclass('admin_auth_attempts')
+          and attname = 'actor_admin_id'
+          and not attisdropped
+      ) as exists
+    `,
+  );
+  adminAuthAttemptActorColumnsAvailable = Boolean(rows[0]?.exists);
+  return adminAuthAttemptActorColumnsAvailable;
 }
 
 function encodeBase32(input: Buffer): string {
@@ -422,18 +451,58 @@ export async function verifyAdminPassword(
   }
 }
 
-async function recordAttempt(args: {
-  adminId?: string | null;
-  email?: string | null;
-  attemptType: string;
-  success: boolean;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-  errorCode?: string | null;
-  db?: Queryable;
-}): Promise<void> {
+async function recordAttempt(
+  args: {
+    adminId?: string | null;
+    email?: string | null;
+    attemptType: string;
+    success: boolean;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    errorCode?: string | null;
+    db?: Queryable;
+  } & AdminAuditActor,
+): Promise<void> {
   const db = args.db ?? pool;
   try {
+    const actorProvided = Boolean(
+      args.actorAdminId || args.actorEmail || args.actorRole,
+    );
+    const includeActor =
+      actorProvided && (await adminAuthAttemptActorColumnsEnabled(db));
+    if (includeActor) {
+      await db.query(
+        `
+          insert into admin_auth_attempts (
+            admin_id,
+            email,
+            attempt_type,
+            success,
+            ip_address,
+            user_agent,
+            error_code,
+            actor_admin_id,
+            actor_email,
+            actor_role
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `,
+        [
+          args.adminId ?? null,
+          args.email ?? null,
+          args.attemptType,
+          args.success,
+          args.ipAddress ?? null,
+          args.userAgent ?? null,
+          args.errorCode ?? null,
+          args.actorAdminId ?? null,
+          args.actorEmail ?? null,
+          args.actorRole ?? null,
+        ],
+      );
+      return;
+    }
+
     await db.query(
       `
         insert into admin_auth_attempts (
@@ -665,7 +734,10 @@ async function revokeAdminSessions(
 }
 
 export class AdminAuthService {
-  static async inviteAdmin(emailInput: string): Promise<{
+  static async inviteAdmin(
+    emailInput: string,
+    actor?: AdminAuditActor,
+  ): Promise<{
     admin: AdminAccount;
     token: string;
     enrollmentUrl: string;
@@ -758,6 +830,7 @@ export class AdminAuthService {
         email,
         attemptType: "invite",
         success: true,
+        ...actor,
       });
       await client.query("commit");
 
@@ -1130,6 +1203,7 @@ export class AdminAuthService {
   static async activateAdminById(
     adminId: string,
     role: AdminRole,
+    actor?: AdminAuditActor,
   ): Promise<AdminAccount> {
     if (!isAdminRole(role)) {
       throw new AdminAuthError("admin_invalid_role", "Invalid admin role", 400);
@@ -1182,6 +1256,7 @@ export class AdminAuthService {
       email: rows[0].email,
       attemptType: "activate",
       success: true,
+      ...actor,
     });
     return toAdminAccount(rows[0]);
   }
@@ -1204,6 +1279,7 @@ export class AdminAuthService {
       if (!target) {
         throw new AdminAuthError("admin_not_found", "Admin not found", 404);
       }
+      const actor = await fetchAdminById(args.actorAdminId, client);
       if (target.status !== "active") {
         throw new AdminAuthError(
           "admin_pending_activation",
@@ -1256,6 +1332,9 @@ export class AdminAuthService {
         db: client,
         adminId: target.id,
         email: target.email,
+        actorAdminId: actor?.id ?? args.actorAdminId,
+        actorEmail: actor?.email ?? null,
+        actorRole: actor?.role ?? null,
         attemptType: "set_role",
         success: true,
       });
@@ -1283,6 +1362,7 @@ export class AdminAuthService {
       if (!target) {
         throw new AdminAuthError("admin_not_found", "Admin not found", 404);
       }
+      const actor = await fetchAdminById(args.actorAdminId, client);
       const otherActiveSadminCount = await countActiveSadminsExcluding(
         target.id,
         client,
@@ -1331,6 +1411,9 @@ export class AdminAuthService {
         db: client,
         adminId: target.id,
         email: target.email,
+        actorAdminId: actor?.id ?? args.actorAdminId,
+        actorEmail: actor?.email ?? null,
+        actorRole: actor?.role ?? null,
         attemptType: "disable",
         success: true,
       });
@@ -1363,6 +1446,7 @@ export class AdminAuthService {
       if (!row) {
         throw new AdminAuthError("admin_not_found", "Admin not found", 404);
       }
+      const actor = await fetchAdminById(args.actorAdminId, client);
       const otherActiveSadminCount = await countActiveSadminsExcluding(
         row.id,
         client,
@@ -1421,6 +1505,9 @@ export class AdminAuthService {
         db: client,
         adminId: row.id,
         email: row.email,
+        actorAdminId: actor?.id ?? args.actorAdminId,
+        actorEmail: actor?.email ?? null,
+        actorRole: actor?.role ?? null,
         attemptType: "rotate_link",
         success: true,
       });
@@ -1440,7 +1527,10 @@ export class AdminAuthService {
     }
   }
 
-  static async revokeSessionsById(adminId: string): Promise<number> {
+  static async revokeSessionsById(
+    adminId: string,
+    actor?: AdminAuditActor,
+  ): Promise<number> {
     const row = await fetchAdminById(adminId);
     if (!row)
       throw new AdminAuthError("admin_not_found", "Admin not found", 404);
@@ -1450,6 +1540,7 @@ export class AdminAuthService {
       email: row.email,
       attemptType: "revoke_sessions",
       success: true,
+      ...actor,
     });
     return revoked;
   }

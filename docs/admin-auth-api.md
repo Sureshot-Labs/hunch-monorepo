@@ -418,6 +418,17 @@ The backend prevents these operations:
 - The last active `sadmin` cannot be disabled or demoted.
 - The last active `sadmin` cannot have their enrollment link rotated.
 
+### Audit Trail
+
+Admin-management actions write to `admin_auth_attempts` with both target and
+actor fields:
+
+- Target fields: `admin_id`, `email`, `attempt_type`, `success`, `error_code`.
+- Actor fields: `actor_admin_id`, `actor_email`, `actor_role`.
+
+Panel actions currently audited with actor fields are invite, activate, role
+change, disable, rotate enrollment link, and revoke sessions.
+
 ## Existing Admin APIs
 
 Existing backend `/admin/*` routes keep their current paths and payloads.
