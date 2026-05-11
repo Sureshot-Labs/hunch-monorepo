@@ -7,11 +7,14 @@ type ClusterMarketRow = {
   slug?: string | null;
   image?: string | null;
   icon?: string | null;
+  market_category?: string | null;
   market_type: string | null;
   best_bid: unknown;
   best_ask: unknown;
   last_price: unknown;
   volume_24h: unknown;
+  activity_volume_last_24h?: unknown;
+  activity_volume_valid?: unknown;
   volume_total: unknown;
   liquidity: unknown;
   open_interest: unknown;
@@ -22,12 +25,18 @@ type ClusterMarketRow = {
   event_slug?: string | null;
   event_image?: string | null;
   event_icon?: string | null;
+  event_category?: string | null;
 };
 
 export type ClusterMarketSummary = {
   marketId: string;
   eventId: string;
   venue: string;
+  source?: "hunch" | "agg";
+  pricingSource?: "hunch_db" | "agg_midpoint" | "agg_orderbook";
+  aggVenueMarketId?: string | null;
+  aggVenueEventId?: string | null;
+  matchMethod?: string | null;
   marketSlug: string | null;
   eventSlug: string | null;
   marketImage: string | null;
@@ -40,6 +49,8 @@ export type ClusterMarketSummary = {
   marketDescription: string | null;
   eventTitle: string | null;
   eventDescription: string | null;
+  marketCategory: string | null;
+  eventCategory: string | null;
   marketType: string | null;
   yesBid: number | null;
   yesAsk: number | null;
@@ -222,14 +233,44 @@ export function resolveExpiresAt(
 export function scoreMarket(
   row: Pick<
     ClusterMarketRow,
-    "volume_24h" | "volume_total" | "liquidity" | "open_interest"
+    | "volume_24h"
+    | "activity_volume_last_24h"
+    | "activity_volume_valid"
+    | "volume_total"
+    | "liquidity"
+    | "open_interest"
   >,
 ): number {
-  const volume24h = toNumber(row.volume_24h) ?? 0;
+  const volume24h = resolveVolume24h(row) ?? 0;
   const volumeTotal = toNumber(row.volume_total) ?? 0;
   const liquidity = toNumber(row.liquidity) ?? 0;
   const openInterest = toNumber(row.open_interest) ?? 0;
   return volume24h * 2 + liquidity + openInterest + volumeTotal * 0.2;
+}
+
+function isTrue(value: unknown): boolean {
+  return value === true || value === "true" || value === "t" || value === "1";
+}
+
+function resolveVolume24h(
+  row: Pick<
+    ClusterMarketRow,
+    "volume_24h" | "activity_volume_last_24h" | "activity_volume_valid"
+  >,
+): number | null {
+  const venueVolume = toNumber(row.volume_24h);
+  if (venueVolume != null && venueVolume > 0) return venueVolume;
+
+  const activityVolume = toNumber(row.activity_volume_last_24h);
+  if (
+    isTrue(row.activity_volume_valid) &&
+    activityVolume != null &&
+    activityVolume > 0
+  ) {
+    return activityVolume;
+  }
+
+  return venueVolume;
 }
 
 export function buildMarketSummary(
@@ -256,13 +297,15 @@ export function buildMarketSummary(
     marketDescription: row.description ?? null,
     eventTitle: row.event_title,
     eventDescription: row.event_description ?? null,
+    marketCategory: row.market_category ?? null,
+    eventCategory: row.event_category ?? null,
     marketType: row.market_type,
     yesBid,
     yesAsk,
     yesMid,
     noMid,
     liquidity: toNumber(row.liquidity),
-    volume24h: toNumber(row.volume_24h),
+    volume24h: resolveVolume24h(row),
     volumeTotal: toNumber(row.volume_total),
     openInterest: toNumber(row.open_interest),
     expiresAt: resolveExpiresAt(row),

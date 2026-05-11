@@ -673,6 +673,14 @@ export const env = {
     "API_SIMILAR_CACHE_TTL_SEC",
     300,
   ),
+  aggMarketAppId: process.env.AGG_APP_ID?.trim() || "",
+  aggMarketBaseUrl:
+    process.env.AGG_MARKET_BASE_URL?.trim() || "https://api.agg.market",
+  aggMarketTimeoutMs: optionalPositiveInt("AGG_MARKET_TIMEOUT_MS", 5_000),
+  aggClustersCacheTtlSec: optionalNonNegativeInt(
+    "AGG_CLUSTERS_CACHE_TTL_SEC",
+    30,
+  ),
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
     15,

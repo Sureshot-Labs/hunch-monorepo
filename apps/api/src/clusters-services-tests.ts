@@ -36,6 +36,8 @@ function buildMarket(
     marketDescription: overrides.marketDescription ?? null,
     eventTitle: overrides.eventTitle ?? null,
     eventDescription: overrides.eventDescription ?? null,
+    marketCategory: overrides.marketCategory ?? null,
+    eventCategory: overrides.eventCategory ?? null,
     marketType: overrides.marketType ?? "binary",
     yesBid: overrides.yesBid ?? null,
     yesAsk: overrides.yesAsk ?? null,
