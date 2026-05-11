@@ -356,7 +356,7 @@ The stored local session should include only:
 
 ```json
 {
-  "baseUrl": "https://api.hunch.app",
+  "baseUrl": "https://api.hunch.trade",
   "grantId": "uuid",
   "token": "one-time-visible-agent-token",
   "expiresAt": "2026-06-10T00:00:00.000Z",
