@@ -175,35 +175,41 @@ Codex, Claude Code, and other clients:
 - policy-aware calls into the Hunch Agent API;
 - redaction and error normalization.
 
-The shared code should live underneath both:
+The agent-facing code should live in a separate repo, for example
+`hunch-agent-tools`, while the Hunch monorepo remains the source of truth for the
+backend Agent API, DB migrations, auth, policy, and OpenAPI schema.
+
+Recommended split:
 
 ```text
-packages/hunch-agent-client
-  src/client.ts          # fetch wrapper, auth headers, retries, redaction
-  src/types.ts           # shared DTOs and Zod schemas
-  src/device-auth.ts     # device-code polling client
-  src/tools.ts           # implementation functions: search, quote, intent, etc.
-  src/token-store.ts     # keychain/file/env abstraction for local tokens
-  src/errors.ts          # safe error shapes for agents
+hunch-monorepo
+  apps/api                # /agent API, auth, policy, signing, audit
+  packages/db             # migrations and DB helpers
+  openapi output          # generated contract consumed by agent tools
 
-apps/mcp-hunch
-  src/server.ts          # MCP tool registration
-  src/tools/*.ts         # thin tool adapters over hunch-agent-client
-  package.json           # binary: hunch-mcp
+hunch-agent-tools
+  packages/hunch-agent-client
+    src/client.ts         # fetch wrapper, auth headers, retries, redaction
+    src/types.ts          # generated API types once available; local types in Phase 1
+    src/device-auth.ts    # device-code polling client
+    src/tools.ts          # implementation functions: search, quote, intent, etc.
+    src/token-store.ts    # keychain/file/env abstraction for local tokens
+    src/errors.ts         # safe error shapes for agents
 
-apps/hunch-agent-cli
-  src/cli.ts             # optional CLI: auth, search, quote, intent, execute
-  package.json           # binary: hunch-agent
+  apps/mcp-hunch
+    src/server.ts         # MCP tool registration
+    src/cli.ts            # CLI entrypoint sharing the same client package
+    package.json          # binaries: hunch-mcp, hunch-agent
 
-skills/hunch-trading
-  SKILL.md               # concise workflow and safety instructions
-  agents/openai.yaml     # Codex UI metadata
-  scripts/hunch-agent    # tiny wrapper invoking the installed CLI, if needed
-  references/tools.md    # tool/command reference loaded only when needed
+  skills/hunch-trading
+    SKILL.md              # concise workflow and safety instructions
+    agents/openai.yaml    # Codex UI metadata
+    scripts/hunch         # tiny wrapper invoking bundled or installed CLI
+    references/tools.md   # tool/command reference loaded only when needed
 ```
 
-If that feels like too many packages at first, keep the deployable/package
-surface to two units:
+For the first external repo version, keep the deployable/package surface to two
+units:
 
 ```text
 packages/hunch-agent-client
@@ -212,7 +218,8 @@ apps/mcp-hunch
 
 and expose the CLI as an extra binary from `apps/mcp-hunch`. The important DRY
 rule is that MCP tools and skill scripts both call `hunch-agent-client`; neither
-should hand-roll HTTP calls.
+should hand-roll HTTP calls. The external repo should consume generated API
+types from the monorepo and should not import Hunch backend packages directly.
 
 Recommended runtime behavior:
 
@@ -224,6 +231,85 @@ Recommended runtime behavior:
 This makes the skill useful in Codex while the MCP server remains the portable
 integration for Claude Code and other clients.
 
+### Separate Repo Boundary
+
+Use a separate repo because MCP, CLI, and skill packaging have different release,
+install, and user-support needs than the backend monorepo. This also keeps agent
+clients from accidentally depending on internal backend modules.
+
+The boundary should be:
+
+- Hunch monorepo owns server behavior: `/agent/*`, database schema, auth,
+  policy, signing, venue dispatch, OpenAPI generation, and production
+  deployment.
+- Agent tools repo owns client distribution: MCP server, CLI, skill files, local
+  token storage, generated API client, and mocked-contract tests.
+- The contract between repos is the public Agent API plus generated types.
+- Breaking API changes must update the OpenAPI contract and agent-tools tests in
+  the same feature branch or release sequence.
+
+Do not duplicate venue logic in the agent-tools repo. It can validate request
+shape and normalize local errors, but market semantics, quotes, transaction
+payloads, wallet readiness, and execution decisions remain backend-owned.
+
+### Current Implementation Status
+
+As of 2026-05-11, Phase 1 has started in the separate
+`hunch-agent-tools` repo.
+
+Implemented:
+
+- PNPM/TypeScript workspace with project references, ESLint, Prettier, and a
+  build script.
+- `packages/hunch-agent-client` with a shared fetch client, local token lookup,
+  Zod input schemas, safe error shapes, and read-only tool functions.
+- `apps/mcp-hunch` with both binaries in one package:
+  - `hunch-mcp` for MCP stdio;
+  - `hunch-agent` for CLI fallback.
+- Read-only MCP tools for the first public discovery surface:
+  `hunch_search_markets`, `hunch_get_market`, `hunch_get_event`,
+  `hunch_get_market_map`, `hunch_get_discovery_sidebars`, and
+  `hunch_get_clusters`.
+- CLI commands for `auth status`, `search`, `market`, `event`, `map`,
+  `sidebars`, and `clusters`.
+- `skills/hunch-trading` with `SKILL.md`, OpenAI/OpenClaw metadata,
+  `references/tools.md`, and a `scripts/hunch` wrapper.
+- Codex plugin metadata under `.codex-plugin/`, `.mcp.json`, and a local
+  `.agents/plugins/marketplace.json`.
+
+Packaging decisions made during implementation:
+
+- The repo intentionally does not contain temporary account-specific homepage or
+  repository URLs in public skill/plugin metadata.
+- `plugin-dist/` and `skills/hunch-trading/bin/` are generated local build
+  outputs and are ignored by Git. Run `pnpm build` before local plugin or
+  skill-only testing that needs bundled runtime files.
+- For Phase 1, the tools call existing public Hunch APIs directly. They do not
+  depend on `/agent/*`, device auth, private account state, or trading routes.
+- Generated OpenAPI-derived types are still a future integration point. Until
+  the Agent API contract exists, Phase 1 uses narrow local types and Zod schemas
+  for the read-only public surface.
+
+Verified locally:
+
+- `pnpm build`
+- `pnpm check`
+- `pnpm format:check`
+- `node plugin-dist/hunch-agent.js auth status --json`
+- `skills/hunch-trading/scripts/hunch auth status --json`
+
+Phase 1 remaining work before treating the external repo as distributable:
+
+- Add mocked HTTP tests for the read-only client, MCP tool handlers, CLI output,
+  and wrapper fallback behavior.
+- Decide package distribution mode for ignored bundles:
+  - build on install / release; or
+  - publish npm packages and let the skill wrapper use `npx`/installed binaries.
+- Replace local hand-written response assumptions with generated API types once
+  the relevant Hunch API contract is available.
+- Add any additional read-only tools that are clearly public and stable, for
+  example feed or price snapshots, without widening into account/trading flows.
+
 ### Skill Runtime Wrapper And Session
 
 The skill can include a runtime wrapper, but that wrapper should be a thin CLI
@@ -233,8 +319,8 @@ Good shape:
 
 ```text
 skills/hunch-trading/scripts/hunch
-  -> finds/invokes installed `hunch-agent`
-    -> uses packages/hunch-agent-client
+  -> finds/invokes bundled, plugin, dev, or installed `hunch-agent`
+    -> uses hunch-agent-tools/packages/hunch-agent-client
       -> reads the local agent grant token
       -> calls Hunch Agent API
 ```
@@ -821,8 +907,10 @@ Indexes should cover:
 
 ## MCP Tool Surface
 
-Package the MCP server as `apps/mcp-hunch`. Keep reusable HTTP/session/tool
-logic in `packages/hunch-agent-client`.
+Package the MCP server in the external `hunch-agent-tools` repo as
+`apps/mcp-hunch`. Keep reusable HTTP/session/tool logic in that repo's
+`packages/hunch-agent-client`. The monorepo exposes the API contract; the
+external repo consumes it.
 
 Read tools:
 
@@ -1118,26 +1206,29 @@ Reuse existing redemption plan endpoints:
 
 ### Phase 1: Read-Only MCP
 
-- Add the MCP package with typed API client wrappers.
-- Use existing public/read endpoints only.
+- Create the separate `hunch-agent-tools` repo. **Started.**
+- Add the MCP package and shared API client. **Started with local read-only
+  types; generated API types remain pending.**
+- Use existing public/read endpoints only. **Started.**
 - Do not depend on device auth or private user account state in this phase.
-- Add tests with mocked API responses.
-- Ship docs for local setup in Codex/Claude.
+- Add tests with mocked API responses. **Pending.**
+- Ship docs for local setup in Codex/Claude. **Started.**
 
 This proves the developer/user workflow without risking funds.
 
 ### Phase 2: Agent Grants
 
-- Add `agent_grants`, device auth tables, and token hashing.
-- Add `/agent/device/*`, `/agent/grants`, and `createAgentAuthMiddleware`.
-- Add scope, wallet, venue, chain, and asset checks.
-- Enable authenticated read tools for account, wallets, balances, positions,
-  orders, funding plan, and venue readiness.
-- Add UI to create/revoke grants and inspect last use.
-- Add API tests for expiry, revocation, scope denial, wallet denial, and token
-  hash lookup.
-- Add device-code tests for one-time token issuance, expiry, rate limits, max
-  attempts, and polling limits.
+- In the Hunch monorepo, add `agent_grants`, device auth tables, token hashing,
+  `/agent/device/*`, `/agent/grants`, and `createAgentAuthMiddleware`.
+- In the Hunch monorepo, add scope, wallet, venue, chain, and asset checks plus
+  UI to create/revoke grants and inspect last use.
+- In the external tools repo, enable authenticated read tools for account,
+  wallets, balances, positions, orders, funding plan, and venue readiness.
+- Add backend API tests for expiry, revocation, scope denial, wallet denial,
+  token hash lookup, one-time token issuance, expiry, rate limits, max attempts,
+  and polling limits.
+- Add external repo tests for auth flow polling, token storage, redaction, and
+  authenticated read tool errors.
 
 ### Phase 3: Preview And Intent Records
 
@@ -1195,6 +1286,10 @@ This proves the developer/user workflow without risking funds.
 
 ## KISS / DRY Rules
 
+- Keep MCP/CLI/skill distribution in the separate agent-tools repo and backend
+  implementation in the Hunch monorepo.
+- Use generated API types as the repo boundary; do not import Hunch backend
+  packages from the external tools repo.
 - Do not build separate venue-specific MCP servers.
 - Do not let the MCP client construct Polymarket/Limitless/Kalshi transactions
   itself. It should request previews/intents from Hunch.
@@ -1240,6 +1335,8 @@ This proves the developer/user workflow without risking funds.
 - Should grant limits be per wallet only, or also per venue market and category?
 - How should mobile users approve pending intents when the agent is running on a
   desktop machine?
+- Should `hunch-agent-tools` be public from Phase 1, or private until
+  authenticated/write tools are ready?
 
 ## Recommendation
 
