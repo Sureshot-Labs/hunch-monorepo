@@ -72,24 +72,31 @@ function midpoint(
     price: null,
     spread: null,
     timestamp: null,
+    markSource: null,
     outcomes: [
       {
         id: `${venueMarketId}:no`,
         label: "No",
         midpoint: 1 - yesMid,
         price: null,
+        markSource: null,
       },
       {
         id: `${venueMarketId}:yes`,
         label: "Yes",
         midpoint: yesMid,
         price: null,
+        markSource: null,
       },
     ],
   };
 }
 
-function topLevelMidpoint(venueMarketId: string, value: number): AggMidpoint {
+function topLevelMidpoint(
+  venueMarketId: string,
+  value: number,
+  markSource: string | null = null,
+): AggMidpoint {
   return {
     venueMarketId,
     venue: null,
@@ -97,6 +104,7 @@ function topLevelMidpoint(venueMarketId: string, value: number): AggMidpoint {
     price: null,
     spread: null,
     timestamp: null,
+    markSource,
     outcomes: [],
   };
 }
@@ -204,6 +212,7 @@ await test("parses top-level AGG midpoint fields when outcomes are empty", async
               price: "0.62",
               spread: "0.03",
               timestamp: "2026-05-12T00:00:00.000Z",
+              markSource: "local",
               outcomes: [],
             },
           ],
@@ -219,6 +228,7 @@ await test("parses top-level AGG midpoint fields when outcomes are empty", async
   assert.equal(rows[0]?.midpoint, 0.61);
   assert.equal(rows[0]?.price, 0.62);
   assert.equal(rows[0]?.spread, 0.03);
+  assert.equal(rows[0]?.markSource, "local");
   assert.equal(rows[0]?.outcomes.length, 0);
   assert.match(requested[0] ?? "", /venueMarketIds=agg-poly/);
 });
@@ -360,6 +370,70 @@ await test("orients top-level AGG midpoints against DB yes and no prices", async
   assert.ok(Math.abs(orientedYesMid - 0.42) < 1e-9);
   assert.ok(cluster.priceSpread != null);
   assert.ok(Math.abs(cluster.priceSpread - 0.16) < 1e-9);
+});
+
+await test("drops one-sided AGG midpoints instead of treating ask-only quotes as fair prices", async () => {
+  const poly = market({
+    id: "agg-poly-knicks",
+    venue: "polymarket",
+    externalIdentifier: "553858",
+    question: "New York Knicks",
+  });
+  const limitless = market({
+    id: "agg-limitless-knicks",
+    venue: "limitless",
+    externalIdentifier: "29729",
+    question: "New York Knicks",
+    venueMarketOutcomes: [
+      {
+        id: "limitless-knicks:yes",
+        externalIdentifier: null,
+        label: "Yes",
+        price: 0.495,
+      },
+      {
+        id: "limitless-knicks:no",
+        externalIdentifier: null,
+        label: "No",
+        price: 0.505,
+      },
+    ],
+  });
+  poly.matchedVenueMarkets = [limitless];
+
+  const response = await buildAggClusterListResponse({
+    query: { minSpread: 0 },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [
+        midpoint("agg-poly-knicks", 0.1375),
+        topLevelMidpoint("agg-limitless-knicks", 0.99, "local_one_sided"),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:553858",
+        venue: "polymarket",
+        venueMarketId: "553858",
+        title: "New York Knicks",
+        eventTitle: "2026 NBA Champion",
+        bestBid: 0.137,
+        bestAsk: 0.138,
+      }),
+      dbRow({
+        id: "limitless:29729",
+        venue: "limitless",
+        venueMarketId: "29729",
+        title: "New York Knicks",
+        eventTitle: "2026 NBA Champion",
+        bestBid: null,
+        bestAsk: 0.99,
+        lastPrice: 0.155439,
+      }),
+    ]),
+  });
+
+  assert.equal(response.items.length, 0);
 });
 
 await test("sorts AGG clusters by 24h volume desc by default", async () => {
