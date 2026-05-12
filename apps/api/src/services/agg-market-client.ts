@@ -40,6 +40,7 @@ export type AggMidpoint = {
   venueMarketId: string;
   venue: string | null;
   midpoint: number | null;
+  price: number | null;
   spread: number | null;
   timestamp: string | null;
   outcomes: AggMidpointOutcome[];
@@ -178,6 +179,7 @@ function normalizeMidpoint(value: unknown): AggMidpoint | null {
     venueMarketId,
     venue: getString(value, "venue"),
     midpoint: getNumber(value, "midpoint"),
+    price: getNumber(value, "price"),
     spread: getNumber(value, "spread"),
     timestamp: getString(value, "timestamp"),
     outcomes: outcomesRaw

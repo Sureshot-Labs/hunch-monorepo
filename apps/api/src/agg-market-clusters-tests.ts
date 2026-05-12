@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { DbQuery } from "./db.js";
 import {
   chunkAggVenueMarketIds,
+  createAggMarketClient,
   type AggMarketClient,
   type AggMidpoint,
   type AggVenueMarket,
@@ -68,6 +69,7 @@ function midpoint(
     venueMarketId,
     venue: null,
     midpoint: topLevelMidpoint,
+    price: null,
     spread: null,
     timestamp: null,
     outcomes: [
@@ -87,6 +89,18 @@ function midpoint(
   };
 }
 
+function topLevelMidpoint(venueMarketId: string, value: number): AggMidpoint {
+  return {
+    venueMarketId,
+    venue: null,
+    midpoint: value,
+    price: null,
+    spread: null,
+    timestamp: null,
+    outcomes: [],
+  };
+}
+
 function dbRow(args: {
   id: string;
   eventId?: string;
@@ -101,6 +115,9 @@ function dbRow(args: {
   activityVolume24h?: number | null;
   activityVolumeValid?: boolean;
   liquidity?: number;
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  lastPrice?: number | null;
 }) {
   return {
     id: args.id,
@@ -114,9 +131,9 @@ function dbRow(args: {
     icon: null,
     market_category: args.marketCategory ?? null,
     market_type: "binary",
-    best_bid: 0.4,
-    best_ask: 0.6,
-    last_price: 0.5,
+    best_bid: args.bestBid ?? 0.4,
+    best_ask: args.bestAsk ?? 0.6,
+    last_price: args.lastPrice ?? 0.5,
     volume_24h: args.volume24h ?? 10,
     activity_volume_last_24h: args.activityVolume24h ?? null,
     activity_volume_valid: args.activityVolumeValid ?? false,
@@ -168,6 +185,42 @@ await test("chunks midpoint ids at the AGG limit", () => {
   assert.equal(chunks[0]?.length, 200);
   assert.equal(chunks[1]?.length, 200);
   assert.equal(chunks[2]?.length, 1);
+});
+
+await test("parses top-level AGG midpoint fields when outcomes are empty", async () => {
+  const requested: string[] = [];
+  const client = createAggMarketClient({
+    appId: "test-app",
+    baseUrl: "https://agg.example",
+    fetchImpl: async (input) => {
+      requested.push(String(input));
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              venueMarketId: "agg-poly",
+              venue: "polymarket",
+              midpoint: "0.61",
+              price: "0.62",
+              spread: "0.03",
+              timestamp: "2026-05-12T00:00:00.000Z",
+              outcomes: [],
+            },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  const rows = await client.getMidpoints(["agg-poly"]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.venueMarketId, "agg-poly");
+  assert.equal(rows[0]?.midpoint, 0.61);
+  assert.equal(rows[0]?.price, 0.62);
+  assert.equal(rows[0]?.spread, 0.03);
+  assert.equal(rows[0]?.outcomes.length, 0);
+  assert.match(requested[0] ?? "", /venueMarketIds=agg-poly/);
 });
 
 await test("builds AGG clusters from labeled Yes midpoints and DB rows", async () => {
@@ -252,6 +305,61 @@ await test("builds AGG clusters from labeled Yes midpoints and DB rows", async (
     cluster.markets.map((row) => row.eventCategory),
     ["sports", "sports", "sports"],
   );
+});
+
+await test("orients top-level AGG midpoints against DB yes and no prices", async () => {
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "Candidate A",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXCANDIDATE-A",
+    question: "Candidate A",
+  });
+  poly.matchedVenueMarkets = [kalshi];
+
+  const response = await buildAggClusterListResponse({
+    query: { minSpread: 0, sort_by: "spread" },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [
+        topLevelMidpoint("agg-poly", 0.58),
+        topLevelMidpoint("agg-kalshi", 0.58),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "Candidate A",
+        bestBid: 0.57,
+        bestAsk: 0.59,
+      }),
+      dbRow({
+        id: "kalshi:KXCANDIDATE-A",
+        venue: "kalshi",
+        venueMarketId: "KXCANDIDATE-A",
+        title: "Candidate A",
+        bestBid: 0.41,
+        bestAsk: 0.43,
+      }),
+    ]),
+  });
+
+  assert.equal(response.items.length, 1);
+  const cluster = response.items[0];
+  assert.ok(cluster);
+  assert.equal(cluster.markets[0]?.yesMid, 0.58);
+  const orientedYesMid = cluster.markets[1]?.yesMid;
+  assert.ok(orientedYesMid != null);
+  assert.ok(Math.abs(orientedYesMid - 0.42) < 1e-9);
+  assert.ok(cluster.priceSpread != null);
+  assert.ok(Math.abs(cluster.priceSpread - 0.16) < 1e-9);
 });
 
 await test("sorts AGG clusters by 24h volume desc by default", async () => {
