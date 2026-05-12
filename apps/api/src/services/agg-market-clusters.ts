@@ -113,7 +113,7 @@ type NormalizedAggMarket = {
   conditionId: string | null;
   venueEventId: string | null;
   question: string | null;
-  yesMid: number;
+  midpoint: ResolvedAggMidpoint;
 };
 
 type NormalizedAggGroup = {
@@ -129,6 +129,11 @@ type DbMatchedMarket = {
 type CacheEntry = {
   expiresAt: number;
   value: AggClusterListResponse;
+};
+
+type ResolvedAggMidpoint = {
+  value: number;
+  side: "yes" | "no" | "unknown";
 };
 
 const DEFAULTS: AggClusterDefaults = {
@@ -201,13 +206,79 @@ function isOpenStatus(value: string | null): boolean {
   return normalizeLabel(value) === "open";
 }
 
-function resolveYesMidpoint(midpoint: AggMidpoint | null): number | null {
+function toProbability(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value >= 0 && value <= 1 ? value : null;
+}
+
+function resolveAggMidpoint(
+  midpoint: AggMidpoint | null,
+): ResolvedAggMidpoint | null {
   if (!midpoint) return null;
   const yesOutcome = midpoint.outcomes.find(
     (outcome) => normalizeLabel(outcome.label) === "yes",
   );
-  const yesValue = yesOutcome?.midpoint ?? yesOutcome?.price ?? null;
-  return yesValue != null && Number.isFinite(yesValue) ? yesValue : null;
+  const yesValue = toProbability(yesOutcome?.midpoint ?? yesOutcome?.price);
+  if (yesValue != null) return { value: yesValue, side: "yes" };
+
+  const noOutcome = midpoint.outcomes.find(
+    (outcome) => normalizeLabel(outcome.label) === "no",
+  );
+  const noValue = toProbability(noOutcome?.midpoint ?? noOutcome?.price);
+  if (noValue != null) return { value: noValue, side: "no" };
+
+  const topLevelValue = toProbability(midpoint.midpoint ?? midpoint.price);
+  return topLevelValue == null
+    ? null
+    : { value: topLevelValue, side: "unknown" };
+}
+
+function orientAggMidpointToDbYes(params: {
+  midpoint: ResolvedAggMidpoint;
+  market: ClusterMarketSummary;
+}): number | null {
+  const { midpoint, market } = params;
+  const yesMid = market.yesMid;
+  const noMid = market.noMid ?? (yesMid == null ? null : 1 - yesMid);
+
+  if (midpoint.side === "yes") {
+    if (
+      yesMid != null &&
+      Math.abs(yesMid - midpoint.value) > MAX_AGG_DB_SELECTED_SIDE_DEVIATION
+    ) {
+      return null;
+    }
+    return midpoint.value;
+  }
+
+  if (midpoint.side === "no") {
+    const inferredYes = 1 - midpoint.value;
+    if (
+      yesMid != null &&
+      Math.abs(yesMid - inferredYes) > MAX_AGG_DB_SELECTED_SIDE_DEVIATION
+    ) {
+      return null;
+    }
+    return inferredYes;
+  }
+
+  // AGG can return an unlabeled top-level midpoint. Orient it against our DB
+  // yes/no midpoint before treating it as the comparable Yes-side price.
+  const yesDiff =
+    yesMid == null
+      ? Number.POSITIVE_INFINITY
+      : Math.abs(yesMid - midpoint.value);
+  const noDiff =
+    noMid == null ? Number.POSITIVE_INFINITY : Math.abs(noMid - midpoint.value);
+  const bestDiff = Math.min(yesDiff, noDiff);
+  if (
+    !Number.isFinite(bestDiff) ||
+    bestDiff > MAX_AGG_DB_SELECTED_SIDE_DEVIATION
+  ) {
+    return null;
+  }
+
+  return noDiff < yesDiff ? 1 - midpoint.value : midpoint.value;
 }
 
 function hasBinaryYesNoOutcomes(market: AggVenueMarket): boolean {
@@ -265,10 +336,10 @@ function normalizeAggGroups(params: {
 
     const normalized: NormalizedAggMarket[] = [];
     for (const market of members) {
-      const yesMid = resolveYesMidpoint(
+      const midpoint = resolveAggMidpoint(
         params.midpointsByMarketId.get(market.id) ?? null,
       );
-      if (yesMid == null) continue;
+      if (midpoint == null) continue;
       normalized.push({
         aggMarketId: market.id,
         venue: market.venue as AggSupportedVenue,
@@ -276,7 +347,7 @@ function normalizeAggGroups(params: {
         conditionId: market.conditionId,
         venueEventId: market.venueEventId,
         question: market.question,
-        yesMid,
+        midpoint,
       });
     }
 
@@ -455,13 +526,11 @@ function buildAggClusterSummaries(params: {
       const matched = params.matchedRowsByAggId.get(aggMarket.aggMarketId);
       if (!matched) continue;
       const baseSummary = buildMarketSummary(matched.row);
-      if (
-        baseSummary.yesMid != null &&
-        Math.abs(baseSummary.yesMid - aggMarket.yesMid) >
-          MAX_AGG_DB_SELECTED_SIDE_DEVIATION
-      ) {
-        continue;
-      }
+      const yesMid = orientAggMidpointToDbYes({
+        midpoint: aggMarket.midpoint,
+        market: baseSummary,
+      });
+      if (yesMid == null) continue;
       markets.push({
         ...baseSummary,
         source: "agg",
@@ -470,8 +539,8 @@ function buildAggClusterSummaries(params: {
         aggVenueEventId: aggMarket.venueEventId,
         matchMethod: matched.matchMethod,
         marketTitle: matched.row.title ?? aggMarket.question,
-        yesMid: aggMarket.yesMid,
-        noMid: 1 - aggMarket.yesMid,
+        yesMid,
+        noMid: 1 - yesMid,
       });
     }
 
