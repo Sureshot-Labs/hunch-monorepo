@@ -202,6 +202,22 @@ function normalizeLabel(value: string | null): string {
   return (value ?? "").trim().toLowerCase();
 }
 
+function isOneSidedMarkSource(value: string | null | undefined): boolean {
+  const normalized = normalizeLabel(value ?? null).replace(/\s+/g, "_");
+  return (
+    normalized.includes("one_sided") ||
+    normalized.includes("one-sided") ||
+    normalized.includes("onesided")
+  );
+}
+
+function isOneSidedAggMidpoint(midpoint: AggMidpoint): boolean {
+  if (isOneSidedMarkSource(midpoint.markSource)) return true;
+  return midpoint.outcomes.some((outcome) =>
+    isOneSidedMarkSource(outcome.markSource),
+  );
+}
+
 function isOpenStatus(value: string | null): boolean {
   return normalizeLabel(value) === "open";
 }
@@ -215,6 +231,8 @@ function resolveAggMidpoint(
   midpoint: AggMidpoint | null,
 ): ResolvedAggMidpoint | null {
   if (!midpoint) return null;
+  if (isOneSidedAggMidpoint(midpoint)) return null;
+
   const yesOutcome = midpoint.outcomes.find(
     (outcome) => normalizeLabel(outcome.label) === "yes",
   );

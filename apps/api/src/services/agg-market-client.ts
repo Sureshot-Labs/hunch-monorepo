@@ -34,6 +34,7 @@ export type AggMidpointOutcome = {
   label: string | null;
   midpoint: number | null;
   price: number | null;
+  markSource: string | null;
 };
 
 export type AggMidpoint = {
@@ -43,6 +44,7 @@ export type AggMidpoint = {
   price: number | null;
   spread: number | null;
   timestamp: string | null;
+  markSource: string | null;
   outcomes: AggMidpointOutcome[];
 };
 
@@ -162,10 +164,11 @@ function normalizeVenueMarket(value: unknown): AggVenueMarket | null {
 function normalizeMidpointOutcome(value: unknown): AggMidpointOutcome | null {
   if (!isRecord(value)) return null;
   return {
-    id: getString(value, "id"),
+    id: getString(value, "id") ?? getString(value, "venueMarketOutcomeId"),
     label: getString(value, "label"),
     midpoint: getNumber(value, "midpoint"),
     price: getNumber(value, "price"),
+    markSource: getString(value, "markSource"),
   };
 }
 
@@ -182,6 +185,7 @@ function normalizeMidpoint(value: unknown): AggMidpoint | null {
     price: getNumber(value, "price"),
     spread: getNumber(value, "spread"),
     timestamp: getString(value, "timestamp"),
+    markSource: getString(value, "markSource"),
     outcomes: outcomesRaw
       .map(normalizeMidpointOutcome)
       .filter((row): row is AggMidpointOutcome => row != null),
