@@ -312,7 +312,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v18:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
