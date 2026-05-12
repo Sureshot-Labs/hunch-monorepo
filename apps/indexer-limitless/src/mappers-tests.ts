@@ -254,6 +254,51 @@ test("mapToUnifiedMarket falls back to event signals when market categories are 
   assert.equal(unified.category, "politics");
 });
 
+test("mapToUnifiedEvent suppresses AMM liquidity in unified rows", () => {
+  const event = makeEvent({
+    tradeType: "amm",
+    liquidity: 1049239077000000,
+    liquidityFormatted: "1049239077.000000",
+    openInterest: 25000000,
+    openInterestFormatted: "25.000000",
+    volume: "12775105599543",
+    volumeFormatted: "12775105.599543",
+  });
+
+  const unified = mapToUnifiedEvent(event);
+  assert.equal(unified.liquidity, undefined);
+  assert.equal(unified.open_interest, 25);
+  assert.equal(unified.volume_total, 12775105.599543);
+});
+
+test("mapToUnifiedMarket suppresses AMM liquidity but keeps volume and open interest", () => {
+  const market = makeMarket({
+    tradeType: "amm",
+    liquidity: 722963751000000,
+    liquidityFormatted: "722963751.000000",
+    openInterest: 50000000,
+    openInterestFormatted: "50.000000",
+    volume: "59362379220291",
+    volumeFormatted: "59362379.220291",
+  });
+
+  const unified = mapToUnifiedMarket(market, "1");
+  assert.equal(unified.liquidity, undefined);
+  assert.equal(unified.open_interest, 50);
+  assert.equal(unified.volume_total, 59362379.220291);
+});
+
+test("mapToUnifiedMarket preserves non-AMM liquidity when provided", () => {
+  const market = makeMarket({
+    tradeType: "clob",
+    liquidity: 123450000,
+    liquidityFormatted: "123.450000",
+  });
+
+  const unified = mapToUnifiedMarket(market, "1");
+  assert.equal(unified.liquidity, 123.45);
+});
+
 test("normalizeLimitlessPricePair scales percent-style AMM prices", () => {
   const even = normalizeLimitlessPricePair([50, 50], "amm");
   assert.equal(even[0], 0.5);
