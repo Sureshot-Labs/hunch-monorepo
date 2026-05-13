@@ -162,6 +162,16 @@ function inferSelectedParticipant(
   return null;
 }
 
+export function hasSameInferredSelectedParticipant(
+  left: ClusterMarketSummary,
+  right: ClusterMarketSummary,
+): boolean {
+  const leftSelected = inferSelectedParticipant(left);
+  const rightSelected = inferSelectedParticipant(right);
+  if (!leftSelected || !rightSelected) return true;
+  return intersectionSize(leftSelected.tokens, rightSelected.tokens) > 0;
+}
+
 function resolveComparablePrice(
   market: ClusterMarketSummary,
   canonicalSelection: ParticipantGroup | null,

@@ -49,6 +49,8 @@ export type AggMidpoint = {
 };
 
 export type AggVenueMarketsParams = {
+  venue?: string;
+  venueEventId?: string;
   search?: string;
   status?: string | string[];
   matchStatus?: string | string[];
@@ -290,6 +292,8 @@ export function createAggMarketClient(
   return {
     async getVenueMarkets(params) {
       const query = new URLSearchParams();
+      appendParam(query, "venue", params.venue);
+      appendParam(query, "venueEventId", params.venueEventId);
       appendParam(query, "search", params.search);
       appendParam(query, "status", params.status);
       appendParam(query, "matchStatus", params.matchStatus);

@@ -13,6 +13,7 @@ import {
   buildAggMarketAlternativesResponse,
   buildAggClusterListResponse,
   clearAggClustersCacheForTests,
+  getAggMarketAlternativesResponseCached,
   getAggClusterListResponseCached,
 } from "./services/agg-market-clusters.js";
 
@@ -113,6 +114,7 @@ function topLevelMidpoint(
 function dbRow(args: {
   id: string;
   eventId?: string;
+  venueEventId?: string | null;
   venue: string;
   venueMarketId: string;
   conditionId?: string | null;
@@ -140,9 +142,9 @@ function dbRow(args: {
     icon: null,
     market_category: args.marketCategory ?? null,
     market_type: "binary",
-    best_bid: args.bestBid ?? 0.4,
-    best_ask: args.bestAsk ?? 0.6,
-    last_price: args.lastPrice ?? 0.5,
+    best_bid: "bestBid" in args ? args.bestBid : 0.4,
+    best_ask: "bestAsk" in args ? args.bestAsk : 0.6,
+    last_price: "lastPrice" in args ? args.lastPrice : 0.5,
     volume_24h: args.volume24h ?? 10,
     activity_volume_last_24h: args.activityVolume24h ?? null,
     activity_volume_valid: args.activityVolumeValid ?? false,
@@ -152,6 +154,7 @@ function dbRow(args: {
     close_time: "2026-06-01T00:00:00.000Z",
     expiration_time: "2026-06-01T00:00:00.000Z",
     condition_id: args.conditionId ?? null,
+    event_venue_event_id: args.venueEventId ?? null,
     event_title: args.eventTitle ?? "Event title",
     event_description: null,
     event_slug: null,
@@ -234,6 +237,34 @@ await test("parses top-level AGG midpoint fields when outcomes are empty", async
   assert.equal(rows[0]?.markSource, "local");
   assert.equal(rows[0]?.outcomes.length, 0);
   assert.match(requested[0] ?? "", /venueMarketIds=agg-poly/);
+});
+
+await test("passes venue and venueEventId filters to AGG venue markets", async () => {
+  const requested: string[] = [];
+  const client = createAggMarketClient({
+    appId: "test-app",
+    baseUrl: "https://agg.example",
+    fetchImpl: async (input) => {
+      requested.push(String(input));
+      return new Response(JSON.stringify({ data: [] }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+
+  await client.getVenueMarkets({
+    venue: "polymarket",
+    venueEventId: "90177",
+    status: "open",
+    matchStatus: ["matched", "verified"],
+    limit: 10,
+  });
+
+  const url = requested[0] ?? "";
+  assert.match(url, /venue=polymarket/);
+  assert.match(url, /venueEventId=90177/);
+  assert.match(url, /matchStatus=matched/);
+  assert.match(url, /matchStatus=verified/);
 });
 
 await test("builds AGG clusters from labeled Yes midpoints and DB rows", async () => {
@@ -320,6 +351,56 @@ await test("builds AGG clusters from labeled Yes midpoints and DB rows", async (
   );
 });
 
+await test("drops opposite participant AGG clusters", async () => {
+  const limitlessSenegal = market({
+    id: "agg-limitless-senegal",
+    venue: "limitless",
+    externalIdentifier: "84875",
+    question: "Senegal",
+  });
+  const polyFrance = market({
+    id: "agg-poly-france",
+    venue: "polymarket",
+    externalIdentifier: "1897082",
+    question: "France",
+  });
+  limitlessSenegal.matchedVenueMarkets = [polyFrance];
+
+  const response = await buildAggClusterListResponse({
+    query: { minSpread: 0, sort_by: "spread" },
+    client: fakeClient({
+      markets: [limitlessSenegal],
+      midpoints: [
+        midpoint("agg-limitless-senegal", 0.135),
+        midpoint("agg-poly-france", 0.68),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+      dbRow({
+        id: "polymarket:1897082",
+        venue: "polymarket",
+        venueMarketId: "1897082",
+        title: "France",
+        eventTitle: "France vs. Senegal",
+        bestBid: 0.67,
+        bestAsk: 0.69,
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.equal(response.items.length, 0);
+});
+
 await test("builds market alternatives from an AGG matched group", async () => {
   const poly = market({
     id: "agg-poly",
@@ -392,8 +473,8 @@ await test("builds market alternatives from an AGG matched group", async () => {
   assert.equal(response.alternatives.length, 2);
   assert.ok(response.priceSpread != null);
   assert.ok(Math.abs(response.priceSpread - 0.02) < 1e-9);
-  assert.equal(response.bestYesBuy?.marketId, "kalshi:KXUCL-26-PSG");
-  assert.equal(response.bestNoBuy?.marketId, "polymarket:101");
+  assert.equal(response.lowestYesMid?.marketId, "kalshi:KXUCL-26-PSG");
+  assert.equal(response.lowestNoMid?.marketId, "polymarket:101");
   assert.deepEqual(
     response.markets.map((row) => row.pricingSource),
     ["agg_midpoint", "agg_midpoint", "agg_midpoint"],
@@ -401,6 +482,318 @@ await test("builds market alternatives from an AGG matched group", async () => {
   assert.equal(
     (venueMarketParams[0] as { search?: string } | undefined)?.search,
     "PSG",
+  );
+});
+
+await test("drops opposite participant market alternatives", async () => {
+  const limitlessSenegal = market({
+    id: "agg-limitless-senegal",
+    venue: "limitless",
+    externalIdentifier: "84875",
+    question: "Senegal",
+  });
+  const polyFrance = market({
+    id: "agg-poly-france",
+    venue: "polymarket",
+    externalIdentifier: "1897082",
+    question: "France",
+  });
+  limitlessSenegal.matchedVenueMarkets = [polyFrance];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "limitless:84875",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [limitlessSenegal],
+      midpoints: [
+        midpoint("agg-limitless-senegal", 0.135),
+        midpoint("agg-poly-france", 0.68),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+      dbRow({
+        id: "polymarket:1897082",
+        venue: "polymarket",
+        venueMarketId: "1897082",
+        title: "France",
+        eventTitle: "France vs. Senegal",
+        bestBid: 0.67,
+        bestAsk: 0.69,
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "not_found");
+  assert.equal(response.markets.length, 0);
+  assert.equal(response.alternatives.length, 0);
+});
+
+await test("keeps same participant market alternatives", async () => {
+  const polyFrance = market({
+    id: "agg-poly-france",
+    venue: "polymarket",
+    externalIdentifier: "1897082",
+    question: "France",
+  });
+  const limitlessFrance = market({
+    id: "agg-limitless-france",
+    venue: "limitless",
+    externalIdentifier: "84874",
+    question: "France",
+  });
+  polyFrance.matchedVenueMarkets = [limitlessFrance];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:1897082",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [polyFrance],
+      midpoints: [
+        midpoint("agg-poly-france", 0.68),
+        midpoint("agg-limitless-france", 0.66),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:1897082",
+        venue: "polymarket",
+        venueMarketId: "1897082",
+        title: "France",
+        eventTitle: "France vs. Senegal",
+        bestBid: 0.67,
+        bestAsk: 0.69,
+      }),
+      dbRow({
+        id: "limitless:84874",
+        venue: "limitless",
+        venueMarketId: "84874",
+        title: "France",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.65,
+        bestAsk: 0.67,
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "matched");
+  assert.deepEqual(
+    response.markets.map((row) => row.marketId),
+    ["polymarket:1897082", "limitless:84874"],
+  );
+  assert.equal(response.matchDiagnostics?.matchedMarketIds.length, 2);
+});
+
+await test("bounds the market alternatives cache", async () => {
+  clearAggClustersCacheForTests();
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  poly.matchedVenueMarkets = [kalshi];
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const client = fakeClient({
+    markets: [poly],
+    midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)],
+    calls,
+  });
+  const db = fakeDb([
+    dbRow({
+      id: "polymarket:101",
+      venue: "polymarket",
+      venueMarketId: "101",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+    dbRow({
+      id: "kalshi:KXUCL-26-PSG",
+      venue: "kalshi",
+      venueMarketId: "KXUCL-26-PSG",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+  ]);
+
+  for (let index = 0; index < 501; index += 1) {
+    await getAggMarketAlternativesResponseCached({
+      marketId: "polymarket:101",
+      query: {
+        limit: (index % 50) + 1,
+        sourceLimit: Math.floor(index / 50) + 1,
+      },
+      client,
+      db,
+      ttlSec: 60,
+    });
+  }
+  const callsAfterFill = calls.venueMarkets;
+
+  await getAggMarketAlternativesResponseCached({
+    marketId: "polymarket:101",
+    query: { limit: 1, sourceLimit: 1 },
+    client,
+    db,
+    ttlSec: 60,
+  });
+
+  assert.equal(calls.venueMarkets, callsAfterFill + 1);
+});
+
+await test("rejects unsupported market alternatives venues before AGG calls", async () => {
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  await assert.rejects(
+    () =>
+      buildAggMarketAlternativesResponse({
+        marketId: "polymarket:101",
+        query: { venues: "polymarket,badvenue" },
+        client: fakeClient({
+          markets: [],
+          midpoints: [],
+          calls,
+        }),
+        db: fakeDb([]),
+      }),
+    /Unsupported AGG venues: badvenue/,
+  );
+  assert.equal(calls.venueMarkets, 0);
+  assert.equal(calls.midpoints, 0);
+});
+
+await test("does not issue live broad market alternatives fallback", async () => {
+  clearAggClustersCacheForTests();
+  const venueMarketParams: unknown[] = [];
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [],
+      midpoints: [],
+      venueMarketParams,
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+      }),
+    ]),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "not_found");
+  assert.ok(venueMarketParams.length > 0);
+  assert.equal(
+    venueMarketParams.some((params) => {
+      const query = params as {
+        search?: string;
+        venueEventId?: string;
+      };
+      return !query.search && !query.venueEventId;
+    }),
+    false,
+  );
+});
+
+await test("uses cached AGG cluster list as alternatives fallback", async () => {
+  clearAggClustersCacheForTests();
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  poly.matchedVenueMarkets = [kalshi];
+
+  let warmCache = true;
+  const venueMarketParams: unknown[] = [];
+  const client: AggMarketClient = {
+    async getVenueMarkets(params) {
+      venueMarketParams.push(params);
+      return warmCache ? [poly] : [];
+    },
+    async getMidpoints(ids) {
+      const wanted = new Set(ids);
+      return [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)].filter(
+        (row) => wanted.has(row.venueMarketId),
+      );
+    },
+  };
+  const db = fakeDb([
+    dbRow({
+      id: "polymarket:101",
+      venue: "polymarket",
+      venueMarketId: "101",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+    dbRow({
+      id: "kalshi:KXUCL-26-PSG",
+      venue: "kalshi",
+      venueMarketId: "KXUCL-26-PSG",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+  ]);
+
+  await getAggClusterListResponseCached({
+    query: { minSpread: 0 },
+    client,
+    db,
+    ttlSec: 60,
+  });
+  warmCache = false;
+  venueMarketParams.length = 0;
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client,
+    db,
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "matched");
+  assert.deepEqual(
+    response.markets.map((row) => row.marketId),
+    ["polymarket:101", "kalshi:KXUCL-26-PSG"],
+  );
+  assert.equal(
+    venueMarketParams.some((params) => {
+      const query = params as {
+        search?: string;
+        venueEventId?: string;
+      };
+      return !query.search && !query.venueEventId;
+    }),
+    false,
   );
 });
 
@@ -495,6 +888,56 @@ await test("drops one-sided AGG midpoints instead of treating ask-only quotes as
       midpoints: [
         midpoint("agg-poly-knicks", 0.1375),
         topLevelMidpoint("agg-limitless-knicks", 0.99, "local_one_sided"),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:553858",
+        venue: "polymarket",
+        venueMarketId: "553858",
+        title: "New York Knicks",
+        eventTitle: "2026 NBA Champion",
+        bestBid: 0.137,
+        bestAsk: 0.138,
+      }),
+      dbRow({
+        id: "limitless:29729",
+        venue: "limitless",
+        venueMarketId: "29729",
+        title: "New York Knicks",
+        eventTitle: "2026 NBA Champion",
+        bestBid: null,
+        bestAsk: 0.99,
+        lastPrice: 0.155439,
+      }),
+    ]),
+  });
+
+  assert.equal(response.items.length, 0);
+});
+
+await test("drops labeled AGG midpoints that conflict with reliable DB last price", async () => {
+  const poly = market({
+    id: "agg-poly-knicks",
+    venue: "polymarket",
+    externalIdentifier: "553858",
+    question: "New York Knicks",
+  });
+  const limitless = market({
+    id: "agg-limitless-knicks",
+    venue: "limitless",
+    externalIdentifier: "29729",
+    question: "New York Knicks",
+  });
+  poly.matchedVenueMarkets = [limitless];
+
+  const response = await buildAggClusterListResponse({
+    query: { minSpread: 0 },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [
+        midpoint("agg-poly-knicks", 0.1375),
+        midpoint("agg-limitless-knicks", 0.86),
       ],
     }),
     db: fakeDb([

@@ -41,6 +41,7 @@ import {
   extractDflowErrorMessage,
 } from "../services/dflow-client.js";
 import {
+  type AggMarketClient,
   AggMarketHttpError,
   createAggMarketClient,
 } from "../services/agg-market-client.js";
@@ -57,6 +58,7 @@ import {
   marketsByTokenQuerySchema,
   marketSimilarQuerySchema,
 } from "../schemas/market.js";
+import type { DbQuery } from "../db.js";
 
 function parseTimestampSeconds(value: unknown): number | null {
   if (value == null) return null;
@@ -147,8 +149,27 @@ function extractLimitlessMeta(
   };
 }
 
-export const marketRoutes: FastifyPluginAsync = async (app) => {
+type MarketRoutesOptions = {
+  aggMarketAppId?: string;
+  aggMarketBaseUrl?: string;
+  aggMarketTimeoutMs?: number;
+  aggMarketAlternativesCacheTtlSec?: number;
+  aggMarketAlternativesDb?: DbQuery;
+  createAggMarketClient?: (config: {
+    appId: string;
+    baseUrl?: string;
+    timeoutMs?: number;
+  }) => AggMarketClient;
+};
+
+export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
+  app,
+  options,
+) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const createAggClient =
+    options.createAggMarketClient ?? createAggMarketClient;
+  const aggAlternativesDb = options.aggMarketAlternativesDb ?? pool;
 
   /**
    * GET /markets/by-token
@@ -698,22 +719,25 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
       },
     },
     async (request, reply) => {
-      if (!env.aggMarketAppId) {
+      const aggMarketAppId = options.aggMarketAppId ?? env.aggMarketAppId;
+      if (!aggMarketAppId) {
         return reply.code(503).send({ error: "AGG Market is not configured" });
       }
 
       try {
-        const client = createAggMarketClient({
-          appId: env.aggMarketAppId,
-          baseUrl: env.aggMarketBaseUrl,
-          timeoutMs: env.aggMarketTimeoutMs,
+        const client = createAggClient({
+          appId: aggMarketAppId,
+          baseUrl: options.aggMarketBaseUrl ?? env.aggMarketBaseUrl,
+          timeoutMs: options.aggMarketTimeoutMs ?? env.aggMarketTimeoutMs,
         });
         const response = await getAggMarketAlternativesResponseCached({
           marketId: request.params.marketId,
           query: request.query,
           client,
-          db: pool,
-          ttlSec: env.aggClustersCacheTtlSec,
+          db: aggAlternativesDb,
+          ttlSec:
+            options.aggMarketAlternativesCacheTtlSec ??
+            env.aggClustersCacheTtlSec,
         });
         if (!response) {
           return reply.code(404).send({ error: "Market not found" });
