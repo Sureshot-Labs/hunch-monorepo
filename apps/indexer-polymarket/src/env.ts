@@ -134,6 +134,14 @@ const overlapPages = clampInt(overlapPagesRaw, {
   max: 10_000,
   fallback: 2,
 });
+const gammaMaxEventsOffsetRaw = parseOptionalInt(
+  process.env.POLYMARKET_GAMMA_MAX_EVENTS_OFFSET,
+);
+const gammaMaxEventsOffset = clampInt(gammaMaxEventsOffsetRaw, {
+  min: 0,
+  max: 1_000_000_000,
+  fallback: 100_000,
+});
 
 const hotStatusMaxEventsRaw = parseOptionalInt(
   process.env.POLYMARKET_HOT_STATUS_MAX_EVENTS,
@@ -215,6 +223,7 @@ export const env = {
   hotLookbackMinutes,
   hotMaxPages,
   overlapPages,
+  gammaMaxEventsOffset,
   // bootstrapLimit removed - now fetching all events
   hotTokensTtlSec,
   hotTokensMax,
