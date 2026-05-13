@@ -188,6 +188,17 @@ function parseMetric(
   return null;
 }
 
+// Limitless AMM liquidity is not comparable to venue orderbook liquidity.
+function parseComparableLiquidity(
+  tradeType: string | null | undefined,
+  value?: string | number | null,
+  formatted?: string | null,
+  decimals = 6,
+): number | null {
+  if (tradeType?.toLowerCase() === "amm") return null;
+  return parseMetric(value, formatted, decimals);
+}
+
 function normalizePositionIds(
   value?: Array<string | string[]> | null,
 ): string[] {
@@ -725,6 +736,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const volumeTotal =
     parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ??
     undefined;
+  const tradeType = lm.tradeType ?? "clob";
   const openInterest =
     parseMetric(
       lm.openInterest,
@@ -732,7 +744,8 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
       lm.collateralToken?.decimals,
     ) ?? undefined;
   const liquidity =
-    parseMetric(
+    parseComparableLiquidity(
+      tradeType,
       lm.liquidity,
       lm.liquidityFormatted,
       lm.collateralToken?.decimals,
@@ -765,7 +778,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     open_interest: openInterest,
     liquidity,
     metadata: {
-      tradeType: lm.tradeType ?? "clob",
+      tradeType,
       marketType: lm.marketType,
       address: lm.address ?? undefined,
       negRiskRequestId: lm.negRiskRequestId ?? undefined,
@@ -794,6 +807,7 @@ export function mapToUnifiedMarket(
   const volumeTotal = market.volumeFormatted
     ? parseFloat(market.volumeFormatted)
     : undefined;
+  const tradeType = market.tradeType ?? "clob";
   const openInterest =
     parseMetric(
       market.openInterest,
@@ -801,7 +815,8 @@ export function mapToUnifiedMarket(
       market.collateralToken?.decimals,
     ) ?? undefined;
   const liquidity =
-    parseMetric(
+    parseComparableLiquidity(
+      tradeType,
       market.liquidity,
       market.liquidityFormatted,
       market.collateralToken?.decimals,
@@ -810,7 +825,6 @@ export function mapToUnifiedMarket(
     ? new Date(Number(market.expirationTimestamp))
     : undefined;
 
-  const tradeType = market.tradeType ?? "clob";
   const normalizedPrices = normalizePrices(
     [market.prices?.[0], market.prices?.[1]],
     tradeType,

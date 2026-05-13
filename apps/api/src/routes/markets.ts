@@ -41,16 +41,24 @@ import {
   extractDflowErrorMessage,
 } from "../services/dflow-client.js";
 import {
+  type AggMarketClient,
+  AggMarketHttpError,
+  createAggMarketClient,
+} from "../services/agg-market-client.js";
+import { getAggMarketAlternativesResponseCached } from "../services/agg-market-clusters.js";
+import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
+  marketAlternativesQuerySchema,
   marketParamsSchema,
   marketsByTokenQuerySchema,
   marketSimilarQuerySchema,
 } from "../schemas/market.js";
+import type { DbQuery } from "../db.js";
 
 function parseTimestampSeconds(value: unknown): number | null {
   if (value == null) return null;
@@ -141,8 +149,27 @@ function extractLimitlessMeta(
   };
 }
 
-export const marketRoutes: FastifyPluginAsync = async (app) => {
+type MarketRoutesOptions = {
+  aggMarketAppId?: string;
+  aggMarketBaseUrl?: string;
+  aggMarketTimeoutMs?: number;
+  aggMarketAlternativesCacheTtlSec?: number;
+  aggMarketAlternativesDb?: DbQuery;
+  createAggMarketClient?: (config: {
+    appId: string;
+    baseUrl?: string;
+    timeoutMs?: number;
+  }) => AggMarketClient;
+};
+
+export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
+  app,
+  options,
+) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const createAggClient =
+    options.createAggMarketClient ?? createAggMarketClient;
+  const aggAlternativesDb = options.aggMarketAlternativesDb ?? pool;
 
   /**
    * GET /markets/by-token
@@ -675,6 +702,73 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "Internal server error",
         });
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/alternatives
+   * Get exact cross-venue alternatives using AGG matched markets.
+   */
+  z.get(
+    "/markets/:marketId/alternatives",
+    {
+      schema: {
+        params: marketParamsSchema,
+        querystring: marketAlternativesQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const aggMarketAppId = options.aggMarketAppId ?? env.aggMarketAppId;
+      if (!aggMarketAppId) {
+        return reply.code(503).send({ error: "AGG Market is not configured" });
+      }
+
+      try {
+        const client = createAggClient({
+          appId: aggMarketAppId,
+          baseUrl: options.aggMarketBaseUrl ?? env.aggMarketBaseUrl,
+          timeoutMs: options.aggMarketTimeoutMs ?? env.aggMarketTimeoutMs,
+        });
+        const response = await getAggMarketAlternativesResponseCached({
+          marketId: request.params.marketId,
+          query: request.query,
+          client,
+          db: aggAlternativesDb,
+          ttlSec:
+            options.aggMarketAlternativesCacheTtlSec ??
+            env.aggClustersCacheTtlSec,
+        });
+        if (!response) {
+          return reply.code(404).send({ error: "Market not found" });
+        }
+        return response;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Unsupported AGG venues:")
+        ) {
+          return reply.code(400).send({ error: error.message });
+        }
+        if (error instanceof AggMarketHttpError) {
+          request.log.warn(
+            { status: error.status },
+            "AGG Market alternatives request failed",
+          );
+          return reply
+            .code(error.status >= 500 ? 502 : 400)
+            .send({ error: "AGG Market request failed" });
+        }
+        if (error instanceof Error && error.name === "AbortError") {
+          request.log.warn("AGG Market alternatives request timed out");
+          return reply
+            .code(504)
+            .send({ error: "AGG Market request timed out" });
+        }
+        request.log.error({ error }, "AGG Market alternatives build failed");
+        return reply
+          .code(500)
+          .send({ error: "Failed to build market alternatives" });
       }
     },
   );

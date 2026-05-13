@@ -196,12 +196,14 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
   const cursorOffset = await getPolymarketEventsOffset();
   const overlap = env.overlapPages * env.pageSize;
   const startOffset = Math.max(0, cursorOffset - overlap);
+  const maxOffset = env.gammaMaxEventsOffset;
 
   log.info("Polymarket catch-up…", {
     cursorOffset,
     startOffset,
     pageSize: env.pageSize,
     overlapPages: env.overlapPages,
+    maxOffset,
   });
 
   const totals: SyncCounters = {
@@ -210,10 +212,22 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
     pages: 0,
   };
 
+  if (startOffset > maxOffset) {
+    log.warn("Polymarket catch-up skipped: cursor exceeds Gamma offset cap", {
+      cursorOffset,
+      startOffset,
+      maxOffset,
+      reason:
+        "Gamma /events rejects offsets above this cap; hot refresh and websocket sync still cover recent/active changes.",
+    });
+    return totals;
+  }
+
   for await (const page of iterateEventPages({
     label: "catch-up",
     startOffset,
     pageSize: env.pageSize,
+    maxOffset,
     order: "id",
     ascending: true,
     active: true,

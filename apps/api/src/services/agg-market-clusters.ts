@@ -3,6 +3,7 @@ import type { DbQuery } from "../db.js";
 import {
   buildMarketSummary,
   computeClusterMetrics,
+  hasSameInferredSelectedParticipant,
   type ClusterMarketSummary,
 } from "./clusters.js";
 import {
@@ -37,6 +38,7 @@ type AggClusterMarketRow = {
   close_time: unknown;
   expiration_time: unknown;
   condition_id: string | null;
+  event_venue_event_id: string | null;
   event_title: string | null;
   event_description: string | null;
   event_slug: string | null;
@@ -106,6 +108,35 @@ export type AggClusterListResponse = {
   items: AggClusterSummary[];
 };
 
+export type AggMarketAlternativesQueryInput = {
+  venues?: string;
+  limit?: number;
+  sourceLimit?: number;
+};
+
+export type AggMarketAlternativeMidpoint = {
+  marketId: string;
+  eventId: string;
+  venue: string;
+  yesMid: number | null;
+  noMid: number | null;
+};
+
+export type AggMarketAlternativesResponse = {
+  generatedAt: string;
+  source: "agg";
+  pricingSource: "agg_midpoint";
+  marketId: string;
+  eventId: string | null;
+  status: "matched" | "not_found";
+  priceSpread: number | null;
+  lowestYesMid: AggMarketAlternativeMidpoint | null;
+  lowestNoMid: AggMarketAlternativeMidpoint | null;
+  markets: ClusterMarketSummary[];
+  alternatives: ClusterMarketSummary[];
+  matchDiagnostics: AggClusterSummary["matchDiagnostics"] | null;
+};
+
 type NormalizedAggMarket = {
   aggMarketId: string;
   venue: AggSupportedVenue;
@@ -126,9 +157,9 @@ type DbMatchedMarket = {
   matchMethod: "externalIdentifier" | "conditionId";
 };
 
-type CacheEntry = {
+type CacheEntry<T> = {
   expiresAt: number;
-  value: AggClusterListResponse;
+  value: T;
 };
 
 type ResolvedAggMidpoint = {
@@ -186,7 +217,12 @@ function resolveClusterCategory(
 
   return best?.category ?? null;
 }
-const cache = new Map<string, CacheEntry>();
+const cache = new Map<string, CacheEntry<AggClusterListResponse>>();
+const alternativesCache = new Map<
+  string,
+  CacheEntry<AggMarketAlternativesResponse>
+>();
+const MAX_ALTERNATIVES_CACHE_ENTRIES = 500;
 const supportedVenueSet = new Set<string>(AGG_SUPPORTED_VENUES);
 
 function clampInt(
@@ -227,6 +263,28 @@ function toProbability(value: number | null | undefined): number | null {
   return value >= 0 && value <= 1 ? value : null;
 }
 
+function toProbabilityFromUnknown(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
+}
+
+function resolveReliableDbYesReference(
+  row: AggClusterMarketRow,
+): number | null {
+  const bid = toProbabilityFromUnknown(row.best_bid);
+  const ask = toProbabilityFromUnknown(row.best_ask);
+  if (bid != null && ask != null) return (bid + ask) / 2;
+
+  const lastPrice = toProbabilityFromUnknown(row.last_price);
+  if (lastPrice != null) return lastPrice;
+
+  // A bid-only quote is a lower bound but still on the selected side. An
+  // ask-only quote can be arbitrarily stale/wide, so do not use it to orient
+  // external midpoint data.
+  return bid;
+}
+
 function resolveAggMidpoint(
   midpoint: AggMidpoint | null,
 ): ResolvedAggMidpoint | null {
@@ -253,15 +311,15 @@ function resolveAggMidpoint(
 
 function orientAggMidpointToDbYes(params: {
   midpoint: ResolvedAggMidpoint;
-  market: ClusterMarketSummary;
+  referenceYesMid: number | null;
 }): number | null {
-  const { midpoint, market } = params;
-  const yesMid = market.yesMid;
-  const noMid = market.noMid ?? (yesMid == null ? null : 1 - yesMid);
+  const { midpoint } = params;
+  const yesMid = params.referenceYesMid;
+  const noMid = yesMid == null ? null : 1 - yesMid;
 
   if (midpoint.side === "yes") {
+    if (yesMid == null) return null;
     if (
-      yesMid != null &&
       Math.abs(yesMid - midpoint.value) > MAX_AGG_DB_SELECTED_SIDE_DEVIATION
     ) {
       return null;
@@ -270,11 +328,9 @@ function orientAggMidpointToDbYes(params: {
   }
 
   if (midpoint.side === "no") {
+    if (yesMid == null) return null;
     const inferredYes = 1 - midpoint.value;
-    if (
-      yesMid != null &&
-      Math.abs(yesMid - inferredYes) > MAX_AGG_DB_SELECTED_SIDE_DEVIATION
-    ) {
+    if (Math.abs(yesMid - inferredYes) > MAX_AGG_DB_SELECTED_SIDE_DEVIATION) {
       return null;
     }
     return inferredYes;
@@ -442,6 +498,7 @@ async function loadMatchedMarketRows(
         m.close_time,
         m.expiration_time,
         m.condition_id,
+        e.venue_event_id as event_venue_event_id,
         e.title as event_title,
         e.description as event_description,
         e.slug as event_slug,
@@ -494,6 +551,58 @@ async function loadMatchedMarketRows(
   return byAggMarketId;
 }
 
+async function loadSeedMarketRow(
+  db: DbQuery,
+  marketId: string,
+): Promise<AggClusterMarketRow | null> {
+  const { rows } = await db.query<AggClusterMarketRow>(
+    `
+      select
+        m.id,
+        m.event_id,
+        m.venue,
+        m.venue_market_id,
+        m.title,
+        m.description,
+        m.slug,
+        m.image,
+        m.icon,
+        m.category as market_category,
+        m.market_type,
+        m.best_bid,
+        m.best_ask,
+        m.last_price,
+        m.volume_24h,
+        mam.volume_last_24h as activity_volume_last_24h,
+        mam.volume_valid as activity_volume_valid,
+        m.volume_total,
+        m.liquidity,
+        m.open_interest,
+        m.close_time,
+        m.expiration_time,
+        m.condition_id,
+        e.venue_event_id as event_venue_event_id,
+        e.title as event_title,
+        e.description as event_description,
+        e.slug as event_slug,
+        e.image as event_image,
+        e.icon as event_icon,
+        e.category as event_category
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      left join unified_market_activity_metrics_24h mam
+        on mam.market_id = m.id
+      where m.status = 'ACTIVE'
+        and e.status = 'ACTIVE'
+        and (m.id = $1 or m.venue_market_id = $1)
+      order by case when m.id = $1 then 0 else 1 end
+      limit 1
+    `,
+    [marketId],
+  );
+  return rows[0] ?? null;
+}
+
 function buildLabel(markets: ClusterMarketSummary[]): string {
   const primary = markets.slice().sort((left, right) => {
     const leftVolume = left.volume24h ?? left.volumeTotal ?? 0;
@@ -530,6 +639,255 @@ function scoreCluster(metrics: {
   return spread * 100 + volume + liquidity * 0.5 + metrics.venueCount;
 }
 
+function buildAlternativeSearchTerms(seed: ClusterMarketSummary): string[] {
+  const values = [
+    seed.marketTitle,
+    seed.eventTitle,
+    seed.marketTitle && seed.eventTitle
+      ? `${seed.marketTitle} ${seed.eventTitle}`
+      : null,
+  ];
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const value of values) {
+    const term = value?.trim();
+    if (!term) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms.slice(0, 3);
+}
+
+function buildAlternativeVenueMarketAttempts(params: {
+  seed: ClusterMarketSummary;
+  seedRow: AggClusterMarketRow;
+}): Array<{
+  venue?: string;
+  venueEventId?: string;
+  search?: string;
+}> {
+  const attempts: Array<{
+    venue?: string;
+    venueEventId?: string;
+    search?: string;
+  }> = [];
+
+  if (params.seedRow.event_venue_event_id) {
+    attempts.push({
+      venue: params.seed.venue,
+      venueEventId: params.seedRow.event_venue_event_id,
+    });
+  }
+
+  for (const search of buildAlternativeSearchTerms(params.seed)) {
+    attempts.push({ search });
+  }
+
+  const seen = new Set<string>();
+  return attempts.filter((attempt) => {
+    const key = JSON.stringify({
+      venue: attempt.venue ?? null,
+      venueEventId: attempt.venueEventId ?? null,
+      search: attempt.search ?? null,
+    });
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function orderAlternativeMarkets(
+  marketId: string,
+  markets: ClusterMarketSummary[],
+): { markets: ClusterMarketSummary[]; alternatives: ClusterMarketSummary[] } {
+  const seed = markets.find((market) => market.marketId === marketId) ?? null;
+  const seedYesMid = seed?.yesMid ?? null;
+  const alternatives = markets
+    .filter((market) => market.marketId !== marketId)
+    .sort((left, right) => {
+      const leftDistance =
+        seedYesMid != null && left.yesMid != null
+          ? Math.abs(left.yesMid - seedYesMid)
+          : -1;
+      const rightDistance =
+        seedYesMid != null && right.yesMid != null
+          ? Math.abs(right.yesMid - seedYesMid)
+          : -1;
+      if (leftDistance !== rightDistance) return rightDistance - leftDistance;
+      const leftVolume = left.volume24h ?? left.volumeTotal ?? 0;
+      const rightVolume = right.volume24h ?? right.volumeTotal ?? 0;
+      if (leftVolume !== rightVolume) return rightVolume - leftVolume;
+      return left.marketId.localeCompare(right.marketId);
+    });
+
+  return {
+    markets: seed ? [seed, ...alternatives] : markets,
+    alternatives,
+  };
+}
+
+function resolveLowestMidpoint(
+  markets: ClusterMarketSummary[],
+  side: "yes" | "no",
+): AggMarketAlternativeMidpoint | null {
+  const candidates = markets.filter((market) =>
+    side === "yes" ? market.yesMid != null : market.noMid != null,
+  );
+  if (!candidates.length) return null;
+
+  const best = candidates.slice().sort((left, right) => {
+    const leftValue = side === "yes" ? left.yesMid : left.noMid;
+    const rightValue = side === "yes" ? right.yesMid : right.noMid;
+    return (
+      (leftValue ?? Number.POSITIVE_INFINITY) -
+      (rightValue ?? Number.POSITIVE_INFINITY)
+    );
+  })[0];
+  if (!best) return null;
+  return {
+    marketId: best.marketId,
+    eventId: best.eventId,
+    venue: best.venue,
+    yesMid: best.yesMid,
+    noMid: best.noMid,
+  };
+}
+
+function matchDiagnosticsForMarkets(
+  diagnostics: AggClusterSummary["matchDiagnostics"] | null,
+  markets: ClusterMarketSummary[],
+): AggClusterSummary["matchDiagnostics"] | null {
+  if (!diagnostics) return null;
+  const venues = [...new Set(markets.map((market) => market.venue))].filter(
+    (venue): venue is AggSupportedVenue => supportedVenueSet.has(venue),
+  );
+  return {
+    ...diagnostics,
+    matchedMarketIds: markets.map((market) => market.marketId),
+    venues,
+  };
+}
+
+function buildNotFoundAlternativesResponse(params: {
+  generatedAt: string;
+  marketId: string;
+  eventId: string | null;
+}): AggMarketAlternativesResponse {
+  return {
+    generatedAt: params.generatedAt,
+    source: "agg",
+    pricingSource: "agg_midpoint",
+    marketId: params.marketId,
+    eventId: params.eventId,
+    status: "not_found",
+    priceSpread: null,
+    lowestYesMid: null,
+    lowestNoMid: null,
+    markets: [],
+    alternatives: [],
+    matchDiagnostics: null,
+  };
+}
+
+function buildMatchedAlternativesResponseFromCluster(params: {
+  generatedAt: string;
+  seed: ClusterMarketSummary;
+  cluster: AggClusterSummary;
+  venues: AggSupportedVenue[];
+  outputLimit: number;
+}): AggMarketAlternativesResponse | null {
+  const venueSet = new Set(params.venues);
+  const clusterMarkets = params.cluster.markets.filter((market) =>
+    venueSet.has(market.venue as AggSupportedVenue),
+  );
+  const ordered = orderAlternativeMarkets(params.seed.marketId, clusterMarkets);
+  const orderedSeed =
+    ordered.markets.find(
+      (market) => market.marketId === params.seed.marketId,
+    ) ?? null;
+  if (!orderedSeed) return null;
+
+  const alternatives = ordered.alternatives
+    .filter((market) => hasSameInferredSelectedParticipant(orderedSeed, market))
+    .slice(0, params.outputLimit);
+  if (!alternatives.length) return null;
+
+  const markets = [orderedSeed, ...alternatives];
+  const metrics = computeClusterMetrics(markets);
+
+  return {
+    generatedAt: params.generatedAt,
+    source: "agg",
+    pricingSource: "agg_midpoint",
+    marketId: params.seed.marketId,
+    eventId: params.seed.eventId,
+    status: "matched",
+    priceSpread: metrics.priceSpread,
+    lowestYesMid: resolveLowestMidpoint(markets, "yes"),
+    lowestNoMid: resolveLowestMidpoint(markets, "no"),
+    markets,
+    alternatives,
+    matchDiagnostics: matchDiagnosticsForMarkets(
+      params.cluster.matchDiagnostics,
+      markets,
+    ),
+  };
+}
+
+function filterParticipantConsistentMarkets(
+  markets: ClusterMarketSummary[],
+): ClusterMarketSummary[] {
+  if (markets.length < 2) return markets;
+
+  let best: ClusterMarketSummary[] = [];
+  for (const first of markets) {
+    const candidate: ClusterMarketSummary[] = [first];
+    for (const market of markets) {
+      if (
+        market !== first &&
+        candidate.every((existing) =>
+          hasSameInferredSelectedParticipant(existing, market),
+        )
+      ) {
+        candidate.push(market);
+      }
+    }
+
+    if (candidate.length > best.length) best = candidate;
+  }
+
+  return best.length >= 2 ? best : [];
+}
+
+function findCachedClusterForMarket(params: {
+  marketId: string;
+  now: number;
+}): AggClusterSummary | null {
+  const candidates: AggClusterSummary[] = [];
+  for (const entry of cache.values()) {
+    if (entry.expiresAt <= params.now) continue;
+    for (const cluster of entry.value.items) {
+      if (
+        cluster.markets.some((market) => market.marketId === params.marketId)
+      ) {
+        candidates.push(cluster);
+      }
+    }
+  }
+
+  return (
+    candidates.sort((left, right) => {
+      if (left.marketCount !== right.marketCount) {
+        return right.marketCount - left.marketCount;
+      }
+      if (left.score !== right.score) return right.score - left.score;
+      return left.id.localeCompare(right.id);
+    })[0] ?? null
+  );
+}
+
 function buildAggClusterSummaries(params: {
   groups: NormalizedAggGroup[];
   matchedRowsByAggId: Map<string, DbMatchedMarket>;
@@ -546,7 +904,7 @@ function buildAggClusterSummaries(params: {
       const baseSummary = buildMarketSummary(matched.row);
       const yesMid = orientAggMidpointToDbYes({
         midpoint: aggMarket.midpoint,
-        market: baseSummary,
+        referenceYesMid: resolveReliableDbYesReference(matched.row),
       });
       if (yesMid == null) continue;
       markets.push({
@@ -562,22 +920,25 @@ function buildAggClusterSummaries(params: {
       });
     }
 
-    const venueSet = new Set(markets.map((market) => market.venue));
-    if (markets.length < 2 || venueSet.size < 2) continue;
+    const comparableMarkets = filterParticipantConsistentMarkets(markets);
+    const venueSet = new Set(comparableMarkets.map((market) => market.venue));
+    if (comparableMarkets.length < 2 || venueSet.size < 2) continue;
 
-    const id = hashClusterId(markets.map((market) => market.marketId));
+    const id = hashClusterId(
+      comparableMarkets.map((market) => market.marketId),
+    );
     if (seenIds.has(id)) continue;
     seenIds.add(id);
 
-    const metrics = computeClusterMetrics(markets);
+    const metrics = computeClusterMetrics(comparableMarkets);
     clusters.push({
       id,
-      label: buildLabel(markets),
+      label: buildLabel(comparableMarkets),
       score: scoreCluster(metrics),
       source: "agg",
-      category: resolveClusterCategory(markets),
-      seedMarketId: markets[0]?.marketId ?? null,
-      marketCount: markets.length,
+      category: resolveClusterCategory(comparableMarkets),
+      seedMarketId: comparableMarkets[0]?.marketId ?? null,
+      marketCount: comparableMarkets.length,
       venueCount: metrics.venueCount,
       venueCounts: metrics.venueCounts,
       priceSpread: metrics.priceSpread,
@@ -594,10 +955,10 @@ function buildAggClusterSummaries(params: {
       matchDiagnostics: {
         source: "agg",
         sourceMarketIds: group.sourceMarketIds,
-        matchedMarketIds: markets.map((market) => market.marketId),
+        matchedMarketIds: comparableMarkets.map((market) => market.marketId),
         venues: [...venueSet] as AggSupportedVenue[],
       },
-      markets,
+      markets: comparableMarkets,
       updatedAt: params.generatedAt,
       version: "agg-v1",
     });
@@ -675,6 +1036,44 @@ function cacheKey(query: AggClustersQueryInput): string {
 
 export function clearAggClustersCacheForTests() {
   cache.clear();
+  alternativesCache.clear();
+}
+
+async function buildAggClustersFromVenueMarkets(params: {
+  venueMarkets: AggVenueMarket[];
+  venues: AggSupportedVenue[];
+  client: AggMarketClient;
+  db: DbQuery;
+  generatedAt: string;
+}): Promise<AggClusterSummary[]> {
+  const candidateMarkets = dedupeAggMarkets(
+    params.venueMarkets.flatMap((market) => [
+      market,
+      ...market.matchedVenueMarkets,
+    ]),
+  ).filter(
+    (market) =>
+      params.venues.includes(market.venue as AggSupportedVenue) &&
+      isOpenStatus(market.status) &&
+      hasBinaryYesNoOutcomes(market),
+  );
+  const midpoints = await params.client.getMidpoints(
+    candidateMarkets.map((market) => market.id),
+  );
+  const midpointsByMarketId = new Map(
+    midpoints.map((midpoint) => [midpoint.venueMarketId, midpoint]),
+  );
+  const groups = normalizeAggGroups({
+    markets: params.venueMarkets,
+    midpointsByMarketId,
+    venues: new Set(params.venues),
+  });
+  const matchedRowsByAggId = await loadMatchedMarketRows(params.db, groups);
+  return buildAggClusterSummaries({
+    groups,
+    matchedRowsByAggId,
+    generatedAt: params.generatedAt,
+  });
 }
 
 export async function buildAggClusterListResponse(params: {
@@ -696,29 +1095,11 @@ export async function buildAggClusterListResponse(params: {
     sortDir: "desc",
   });
 
-  const candidateMarkets = dedupeAggMarkets(
-    venueMarkets.flatMap((market) => [market, ...market.matchedVenueMarkets]),
-  ).filter(
-    (market) =>
-      venues.includes(market.venue as AggSupportedVenue) &&
-      isOpenStatus(market.status) &&
-      hasBinaryYesNoOutcomes(market),
-  );
-  const midpoints = await params.client.getMidpoints(
-    candidateMarkets.map((market) => market.id),
-  );
-  const midpointsByMarketId = new Map(
-    midpoints.map((midpoint) => [midpoint.venueMarketId, midpoint]),
-  );
-  const groups = normalizeAggGroups({
-    markets: venueMarkets,
-    midpointsByMarketId,
-    venues: new Set(venues),
-  });
-  const matchedRowsByAggId = await loadMatchedMarketRows(params.db, groups);
-  const clusters = buildAggClusterSummaries({
-    groups,
-    matchedRowsByAggId,
+  const clusters = await buildAggClustersFromVenueMarkets({
+    venueMarkets,
+    venues,
+    client: params.client,
+    db: params.db,
     generatedAt,
   });
   const filtered = applyFilters(clusters, params.query, DEFAULTS);
@@ -733,6 +1114,96 @@ export async function buildAggClusterListResponse(params: {
     defaults: DEFAULTS,
     items: sorted.slice(0, outputLimit),
   };
+}
+
+export async function buildAggMarketAlternativesResponse(params: {
+  marketId: string;
+  query: AggMarketAlternativesQueryInput;
+  client: AggMarketClient;
+  db: DbQuery;
+  now?: Date;
+}): Promise<AggMarketAlternativesResponse | null> {
+  const generatedAt = (params.now ?? new Date()).toISOString();
+  const venues = parseAggVenues(params.query.venues);
+  const sourceLimit = clampInt(params.query.sourceLimit, 50, 100);
+  const outputLimit = clampInt(params.query.limit, 10, 50);
+  const seedRow = await loadSeedMarketRow(params.db, params.marketId);
+  if (!seedRow) return null;
+
+  const seed = buildMarketSummary(seedRow);
+  if (!venues.includes(seed.venue as AggSupportedVenue)) {
+    return buildNotFoundAlternativesResponse({
+      generatedAt,
+      marketId: seed.marketId,
+      eventId: seed.eventId,
+    });
+  }
+
+  const attempts = buildAlternativeVenueMarketAttempts({ seed, seedRow });
+
+  for (const attempt of attempts) {
+    const venueMarkets = await params.client.getVenueMarkets({
+      venue: attempt.venue,
+      venueEventId: attempt.venueEventId,
+      search: attempt.search,
+      status: "open",
+      matchStatus: ["matched", "verified"],
+      limit: sourceLimit,
+      sortBy: "volume",
+      sortDir: "desc",
+    });
+    if (!venueMarkets.length) continue;
+
+    const clusters = await buildAggClustersFromVenueMarkets({
+      venueMarkets,
+      venues,
+      client: params.client,
+      db: params.db,
+      generatedAt,
+    });
+    const cluster = clusters
+      .filter((entry) =>
+        entry.markets.some((market) => market.marketId === seed.marketId),
+      )
+      .sort((left, right) => {
+        if (left.marketCount !== right.marketCount) {
+          return right.marketCount - left.marketCount;
+        }
+        if (left.score !== right.score) return right.score - left.score;
+        return left.id.localeCompare(right.id);
+      })[0];
+    if (!cluster) continue;
+
+    const response = buildMatchedAlternativesResponseFromCluster({
+      generatedAt,
+      seed,
+      cluster,
+      venues,
+      outputLimit,
+    });
+    if (response) return response;
+  }
+
+  const cachedCluster = findCachedClusterForMarket({
+    marketId: seed.marketId,
+    now: Date.now(),
+  });
+  if (cachedCluster) {
+    const response = buildMatchedAlternativesResponseFromCluster({
+      generatedAt,
+      seed,
+      cluster: cachedCluster,
+      venues,
+      outputLimit,
+    });
+    if (response) return response;
+  }
+
+  return buildNotFoundAlternativesResponse({
+    generatedAt,
+    marketId: seed.marketId,
+    eventId: seed.eventId,
+  });
 }
 
 export async function getAggClusterListResponseCached(params: {
@@ -757,6 +1228,63 @@ export async function getAggClusterListResponseCached(params: {
       expiresAt: now + params.ttlSec * 1000,
       value,
     });
+  }
+
+  return value;
+}
+
+function alternativesCacheKey(
+  marketId: string,
+  query: AggMarketAlternativesQueryInput,
+): string {
+  return JSON.stringify({
+    marketId,
+    venues: parseAggVenues(query.venues).join(","),
+    limit: clampInt(query.limit, 10, 50),
+    sourceLimit: clampInt(query.sourceLimit, 50, 100),
+  });
+}
+
+function pruneAlternativesCache(now: number): void {
+  for (const [key, entry] of alternativesCache.entries()) {
+    if (entry.expiresAt <= now) alternativesCache.delete(key);
+  }
+
+  while (alternativesCache.size > MAX_ALTERNATIVES_CACHE_ENTRIES) {
+    const oldestKey = alternativesCache.keys().next().value as
+      | string
+      | undefined;
+    if (!oldestKey) break;
+    alternativesCache.delete(oldestKey);
+  }
+}
+
+export async function getAggMarketAlternativesResponseCached(params: {
+  marketId: string;
+  query: AggMarketAlternativesQueryInput;
+  client: AggMarketClient;
+  db: DbQuery;
+  ttlSec: number;
+}): Promise<AggMarketAlternativesResponse | null> {
+  const key = alternativesCacheKey(params.marketId, params.query);
+  const now = Date.now();
+  const cached = alternativesCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const value = await buildAggMarketAlternativesResponse({
+    marketId: params.marketId,
+    query: params.query,
+    client: params.client,
+    db: params.db,
+  });
+
+  if (value && params.ttlSec > 0) {
+    pruneAlternativesCache(now);
+    alternativesCache.set(key, {
+      expiresAt: now + params.ttlSec * 1000,
+      value,
+    });
+    pruneAlternativesCache(now);
   }
 
   return value;

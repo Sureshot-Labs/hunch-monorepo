@@ -6,6 +6,25 @@ import { z } from "zod";
 
 const GammaEventsListResponse = z.array(GammaEvent);
 
+export class GammaHttpError extends Error {
+  readonly status: number;
+  readonly url: string;
+  readonly bodySnippet: string;
+
+  constructor(status: number, url: string, body: string) {
+    const snippet = body.trim().slice(0, 1000);
+    super(
+      snippet.length > 0
+        ? `Gamma ${status} ${url}: ${snippet}`
+        : `Gamma ${status} ${url}`,
+    );
+    this.name = "GammaHttpError";
+    this.status = status;
+    this.url = url;
+    this.bodySnippet = snippet;
+  }
+}
+
 export type GammaEventsQuery = {
   offset: number;
   limit: number;
@@ -99,7 +118,10 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
   setOptionalString(url.searchParams, "end_date_max", q.end_date_max);
 
   const r = await fetch(url, { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error(`Gamma ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new GammaHttpError(r.status, url.toString(), body);
+  }
   const j = await r.json();
 
   let events: GammaEventType[];
@@ -122,6 +144,7 @@ export type GammaEventPaginationOptions = {
   startOffset?: number;
   pageSize?: number;
   maxPages?: number; // 0 = unlimited
+  maxOffset?: number;
 } & Omit<GammaEventsQuery, "offset" | "limit">;
 
 // Streaming generator: yields events page-by-page to avoid loading everything into memory
@@ -131,12 +154,14 @@ export async function* iterateEventPages(
   let offset = opts.startOffset ?? 0;
   const pageSize = opts.pageSize ?? env.pageSize;
   const maxPages = opts.maxPages ?? 0;
+  const maxOffset = opts.maxOffset;
 
   const {
     label,
     startOffset: _startOffset,
     pageSize: _pageSize,
     maxPages: _maxPages,
+    maxOffset: _maxOffset,
     ...query
   } = opts;
 
@@ -147,6 +172,12 @@ export async function* iterateEventPages(
   let pages = 0;
   while (true) {
     if (maxPages > 0 && pages >= maxPages) break;
+    if (maxOffset != null && offset > maxOffset) {
+      console.log(
+        `Stopping Polymarket Gamma events${label ? ` [${label}]` : ""}: offset ${offset} exceeds configured maxOffset ${maxOffset}`,
+      );
+      break;
+    }
 
     const { events } = await fetchEventsPage({
       offset,
