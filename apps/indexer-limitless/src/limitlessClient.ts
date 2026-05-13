@@ -2,10 +2,11 @@ import { sleep } from "@hunch/shared";
 import PQueue from "p-queue";
 
 import { env } from "./env.js";
+import { log } from "./log.js";
 import {
-  LimitlessActiveResponse,
   LimitlessMarket,
   LimitlessOrderbook,
+  parseLimitlessActivePayload,
   TLimitlessMarket,
 } from "./types.js";
 const defaultHeaders = {
@@ -22,6 +23,39 @@ const requestQueue = new PQueue({
 
 function shouldRetry(status: number) {
   return status === 429 || status === 403 || status === 503;
+}
+
+function logActivePageParseIssues(
+  page: number,
+  url: string,
+  validMarkets: number,
+  invalidMarkets: ReturnType<
+    typeof parseLimitlessActivePayload
+  >["invalidMarkets"],
+) {
+  if (invalidMarkets.length === 0) return;
+
+  const totalMarkets = validMarkets + invalidMarkets.length;
+  log.warn("Limitless active page skipped malformed markets", {
+    page,
+    url,
+    validMarkets,
+    skippedMarkets: invalidMarkets.length,
+    totalMarkets,
+    samples: invalidMarkets.slice(0, 10),
+    omittedSamples: Math.max(0, invalidMarkets.length - 10),
+  });
+
+  const malformedShare =
+    totalMarkets > 0 ? invalidMarkets.length / totalMarkets : 0;
+  if (invalidMarkets.length >= 10 || malformedShare >= 0.2) {
+    log.warn("Limitless active page malformed market rate is elevated", {
+      page,
+      skippedMarkets: invalidMarkets.length,
+      totalMarkets,
+      malformedShare,
+    });
+  }
 }
 
 async function getJson(url: string) {
@@ -96,8 +130,21 @@ export async function fetchActivePage(
     sortBy,
   )}`;
   const j = await getJson(url);
-  const parsed = LimitlessActiveResponse.parse(j);
-  return parsed;
+  const parsed = parseLimitlessActivePayload(j);
+  logActivePageParseIssues(
+    page,
+    url,
+    parsed.response.data.length,
+    parsed.invalidMarkets,
+  );
+
+  if (parsed.invalidMarkets.length > 0 && parsed.response.data.length === 0) {
+    throw new Error(
+      `Limitless active page ${page} returned only malformed markets (${parsed.invalidMarkets.length})`,
+    );
+  }
+
+  return parsed.response;
 }
 
 export async function fetchAllActive(

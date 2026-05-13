@@ -5,7 +5,10 @@ import {
   resolveLimitlessCategory,
 } from "./mappers.js";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
-import { LimitlessActiveResponse } from "./types.js";
+import {
+  LimitlessActiveResponse,
+  parseLimitlessActivePayload,
+} from "./types.js";
 import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
 
 function test(name: string, fn: () => void) {
@@ -68,7 +71,7 @@ function makeMarket(
   } as TLimitlessMarketItem;
 }
 
-test("Limitless active response accepts null rewardable flags", () => {
+test("Limitless active response accepts null rewardable and creator fields", () => {
   const parsed = LimitlessActiveResponse.parse({
     data: [
       {
@@ -77,7 +80,7 @@ test("Limitless active response accepts null rewardable flags", () => {
         title: "Group market",
         tags: [],
         status: "ACTIVE",
-        creator: { name: "Limitless", imageURI: "", link: "" },
+        creator: { name: "Limitless", imageURI: null, link: null },
         expired: false,
         metadata: { fee: null },
         createdAt: "2026-03-12T00:00:00Z",
@@ -96,7 +99,7 @@ test("Limitless active response accepts null rewardable flags", () => {
             title: "Child market",
             tags: [],
             status: "ACTIVE",
-            creator: { name: "Limitless", imageURI: "", link: "" },
+            creator: { name: "Limitless", imageURI: null, link: null },
             expired: false,
             metadata: {},
             createdAt: "2026-03-12T00:00:00Z",
@@ -125,7 +128,36 @@ test("Limitless active response accepts null rewardable flags", () => {
 
   assert.equal(parsed.data[0]?.isRewardable, undefined);
   assert.equal(parsed.data[0]?.metadata.fee, undefined);
+  assert.equal(parsed.data[0]?.creator?.imageURI, null);
+  assert.equal(parsed.data[0]?.creator?.link, null);
   assert.equal(parsed.data[0]?.markets?.[0]?.isRewardable, false);
+  assert.equal(parsed.data[0]?.markets?.[0]?.creator?.imageURI, null);
+  assert.equal(parsed.data[0]?.markets?.[0]?.creator?.link, null);
+});
+
+test("Limitless active payload parser keeps valid markets and reports malformed rows", () => {
+  const validMarket = makeEvent({ id: 2, slug: "valid-market" });
+  const malformedMarket = {
+    ...makeEvent({ slug: "bad-market" }),
+    id: "bad-id",
+  };
+
+  const parsed = parseLimitlessActivePayload({
+    data: [validMarket, malformedMarket],
+    page: 1,
+    totalPages: 1,
+    totalMarketsCount: "2",
+  });
+
+  assert.equal(parsed.response.data.length, 1);
+  assert.equal(parsed.response.data[0]?.slug, "valid-market");
+  assert.equal(parsed.response.totalMarketsCount, 2);
+  assert.equal(parsed.invalidMarkets.length, 1);
+  assert.equal(parsed.invalidMarkets[0]?.index, 1);
+  assert.equal(parsed.invalidMarkets[0]?.slug, "bad-market");
+  assert.ok(
+    parsed.invalidMarkets[0]?.issues.some((issue) => issue.path === "id"),
+  );
 });
 
 test("resolveLimitlessCategory prefers structured crypto domain over 15 min", () => {
