@@ -49,6 +49,7 @@ export type AggMidpoint = {
 };
 
 export type AggVenueMarketsParams = {
+  search?: string;
   status?: string | string[];
   matchStatus?: string | string[];
   limit?: number;
@@ -289,6 +290,7 @@ export function createAggMarketClient(
   return {
     async getVenueMarkets(params) {
       const query = new URLSearchParams();
+      appendParam(query, "search", params.search);
       appendParam(query, "status", params.status);
       appendParam(query, "matchStatus", params.matchStatus);
       appendParam(query, "limit", params.limit);

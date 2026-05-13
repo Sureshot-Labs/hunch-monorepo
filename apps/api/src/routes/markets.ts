@@ -41,12 +41,18 @@ import {
   extractDflowErrorMessage,
 } from "../services/dflow-client.js";
 import {
+  AggMarketHttpError,
+  createAggMarketClient,
+} from "../services/agg-market-client.js";
+import { getAggMarketAlternativesResponseCached } from "../services/agg-market-clusters.js";
+import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
+  marketAlternativesQuerySchema,
   marketParamsSchema,
   marketsByTokenQuerySchema,
   marketSimilarQuerySchema,
@@ -675,6 +681,70 @@ export const marketRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "Internal server error",
         });
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/alternatives
+   * Get exact cross-venue alternatives using AGG matched markets.
+   */
+  z.get(
+    "/markets/:marketId/alternatives",
+    {
+      schema: {
+        params: marketParamsSchema,
+        querystring: marketAlternativesQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      if (!env.aggMarketAppId) {
+        return reply.code(503).send({ error: "AGG Market is not configured" });
+      }
+
+      try {
+        const client = createAggMarketClient({
+          appId: env.aggMarketAppId,
+          baseUrl: env.aggMarketBaseUrl,
+          timeoutMs: env.aggMarketTimeoutMs,
+        });
+        const response = await getAggMarketAlternativesResponseCached({
+          marketId: request.params.marketId,
+          query: request.query,
+          client,
+          db: pool,
+          ttlSec: env.aggClustersCacheTtlSec,
+        });
+        if (!response) {
+          return reply.code(404).send({ error: "Market not found" });
+        }
+        return response;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Unsupported AGG venues:")
+        ) {
+          return reply.code(400).send({ error: error.message });
+        }
+        if (error instanceof AggMarketHttpError) {
+          request.log.warn(
+            { status: error.status },
+            "AGG Market alternatives request failed",
+          );
+          return reply
+            .code(error.status >= 500 ? 502 : 400)
+            .send({ error: "AGG Market request failed" });
+        }
+        if (error instanceof Error && error.name === "AbortError") {
+          request.log.warn("AGG Market alternatives request timed out");
+          return reply
+            .code(504)
+            .send({ error: "AGG Market request timed out" });
+        }
+        request.log.error({ error }, "AGG Market alternatives build failed");
+        return reply
+          .code(500)
+          .send({ error: "Failed to build market alternatives" });
       }
     },
   );

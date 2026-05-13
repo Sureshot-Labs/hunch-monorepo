@@ -10,6 +10,7 @@ import {
   type AggVenueMarket,
 } from "./services/agg-market-client.js";
 import {
+  buildAggMarketAlternativesResponse,
   buildAggClusterListResponse,
   clearAggClustersCacheForTests,
   getAggClusterListResponseCached,
@@ -164,10 +165,12 @@ function fakeClient(args: {
   markets: AggVenueMarket[];
   midpoints: AggMidpoint[];
   calls?: { venueMarkets: number; midpoints: number };
+  venueMarketParams?: unknown[];
 }): AggMarketClient {
   return {
-    async getVenueMarkets() {
+    async getVenueMarkets(params) {
       if (args.calls) args.calls.venueMarkets += 1;
+      args.venueMarketParams?.push(params);
       return args.markets;
     },
     async getMidpoints(ids) {
@@ -314,6 +317,90 @@ await test("builds AGG clusters from labeled Yes midpoints and DB rows", async (
   assert.deepEqual(
     cluster.markets.map((row) => row.eventCategory),
     ["sports", "sports", "sports"],
+  );
+});
+
+await test("builds market alternatives from an AGG matched group", async () => {
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "26242",
+    question: "PSG",
+  });
+  poly.matchedVenueMarkets = [kalshi, limitless];
+  const venueMarketParams: unknown[] = [];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [
+        midpoint("agg-poly", 0.57),
+        midpoint("agg-kalshi", 0.55),
+        midpoint("agg-limitless", 0.56),
+      ],
+      venueMarketParams,
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        volume24h: 10,
+      }),
+      dbRow({
+        id: "kalshi:KXUCL-26-PSG",
+        venue: "kalshi",
+        venueMarketId: "KXUCL-26-PSG",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        volume24h: 20,
+      }),
+      dbRow({
+        id: "limitless:26242",
+        venue: "limitless",
+        venueMarketId: "26242",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        volume24h: 30,
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "matched");
+  assert.equal(response.marketId, "polymarket:101");
+  assert.equal(response.eventId, "polymarket:101:event");
+  assert.equal(response.markets.length, 3);
+  assert.equal(response.markets[0]?.marketId, "polymarket:101");
+  assert.equal(response.alternatives.length, 2);
+  assert.ok(response.priceSpread != null);
+  assert.ok(Math.abs(response.priceSpread - 0.02) < 1e-9);
+  assert.equal(response.bestYesBuy?.marketId, "kalshi:KXUCL-26-PSG");
+  assert.equal(response.bestNoBuy?.marketId, "polymarket:101");
+  assert.deepEqual(
+    response.markets.map((row) => row.pricingSource),
+    ["agg_midpoint", "agg_midpoint", "agg_midpoint"],
+  );
+  assert.equal(
+    (venueMarketParams[0] as { search?: string } | undefined)?.search,
+    "PSG",
   );
 });
 
