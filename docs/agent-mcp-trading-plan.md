@@ -1,6 +1,6 @@
 # Agent / MCP Trading Access Plan
 
-Last updated: 2026-05-11
+Last updated: 2026-05-13
 
 ## Goal
 
@@ -254,61 +254,49 @@ payloads, wallet readiness, and execution decisions remain backend-owned.
 
 ### Current Implementation Status
 
-As of 2026-05-11, Phase 1 has started in the separate
-`hunch-agent-tools` repo.
+As of 2026-05-13, Phase 1 is implemented in the separate
+`hunch-agent-tools` repo for public/read-only workflows.
 
 Implemented:
 
-- PNPM/TypeScript workspace with project references, ESLint, Prettier, and a
-  build script.
+- PNPM/TypeScript workspace with project references, ESLint, Prettier, tests,
+  build, and local release packaging.
 - `packages/hunch-agent-client` with a shared fetch client, local token lookup,
-  Zod input schemas, safe error shapes, and read-only tool functions.
+  Zod input schemas, safe error shapes, response shaping, and read-only tool
+  functions.
 - `apps/mcp-hunch` with both binaries in one package:
   - `hunch-mcp` for MCP stdio;
   - `hunch-agent` for CLI fallback.
-- Read-only MCP tools for the first public discovery surface:
-  `hunch_search_markets`, `hunch_get_market`, `hunch_get_event`,
-  `hunch_get_market_map`, `hunch_get_discovery_sidebars`, and
-  `hunch_get_clusters`.
-- CLI commands for `auth status`, `search`, `market`, `event`, `map`,
-  `sidebars`, and `clusters`.
-- `skills/hunch-trading` with `SKILL.md`, OpenAI/OpenClaw metadata,
-  `references/tools.md`, and a `scripts/hunch` wrapper.
-- Codex plugin metadata under `.codex-plugin/`, `.mcp.json`, and a local
-  `.agents/plugins/marketplace.json`.
+- Codex plugin metadata, MCP config, skill files, wrapper script, and local
+  packaging artifacts.
+- Read-only MCP/CLI surfaces for discovery search/browse, discovery top lists,
+  market map, market/event detail, AGG/Hunch clusters, exact market
+  alternatives, similar markets/events, holders, price history, tracking
+  overview, wallet intel/activity/positions/series/signals, signals, and trades.
+- Tests for client behavior, MCP tool registration/calls, CLI behavior, tool
+  shaping, plugin packaging, and wrapper fallback behavior.
 
 Packaging decisions made during implementation:
 
 - The repo intentionally does not contain temporary account-specific homepage or
   repository URLs in public skill/plugin metadata.
-- `plugin-dist/` and `skills/hunch-trading/bin/` are generated local build
-  outputs and are ignored by Git. Run `pnpm build` before local plugin or
-  skill-only testing that needs bundled runtime files.
+- `plugin-dist/`, `skills/hunch-trading/bin/`, and `artifacts/` are generated
+  local build outputs and are ignored by Git. Run `pnpm build` or
+  `pnpm release:local` before local plugin or skill-only testing that needs
+  bundled runtime files.
 - For Phase 1, the tools call existing public Hunch APIs directly. They do not
   depend on `/agent/*`, device auth, private account state, or trading routes.
 - Generated OpenAPI-derived types are still a future integration point. Until
   the Agent API contract exists, Phase 1 uses narrow local types and Zod schemas
   for the read-only public surface.
 
-Verified locally:
+Still not implemented:
 
-- `pnpm build`
-- `pnpm check`
-- `pnpm format:check`
-- `node plugin-dist/hunch-agent.js auth status --json`
-- `skills/hunch-trading/scripts/hunch auth status --json`
-
-Phase 1 remaining work before treating the external repo as distributable:
-
-- Add mocked HTTP tests for the read-only client, MCP tool handlers, CLI output,
-  and wrapper fallback behavior.
-- Decide package distribution mode for ignored bundles:
-  - build on install / release; or
-  - publish npm packages and let the skill wrapper use `npx`/installed binaries.
-- Replace local hand-written response assumptions with generated API types once
-  the relevant Hunch API contract is available.
-- Add any additional read-only tools that are clearly public and stable, for
-  example feed or price snapshots, without widening into account/trading flows.
+- `/agent/*` backend auth/grant APIs.
+- Device/browser approval login.
+- Multi-profile authenticated token storage.
+- Authenticated private account read tools through the Agent API.
+- Intent, trading, bridge, redemption, or delegated signing flows.
 
 ### Skill Runtime Wrapper And Session
 
@@ -348,26 +336,80 @@ Session ownership should be:
 Local token lookup order:
 
 1. `HUNCH_AGENT_TOKEN` for CI or temporary one-off use.
-2. OS keychain when available.
-3. File fallback with `0600` permissions, for example:
+2. Named local profile from CLI/MCP config.
+3. Active local profile from CLI/MCP config.
+4. OS keychain when available.
+5. File fallback with `0600` permissions, for example:
    `~/.config/hunch/agent/sessions.json`.
 
-The stored local session should include only:
+`HUNCH_AGENT_TOKEN` is an escape hatch, not the normal user path. For any future
+write/intent tool, require an explicit profile unless the user passes an
+override flag or the tool response clearly states that the environment token is
+being used.
+
+The stored local session should support multiple profiles from the start. This
+lets one agent installation switch between multiple Hunch accounts or multiple
+grants for the same account without sharing tokens across accounts.
 
 ```json
 {
-  "baseUrl": "https://api.hunch.trade",
-  "grantId": "uuid",
-  "token": "one-time-visible-agent-token",
-  "expiresAt": "2026-06-10T00:00:00.000Z",
-  "scopes": ["read:markets", "quote:trade", "prepare:trade"],
-  "walletAddresses": ["0x...", "solana..."]
+  "activeProfile": "main",
+  "profiles": {
+    "main": {
+      "baseUrl": "https://api.hunch.trade",
+      "grantId": "uuid",
+      "token": "one-time-visible-agent-token",
+      "expiresAt": "2026-06-10T00:00:00.000Z",
+      "userId": "uuid",
+      "scopes": ["read:markets", "read:wallets", "read:positions"],
+      "walletAddresses": ["0x...", "solana..."]
+    },
+    "research-alt": {
+      "baseUrl": "https://api.hunch.trade",
+      "grantId": "uuid",
+      "token": "another-limited-agent-token",
+      "expiresAt": "2026-06-10T00:00:00.000Z",
+      "userId": "uuid",
+      "scopes": ["read:markets"],
+      "walletAddresses": ["0x..."]
+    }
+  }
 }
 ```
 
 The token is sensitive locally, but still limited server-side by scopes, wallets,
 venues, expiry, confirmation mode, and spend limits. A leaked agent token should
 not be equivalent to a browser session.
+
+Local storage rules:
+
+- the config directory must be created with `0700`;
+- the session file must be written with `0600`;
+- `auth status` and logs must never print raw tokens;
+- expired profiles should be ignored by default and clearly marked by
+  `auth list`;
+- `auth logout --profile` should remove only that profile;
+- `auth logout --all` should remove all local profiles;
+- OS keychain support is preferred when available, but file fallback is
+  acceptable for Phase 2 because the token is scoped, expiring, and revocable.
+
+Profile CLI behavior:
+
+```text
+hunch auth login --profile main
+hunch auth login --profile alt
+hunch auth list
+hunch auth use main
+hunch auth logout --profile alt
+hunch positions --profile main
+```
+
+Authenticated MCP tools should accept an optional `profile` argument where the
+tool meaningfully touches account state. If omitted, they use `activeProfile`.
+For write/intent tools, the response must echo the selected profile, Hunch user,
+wallet, venue, and grant before preparing or executing anything. This prevents
+silent use of the wrong account on machines where multiple Hunch accounts are
+connected.
 
 The CLI should return structured JSON when called by a skill:
 
@@ -397,59 +439,169 @@ Use a device-code style connection as the default v1 flow.
 2. The agent shows the user a login link and short code.
 3. The user opens Hunch in the browser, logs in with Privy, enters or follows the
    link/code, and selects scopes, wallets, venues, limits, and expiry.
-4. The MCP server polls until approved.
-5. The backend returns one agent token once.
-6. The MCP server stores it locally in the user's agent config/keychain.
-7. The backend stores only a hash of the token.
+4. Browser approval stores only approved scopes, wallets, venues, limits, and
+   grant expiry on the pending device authorization. It does not create or see
+   the raw agent token.
+5. The MCP server polls until approved.
+6. On the first successful `/agent/device/token` poll after approval, the
+   backend generates one raw agent token, creates `agent_grants` with only the
+   HMAC hash plus prefix, marks the device authorization as `token_issued`, and
+   returns the raw token once.
+7. The MCP server stores the returned token locally in the user's agent
+   config/keychain.
 
 Avoid using the existing Hunch browser session token as the MCP credential except
 as a local development shortcut.
 
-Recommended DB tables:
+Token and code hardening:
+
+- generate agent tokens, device codes, and approval tokens with at least 256
+  bits of cryptographic randomness;
+- store agent token hashes as `HMAC_SHA256(token, AGENT_TOKEN_HASH_SECRET)`,
+  not plain SHA-256, so a database leak alone is less useful;
+- store device-code and approval-token hashes the same way or with a separate
+  server-side pepper;
+- keep approval/device sessions short-lived, for example 10 minutes;
+- default agent grants should be short-lived for early releases, for example 7
+  to 30 days depending on scope;
+- log only token prefixes, grant IDs, and safe metadata;
+- never log full approval URLs, device codes, raw agent tokens, or bearer
+  headers;
+- approval tokens in URLs are acceptable only because they are short-lived and
+  still require the user's normal Hunch browser session.
+
+Recommended migration:
+
+```text
+packages/db/migrations/0105_agent_grants.sql
+```
+
+Use one migration for this phase. These tables are new and not legacy, so avoid
+splitting the migration unless a later feature adds a genuinely separate table.
+
+`agent_grants` is the durable approved access object. It belongs to one Hunch
+user, one approved agent grant, and one token hash.
 
 ```sql
-agent_grants (
-  id uuid primary key,
+create table if not exists agent_grants (
+  id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
   name text not null,
+  client_name text,
+  client_version text,
+  client_kind text,
   token_hash text not null unique,
-  scopes text[] not null,
-  wallet_addresses text[] not null,
-  venues text[] not null,
+  token_prefix text not null,
+  scopes text[] not null default '{}',
+  wallet_addresses text[] not null default '{}',
+  venues text[] not null default '{}',
   allowed_chains text[] not null default '{}',
   allowed_assets text[] not null default '{}',
-  confirmation_mode text not null,
-  limits jsonb not null,
+  confirmation_mode text not null default 'always',
+  limits jsonb not null default '{}',
+  metadata jsonb not null default '{}',
   is_active boolean not null default true,
   expires_at timestamptz not null,
   last_used_at timestamptz,
+  revoked_at timestamptz,
   created_at timestamptz not null default now(),
-  revoked_at timestamptz
+  updated_at timestamptz not null default now()
 );
 
-agent_device_authorizations (
-  id uuid primary key,
+create unique index if not exists idx_agent_grants_token_hash_unique
+  on agent_grants(token_hash);
+
+create index if not exists idx_agent_grants_user_active
+  on agent_grants(user_id, is_active, expires_at desc);
+
+create index if not exists idx_agent_grants_active_expiry
+  on agent_grants(expires_at)
+  where is_active = true;
+```
+
+`agent_device_authorizations` stores short-lived pending login/approval sessions.
+The device code is for MCP/CLI polling. The approval token is for the browser
+approval link. Store both as hashes.
+
+```sql
+create table if not exists agent_device_authorizations (
+  id uuid primary key default gen_random_uuid(),
   device_code_hash text not null unique,
-  user_code_hash text not null unique,
-  status text not null,
-  requested_scopes text[] not null,
+  approval_token_hash text not null unique,
+  status text not null check (
+    status in ('pending', 'approved', 'denied', 'expired', 'token_issued')
+  ),
+  requested_scopes text[] not null default '{}',
+  requested_wallet_addresses text[] not null default '{}',
+  requested_venues text[] not null default '{}',
+  requested_limits jsonb not null default '{}',
+  approved_scopes text[],
+  approved_wallet_addresses text[],
+  approved_venues text[],
+  approved_limits jsonb,
+  grant_expires_at timestamptz,
+  client_name text,
+  client_version text,
+  client_kind text,
+  metadata jsonb not null default '{}',
+  approved_user_id uuid references users(id) on delete cascade,
   approved_grant_id uuid references agent_grants(id) on delete set null,
   poll_count integer not null default 0,
   approval_attempts integer not null default 0,
   last_polled_at timestamptz,
   approved_at timestamptz,
+  denied_at timestamptz,
   token_issued_at timestamptz,
   expires_at timestamptz not null,
   created_at timestamptz not null default now()
 );
+
+create index if not exists idx_agent_device_authorizations_status_expiry
+  on agent_device_authorizations(status, expires_at);
+
+create index if not exists idx_agent_device_authorizations_grant
+  on agent_device_authorizations(approved_grant_id);
+
+create index if not exists idx_agent_device_authorizations_created
+  on agent_device_authorizations(created_at desc);
+```
+
+The approved fields are intentionally separate from requested fields. The user
+may approve a narrower wallet/scope/venue set or a different expiry than the
+agent requested. `/agent/device/token` must create the grant from the approved
+fields, not by trusting the original requested values.
+
+`agent_audit_events` starts in this phase so grant lifecycle and later intents
+share one audit path.
+
+```sql
+create table if not exists agent_audit_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references users(id) on delete cascade,
+  grant_id uuid references agent_grants(id) on delete set null,
+  device_authorization_id uuid references agent_device_authorizations(id)
+    on delete set null,
+  event_type text not null,
+  actor_type text not null check (actor_type in ('user', 'agent', 'system')),
+  ip_address text,
+  user_agent text,
+  metadata jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_agent_audit_events_user_created
+  on agent_audit_events(user_id, created_at desc);
+
+create index if not exists idx_agent_audit_events_grant_created
+  on agent_audit_events(grant_id, created_at desc);
 ```
 
 Device-code auth requirements:
 
-- device codes and user codes are single-use and short-lived;
+- device codes and approval tokens are single-use and short-lived;
 - `/agent/device/token` returns the agent token only once;
 - polling has a minimum interval and max poll count;
-- user-code approval has a max attempt count and IP/session rate limit;
+- approval has a max attempt count and IP/session rate limit;
 - expired device rows are cleaned up by a scheduled job or opportunistic cleanup;
 - approval always requires the user's normal browser session.
 
@@ -472,6 +624,220 @@ submit:bridge
 redeem
 manage:positions
 ```
+
+Phase 2 should enable only read scopes first:
+
+```text
+read:account
+read:wallets
+read:orders
+read:positions
+read:funding
+```
+
+Quote, prepare, submit, cancel, bridge, redeem, and position-management scopes
+belong to later intent/execution phases.
+
+### Phase 2 Backend Implementation Detail
+
+Backend files should stay focused:
+
+```text
+apps/api/src/routes/agent.ts
+apps/api/src/services/agent-auth.ts
+apps/api/src/schemas/agent.ts
+apps/api/src/types/fastify.d.ts
+apps/api/src/server.ts
+```
+
+Do not wire agent auth into every private route directly. Add a small Agent API
+gateway first, then reuse existing account/read services behind it.
+
+Environment:
+
+```text
+AGENT_TOKEN_HASH_SECRET=<32+ bytes secret>
+AGENT_AUTH_APPROVAL_TTL_MS=600000
+AGENT_GRANT_DEFAULT_TTL_MS=<7-30 days>
+AGENT_AUTH_POLL_INTERVAL_MS=3000
+AGENT_AUTH_MAX_POLLS=<bounded count>
+```
+
+`AGENT_TOKEN_HASH_SECRET` must be independent from `JWT_SECRET`. Rotating it
+invalidates active agent grants unless a versioned secret scheme is added, so
+start with one secret and plan rotation before public unattended trading.
+
+Public/device routes:
+
+```http
+POST /agent/device/start
+POST /agent/device/token
+GET  /agent/capabilities
+```
+
+`POST /agent/device/start`:
+
+- accepts requested scopes, requested wallets, requested venues, requested
+  limits, client name/version/kind, and optional profile label;
+- validates requested scopes against the server allowlist;
+- generates device and approval tokens with cryptographic randomness;
+- creates `agent_device_authorizations` with hashed device and approval tokens;
+- returns `deviceCode`, `approvalUrl`, `expiresAt`, and `pollIntervalSec`;
+- writes an `agent_device_started` audit event with safe metadata only.
+
+`POST /agent/device/token`:
+
+- accepts `deviceCode`;
+- hashes and looks up the pending authorization;
+- rate-limits polling with `poll_count`, `last_polled_at`, and minimum interval;
+- returns `authorization_pending`, `slow_down`, `access_denied`, or
+  `expired_token` until approved;
+- after approval, generates the raw agent token, creates `agent_grants` from
+  approved scopes/wallets/venues/limits/expiry, stores only the HMAC hash plus
+  prefix, marks `token_issued_at`, and returns the raw token once;
+- after token issuance, returns a terminal already-issued response instead of
+  replaying the raw token.
+
+Browser-user routes:
+
+```http
+GET    /agent/device/approval/:approvalToken
+POST   /agent/device/approve
+POST   /agent/device/deny
+GET    /agent/grants
+DELETE /agent/grants/:id
+GET    /agent/audit
+```
+
+These use the normal Hunch browser session middleware and CSRF rules. They are
+for the frontend, not for the MCP server.
+
+Approval behavior:
+
+- hash and look up `approvalToken`;
+- require `status = 'pending'` and `expires_at > now()`;
+- require the approving user to be logged in;
+- validate requested wallets are linked to that user;
+- validate venues and scopes are currently allowed;
+- store approved scopes, wallets, venues, limits, grant expiry, and approving
+  user on `agent_device_authorizations`;
+- mark the device authorization approved without creating the grant yet;
+- write audit events;
+- never return the raw agent token to the browser;
+- avoid logging full `approvalToken` or full `approvalUrl`.
+
+Agent-token routes:
+
+```http
+GET /agent/me
+```
+
+This is the first route behind `createAgentAuthMiddleware`. It proves token
+validation, scope attachment, grant metadata, user lookup, and profile display
+without touching private trading flows. Later authenticated read routes can add
+wallets, balances, positions, orders, rewards, and funding readiness.
+
+Agent auth middleware:
+
+```ts
+createAgentAuthMiddleware({
+  requiredScopes?: string[];
+})
+```
+
+Rules:
+
+- require `Authorization: Bearer <agent-token>`;
+- HMAC-hash the token with `AGENT_TOKEN_HASH_SECRET` and do one indexed lookup
+  by `agent_grants.token_hash`;
+- reject inactive, revoked, or expired grants;
+- reject inactive users;
+- re-check approved wallets are still linked before returning wallet-sensitive
+  data or preparing later intents;
+- attach `request.agentGrant`, `request.user`, and approved wallet/scope/venue
+  context;
+- enforce `requiredScopes`;
+- update `last_used_at` with throttling or async best effort;
+- do not require CSRF because agent routes use bearer tokens, not browser
+  cookies.
+
+Raw token generation should use a recognizable prefix for support/debugging,
+for example:
+
+```text
+ha_live_<random>
+ha_test_<random>
+```
+
+Only the prefix and hash go into Postgres. The full token is visible once to the
+MCP/CLI polling session and then stored locally by `hunch-agent-tools`.
+Token issuance, grant insertion, and `token_issued_at` update must happen in one
+database transaction. If the token response is lost after issuance, the user
+should reconnect rather than the backend replaying the raw token.
+
+Phase 2 authenticated-read rollout should be narrow:
+
+1. `/agent/me`;
+2. grant list/revoke in frontend;
+3. agent-tools `auth login`, `auth list`, `auth use`, `auth logout`;
+4. private read tools after `/agent/me` is stable.
+
+Implementation order:
+
+1. Add the `0105_agent_grants.sql` migration.
+2. Add agent token/code generation, HMAC hashing, and grant/device auth service.
+3. Add public `/agent/device/start`, `/agent/device/token`, and
+   `/agent/capabilities`.
+4. Add browser-session approval, deny, grant list, grant revoke, and audit
+   routes.
+5. Add `createAgentAuthMiddleware`.
+6. Add `/agent/me`.
+7. Add backend tests for the full device approval and one-time token lifecycle.
+8. Add frontend approval/settings pages against the browser-session routes.
+9. Add agent-tools multi-profile login/logout/list/use support.
+10. Add authenticated private read tools only after `/agent/me` and
+    multi-profile auth are stable.
+
+Backend tests:
+
+- start auth session creates hashed device/approval tokens only;
+- token/device/approval hashes use the agent HMAC secret, not raw SHA-256;
+- generated tokens have at least 256 bits of entropy;
+- invalid scopes are rejected;
+- polling pending returns pending;
+- polling too fast returns slow-down or rate-limit response;
+- expired session cannot be approved;
+- denied session never issues a token;
+- browser approval stores approved scopes/wallets/venues/limits/expiry but does
+  not create a raw token or grant;
+- first successful token poll after approval creates the grant from approved
+  values and issues the token once;
+- repeated token polls after issuance do not replay the raw token;
+- raw token is not stored in Postgres;
+- token hash lookup authenticates the grant;
+- revoked grant rejects immediately;
+- expired grant rejects;
+- missing required scope rejects;
+- unlinked wallet approval rejects;
+- browser approval requires normal user auth and CSRF;
+- revoke requires owning user;
+- grant list only shows the current user's grants;
+- approval routes and audit metadata do not include raw tokens or full approval
+  URLs;
+- audit events are written for start, approve, deny, token issuance, revoke, and
+  failed auth where useful.
+
+External agent-tools tests:
+
+- local session directory is created with `0700` and file with `0600`;
+- `auth status`, errors, and debug output redact raw tokens;
+- expired profiles are ignored for requests and shown as expired in
+  `auth list`;
+- `auth logout --profile` removes only the selected profile;
+- `auth logout --all` removes every local profile;
+- profile-specific requests use that profile's `baseUrl` and token;
+- write/intent tools require explicit profile or clearly echo environment-token
+  usage before action.
 
 ## Confirmation And Limits
 
@@ -521,13 +887,13 @@ approval, it should return a Hunch link.
 Auth link:
 
 ```text
-https://hunch.app/agent/connect?code=<user-code>
+https://app.hunch.trade/agent/approve/<approval-token>
 ```
 
 Intent approval link:
 
 ```text
-https://hunch.app/agent/intents/<intent-id>
+https://app.hunch.trade/agent/intents/<intent-id>
 ```
 
 The approval page should show:
@@ -560,6 +926,128 @@ If a signed wallet action is required, approval must still produce the required
 Privy authorization signatures or use an explicitly configured delegated-signing
 grant. A UI checkbox alone is not sufficient for no-confirmation wallet signing
 unless the signing layer supports it.
+
+## Frontend UX Surfaces
+
+The frontend should make agent access feel like a normal Hunch account-control
+flow, not a developer-only token flow. The user should approve links in Hunch,
+inspect connected agents in settings, and confirm sensitive actions from a
+first-party page.
+
+### 1. Agent Approval Flow
+
+Add a browser route such as:
+
+```text
+/agent/approve/:approvalToken
+```
+
+Responsibilities:
+
+- if the user is not logged in, send them through the existing Hunch/Privy auth
+  flow and return to the approval page;
+- load the pending device/auth session from the backend;
+- show the requesting agent name, client/app metadata, requested scopes,
+  requested wallets/venues, expiry, and requested policy limits;
+- explain that approval gives a limited Hunch agent grant, not wallet private
+  keys, Privy browser cookies, or broad account session access;
+- provide `Approve` and `Deny` actions;
+- never show, copy, or store the issued agent token in the browser UI.
+
+The backend returns the agent token only to the polling MCP/CLI session after
+approval. The frontend only approves or denies the pending session with the
+user's normal Hunch session.
+
+### 2. Agent Access Settings
+
+Add a settings route such as:
+
+```text
+/settings/agents
+```
+
+Responsibilities:
+
+- list active, expired, and revoked agent grants;
+- show grant name, scopes, wallet/account access, venues, limits, created time,
+  expiry, last-used time, and status;
+- support revoke access;
+- support editing or tightening limits before broader automation is enabled;
+- show recent audit activity once agent write/intents exist.
+
+This is the user's main kill switch. It should be obvious how to revoke an
+agent without using the CLI or MCP client.
+
+### 3. Intent Confirmation UI
+
+Add a browser route such as:
+
+```text
+/agent/intents/:intentId
+```
+
+Responsibilities:
+
+- load the pending intent with the user's normal Hunch session;
+- show the full normalized action before approval:
+  - market/event and venue;
+  - selected wallet and network;
+  - buy/sell, YES/NO or outcome, order type, amount, limit price, estimated
+    shares/proceeds, quote age, fees, slippage, and expiry;
+  - balance impact and funding/bridge blockers;
+  - requesting agent/grant name;
+  - policy decision and remaining limits;
+- provide `Confirm` and `Reject` actions;
+- run the existing Privy authorization/signature flow when a signed wallet
+  action is required;
+- bind approval to the exact intent payload or explicitly show refreshed
+  economics before approval.
+
+Later, this page can offer `approve similar actions within limits`, but the
+first version should default to explicit per-intent confirmation.
+
+### 4. Frontend API Integration
+
+Use the existing `Hunch_App` API-client and proxy-route patterns rather than a
+parallel frontend stack.
+
+Expected frontend additions:
+
+```text
+Hunch_App/src/lib/api/agent.ts
+Hunch_App/src/app/api/hunch/agent/...
+```
+
+The Next route handlers under `src/app/api/hunch/*` should proxy
+cookie-authenticated browser calls to the backend for approval, grant
+management, and intent confirmation. The agent token itself should not pass
+through these browser routes.
+
+Reusable UI pieces should stay close to existing Hunch components:
+
+- scope/permission summary;
+- grant card;
+- policy summary/editor;
+- intent summary;
+- audit log;
+- wallet funding/deposit panel;
+- QR rendering from backend-provided `qrPayload` or `depositUri`.
+
+Reuse existing market/event cards, venue badges, wallet displays, and trade
+summary components wherever possible. Do not build a second trading UI for
+agent intents.
+
+### KISS Frontend Version
+
+The first frontend milestone should ship only:
+
+1. `/agent/approve/:approvalToken`;
+2. `/settings/agents`;
+3. `/agent/intents/:intentId`.
+
+Avoid a complex automation-policy builder until confirmation-required intents
+are working end to end. A compact policy summary plus revoke controls are enough
+for the first authenticated-read and explicit-confirmation releases.
 
 ## Signing Delegation Solution
 
@@ -634,7 +1122,7 @@ and intent APIs to the agent.
 
 User flow:
 
-1. User opens `/agent/connect` or `/agent/intents/:id`.
+1. User opens `/agent/approve/:approvalToken` or `/agent/intents/:id`.
 2. User selects automatic execution and limits.
 3. Hunch creates or reuses an app authorization key / key quorum and asks Privy
    to add it as a signer for the selected Trading Wallet, with policy IDs that
@@ -719,12 +1207,14 @@ Add backend routes under `/agent/*`.
 
 ```text
 POST /agent/device/start
+GET  /agent/device/approval/:approvalToken
 POST /agent/device/approve
+POST /agent/device/deny
 POST /agent/device/token
 GET  /agent/capabilities
 GET  /agent/grants
-POST /agent/grants
 DELETE /agent/grants/:id
+GET  /agent/me
 POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
@@ -747,27 +1237,33 @@ GET  /agent/capabilities
 Agent-token routes:
 
 ```text
+GET  /agent/me
 POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
 POST /agent/intents/:id/execute
-GET  /agent/audit
 GET  /agent/funding-plan
 ```
 
 Browser-user session routes:
 
 ```text
+GET  /agent/device/approval/:approvalToken
 POST /agent/device/approve
+POST /agent/device/deny
 GET  /agent/grants
-POST /agent/grants
 DELETE /agent/grants/:id
 POST /agent/intents/:id/approve
+GET  /agent/audit
 ```
 
 Do not let an agent token approve its own device login, widen its own grant, or
 approve its own pending intent. Those actions require the user's normal Hunch
 session and, when signing is needed, Privy authorization in the browser.
+
+For Phase 2, grants are created only through device approval plus the first
+successful token poll. Do not add a separate `POST /agent/grants` creation path
+until there is a separate product need for manual grant creation.
 
 `/agent/intents` should accept normalized actions such as:
 
@@ -831,8 +1327,8 @@ type AgentIntent =
 Store intents and events:
 
 ```sql
-agent_intents (
-  id uuid primary key,
+create table if not exists agent_intents (
+  id uuid primary key default gen_random_uuid(),
   grant_id uuid references agent_grants(id) on delete set null,
   user_id uuid not null references users(id) on delete cascade,
   wallet_address text not null,
@@ -862,15 +1358,12 @@ agent_intents (
   unique (grant_id, idempotency_key)
 );
 
-agent_audit_events (
-  id uuid primary key,
-  grant_id uuid references agent_grants(id) on delete set null,
-  intent_id uuid references agent_intents(id) on delete set null,
-  user_id uuid not null references users(id) on delete cascade,
-  event_type text not null,
-  metadata jsonb not null default '{}',
-  created_at timestamptz not null default now()
-);
+alter table agent_audit_events
+  add column if not exists intent_id uuid
+  references agent_intents(id) on delete set null;
+
+create index if not exists idx_agent_audit_events_intent_created
+  on agent_audit_events(intent_id, created_at desc);
 ```
 
 Intent idempotency and state-machine rules:
@@ -912,19 +1405,35 @@ Package the MCP server in the external `hunch-agent-tools` repo as
 `packages/hunch-agent-client`. The monorepo exposes the API contract; the
 external repo consumes it.
 
-Read tools:
+Current public/read tools:
 
 ```text
-hunch_search_markets
-hunch_get_market
-hunch_get_event
-hunch_get_feed
+hunch_search_discovery
+hunch_browse_discovery
+hunch_get_discovery_top_lists
+hunch_get_discovery_map
+hunch_get_market_detail
+hunch_get_event_detail
+hunch_get_arbitrage_clusters
+hunch_get_market_alternatives
 hunch_get_similar_markets
 hunch_get_similar_events
-hunch_get_market_map
-hunch_get_discovery_sidebars
-hunch_get_clusters
-hunch_get_prices
+hunch_get_market_holders
+hunch_get_market_price_history
+hunch_get_event_price_history
+hunch_get_tracking_overview
+hunch_get_wallet_intel
+hunch_get_wallet_activity
+hunch_get_wallet_positions
+hunch_get_wallet_series
+hunch_get_wallet_signals
+hunch_get_signals
+hunch_get_trades
+```
+
+Phase 2 authenticated read tools:
+
+```text
 hunch_get_account
 hunch_get_wallets
 hunch_get_wallet_balances
@@ -933,8 +1442,6 @@ hunch_get_funding_plan
 hunch_get_positions
 hunch_get_orders
 hunch_get_deposit_address
-hunch_get_bridge_options
-hunch_get_redemption_plan
 hunch_get_notifications
 ```
 
@@ -1206,29 +1713,45 @@ Reuse existing redemption plan endpoints:
 
 ### Phase 1: Read-Only MCP
 
-- Create the separate `hunch-agent-tools` repo. **Started.**
-- Add the MCP package and shared API client. **Started with local read-only
+- Create the separate `hunch-agent-tools` repo. **Implemented.**
+- Add the MCP package and shared API client. **Implemented with local read-only
   types; generated API types remain pending.**
-- Use existing public/read endpoints only. **Started.**
+- Use existing public/read endpoints only. **Implemented.**
 - Do not depend on device auth or private user account state in this phase.
-- Add tests with mocked API responses. **Pending.**
+- Add tests with mocked API responses. **Implemented for current read tools and
+  packaging paths.**
 - Ship docs for local setup in Codex/Claude. **Started.**
 
 This proves the developer/user workflow without risking funds.
 
 ### Phase 2: Agent Grants
 
-- In the Hunch monorepo, add `agent_grants`, device auth tables, token hashing,
-  `/agent/device/*`, `/agent/grants`, and `createAgentAuthMiddleware`.
-- In the Hunch monorepo, add scope, wallet, venue, chain, and asset checks plus
-  UI to create/revoke grants and inspect last use.
+- In the Hunch monorepo, add one migration for `agent_grants`,
+  `agent_device_authorizations`, and `agent_audit_events`.
+- In the Hunch monorepo, add token hashing, `/agent/device/*`,
+  `/agent/grants`, `/agent/audit`, `/agent/me`, and
+  `createAgentAuthMiddleware`.
+- In the Hunch monorepo, hash agent tokens/device codes/approval tokens with an
+  agent-specific HMAC secret, use short device approval TTLs, redact raw tokens
+  from logs/audit metadata, and re-check wallet ownership on agent access.
+- In the Hunch monorepo, add scope, wallet, venue, chain, and asset checks.
+- In the frontend, add `/agent/approve/:approvalToken` and `/settings/agents` so
+  users can approve limited grants, inspect connected agents, and revoke access.
 - In the external tools repo, enable authenticated read tools for account,
   wallets, balances, positions, orders, funding plan, and venue readiness.
+- In the external tools repo, support multiple local auth profiles:
+  `auth login --profile`, `auth list`, `auth use`, and
+  `auth logout --profile`; authenticated tools may accept optional `profile`.
+- In the external tools repo, keep local token files permission-restricted,
+  redact token output, ignore expired profiles, and treat `HUNCH_AGENT_TOKEN` as
+  an explicit escape hatch instead of the normal multi-account UX.
 - Add backend API tests for expiry, revocation, scope denial, wallet denial,
   token hash lookup, one-time token issuance, expiry, rate limits, max attempts,
-  and polling limits.
+  polling limits, HMAC hashing, entropy, redaction, and wallet re-checks.
 - Add external repo tests for auth flow polling, token storage, redaction, and
-  authenticated read tool errors.
+  authenticated read tool errors, including multi-profile selection.
+- Add frontend tests for logged-out redirect/return, approve, deny, revoke, and
+  no-token-exposure behavior.
 
 ### Phase 3: Preview And Intent Records
 
@@ -1247,7 +1770,7 @@ This proves the developer/user workflow without risking funds.
 
 ### Phase 4: Confirmation-Required Execution
 
-- Add a Hunch UI surface for pending agent intents.
+- Add `/agent/intents/:intentId` for pending agent intents.
 - User approval should run the same Privy authorization-signature flow used by
   normal trading.
 - Execution should dispatch to existing venue/bridge routes or extracted shared
@@ -1256,6 +1779,8 @@ This proves the developer/user workflow without risking funds.
   that approval binds to the exact prepared payload.
 - Add tests for legal/illegal status transitions, row locking, duplicate execute
   calls, and terminal-result replay.
+- Add frontend tests for intent details, reject, confirm, stale quote handling,
+  insufficient-funds/funding guidance, and Privy authorization errors.
 
 ### Phase 5: Policy Automation
 
