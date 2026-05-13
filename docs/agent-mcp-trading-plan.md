@@ -614,6 +614,7 @@ read:wallets
 read:orders
 read:positions
 read:funding
+read:notifications
 quote:trade
 prepare:venue
 prepare:trade
@@ -633,6 +634,7 @@ read:wallets
 read:orders
 read:positions
 read:funding
+read:notifications
 ```
 
 Quote, prepare, submit, cancel, bridge, redeem, and position-management scopes
@@ -730,12 +732,33 @@ Agent-token routes:
 
 ```http
 GET /agent/me
+GET /agent/notifications
 ```
 
 This is the first route behind `createAgentAuthMiddleware`. It proves token
 validation, scope attachment, grant metadata, user lookup, and profile display
 without touching private trading flows. Later authenticated read routes can add
 wallets, balances, positions, orders, rewards, and funding readiness.
+
+Notifications should be included as a Phase 2 authenticated read surface:
+
+```http
+GET /agent/notifications?limit=50&offset=0&status=unread&type=...
+```
+
+Rules:
+
+- require `read:notifications`;
+- reuse the existing notification read model/repository instead of creating a
+  parallel notification store;
+- return user-level notifications for the authenticated grant's user, with
+  pagination and optional status/type filters;
+- include safe links to related Hunch pages when the notification references an
+  event, market, wallet, grant, or later an intent;
+- Phase 2 is list/read only: do not mark notifications read, delete
+  notifications, or mutate notification preferences from an agent token;
+- marking read or managing notification settings should require a later
+  `manage:notifications` scope or the normal browser session.
 
 Agent auth middleware:
 
@@ -780,7 +803,8 @@ Phase 2 authenticated-read rollout should be narrow:
 1. `/agent/me`;
 2. grant list/revoke in frontend;
 3. agent-tools `auth login`, `auth list`, `auth use`, `auth logout`;
-4. private read tools after `/agent/me` is stable.
+4. `/agent/notifications` as read-only account context;
+5. other private read tools after `/agent/me` is stable.
 
 Implementation order:
 
@@ -795,7 +819,8 @@ Implementation order:
 7. Add backend tests for the full device approval and one-time token lifecycle.
 8. Add frontend approval/settings pages against the browser-session routes.
 9. Add agent-tools multi-profile login/logout/list/use support.
-10. Add authenticated private read tools only after `/agent/me` and
+10. Add read-only `/agent/notifications` and `hunch_get_notifications`.
+11. Add authenticated private read tools only after `/agent/me` and
     multi-profile auth are stable.
 
 Backend tests:
@@ -818,6 +843,8 @@ Backend tests:
 - revoked grant rejects immediately;
 - expired grant rejects;
 - missing required scope rejects;
+- `/agent/notifications` requires `read:notifications`, paginates results, and
+  does not expose notification mutations;
 - unlinked wallet approval rejects;
 - browser approval requires normal user auth and CSRF;
 - revoke requires owning user;
@@ -1215,6 +1242,7 @@ GET  /agent/capabilities
 GET  /agent/grants
 DELETE /agent/grants/:id
 GET  /agent/me
+GET  /agent/notifications
 POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
@@ -1238,6 +1266,7 @@ Agent-token routes:
 
 ```text
 GET  /agent/me
+GET  /agent/notifications
 POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
@@ -1738,7 +1767,8 @@ This proves the developer/user workflow without risking funds.
 - In the frontend, add `/agent/approve/:approvalToken` and `/settings/agents` so
   users can approve limited grants, inspect connected agents, and revoke access.
 - In the external tools repo, enable authenticated read tools for account,
-  wallets, balances, positions, orders, funding plan, and venue readiness.
+  wallets, balances, positions, orders, funding plan, notifications, and venue
+  readiness.
 - In the external tools repo, support multiple local auth profiles:
   `auth login --profile`, `auth list`, `auth use`, and
   `auth logout --profile`; authenticated tools may accept optional `profile`.
