@@ -36,7 +36,7 @@ const inviteAdminBodySchema = z.object({
 });
 
 const adminRoleBodySchema = z.object({
-  role: z.enum(["admin", "sadmin"]),
+  role: z.enum(["sadmin", "admin", "viewer", "analyst"]),
 });
 
 function readRequestUserAgent(request: FastifyRequest): string | null {

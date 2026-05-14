@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  adminHasPermission,
   adminRoleAllowed,
   buildTotpUri,
   hashAdminPassword,
@@ -59,10 +60,29 @@ await test("builds authenticator-compatible TOTP URIs", () => {
 });
 
 await test("enforces sadmin-only role gates", () => {
+  assert.equal(adminRoleAllowed("analyst", "analyst"), true);
+  assert.equal(adminRoleAllowed("viewer", "analyst"), true);
+  assert.equal(adminRoleAllowed("admin", "viewer"), true);
   assert.equal(adminRoleAllowed("admin", "admin"), true);
   assert.equal(adminRoleAllowed("sadmin", "admin"), true);
+  assert.equal(adminRoleAllowed("analyst", "viewer"), false);
+  assert.equal(adminRoleAllowed("viewer", "admin"), false);
   assert.equal(adminRoleAllowed("admin", "sadmin"), false);
   assert.equal(adminRoleAllowed("sadmin", "sadmin"), true);
+});
+
+await test("maps admin role permissions conservatively", () => {
+  assert.equal(adminHasPermission("sadmin", "admin:manage"), true);
+  assert.equal(adminHasPermission("admin", "users:write"), true);
+  assert.equal(adminHasPermission("admin", "admin:manage"), false);
+  assert.equal(adminHasPermission("viewer", "users:read"), true);
+  assert.equal(adminHasPermission("viewer", "users:write"), false);
+  assert.equal(adminHasPermission("viewer", "finance:read"), true);
+  assert.equal(adminHasPermission("viewer", "finance:write"), false);
+  assert.equal(adminHasPermission("analyst", "analytics:read"), false);
+  assert.equal(adminHasPermission("analyst", "intel:read"), false);
+  assert.equal(adminHasPermission("analyst", "users:read"), false);
+  assert.equal(adminHasPermission("analyst", "rewards:read"), false);
 });
 
 await test("prevents admin-management lockouts", () => {

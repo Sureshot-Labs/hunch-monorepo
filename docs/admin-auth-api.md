@@ -7,14 +7,22 @@ The public Hunch app and Privy user auth remain unchanged.
 
 Admin accounts are independent from normal `users` records. Operators create an
 admin invite with the backend CLI, send the one-time enrollment URL manually,
-then activate the enrolled account with a role.
+then activate the enrolled account with a role: `sadmin`, `admin`, `viewer`, or
+`analyst`.
 
 Supported roles:
 
-- `admin`: can use existing `/admin/*` panel APIs except admin-management
-  endpoints.
 - `sadmin`: can use all `admin` APIs and admin-management endpoints such as
   changing legacy user admin status.
+- `admin`: can use existing operational `/admin/*` panel APIs except
+  admin-management endpoints.
+- `viewer`: can use read-only `/admin/*` panel APIs, including user, finance,
+  rewards, intel, and analytics reads, but cannot mutate users, fees, rewards,
+  points, policies, or admin accounts.
+- `analyst`: can log in to the admin panel so the frontend can show
+  external/client-side analytics surfaces, such as Google Analytics. It cannot
+  call internal Hunch `/admin/*`, `/analytics/*`, user, finance, rewards, or
+  intel APIs unless a future backend route grants a narrower permission.
 
 Account statuses:
 
@@ -23,6 +31,47 @@ Account statuses:
 - `active`: can log in.
 - `disabled`: cannot enroll or log in; sessions are revoked.
 
+## Admin Frontend RBAC Contract
+
+The admin frontend should treat the backend role as a navigation and capability
+hint only. Backend permissions remain the security boundary; hidden frontend UI
+does not replace backend authorization.
+
+Recommended role visibility:
+
+| Role | Frontend visibility | Mutations |
+| --- | --- | --- |
+| `sadmin` | All admin sections, including admin account management. | All supported admin mutations. |
+| `admin` | Operational admin sections, but no admin account management. | Operational mutations only. |
+| `viewer` | Read-only internal admin sections. | None. Hide or disable write controls. |
+| `analyst` | External/client-side analytics surfaces only. | None. Do not call internal Hunch admin APIs. |
+
+Internal Hunch admin sections currently map to backend permissions like this:
+
+| Section | Example backend routes | Required permission family |
+| --- | --- | --- |
+| Operational analytics health | `/analytics/collector/telemetry`, `/admin/vector`, `/admin/api-cache-warm/status` | `analytics:read` |
+| Users | `/admin/users`, `/admin/users/:id`, user balances/activity | `users:read` or `users:write` |
+| Finance | `/admin/overview`, `/admin/fees/*`, debridge config routes | `finance:read` or `finance:write` |
+| Wallet intel | `/admin/intel/*` | `intel:read` or `intel:write` |
+| Rewards and points | `/admin/rewards/*`, manual points routes | `rewards:read` or `rewards:write` |
+| Admin accounts | `/admin-auth/admins/*` | `admin:manage` |
+
+`analyst` is intentionally not included in any internal backend permission
+family. The role exists so the future admin panel can authenticate a user and
+then show frontend-owned or third-party analytics content, such as embedded or
+linked Google Analytics reporting, without granting access to Hunch user,
+finance, rewards, wallet, intel, cache, vector, or collector data.
+
+Frontend implementation notes:
+
+- Build the navigation from the role returned by `/admin-auth/me`.
+- Clear admin cookies and redirect to login on `admin_session_expired`.
+- Hide write controls for `viewer` and `analyst`; still handle backend `403`
+  responses because authorization is enforced server-side.
+- Keep legacy fallback out of the new admin frontend. It exists only to avoid
+  breaking current backend/admin ops during rollout.
+
 ## CLI Ops
 
 Run inside the API package:
@@ -30,6 +79,8 @@ Run inside the API package:
 ```bash
 pnpm -F api run admin:auth -- invite --email admin@example.com
 pnpm -F api run admin:auth -- activate --email admin@example.com --role admin
+pnpm -F api run admin:auth -- activate --email viewer@example.com --role viewer
+pnpm -F api run admin:auth -- activate --email analyst@example.com --role analyst
 pnpm -F api run admin:auth -- activate --email owner@example.com --role sadmin
 pnpm -F api run admin:auth -- disable --email admin@example.com
 pnpm -F api run admin:auth -- rotate-link --email admin@example.com
@@ -342,6 +393,8 @@ Request:
 { "role": "admin" }
 ```
 
+Allowed role values are `sadmin`, `admin`, `viewer`, and `analyst`.
+
 Success:
 
 ```json
@@ -359,6 +412,8 @@ Request:
 ```json
 { "role": "sadmin" }
 ```
+
+Allowed role values are `sadmin`, `admin`, `viewer`, and `analyst`.
 
 Success:
 
@@ -443,6 +498,14 @@ For new admin sessions, endpoints that grant or revoke admin powers require
 `sadmin`. During compatibility, legacy app admin sessions keep their current
 behavior while `ADMIN_AUTH_LEGACY_FALLBACK=true`.
 
+Role permissions for new admin sessions:
+
+- `sadmin`: all read/write/admin-management permissions.
+- `admin`: operational read/write permissions, but no admin-account management.
+- `viewer`: read-only admin panel permissions.
+- `analyst`: admin-panel login only; no internal Hunch admin API data
+  permissions.
+
 ## Error Codes
 
 Errors use this shape:
@@ -471,6 +534,7 @@ Known error codes:
 - `admin_csrf_invalid`
 - `admin_access_required`
 - `sadmin_access_required`
+- `admin_permission_required`
 - `admin_invalid_role`
 - `admin_not_found`
 - `admin_self_action_forbidden`

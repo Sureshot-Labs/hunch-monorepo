@@ -21,8 +21,58 @@ const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_LENGTH = 256;
 const SESSION_LAST_ACCESSED_THROTTLE_MS = 5 * 60 * 1000;
 
-export type AdminRole = "admin" | "sadmin";
+export type AdminRole = "sadmin" | "admin" | "viewer" | "analyst";
 export type AdminStatus = "invited" | "enrolled" | "active" | "disabled";
+export type AdminPermission =
+  | "admin:manage"
+  | "analytics:read"
+  | "users:read"
+  | "users:write"
+  | "finance:read"
+  | "finance:write"
+  | "intel:read"
+  | "intel:write"
+  | "rewards:read"
+  | "rewards:write";
+
+const ALL_ADMIN_PERMISSIONS = [
+  "admin:manage",
+  "analytics:read",
+  "users:read",
+  "users:write",
+  "finance:read",
+  "finance:write",
+  "intel:read",
+  "intel:write",
+  "rewards:read",
+  "rewards:write",
+] as const satisfies readonly AdminPermission[];
+
+const ADMIN_ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
+  sadmin: ALL_ADMIN_PERMISSIONS,
+  admin: ALL_ADMIN_PERMISSIONS.filter(
+    (permission) => permission !== "admin:manage",
+  ),
+  viewer: [
+    "analytics:read",
+    "users:read",
+    "finance:read",
+    "intel:read",
+    "rewards:read",
+  ],
+  // Analyst is intentionally a panel-login role only for now. It can
+  // authenticate through /admin-auth/me so the admin frontend can unlock
+  // external analytics surfaces, but it should not read internal Hunch admin
+  // data unless a future backend route grants a narrower permission.
+  analyst: [],
+};
+
+const ADMIN_ROLE_RANK: Record<AdminRole, number> = {
+  analyst: 0,
+  viewer: 1,
+  admin: 2,
+  sadmin: 3,
+};
 
 export type AdminAccount = {
   id: string;
@@ -75,7 +125,8 @@ export type AdminAuthErrorCode =
   | "admin_session_expired"
   | "admin_csrf_invalid"
   | "admin_access_required"
-  | "sadmin_access_required";
+  | "sadmin_access_required"
+  | "admin_permission_required";
 
 export class AdminAuthError extends Error {
   readonly code: AdminAuthErrorCode;
@@ -101,6 +152,8 @@ function adminAuthErrorMessage(code: AdminAuthErrorCode): string {
       return "Admins cannot perform this action on their own account";
     case "admin_last_sadmin_forbidden":
       return "Cannot remove the last active sadmin";
+    case "admin_permission_required":
+      return "Admin permission required";
     case "invalid_credentials":
       return "Invalid email, password, or TOTP code";
     case "invalid_totp":
@@ -183,7 +236,12 @@ export type AdminSessionAuthResult =
     };
 
 function isAdminRole(value: string | null | undefined): value is AdminRole {
-  return value === "admin" || value === "sadmin";
+  return (
+    value === "sadmin" ||
+    value === "admin" ||
+    value === "viewer" ||
+    value === "analyst"
+  );
 }
 
 function isMissingTableError(error: unknown): boolean {
@@ -1764,7 +1822,7 @@ export class AdminAuthService {
             and s.revoked_at is null
             and s.expires_at > now()
             and a.status = 'active'
-            and a.role in ('admin', 'sadmin')
+            and a.role in ('sadmin', 'admin', 'viewer', 'analyst')
           limit 1
         `,
         [hashToken(token)],
@@ -1853,8 +1911,24 @@ export function adminRoleAllowed(
   actual: AdminRole,
   minimum: AdminRole,
 ): boolean {
-  if (minimum === "admin") return actual === "admin" || actual === "sadmin";
-  return actual === "sadmin";
+  return ADMIN_ROLE_RANK[actual] >= ADMIN_ROLE_RANK[minimum];
+}
+
+export function adminHasPermission(
+  role: AdminRole,
+  permission: AdminPermission,
+): boolean {
+  return ADMIN_ROLE_PERMISSIONS[role].includes(permission);
+}
+
+function adminHasAllPermissions(
+  role: AdminRole,
+  permissions: readonly AdminPermission[] | undefined,
+): boolean {
+  if (!permissions?.length) return true;
+  return permissions.every((permission) =>
+    adminHasPermission(role, permission),
+  );
 }
 
 export function resolveAdminManagementLockout(args: {
@@ -1889,7 +1963,11 @@ export function resolveAdminManagementLockout(args: {
 
 export async function attachAdminSessionToRequest(
   request: FastifyRequest,
-  options: { minRole?: AdminRole; requireCsrf?: boolean } = {},
+  options: {
+    minRole?: AdminRole;
+    requiredPermissions?: AdminPermission[];
+    requireCsrf?: boolean;
+  } = {},
 ): Promise<AdminSessionAuthResult> {
   const token = readAdminBearerToken(request);
   if (!token) {
@@ -1911,18 +1989,36 @@ export async function attachAdminSessionToRequest(
     };
   }
 
-  const minRole = options.minRole ?? "admin";
-  if (!result.actor.role || !adminRoleAllowed(result.actor.role, minRole)) {
+  if (
+    options.minRole &&
+    (!result.actor.role ||
+      !adminRoleAllowed(result.actor.role, options.minRole))
+  ) {
     const error =
-      minRole === "sadmin" ? "sadmin_access_required" : "admin_access_required";
+      options.minRole === "sadmin"
+        ? "sadmin_access_required"
+        : "admin_permission_required";
     return {
       ok: false,
       error,
       statusCode: 403,
       message:
-        minRole === "sadmin"
+        options.minRole === "sadmin"
           ? "Sadmin access required"
-          : "Admin access required",
+          : "Admin permission required",
+    };
+  }
+
+  if (
+    options.requiredPermissions?.length &&
+    (!result.actor.role ||
+      !adminHasAllPermissions(result.actor.role, options.requiredPermissions))
+  ) {
+    return {
+      ok: false,
+      error: "admin_permission_required",
+      statusCode: 403,
+      message: "Admin permission required",
     };
   }
 
@@ -1948,11 +2044,15 @@ export async function attachAdminSessionToRequest(
 }
 
 export function createAdminSessionMiddleware(
-  options: { minRole?: AdminRole } = {},
+  options: {
+    minRole?: AdminRole;
+    requiredPermissions?: AdminPermission[];
+  } = {},
 ) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const result = await attachAdminSessionToRequest(request, {
       minRole: options.minRole,
+      requiredPermissions: options.requiredPermissions,
     });
     if (result.ok) return;
     reply.code(result.statusCode);

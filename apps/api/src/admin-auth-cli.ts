@@ -27,7 +27,7 @@ function usage(): string {
   return `
 Usage:
   pnpm -F api run admin:auth -- invite --email <email>
-  pnpm -F api run admin:auth -- activate --email <email> --role admin|sadmin
+  pnpm -F api run admin:auth -- activate --email <email> --role sadmin|admin|viewer|analyst
   pnpm -F api run admin:auth -- disable --email <email>
   pnpm -F api run admin:auth -- rotate-link --email <email>
   pnpm -F api run admin:auth -- revoke-sessions --email <email>
@@ -49,7 +49,12 @@ function parseArgs(argv: string[]): Options {
   };
   const roleRaw = getValue("--role");
   const role =
-    roleRaw === "admin" || roleRaw === "sadmin" ? roleRaw : undefined;
+    roleRaw === "sadmin" ||
+    roleRaw === "admin" ||
+    roleRaw === "viewer" ||
+    roleRaw === "analyst"
+      ? roleRaw
+      : undefined;
   return {
     command,
     email: getValue("--email"),
@@ -66,7 +71,7 @@ function requireEmail(options: Options): string {
 
 function requireRole(options: Options): AdminRole {
   if (options.role) return options.role;
-  throw new Error("--role admin|sadmin is required");
+  throw new Error("--role sadmin|admin|viewer|analyst is required");
 }
 
 function print(options: Options, payload: unknown, text: string): void {

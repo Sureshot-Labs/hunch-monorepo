@@ -518,7 +518,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/overview",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+    },
     async (_request, reply) => {
       const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
       const feeCollectorPrivateKey = env.feeCollectorPrivateKey?.trim() || "";
@@ -998,7 +1002,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/api-cache-warm/status",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+    },
     async (_request, reply) => {
       const policy = await resolveApiCacheWarmPolicy(pool);
       const { redis, status, error } = await getRedisStatus();
@@ -1053,7 +1061,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/vector",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+    },
     async (_request, reply) => {
       const streamKey = getEmbedStreamKey();
       const groupName = process.env.AI_EMBED_GROUP ?? "ai-embedder";
@@ -1234,7 +1246,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/users",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
       schema: { querystring: adminUsersQuerySchema },
     },
     async (request, reply) => {
@@ -1382,7 +1396,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/users/:id",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
       schema: { params: adminUserParamsSchema },
     },
     async (request, reply) => {
@@ -1511,7 +1527,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/users/:id/balances",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
       schema: { params: adminUserParamsSchema },
     },
     async (request, reply) => {
@@ -1733,7 +1751,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/users/:id/activity",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
       schema: {
         params: adminUserParamsSchema,
         querystring: adminUserActivityQuerySchema,
@@ -1847,7 +1867,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/merge",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:write",
+      }),
       schema: { body: adminUserMergeSchema },
     },
     async (request, reply) => {
@@ -1886,7 +1908,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/privy-bind-grant",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:write",
+      }),
       schema: { body: adminUserPrivyBindGrantSchema },
     },
     async (request, reply) => {
@@ -1984,7 +2008,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/:id/active",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:write",
+      }),
       schema: { params: adminUserParamsSchema, body: adminUserActiveSchema },
     },
     async (request, reply) => {
@@ -2060,7 +2086,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/:id/kalshi-proof-bypass",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:write",
+      }),
       schema: {
         params: adminUserParamsSchema,
         body: adminUserKalshiProofBypassSchema,
@@ -2096,7 +2124,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/users/:id/referral-code",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:write",
+      }),
       schema: {
         params: adminUserParamsSchema,
         body: adminUserReferralCodeSchema,
@@ -2144,7 +2174,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/fees/policy",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+    },
     async (_request, reply) => {
       const [poly, kalshi] = await Promise.all([
         fetchActiveFeePolicy(pool, "polymarket"),
@@ -2175,7 +2209,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/fees/policy",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:write",
+      }),
       schema: { body: adminFeePolicySchema },
     },
     async (request, reply) => {
@@ -2209,7 +2245,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/fees/debridge",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+    },
     async (_request, reply) => {
       const row = await fetchActiveDebridgeConfig(pool);
       const recipients =
@@ -2241,7 +2281,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/fees/debridge",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:write",
+      }),
       schema: { body: adminDebridgeConfigSchema },
     },
     async (request, reply) => {
@@ -2285,7 +2327,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/intel/policies",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:read",
+      }),
+    },
     async (_request, reply) => {
       const resolved = await resolveAllIntelPolicies(pool);
       const items = INTEL_POLICY_KEYS.map((key) => {
@@ -2312,7 +2358,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/intel/policies/:key",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:read",
+      }),
       schema: { params: adminIntelPolicyParamsSchema },
     },
     async (request, reply) => {
@@ -2336,7 +2384,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/intel/policies/:key",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:write",
+      }),
       schema: {
         params: adminIntelPolicyParamsSchema,
         body: adminIntelPolicyBodySchema,
@@ -2414,7 +2464,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/rewards/multiplier-policy",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
+    },
     async (_request, reply) => {
       const active = await fetchActiveRewardsMultiplierPolicy(pool);
       const fallbackEffectiveAt = active?.effective_at ?? null;
@@ -2456,7 +2510,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/rewards/multiplier-policy",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { body: adminRewardsMultiplierPolicySchema },
     },
     async (request, reply) => {
@@ -2491,7 +2547,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/rewards/multiplier-overrides",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
       schema: { querystring: adminRewardsMultiplierOverridesQuerySchema },
     },
     async (request, reply) => {
@@ -2529,7 +2587,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/rewards/multiplier-overrides",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { body: adminRewardsMultiplierOverrideSchema },
     },
     async (request, reply) => {
@@ -2594,7 +2654,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.delete(
     "/admin/rewards/multiplier-overrides/:userId",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { params: adminRewardsMultiplierOverrideParamsSchema },
     },
     async (request, reply) => {
@@ -2614,7 +2676,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/admin/rewards/policy",
-    { preHandler: createAdminMiddleware() },
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
+    },
     async (_request, reply) => {
       const active = await fetchActiveRewardsPolicy(pool);
       const policy = await getRewardsPolicy(pool);
@@ -2637,7 +2703,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/rewards/treasury",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
       schema: { querystring: adminRewardsTreasuryQuerySchema },
     },
     async (request, reply) => {
@@ -2662,7 +2730,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/rewards/policy",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { body: adminRewardsPolicySchema },
     },
     async (request, reply) => {
@@ -2701,7 +2771,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/admin/rewards/points",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { body: adminPointsSchema },
     },
     async (request, reply) => {
@@ -2771,7 +2843,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/admin/points/manual-events",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
       schema: { querystring: adminManualPointsQuerySchema },
     },
     async (request, reply) => {
@@ -2807,7 +2881,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   z.delete(
     "/admin/points/manual-events/:id",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
       schema: { params: adminManualPointsParamsSchema },
     },
     async (request, reply) => {

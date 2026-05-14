@@ -20,6 +20,7 @@ import { resolveSecurityClientIp } from "./lib/request-ip.js";
 import { checkRateLimit } from "./lib/rate-limit.js";
 import {
   attachAdminSessionToRequest,
+  type AdminPermission,
   type AdminRole,
 } from "./services/admin-auth.js";
 
@@ -2009,6 +2010,8 @@ type AuthMiddlewareOptions = {
 
 type AdminMiddlewareOptions = AuthMiddlewareOptions & {
   minAdminRole?: AdminRole;
+  requiredAdminPermission?: AdminPermission;
+  requiredAdminPermissions?: AdminPermission[];
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -2169,6 +2172,13 @@ export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const adminSession = await attachAdminSessionToRequest(request, {
       minRole: options.minAdminRole,
+      requiredPermissions:
+        options.requiredAdminPermissions ??
+        (options.requiredAdminPermission
+          ? [options.requiredAdminPermission]
+          : options.minAdminRole
+            ? undefined
+            : ["users:write"]),
       requireCsrf: requiresCsrf(request.method),
     });
     if (adminSession.ok) {
@@ -2186,6 +2196,7 @@ export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
 
     if (
       adminSession.error === "sadmin_access_required" ||
+      adminSession.error === "admin_permission_required" ||
       adminSession.error === "admin_csrf_invalid"
     ) {
       reply.code(adminSession.statusCode);
