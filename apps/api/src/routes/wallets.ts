@@ -81,6 +81,14 @@ const VENUE_STATUS_TTL_MS = 15_000;
 const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
 const KALSHI_LOW_SOL_BUFFER_LAMPORTS = 2_000_000n;
 
+function withBalanceOwner<T extends Record<string, unknown>>(
+  status: T,
+  ownerRole: "signer" | "funder" | "wallet",
+  ownerAddress: string,
+): T & { ownerRole: "signer" | "funder" | "wallet"; ownerAddress: string } {
+  return { ...status, ownerRole, ownerAddress };
+}
+
 const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
   "100000001": "245022934", // Neon
   "100000002": "100", // Gnosis
@@ -1404,64 +1412,154 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         negRiskReasons.push("allowance_neg_risk_adapter");
                       }
 
-                      const pusdStatus = {
-                        tokenAddress: env.polymarketUsdcAddress,
-                        decimals: 6,
-                        balance: ethers.formatUnits(pusdBalance, 6),
-                        balanceRaw: pusdBalance.toString(),
-                        allowance: {
-                          exchange: {
-                            spender: env.polymarketExchangeAddress,
-                            allowance: ethers.formatUnits(allowanceExchange, 6),
-                            allowanceRaw: allowanceExchange.toString(),
+                      const pusdStatus = withBalanceOwner(
+                        {
+                          tokenAddress: env.polymarketUsdcAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(pusdBalance, 6),
+                          balanceRaw: pusdBalance.toString(),
+                          allowance: {
+                            exchange: {
+                              spender: env.polymarketExchangeAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceExchange,
+                                6,
+                              ),
+                              allowanceRaw: allowanceExchange.toString(),
+                            },
+                            negRiskExchange: {
+                              spender: env.polymarketNegRiskExchangeAddress,
+                              allowance: ethers.formatUnits(
+                                allowanceNegRisk,
+                                6,
+                              ),
+                              allowanceRaw: allowanceNegRisk.toString(),
+                            },
+                            ...(negRiskAdapterAddress
+                              ? {
+                                  negRiskAdapter: {
+                                    spender: negRiskAdapterAddress,
+                                    allowance: ethers.formatUnits(
+                                      allowanceNegRiskAdapter ?? 0n,
+                                      6,
+                                    ),
+                                    allowanceRaw: (
+                                      allowanceNegRiskAdapter ?? 0n
+                                    ).toString(),
+                                  },
+                                }
+                              : {}),
+                            ...(feeCollectorAddress
+                              ? {
+                                  feeCollector: {
+                                    spender: feeCollectorAddress,
+                                    allowance: ethers.formatUnits(
+                                      allowanceFeeCollector ?? 0n,
+                                      6,
+                                    ),
+                                    allowanceRaw: (
+                                      allowanceFeeCollector ?? 0n
+                                    ).toString(),
+                                  },
+                                }
+                              : {}),
                           },
-                          negRiskExchange: {
-                            spender: env.polymarketNegRiskExchangeAddress,
-                            allowance: ethers.formatUnits(allowanceNegRisk, 6),
-                            allowanceRaw: allowanceNegRisk.toString(),
-                          },
-                          ...(negRiskAdapterAddress
-                            ? {
-                                negRiskAdapter: {
-                                  spender: negRiskAdapterAddress,
-                                  allowance: ethers.formatUnits(
-                                    allowanceNegRiskAdapter ?? 0n,
-                                    6,
-                                  ),
-                                  allowanceRaw: (
-                                    allowanceNegRiskAdapter ?? 0n
-                                  ).toString(),
-                                },
-                              }
-                            : {}),
-                          ...(feeCollectorAddress
-                            ? {
-                                feeCollector: {
-                                  spender: feeCollectorAddress,
-                                  allowance: ethers.formatUnits(
-                                    allowanceFeeCollector ?? 0n,
-                                    6,
-                                  ),
-                                  allowanceRaw: (
-                                    allowanceFeeCollector ?? 0n
-                                  ).toString(),
-                                },
-                              }
-                            : {}),
                         },
-                      };
+                        "funder",
+                        funder,
+                      );
 
-                      const signerPusdStatus = {
-                        tokenAddress: env.polymarketUsdcAddress,
-                        decimals: 6,
-                        balance: ethers.formatUnits(
-                          signerPusdBalanceResolved ?? 0n,
-                          6,
-                        ),
-                        balanceRaw: (
-                          signerPusdBalanceResolved ?? 0n
-                        ).toString(),
-                      };
+                      const funderUsdceStatus = withBalanceOwner(
+                        {
+                          tokenAddress: env.polymarketUsdceAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(usdceBalance, 6),
+                          balanceRaw: usdceBalance.toString(),
+                        },
+                        "funder",
+                        funder,
+                      );
+                      const funderNativeUsdcStatus = withBalanceOwner(
+                        {
+                          tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+                          decimals: 6,
+                          balance: ethers.formatUnits(nativeUsdcBalance, 6),
+                          balanceRaw: nativeUsdcBalance.toString(),
+                        },
+                        "funder",
+                        funder,
+                      );
+                      const funderNativeStatus = withBalanceOwner(
+                        {
+                          symbol: "POL",
+                          decimals: 18,
+                          balance: ethers.formatUnits(funderNativeBalance, 18),
+                          balanceRaw: funderNativeBalance.toString(),
+                        },
+                        "funder",
+                        funder,
+                      );
+
+                      const signerPusdStatus = withBalanceOwner(
+                        {
+                          tokenAddress: env.polymarketUsdcAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(
+                            signerPusdBalanceResolved ?? 0n,
+                            6,
+                          ),
+                          balanceRaw: (
+                            signerPusdBalanceResolved ?? 0n
+                          ).toString(),
+                        },
+                        "signer",
+                        walletAddress,
+                      );
+                      const signerUsdceStatus = withBalanceOwner(
+                        {
+                          tokenAddress: env.polymarketUsdceAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(
+                            signerUsdceBalanceResolved ?? 0n,
+                            6,
+                          ),
+                          balanceRaw: (
+                            signerUsdceBalanceResolved ?? 0n
+                          ).toString(),
+                        },
+                        "signer",
+                        walletAddress,
+                      );
+                      const signerNativeUsdcStatus = withBalanceOwner(
+                        {
+                          tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+                          decimals: 6,
+                          balance: ethers.formatUnits(
+                            signerNativeUsdcBalanceResolved ?? 0n,
+                            6,
+                          ),
+                          balanceRaw: (
+                            signerNativeUsdcBalanceResolved ?? 0n
+                          ).toString(),
+                        },
+                        "signer",
+                        walletAddress,
+                      );
+                      const signerNativeStatus = withBalanceOwner(
+                        {
+                          symbol: "POL",
+                          decimals: 18,
+                          balance: ethers.formatUnits(
+                            signerNativeBalance ?? funderNativeBalance,
+                            18,
+                          ),
+                          balanceRaw: (
+                            signerNativeBalance ?? funderNativeBalance
+                          ).toString(),
+                        },
+                        "signer",
+                        walletAddress,
+                      );
 
                       return {
                         supported: true,
@@ -1471,67 +1569,47 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         negRiskReasons,
                         hasCredentials: Boolean(polymarketCreds),
                         signerIsContract,
+                        signer: {
+                          address: walletAddress,
+                          isContract: signerIsContract,
+                          balances: {
+                            pusd: signerPusdStatus,
+                            usdc: signerPusdStatus,
+                            usdce: signerUsdceStatus,
+                            nativeUsdc: signerNativeUsdcStatus,
+                            native: signerNativeStatus,
+                          },
+                        },
                         funder,
                         funderSource,
                         funderIsContract,
+                        signerMatchesFunder,
+                        tradingBalanceOwner: "funder",
+                        funderAccount: {
+                          address: funder,
+                          source: funderSource,
+                          isContract: funderIsContract,
+                          balances: {
+                            pusd: pusdStatus,
+                            usdc: pusdStatus,
+                            usdce: funderUsdceStatus,
+                            nativeUsdc: funderNativeUsdcStatus,
+                            native: funderNativeStatus,
+                          },
+                        },
                         relayerEnabled,
                         pusd: pusdStatus,
                         usdc: pusdStatus,
-                        usdce: {
-                          tokenAddress: env.polymarketUsdceAddress,
-                          decimals: 6,
-                          balance: ethers.formatUnits(usdceBalance, 6),
-                          balanceRaw: usdceBalance.toString(),
-                        },
-                        nativeUsdc: {
-                          tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
-                          decimals: 6,
-                          balance: ethers.formatUnits(nativeUsdcBalance, 6),
-                          balanceRaw: nativeUsdcBalance.toString(),
-                        },
-                        native: {
-                          symbol: "POL",
-                          decimals: 18,
-                          balance: ethers.formatUnits(funderNativeBalance, 18),
-                          balanceRaw: funderNativeBalance.toString(),
-                        },
-                        ...(funderIsContract
+                        usdce: funderUsdceStatus,
+                        nativeUsdc: funderNativeUsdcStatus,
+                        native: funderNativeStatus,
+                        ...(shouldFetchSignerUsdc
                           ? {
                               signerPusd: signerPusdStatus,
                               signerUsdc: signerPusdStatus,
-                              signerUsdce: {
-                                tokenAddress: env.polymarketUsdceAddress,
-                                decimals: 6,
-                                balance: ethers.formatUnits(
-                                  signerUsdceBalanceResolved ?? 0n,
-                                  6,
-                                ),
-                                balanceRaw: (
-                                  signerUsdceBalanceResolved ?? 0n
-                                ).toString(),
-                              },
-                              signerNativeUsdc: {
-                                tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
-                                decimals: 6,
-                                balance: ethers.formatUnits(
-                                  signerNativeUsdcBalanceResolved ?? 0n,
-                                  6,
-                                ),
-                                balanceRaw: (
-                                  signerNativeUsdcBalanceResolved ?? 0n
-                                ).toString(),
-                              },
-                              signerNative: {
-                                symbol: "POL",
-                                decimals: 18,
-                                balance: ethers.formatUnits(
-                                  signerNativeBalance ?? 0n,
-                                  18,
-                                ),
-                                balanceRaw: (
-                                  signerNativeBalance ?? 0n
-                                ).toString(),
-                              },
+                              signerUsdce: signerUsdceStatus,
+                              signerNativeUsdc: signerNativeUsdcStatus,
+                              signerNative: signerNativeStatus,
                             }
                           : {}),
                         conditionalTokens: {

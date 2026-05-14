@@ -512,7 +512,16 @@ function baseBalance(
   balance: string | undefined,
   balanceRaw: string | undefined,
   decimals = 6,
-): WalletBalanceItem | null {
+  owner?: {
+    ownerRole: "signer" | "funder" | "wallet";
+    ownerAddress: string;
+  },
+):
+  | (WalletBalanceItem & {
+      ownerRole?: "signer" | "funder" | "wallet";
+      ownerAddress?: string;
+    })
+  | null {
   if (balance == null || balanceRaw == null) return null;
   return {
     chainId,
@@ -523,7 +532,16 @@ function baseBalance(
     balance,
     balanceRaw,
     isNative: false,
+    ...(owner ?? {}),
   };
+}
+
+function withBalanceOwner<T extends Record<string, unknown>>(
+  status: T,
+  ownerRole: "signer" | "funder" | "wallet",
+  ownerAddress: string,
+): T & { ownerRole: "signer" | "funder" | "wallet"; ownerAddress: string } {
+  return { ...status, ownerRole, ownerAddress };
 }
 
 async function resolveAgentVenueStatusForWallet(input: {
@@ -585,25 +603,37 @@ async function resolveAgentVenueStatusForWallet(input: {
                 timeoutMs: env.polygonRpcTimeoutMs,
                 address: funder,
               });
-          const [signerCode, funderCode, snapshot, funderNativeBalance] =
-            await Promise.all([
-              signerCodePromise,
-              funderCodePromise,
-              fetchPolymarketOnchainSnapshot({
-                rpcUrl: env.polygonRpcUrl,
-                timeoutMs: env.polygonRpcTimeoutMs,
-                signer: walletAddress,
-                funder,
-                includeSignerUsdc: !signerMatchesFunder,
-                negRiskAdapterAddress,
-                feeCollectorAddress,
-              }),
-              fetchEvmBalance({
-                rpcUrl: env.polygonRpcUrl,
-                timeoutMs: env.polygonRpcTimeoutMs,
-                address: funder,
-              }),
-            ]);
+          const [
+            signerCode,
+            funderCode,
+            snapshot,
+            funderNativeBalance,
+            signerNativeBalance,
+          ] = await Promise.all([
+            signerCodePromise,
+            funderCodePromise,
+            fetchPolymarketOnchainSnapshot({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              signer: walletAddress,
+              funder,
+              includeSignerUsdc: !signerMatchesFunder,
+              negRiskAdapterAddress,
+              feeCollectorAddress,
+            }),
+            fetchEvmBalance({
+              rpcUrl: env.polygonRpcUrl,
+              timeoutMs: env.polygonRpcTimeoutMs,
+              address: funder,
+            }),
+            signerMatchesFunder
+              ? Promise.resolve<bigint | null>(null)
+              : fetchEvmBalance({
+                  rpcUrl: env.polygonRpcUrl,
+                  timeoutMs: env.polygonRpcTimeoutMs,
+                  address: walletAddress,
+                }),
+          ]);
           const signerIsContract =
             typeof signerCode === "string" && signerCode.length > 2;
           const funderIsContract =
@@ -636,21 +666,8 @@ async function resolveAgentVenueStatusForWallet(input: {
             negRiskReasons.push("allowance_neg_risk_adapter");
           }
 
-          return {
-            supported: true,
-            ready: reasons.length === 0,
-            readyNegRisk: negRiskReasons.length === 0,
-            reasons,
-            negRiskReasons,
-            hasCredentials: Boolean(polymarketCreds),
-            signerIsContract,
-            funder,
-            funderSource: polymarketCreds?.funderAddress
-              ? "credentials"
-              : "signer",
-            funderIsContract,
-            relayerEnabled,
-            pusd: {
+          const funderPusd = withBalanceOwner(
+            {
               tokenAddress: env.polymarketUsdcAddress,
               decimals: 6,
               balance: ethers.formatUnits(snapshot.pusdBalance, 6),
@@ -668,30 +685,132 @@ async function resolveAgentVenueStatusForWallet(input: {
                 },
               },
             },
-            usdc: {
-              tokenAddress: env.polymarketUsdcAddress,
-              decimals: 6,
-              balance: ethers.formatUnits(snapshot.pusdBalance, 6),
-              balanceRaw: snapshot.pusdBalance.toString(),
-            },
-            usdce: {
+            "funder",
+            funder,
+          );
+          const funderUsdce = withBalanceOwner(
+            {
               tokenAddress: env.polymarketUsdceAddress,
               decimals: 6,
               balance: ethers.formatUnits(snapshot.usdceBalance, 6),
               balanceRaw: snapshot.usdceBalance.toString(),
             },
-            nativeUsdc: {
+            "funder",
+            funder,
+          );
+          const funderNativeUsdc = withBalanceOwner(
+            {
               tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
               decimals: 6,
               balance: ethers.formatUnits(snapshot.nativeUsdcBalance, 6),
               balanceRaw: snapshot.nativeUsdcBalance.toString(),
             },
-            native: {
+            "funder",
+            funder,
+          );
+          const funderNative = withBalanceOwner(
+            {
               symbol: "POL",
               decimals: 18,
               balance: ethers.formatUnits(funderNativeBalance, 18),
               balanceRaw: funderNativeBalance.toString(),
             },
+            "funder",
+            funder,
+          );
+          const signerPusdBalance =
+            snapshot.signerPusdBalance ?? snapshot.pusdBalance;
+          const signerUsdceBalance =
+            snapshot.signerUsdceBalance ?? snapshot.usdceBalance;
+          const signerNativeUsdcBalance =
+            snapshot.signerNativeUsdcBalance ?? snapshot.nativeUsdcBalance;
+          const signerNativeBalanceResolved =
+            signerNativeBalance ?? funderNativeBalance;
+          const signerPusd = withBalanceOwner(
+            {
+              tokenAddress: env.polymarketUsdcAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(signerPusdBalance, 6),
+              balanceRaw: signerPusdBalance.toString(),
+            },
+            "signer",
+            walletAddress,
+          );
+          const signerUsdce = withBalanceOwner(
+            {
+              tokenAddress: env.polymarketUsdceAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(signerUsdceBalance, 6),
+              balanceRaw: signerUsdceBalance.toString(),
+            },
+            "signer",
+            walletAddress,
+          );
+          const signerNativeUsdc = withBalanceOwner(
+            {
+              tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+              decimals: 6,
+              balance: ethers.formatUnits(signerNativeUsdcBalance, 6),
+              balanceRaw: signerNativeUsdcBalance.toString(),
+            },
+            "signer",
+            walletAddress,
+          );
+          const signerNative = withBalanceOwner(
+            {
+              symbol: "POL",
+              decimals: 18,
+              balance: ethers.formatUnits(signerNativeBalanceResolved, 18),
+              balanceRaw: signerNativeBalanceResolved.toString(),
+            },
+            "signer",
+            walletAddress,
+          );
+
+          return {
+            supported: true,
+            ready: reasons.length === 0,
+            readyNegRisk: negRiskReasons.length === 0,
+            reasons,
+            negRiskReasons,
+            hasCredentials: Boolean(polymarketCreds),
+            signerIsContract,
+            signer: {
+              address: walletAddress,
+              isContract: signerIsContract,
+              balances: {
+                pusd: signerPusd,
+                usdc: signerPusd,
+                usdce: signerUsdce,
+                nativeUsdc: signerNativeUsdc,
+                native: signerNative,
+              },
+            },
+            funder,
+            funderSource: polymarketCreds?.funderAddress
+              ? "credentials"
+              : "signer",
+            funderIsContract,
+            signerMatchesFunder,
+            tradingBalanceOwner: "funder",
+            funderAccount: {
+              address: funder,
+              source: polymarketCreds?.funderAddress ? "credentials" : "signer",
+              isContract: funderIsContract,
+              balances: {
+                pusd: funderPusd,
+                usdc: funderPusd,
+                usdce: funderUsdce,
+                nativeUsdc: funderNativeUsdc,
+                native: funderNative,
+              },
+            },
+            relayerEnabled,
+            pusd: funderPusd,
+            usdc: funderPusd,
+            usdce: funderUsdce,
+            nativeUsdc: funderNativeUsdc,
+            native: funderNative,
             conditionalTokens: {
               contractAddress: env.polymarketConditionalTokensAddress,
               isApprovedForAll: {
@@ -964,6 +1083,139 @@ function readStringField(
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function readRecordField(
+  object: Record<string, unknown> | null | undefined,
+  key: string,
+): Record<string, unknown> | null {
+  const value = object?.[key];
+  return typeof value === "object" && value != null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readBalanceRecord(
+  object: Record<string, unknown> | null | undefined,
+  key: string,
+): Record<string, string> | undefined {
+  const value = object?.[key];
+  return typeof value === "object" && value != null
+    ? (value as Record<string, string>)
+    : undefined;
+}
+
+function buildPolymarketReadinessBalances(input: {
+  walletAddress: string;
+  venueStatus: Record<string, unknown>;
+}): Array<
+  WalletBalanceItem & {
+    ownerRole?: "signer" | "funder" | "wallet";
+    ownerAddress?: string;
+  }
+> {
+  const funderAddress =
+    readStringField(input.venueStatus, "funder") ?? input.walletAddress;
+  const signer = readRecordField(input.venueStatus, "signer");
+  const signerAddress =
+    readStringField(signer ?? {}, "address") ?? input.walletAddress;
+  const funderAccount = readRecordField(input.venueStatus, "funderAccount");
+  const signerBalances = readRecordField(signer, "balances");
+  const funderBalances = readRecordField(funderAccount, "balances");
+  const signerMatchesFunder =
+    input.venueStatus.signerMatchesFunder === true ||
+    signerAddress.toLowerCase() === funderAddress.toLowerCase();
+
+  const funderPusd =
+    readBalanceRecord(funderBalances, "pusd") ??
+    readBalanceRecord(input.venueStatus, "pusd") ??
+    readBalanceRecord(input.venueStatus, "usdc");
+  const funderUsdce =
+    readBalanceRecord(funderBalances, "usdce") ??
+    readBalanceRecord(input.venueStatus, "usdce");
+  const funderNativeUsdc =
+    readBalanceRecord(funderBalances, "nativeUsdc") ??
+    readBalanceRecord(input.venueStatus, "nativeUsdc");
+  const signerPusd =
+    readBalanceRecord(signerBalances, "pusd") ??
+    readBalanceRecord(input.venueStatus, "signerPusd") ??
+    readBalanceRecord(input.venueStatus, "signerUsdc");
+  const signerUsdce =
+    readBalanceRecord(signerBalances, "usdce") ??
+    readBalanceRecord(input.venueStatus, "signerUsdce");
+  const signerNativeUsdc =
+    readBalanceRecord(signerBalances, "nativeUsdc") ??
+    readBalanceRecord(input.venueStatus, "signerNativeUsdc");
+
+  return [
+    baseBalance(
+      "137",
+      env.polymarketUsdcAddress,
+      "pUSD",
+      funderPusd?.balance,
+      funderPusd?.balanceRaw,
+      6,
+      { ownerRole: "funder", ownerAddress: funderAddress },
+    ),
+    baseBalance(
+      "137",
+      env.polymarketUsdceAddress,
+      "USDC.e",
+      funderUsdce?.balance,
+      funderUsdce?.balanceRaw,
+      6,
+      { ownerRole: "funder", ownerAddress: funderAddress },
+    ),
+    baseBalance(
+      "137",
+      POLYGON_NATIVE_USDC_ADDRESS,
+      "USDC",
+      funderNativeUsdc?.balance,
+      funderNativeUsdc?.balanceRaw,
+      6,
+      { ownerRole: "funder", ownerAddress: funderAddress },
+    ),
+    signerMatchesFunder
+      ? null
+      : baseBalance(
+          "137",
+          env.polymarketUsdcAddress,
+          "pUSD",
+          signerPusd?.balance,
+          signerPusd?.balanceRaw,
+          6,
+          { ownerRole: "signer", ownerAddress: signerAddress },
+        ),
+    signerMatchesFunder
+      ? null
+      : baseBalance(
+          "137",
+          env.polymarketUsdceAddress,
+          "USDC.e",
+          signerUsdce?.balance,
+          signerUsdce?.balanceRaw,
+          6,
+          { ownerRole: "signer", ownerAddress: signerAddress },
+        ),
+    signerMatchesFunder
+      ? null
+      : baseBalance(
+          "137",
+          POLYGON_NATIVE_USDC_ADDRESS,
+          "USDC",
+          signerNativeUsdc?.balance,
+          signerNativeUsdc?.balanceRaw,
+          6,
+          { ownerRole: "signer", ownerAddress: signerAddress },
+        ),
+  ].filter(
+    (
+      item,
+    ): item is WalletBalanceItem & {
+      ownerRole?: "signer" | "funder" | "wallet";
+      ownerAddress?: string;
+    } => Boolean(item),
+  );
 }
 
 function buildReadinessNextActions(input: {
@@ -1881,49 +2133,62 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
                               ? "verified"
                               : undefined,
                 },
-                balances: [
+                balances:
                   venue === "polymarket"
-                    ? baseBalance(
-                        "137",
-                        env.polymarketUsdcAddress,
-                        "USDC",
-                        (venueStatus.usdc as Record<string, string> | undefined)
-                          ?.balance,
-                        (venueStatus.usdc as Record<string, string> | undefined)
-                          ?.balanceRaw,
-                      )
-                    : venue === "limitless"
-                      ? baseBalance(
-                          "8453",
-                          env.limitlessUsdcAddress,
-                          "USDC",
-                          (
-                            venueStatus.usdc as
-                              | Record<string, string>
-                              | undefined
-                          )?.balance,
-                          (
-                            venueStatus.usdc as
-                              | Record<string, string>
-                              | undefined
-                          )?.balanceRaw,
-                        )
-                      : baseBalance(
-                          "7565164",
-                          env.solanaUsdcMint,
-                          "USDC",
-                          (
-                            venueStatus.usdc as
-                              | Record<string, string>
-                              | undefined
-                          )?.balance,
-                          (
-                            venueStatus.usdc as
-                              | Record<string, string>
-                              | undefined
-                          )?.balanceRaw,
-                        ),
-                ].filter((item): item is WalletBalanceItem => Boolean(item)),
+                    ? buildPolymarketReadinessBalances({
+                        walletAddress,
+                        venueStatus,
+                      })
+                    : [
+                        venue === "limitless"
+                          ? baseBalance(
+                              "8453",
+                              env.limitlessUsdcAddress,
+                              "USDC",
+                              (
+                                venueStatus.usdc as
+                                  | Record<string, string>
+                                  | undefined
+                              )?.balance,
+                              (
+                                venueStatus.usdc as
+                                  | Record<string, string>
+                                  | undefined
+                              )?.balanceRaw,
+                              6,
+                              {
+                                ownerRole: "wallet",
+                                ownerAddress: walletAddress,
+                              },
+                            )
+                          : baseBalance(
+                              "7565164",
+                              env.solanaUsdcMint,
+                              "USDC",
+                              (
+                                venueStatus.usdc as
+                                  | Record<string, string>
+                                  | undefined
+                              )?.balance,
+                              (
+                                venueStatus.usdc as
+                                  | Record<string, string>
+                                  | undefined
+                              )?.balanceRaw,
+                              6,
+                              {
+                                ownerRole: "wallet",
+                                ownerAddress: walletAddress,
+                              },
+                            ),
+                      ].filter(
+                        (
+                          item,
+                        ): item is WalletBalanceItem & {
+                          ownerRole?: "signer" | "funder" | "wallet";
+                          ownerAddress?: string;
+                        } => Boolean(item),
+                      ),
                 nextActions: buildReadinessNextActions({
                   blockers: uniqueBlockers,
                   venue,
