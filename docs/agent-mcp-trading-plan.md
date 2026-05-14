@@ -290,12 +290,25 @@ Packaging decisions made during implementation:
   the Agent API contract exists, Phase 1 uses narrow local types and Zod schemas
   for the read-only public surface.
 
+As of 2026-05-14, Phase 2A is implemented in code and ready for migration /
+environment-gated rollout:
+
+- `0106_agent_grants.sql` adds agent grants, short-lived device
+  authorizations, and audit events.
+- `apps/api/src/routes/agent.ts` exposes device start/token, browser
+  approve/deny, grant list/revoke, audit, `/agent/me`, and
+  `/agent/notifications`.
+- `createAgentAuthMiddleware` validates HMAC-hashed bearer tokens, scopes,
+  active grants, grant expiry, and linked-wallet ownership.
+- `Hunch_App` has minimal `/agent/approve/:approvalToken` and
+  `/settings/agents` surfaces through the existing browser-session proxy.
+- `hunch-agent-tools` has `auth login`, `auth status`, `auth list`,
+  `auth use`, `auth logout`, multi-profile local token storage, and
+  `hunch_get_notifications` / `hunch-agent notifications`.
+
 Still not implemented:
 
-- `/agent/*` backend auth/grant APIs.
-- Device/browser approval login.
-- Multi-profile authenticated token storage.
-- Authenticated private account read tools through the Agent API.
+- Phase 2B private account read routes through `/agent/*`.
 - Intent, trading, bridge, redemption, or delegated signing flows.
 
 ### Skill Runtime Wrapper And Session

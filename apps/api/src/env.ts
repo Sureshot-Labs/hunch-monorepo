@@ -379,6 +379,45 @@ const adminSessionTtlMs = optionalPositiveInt(
   8 * 60 * 60 * 1000,
 );
 const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
+const agentAuthEnabled =
+  parseOptionalBool(process.env.AGENT_AUTH_ENABLED) ?? false;
+const agentTokenHashSecret = process.env.AGENT_TOKEN_HASH_SECRET?.trim() || "";
+const agentAppBaseUrl =
+  process.env.AGENT_APP_BASE_URL?.trim() || "https://app.hunch.trade";
+const agentAuthApprovalTtlMs = optionalPositiveInt(
+  "AGENT_AUTH_APPROVAL_TTL_MS",
+  10 * 60 * 1000,
+);
+const agentGrantDefaultTtlMs = optionalPositiveInt(
+  "AGENT_GRANT_DEFAULT_TTL_MS",
+  30 * 24 * 60 * 60 * 1000,
+);
+const agentGrantMaxReadTtlMs = optionalPositiveInt(
+  "AGENT_GRANT_MAX_READ_TTL_MS",
+  90 * 24 * 60 * 60 * 1000,
+);
+const agentGrantMaxWriteTtlMs = optionalPositiveInt(
+  "AGENT_GRANT_MAX_WRITE_TTL_MS",
+  7 * 24 * 60 * 60 * 1000,
+);
+const agentAuthPollIntervalMs = optionalPositiveInt(
+  "AGENT_AUTH_POLL_INTERVAL_MS",
+  3_000,
+);
+const agentAuthMaxPolls = optionalPositiveInt("AGENT_AUTH_MAX_POLLS", 300);
+const jwtSecret = req("JWT_SECRET");
+if (agentAuthEnabled) {
+  if (agentTokenHashSecret.length < 32) {
+    throw new Error(
+      "[env] AGENT_TOKEN_HASH_SECRET must be at least 32 bytes when AGENT_AUTH_ENABLED=true",
+    );
+  }
+  if (agentTokenHashSecret === jwtSecret) {
+    throw new Error(
+      "[env] AGENT_TOKEN_HASH_SECRET must be independent from JWT_SECRET",
+    );
+  }
+}
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -664,7 +703,7 @@ export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
   dbUrl: req("DATABASE_URL"),
-  jwtSecret: req("JWT_SECRET"),
+  jwtSecret,
   authJwtExpiresIn,
   authSessionTtlMs,
   redisUrl: process.env.REDIS_URL ?? "", // optional
@@ -693,6 +732,15 @@ export const env = {
   adminEnrollmentTtlMs,
   adminSessionTtlMs,
   adminTotpIssuer,
+  agentAuthEnabled,
+  agentTokenHashSecret,
+  agentAppBaseUrl,
+  agentAuthApprovalTtlMs,
+  agentGrantDefaultTtlMs,
+  agentGrantMaxReadTtlMs,
+  agentGrantMaxWriteTtlMs,
+  agentAuthPollIntervalMs,
+  agentAuthMaxPolls,
   postSignupOnboardingEligibleAfter,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
