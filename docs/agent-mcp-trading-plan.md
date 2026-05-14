@@ -960,6 +960,183 @@ Rules:
 - marking read or managing notification settings should require a later
   `manage:notifications` scope or the normal browser session.
 
+Phase 2B authenticated account-read routes should reuse existing account,
+wallet, position, order, and venue-status services. They must filter requested
+wallets by both linked-wallet ownership and the active agent grant's
+`wallet_addresses`.
+
+```http
+GET /agent/wallets
+GET /agent/wallet-balances?walletAddress=...&tokens=...&chains=...
+GET /agent/positions?venue=...&wallets=...&marketId=...&eventId=...
+GET /agent/orders?venue=...&wallets=...&status=...&limit=25&offset=0
+GET /agent/venue-status?walletAddress=...&includeAllWallets=false&refresh=false
+GET /agent/readiness?venue=...&walletAddress=...&marketId=...
+GET /agent/deposit-targets?venue=...&walletAddress=...&asset=USDC
+```
+
+Phase 2B response contracts:
+
+```ts
+type AgentWallet = {
+  walletAddress: string;
+  walletType: "ethereum" | "solana";
+  isPrimary: boolean;
+  displayName?: string | null;
+  venues: Array<"polymarket" | "kalshi" | "limitless">;
+};
+
+type AgentWalletsResponse = {
+  ok: true;
+  items: AgentWallet[];
+};
+
+type AgentBalance = {
+  chainId: string;
+  address: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+  balance: string;
+  balanceRaw: string;
+  isNative: boolean;
+};
+
+type AgentWalletBalancesResponse = {
+  ok: true;
+  walletAddress: string;
+  walletType: "ethereum" | "solana";
+  balances: AgentBalance[];
+  warnings: string[];
+};
+
+type AgentPositionsResponse = {
+  ok: true;
+  positions: Position[];
+  venue?: "polymarket" | "kalshi" | "limitless";
+};
+
+type AgentOrdersResponse = {
+  ok: true;
+  orders: UnifiedOrder[];
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  };
+};
+```
+
+Readiness must summarize venue-specific blockers from existing Hunch services
+instead of hiding them behind one generic `ready` boolean:
+
+```ts
+type AgentReadinessBlocker =
+  | "missing_wallet"
+  | "wallet_not_in_grant"
+  | "wallet_type_mismatch"
+  | "missing_credentials"
+  | "invalid_credentials"
+  | "account_verification_required"
+  | "account_verification_unavailable"
+  | "geo_or_proof_blocked"
+  | "approval_required"
+  | "allowance_required"
+  | "insufficient_balance"
+  | "native_fee_required"
+  | "low_native_balance"
+  | "relayer_disabled"
+  | "service_unavailable"
+  | "market_not_accepting_orders"
+  | "market_expired";
+
+type AgentVenueReadiness = {
+  venue: "polymarket" | "kalshi" | "limitless";
+  supported: boolean;
+  ready: boolean;
+  blockers: AgentReadinessBlocker[];
+  warnings: string[];
+  walletAddress: string;
+  walletType: "ethereum" | "solana";
+  chainId?: string | number;
+  account?: {
+    hasCredentials?: boolean;
+    credentialsValid?: boolean | null;
+    verificationRequired?: boolean;
+    verificationStatus?:
+      | "verified"
+      | "required"
+      | "unavailable"
+      | "disabled"
+      | "bypassed";
+  };
+  approvals?: Array<{
+    kind: "erc20_allowance" | "erc1155_operator" | "venue_connection";
+    target: string;
+    ok: boolean;
+    allowanceRaw?: string | null;
+  }>;
+  balances?: AgentBalance[];
+  nextActions: Array<{
+    code: AgentReadinessBlocker;
+    label: string;
+    href?: string | null;
+  }>;
+};
+
+type AgentReadinessResponse = {
+  ok: true;
+  wallets: Array<{
+    walletAddress: string;
+    walletType: "ethereum" | "solana";
+    venues: AgentVenueReadiness[];
+  }>;
+};
+```
+
+Readiness should cover account/KYC-style risks where Hunch can observe them:
+Kalshi/DFlow proof status, geofence blocks, venue account credentials,
+Limitless partner auth validity, Polymarket funder/relayer state, ERC20
+allowances, ERC1155 operator approvals, USDC balances, native gas/SOL buffers,
+service availability, and market accept/expiry state when a market is supplied.
+It should not claim to complete off-platform KYC or legal eligibility. It should
+return `account_verification_required`, `geo_or_proof_blocked`, or
+`account_verification_unavailable` with a safe Hunch/venue link when the next
+step requires the user.
+
+Deposit targets in Phase 2B are read-only and must be backend-derived:
+
+```ts
+type AgentDepositTarget = {
+  venue?: "polymarket" | "kalshi" | "limitless";
+  walletAddress: string;
+  walletType: "ethereum" | "solana";
+  targetAddress: string;
+  targetKind: "trading_wallet" | "venue_funder";
+  chainId: string;
+  chainName: string;
+  asset: {
+    symbol: string;
+    address?: string | null;
+    mint?: string | null;
+    decimals: number;
+  };
+  depositUri?: string | null;
+  qrPayload: string;
+  depositPageUrl: string;
+  warnings: string[];
+};
+
+type AgentDepositTargetsResponse = {
+  ok: true;
+  items: AgentDepositTarget[];
+};
+```
+
+Do not include bridge quotes, bridge recipients, or missing-balance routing in
+Phase 2B deposit targets. Those belong to the Phase 3 funding plan.
+
 Agent auth middleware:
 
 ```ts
@@ -1812,15 +1989,26 @@ Readiness must report the next missing step, for example:
 ```text
 missing_wallet
 wallet_type_mismatch
-missing_venue_connect
+missing_credentials
+invalid_credentials
+account_verification_required
+account_verification_unavailable
 approval_required
+allowance_required
 insufficient_balance
-bridge_required
 native_fee_required
+low_native_balance
+relayer_disabled
+service_unavailable
 market_not_accepting_orders
 market_expired
 geo_or_proof_blocked
+bridge_required
 ```
+
+`bridge_required` is a Phase 3 funding-plan blocker. Phase 2B readiness may
+report missing balances and deposit targets, but it should not route bridge
+execution or choose bridge recipients.
 
 For agent trading, v1 should default to internal Privy Trading Wallets:
 
