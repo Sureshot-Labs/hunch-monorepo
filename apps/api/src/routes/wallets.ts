@@ -37,7 +37,7 @@ import {
   walletVenueStatusQuerySchema,
 } from "../schemas/wallets.js";
 
-type WalletBalanceItem = {
+export type WalletBalanceItem = {
   chainId: string;
   address: string;
   symbol: string | null;
@@ -57,7 +57,7 @@ type TokenMeta = {
   tags?: unknown;
 };
 
-type WalletVenueStatus = Record<string, unknown>;
+export type WalletVenueStatus = Record<string, unknown>;
 type BalanceWalletResolution = {
   walletAddress: string;
   walletType: string | null | undefined;
@@ -934,7 +934,7 @@ function buildWalletBalancesInflightKey(inputs: {
   });
 }
 
-async function resolveWalletBalancesForWalletWithInflight(inputs: {
+export async function resolveWalletBalancesForWalletWithInflight(inputs: {
   walletAddress: string;
   walletType: string | null | undefined;
   tokens: string[];

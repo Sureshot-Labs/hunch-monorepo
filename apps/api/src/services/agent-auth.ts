@@ -158,6 +158,12 @@ const READ_SCOPES: readonly AgentScope[] = [
   "read:notifications",
 ];
 const READ_SCOPE_SET = new Set<AgentScope>(READ_SCOPES);
+const WALLET_SENSITIVE_SCOPES = new Set<AgentScope>([
+  "read:wallets",
+  "read:orders",
+  "read:positions",
+  "read:funding",
+]);
 const MAX_APPROVAL_ATTEMPTS = 20;
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -322,6 +328,35 @@ function assertSubset<T extends string>(
   const invalid = selected.find((value) => !allowed.has(value));
   if (invalid) {
     throw new AgentAuthError(code, `${label} was not requested: ${invalid}`);
+  }
+}
+
+function hasWalletSensitiveScope(scopes: readonly AgentScope[]): boolean {
+  return scopes.some((scope) => WALLET_SENSITIVE_SCOPES.has(scope));
+}
+
+function assertWalletApprovalAllowed(input: {
+  selectedWallets: readonly string[];
+  requestedWallets: readonly string[];
+  approvedScopes: readonly AgentScope[];
+}) {
+  if (input.requestedWallets.length > 0) {
+    assertSubset(
+      input.selectedWallets,
+      input.requestedWallets,
+      "invalid_wallet",
+      "Wallet",
+    );
+    return;
+  }
+  if (
+    input.selectedWallets.length > 0 &&
+    !hasWalletSensitiveScope(input.approvedScopes)
+  ) {
+    throw new AgentAuthError(
+      "invalid_wallet",
+      "Wallet approval requires a wallet-sensitive scope",
+    );
   }
 }
 
@@ -626,12 +661,11 @@ export class AgentAuthService {
       const walletAddresses = uniqueWallets(input.walletAddresses);
       const venues = uniqueStrings(input.venues);
       assertSubset(scopes, auth.requestedScopes, "invalid_scope", "Scope");
-      assertSubset(
-        walletAddresses,
-        auth.requestedWalletAddresses,
-        "invalid_wallet",
-        "Wallet",
-      );
+      assertWalletApprovalAllowed({
+        selectedWallets: walletAddresses,
+        requestedWallets: auth.requestedWalletAddresses,
+        approvedScopes: scopes,
+      });
       assertSubset(venues, auth.requestedVenues, "invalid_venue", "Venue");
       await assertWalletsLinked(input.userId, walletAddresses);
 

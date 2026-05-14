@@ -998,7 +998,7 @@ GET /agent/positions?venue=...&wallets=...&marketId=...&eventId=...
 GET /agent/orders?venue=...&wallets=...&status=...&limit=25&offset=0
 GET /agent/venue-status?walletAddress=...&includeAllWallets=false&refresh=false
 GET /agent/readiness?venue=...&walletAddress=...&marketId=...
-GET /agent/deposit-targets?venue=...&walletAddress=...&asset=USDC
+GET /agent/deposit-targets?venue=...&walletAddress=...&asset=pUSD|USDC.e|USDC|SOL|POL|ETH
 ```
 
 Code-grounded Phase 2B implementation map:
@@ -1044,11 +1044,13 @@ Code-grounded Phase 2B implementation map:
   the summary needs account fields that venue status does not expose, for
   example Limitless spender-specific approvals for a known AMM/CLOB market.
 - `/agent/deposit-targets` should be backend-derived from approved wallets and
-  venue status. Polymarket target is the configured/derived funder when present,
-  otherwise the signer wallet on Polygon. Limitless target is the EVM trading
-  wallet on Base. Kalshi target is the Solana trading wallet. Return structured
-  chain/asset/address data plus `qrPayload` and a first-party Hunch
-  `depositPageUrl`; do not choose bridge routes or quote funding in Phase 2B.
+  venue status. It must not assume a single USDC target. Polymarket may expose
+  pUSD collateral, Polygon USDC.e/native USDC conversion sources, and Polygon
+  native POL for fees. Limitless may expose Base USDC and Base ETH. Kalshi may
+  expose Solana USDC and SOL, while embedded Solana trading wallets can mark
+  native fees as sponsored. Return structured chain/asset/address data plus
+  `qrPayload` and a first-party Hunch `depositPageUrl`; do not choose bridge
+  routes or quote funding in Phase 2B.
 
 Frontend/client grounding:
 
@@ -1201,8 +1203,9 @@ type AgentReadinessResponse = {
 Readiness should cover account/KYC-style risks where Hunch can observe them:
 Kalshi/DFlow proof status, geofence blocks, venue account credentials,
 Limitless partner auth validity, Polymarket funder/relayer state, ERC20
-allowances, ERC1155 operator approvals, USDC balances, native gas/SOL buffers,
-service availability, and market accept/expiry state when a market is supplied.
+allowances, ERC1155 operator approvals, venue collateral/stablecoin balances,
+native gas/SOL buffers where they are actually required, service availability,
+and market accept/expiry state when a market is supplied.
 It should not claim to complete off-platform KYC or legal eligibility. It should
 return `account_verification_required`, `geo_or_proof_blocked`, or
 `account_verification_unavailable` with a safe Hunch/venue link when the next
@@ -1220,10 +1223,13 @@ type AgentDepositTarget = {
   chainId: string;
   chainName: string;
   asset: {
+    id: string;
     symbol: string;
+    purpose: "collateral" | "convertible" | "native_fee";
     address?: string | null;
     mint?: string | null;
     decimals: number;
+    aliases?: string[];
   };
   depositUri?: string | null;
   qrPayload: string;

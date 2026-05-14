@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { zVenue } from "./common.js";
+import { zCsvString, zVenue } from "./common.js";
+import { ordersQuerySchema } from "./orders.js";
 
 const zOptionalString = z
   .string()
@@ -19,6 +20,10 @@ const zScope = z.enum([
 const zWalletAddress = z.string().trim().min(1).max(128);
 
 const zLimits = z.record(z.string(), z.unknown()).optional();
+const zOptionalBool = z
+  .union([z.boolean(), z.string(), z.undefined()])
+  .transform((value) => value === true || value === "true")
+  .catch(false);
 
 export const agentDeviceStartBodySchema = z.object({
   requestedScopes: z.array(zScope).min(1).optional(),
@@ -65,4 +70,38 @@ export const agentGrantParamsSchema = z.object({
 
 export const agentAuditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const agentWalletBalancesQuerySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  wallets: zCsvString("wallets is required").optional(),
+  tokens: zCsvString("tokens is required").optional(),
+  chains: zCsvString("chains is required").optional(),
+});
+
+export const agentVenueStatusQuerySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  wallets: zCsvString("wallets is required").optional(),
+  includeAllWallets: zOptionalBool.optional(),
+  refresh: zOptionalBool.optional(),
+});
+
+export const agentOrdersQuerySchema = ordersQuerySchema.extend({
+  openOnly: zOptionalBool.optional(),
+});
+
+export const agentReadinessQuerySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  wallets: zCsvString("wallets is required").optional(),
+  venue: zVenue.optional(),
+  marketId: z.string().trim().min(1).optional(),
+  eventId: z.string().trim().min(1).optional(),
+  refresh: zOptionalBool.optional(),
+});
+
+export const agentDepositTargetsQuerySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  wallets: zCsvString("wallets is required").optional(),
+  venue: zVenue.optional(),
+  asset: z.string().trim().min(1).optional(),
 });

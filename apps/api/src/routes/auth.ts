@@ -10,7 +10,6 @@ import {
   AuthService,
   PrivyTerminalAuthError,
   type User,
-  type UserWallet,
   WalletAlreadyExistsError,
   WalletNotFoundError,
   WalletUnlinkNotAllowedError,
@@ -23,7 +22,6 @@ import { env } from "../env.js";
 import {
   PrivyAccessTokenError,
   PrivyService,
-  type PrivyWalletProfile,
   PrivyUpstreamError,
 } from "../privy-service.js";
 import {
@@ -63,6 +61,10 @@ import {
   DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
   getPrivyTerminalAuthMessage,
 } from "../lib/privy-auth-errors.js";
+import {
+  buildAuthWalletPayloads,
+  loadPrivyWalletProfilesForUser,
+} from "../services/auth-wallet-payloads.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -104,56 +106,6 @@ function buildAuthUserPayload(user: User) {
     createdAt: user.createdAt.toISOString(),
     lastLoginAt: user.lastLoginAt?.toISOString(),
   };
-}
-
-function buildPrivyWalletProfileLookup(
-  walletProfiles: PrivyWalletProfile[] | null | undefined,
-): Map<string, PrivyWalletProfile> {
-  const lookup = new Map<string, PrivyWalletProfile>();
-  for (const profile of walletProfiles ?? []) {
-    const walletType = normalizeWalletType(profile.walletType);
-    const normalizedAddress = normalizeWalletAddressForType(
-      walletType,
-      profile.address,
-    );
-    lookup.set(`${walletType}:${normalizedAddress}`, profile);
-  }
-  return lookup;
-}
-
-function buildAuthWalletPayloads(
-  wallets: UserWallet[],
-  walletProfiles?: PrivyWalletProfile[] | null,
-) {
-  const walletProfileLookup = buildPrivyWalletProfileLookup(walletProfiles);
-  return wallets.map((wallet) => {
-    const walletType = normalizeWalletType(wallet.walletType);
-    const normalizedAddress = normalizeWalletAddressForType(
-      walletType,
-      wallet.walletAddress,
-    );
-    const profile = walletProfileLookup.get(
-      `${walletType}:${normalizedAddress}`,
-    );
-    const isEmbeddedWallet = profile?.source === "embedded";
-    const isSmartWallet = profile?.source === "smart";
-    const isInternalWallet = profile?.isInternalWallet;
-
-    return {
-      id: wallet.id,
-      walletAddress: wallet.walletAddress,
-      walletType: wallet.walletType,
-      walletSource: profile?.source ?? "unknown",
-      isEmbeddedWallet,
-      isSmartWallet,
-      isInternalWallet,
-      name: isInternalWallet ? "Trading Wallet" : wallet.name,
-      isPrimary: wallet.isPrimary,
-      isVerified: wallet.isVerified,
-      createdAt: wallet.createdAt.toISOString(),
-      updatedAt: wallet.updatedAt.toISOString(),
-    };
-  });
 }
 
 function getPolymarketConnectFailureResponse(error: unknown): {
@@ -714,18 +666,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const wallets = await AuthService.getUserWallets(user.id);
-        let walletProfiles: PrivyWalletProfile[] | null = null;
-        if (user.privyUserId) {
-          try {
-            const privyUser = await PrivyService.getUserById(user.privyUserId);
-            walletProfiles = PrivyService.classifyWallets(privyUser);
-          } catch (error) {
-            app.log.warn(
-              { error, userId: user.id, privyUserId: user.privyUserId },
-              "Failed to enrich auth wallets with Privy wallet profiles",
-            );
-          }
-        }
+        const walletProfiles = await loadPrivyWalletProfilesForUser(
+          user,
+          app.log,
+        );
         const polymarketCreds = await AuthService.getVenueCredentialsInfo(
           user.id,
           "polymarket",
@@ -1301,18 +1245,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const wallets = await AuthService.getUserWallets(user.id);
-        let walletProfiles: PrivyWalletProfile[] | null = null;
-        if (user.privyUserId) {
-          try {
-            const privyUser = await PrivyService.getUserById(user.privyUserId);
-            walletProfiles = PrivyService.classifyWallets(privyUser);
-          } catch (error) {
-            app.log.warn(
-              { error, userId: user.id, privyUserId: user.privyUserId },
-              "Failed to enrich wallet list with Privy wallet profiles",
-            );
-          }
-        }
+        const walletProfiles = await loadPrivyWalletProfilesForUser(
+          user,
+          app.log,
+        );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
