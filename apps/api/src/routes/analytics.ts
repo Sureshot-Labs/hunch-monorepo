@@ -46,7 +46,9 @@ export const analyticsRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/analytics/collector/telemetry",
     {
-      preHandler: createAdminMiddleware(),
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
       schema: {
         response: {
           200: analyticsForwardTelemetryResponseSchema,

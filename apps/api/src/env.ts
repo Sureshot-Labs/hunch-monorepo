@@ -364,6 +364,21 @@ const authAccessState = parseEnum(
   ["off", "prompt", "required"] as const,
   "off",
 );
+const adminAuthEnabled =
+  parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
+const adminAuthLegacyFallback =
+  parseOptionalBool(process.env.ADMIN_AUTH_LEGACY_FALLBACK) ?? true;
+const adminAppBaseUrl =
+  process.env.ADMIN_APP_BASE_URL?.trim() || "https://admin.hunch.trade";
+const adminEnrollmentTtlMs = optionalPositiveInt(
+  "ADMIN_ENROLLMENT_TTL_MS",
+  72 * 60 * 60 * 1000,
+);
+const adminSessionTtlMs = optionalPositiveInt(
+  "ADMIN_SESSION_TTL_MS",
+  8 * 60 * 60 * 1000,
+);
+const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -660,8 +675,24 @@ export const env = {
   proxySecret,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
+  apiGlobalRateLimitEnabled:
+    parseOptionalBool(process.env.API_GLOBAL_RATE_LIMIT_ENABLED) ?? true,
+  apiGlobalRateLimitMaxRequests: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_MAX_REQUESTS",
+    600,
+  ),
+  apiGlobalRateLimitWindowMs: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_WINDOW_MS",
+    60_000,
+  ),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   authAccessState,
+  adminAuthEnabled,
+  adminAuthLegacyFallback,
+  adminAppBaseUrl,
+  adminEnrollmentTtlMs,
+  adminSessionTtlMs,
+  adminTotpIssuer,
   postSignupOnboardingEligibleAfter,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { getRedisStatus } from "../redis.js";
 
-type RateLimitErrorMode = "fail_open" | "fail_closed";
+export type RateLimitErrorMode = "fail_open" | "fail_closed";
 
 type CheckRateLimitOptions = {
   onError?: RateLimitErrorMode;

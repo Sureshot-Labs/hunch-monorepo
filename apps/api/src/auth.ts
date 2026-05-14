@@ -16,8 +16,12 @@ import {
   encryptCredentialsString,
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
-import { resolveSecurityClientIp } from "./lib/request-ip.js";
-import { checkRateLimit } from "./lib/rate-limit.js";
+import { checkRateLimitForSecurityClientIp } from "./lib/request-ip.js";
+import {
+  attachAdminSessionToRequest,
+  type AdminPermission,
+  type AdminRole,
+} from "./services/admin-auth.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = env.jwtSecret;
@@ -2003,6 +2007,12 @@ type AuthMiddlewareOptions = {
   requireWallet?: boolean;
 };
 
+type AdminMiddlewareOptions = AuthMiddlewareOptions & {
+  minAdminRole?: AdminRole;
+  requiredAdminPermission?: AdminPermission;
+  requiredAdminPermissions?: AdminPermission[];
+};
+
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 function normalizeWalletAddress(input: string): string {
@@ -2156,22 +2166,73 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
   };
 }
 
-export function createAdminMiddleware(options: AuthMiddlewareOptions = {}) {
+export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
   const auth = createAuthMiddleware(options);
   return async (request: FastifyRequest, reply: FastifyReply) => {
+    const adminSession = await attachAdminSessionToRequest(request, {
+      minRole: options.minAdminRole,
+      requiredPermissions:
+        options.requiredAdminPermissions ??
+        (options.requiredAdminPermission
+          ? [options.requiredAdminPermission]
+          : options.minAdminRole
+            ? undefined
+            : ["users:write"]),
+      requireCsrf: requiresCsrf(request.method),
+    });
+    if (adminSession.ok) {
+      const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+        keyPrefix: "admin",
+        maxRequests: 120,
+        windowMs: 60_000,
+        onError: "fail_closed",
+      });
+      if (!rateLimit.allowed) {
+        reply.code(429);
+        return reply.send({ error: "Rate limit exceeded" });
+      }
+      return;
+    }
+
+    if (
+      adminSession.error === "sadmin_access_required" ||
+      adminSession.error === "admin_permission_required" ||
+      adminSession.error === "admin_csrf_invalid"
+    ) {
+      reply.code(adminSession.statusCode);
+      return reply.send({
+        error: adminSession.error,
+        message: adminSession.message,
+      });
+    }
+
+    if (!env.adminAuthLegacyFallback) {
+      reply.code(adminSession.statusCode);
+      return reply.send({
+        error: adminSession.error,
+        message: adminSession.message,
+      });
+    }
+
     await auth(request, reply);
     if (reply.sent) return;
     if (!request.user?.isAdmin) {
       reply.code(403);
       return reply.send({ error: "Admin access required" });
     }
+    request.adminActor = {
+      kind: "legacy_user",
+      id: request.user.id,
+      email: request.user.email,
+    };
 
-    const clientIp = resolveSecurityClientIp(request);
-    const rateLimitKey = `admin:${clientIp}`;
-    const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000, {
+    const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+      keyPrefix: "admin",
+      maxRequests: 120,
+      windowMs: 60_000,
       onError: "fail_closed",
     });
-    if (!canProceed) {
+    if (!rateLimit.allowed) {
       reply.code(429);
       return reply.send({ error: "Rate limit exceeded" });
     }
