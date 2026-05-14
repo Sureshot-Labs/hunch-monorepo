@@ -57,6 +57,10 @@ import {
 } from "../repos/unified-orders.js";
 import { fetchNotifications } from "../repos/notifications-repo.js";
 import {
+  fetchMarketsByTokenIds,
+  type MarketByTokenRow,
+} from "../repos/unified-read.js";
+import {
   agentDepositTargetsQuerySchema,
   agentApprovalTokenParamsSchema,
   agentApproveBodySchema,
@@ -76,12 +80,14 @@ import {
   positionsQuerySchema,
 } from "../schemas/positions.js";
 import { orderIdParamsSchema, orderIdQuerySchema } from "../schemas/orders.js";
+import type { Position } from "../order-types.js";
 import {
   AgentAuthError,
   AgentAuthService,
   createAgentAuthMiddleware,
   summarizeAgentGrant,
 } from "../services/agent-auth.js";
+import { outcomeLabelOrSide } from "../services/wallet-intel-helpers.js";
 
 function readRequestUserAgent(request: FastifyRequest): string | null {
   const raw = request.headers["user-agent"];
@@ -327,6 +333,364 @@ async function resolveTokenIdsForFilter(
     return rows.map((row) => row.token_id);
   }
   return null;
+}
+
+type AgentPositionRow = Position & {
+  marketId: string | null;
+  eventId: string | null;
+  marketTitle: string | null;
+  eventTitle: string | null;
+  outcome: string | null;
+  outcomeSide: "YES" | "NO" | null;
+  currentPrice: number | null;
+  marketStatus: string | null;
+  eventUrl: string | null;
+  tradeUrl: string | null;
+};
+
+type AgentPositionSummaryGroup = {
+  walletAddress: string | null;
+  venue: Position["venue"];
+  marketId: string | null;
+  eventId: string | null;
+  marketTitle: string | null;
+  eventTitle: string | null;
+  outcome: string | null;
+  outcomeSide: "YES" | "NO" | null;
+  currentPrice: number | null;
+  marketStatus: string | null;
+  tokenIds: string[];
+  positionsCount: number;
+  visiblePositionsCount: number;
+  hiddenPositionsCount: number;
+  autoLostCount: number;
+  totalSize: number;
+  totalUnrealizedPnl: number;
+  totalRealizedPnl: number;
+  totalEstimatedPayout: number;
+  totalEstimatedProfit: number | null;
+  weightedAveragePrice: number | null;
+  latestUpdatedAt: Date | null;
+  eventUrl: string | null;
+  tradeUrl: string | null;
+};
+
+type AgentPositionSummaryAccumulator = AgentPositionSummaryGroup & {
+  weightedAveragePriceNumerator: number;
+  weightedAveragePriceSize: number;
+};
+
+type AgentPositionFilterOptions = {
+  activeOnly?: boolean;
+  hideAutoLost?: boolean;
+  marketStatus?: string;
+};
+
+function normalizeKalshiMarketIdForApi(
+  venue: string | null | undefined,
+  marketId: string | null | undefined,
+): string | null {
+  if (!marketId) return null;
+  if (venue === "kalshi" && !marketId.includes(":") && /^KX/i.test(marketId)) {
+    return `kalshi:${marketId}`;
+  }
+  return marketId;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function midpointOrSingle(bid: unknown, ask: unknown): number | null {
+  const bidValue = toFiniteNumber(bid);
+  const askValue = toFiniteNumber(ask);
+  if (bidValue != null && askValue != null) return (bidValue + askValue) / 2;
+  return bidValue ?? askValue ?? null;
+}
+
+function buildEventUrl(eventId: string | null): string | null {
+  if (!eventId) return null;
+  return new URL(
+    `/events/${encodeURIComponent(eventId)}`,
+    env.agentAppBaseUrl,
+  ).toString();
+}
+
+function buildTradeUrl(input: {
+  eventId: string | null;
+  marketId: string | null;
+}): string | null {
+  if (!input.eventId || !input.marketId) return null;
+  const url = new URL(
+    `/events/${encodeURIComponent(input.eventId)}`,
+    env.agentAppBaseUrl,
+  );
+  url.searchParams.set("market", input.marketId);
+  return url.toString();
+}
+
+function currentPriceForToken(row: MarketByTokenRow): number | null {
+  const outcomeSide = row.side === "YES" || row.side === "NO" ? row.side : null;
+  if (outcomeSide === "YES") {
+    return (
+      midpointOrSingle(row.best_bid_yes, row.best_ask_yes) ??
+      midpointOrSingle(row.best_bid, row.best_ask) ??
+      toFiniteNumber(row.last_price)
+    );
+  }
+  if (outcomeSide === "NO") {
+    const noTop = midpointOrSingle(row.best_bid_no, row.best_ask_no);
+    if (noTop != null) return noTop;
+    const yesPrice =
+      midpointOrSingle(row.best_bid_yes, row.best_ask_yes) ??
+      midpointOrSingle(row.best_bid, row.best_ask) ??
+      toFiniteNumber(row.last_price);
+    return yesPrice == null ? null : 1 - yesPrice;
+  }
+  return (
+    midpointOrSingle(row.best_bid, row.best_ask) ??
+    toFiniteNumber(row.last_price)
+  );
+}
+
+function mapPositionMarketContext(row: MarketByTokenRow | undefined): {
+  marketId: string | null;
+  eventId: string | null;
+  marketTitle: string | null;
+  eventTitle: string | null;
+  outcome: string | null;
+  outcomeSide: "YES" | "NO" | null;
+  currentPrice: number | null;
+  marketStatus: string | null;
+  eventUrl: string | null;
+  tradeUrl: string | null;
+} {
+  if (!row) {
+    return {
+      marketId: null,
+      eventId: null,
+      marketTitle: null,
+      eventTitle: null,
+      outcome: null,
+      outcomeSide: null,
+      currentPrice: null,
+      marketStatus: null,
+      eventUrl: null,
+      tradeUrl: null,
+    };
+  }
+  const outcomeSide = row.side === "YES" || row.side === "NO" ? row.side : null;
+  const marketId = normalizeKalshiMarketIdForApi(row.venue, row.market_id);
+  const eventId = normalizeKalshiMarketIdForApi(row.event_venue, row.event_id);
+  return {
+    marketId,
+    eventId,
+    marketTitle: row.market_title,
+    eventTitle: row.event_title,
+    outcome: outcomeSide ? outcomeLabelOrSide(row.outcomes, outcomeSide) : null,
+    outcomeSide,
+    currentPrice: currentPriceForToken(row),
+    marketStatus: row.market_status,
+    eventUrl: buildEventUrl(eventId),
+    tradeUrl: buildTradeUrl({ eventId, marketId }),
+  };
+}
+
+async function enrichAgentPositions(
+  positions: Position[],
+): Promise<AgentPositionRow[]> {
+  if (positions.length === 0) return [];
+  const tokenIds = Array.from(
+    new Set(positions.map((position) => position.tokenId)),
+  );
+  const markets = await fetchMarketsByTokenIds(pool, {
+    tokenIds,
+    includeTop: true,
+  });
+  const marketByToken = new Map<string, MarketByTokenRow>();
+  for (const market of markets) {
+    if (!marketByToken.has(market.token_id)) {
+      marketByToken.set(market.token_id, market);
+    }
+  }
+  return positions.map((position) => ({
+    ...position,
+    ...mapPositionMarketContext(marketByToken.get(position.tokenId)),
+  }));
+}
+
+function summarizeAgentPositions(
+  positions: AgentPositionRow[],
+): AgentPositionSummaryGroup[] {
+  const groups = new Map<string, AgentPositionSummaryAccumulator>();
+  for (const position of positions) {
+    const key = [
+      position.walletAddress ?? "",
+      position.venue,
+      position.marketId ?? position.tokenId,
+      position.outcomeSide ?? "",
+    ].join("|");
+    const existing = groups.get(key);
+    const estimatedProfit = position.estimatedProfit ?? null;
+    const updatedAt = position.updatedAt ?? position.lastUpdatedAt ?? null;
+    const group =
+      existing ??
+      ({
+        walletAddress: position.walletAddress,
+        venue: position.venue,
+        marketId: position.marketId,
+        eventId: position.eventId,
+        marketTitle: position.marketTitle,
+        eventTitle: position.eventTitle,
+        outcome: position.outcome,
+        outcomeSide: position.outcomeSide,
+        currentPrice: position.currentPrice,
+        marketStatus: position.marketStatus,
+        tokenIds: [],
+        positionsCount: 0,
+        visiblePositionsCount: 0,
+        hiddenPositionsCount: 0,
+        autoLostCount: 0,
+        totalSize: 0,
+        totalUnrealizedPnl: 0,
+        totalRealizedPnl: 0,
+        totalEstimatedPayout: 0,
+        totalEstimatedProfit: null,
+        weightedAveragePrice: null,
+        weightedAveragePriceNumerator: 0,
+        weightedAveragePriceSize: 0,
+        latestUpdatedAt: null,
+        eventUrl: position.eventUrl,
+        tradeUrl: position.tradeUrl,
+      } satisfies AgentPositionSummaryAccumulator);
+    if (!group.tokenIds.includes(position.tokenId)) {
+      group.tokenIds.push(position.tokenId);
+    }
+    group.positionsCount += 1;
+    if (position.isHidden) {
+      group.hiddenPositionsCount += 1;
+      if (position.hiddenReason === "auto_lost") group.autoLostCount += 1;
+    } else {
+      group.visiblePositionsCount += 1;
+    }
+    group.totalSize += position.size;
+    group.totalUnrealizedPnl += position.unrealizedPnl;
+    group.totalRealizedPnl += position.realizedPnl;
+    group.totalEstimatedPayout += position.estimatedPayout ?? 0;
+    if (estimatedProfit != null) {
+      group.totalEstimatedProfit =
+        (group.totalEstimatedProfit ?? 0) + estimatedProfit;
+    }
+    if (
+      position.averagePrice != null &&
+      Number.isFinite(position.averagePrice) &&
+      Number.isFinite(position.size) &&
+      position.size > 0
+    ) {
+      group.weightedAveragePriceNumerator +=
+        position.averagePrice * position.size;
+      group.weightedAveragePriceSize += position.size;
+      group.weightedAveragePrice =
+        group.weightedAveragePriceNumerator / group.weightedAveragePriceSize;
+    }
+    if (
+      updatedAt &&
+      (!group.latestUpdatedAt || updatedAt > group.latestUpdatedAt)
+    ) {
+      group.latestUpdatedAt = updatedAt;
+    }
+    groups.set(key, group);
+  }
+  return Array.from(groups.values())
+    .map(
+      ({
+        weightedAveragePriceNumerator: _weightedAveragePriceNumerator,
+        weightedAveragePriceSize: _weightedAveragePriceSize,
+        ...group
+      }) => group,
+    )
+    .sort((a, b) => {
+      const aTime = a.latestUpdatedAt?.getTime() ?? 0;
+      const bTime = b.latestUpdatedAt?.getTime() ?? 0;
+      return bTime - aTime;
+    });
+}
+
+function filterAgentPositions(
+  positions: AgentPositionRow[],
+  options: AgentPositionFilterOptions,
+): AgentPositionRow[] {
+  const marketStatus = options.marketStatus?.trim().toLowerCase();
+  return positions.filter((position) => {
+    if (
+      options.activeOnly &&
+      (position.side === "FLAT" ||
+        position.size <= 0 ||
+        position.marketStatus?.toLowerCase() !== "active")
+    ) {
+      return false;
+    }
+    if (options.hideAutoLost && position.hiddenReason === "auto_lost") {
+      return false;
+    }
+    if (
+      marketStatus &&
+      (position.marketStatus ?? "").trim().toLowerCase() !== marketStatus
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function limitedAgentPositions<T>(items: T[], limit: number | undefined): T[] {
+  return limit == null ? items : items.slice(0, limit);
+}
+
+function countAgentPositions(positions: AgentPositionRow[]) {
+  return {
+    positionsCount: positions.length,
+    visiblePositionsCount: positions.filter((position) => !position.isHidden)
+      .length,
+    hiddenPositionsCount: positions.filter((position) => position.isHidden)
+      .length,
+    autoLostCount: positions.filter(
+      (position) => position.hiddenReason === "auto_lost",
+    ).length,
+  };
+}
+
+function buildAgentPositionsFilterPayload(input: {
+  venue?: string;
+  venues?: string[];
+  eventId?: string;
+  marketId?: string;
+  minSize?: number;
+  includeHidden: boolean;
+  activeOnly: boolean;
+  hideAutoLost: boolean;
+  marketStatus?: string;
+  limit?: number;
+}) {
+  return {
+    venue: input.venue ?? null,
+    venues: input.venues ?? null,
+    eventId: input.eventId ?? null,
+    marketId: input.marketId ?? null,
+    minSize: input.minSize ?? null,
+    includeHidden: input.includeHidden,
+    activeOnly: input.activeOnly,
+    hideAutoLost: input.hideAutoLost,
+    marketStatus: input.marketStatus ?? null,
+    limit: input.limit ?? null,
+    countScope:
+      "positions summary counts apply these filters before limit; pnl counts do not apply minSize or display filters",
+  };
 }
 
 function buildDepositPageUrl(input: {
@@ -1803,7 +2167,57 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
             tokenIds: positions.map((position) => position.tokenId),
           });
         }
-        return reply.send({ ok: true, positions });
+        const enrichedPositions = await enrichAgentPositions(positions);
+        const filteredPositions = filterAgentPositions(enrichedPositions, {
+          activeOnly: query.activeOnly,
+          hideAutoLost: query.hideAutoLost,
+          marketStatus: query.marketStatus,
+        });
+        const filters = buildAgentPositionsFilterPayload({
+          venue: query.venue,
+          venues: query.venues,
+          eventId: query.eventId,
+          marketId: query.marketId,
+          minSize: effectiveMinSize,
+          includeHidden: query.includeHidden,
+          activeOnly: query.activeOnly,
+          hideAutoLost: query.hideAutoLost,
+          marketStatus: query.marketStatus,
+          limit: query.limit,
+        });
+        const matchingCounts = countAgentPositions(filteredPositions);
+        if (query.view === "summary") {
+          const allGroups = summarizeAgentPositions(filteredPositions);
+          const groups = limitedAgentPositions(allGroups, query.limit);
+          return reply.send({
+            ok: true,
+            view: "summary",
+            filters,
+            groups,
+            summary: {
+              ...matchingCounts,
+              groupsCount: groups.length,
+              totalMatchingGroupsCount: allGroups.length,
+              fetchedPositionsCount: enrichedPositions.length,
+              returnedGroupsCount: groups.length,
+            },
+          });
+        }
+        const returnedPositions = limitedAgentPositions(
+          filteredPositions,
+          query.limit,
+        );
+        return reply.send({
+          ok: true,
+          view: "rows",
+          filters,
+          positions: returnedPositions,
+          summary: {
+            ...matchingCounts,
+            fetchedPositionsCount: enrichedPositions.length,
+            returnedPositionsCount: returnedPositions.length,
+          },
+        });
       } catch (error) {
         return handleAgentError(error, reply);
       }
@@ -1833,8 +2247,21 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
         if (wallets.length === 0) {
           return reply.send({
             ok: true,
+            filters: {
+              venue: query.venue ?? null,
+              venues: query.venues ?? null,
+              wallets: query.wallets ?? null,
+              includeHidden: true,
+              minSize: null,
+              countScope:
+                "pnl counts include visible and hidden own positions for approved wallets; minSize/display filters are not applied",
+            },
             summary: {
               openPositionsCount: 0,
+              visibleOpenPositionsCount: 0,
+              hiddenOpenPositionsCount: 0,
+              hiddenPositionsCount: 0,
+              autoLostCount: 0,
               positionsCount: 0,
               realizedPnlAllTime: 0,
               unrealizedCostBasisCurrent: 0,
@@ -1849,7 +2276,19 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           venue: query.venue,
           venues: query.venues,
         });
-        return reply.send({ ok: true, summary });
+        return reply.send({
+          ok: true,
+          filters: {
+            venue: query.venue ?? null,
+            venues: query.venues ?? null,
+            wallets: query.wallets ?? null,
+            includeHidden: true,
+            minSize: null,
+            countScope:
+              "pnl counts include visible and hidden own positions for approved wallets; minSize/display filters are not applied",
+          },
+          summary,
+        });
       } catch (error) {
         return handleAgentError(error, reply);
       }
@@ -1912,6 +2351,9 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           marketId: query.marketId,
           marketIds: marketIds.length ? marketIds : undefined,
           tokenId: query.tokenId,
+          mint: query.mint,
+          inputMint: query.inputMint,
+          outputMint: query.outputMint,
           status: query.openOnly ? OPEN_ORDER_STATUSES : query.status,
           openOnly: query.openOnly,
           type: query.openOnly ? "order" : query.type,

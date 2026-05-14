@@ -42,6 +42,20 @@ const zOptionalNumber = z
   .optional()
   .catch(undefined);
 
+const zOptionalInt = z
+  .union([z.number(), z.string()])
+  .transform((value) => {
+    const parsed = typeof value === "string" ? Number(value) : value;
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : undefined;
+  })
+  .optional()
+  .catch(undefined);
+
+const zOptionalBoolFalse = z
+  .union([z.boolean(), z.string(), z.undefined()])
+  .transform((v) => v === true || v === "true")
+  .catch(false);
+
 const zBoolish = z
   .union([z.boolean(), z.string(), z.undefined()])
   .transform((value) => {
@@ -54,6 +68,12 @@ export const positionsQuerySchema = z.object({
   venue: zVenueOptional,
   venues: zVenueListOptional,
   wallets: zCsvString("wallets is required").optional(),
+  view: z
+    .preprocess(
+      (v) => (typeof v === "string" ? v.toLowerCase() : v),
+      z.enum(["rows", "summary"]).optional(),
+    )
+    .catch(undefined),
   eventId: z
     .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
     .optional()
@@ -63,10 +83,16 @@ export const positionsQuerySchema = z.object({
     .optional()
     .transform((v) => (v && v.length ? v : undefined)),
   minSize: zOptionalNumber,
-  includeHidden: z
-    .union([z.boolean(), z.string(), z.undefined()])
-    .transform((v) => v === true || v === "true")
-    .catch(false),
+  marketStatus: z
+    .preprocess((v) => (typeof v === "string" ? v.trim() : v), z.string())
+    .optional()
+    .transform((v) => (v && v.length ? v : undefined)),
+  limit: zOptionalInt.transform((n) =>
+    n == null ? undefined : Math.min(Math.max(n, 1), 250),
+  ),
+  activeOnly: zOptionalBoolFalse,
+  hideAutoLost: zOptionalBoolFalse,
+  includeHidden: zOptionalBoolFalse,
   force: z
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")

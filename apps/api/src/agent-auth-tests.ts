@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import {
   agentApproveBodySchema,
   agentDeviceStartBodySchema,
+  agentOrdersQuerySchema,
 } from "./schemas/agent.js";
+import { positionsQuerySchema } from "./schemas/positions.js";
 import {
   AgentAuthService,
   summarizeAgentGrant,
   type AgentGrant,
 } from "./services/agent-auth.js";
+import { mapUnifiedOrder } from "./services/unified-order-presenter.js";
+import type { UnifiedOrderRow } from "./repos/unified-orders.js";
 
 async function test(name: string, fn: () => Promise<void> | void) {
   await fn();
@@ -44,6 +48,68 @@ await test("approval schema keeps bounded read-only grant expiries", () => {
     expiresInDays: 3650,
   });
   assert.equal(forever.success, false);
+});
+
+await test("account position and order schemas expose agent-friendly filters", () => {
+  const positions = positionsQuerySchema.parse({
+    view: "summary",
+    includeHidden: "true",
+    activeOnly: "true",
+    hideAutoLost: "true",
+    marketStatus: "ACTIVE",
+    limit: "20",
+  });
+  assert.equal(positions.view, "summary");
+  assert.equal(positions.includeHidden, true);
+  assert.equal(positions.activeOnly, true);
+  assert.equal(positions.hideAutoLost, true);
+  assert.equal(positions.marketStatus, "ACTIVE");
+  assert.equal(positions.limit, 20);
+
+  const orders = agentOrdersQuerySchema.parse({
+    mint: "sol:mint-yes",
+    inputMint: "input-mint",
+    outputMint: "output-mint",
+    openOnly: "false",
+  });
+  assert.equal(orders.mint, "sol:mint-yes");
+  assert.equal(orders.inputMint, "input-mint");
+  assert.equal(orders.outputMint, "output-mint");
+  assert.equal(orders.openOnly, false);
+});
+
+await test("unified order presenter normalizes Kalshi market IDs", () => {
+  const mapped = mapUnifiedOrder({
+    id: "order-1",
+    kind: "swap",
+    venue: "kalshi",
+    wallet_address: "wallet",
+    venue_order_id: null,
+    token_id: null,
+    side: "BUY",
+    outcome: "YES",
+    order_type: null,
+    price: null,
+    size: null,
+    status: "fulfilled",
+    filled_size: null,
+    average_fill_price: null,
+    expires_at: null,
+    created_at: null,
+    updated_at: null,
+    filled_at: null,
+    cancelled_at: null,
+    unified_market_id: "KXTEST-26",
+    input_mint: "usdc",
+    output_mint: "mint-yes",
+    amount_in: "1",
+    amount_out: "2",
+    input_decimals: "6",
+    output_decimals: "6",
+    tx_signature: "sig",
+  } satisfies UnifiedOrderRow);
+
+  assert.equal(mapped.unifiedMarketId, "kalshi:KXTEST-26");
 });
 
 await test("grant summary excludes raw token metadata", () => {

@@ -30,6 +30,10 @@ type PositionRow = {
 
 type PositionPnlSummaryRow = {
   open_positions_count: string;
+  visible_open_positions_count: string;
+  hidden_open_positions_count: string;
+  hidden_positions_count: string;
+  auto_lost_count: string;
   positions_count: string;
   total_pnl_all_time: string | null;
   unrealized_cost_basis_current: string | null;
@@ -38,6 +42,10 @@ type PositionPnlSummaryRow = {
 
 export type PositionPnlSummary = {
   openPositionsCount: number;
+  visibleOpenPositionsCount: number;
+  hiddenOpenPositionsCount: number;
+  hiddenPositionsCount: number;
+  autoLostCount: number;
   positionsCount: number;
   realizedPnlAllTime: number;
   unrealizedCostBasisCurrent: number;
@@ -219,6 +227,10 @@ export async function fetchPositionPnlSummaryForUserWallet(
   if (walletAddresses.length === 0) {
     return {
       openPositionsCount: 0,
+      visibleOpenPositionsCount: 0,
+      hiddenOpenPositionsCount: 0,
+      hiddenPositionsCount: 0,
+      autoLostCount: 0,
       positionsCount: 0,
       realizedPnlAllTime: 0,
       unrealizedCostBasisCurrent: 0,
@@ -243,6 +255,22 @@ export async function fetchPositionPnlSummaryForUserWallet(
       select
         count(*)::text as positions_count,
         count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
+        count(*) filter (
+          where p.side <> 'FLAT'
+            and p.size > 0
+            and coalesce(p.is_hidden, false) = false
+        )::text as visible_open_positions_count,
+        count(*) filter (
+          where p.side <> 'FLAT'
+            and p.size > 0
+            and coalesce(p.is_hidden, false) = true
+        )::text as hidden_open_positions_count,
+        count(*) filter (
+          where coalesce(p.is_hidden, false) = true
+        )::text as hidden_positions_count,
+        count(*) filter (
+          where p.hidden_reason = 'auto_lost'
+        )::text as auto_lost_count,
         coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::text as total_pnl_all_time,
         coalesce(sum(case
           when p.side <> 'FLAT'
@@ -296,6 +324,10 @@ export async function fetchPositionPnlSummaryForUserWallet(
 
   return {
     openPositionsCount: parseNumeric(row?.open_positions_count),
+    visibleOpenPositionsCount: parseNumeric(row?.visible_open_positions_count),
+    hiddenOpenPositionsCount: parseNumeric(row?.hidden_open_positions_count),
+    hiddenPositionsCount: parseNumeric(row?.hidden_positions_count),
+    autoLostCount: parseNumeric(row?.auto_lost_count),
     positionsCount: parseNumeric(row?.positions_count),
     realizedPnlAllTime,
     unrealizedCostBasisCurrent,

@@ -87,6 +87,9 @@ export const agentVenueStatusQuerySchema = z.object({
 });
 
 export const agentOrdersQuerySchema = ordersQuerySchema.extend({
+  mint: z.string().trim().min(1).optional(),
+  inputMint: z.string().trim().min(1).optional(),
+  outputMint: z.string().trim().min(1).optional(),
   openOnly: zOptionalBool.optional(),
 });
 

@@ -16,6 +16,17 @@ export const OPEN_ORDER_STATUSES: string[] = [
   "open",
 ];
 
+function normalizeUnifiedMarketIdForApi(
+  venue: string,
+  marketId: string | null,
+): string | null {
+  if (!marketId) return null;
+  if (venue === "kalshi" && !marketId.includes(":") && /^KX/i.test(marketId)) {
+    return `kalshi:${marketId}`;
+  }
+  return marketId;
+}
+
 export function mapUnifiedOrder(row: UnifiedOrderRow) {
   return {
     id: row.id,
@@ -37,7 +48,10 @@ export function mapUnifiedOrder(row: UnifiedOrderRow) {
     updatedAt: row.updated_at,
     filledAt: row.filled_at,
     cancelledAt: row.cancelled_at,
-    unifiedMarketId: row.unified_market_id,
+    unifiedMarketId: normalizeUnifiedMarketIdForApi(
+      row.venue,
+      row.unified_market_id,
+    ),
     inputMint: row.input_mint,
     outputMint: row.output_mint,
     amountIn: toNumber(row.amount_in),

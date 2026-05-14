@@ -40,6 +40,9 @@ type FilterInputs = {
   marketId?: string;
   marketIds?: string[];
   tokenId?: string;
+  mint?: string;
+  inputMint?: string;
+  outputMint?: string;
 };
 
 type FetchUnifiedOrdersInputs = FilterInputs & {
@@ -54,7 +57,40 @@ type FilterParams = {
   statusIndex?: number;
   marketListIndex?: number;
   tokenIndex?: number;
+  mintIndex?: number;
+  inputMintIndex?: number;
+  outputMintIndex?: number;
 };
+
+function normalizeMarketIdVariants(marketIds: string[]): string[] {
+  const variants = new Map<string, string>();
+  for (const raw of marketIds) {
+    const marketId = raw.trim();
+    if (!marketId) continue;
+    variants.set(marketId, marketId);
+    if (marketId.toLowerCase().startsWith("kalshi:")) {
+      const unprefixed = marketId.slice("kalshi:".length);
+      if (unprefixed) variants.set(unprefixed, unprefixed);
+    } else if (/^KX/i.test(marketId)) {
+      variants.set(`kalshi:${marketId}`, `kalshi:${marketId}`);
+    }
+  }
+  return Array.from(variants.values());
+}
+
+function normalizeMintVariants(mint: string): string[] {
+  const trimmed = mint.trim();
+  if (!trimmed) return [];
+  const variants = new Map<string, string>();
+  variants.set(trimmed, trimmed);
+  if (trimmed.toLowerCase().startsWith("sol:")) {
+    const unprefixed = trimmed.slice("sol:".length);
+    if (unprefixed) variants.set(unprefixed, unprefixed);
+  } else {
+    variants.set(`sol:${trimmed}`, `sol:${trimmed}`);
+  }
+  return Array.from(variants.values());
+}
 
 const buildFilterParams = (inputs: FilterInputs): FilterParams => {
   const params: PgParams = [inputs.userId, inputs.walletAddresses];
@@ -86,9 +122,10 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
       : undefined;
   let marketListIndex: number | undefined;
   if (normalizedMarketIds?.length) {
+    const marketIdVariants = normalizeMarketIdVariants(normalizedMarketIds);
     paramCount += 1;
     marketListIndex = paramCount;
-    params.push(normalizedMarketIds);
+    params.push(marketIdVariants);
   }
 
   let tokenIndex: number | undefined;
@@ -98,14 +135,58 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.tokenId);
   }
 
-  return { params, venueIndex, statusIndex, marketListIndex, tokenIndex };
+  let mintIndex: number | undefined;
+  if (inputs.mint) {
+    const mintVariants = normalizeMintVariants(inputs.mint);
+    if (mintVariants.length > 0) {
+      paramCount += 1;
+      mintIndex = paramCount;
+      params.push(mintVariants);
+    }
+  }
+
+  let inputMintIndex: number | undefined;
+  if (inputs.inputMint) {
+    const mintVariants = normalizeMintVariants(inputs.inputMint);
+    if (mintVariants.length > 0) {
+      paramCount += 1;
+      inputMintIndex = paramCount;
+      params.push(mintVariants);
+    }
+  }
+
+  let outputMintIndex: number | undefined;
+  if (inputs.outputMint) {
+    const mintVariants = normalizeMintVariants(inputs.outputMint);
+    if (mintVariants.length > 0) {
+      paramCount += 1;
+      outputMintIndex = paramCount;
+      params.push(mintVariants);
+    }
+  }
+
+  return {
+    params,
+    venueIndex,
+    statusIndex,
+    marketListIndex,
+    tokenIndex,
+    mintIndex,
+    inputMintIndex,
+    outputMintIndex,
+  };
 };
 
 const buildWhereClause = (
   alias: string,
   filterParams: FilterParams,
   includeSigner: boolean,
-  columns: { market?: string; token?: string } = {},
+  columns: {
+    market?: string;
+    token?: string;
+    inputMint?: string;
+    outputMint?: string;
+  } = {},
 ): string => {
   const normalizedWalletExpr = `case when ${alias}.wallet_address like '0x%' then lower(${alias}.wallet_address) else ${alias}.wallet_address end`;
   const normalizedSignerExpr = `case when ${alias}.signer_address like '0x%' then lower(${alias}.signer_address) else ${alias}.signer_address end`;
@@ -132,6 +213,39 @@ const buildWhereClause = (
 
   if (filterParams.tokenIndex && columns.token) {
     conditions.push(`${columns.token} = $${filterParams.tokenIndex}`);
+  }
+
+  if (filterParams.mintIndex) {
+    const mintConditions = [
+      columns.token
+        ? `${columns.token} = ANY($${filterParams.mintIndex}::text[])`
+        : null,
+      columns.inputMint
+        ? `${columns.inputMint} = ANY($${filterParams.mintIndex}::text[])`
+        : null,
+      columns.outputMint
+        ? `${columns.outputMint} = ANY($${filterParams.mintIndex}::text[])`
+        : null,
+    ].filter(Boolean);
+    conditions.push(
+      mintConditions.length > 0 ? `(${mintConditions.join(" or ")})` : "false",
+    );
+  }
+
+  if (filterParams.inputMintIndex) {
+    conditions.push(
+      columns.inputMint
+        ? `${columns.inputMint} = ANY($${filterParams.inputMintIndex}::text[])`
+        : "false",
+    );
+  }
+
+  if (filterParams.outputMintIndex) {
+    conditions.push(
+      columns.outputMint
+        ? `${columns.outputMint} = ANY($${filterParams.outputMintIndex}::text[])`
+        : "false",
+    );
   }
 
   return `where ${conditions.join(" and ")}`;
@@ -242,6 +356,8 @@ export async function fetchUnifiedOrders(
     : baseOrderWhere;
   const execWhere = buildWhereClause("e", filterParams, false, {
     market: "e.unified_market_id",
+    inputMint: "e.input_mint",
+    outputMint: "e.output_mint",
   });
 
   const selects: string[] = [];
