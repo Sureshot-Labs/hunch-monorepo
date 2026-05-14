@@ -4,6 +4,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import {
   buildGeoFenceResponse,
   evaluateGeoFence,
@@ -359,6 +360,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         .map((mint) => `sol:${mint}`);
       if (hotTokenIds.length) {
         void markHotTokens({ tokenIds: hotTokenIds, venue: "dflow" });
+        void requestPriceRefreshForTokens({
+          tokenIds: hotTokenIds,
+          venue: "dflow",
+        });
       }
 
       const upstream = await dflowRequest({
@@ -521,6 +526,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         .map((mint) => `sol:${mint}`);
       if (hotTokenIds.length) {
         void markHotTokens({ tokenIds: hotTokenIds, venue: "dflow" });
+        void requestPriceRefreshForTokens({
+          tokenIds: hotTokenIds,
+          venue: "dflow",
+        });
       }
 
       const upstream = await dflowRequest({

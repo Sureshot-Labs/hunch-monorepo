@@ -163,6 +163,25 @@ const hotStreamTokensMax = clampInt(
   },
 );
 
+const priceRefreshQueueEnabled =
+  parseOptionalBool(process.env.PRICE_REFRESH_QUEUE_ENABLED) ?? true;
+const priceRefreshQueueBatch = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_BATCH),
+  { min: 1, max: 1000, fallback: 100 },
+);
+const priceRefreshQueueIntervalMs = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_INTERVAL_MS),
+  { min: 1000, max: 10 * 60 * 1000, fallback: 5000 },
+);
+const priceRefreshQueueMax = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_MAX),
+  { min: 100, max: 1_000_000, fallback: 20_000 },
+);
+const priceRefreshRetryDelayMs = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
+  { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
+);
+
 const wsHotShareRaw = parseOptionalFloat(
   process.env.LIMITLESS_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
 );
@@ -216,6 +235,11 @@ export const env = {
   hotTokensMax,
   hotStreamTokensTtlSec,
   hotStreamTokensMax,
+  priceRefreshQueueEnabled,
+  priceRefreshQueueBatch,
+  priceRefreshQueueIntervalMs,
+  priceRefreshQueueMax,
+  priceRefreshRetryDelayMs,
   hotAmmQuoteCooldownMs,
   hotAmmQuoteMaxMarkets,
 

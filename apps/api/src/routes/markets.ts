@@ -9,6 +9,7 @@ import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   parseMetadata,
@@ -161,6 +162,25 @@ type MarketRoutesOptions = {
     timeoutMs?: number;
   }) => AggMarketClient;
 };
+
+function extractTokenIdsFromTokenPair(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  return [value.yes, value.no].filter(
+    (tokenId): tokenId is string =>
+      typeof tokenId === "string" && tokenId.length > 0,
+  );
+}
+
+function enqueuePriceRefreshFromCachedMarket(cachedData: string): void {
+  try {
+    const parsed = JSON.parse(cachedData) as unknown;
+    if (!isRecord(parsed)) return;
+    const tokenIds = extractTokenIdsFromTokenPair(parsed.tokens);
+    if (tokenIds.length) void requestPriceRefreshForTokens({ tokenIds });
+  } catch {
+    // Ignore stale or non-JSON cache entries.
+  }
+}
 
 export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
   app,
@@ -412,6 +432,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
 
         if (tokenIds.length) {
           void markHotTokens({ tokenIds });
+          void requestPriceRefreshForTokens({ tokenIds });
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -469,6 +490,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       if (r) {
         const cachedData = await r.get(cacheKey);
         if (cachedData) {
+          enqueuePriceRefreshFromCachedMarket(cachedData);
           reply.header("x-cache", "hit");
           reply.header("Content-Type", "application/json; charset=utf-8");
           reply.header(
@@ -680,6 +702,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         );
         if (tokenIds.length) {
           void markHotTokens({ tokenIds });
+          void requestPriceRefreshForTokens({ tokenIds });
         }
 
         const responseBody = JSON.stringify(response);

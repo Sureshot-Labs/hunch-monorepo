@@ -17,9 +17,13 @@ import {
 } from "./consistentUpserts.js";
 import {
   buildTopMarketsText,
+  claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  getPriceRefreshQueueBacklog,
   isPgSetupIssue,
+  requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshRedis,
 } from "@hunch/infra";
 import { pool } from "./db.js";
 import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
@@ -334,12 +338,16 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   };
 }
 
-export async function snapshotBooks(tokenIds: string[]): Promise<void> {
-  if (tokenIds.length === 0) return;
+export async function snapshotBooks(tokenIds: string[]): Promise<{
+  requested: number;
+  failedTokenIds: string[];
+}> {
+  if (tokenIds.length === 0) return { requested: 0, failedTokenIds: [] };
   await ensureRedis();
   await pool.query("select 1");
 
   const snapIds = tokenIds.slice(0, env.topBookSnapshot);
+  const failedTokenIds: string[] = [];
   log.info(`Snapshotting ${snapIds.length} top books`);
 
   const batches = chunkArray(snapIds, 20);
@@ -368,11 +376,70 @@ export async function snapshotBooks(tokenIds: string[]): Promise<void> {
           }
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;
+          failedTokenIds.push(...group);
           log.warn("book snapshot failed batch", group[0], String(e));
         }
       }),
     ),
   );
+  return { requested: snapIds.length, failedTokenIds };
+}
+
+export async function processPriceRefreshQueue(): Promise<{
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+}> {
+  if (!env.priceRefreshQueueEnabled) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  await ensureRedis();
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+    venue: "polymarket",
+    limit: env.priceRefreshQueueBatch,
+  });
+  if (!tokenIds.length) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  try {
+    const result = await snapshotBooks(tokenIds);
+    refreshed = result.requested - result.failedTokenIds.length;
+    failed = result.failedTokenIds.length;
+    if (result.failedTokenIds.length) {
+      await requeuePriceRefreshTokens(redisClient, {
+        venue: "polymarket",
+        tokenIds: result.failedTokenIds,
+        delayMs: env.priceRefreshRetryDelayMs,
+        maxQueueSize: env.priceRefreshQueueMax,
+      });
+    }
+  } catch (error) {
+    failed = tokenIds.length;
+    await requeuePriceRefreshTokens(redisClient, {
+      venue: "polymarket",
+      tokenIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshQueueMax,
+    });
+    log.warn("Polymarket price refresh queue failed", { error });
+  }
+
+  const backlog = await getPriceRefreshQueueBacklog(redisClient, "polymarket");
+  log.info("Polymarket price refresh queue processed", {
+    claimed: tokenIds.length,
+    refreshed,
+    failed,
+    backlog,
+    durationMs: Date.now() - startedAt,
+  });
+  return { claimed: tokenIds.length, refreshed, failed, backlog };
 }
 
 function parseJsonStringArray(raw: unknown): string[] {

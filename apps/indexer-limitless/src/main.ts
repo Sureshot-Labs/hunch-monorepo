@@ -2,6 +2,7 @@ import {
   backfillHotLimitlessAmmPrices,
   bootstrapLimitless,
   ensureStartupWsTargets,
+  processPriceRefreshQueue,
   resolveHotWsTargets,
   syncHotLimitlessMarkets,
 } from "./bootstrap.js";
@@ -17,6 +18,7 @@ import {
 let fullBootstrapping = false;
 let hotRefreshing = false;
 let wsRefreshRunning = false;
+let priceRefreshRunning = false;
 
 async function periodicHotRefresh() {
   if (hotRefreshing) return;
@@ -90,6 +92,23 @@ async function periodicWsRefresh() {
   }
 }
 
+async function periodicPriceRefresh() {
+  if (!env.priceRefreshQueueEnabled || priceRefreshRunning) return;
+  priceRefreshRunning = true;
+  try {
+    await processPriceRefreshQueue();
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`price refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic price refresh err", e);
+    }
+  } finally {
+    priceRefreshRunning = false;
+  }
+}
+
 async function main() {
   if (!env.limitlessEnabled) {
     log.warn("Limitless indexer disabled (LIMITLESS_ENABLED=false)");
@@ -102,6 +121,7 @@ async function main() {
     addresses: targets.addresses.length,
   });
   startMarketWS(targets);
+  await periodicPriceRefresh();
   void (async () => {
     log.info("Limitless startup: running initial hot refresh");
     try {
@@ -124,6 +144,7 @@ async function main() {
   setInterval(periodicFullBootstrap, env.fullRefreshMinutes * 60 * 1000);
   // Refresh WS desired subscriptions independently from HTTP refresh cadence.
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
+  setInterval(periodicPriceRefresh, env.priceRefreshQueueIntervalMs);
 }
 
 main().catch((e) => {

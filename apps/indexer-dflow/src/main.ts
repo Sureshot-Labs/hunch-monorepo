@@ -1,6 +1,7 @@
 import { formatPgError, isPgSetupIssue } from "@hunch/infra";
 
 import {
+  processPriceRefreshQueue,
   syncCatchUpFromCursor,
   syncHotMarketStatuses,
   syncHotWindow,
@@ -16,6 +17,7 @@ let running = false;
 let wsRefreshRunning = false;
 let wsStarted = false;
 let bootstrapRuns = 0;
+let priceRefreshRunning = false;
 
 async function periodicBootstrap() {
   if (running) return;
@@ -64,8 +66,26 @@ async function periodicWsRefresh() {
   }
 }
 
+async function periodicPriceRefresh() {
+  if (!env.priceRefreshQueueEnabled || priceRefreshRunning) return;
+  priceRefreshRunning = true;
+  try {
+    await processPriceRefreshQueue();
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`price refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic price refresh err", e);
+    }
+  } finally {
+    priceRefreshRunning = false;
+  }
+}
+
 async function main() {
   await periodicBootstrap();
+  await periodicPriceRefresh();
   const tickers = await resolveHotTickersForWs();
   const ws = startMarketWS(tickers);
   wsStarted = ws != null;
@@ -81,6 +101,7 @@ async function main() {
 
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
+  setInterval(periodicPriceRefresh, env.priceRefreshQueueIntervalMs);
 }
 
 main().catch((e) => {

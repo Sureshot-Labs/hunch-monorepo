@@ -32,10 +32,14 @@ import {
 } from "@hunch/db";
 import {
   buildTopMarketsText,
+  claimDuePriceRefreshTokens,
   createTopTickGate,
   enqueueEmbedItems,
+  getPriceRefreshQueueBacklog,
   isPgSetupIssue,
+  requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshRedis,
 } from "@hunch/infra";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
@@ -273,7 +277,7 @@ async function resolveOrderedHotLimitlessMarketRows(
         select
           m.id as market_id,
           min(ht.ord)::int as hot_rank,
-          coalesce(e.slug, m.slug) as slug,
+          m.slug,
           lower(nullif(m.metadata->>'address', '')) as address,
           nullif(m.metadata->>'tradeType', '') as trade_type,
           m.token_yes,
@@ -288,7 +292,7 @@ async function resolveOrderedHotLimitlessMarketRows(
           and m.status = 'ACTIVE'
         group by
           m.id,
-          coalesce(e.slug, m.slug),
+          m.slug,
           lower(nullif(m.metadata->>'address', '')),
           nullif(m.metadata->>'tradeType', ''),
           m.token_yes,
@@ -316,6 +320,214 @@ async function resolveOrderedHotLimitlessMarketRows(
   );
 
   return rows;
+}
+
+function expandLimitlessTokenLookupIds(tokenIds: string[]): string[] {
+  const ids = new Set<string>();
+  for (const raw of tokenIds) {
+    const tokenId = raw.trim();
+    if (!tokenId) continue;
+    ids.add(tokenId);
+    const stripped = tokenId.replace(/^limitless:/, "");
+    if (stripped) {
+      ids.add(stripped);
+      ids.add(`limitless:${stripped}`);
+    }
+  }
+  return Array.from(ids);
+}
+
+async function resolveLimitlessMarketRowsForTokenIds(
+  tokenIds: string[],
+): Promise<HotLimitlessMarketRow[]> {
+  const lookupTokenIds = expandLimitlessTokenLookupIds(tokenIds);
+  if (!lookupTokenIds.length) return [];
+
+  const { rows } = await pool.query<HotLimitlessMarketRow>(
+    `
+      with requested_tokens as (
+        select token_id, ord::int as ord
+        from unnest($1::text[]) with ordinality as t(token_id, ord)
+      ),
+      requested_markets as (
+        select
+          m.id as market_id,
+          min(rt.ord)::int as hot_rank,
+          m.slug,
+          lower(nullif(m.metadata->>'address', '')) as address,
+          nullif(m.metadata->>'tradeType', '') as trade_type,
+          m.token_yes,
+          m.token_no,
+          m.volume_total,
+          m.liquidity
+        from requested_tokens rt
+        join unified_tokens t on t.token_id = rt.token_id
+        join unified_markets m on m.id = t.market_id
+        left join unified_events e on e.id = m.event_id
+        where m.venue = 'limitless'
+          and m.status = 'ACTIVE'
+        group by
+          m.id,
+          m.slug,
+          lower(nullif(m.metadata->>'address', '')),
+          nullif(m.metadata->>'tradeType', ''),
+          m.token_yes,
+          m.token_no,
+          m.volume_total,
+          m.liquidity
+      )
+      select
+        market_id,
+        hot_rank,
+        slug,
+        address,
+        trade_type,
+        token_yes,
+        token_no,
+        volume_total,
+        liquidity
+      from requested_markets
+      order by hot_rank asc,
+               volume_total desc nulls last,
+               liquidity desc nulls last
+    `,
+    [lookupTokenIds],
+  );
+
+  return rows;
+}
+
+async function refreshLimitlessMarketTop(
+  row: HotLimitlessMarketRow,
+): Promise<boolean> {
+  const tradeType = row.trade_type?.trim().toLowerCase();
+  if (tradeType === "amm") {
+    const address = row.address?.toLowerCase() ?? null;
+    if (!address) return false;
+
+    const quote = await fetchLimitlessAmmQuotePair({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      marketAddress: address,
+    });
+    const ts = new Date();
+    const yesToken = prefixLimitlessToken(row.token_yes);
+    const noToken = prefixLimitlessToken(row.token_no);
+    let updated = false;
+
+    if (yesToken && quote.yesPrice != null) {
+      await publishTokenTop(yesToken, quote.yesPrice, quote.yesPrice, ts);
+      updated = true;
+    }
+    if (noToken && quote.noPrice != null) {
+      await publishTokenTop(noToken, quote.noPrice, quote.noPrice, ts);
+      updated = true;
+    }
+    return updated;
+  }
+
+  if (!row.slug) return false;
+  const ob = await fetchOrderbook(row.slug);
+  const bestBid = ob.bids?.[0]?.price ?? null;
+  const bestAsk = ob.asks?.[0]?.price ?? null;
+  const obTokenId =
+    prefixLimitlessToken(ob.tokenId) ?? prefixLimitlessToken(row.token_yes);
+  if (!obTokenId || (bestBid == null && bestAsk == null)) return false;
+
+  await publishTokenTop(obTokenId, bestBid, bestAsk, new Date(), {
+    token_id: obTokenId,
+    bids: ob.bids ?? [],
+    asks: ob.asks ?? [],
+    timestamp: Date.now().toString(),
+  });
+  return true;
+}
+
+function isPermanentLimitlessPriceRefreshError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /Limitless 404\b/i.test(error.message);
+}
+
+export async function processPriceRefreshQueue(): Promise<{
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+}> {
+  if (!env.priceRefreshQueueEnabled || !env.limitlessEnabled) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+    venue: "limitless",
+    limit: env.priceRefreshQueueBatch,
+  });
+  if (!tokenIds.length) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  const failedTokenIds: string[] = [];
+  try {
+    const rows = await resolveLimitlessMarketRowsForTokenIds(tokenIds);
+    for (const row of rows) {
+      try {
+        if (await refreshLimitlessMarketTop(row)) refreshed += 1;
+      } catch (error) {
+        failed += 1;
+        const permanent = isPermanentLimitlessPriceRefreshError(error);
+        if (!permanent) {
+          const yesToken = prefixLimitlessToken(row.token_yes);
+          const noToken = prefixLimitlessToken(row.token_no);
+          if (yesToken) failedTokenIds.push(yesToken);
+          if (noToken) failedTokenIds.push(noToken);
+        }
+        log.warn(
+          permanent
+            ? "Limitless price refresh market skipped permanently"
+            : "Limitless price refresh market failed",
+          {
+            marketId: row.market_id,
+            slug: row.slug,
+            error,
+          },
+        );
+      }
+    }
+    if (failedTokenIds.length) {
+      await requeuePriceRefreshTokens(redisClient, {
+        venue: "limitless",
+        tokenIds: failedTokenIds,
+        delayMs: env.priceRefreshRetryDelayMs,
+        maxQueueSize: env.priceRefreshQueueMax,
+      });
+    }
+  } catch (error) {
+    failed = tokenIds.length;
+    await requeuePriceRefreshTokens(redisClient, {
+      venue: "limitless",
+      tokenIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshQueueMax,
+    });
+    log.warn("Limitless price refresh queue failed", { error });
+  }
+
+  const backlog = await getPriceRefreshQueueBacklog(redisClient, "limitless");
+  log.info("Limitless price refresh queue processed", {
+    claimed: tokenIds.length,
+    refreshed,
+    failed,
+    backlog,
+    durationMs: Date.now() - startedAt,
+  });
+  return { claimed: tokenIds.length, refreshed, failed, backlog };
 }
 
 export async function backfillHotLimitlessAmmPrices(): Promise<{

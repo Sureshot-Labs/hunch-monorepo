@@ -1,10 +1,7 @@
 import type { FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { resolveClientIp, type GeoFenceConfig } from "./geo-fence.js";
-import {
-  checkRateLimit,
-  type RateLimitErrorMode,
-} from "./rate-limit.js";
+import { checkRateLimit, type RateLimitErrorMode } from "./rate-limit.js";
 
 const requestIpConfig: GeoFenceConfig = {
   enabled: false,

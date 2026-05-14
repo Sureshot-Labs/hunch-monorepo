@@ -3,9 +3,13 @@ import PQueue from "p-queue";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
   buildTopMarketsText,
+  claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  getPriceRefreshQueueBacklog,
   createTopTickGate,
+  requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshRedis,
 } from "@hunch/infra";
 import {
   upsertUnifiedEvents,
@@ -879,7 +883,11 @@ async function refreshHotTokenTops(): Promise<number> {
   return publish.length;
 }
 
-export async function syncHotMarketStatuses(): Promise<{
+async function syncMarketStatusesForTokenIds(
+  inputTokenIds: string[],
+  context: string,
+  options: { includeSiblings?: boolean } = {},
+): Promise<{
   processedMarkets: number;
 }> {
   if (!env.dflowEnabled) return { processedMarkets: 0 };
@@ -887,14 +895,7 @@ export async function syncHotMarketStatuses(): Promise<{
   await ensureRedis();
   await pool.query("select 1");
 
-  const hotTokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.wsSubset * 12),
-  );
-  const positionTokenIds = await fetchPositionTokenIds();
-
-  const allTokenIds = Array.from(
-    new Set([...hotTokenIds, ...positionTokenIds]),
-  );
+  const allTokenIds = Array.from(new Set(inputTokenIds));
   let processedMarkets = 0;
   const touchedEventIds = new Set<string>();
 
@@ -930,7 +931,7 @@ export async function syncHotMarketStatuses(): Promise<{
       );
 
       let siblingTickersFetched = 0;
-      if (initialEventIds.length) {
+      if (options.includeSiblings !== false && initialEventIds.length) {
         const siblingTickers = await fetchTickersForEventIds(initialEventIds);
         const missingSiblingTickers = siblingTickers.filter(
           (ticker) => !marketsByTicker.has(ticker),
@@ -991,7 +992,7 @@ export async function syncHotMarketStatuses(): Promise<{
       }
 
       const mappedGroups = Array.from(mappedGroupsByEvent.values());
-      await maybeEnrichKalshiMappedMarketGroups(mappedGroups, "hot-status");
+      await maybeEnrichKalshiMappedMarketGroups(mappedGroups, context);
 
       const unifiedMarketRows: UnifiedMarketRow[] = [];
       const tokenRows: Array<{
@@ -1045,7 +1046,8 @@ export async function syncHotMarketStatuses(): Promise<{
       }
 
       if (siblingTickersFetched > 0) {
-        log.info("DFlow hot status sibling refresh", {
+        log.info("DFlow market status sibling refresh", {
+          context,
           initialTickers: initialTickers.length,
           siblingTickersFetched,
           totalTickers: markets.length,
@@ -1058,13 +1060,82 @@ export async function syncHotMarketStatuses(): Promise<{
     Array.from(touchedEventIds),
   );
 
-  log.info("DFlow hot status refresh complete", {
+  log.info("DFlow market status refresh complete", {
+    context,
     tokens: allTokenIds.length,
     markets: processedMarkets,
     reconciledEvents,
   });
 
   return { processedMarkets };
+}
+
+export async function syncHotMarketStatuses(): Promise<{
+  processedMarkets: number;
+}> {
+  if (!env.dflowEnabled) return { processedMarkets: 0 };
+
+  const hotTokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 12),
+  );
+  const positionTokenIds = await fetchPositionTokenIds();
+  return syncMarketStatusesForTokenIds(
+    [...hotTokenIds, ...positionTokenIds],
+    "hot-status",
+    { includeSiblings: true },
+  );
+}
+
+export async function processPriceRefreshQueue(): Promise<{
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+}> {
+  if (!env.priceRefreshQueueEnabled || !env.dflowEnabled) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  await ensureRedis();
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+    venue: "dflow",
+    limit: env.priceRefreshQueueBatch,
+  });
+  if (!tokenIds.length) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+  }
+
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  try {
+    const result = await syncMarketStatusesForTokenIds(
+      tokenIds,
+      "price-refresh",
+      { includeSiblings: false },
+    );
+    refreshed = result.processedMarkets;
+  } catch (error) {
+    failed = tokenIds.length;
+    await requeuePriceRefreshTokens(redisClient, {
+      venue: "dflow",
+      tokenIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshQueueMax,
+    });
+    log.warn("DFlow price refresh queue failed", { error });
+  }
+
+  const backlog = await getPriceRefreshQueueBacklog(redisClient, "dflow");
+  log.info("DFlow price refresh queue processed", {
+    claimed: tokenIds.length,
+    refreshed,
+    failed,
+    backlog,
+    durationMs: Date.now() - startedAt,
+  });
+  return { claimed: tokenIds.length, refreshed, failed, backlog };
 }
 
 async function processEvents(

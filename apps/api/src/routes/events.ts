@@ -6,6 +6,7 @@ import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -56,6 +57,27 @@ type PolymarketRepresentative = {
   row: EventDetailsRow;
   tokens: TokenPair;
 };
+
+function extractTokenIdsFromTokenPair(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  return [value.yes, value.no].filter(
+    (tokenId): tokenId is string =>
+      typeof tokenId === "string" && tokenId.length > 0,
+  );
+}
+
+function enqueuePriceRefreshFromCachedEvent(cachedData: string): void {
+  try {
+    const parsed = JSON.parse(cachedData) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed.markets)) return;
+    const tokenIds = parsed.markets.flatMap((market) =>
+      isRecord(market) ? extractTokenIdsFromTokenPair(market.tokens) : [],
+    );
+    if (tokenIds.length) void requestPriceRefreshForTokens({ tokenIds });
+  } catch {
+    // Ignore stale or non-JSON cache entries.
+  }
+}
 
 type SimilarEventMarketSummary = {
   marketId: string;
@@ -376,6 +398,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       if (r) {
         const cachedData = await r.get(cacheKey);
         if (cachedData) {
+          enqueuePriceRefreshFromCachedEvent(cachedData);
           reply.header("x-cache", "hit");
           reply.header("Content-Type", "application/json; charset=utf-8");
           reply.header(
@@ -462,6 +485,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             return bValue - aValue;
           })
           .map((item) => item.row);
+        const refreshTokenIds: string[] = [];
 
         // Process markets (sorted by YES probability desc)
         for (const row of marketRows) {
@@ -510,6 +534,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               no: row.token_no != null ? String(row.token_no) : null,
             };
           }
+          refreshTokenIds.push(...extractTokenIdsFromTokenPair(tokens));
 
           // Parse outcomes if available
           let outcomes: unknown = null;
@@ -640,6 +665,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             updatedAt: row.market_updated_at,
             lastUpdate: row.market_updated_at,
           });
+        }
+        if (refreshTokenIds.length) {
+          void requestPriceRefreshForTokens({ tokenIds: refreshTokenIds });
         }
 
         const responseBody = JSON.stringify(event);
