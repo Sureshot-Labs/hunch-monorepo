@@ -579,3 +579,6 @@ Proxy requirements:
   socket address before proxying to API/frontend containers.
 - Keep `ADMIN_AUTH_LEGACY_FALLBACK=true` during migration only; disable it once
   the separate admin panel is fully verified.
+
+See `docs/api-rate-limits-and-geofence.md` for the shared client-IP resolution,
+global API rate limit, and geofence behavior.

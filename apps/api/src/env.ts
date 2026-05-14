@@ -675,6 +675,16 @@ export const env = {
   proxySecret,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
+  apiGlobalRateLimitEnabled:
+    parseOptionalBool(process.env.API_GLOBAL_RATE_LIMIT_ENABLED) ?? true,
+  apiGlobalRateLimitMaxRequests: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_MAX_REQUESTS",
+    600,
+  ),
+  apiGlobalRateLimitWindowMs: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_WINDOW_MS",
+    60_000,
+  ),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
   authAccessState,
   adminAuthEnabled,
