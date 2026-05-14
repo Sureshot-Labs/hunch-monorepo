@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
-import { resolveSecurityClientIp } from "../lib/request-ip.js";
+import { checkRateLimitForSecurityClientIp } from "../lib/request-ip.js";
 import {
   AdminAuthError,
   AdminAuthService,
@@ -89,6 +89,25 @@ function handleAdminAuthError(error: unknown, reply: FastifyReply) {
 }
 
 async function enforceRateLimit(
+  request: FastifyRequest,
+  keyPrefix: string,
+  maxRequests: number,
+  windowMs: number,
+  reply: FastifyReply,
+): Promise<string | null> {
+  const result = await checkRateLimitForSecurityClientIp(request, {
+    keyPrefix,
+    maxRequests,
+    windowMs,
+    onError: "fail_closed",
+  });
+  if (result.allowed) return result.clientIp;
+  reply.code(429);
+  reply.send({ error: "rate_limit_exceeded" });
+  return null;
+}
+
+async function enforceGlobalRateLimit(
   key: string,
   maxRequests: number,
   windowMs: number,
@@ -117,17 +136,18 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
         reply.code(404);
         return reply.send({ error: "admin_auth_disabled" });
       }
-      const clientIp = resolveSecurityClientIp(request);
       const body = request.body;
-      const ipOk = await enforceRateLimit(
-        `admin:enroll:start:ip:${clientIp}`,
+      const clientIp = await enforceRateLimit(
+        request,
+        "admin:enroll:start:ip",
         30,
         60_000,
         reply,
       );
-      if (!ipOk) return;
+      if (!clientIp) return;
       const canProceed = await enforceRateLimit(
-        `admin:enroll:start:${clientIp}:${body.token.slice(0, 16)}`,
+        request,
+        `admin:enroll:start:token:${body.token.slice(0, 16)}`,
         10,
         60_000,
         reply,
@@ -135,7 +155,11 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
       if (!canProceed) return;
 
       try {
-        const result = await AdminAuthService.startEnrollment(body.token);
+        const result = await AdminAuthService.startEnrollment({
+          token: body.token,
+          ipAddress: clientIp,
+          userAgent: readRequestUserAgent(request),
+        });
         return reply.send({
           ok: true,
           email: result.email,
@@ -159,17 +183,18 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
         reply.code(404);
         return reply.send({ error: "admin_auth_disabled" });
       }
-      const clientIp = resolveSecurityClientIp(request);
       const body = request.body;
-      const ipOk = await enforceRateLimit(
-        `admin:enroll:complete:ip:${clientIp}`,
+      const clientIp = await enforceRateLimit(
+        request,
+        "admin:enroll:complete:ip",
         30,
         60_000,
         reply,
       );
-      if (!ipOk) return;
+      if (!clientIp) return;
       const canProceed = await enforceRateLimit(
-        `admin:enroll:complete:${clientIp}:${body.token.slice(0, 16)}`,
+        request,
+        `admin:enroll:complete:token:${body.token.slice(0, 16)}`,
         10,
         60_000,
         reply,
@@ -201,17 +226,17 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
         reply.code(404);
         return reply.send({ error: "admin_auth_disabled" });
       }
-      const clientIp = resolveSecurityClientIp(request);
       const body = request.body;
       const emailKey = body.email.trim().toLowerCase();
-      const ipOk = await enforceRateLimit(
-        `admin:login:ip:${clientIp}`,
+      const clientIp = await enforceRateLimit(
+        request,
+        "admin:login:ip",
         30,
         60_000,
         reply,
       );
-      if (!ipOk) return;
-      const emailOk = await enforceRateLimit(
+      if (!clientIp) return;
+      const emailOk = await enforceGlobalRateLimit(
         `admin:login:email:${emailKey}`,
         10,
         60_000,

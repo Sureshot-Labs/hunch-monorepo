@@ -16,8 +16,7 @@ import {
   encryptCredentialsString,
   getCredentialsEncryptionKey,
 } from "./lib/credentials-encryption.js";
-import { resolveSecurityClientIp } from "./lib/request-ip.js";
-import { checkRateLimit } from "./lib/rate-limit.js";
+import { checkRateLimitForSecurityClientIp } from "./lib/request-ip.js";
 import {
   attachAdminSessionToRequest,
   type AdminPermission,
@@ -2182,12 +2181,13 @@ export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
       requireCsrf: requiresCsrf(request.method),
     });
     if (adminSession.ok) {
-      const clientIp = resolveSecurityClientIp(request);
-      const rateLimitKey = `admin:${clientIp}`;
-      const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000, {
+      const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+        keyPrefix: "admin",
+        maxRequests: 120,
+        windowMs: 60_000,
         onError: "fail_closed",
       });
-      if (!canProceed) {
+      if (!rateLimit.allowed) {
         reply.code(429);
         return reply.send({ error: "Rate limit exceeded" });
       }
@@ -2226,12 +2226,13 @@ export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
       email: request.user.email,
     };
 
-    const clientIp = resolveSecurityClientIp(request);
-    const rateLimitKey = `admin:${clientIp}`;
-    const canProceed = await checkRateLimit(rateLimitKey, 120, 60_000, {
+    const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+      keyPrefix: "admin",
+      maxRequests: 120,
+      windowMs: 60_000,
       onError: "fail_closed",
     });
-    if (!canProceed) {
+    if (!rateLimit.allowed) {
       reply.code(429);
       return reply.send({ error: "Rate limit exceeded" });
     }

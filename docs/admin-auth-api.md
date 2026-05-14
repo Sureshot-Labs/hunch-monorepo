@@ -226,6 +226,9 @@ Frontend proxy requirements:
 
 - Call this endpoint from a server route/proxy, not directly from browser
   client code.
+- The frontend proxy must set `X-Hunch-Proxy-Secret` from the shared
+  `HUNCH_PROXY_SECRET` env and `X-Hunch-Client-IP` from ingress-owned IP
+  headers. Do not trust or re-sign a browser-supplied `X-Hunch-Client-IP`.
 - Store `session.token` in an httpOnly cookie, recommended name
   `hunch_admin_session`.
 - Store `session.csrfToken` in a readable cookie, recommended name
@@ -517,6 +520,9 @@ Errors use this shape:
 }
 ```
 
+`error` is the canonical field. `message` is optional because the API-wide
+error sanitizer may strip it from non-success responses.
+
 Known error codes:
 
 - `admin_auth_disabled`
@@ -558,9 +564,18 @@ Backend envs:
 - `ADMIN_AUTH_ENABLED=true`
 - `ADMIN_AUTH_LEGACY_FALLBACK=true`
 - `ADMIN_APP_BASE_URL=https://admin.hunch.trade`
+- `HUNCH_PROXY_SECRET=<shared frontend/backend secret>`
 - `ADMIN_ENROLLMENT_TTL_MS=259200000`
 - `ADMIN_SESSION_TTL_MS=28800000`
 - `ADMIN_TOTP_ISSUER="Hunch Admin"`
 
 `CREDENTIALS_ENCRYPTION_KEY` is required because TOTP secrets are encrypted with
 the existing credentials encryption helper.
+
+Proxy requirements:
+
+- Backend and frontend proxy must use the same `HUNCH_PROXY_SECRET`.
+- Nginx should overwrite standard forwarded IP headers with the direct client
+  socket address before proxying to API/frontend containers.
+- Keep `ADMIN_AUTH_LEGACY_FALLBACK=true` during migration only; disable it once
+  the separate admin panel is fully verified.

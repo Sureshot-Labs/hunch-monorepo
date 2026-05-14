@@ -982,7 +982,11 @@ export class AdminAuthService {
     }
   }
 
-  static async startEnrollment(token: string): Promise<{
+  static async startEnrollment(args: {
+    token: string;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+  }): Promise<{
     email: string;
     otpauthUri: string;
     manualSecret: string;
@@ -991,7 +995,7 @@ export class AdminAuthService {
     const client = await pool.connect();
     try {
       await client.query("begin");
-      const row = await loadEnrollmentToken(token, client, true);
+      const row = await loadEnrollmentToken(args.token, client, true);
       const secret = generateTotpSecret();
       await client.query(
         `
@@ -1010,6 +1014,8 @@ export class AdminAuthService {
         email: row.email,
         attemptType: "enroll_start",
         success: true,
+        ipAddress: args.ipAddress,
+        userAgent: args.userAgent,
       });
       await client.query("commit");
       return {
@@ -1024,6 +1030,8 @@ export class AdminAuthService {
         await recordAttempt({
           attemptType: "enroll_start",
           success: false,
+          ipAddress: args.ipAddress,
+          userAgent: args.userAgent,
           errorCode: error.code,
         });
       }
