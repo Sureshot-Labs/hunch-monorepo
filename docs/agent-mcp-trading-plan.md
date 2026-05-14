@@ -335,17 +335,19 @@ Session ownership should be:
 
 Local token lookup order:
 
-1. `HUNCH_AGENT_TOKEN` for CI or temporary one-off use.
-2. Named local profile from CLI/MCP config.
-3. Active local profile from CLI/MCP config.
-4. OS keychain when available.
-5. File fallback with `0600` permissions, for example:
+1. Explicit `--profile` CLI flag or MCP tool `profile` argument.
+2. Active local profile from CLI/MCP config.
+3. OS keychain when available.
+4. File fallback with `0600` permissions, for example:
    `~/.config/hunch/agent/sessions.json`.
+5. `HUNCH_AGENT_TOKEN` only when no local profile is selected or an explicit
+   env-token mode is used.
 
 `HUNCH_AGENT_TOKEN` is an escape hatch, not the normal user path. For any future
 write/intent tool, require an explicit profile unless the user passes an
-override flag or the tool response clearly states that the environment token is
-being used.
+override flag such as `--allow-env-token`; read-only tools may use it only after
+the selected-profile lookup fails and must clearly echo that the environment
+token is being used.
 
 The stored local session should support multiple profiles from the start. This
 lets one agent installation switch between multiple Hunch accounts or multiple
@@ -702,6 +704,7 @@ grants. Agent scopes are a separate user-grant model under `/agent/*`.
 Environment:
 
 ```text
+AGENT_AUTH_ENABLED=false
 AGENT_TOKEN_HASH_SECRET=<32+ bytes secret>
 AGENT_AUTH_APPROVAL_TTL_MS=600000
 AGENT_GRANT_DEFAULT_TTL_MS=<30 days for Phase 2 read-only grants>
@@ -714,10 +717,10 @@ AGENT_AUTH_MAX_POLLS=<bounded count>
 `AGENT_TOKEN_HASH_SECRET` must be independent from `JWT_SECRET`. Rotating it
 invalidates active agent grants unless a versioned secret scheme is added, so
 start with one secret and plan rotation before public unattended trading. The
-API should fail startup when `/agent/*` routes are enabled and the secret is
-missing, shorter than 32 bytes, or equal to `JWT_SECRET`. Add `token_hash_version`
-only when rotation is implemented; do not add unused rotation plumbing in Phase
-2.
+API should register `/agent/*` routes only when `AGENT_AUTH_ENABLED=true`.
+When enabled, startup must fail if `AGENT_TOKEN_HASH_SECRET` is missing, shorter
+than 32 bytes, or equal to `JWT_SECRET`. Add `token_hash_version` only when
+rotation is implemented; do not add unused rotation plumbing in Phase 2.
 
 Public/device routes:
 
@@ -726,6 +729,87 @@ POST /agent/device/start
 POST /agent/device/token
 GET  /agent/capabilities
 ```
+
+Phase 2A response contracts should be stable and small:
+
+```ts
+type AgentGrantSummary = {
+  id: string;
+  name: string;
+  clientName: string | null;
+  clientVersion: string | null;
+  clientKind: string | null;
+  scopes: string[];
+  walletAddresses: string[];
+  venues: string[];
+  limits: Record<string, unknown>;
+  confirmationMode: "always" | "policy" | "never";
+  isActive: boolean;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
+type AgentDeviceStartResponse = {
+  ok: true;
+  deviceCode: string;
+  approvalUrl: string;
+  expiresAt: string;
+  pollIntervalSec: number;
+};
+
+type AgentDeviceTokenResponse =
+  | {
+      ok: true;
+      token: string;
+      tokenType: "Bearer";
+      grant: AgentGrantSummary;
+      expiresAt: string;
+    }
+  | {
+      ok: false;
+      error:
+        | "authorization_pending"
+        | "slow_down"
+        | "access_denied"
+        | "expired_token"
+        | "token_already_issued";
+      message: string;
+      pollIntervalSec?: number;
+    };
+
+type AgentApprovalResponse = {
+  ok: true;
+  authorization: {
+    id: string;
+    status: "pending" | "approved" | "denied" | "expired" | "token_issued";
+    requestedScopes: string[];
+    requestedWalletAddresses: string[];
+    requestedVenues: string[];
+    requestedLimits: Record<string, unknown>;
+    clientName: string | null;
+    clientVersion: string | null;
+    clientKind: string | null;
+    expiresAt: string;
+  };
+};
+
+type AgentMeResponse = {
+  ok: true;
+  user: { id: string; email?: string | null };
+  grant: AgentGrantSummary;
+};
+```
+
+Error responses should follow the existing backend style:
+
+```json
+{ "error": "agent_auth_required", "message": "Agent token required" }
+```
+
+Do not return raw agent tokens from browser-user routes. The only route that can
+return `token` is `POST /agent/device/token`.
 
 `POST /agent/device/start`:
 
@@ -773,6 +857,52 @@ GET    /agent/audit
 
 These use the normal Hunch browser session middleware and CSRF rules. They are
 for the frontend, not for the MCP server.
+
+Browser-user route contracts:
+
+```ts
+type AgentApproveBody = {
+  approvalToken: string;
+  scopes: string[];
+  walletAddresses: string[];
+  venues: string[];
+  limits?: Record<string, unknown>;
+  expiresInDays: 1 | 7 | 30 | 90;
+  grantName?: string;
+};
+
+type AgentApproveResponse = {
+  ok: true;
+  status: "approved";
+};
+
+type AgentDenyResponse = {
+  ok: true;
+  status: "denied";
+};
+
+type AgentGrantListResponse = {
+  ok: true;
+  items: AgentGrantSummary[];
+};
+
+type AgentGrantRevokeResponse = {
+  ok: true;
+  revoked: true;
+};
+
+type AgentAuditResponse = {
+  ok: true;
+  items: Array<{
+    id: string;
+    eventType: string;
+    actorType: "user" | "agent" | "system";
+    grantId: string | null;
+    createdAt: string;
+    metadata: Record<string, unknown>;
+  }>;
+};
+```
 
 Approval behavior:
 
@@ -872,13 +1002,30 @@ Token issuance, grant insertion, and `token_issued_at` update must happen in one
 database transaction. If the token response is lost after issuance, the user
 should reconnect rather than the backend replaying the raw token.
 
-Phase 2 authenticated-read rollout should be narrow:
+Phase 2 authenticated-read rollout should be split:
 
-1. `/agent/me`;
-2. grant list/revoke in frontend;
-3. agent-tools `auth login`, `auth list`, `auth use`, `auth logout`;
-4. `/agent/notifications` as read-only account context;
-5. other private read tools after `/agent/me` is stable.
+Phase 2A:
+
+1. device start/token, browser approve/deny, grant list/revoke, audit;
+2. `createAgentAuthMiddleware`;
+3. `/agent/me`;
+4. `/agent/notifications`;
+5. frontend `/agent/approve/:approvalToken` and `/settings/agents`;
+6. agent-tools `auth login`, `auth list`, `auth use`, `auth status`, and
+   `auth logout`.
+
+Phase 2B:
+
+1. `/agent/wallets`;
+2. `/agent/wallet-balances`;
+3. `/agent/positions`;
+4. `/agent/orders`;
+5. `/agent/venue-status`;
+6. `/agent/readiness`;
+7. `/agent/deposit-targets`.
+
+Do not implement Phase 2B private read routes until Phase 2A device auth,
+profile storage, frontend approval, and `/agent/me` are stable.
 
 Implementation order:
 
@@ -891,10 +1038,11 @@ Implementation order:
 5. Add `createAgentAuthMiddleware`.
 6. Add `/agent/me`.
 7. Add backend tests for the full device approval and one-time token lifecycle.
-8. Add frontend approval/settings pages against the browser-session routes.
-9. Add agent-tools multi-profile login/logout/list/use support.
-10. Add read-only `/agent/notifications` and `hunch_get_notifications`.
-11. Add authenticated private read tools only after `/agent/me` and
+8. Add read-only `/agent/notifications`.
+9. Add frontend approval/settings pages against the browser-session routes.
+10. Add agent-tools multi-profile login/logout/list/use support and
+    `hunch_get_notifications`.
+11. Add Phase 2B authenticated private read tools only after `/agent/me` and
     multi-profile auth are stable.
 
 Backend tests:
@@ -1035,6 +1183,15 @@ flow, not a developer-only token flow. The user should approve links in Hunch,
 inspect connected agents in settings, and confirm sensitive actions from a
 first-party page.
 
+Phase 2 frontend should be deliberately minimal. Use existing `Hunch_App`
+patterns: the `src/app/api/hunch/[...path]/route.ts` proxy, `useAuth` /
+Privy login flow, TanStack Query, `@/ui` buttons/alerts/table primitives, and
+existing typography/color tokens. Do not introduce a new design system, a
+complex automation-policy builder, or Tailwind breakpoint prefixes such as
+`sm:`, `md:`, or `lg:` because project breakpoints are disabled. Use a simple
+stacked responsive layout with constrained content width, clear loading/error
+states, and compact cards or tables matching existing app surfaces.
+
 ### 1. Agent Approval Flow
 
 Add a browser route such as:
@@ -1045,8 +1202,8 @@ Add a browser route such as:
 
 Responsibilities:
 
-- if the user is not logged in, send them through the existing Hunch/Privy auth
-  flow and return to the approval page;
+- if the user is not logged in, use the existing Hunch/Privy auth flow and
+  return to the same approval URL after login;
 - load the pending device/auth session from the backend;
 - show the requesting agent name, client/app metadata, requested scopes,
   requested wallets/venues, expiry, and requested policy limits;
@@ -1057,6 +1214,16 @@ Responsibilities:
   keys, Privy browser cookies, or broad account session access;
 - provide `Approve` and `Deny` actions;
 - never show, copy, or store the issued agent token in the browser UI.
+
+Required states:
+
+- loading pending authorization;
+- logged-out/authenticating;
+- pending approval with expiry selector and requested access summary;
+- approve success: "Agent connected. You can close this page.";
+- deny success;
+- expired, denied, token-issued, not-found, and backend-unavailable errors;
+- action-in-flight disabled buttons.
 
 The backend returns the agent token only to the polling MCP/CLI session after
 approval. The frontend only approves or denies the pending session with the
@@ -1076,8 +1243,10 @@ Responsibilities:
 - show grant name, scopes, wallet/account access, venues, limits, created time,
   expiry, last-used time, and status;
 - support revoke access;
-- support editing or tightening limits before broader automation is enabled;
-- show recent audit activity once agent write/intents exist.
+- do not support editing limits in Phase 2A; show a disabled or omitted edit
+  affordance until broader automation exists;
+- show recent audit activity only if `/agent/audit` is implemented; otherwise
+  keep the settings page to grant list and revoke.
 
 This is the user's main kill switch. It should be obvious how to revoke an
 agent without using the CLI or MCP client.
@@ -1837,6 +2006,9 @@ This proves the developer/user workflow without risking funds.
 
 ### Phase 2: Agent Grants
 
+Phase 2A is the required first slice. Phase 2B private account read routes come
+after the auth and approval loop is stable.
+
 - In the Hunch monorepo, add one migration for `agent_grants`,
   `agent_device_authorizations`, and `agent_audit_events`.
 - In the Hunch monorepo, add token hashing, `/agent/device/*`,
@@ -1848,18 +2020,18 @@ This proves the developer/user workflow without risking funds.
 - In the Hunch monorepo, add scope, wallet, venue, chain, and asset checks.
 - In the frontend, add `/agent/approve/:approvalToken` and `/settings/agents` so
   users can approve limited grants, inspect connected agents, and revoke access.
-- In the external tools repo, enable authenticated read tools for account,
-  wallets, balances, positions, orders, readiness, deposit targets,
-  notifications, and venue status.
+- In the external tools repo, enable Phase 2A authenticated tools for account
+  and notifications first; add wallets, balances, positions, orders, readiness,
+  deposit targets, and venue status in Phase 2B.
 - In the external tools repo, support multiple local auth profiles:
   `auth login --profile`, `auth list`, `auth use`, and
   `auth logout --profile`; authenticated tools may accept optional `profile`.
 - In the external tools repo, keep local token files permission-restricted,
   redact token output, ignore expired profiles, and treat `HUNCH_AGENT_TOKEN` as
-  an explicit escape hatch instead of the normal multi-account UX. Read-only
-  tools may use `HUNCH_AGENT_TOKEN`; later write/intent tools must require a
-  named profile unless the user explicitly passes an override such as
-  `--allow-env-token`.
+  an explicit escape hatch instead of the normal multi-account UX. Explicit
+  profile and active-profile selection must win over the environment token;
+  later write/intent tools must require a named profile unless the user
+  explicitly passes an override such as `--allow-env-token`.
 - Add backend API tests for expiry, revocation, scope denial, wallet denial,
   token hash lookup, one-time token issuance, expiry, rate limits, max attempts,
   polling limits, HMAC hashing, entropy, redaction, and wallet re-checks.
