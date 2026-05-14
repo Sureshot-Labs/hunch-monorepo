@@ -462,8 +462,13 @@ Token and code hardening:
 - store device-code and approval-token hashes the same way or with a separate
   server-side pepper;
 - keep approval/device sessions short-lived, for example 10 minutes;
-- default agent grants should be short-lived for early releases, for example 7
-  to 30 days depending on scope;
+- Phase 2 read-only grants should default to 30 days, with approval-page options
+  such as 1 day, 7 days, 30 days, and 90 days;
+- do not offer "forever" grants in public v1; 90 days should be the maximum
+  read-only grant duration unless a later admin/enterprise policy explicitly
+  allows more;
+- later write/trading, bridge, redeem, cancel, and delegated-signing grants
+  should start with shorter expiries, for example 1 to 7 days;
 - log only token prefixes, grant IDs, and safe metadata;
 - never log full approval URLs, device codes, raw agent tokens, or bearer
   headers;
@@ -596,6 +601,14 @@ create index if not exists idx_agent_audit_events_grant_created
   on agent_audit_events(grant_id, created_at desc);
 ```
 
+Audit retention should be explicit. Phase 2 should use privacy-first user
+deletion semantics: user deletion may cascade audit rows, while grant/device
+references use `on delete set null` where useful for lifecycle visibility. Do
+not store raw tokens, full approval URLs, bearer headers, Privy signatures,
+partner credentials, or other secrets in audit metadata. Add a separate timed
+retention job only when audit volume or compliance policy requires it; do not
+block Phase 2 on a complex archival system.
+
 Device-code auth requirements:
 
 - device codes and approval tokens are single-use and short-lived;
@@ -615,6 +628,7 @@ read:orders
 read:positions
 read:funding
 read:notifications
+manage:notifications
 quote:trade
 prepare:venue
 prepare:trade
@@ -639,6 +653,26 @@ read:notifications
 
 Quote, prepare, submit, cancel, bridge, redeem, and position-management scopes
 belong to later intent/execution phases.
+`manage:notifications` is also future-only; Phase 2 notification access is
+read/list only through `read:notifications`.
+
+Phase 2 endpoint-to-scope mapping should be explicit:
+
+```text
+GET /agent/me                 read:account
+GET /agent/notifications      read:notifications
+GET /agent/wallets            read:wallets
+GET /agent/wallet-balances    read:wallets
+GET /agent/positions          read:positions
+GET /agent/orders             read:orders
+GET /agent/venue-status       read:funding
+GET /agent/readiness          read:funding
+GET /agent/deposit-targets    read:funding
+```
+
+Routes that combine multiple resources must require every relevant read scope.
+For example, an account overview that includes wallets and positions requires
+`read:account`, `read:wallets`, and `read:positions`.
 
 ### Phase 2 Backend Implementation Detail
 
@@ -660,14 +694,20 @@ Environment:
 ```text
 AGENT_TOKEN_HASH_SECRET=<32+ bytes secret>
 AGENT_AUTH_APPROVAL_TTL_MS=600000
-AGENT_GRANT_DEFAULT_TTL_MS=<7-30 days>
+AGENT_GRANT_DEFAULT_TTL_MS=<30 days for Phase 2 read-only grants>
+AGENT_GRANT_MAX_READ_TTL_MS=<90 days>
+AGENT_GRANT_MAX_WRITE_TTL_MS=<1-7 days, later phases only>
 AGENT_AUTH_POLL_INTERVAL_MS=3000
 AGENT_AUTH_MAX_POLLS=<bounded count>
 ```
 
 `AGENT_TOKEN_HASH_SECRET` must be independent from `JWT_SECRET`. Rotating it
 invalidates active agent grants unless a versioned secret scheme is added, so
-start with one secret and plan rotation before public unattended trading.
+start with one secret and plan rotation before public unattended trading. The
+API should fail startup when `/agent/*` routes are enabled and the secret is
+missing, shorter than 32 bytes, or equal to `JWT_SECRET`. Add `token_hash_version`
+only when rotation is implemented; do not add unused rotation plumbing in Phase
+2.
 
 Public/device routes:
 
@@ -698,7 +738,14 @@ GET  /agent/capabilities
   approved scopes/wallets/venues/limits/expiry, stores only the HMAC hash plus
   prefix, marks `token_issued_at`, and returns the raw token once;
 - after token issuance, returns a terminal already-issued response instead of
-  replaying the raw token.
+  replaying the raw token:
+
+```json
+{
+  "error": "token_already_issued",
+  "message": "This device authorization already issued a token. Reconnect to create a new grant."
+}
+```
 
 Browser-user routes:
 
@@ -720,6 +767,10 @@ Approval behavior:
 - require `status = 'pending'` and `expires_at > now()`;
 - require the approving user to be logged in;
 - validate requested wallets are linked to that user;
+- normalize wallet identifiers before storing or comparing them: EVM addresses
+  are compared by lowercase address plus chain/type, Solana addresses are
+  compared by exact base58 string plus chain/type, and display formatting can
+  use checksummed EVM addresses;
 - validate venues and scopes are currently allowed;
 - store approved scopes, wallets, venues, limits, grant expiry, and approving
   user on `agent_device_authorizations`;
@@ -738,7 +789,10 @@ GET /agent/notifications
 This is the first route behind `createAgentAuthMiddleware`. It proves token
 validation, scope attachment, grant metadata, user lookup, and profile display
 without touching private trading flows. Later authenticated read routes can add
-wallets, balances, positions, orders, rewards, and funding readiness.
+wallets, balances, positions, orders, rewards, venue status, readiness, and
+deposit targets. The full `/agent/funding-plan` route stays in Phase 3 because
+it combines missing-balance guidance, bridge suggestions, and intent-oriented
+funding decisions.
 
 Notifications should be included as a Phase 2 authenticated read surface:
 
@@ -777,10 +831,14 @@ Rules:
 - reject inactive users;
 - re-check approved wallets are still linked before returning wallet-sensitive
   data or preparing later intents;
+- compare wallet access by normalized wallet address plus chain/type, not by
+  raw display string alone;
 - attach `request.agentGrant`, `request.user`, and approved wallet/scope/venue
   context;
 - enforce `requiredScopes`;
-- update `last_used_at` with throttling or async best effort;
+- update `last_used_at` only when it is null or older than 5 minutes, using
+  async best effort where practical, so frequent MCP reads do not write on every
+  request;
 - do not require CSRF because agent routes use bearer tokens, not browser
   cookies.
 
@@ -976,6 +1034,9 @@ Responsibilities:
 - load the pending device/auth session from the backend;
 - show the requesting agent name, client/app metadata, requested scopes,
   requested wallets/venues, expiry, and requested policy limits;
+- let the user choose an expiry from bounded options such as 1 day, 7 days, 30
+  days, or 90 days for read-only grants; do not offer "forever" grants in public
+  v1;
 - explain that approval gives a limited Hunch agent grant, not wallet private
   keys, Privy browser cookies, or broad account session access;
 - provide `Approve` and `Deny` actions;
@@ -1467,12 +1528,17 @@ hunch_get_account
 hunch_get_wallets
 hunch_get_wallet_balances
 hunch_get_venue_status
-hunch_get_funding_plan
+hunch_get_readiness
+hunch_get_deposit_targets
 hunch_get_positions
 hunch_get_orders
-hunch_get_deposit_address
 hunch_get_notifications
 ```
+
+`hunch_get_wallet_positions` in the public/read tool set means public wallet
+intelligence for an arbitrary wallet. `hunch_get_positions` in the authenticated
+tool set means the connected Hunch user's own account positions under the active
+agent grant. Tool descriptions should keep that distinction explicit.
 
 Write/intent tools:
 
@@ -1767,14 +1833,17 @@ This proves the developer/user workflow without risking funds.
 - In the frontend, add `/agent/approve/:approvalToken` and `/settings/agents` so
   users can approve limited grants, inspect connected agents, and revoke access.
 - In the external tools repo, enable authenticated read tools for account,
-  wallets, balances, positions, orders, funding plan, notifications, and venue
-  readiness.
+  wallets, balances, positions, orders, readiness, deposit targets,
+  notifications, and venue status.
 - In the external tools repo, support multiple local auth profiles:
   `auth login --profile`, `auth list`, `auth use`, and
   `auth logout --profile`; authenticated tools may accept optional `profile`.
 - In the external tools repo, keep local token files permission-restricted,
   redact token output, ignore expired profiles, and treat `HUNCH_AGENT_TOKEN` as
-  an explicit escape hatch instead of the normal multi-account UX.
+  an explicit escape hatch instead of the normal multi-account UX. Read-only
+  tools may use `HUNCH_AGENT_TOKEN`; later write/intent tools must require a
+  named profile unless the user explicitly passes an override such as
+  `--allow-env-token`.
 - Add backend API tests for expiry, revocation, scope denial, wallet denial,
   token hash lookup, one-time token issuance, expiry, rate limits, max attempts,
   polling limits, HMAC hashing, entropy, redaction, and wallet re-checks.
