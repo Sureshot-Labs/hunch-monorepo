@@ -478,11 +478,14 @@ Token and code hardening:
 Recommended migration:
 
 ```text
-packages/db/migrations/0105_agent_grants.sql
+packages/db/migrations/0106_agent_grants.sql
 ```
 
 Use one migration for this phase. These tables are new and not legacy, so avoid
 splitting the migration unless a later feature adds a genuinely separate table.
+`0105_admin_rbac_roles.sql` is already present after the admin-auth merge, so
+the agent migration should use the next number even though same-number
+independent migrations are technically allowed by the filename-based migrator.
 
 `agent_grants` is the durable approved access object. It belongs to one Hunch
 user, one approved agent grant, and one token hash.
@@ -615,6 +618,10 @@ Device-code auth requirements:
 - `/agent/device/token` returns the agent token only once;
 - polling has a minimum interval and max poll count;
 - approval has a max attempt count and IP/session rate limit;
+- use the existing `checkRateLimitForSecurityClientIp` helper for device start,
+  browser approval, and token polling route limits instead of adding a parallel
+  rate-limit mechanism; keep DB `poll_count`/`last_polled_at` as the device-flow
+  state machine guard;
 - expired device rows are cleaned up by a scheduled job or opportunistic cleanup;
 - approval always requires the user's normal browser session.
 
@@ -682,12 +689,15 @@ Backend files should stay focused:
 apps/api/src/routes/agent.ts
 apps/api/src/services/agent-auth.ts
 apps/api/src/schemas/agent.ts
-apps/api/src/types/fastify.d.ts
-apps/api/src/server.ts
+apps/api/src/fastify.d.ts
+apps/api/src/routes/index.ts
 ```
 
 Do not wire agent auth into every private route directly. Add a small Agent API
 gateway first, then reuse existing account/read services behind it.
+Agent auth must remain separate from the merged admin-auth system: do not reuse
+`AdminRole`, `AdminPermission`, admin sessions, or admin tables for agent
+grants. Agent scopes are a separate user-grant model under `/agent/*`.
 
 Environment:
 
@@ -722,6 +732,7 @@ GET  /agent/capabilities
 - accepts requested scopes, requested wallets, requested venues, requested
   limits, client name/version/kind, and optional profile label;
 - validates requested scopes against the server allowlist;
+- rate-limits by security client IP with `checkRateLimitForSecurityClientIp`;
 - generates device and approval tokens with cryptographic randomness;
 - creates `agent_device_authorizations` with hashed device and approval tokens;
 - returns `deviceCode`, `approvalUrl`, `expiresAt`, and `pollIntervalSec`;
@@ -731,7 +742,9 @@ GET  /agent/capabilities
 
 - accepts `deviceCode`;
 - hashes and looks up the pending authorization;
-- rate-limits polling with `poll_count`, `last_polled_at`, and minimum interval;
+- rate-limits by security client IP with `checkRateLimitForSecurityClientIp`
+  and rate-limits polling with `poll_count`, `last_polled_at`, and minimum
+  interval;
 - returns `authorization_pending`, `slow_down`, `access_denied`, or
   `expired_token` until approved;
 - after approval, generates the raw agent token, creates `agent_grants` from
@@ -797,7 +810,7 @@ funding decisions.
 Notifications should be included as a Phase 2 authenticated read surface:
 
 ```http
-GET /agent/notifications?limit=50&offset=0&status=unread&type=...
+GET /agent/notifications?limit=20&cursor=...&unreadOnly=true
 ```
 
 Rules:
@@ -806,7 +819,10 @@ Rules:
 - reuse the existing notification read model/repository instead of creating a
   parallel notification store;
 - return user-level notifications for the authenticated grant's user, with
-  pagination and optional status/type filters;
+  the same cursor pagination shape as the existing `/notifications` route;
+- support `limit`, `cursor`, and `unreadOnly` in Phase 2; do not add
+  offset/status/type filters unless the shared notification schema is extended
+  for both browser and agent routes;
 - include safe links to related Hunch pages when the notification references an
   event, market, wallet, grant, or later an intent;
 - Phase 2 is list/read only: do not mark notifications read, delete
@@ -866,7 +882,7 @@ Phase 2 authenticated-read rollout should be narrow:
 
 Implementation order:
 
-1. Add the `0105_agent_grants.sql` migration.
+1. Add the `0106_agent_grants.sql` migration.
 2. Add agent token/code generation, HMAC hashing, and grant/device auth service.
 3. Add public `/agent/device/start`, `/agent/device/token`, and
    `/agent/capabilities`.
