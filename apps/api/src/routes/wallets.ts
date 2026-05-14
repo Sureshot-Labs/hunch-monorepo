@@ -57,6 +57,12 @@ type TokenMeta = {
   tags?: unknown;
 };
 
+type BalanceTokenRef = {
+  chainId: string;
+  address: string;
+  isNative: boolean;
+};
+
 export type WalletVenueStatus = Record<string, unknown>;
 type BalanceWalletResolution = {
   walletAddress: string;
@@ -392,6 +398,122 @@ function parseTokenRef(
   return { chainId: chainId.trim(), address: address.trim() };
 }
 
+function normalizeAssetLookup(value: string | null | undefined): string {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_.-]+/g, "");
+}
+
+function resolveTokenAliasRefs(
+  raw: string,
+  inputs: {
+    isEvmWallet: boolean;
+    isSolanaWallet: boolean;
+    requestedChains: Set<string>;
+  },
+): BalanceTokenRef[] | null {
+  const alias = normalizeAssetLookup(raw);
+  if (!alias) return null;
+
+  const refs: BalanceTokenRef[] = [];
+  const isPusdAlias = ["pusd", "polymarketusdc", "collateral"].includes(alias);
+  const isUsdceAlias = ["usdce", "bridgedusdc", "polygonusdce"].includes(alias);
+  const isPolygonUsdcAlias = ["usdc", "nativeusdc", "polygonusdc"].includes(
+    alias,
+  );
+  const isBaseUsdcAlias = ["usdc", "baseusdc"].includes(alias);
+  const isSolanaUsdcAlias = ["usdc", "solanausdc"].includes(alias);
+  const isPolAlias = ["pol", "matic"].includes(alias);
+  const isEthAlias = ["eth", "baseeth"].includes(alias);
+  const isSolAlias = alias === "sol";
+  const knownAlias =
+    isPusdAlias ||
+    isUsdceAlias ||
+    isPolygonUsdcAlias ||
+    isBaseUsdcAlias ||
+    isSolanaUsdcAlias ||
+    isPolAlias ||
+    isEthAlias ||
+    isSolAlias;
+  const add = (ref: BalanceTokenRef) => {
+    if (
+      inputs.requestedChains.size > 0 &&
+      !inputs.requestedChains.has(ref.chainId)
+    ) {
+      return;
+    }
+    refs.push(ref);
+  };
+
+  if (inputs.isEvmWallet && isPusdAlias) {
+    add({
+      chainId: POLYGON_CHAIN_ID,
+      address: env.polymarketUsdcAddress,
+      isNative: false,
+    });
+  }
+
+  if (inputs.isEvmWallet && isUsdceAlias) {
+    add({
+      chainId: POLYGON_CHAIN_ID,
+      address: env.polymarketUsdceAddress,
+      isNative: false,
+    });
+  }
+
+  if (inputs.isEvmWallet && isPolygonUsdcAlias) {
+    add({
+      chainId: POLYGON_CHAIN_ID,
+      address: POLYGON_NATIVE_USDC_ADDRESS,
+      isNative: false,
+    });
+  }
+
+  if (inputs.isEvmWallet && isBaseUsdcAlias) {
+    add({
+      chainId: BASE_CHAIN_ID,
+      address: env.limitlessUsdcAddress,
+      isNative: false,
+    });
+  }
+
+  if (inputs.isSolanaWallet && isSolanaUsdcAlias) {
+    add({
+      chainId: SOLANA_CHAIN_ID,
+      address: env.solanaUsdcMint,
+      isNative: false,
+    });
+  }
+
+  if (inputs.isEvmWallet && isPolAlias) {
+    add({
+      chainId: POLYGON_CHAIN_ID,
+      address: EVM_NATIVE_ADDRESS,
+      isNative: true,
+    });
+  }
+
+  if (inputs.isEvmWallet && isEthAlias) {
+    add({
+      chainId: BASE_CHAIN_ID,
+      address: EVM_NATIVE_ADDRESS,
+      isNative: true,
+    });
+  }
+
+  if (inputs.isSolanaWallet && isSolAlias) {
+    add({
+      chainId: SOLANA_CHAIN_ID,
+      address: SOLANA_NATIVE_ADDRESS,
+      isNative: true,
+    });
+  }
+
+  if (knownAlias) return refs;
+  return null;
+}
+
 function isEvmWalletAddress(address: string) {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
 }
@@ -693,6 +815,11 @@ async function resolveWalletBalancesForWallet(inputs: {
   const tokens = inputs.tokens;
   const chains = inputs.chains;
   const warnings: string[] = [];
+  const isEvmWallet =
+    inputs.walletType === "ethereum" ||
+    isEvmWalletAddress(inputs.walletAddress);
+  const isSolanaWallet = !isEvmWallet;
+  const requestedChains = new Set(chains.map((chainId) => chainId.trim()));
 
   const entries = new Map<
     string,
@@ -708,24 +835,31 @@ async function resolveWalletBalancesForWallet(inputs: {
 
   for (const token of tokens) {
     const parsed = parseTokenRef(token);
-    if (!parsed) {
+    const refs = parsed
+      ? [
+          {
+            chainId: parsed.chainId,
+            address: parsed.address,
+            isNative:
+              parsed.chainId !== SOLANA_CHAIN_ID &&
+              isEvmNativeAddress(parsed.address),
+          },
+        ]
+      : resolveTokenAliasRefs(token, {
+          isEvmWallet,
+          isSolanaWallet,
+          requestedChains,
+        });
+    if (!refs) {
       warnings.push(`Invalid token reference: ${token}`);
       continue;
     }
-    const key = normalizeTokenKey(parsed.chainId, parsed.address);
-    entries.set(key, {
-      chainId: parsed.chainId,
-      address: parsed.address,
-      isNative:
-        parsed.chainId !== SOLANA_CHAIN_ID &&
-        isEvmNativeAddress(parsed.address),
-    });
+    for (const ref of refs) {
+      const key = normalizeTokenKey(ref.chainId, ref.address);
+      entries.set(key, ref);
+    }
   }
 
-  const isEvmWallet =
-    inputs.walletType === "ethereum" ||
-    isEvmWalletAddress(inputs.walletAddress);
-  const isSolanaWallet = !isEvmWallet;
   const balances: WalletBalanceItem[] = [];
 
   const addressesByChain = new Map<string, string[]>();
