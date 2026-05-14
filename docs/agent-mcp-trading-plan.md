@@ -1,6 +1,6 @@
 # Agent / MCP Trading Access Plan
 
-Last updated: 2026-05-13
+Last updated: 2026-05-14
 
 ## Goal
 
@@ -594,6 +594,19 @@ may approve a narrower wallet/scope/venue set or a different expiry than the
 agent requested. `/agent/device/token` must create the grant from the approved
 fields, not by trusting the original requested values.
 
+Wallet selection needs one Phase 2B adjustment before private account routes are
+useful. A device request with wallet-sensitive scopes (`read:wallets`,
+`read:positions`, `read:orders`, or `read:funding`) and no
+`requested_wallet_addresses` should mean "let the signed-in user choose linked
+wallets on the approval page", not "the agent can never receive wallet access".
+If the request does include specific wallet addresses, approval must still be a
+subset of those requested addresses. This keeps explicit narrow requests strict,
+while allowing a simple `hunch auth login --scopes read:account,read:wallets`
+flow where the user picks the wallets in Hunch. No migration is needed for this:
+an empty `requested_wallet_addresses` already represents "no preselected wallet
+filter" during approval, and the durable grant still stores the concrete
+approved `wallet_addresses`.
+
 `agent_audit_events` starts in this phase so grant lifecycle and later intents
 share one audit path.
 
@@ -988,12 +1001,89 @@ GET /agent/readiness?venue=...&walletAddress=...&marketId=...
 GET /agent/deposit-targets?venue=...&walletAddress=...&asset=USDC
 ```
 
+Code-grounded Phase 2B implementation map:
+
+- `/agent/wallets` should reuse the same wallet payload shape as
+  `/auth/me`. Extract the wallet enrichment helper from
+  `apps/api/src/routes/auth.ts` so it can include `walletSource`,
+  `isEmbeddedWallet`, `isSmartWallet`, `isInternalWallet`, display name, and
+  primary/verified flags without duplicating Privy classification logic. Filter
+  the returned wallets to the active grant's `wallet_addresses`. If the grant
+  has `read:wallets` but no approved wallets, return an empty `items` array.
+- `/agent/wallet-balances` should reuse the existing
+  `/wallets/balances` and `/wallets/balances/batch` behavior from
+  `apps/api/src/routes/wallets.ts`. The balance implementation is route-local
+  today, so first extract the balance lookup and wallet-resolution helpers into
+  a shared service, then have both the browser route and agent route call it.
+  The agent route must reject any requested wallet that is not in the active
+  grant. It should require `tokens` or `chains`, preserving existing max-token
+  and batch limits.
+- `/agent/positions` can call `fetchPositionsForUserWallet`,
+  `fetchPositionsForUserWalletByTokenIds`, and
+  `fetchPositionPnlSummaryForUserWallet` from
+  `apps/api/src/repos/positions-repo.ts`. The repo already expands approved
+  Polymarket signer wallets to stored/derived funders when needed, so the agent
+  should pass approved signer wallets and not grant funder addresses directly.
+  Keep `venue`, `venues`, `wallets`, `eventId`, `marketId`, `includeHidden`, and
+  `minSize` aligned with the existing `/positions` schema.
+- `/agent/orders` can call `fetchUnifiedOrders` and `fetchUnifiedOrderById`
+  from `apps/api/src/repos/unified-orders.ts`. The repository already matches
+  both `wallet_address` and `signer_address` for venue orders, which is needed
+  for Polymarket funder-backed orders. Extract or share the existing
+  `mapUnifiedOrder` response mapper from `apps/api/src/routes/orders.ts` so the
+  browser and agent responses stay identical.
+- `/agent/venue-status` should reuse the existing
+  `/wallets/venue-status` computation, including the 15 second in-process cache
+  and in-flight de-duplication. That logic is also route-local today, so extract
+  it beside the balance helpers before adding the agent route. Preserve
+  `includeAllWallets`, `walletAddress`, `wallets`, and `refresh`, but scope
+  `includeAllWallets` to "all wallets approved by this grant".
+- `/agent/readiness` should be a summarizer over existing data, not a parallel
+  venue integration. Start from venue status plus unified market state when
+  `marketId` or `eventId` is supplied. Use private account endpoints only when
+  the summary needs account fields that venue status does not expose, for
+  example Limitless spender-specific approvals for a known AMM/CLOB market.
+- `/agent/deposit-targets` should be backend-derived from approved wallets and
+  venue status. Polymarket target is the configured/derived funder when present,
+  otherwise the signer wallet on Polygon. Limitless target is the EVM trading
+  wallet on Base. Kalshi target is the Solana trading wallet. Return structured
+  chain/asset/address data plus `qrPayload` and a first-party Hunch
+  `depositPageUrl`; do not choose bridge routes or quote funding in Phase 2B.
+
+Frontend/client grounding:
+
+- Existing browser API clients live in `Hunch_App/src/lib/api/wallets.ts`,
+  `positions.ts`, `orders.ts`, `deposit.ts`, and the venue-private clients.
+  Phase 2B frontend additions should go in `Hunch_App/src/lib/api/agent.ts` and
+  call `/api/hunch/agent/*` through the existing catch-all proxy. No new Next
+  proxy route is required.
+- The approval page currently displays requested scopes/wallets and approves
+  exactly the requested wallet list. For 2B, it must render a minimal wallet
+  selector whenever wallet-sensitive scopes are requested. If the agent
+  requested specific wallets, only those linked wallets are selectable. If it
+  requested wallet-sensitive scopes with no specific wallets, all linked wallets
+  are selectable and the user must select at least one before approval.
+- The agent-tools repo already supports scope and wallet flags in
+  `hunch-agent auth login`; its default login is currently
+  `read:account,read:notifications`. Phase 2B should add convenience presets or
+  documented examples for account reads, for example
+  `--scopes read:account,read:wallets,read:positions,read:orders,read:funding`
+  with wallet selection completed in the Hunch approval UI.
+
+No Phase 2B migration is expected. The durable access control remains
+`agent_grants.wallet_addresses`, `scopes`, and `venues`; Phase 2B only adds
+read routes, shared service extraction, frontend client functions, and tests.
+
 Phase 2B response contracts:
 
 ```ts
 type AgentWallet = {
   walletAddress: string;
   walletType: "ethereum" | "solana";
+  walletSource?: "embedded" | "smart" | "external" | "unknown";
+  isEmbeddedWallet?: boolean;
+  isSmartWallet?: boolean;
+  isInternalWallet?: boolean;
   isPrimary: boolean;
   displayName?: string | null;
   venues: Array<"polymarket" | "kalshi" | "limitless">;
@@ -1206,13 +1296,19 @@ Phase 2A:
 
 Phase 2B:
 
-1. `/agent/wallets`;
-2. `/agent/wallet-balances`;
-3. `/agent/positions`;
-4. `/agent/orders`;
-5. `/agent/venue-status`;
-6. `/agent/readiness`;
-7. `/agent/deposit-targets`.
+1. approval-page wallet selection for wallet-sensitive read scopes;
+2. shared wallet payload helper extracted from `/auth/me`;
+3. shared wallet balance and venue-status services extracted from
+   `/wallets/*`;
+4. shared order response mapper extracted from `/orders`;
+5. `/agent/wallets`;
+6. `/agent/wallet-balances`;
+7. `/agent/positions`;
+8. `/agent/orders`;
+9. `/agent/venue-status`;
+10. `/agent/readiness`;
+11. `/agent/deposit-targets`;
+12. agent-tools authenticated account-read MCP tools and CLI commands.
 
 Do not implement Phase 2B private read routes until Phase 2A device auth,
 profile storage, frontend approval, and `/agent/me` are stable.
@@ -1232,8 +1328,8 @@ Implementation order:
 9. Add frontend approval/settings pages against the browser-session routes.
 10. Add agent-tools multi-profile login/logout/list/use support and
     `hunch_get_notifications`.
-11. Add Phase 2B authenticated private read tools only after `/agent/me` and
-    multi-profile auth are stable.
+11. Add Phase 2B shared read services and authenticated private read tools only
+    after `/agent/me` and multi-profile auth are stable.
 
 Backend tests:
 
@@ -1265,6 +1361,24 @@ Backend tests:
   URLs;
 - audit events are written for start, approve, deny, token issuance, revoke, and
   failed auth where useful.
+- wallet-sensitive scopes with no requested wallets allow the approving user to
+  select any linked wallet, but only after normal browser auth;
+- wallet-sensitive scopes with explicit requested wallets only allow approving a
+  subset of those requested wallets;
+- wallet-sensitive `/agent/*` routes reject wallets outside the active grant;
+- wallet-sensitive `/agent/*` routes use all approved grant wallets when no
+  `wallets` or `walletAddress` query is supplied;
+- `/agent/wallets` returns the same wallet metadata semantics as `/auth/me`,
+  including internal Trading Wallet flags when Privy enrichment is available;
+- `/agent/positions` matches `/positions` for the same approved wallet and query
+  filters;
+- `/agent/orders` matches `/orders` for the same approved wallet and query
+  filters;
+- `/agent/wallet-balances` and `/agent/venue-status` preserve the existing
+  browser-route validation, cache, and batch limits;
+- `/agent/readiness` maps existing venue-status reasons to stable blocker codes;
+- `/agent/deposit-targets` never returns an arbitrary caller-supplied target
+  address and returns Polymarket funder targets when venue state uses a funder.
 
 External agent-tools tests:
 
