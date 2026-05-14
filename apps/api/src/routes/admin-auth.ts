@@ -119,6 +119,13 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
       }
       const clientIp = resolveSecurityClientIp(request);
       const body = request.body;
+      const ipOk = await enforceRateLimit(
+        `admin:enroll:start:ip:${clientIp}`,
+        30,
+        60_000,
+        reply,
+      );
+      if (!ipOk) return;
       const canProceed = await enforceRateLimit(
         `admin:enroll:start:${clientIp}:${body.token.slice(0, 16)}`,
         10,
@@ -154,6 +161,13 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
       }
       const clientIp = resolveSecurityClientIp(request);
       const body = request.body;
+      const ipOk = await enforceRateLimit(
+        `admin:enroll:complete:ip:${clientIp}`,
+        30,
+        60_000,
+        reply,
+      );
+      if (!ipOk) return;
       const canProceed = await enforceRateLimit(
         `admin:enroll:complete:${clientIp}:${body.token.slice(0, 16)}`,
         10,

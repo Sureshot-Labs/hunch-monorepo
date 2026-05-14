@@ -19,6 +19,7 @@ const SCRYPT_P = 1;
 const SCRYPT_KEY_LEN = 64;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_LENGTH = 256;
+const SESSION_LAST_ACCESSED_THROTTLE_MS = 5 * 60 * 1000;
 
 export type AdminRole = "admin" | "sadmin";
 export type AdminStatus = "invited" | "enrolled" | "active" | "disabled";
@@ -1771,10 +1772,15 @@ export class AdminAuthService {
       const row = rows[0];
       if (!row || !isAdminRole(row.role)) return null;
 
-      await pool.query(
-        `update admin_sessions set last_accessed_at = now() where id = $1`,
-        [row.session_id],
-      );
+      if (
+        row.last_accessed_at.getTime() <=
+        Date.now() - SESSION_LAST_ACCESSED_THROTTLE_MS
+      ) {
+        await pool.query(
+          `update admin_sessions set last_accessed_at = now() where id = $1`,
+          [row.session_id],
+        );
+      }
 
       const admin = toAdminAccount(row);
       const session: AdminSession = {

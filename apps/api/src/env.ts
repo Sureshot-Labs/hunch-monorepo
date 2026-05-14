@@ -369,7 +369,7 @@ const adminAuthEnabled =
 const adminAuthLegacyFallback =
   parseOptionalBool(process.env.ADMIN_AUTH_LEGACY_FALLBACK) ?? true;
 const adminAppBaseUrl =
-  process.env.ADMIN_APP_BASE_URL?.trim() || "http://localhost:3002";
+  process.env.ADMIN_APP_BASE_URL?.trim() || "https://admin.hunch.trade";
 const adminEnrollmentTtlMs = optionalPositiveInt(
   "ADMIN_ENROLLMENT_TTL_MS",
   72 * 60 * 60 * 1000,
