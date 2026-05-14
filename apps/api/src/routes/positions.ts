@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { pool } from "../db.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
   fetchPositionPnlSummaryForUserWallet,
@@ -194,9 +195,11 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               });
 
         if (positions.length) {
+          const tokenIds = positions.map((position) => position.tokenId);
           void markHotTokens({
-            tokenIds: positions.map((position) => position.tokenId),
+            tokenIds,
           });
+          void requestPriceRefreshForTokens({ tokenIds });
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -331,9 +334,11 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         });
 
         if (positions.length) {
+          const tokenIds = positions.map((position) => position.tokenId);
           void markHotTokens({
-            tokenIds: positions.map((position) => position.tokenId),
+            tokenIds,
           });
+          void requestPriceRefreshForTokens({ tokenIds });
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");

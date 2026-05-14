@@ -8,6 +8,7 @@ import {
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   fetchSolanaTokenBalancesByOwner,
@@ -37,6 +38,9 @@ import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_RECENT_FLAT_PROTECT_SEC = 15;
 const POLYMARKET_FLATTEN_GRACE_SEC = 15;
+const LIMITLESS_HISTORY_SYNC_WARN_TTL_MS = 5 * 60 * 1000;
+const limitlessHistorySyncWarnAt = new Map<string, number>();
+let limitlessHistorySyncWarnSweepAt = 0;
 
 function isEthAddress(address: string): boolean {
   return ETH_ADDRESS_RE.test(address);
@@ -166,6 +170,29 @@ function mergeWalletTokenBalances(
     tokenId,
     size: value.size,
   }));
+}
+
+function shouldLogLimitlessHistorySyncWarning(
+  walletAddress: string,
+  message: string,
+): boolean {
+  const key = `${walletAddress}:${message}`;
+  const now = Date.now();
+  if (
+    now - limitlessHistorySyncWarnSweepAt >=
+    LIMITLESS_HISTORY_SYNC_WARN_TTL_MS
+  ) {
+    for (const [warnKey, lastAt] of limitlessHistorySyncWarnAt.entries()) {
+      if (now - lastAt >= LIMITLESS_HISTORY_SYNC_WARN_TTL_MS) {
+        limitlessHistorySyncWarnAt.delete(warnKey);
+      }
+    }
+    limitlessHistorySyncWarnSweepAt = now;
+  }
+  const lastAt = limitlessHistorySyncWarnAt.get(key) ?? 0;
+  if (now - lastAt < LIMITLESS_HISTORY_SYNC_WARN_TTL_MS) return false;
+  limitlessHistorySyncWarnAt.set(key, now);
+  return true;
 }
 
 function normalizeNumericTokenIds(tokenIds: string[]): string[] {
@@ -949,10 +976,12 @@ async function syncPolymarketStoredPositionsFromPolygon(
   }
 
   if (allHeldTokens.size) {
+    const tokenIds = Array.from(allHeldTokens);
     void markHotTokens({
-      tokenIds: Array.from(allHeldTokens),
+      tokenIds,
       venue: "polymarket",
     });
+    void requestPriceRefreshForTokens({ tokenIds, venue: "polymarket" });
   }
 
   return {
@@ -1372,10 +1401,12 @@ async function syncKalshiPositionsFromSolana(
   }
 
   if (tokenBalances.length) {
+    const tokenIds = tokenBalances.map((balance) => balance.tokenId);
     void markHotTokens({
-      tokenIds: tokenBalances.map((balance) => balance.tokenId),
+      tokenIds,
       venue: "dflow",
     });
+    void requestPriceRefreshForTokens({ tokenIds, venue: "dflow" });
   }
 
   const result = await syncWalletPositionsFromTokenBalances(pool, {
@@ -1504,7 +1535,14 @@ async function syncLimitlessPositionsFromPortfolio(
       limit: 50,
     });
   } catch (error) {
-    console.error("Limitless history sync failed", error);
+    const message =
+      error instanceof Error ? error.message : "Limitless history sync failed.";
+    if (shouldLogLimitlessHistorySyncWarning(inputs.walletAddress, message)) {
+      console.warn("Limitless history sync skipped", {
+        walletAddress: inputs.walletAddress,
+        message,
+      });
+    }
   }
 
   const snapshotTokenBalances = extractLimitlessTokenBalances(upstream.payload);
@@ -1523,10 +1561,12 @@ async function syncLimitlessPositionsFromPortfolio(
   );
 
   if (tokenBalances.length) {
+    const tokenIds = tokenBalances.map((balance) => balance.tokenId);
     void markHotTokens({
-      tokenIds: tokenBalances.map((balance) => balance.tokenId),
+      tokenIds,
       venue: "limitless",
     });
+    void requestPriceRefreshForTokens({ tokenIds, venue: "limitless" });
   }
 
   const result = await syncWalletPositionsFromTokenBalances(pool, {

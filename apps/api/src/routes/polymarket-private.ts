@@ -6,6 +6,7 @@ import { AuthService, createAuthMiddleware, type User } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   fetchStoredOrderWalletContext,
@@ -1648,6 +1649,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         typeof order.tokenId === "string" ? order.tokenId : "";
       if (orderTokenId) {
         void markHotTokens({ tokenIds: [orderTokenId], venue: "polymarket" });
+        void requestPriceRefreshForTokens({
+          tokenIds: [orderTokenId],
+          venue: "polymarket",
+        });
       }
 
       const orderSigner = typeof order.signer === "string" ? order.signer : "";
@@ -1909,6 +1914,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       void markHotTokens({ tokenIds: [tokenId], venue: "polymarket" });
+      void requestPriceRefreshForTokens({
+        tokenIds: [tokenId],
+        venue: "polymarket",
+      });
 
       try {
         const [orderbookPayload, marketInfo] = await Promise.all([

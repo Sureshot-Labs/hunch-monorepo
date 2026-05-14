@@ -782,6 +782,13 @@ export const env = {
     "HOT_STREAM_MARK_INTERVAL_SEC",
     60,
   ),
+  priceRefreshQueueEnabled:
+    parseOptionalBool(process.env.PRICE_REFRESH_QUEUE_ENABLED) ?? true,
+  priceRefreshQueueMax: optionalPositiveInt("PRICE_REFRESH_QUEUE_MAX", 20_000),
+  priceRefreshEnqueueMaxPerRequest: optionalPositiveInt(
+    "PRICE_REFRESH_ENQUEUE_MAX_PER_REQUEST",
+    200,
+  ),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",
   aiWhaleProfileAutoRun,
   aiWhaleProfileLimit,

@@ -1,4 +1,5 @@
 import {
+  processPriceRefreshQueue,
   selectHotTokenIds,
   selectWsTokenIds,
   snapshotBooks,
@@ -14,6 +15,7 @@ import { env } from "./env.js";
 let running = false;
 let wsStarted = false;
 let wsRefreshRunning = false;
+let priceRefreshRunning = false;
 
 async function periodicBootstrap() {
   if (running) return; // skip if one is running
@@ -74,9 +76,27 @@ async function periodicWsRefresh() {
   }
 }
 
+async function periodicPriceRefresh() {
+  if (!env.priceRefreshQueueEnabled || priceRefreshRunning) return;
+  priceRefreshRunning = true;
+  try {
+    await processPriceRefreshQueue();
+  } catch (e) {
+    if (isPgSetupIssue(e)) {
+      log.warn(`price refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic price refresh err", e);
+    }
+  } finally {
+    priceRefreshRunning = false;
+  }
+}
+
 async function main() {
   await periodicBootstrap();
   await periodicWsRefresh();
+  await periodicPriceRefresh();
   void syncCatchUpFromCursor().catch((e) => {
     if (isPgSetupIssue(e)) {
       log.warn(`catch-up blocked: ${formatPgError(e)}`);
@@ -90,6 +110,7 @@ async function main() {
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
   // Refresh WS desired subscriptions independently from HTTP refresh cadence.
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
+  setInterval(periodicPriceRefresh, env.priceRefreshQueueIntervalMs);
 }
 
 main().catch((e) => {

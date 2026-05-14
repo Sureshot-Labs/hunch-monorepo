@@ -23,7 +23,24 @@ export {
   createTopTickGate,
   resolveTopTickGateOptionsFromEnv,
 } from "./top-tick-gate.js";
+export {
+  claimDuePriceRefreshTokens,
+  enqueuePriceRefreshTokens,
+  getPriceRefreshQueueBacklog,
+  getPriceRefreshQueueKey,
+  inferPriceRefreshVenue,
+  PRICE_REFRESH_QUEUE_KEYS,
+  requeuePriceRefreshTokens,
+} from "./price-refresh.js";
 export type { EmbedQueueItem, TopMarketCandidate } from "./ai-embed.js";
+export type {
+  ClaimPriceRefreshInputs,
+  EnqueuePriceRefreshInputs,
+  EnqueuePriceRefreshResult,
+  PriceRefreshRedis,
+  PriceRefreshVenue,
+  RequeuePriceRefreshInputs,
+} from "./price-refresh.js";
 export type {
   TopTickGate,
   TopTickGateInputs,
