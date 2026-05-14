@@ -1,6 +1,6 @@
 # Agent / MCP Trading Access Plan
 
-Last updated: 2026-05-14
+Last updated: 2026-05-15
 
 ## Goal
 
@@ -290,26 +290,44 @@ Packaging decisions made during implementation:
   the Agent API contract exists, Phase 1 uses narrow local types and Zod schemas
   for the read-only public surface.
 
-As of 2026-05-14, Phase 2A is implemented in code and ready for migration /
-environment-gated rollout:
+As of 2026-05-15, Phase 2A and Phase 2B authenticated read access are
+implemented in code:
 
 - `0106_agent_grants.sql` adds agent grants, short-lived device
   authorizations, and audit events.
 - `apps/api/src/routes/agent.ts` exposes device start/token, browser
-  approve/deny, grant list/revoke, audit, `/agent/me`, and
-  `/agent/notifications`.
+  approve/deny, grant list/revoke, audit, `/agent/me`,
+  `/agent/notifications`, `/agent/wallets`, `/agent/wallet-balances`,
+  `/agent/positions`, `/agent/positions/pnl`, `/agent/orders`,
+  `/agent/orders/:id`, `/agent/venue-status`, `/agent/readiness`, and
+  `/agent/deposit-targets`.
 - `createAgentAuthMiddleware` validates HMAC-hashed bearer tokens, scopes,
   active grants, grant expiry, and linked-wallet ownership.
 - `Hunch_App` has minimal `/agent/approve/:approvalToken` and
-  `/settings/agents` surfaces through the existing browser-session proxy.
+  `/settings/agents` surfaces through the existing browser-session proxy, plus
+  typed frontend API helpers for the Phase 2B account-read routes.
 - `hunch-agent-tools` has `auth login`, `auth status`, `auth list`,
   `auth use`, `auth logout`, multi-profile local token storage, and
-  `hunch_get_notifications` / `hunch-agent notifications`.
+  authenticated MCP/CLI account-read tools for notifications, wallets,
+  balances, positions/PnL, orders/order detail, venue status, readiness, and
+  deposit targets.
+- Account tool descriptions now explicitly separate source-of-truth semantics:
+  positions for displayed holdings, PnL for account totals, readiness for
+  user-facing tradability, venue status for diagnostics, wallet balances for raw
+  funding balances, account orders for authenticated fills/swaps, and public
+  trades for market tape.
+- Agent-tools compactness and payload controls have been tightened for tracking
+  and wallet-intel tools: `tracking_overview` supports `sections`,
+  `topWalletSections`, and `topMarketsLimit`; embedded wallet series in
+  `wallet_intel` honors `seriesLimit`.
 
 Still not implemented:
 
-- Phase 2B private account read routes through `/agent/*`.
 - Intent, trading, bridge, redemption, or delegated signing flows.
+- Generated OpenAPI-derived client types for the external `hunch-agent-tools`
+  repo boundary.
+- Full automated install/release path for public npm/plugin distribution beyond
+  local release artifacts.
 
 ### Skill Runtime Wrapper And Session
 
@@ -1293,31 +1311,38 @@ Phase 2 authenticated-read rollout should be split:
 Phase 2A:
 
 1. device start/token, browser approve/deny, grant list/revoke, audit;
-2. `createAgentAuthMiddleware`;
-3. `/agent/me`;
-4. `/agent/notifications`;
+   **implemented**.
+2. `createAgentAuthMiddleware`; **implemented**.
+3. `/agent/me`; **implemented**.
+4. `/agent/notifications`; **implemented**.
 5. frontend `/agent/approve/:approvalToken` and `/settings/agents`;
+   **implemented**.
 6. agent-tools `auth login`, `auth list`, `auth use`, `auth status`, and
-   `auth logout`.
+   `auth logout`; **implemented**.
 
 Phase 2B:
 
 1. approval-page wallet selection for wallet-sensitive read scopes;
-2. shared wallet payload helper extracted from `/auth/me`;
+   **implemented**.
+2. shared wallet payload helper extracted from `/auth/me`; **implemented**.
 3. shared wallet balance and venue-status services extracted from
-   `/wallets/*`;
-4. shared order response mapper extracted from `/orders`;
-5. `/agent/wallets`;
-6. `/agent/wallet-balances`;
-7. `/agent/positions`;
-8. `/agent/orders`;
-9. `/agent/venue-status`;
-10. `/agent/readiness`;
-11. `/agent/deposit-targets`;
-12. agent-tools authenticated account-read MCP tools and CLI commands.
+   `/wallets/*`; **implemented for Phase 2B read needs**.
+4. shared order response mapper extracted from `/orders`; **implemented for
+   Phase 2B account-order responses**.
+5. `/agent/wallets`; **implemented**.
+6. `/agent/wallet-balances`; **implemented**.
+7. `/agent/positions` and `/agent/positions/pnl`; **implemented**.
+8. `/agent/orders` and `/agent/orders/:id`; **implemented**.
+9. `/agent/venue-status`; **implemented**.
+10. `/agent/readiness`; **implemented**.
+11. `/agent/deposit-targets`; **implemented as read-only backend-derived
+    funding instructions**.
+12. agent-tools authenticated account-read MCP tools and CLI commands;
+    **implemented**.
 
-Do not implement Phase 2B private read routes until Phase 2A device auth,
-profile storage, frontend approval, and `/agent/me` are stable.
+Phase 2B is now the current read-only account baseline. It intentionally stops
+before intents, trading, bridge routing, redemption, notification mutation, or
+delegated signing.
 
 Implementation order:
 
@@ -1335,7 +1360,7 @@ Implementation order:
 10. Add agent-tools multi-profile login/logout/list/use support and
     `hunch_get_notifications`.
 11. Add Phase 2B shared read services and authenticated private read tools only
-    after `/agent/me` and multi-profile auth are stable.
+    after `/agent/me` and multi-profile auth are stable. **Implemented.**
 
 Backend tests:
 
@@ -2347,39 +2372,66 @@ This proves the developer/user workflow without risking funds.
 
 ### Phase 2: Agent Grants
 
-Phase 2A is the required first slice. Phase 2B private account read routes come
-after the auth and approval loop is stable.
+Phase 2A and Phase 2B are implemented as the read-only authenticated account
+baseline. This phase is not a trading phase.
 
 - In the Hunch monorepo, add one migration for `agent_grants`,
-  `agent_device_authorizations`, and `agent_audit_events`.
+  `agent_device_authorizations`, and `agent_audit_events`. **Implemented.**
 - In the Hunch monorepo, add token hashing, `/agent/device/*`,
   `/agent/grants`, `/agent/audit`, `/agent/me`, and
-  `createAgentAuthMiddleware`.
+  `createAgentAuthMiddleware`. **Implemented.**
 - In the Hunch monorepo, hash agent tokens/device codes/approval tokens with an
   agent-specific HMAC secret, use short device approval TTLs, redact raw tokens
   from logs/audit metadata, and re-check wallet ownership on agent access.
+  **Implemented.**
 - In the Hunch monorepo, add scope, wallet, venue, chain, and asset checks.
+  **Implemented for read scopes.**
 - In the frontend, add `/agent/approve/:approvalToken` and `/settings/agents` so
   users can approve limited grants, inspect connected agents, and revoke access.
+  **Implemented as minimal UI.**
 - In the external tools repo, enable Phase 2A authenticated tools for account
   and notifications first; add wallets, balances, positions, orders, readiness,
-  deposit targets, and venue status in Phase 2B.
+  deposit targets, and venue status in Phase 2B. **Implemented.**
 - In the external tools repo, support multiple local auth profiles:
   `auth login --profile`, `auth list`, `auth use`, and
   `auth logout --profile`; authenticated tools may accept optional `profile`.
+  **Implemented.**
 - In the external tools repo, keep local token files permission-restricted,
   redact token output, ignore expired profiles, and treat `HUNCH_AGENT_TOKEN` as
   an explicit escape hatch instead of the normal multi-account UX. Explicit
   profile and active-profile selection must win over the environment token;
   later write/intent tools must require a named profile unless the user
-  explicitly passes an override such as `--allow-env-token`.
+  explicitly passes an override such as `--allow-env-token`. **Implemented for
+  current read tools.**
 - Add backend API tests for expiry, revocation, scope denial, wallet denial,
   token hash lookup, one-time token issuance, expiry, rate limits, max attempts,
   polling limits, HMAC hashing, entropy, redaction, and wallet re-checks.
+  **Partially implemented; keep as a QA checklist before broad rollout.**
 - Add external repo tests for auth flow polling, token storage, redaction, and
   authenticated read tool errors, including multi-profile selection.
+  **Implemented for current tools.**
 - Add frontend tests for logged-out redirect/return, approve, deny, revoke, and
-  no-token-exposure behavior.
+  no-token-exposure behavior. **Still pending.**
+
+### Current Next Steps After Phase 2B
+
+1. Run a focused pre-merge QA pass for the Phase 2B read-only baseline:
+   backend typecheck/lint/build, frontend `bun check`, agent-tools
+   typecheck/lint/test/release smoke, and one local auth read flow after
+   migration.
+2. Add or backfill missing frontend tests for `/agent/approve/:approvalToken`,
+   `/settings/agents`, revoke, deny, logged-out redirect, and "token never
+   appears in browser response" behavior.
+3. Tighten operational rollout docs: required env vars, migration order,
+   feature flag state, local/prod plugin release process, and rollback steps.
+4. Decide whether generated OpenAPI types should become the agent-tools API
+   boundary before Phase 3. This is useful but should not block Phase 2B if the
+   current narrow schemas remain covered by tests.
+5. Treat `discovery_map(level=1)` empty results as a backend/data follow-up, not
+   an MCP schema blocker.
+6. Start Phase 3 only after Phase 2B is stable in production. Phase 3 should add
+   preview/intent records and funding-plan reads; it must still avoid direct
+   MCP-side transaction construction or unattended signing.
 
 ### Phase 3: Preview And Intent Records
 
@@ -2495,9 +2547,10 @@ after the auth and approval loop is stable.
 
 Build this in order:
 
-1. Read-only MCP.
-2. Agent grant/device auth plus authenticated read tools.
-3. Intent preview and policy records.
+1. Read-only MCP. **Done.**
+2. Agent grant/device auth plus authenticated read tools. **Done as the Phase 2B
+   read-only baseline; keep QA/rollout checks active.**
+3. Intent preview and policy records. **Next implementation phase.**
 4. Confirmation-required execution through existing Privy/browser approval.
 5. Limited automation only after delegated signing and exposure accounting are
    explicitly implemented.
