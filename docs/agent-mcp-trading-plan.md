@@ -1306,6 +1306,13 @@ Reusable UI pieces should stay close to existing Hunch components:
 - wallet funding/deposit panel;
 - QR rendering from backend-provided `qrPayload` or `depositUri`.
 
+Hosted Hunch pages should be the canonical user-facing funding surface. Agent
+tools may show text guidance or render QR codes as a convenience, but whenever a
+funding/deposit flow is user-facing the response should include a Hunch
+`depositPageUrl`/`fundingPageUrl` that opens a first-party page with the QR,
+plain address, chain, asset, amount when known, copy buttons, warnings, and
+status.
+
 Reuse existing market/event cards, venue badges, wallet displays, and trade
 summary components wherever possible. Do not build a second trading UI for
 agent intents.
@@ -1836,6 +1843,7 @@ Funding plan output should include:
 
 ```ts
 type AgentFundingPlan = {
+  id: string;
   walletAddress: string;
   walletType: "ethereum" | "solana";
   venue?: "polymarket" | "kalshi" | "limitless";
@@ -1853,16 +1861,28 @@ type AgentFundingPlan = {
   missingAmountUi?: string | null;
   depositUri?: string | null;
   qrPayload: string;
+  depositPageUrl: string;
+  fundingPageUrl?: string | null;
   bridgeRequired: boolean;
   bridgeQuote?: unknown;
+  warnings: string[];
   instructions: string[];
 };
 ```
 
-The API does not need to render a QR image. It should return `qrPayload` and
-`depositUri`; the MCP/CLI or frontend can render a QR code from that payload.
-For text-only agents, the tool should also return copyable address, chain, asset,
-and amount guidance.
+The API should not render a QR image. It should return structured funding data,
+`qrPayload`, `depositUri`, and a first-party Hunch `depositPageUrl` or
+`fundingPageUrl`. The hosted Hunch page is canonical because it can present
+Hunch-styled QR, plain address, chain, asset, amount when known, copy controls,
+warnings, and status in a user-verifiable context.
+
+MCP tools may include `qrPayload` and copyable text guidance, but should prefer
+showing the Hunch page link for normal users because MCP clients vary in image
+support. The CLI may optionally render a terminal QR or write a PNG/SVG in a
+later convenience feature, but that rendering must be derived only from the
+backend-provided payload and must also print the plain address, chain, asset,
+and amount guidance. No agent, MCP client, or CLI may construct or override the
+target address.
 
 Venue setup should be its own intent type, not hidden inside trade execution:
 
@@ -2044,7 +2064,7 @@ after the auth and approval loop is stable.
 
 - Add `/agent/intents/preview` and `/agent/intents`.
 - Add `/agent/funding-plan` for deposit address, QR payload, bridge suggestion,
-  and missing-balance guidance.
+  missing-balance guidance, and a canonical Hunch-hosted funding page URL.
 - Normalize venue setup, funding, trade, bridge, cancel, and redemption requests
   into one intent model.
 - Reuse existing market lookup, quote, bridge, and venue preparation services.
