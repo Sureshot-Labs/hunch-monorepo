@@ -149,6 +149,7 @@ export type ApiCacheWarmPolicy = {
   pollIntervalSec: number;
   requestTimeoutMs: number;
   warmFeed: boolean;
+  warmMarketMap: boolean;
   warmWalletIntel: boolean;
 };
 
@@ -762,6 +763,7 @@ const apiCacheWarmSchema = z
     pollIntervalSec: positiveInt.max(60 * 60 * 24),
     requestTimeoutMs: positiveInt.max(60_000),
     warmFeed: strictBoolean,
+    warmMarketMap: strictBoolean,
     warmWalletIntel: strictBoolean,
   })
   .strict()
@@ -1128,6 +1130,7 @@ function getDefaults(): IntelPolicyMap {
       pollIntervalSec: 30,
       requestTimeoutMs: 10_000,
       warmFeed: true,
+      warmMarketMap: true,
       warmWalletIntel: true,
     },
     ai_whale_profiles: {
@@ -1690,6 +1693,7 @@ function normalizeApiCacheWarmPolicy(
     ),
     requestTimeoutMs: clamp(Math.trunc(policy.requestTimeoutMs), 250, 60_000),
     warmFeed: Boolean(policy.warmFeed),
+    warmMarketMap: Boolean(policy.warmMarketMap),
     warmWalletIntel: Boolean(policy.warmWalletIntel),
   };
 }

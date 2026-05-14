@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ZodIssue } from "zod";
 
 // numbers often come as strings; welcome to APIs.
 const numish = z
@@ -23,11 +24,14 @@ const CollateralToken = z.object({
 });
 
 // Creator schema
-const Creator = z.object({
-  name: z.string(),
-  imageURI: z.string(),
-  link: z.string(),
-});
+const Creator = z
+  .object({
+    name: z.string(),
+    imageURI: z.string().nullable().optional(),
+    link: z.string().nullable().optional(),
+  })
+  .nullable()
+  .optional();
 
 // Trends schema
 const Trends = z
@@ -186,8 +190,81 @@ export const LimitlessActiveResponse = z
   })
   .passthrough();
 
+const LimitlessActiveEnvelope = z
+  .object({
+    data: z.array(z.unknown()).default([]),
+    page: z.number().optional(),
+    totalPages: z.number().optional(),
+    totalMarketsCount: numish.optional(),
+  })
+  .passthrough();
+
 export type TLimitlessMarket = z.infer<typeof LimitlessMarket>;
 export type TLimitlessMarketItem = z.infer<typeof LimitlessMarketItem>;
+export type TLimitlessActiveResponse = z.infer<typeof LimitlessActiveResponse>;
+
+export type LimitlessActiveParseIssue = {
+  index: number;
+  id?: number | string;
+  slug?: string;
+  title?: string;
+  issues: Array<{
+    path: string;
+    message: string;
+  }>;
+};
+
+function rawMarketIdentity(raw: unknown) {
+  if (!raw || typeof raw !== "object") return {};
+  const record = raw as Record<string, unknown>;
+
+  return {
+    id:
+      typeof record.id === "string" || typeof record.id === "number"
+        ? record.id
+        : undefined,
+    slug: typeof record.slug === "string" ? record.slug : undefined,
+    title: typeof record.title === "string" ? record.title : undefined,
+  };
+}
+
+function formatZodIssues(issues: ZodIssue[]) {
+  return issues.slice(0, 8).map((issue) => ({
+    path: issue.path.length > 0 ? issue.path.join(".") : "(root)",
+    message: issue.message,
+  }));
+}
+
+export function parseLimitlessActivePayload(raw: unknown): {
+  response: TLimitlessActiveResponse;
+  invalidMarkets: LimitlessActiveParseIssue[];
+} {
+  const envelope = LimitlessActiveEnvelope.parse(raw);
+  const data: TLimitlessMarket[] = [];
+  const invalidMarkets: LimitlessActiveParseIssue[] = [];
+
+  envelope.data.forEach((market, index) => {
+    const parsed = LimitlessMarket.safeParse(market);
+    if (parsed.success) {
+      data.push(parsed.data);
+      return;
+    }
+
+    invalidMarkets.push({
+      index,
+      ...rawMarketIdentity(market),
+      issues: formatZodIssues(parsed.error.issues),
+    });
+  });
+
+  return {
+    response: {
+      ...envelope,
+      data,
+    },
+    invalidMarkets,
+  };
+}
 
 const OrderbookEntry = z.object({
   price: numish,

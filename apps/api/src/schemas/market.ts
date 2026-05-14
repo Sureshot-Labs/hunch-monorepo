@@ -58,3 +58,9 @@ export const marketSimilarQuerySchema = z.object({
   excludeMarkets: zOptionalCsv.optional(),
   excludeEvents: zOptionalCsv.optional(),
 });
+
+export const marketAlternativesQuerySchema = z.object({
+  venues: z.string().trim().min(1).optional(),
+  limit: zOptionalInt.optional(),
+  sourceLimit: zOptionalInt.optional(),
+});

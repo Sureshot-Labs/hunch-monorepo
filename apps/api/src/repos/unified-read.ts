@@ -92,6 +92,8 @@ type FeedSearchContext = {
   searchCte: string;
   searchEventJoin: string;
   searchMarketJoin: string;
+  eventRankExpr: string;
+  joinedRankExpr: string;
 };
 
 type FeedEventFilterInputs = Pick<
@@ -156,6 +158,24 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   };
 }
 
+function buildFeedSearchDocumentExpr(alias: string): string {
+  return `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.slug, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(${alias}.description, '')), 'D')
+  `;
+}
+
+function buildFeedSearchPrefixQuery(q?: string): string | null {
+  const terms = (q?.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter((term) => term.length >= 2)
+    .slice(0, 8);
+  const uniqueTerms = Array.from(new Set(terms));
+  if (!uniqueTerms.length) return null;
+  return uniqueTerms.map((term) => `${term}:*`).join(" & ");
+}
+
 function buildFeedSearchContext(args: {
   add: PgParamAdder;
   q?: string;
@@ -171,36 +191,78 @@ function buildFeedSearchContext(args: {
     renderableMarketExpr,
   } = args;
   const hasSearch = Boolean(q);
-  const searchParam = hasSearch ? add(`%${q}%`) : null;
+  const searchParam = hasSearch ? add(q ?? "") : null;
+  const prefixParam = hasSearch ? add(buildFeedSearchPrefixQuery(q)) : null;
+  const eventSearchDocExpr = buildFeedSearchDocumentExpr("e");
+  const marketSearchDocExpr = buildFeedSearchDocumentExpr("m");
   const searchCte = hasSearch
     ? `
+      search_query as materialized (
+        select
+          websearch_to_tsquery('english', ${searchParam}::text) as query,
+          case
+            when ${prefixParam}::text is null then null::tsquery
+            else to_tsquery('english', ${prefixParam}::text)
+          end as prefix_query
+      ),
       search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-            e.title ilike ${searchParam} or
-            e.description ilike ${searchParam} or
-            e.category ilike ${searchParam} or
-            e.slug ilike ${searchParam}
-          )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-            m.title ilike ${searchParam} or
-            m.description ilike ${searchParam} or
-            m.category ilike ${searchParam} or
-            m.slug ilike ${searchParam}
-          )
+        select
+          id,
+          max(rank) as rank
+        from (
+          select
+            e.id,
+            ts_rank_cd((${eventSearchDocExpr}), sq.query) * 2 as rank
+          from unified_events e
+          cross join search_query sq
+          where querytree(sq.query) <> ''
+            and e.status = 'ACTIVE'
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and (${eventSearchDocExpr}) @@ sq.query
+          union all
+          select
+            e.id,
+            ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query) as rank
+          from unified_events e
+          cross join search_query sq
+          where sq.prefix_query is not null
+            and querytree(sq.prefix_query) <> ''
+            and e.status = 'ACTIVE'
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and (${eventSearchDocExpr}) @@ sq.prefix_query
+          union all
+          select
+            m.event_id as id,
+            ts_rank_cd((${marketSearchDocExpr}), sq.query) * 2 as rank
+          from unified_markets m
+          join unified_events e on e.id = m.event_id
+          cross join search_query sq
+          where querytree(sq.query) <> ''
+            and m.status = 'ACTIVE'
+            and e.status = 'ACTIVE'
+            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+            and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and ${renderableMarketExpr}
+            and (${marketSearchDocExpr}) @@ sq.query
+          union all
+          select
+            m.event_id as id,
+            ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query) as rank
+          from unified_markets m
+          join unified_events e on e.id = m.event_id
+          cross join search_query sq
+          where sq.prefix_query is not null
+            and querytree(sq.prefix_query) <> ''
+            and m.status = 'ACTIVE'
+            and e.status = 'ACTIVE'
+            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+            and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and ${renderableMarketExpr}
+            and (${marketSearchDocExpr}) @@ sq.prefix_query
+        ) matches
+        group by id
       )
     `
     : "";
@@ -212,6 +274,10 @@ function buildFeedSearchContext(args: {
     searchMarketJoin: hasSearch
       ? "join search_events se on se.id = m.event_id"
       : "",
+    eventRankExpr: hasSearch
+      ? "coalesce((select se_rank.rank from search_events se_rank where se_rank.id = e.id), 0)"
+      : "0",
+    joinedRankExpr: hasSearch ? "coalesce(se.rank, 0)" : "0",
   };
 }
 
@@ -865,6 +931,9 @@ export async function fetchFeedEventIds(
 
     const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
     let eventOnlyOrder = "";
+    const eventOnlySearchOrder = search.hasSearch
+      ? `${search.eventRankExpr} desc nulls last, `
+      : "";
     if (inputs.sort === "totalvol")
       eventOnlyOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
     else if (inputs.sort === "liquidity")
@@ -881,7 +950,7 @@ export async function fetchFeedEventIds(
       const sevenDaysAgo = add(inputs.sevenDaysAgo);
       const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
       eventOnlyOrder = `
-        (coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
+        ${eventOnlySearchOrder}(coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
          coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
          case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
          case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
@@ -919,6 +988,9 @@ export async function fetchFeedEventIds(
       : "";
 
   let eventOrder = "";
+  const eventSearchOrder = search.hasSearch
+    ? `${search.eventRankExpr} desc nulls last, `
+    : "";
   if (inputs.sort === "totalvol")
     eventOrder = `(${eventVolumeSortExpr}) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "liquidity")
@@ -945,7 +1017,7 @@ export async function fetchFeedEventIds(
     const sevenDaysAgo = add(inputs.sevenDaysAgo);
     const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
     eventOrder = `
-      (coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
+      ${eventSearchOrder}(coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
        coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
        case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
@@ -1399,9 +1471,12 @@ export async function fetchFeedMarketsDirect(
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
+    const searchOrder = marketContext.hasSearch
+      ? `${marketContext.joinedRankExpr} desc nulls last, `
+      : "";
     marketOrder = `
-      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
-       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
+      ${searchOrder}(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 +
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
        case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) ${sortDir} nulls last, m.venue_market_id
@@ -1603,52 +1678,19 @@ export async function fetchFavoriteFeedEventPage(
   const marketIdsParam = add(inputs.marketIds);
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
-  const hasSearch = Boolean(inputs.q);
-  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
-  const searchCte = hasSearch
-    ? `
-      search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-            e.title ilike ${searchParam} or
-            e.description ilike ${searchParam} or
-            e.category ilike ${searchParam} or
-            e.slug ilike ${searchParam}
-          )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-            m.title ilike ${searchParam} or
-            m.description ilike ${searchParam} or
-            m.category ilike ${searchParam} or
-            m.slug ilike ${searchParam}
-          )
-      )
-    `
-    : "";
-  const searchEventJoin = hasSearch
-    ? "join search_events se on se.id = e.id"
-    : "";
-  const searchMarketJoin = hasSearch
-    ? "join search_events se on se.id = m.event_id"
-    : "";
+  const search = buildFeedSearchContext({
+    add,
+    q: inputs.q,
+    nowParam,
+    nowCloseParam,
+    renderableMarketExpr,
+  });
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
       from unified_markets m
       join unified_events e on e.id = m.event_id
-      ${searchMarketJoin}
+      ${search.searchMarketJoin}
       where m.status = 'ACTIVE'
         and m.id = ANY(${marketIdsParam}::text[])
         and e.status = 'ACTIVE'
@@ -1766,9 +1808,12 @@ export async function fetchFavoriteFeedEventPage(
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
+    const searchOrder = search.hasSearch
+      ? `${search.joinedRankExpr} desc nulls last, `
+      : "";
     marketOrder = `
-      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
-       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
+      ${searchOrder}(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 +
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
        case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) ${sortDir} nulls last, m.venue_market_id
@@ -1807,7 +1852,7 @@ export async function fetchFavoriteFeedEventPage(
       , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
-    ${searchEventJoin}
+    ${search.searchEventJoin}
     ${marketCountJoin}
     ${change24hCandidateJoin}
     ${tradeJoin}
@@ -1815,7 +1860,7 @@ export async function fetchFavoriteFeedEventPage(
   `;
 
   const withParts: string[] = [];
-  if (searchCte) withParts.push(searchCte);
+  if (search.searchCte) withParts.push(search.searchCte);
   if (needsMarketCount) withParts.push(marketCountCte);
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);
@@ -1841,11 +1886,11 @@ export async function fetchFavoriteFeedEventPage(
       ) as event_ids
   `;
 
-  const { rows } = await pool.query<{
+  const rows = await queryRowsWithSearchHint<{
     total_markets: number;
     total_events: number;
     event_ids: string[] | null;
-  }>(sql, params);
+  }>(pool, sql, params, search.hasSearch);
   const row = rows[0];
   if (!row) return { eventIds: [], totalEvents: 0, totalMarkets: 0 };
 

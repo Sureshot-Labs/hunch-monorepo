@@ -272,6 +272,7 @@ Common knobs:
 - `POLYMARKET_HOT_LOOKBACK_MIN=30` (how far back in time to refresh by `updatedAt`; default is `max(REFRESH_MIN*2, 30)`)
 - `POLYMARKET_HOT_MAX_PAGES=10` (safety cap for hot refresh pagination)
 - `POLYMARKET_OVERLAP_PAGES=2` (rewind the catch-up cursor by this many pages on restart)
+- `POLYMARKET_GAMMA_MAX_EVENTS_OFFSET=100000` (Gamma `/events` rejects larger offsets; catch-up stops at this cap)
 
 WS orderbook streaming (best bid/ask) is always a subset:
 
