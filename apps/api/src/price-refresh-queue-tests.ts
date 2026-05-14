@@ -8,6 +8,7 @@ import {
   requeuePriceRefreshTokens,
   type PriceRefreshRedis,
 } from "@hunch/infra";
+import { collectPriceRefreshTokenIdsFromSources } from "./lib/price-refresh.js";
 
 async function test(name: string, fn: () => void | Promise<void>) {
   try {
@@ -92,6 +93,65 @@ await test("inferPriceRefreshVenue recognizes active venue token shapes", () => 
   assert.equal(inferPriceRefreshVenue("sol:mint"), "dflow");
   assert.equal(inferPriceRefreshVenue("limitless:abc"), "limitless");
   assert.equal(inferPriceRefreshVenue("kalshi:legacy"), null);
+});
+
+await test("collectPriceRefreshTokenIdsFromSources normalizes agent position tokens", () => {
+  assert.deepEqual(
+    collectPriceRefreshTokenIdsFromSources([
+      { venue: "polymarket", tokenId: "12345" },
+      { venue: "limitless", tokenId: "abc" },
+      { venue: "limitless", tokenId: "limitless:def" },
+      { venue: "kalshi", tokenId: "raw-mint" },
+      { venue: "kalshi", tokenId: "sol:prefixed-mint" },
+      { venue: "polymarket", tokenId: "not-a-polymarket-token" },
+    ]),
+    [
+      "12345",
+      "limitless:abc",
+      "limitless:def",
+      "sol:raw-mint",
+      "sol:prefixed-mint",
+    ],
+  );
+});
+
+await test("collectPriceRefreshTokenIdsFromSources normalizes order mints and skips USDC", () => {
+  assert.deepEqual(
+    collectPriceRefreshTokenIdsFromSources(
+      [
+        {
+          venue: "kalshi",
+          input_mint: "USDC_MINT",
+          output_mint: "outcome-mint",
+        },
+        {
+          venue: "kalshi",
+          inputMint: "sol:outcome-mint",
+          outputMint: "USDC_MINT",
+        },
+        {
+          venue: "polymarket",
+          token_id: "999",
+        },
+      ],
+      { solanaUsdcMint: "USDC_MINT" },
+    ),
+    ["sol:outcome-mint", "999"],
+  );
+});
+
+await test("collectPriceRefreshTokenIdsFromSources does not treat non-DFlow mints as Solana tokens", () => {
+  assert.deepEqual(
+    collectPriceRefreshTokenIdsFromSources([
+      {
+        venue: "limitless",
+        token_id: "limitless-token",
+        input_mint: "base-usdc",
+        output_mint: "base-outcome",
+      },
+    ]),
+    ["limitless:limitless-token"],
+  );
 });
 
 await test("enqueuePriceRefreshTokens dedupes and groups by inferred venue", async () => {

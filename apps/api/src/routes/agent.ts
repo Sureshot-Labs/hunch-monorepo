@@ -17,6 +17,7 @@ import { env } from "../env.js";
 import { checkRateLimitForSecurityClientIp } from "../lib/request-ip.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokenSources } from "../lib/price-refresh.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -2166,6 +2167,9 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           void markHotTokens({
             tokenIds: positions.map((position) => position.tokenId),
           });
+          void requestPriceRefreshForTokenSources({
+            sources: positions,
+          });
         }
         const enrichedPositions = await enrichAgentPositions(positions);
         const filteredPositions = filterAgentPositions(enrichedPositions, {
@@ -2360,6 +2364,9 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           limit: query.limit,
           offset: query.offset,
         });
+        if (result.rows.length) {
+          void requestPriceRefreshForTokenSources({ sources: result.rows });
+        }
         return reply.send({
           ok: true,
           orders: result.rows.map(mapUnifiedOrder),
@@ -2408,6 +2415,7 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           reply.code(404);
           return reply.send({ error: "Order not found" });
         }
+        void requestPriceRefreshForTokenSources({ sources: [row] });
         return reply.send({ ok: true, order: mapUnifiedOrder(row) });
       } catch (error) {
         return handleAgentError(error, reply);
