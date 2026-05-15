@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
+import { getRedis } from "../redis.js";
 import {
   embeddedEvmExecuteBodySchema,
   embeddedEvmPrepareBodySchema,
@@ -21,12 +23,133 @@ import {
   executeEmbeddedSolanaTransactionRequests,
   prepareEmbeddedSolanaTransactionRequests,
   resolveEmbeddedSolanaWalletContext,
+  type EmbeddedPrivyAuthorizationRequest,
 } from "../services/embedded-solana.js";
+
+const EMBEDDED_SOLANA_PREPARED_TTL_SEC = 300;
+
+type EmbeddedSolanaPreparedCacheEntry = {
+  expiresAt: number;
+  requests: EmbeddedPrivyAuthorizationRequest[];
+};
+
+type RouteLogger = {
+  warn: (obj: object, message?: string) => void;
+};
+
+const embeddedSolanaPreparedMemory = new Map<
+  string,
+  EmbeddedSolanaPreparedCacheEntry
+>();
+
+function pruneExpiredEmbeddedSolanaPreparedMemory(now = Date.now()): void {
+  for (const [key, entry] of embeddedSolanaPreparedMemory) {
+    if (entry.expiresAt <= now) embeddedSolanaPreparedMemory.delete(key);
+  }
+}
 
 function normalizeEvmAddress(value: string | null | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   return /^0x[a-fA-F0-9]{40}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function buildEmbeddedSolanaPreparedCacheKey(inputs: {
+  signer: string;
+  executionKey: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      `embedded-solana:prepared:${inputs.signer.trim()}:${inputs.executionKey.trim()}`,
+    )
+    .digest("hex");
+  return `embedded-solana:prepared:${digest}`;
+}
+
+function parseEmbeddedSolanaPreparedRequests(
+  raw: string | null,
+): EmbeddedPrivyAuthorizationRequest[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !Array.isArray((parsed as { requests?: unknown }).requests)
+    ) {
+      return null;
+    }
+    return (parsed as { requests: EmbeddedPrivyAuthorizationRequest[] })
+      .requests;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheEmbeddedSolanaPreparedRequests(inputs: {
+  signer: string;
+  executionKey: string | null | undefined;
+  requests: EmbeddedPrivyAuthorizationRequest[];
+  log: RouteLogger;
+}): Promise<void> {
+  const executionKey = inputs.executionKey?.trim() ?? "";
+  if (!executionKey) return;
+
+  pruneExpiredEmbeddedSolanaPreparedMemory();
+
+  const key = buildEmbeddedSolanaPreparedCacheKey({
+    signer: inputs.signer,
+    executionKey,
+  });
+  embeddedSolanaPreparedMemory.set(key, {
+    expiresAt: Date.now() + EMBEDDED_SOLANA_PREPARED_TTL_SEC * 1000,
+    requests: inputs.requests,
+  });
+
+  try {
+    const redis = await getRedis();
+    if (!redis) return;
+    await redis.set(key, JSON.stringify({ requests: inputs.requests }), {
+      EX: EMBEDDED_SOLANA_PREPARED_TTL_SEC,
+    });
+  } catch (error) {
+    inputs.log.warn(
+      { error, signer: inputs.signer },
+      "Failed to cache prepared embedded Solana requests in Redis",
+    );
+  }
+}
+
+async function readCachedEmbeddedSolanaPreparedRequests(inputs: {
+  signer: string;
+  executionKey: string;
+  log: RouteLogger;
+}): Promise<EmbeddedPrivyAuthorizationRequest[] | null> {
+  const key = buildEmbeddedSolanaPreparedCacheKey({
+    signer: inputs.signer,
+    executionKey: inputs.executionKey,
+  });
+
+  try {
+    const redis = await getRedis();
+    if (redis) {
+      const cached = parseEmbeddedSolanaPreparedRequests(await redis.get(key));
+      if (cached) return cached;
+    }
+  } catch (error) {
+    inputs.log.warn(
+      { error, signer: inputs.signer },
+      "Failed to read prepared embedded Solana requests from Redis",
+    );
+  }
+
+  const memoryEntry = embeddedSolanaPreparedMemory.get(key);
+  if (!memoryEntry) return null;
+  if (memoryEntry.expiresAt <= Date.now()) {
+    embeddedSolanaPreparedMemory.delete(key);
+    return null;
+  }
+  return memoryEntry.requests;
 }
 
 export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
@@ -171,10 +294,23 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
-        const requests = prepareEmbeddedSolanaTransactionRequests({
+        const executionKey = request.body.executionKey ?? null;
+        const requests = await prepareEmbeddedSolanaTransactionRequests({
           context,
-          executionKey: request.body.executionKey ?? null,
+          executionKey,
           transactions: request.body.transactions,
+          onSponsorBalanceFetchError: (error) => {
+            app.log.warn(
+              { error, userId: user.id, signer: context.signer },
+              "Embedded Solana sponsor balance fetch failed",
+            );
+          },
+        });
+        await cacheEmbeddedSolanaPreparedRequests({
+          signer: context.signer,
+          executionKey,
+          requests,
+          log: app.log,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -229,11 +365,16 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             request.body.executionKey,
           ),
           run: async () => {
-            const requests = prepareEmbeddedSolanaTransactionRequests({
-              context,
+            const requests = await readCachedEmbeddedSolanaPreparedRequests({
+              signer: context.signer,
               executionKey: request.body.executionKey,
-              transactions: request.body.transactions,
+              log: app.log,
             });
+            if (!requests) {
+              throw new Error(
+                "Prepared Solana authorization expired. Refresh quote and try again.",
+              );
+            }
             const signatures = await executeEmbeddedSolanaTransactionRequests({
               requests,
               signatures: request.body.signedRequests,

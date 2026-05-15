@@ -13,6 +13,7 @@ import {
 
 import {
   buildEmbeddedSolanaSignAndSendRequest,
+  getEmbeddedSolanaSponsorshipRequirementLamports,
   prepareEmbeddedSolanaTransactionRequests,
   shouldDisableEmbeddedSolanaSponsorshipForTransaction,
   type EmbeddedSolanaWalletContext,
@@ -41,6 +42,7 @@ const SPL_TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 );
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
+const SPONSOR_BASE_REQUIREMENT_LAMPORTS = 8_000_000n;
 
 function serializeTransaction(
   instructions: TransactionInstruction[],
@@ -167,7 +169,7 @@ const tests: TestCase[] = [
   },
   {
     name: "prepare embedded solana requests preserves explicit sponsor false",
-    run: () => {
+    run: async () => {
       const transaction = serializeTransaction([
         SystemProgram.createAccount({
           fromPubkey: signerKeypair.publicKey,
@@ -178,7 +180,7 @@ const tests: TestCase[] = [
         }),
       ]);
 
-      const requests = prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -193,6 +195,165 @@ const tests: TestCase[] = [
       const request = requests[0];
       assert.ok(request);
       assert.equal(getSponsor(request), false);
+    },
+  },
+  {
+    name: "embedded solana disables sponsorship when signer can pay normal fees",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      assert.equal(
+        getEmbeddedSolanaSponsorshipRequirementLamports({
+          signer: walletContext.signer,
+          transaction,
+        }),
+        SPONSOR_BASE_REQUIREMENT_LAMPORTS,
+      );
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "normal-trade",
+            label: "Normal trade",
+            transaction,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), false);
+    },
+  },
+  {
+    name: "embedded solana keeps sponsorship when signer cannot pay normal fees",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "normal-trade",
+            label: "Normal trade",
+            transaction,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), true);
+    },
+  },
+  {
+    name: "embedded solana includes account creation rent in sponsorship threshold",
+    run: async () => {
+      const accountCreationLamports = 20_000_000n;
+      const transaction = serializeTransaction([
+        SystemProgram.createAccount({
+          fromPubkey: signerKeypair.publicKey,
+          newAccountPubkey: Keypair.generate().publicKey,
+          lamports: Number(accountCreationLamports),
+          space: 0,
+          programId: SystemProgram.programId,
+        }),
+      ]);
+      const requiredLamports =
+        SPONSOR_BASE_REQUIREMENT_LAMPORTS + accountCreationLamports;
+
+      assert.equal(
+        getEmbeddedSolanaSponsorshipRequirementLamports({
+          signer: walletContext.signer,
+          transaction,
+        }),
+        requiredLamports,
+      );
+
+      const lowBalanceRequests = await prepareEmbeddedSolanaTransactionRequests(
+        {
+          context: walletContext,
+          transactions: [
+            {
+              id: "account-setup",
+              label: "Account setup",
+              transaction,
+            },
+          ],
+          fetchSponsorBalanceLamports: async () => requiredLamports - 1n,
+        },
+      );
+      const lowBalanceRequest = lowBalanceRequests[0];
+      assert.ok(lowBalanceRequest);
+      assert.equal(getSponsor(lowBalanceRequest), true);
+
+      const highBalanceRequests =
+        await prepareEmbeddedSolanaTransactionRequests({
+          context: walletContext,
+          transactions: [
+            {
+              id: "account-setup",
+              label: "Account setup",
+              transaction,
+            },
+          ],
+          fetchSponsorBalanceLamports: async () => requiredLamports,
+        });
+      const highBalanceRequest = highBalanceRequests[0];
+      assert.ok(highBalanceRequest);
+      assert.equal(getSponsor(highBalanceRequest), false);
+    },
+  },
+  {
+    name: "prepare embedded solana requests allows sponsorship when balance fetch fails",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+      let sawError = false;
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "normal-trade",
+            label: "Normal trade",
+            transaction,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () => {
+          throw new Error("rpc down");
+        },
+        onSponsorBalanceFetchError: () => {
+          sawError = true;
+        },
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(sawError, true);
+      assert.equal(getSponsor(request), true);
     },
   },
 ];
