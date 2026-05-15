@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
 import { type WalletApiRequestSignatureInput } from "@privy-io/server-auth";
+import {
+  type AccountMeta,
+  PublicKey,
+  SystemInstruction,
+  SystemProgram,
+  TransactionInstruction,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import bs58 from "bs58";
 
 import type { User } from "../auth.js";
@@ -8,6 +16,12 @@ import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
+
+type CompiledSolanaInstruction =
+  VersionedTransaction["message"]["compiledInstructions"][number];
 
 function buildPrivyIdempotencyKey(inputs: {
   executionKey: string;
@@ -18,6 +32,148 @@ function buildPrivyIdempotencyKey(inputs: {
     .digest("hex")
     .slice(0, 32);
   return `hunch-sol-${digest}`;
+}
+
+function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
+  if (payload.startsWith("0x")) {
+    const hex = payload.slice(2);
+    if (!hex.length || hex.length % 2 !== 0) return null;
+    return Buffer.from(hex, "hex");
+  }
+  try {
+    return Buffer.from(payload, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function getCompiledInstructionProgramId(
+  tx: VersionedTransaction,
+  instruction: CompiledSolanaInstruction,
+): PublicKey | null {
+  return tx.message.staticAccountKeys[instruction.programIdIndex] ?? null;
+}
+
+function buildTransactionInstruction(
+  tx: VersionedTransaction,
+  instruction: CompiledSolanaInstruction,
+): TransactionInstruction | null {
+  const programId = getCompiledInstructionProgramId(tx, instruction);
+  if (!programId) return null;
+
+  const keys: AccountMeta[] = [];
+  for (const accountIndex of instruction.accountKeyIndexes) {
+    const pubkey = tx.message.staticAccountKeys[accountIndex] ?? null;
+    if (!pubkey) return null;
+    keys.push({
+      pubkey,
+      isSigner: tx.message.isAccountSigner(accountIndex),
+      isWritable: tx.message.isAccountWritable(accountIndex),
+    });
+  }
+
+  return new TransactionInstruction({
+    programId,
+    keys,
+    data: Buffer.from(instruction.data),
+  });
+}
+
+function instructionSyncsNativeSol(
+  tx: VersionedTransaction,
+  instruction: CompiledSolanaInstruction,
+): boolean {
+  const programId = getCompiledInstructionProgramId(tx, instruction);
+  if (!programId) return false;
+  const programIdBase58 = programId.toBase58();
+  if (
+    programIdBase58 !== SPL_TOKEN_PROGRAM_ID &&
+    programIdBase58 !== TOKEN_2022_PROGRAM_ID
+  ) {
+    return false;
+  }
+  const data = Buffer.from(instruction.data);
+  return data.length > 0 && data[0] === TOKEN_SYNC_NATIVE_INSTRUCTION;
+}
+
+function instructionTransfersNativeSolFromSignerOrFeePayer(
+  tx: VersionedTransaction,
+  instruction: CompiledSolanaInstruction,
+  signer: string,
+): boolean {
+  const transactionInstruction = buildTransactionInstruction(tx, instruction);
+  if (!transactionInstruction) return false;
+  if (!transactionInstruction.programId.equals(SystemProgram.programId)) {
+    return false;
+  }
+
+  const feePayer = tx.message.staticAccountKeys[0]?.toBase58() ?? null;
+  const blockedSources = new Set([signer, feePayer].filter(Boolean));
+
+  try {
+    const instructionType = SystemInstruction.decodeInstructionType(
+      transactionInstruction,
+    );
+    if (instructionType === "Transfer") {
+      const decoded = SystemInstruction.decodeTransfer(transactionInstruction);
+      return (
+        BigInt(decoded.lamports.toString()) > BigInt(0) &&
+        blockedSources.has(decoded.fromPubkey.toBase58())
+      );
+    }
+    if (instructionType === "TransferWithSeed") {
+      const decoded = SystemInstruction.decodeTransferWithSeed(
+        transactionInstruction,
+      );
+      return (
+        BigInt(decoded.lamports.toString()) > BigInt(0) &&
+        blockedSources.has(decoded.fromPubkey.toBase58())
+      );
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+export function shouldDisableEmbeddedSolanaSponsorshipForTransaction(inputs: {
+  signer: string;
+  transaction: string;
+}): boolean {
+  const raw = decodeSerializedSolanaTransaction(inputs.transaction.trim());
+  if (!raw) return false;
+
+  let tx: VersionedTransaction;
+  try {
+    tx = VersionedTransaction.deserialize(raw);
+  } catch {
+    return false;
+  }
+
+  return tx.message.compiledInstructions.some(
+    (instruction) =>
+      instructionSyncsNativeSol(tx, instruction) ||
+      instructionTransfersNativeSolFromSignerOrFeePayer(
+        tx,
+        instruction,
+        inputs.signer,
+      ),
+  );
+}
+
+function resolveEmbeddedSolanaSponsor(inputs: {
+  context: EmbeddedSolanaWalletContext;
+  transaction: EmbeddedSolanaTransactionSpec;
+}): boolean {
+  if (inputs.transaction.sponsor === false) return false;
+  // The client flag is advisory. Never sponsor transactions that directly
+  // spend native SOL or wrap SOL, because sponsorship can otherwise become
+  // the SOL source for fee-funded conversion loops.
+  return !shouldDisableEmbeddedSolanaSponsorshipForTransaction({
+    signer: inputs.context.signer,
+    transaction: inputs.transaction.transaction,
+  });
 }
 
 function isKalshiReduceOrderEscrowInitializationMessage(
@@ -286,7 +442,10 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     body: {
       chain_type: "solana",
       method: "signAndSendTransaction",
-      sponsor: inputs.transaction.sponsor !== false,
+      sponsor: resolveEmbeddedSolanaSponsor({
+        context: inputs.context,
+        transaction: inputs.transaction,
+      }),
       params: {
         transaction,
         encoding: inputs.transaction.encoding ?? "base64",
