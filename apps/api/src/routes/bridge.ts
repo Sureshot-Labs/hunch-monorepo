@@ -576,9 +576,7 @@ function validateDebridgeSameChainSolanaSigner(inputs: {
 
   return {
     message:
-      `deBridge returned a Solana transaction that requires ${requiredSigners.join(", ") || "no wallet"} ` +
-      `to sign, but the selected source wallet is ${inputs.senderAddress}. ` +
-      "This deBridge same-chain Solana route is not signable by the selected source wallet.",
+      "Same-wallet Solana swaps are not available for this route. Use the selected wallet directly or choose another funding path.",
     requiredSigners,
   };
 }
