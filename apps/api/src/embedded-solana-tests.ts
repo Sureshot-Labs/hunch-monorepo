@@ -42,6 +42,7 @@ const SPL_TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 );
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
+const MIN_SOL_SOURCE_BALANCE_LAMPORTS = 20_000_000n;
 const SPONSOR_BASE_REQUIREMENT_LAMPORTS = 8_000_000n;
 
 function serializeTransaction(
@@ -195,6 +196,130 @@ const tests: TestCase[] = [
       const request = requests[0];
       assert.ok(request);
       assert.equal(getSponsor(request), false);
+    },
+  },
+  {
+    name: "prepare embedded solana requests rejects native SOL source below hard minimum",
+    run: async () => {
+      const transaction = serializeTransaction([
+        SystemProgram.transfer({
+          fromPubkey: signerKeypair.publicKey,
+          toPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+        }),
+      ]);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "sol-swap",
+                label: "SOL swap",
+                transaction,
+              },
+            ],
+            fetchSponsorBalanceLamports: async () =>
+              MIN_SOL_SOURCE_BALANCE_LAMPORTS - 1n,
+          }),
+        /SOL balance is reserved for network fees/,
+      );
+    },
+  },
+  {
+    name: "prepare embedded solana requests allows native SOL source at hard minimum without sponsorship",
+    run: async () => {
+      const transaction = serializeTransaction([
+        SystemProgram.transfer({
+          fromPubkey: signerKeypair.publicKey,
+          toPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+        }),
+      ]);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "sol-swap",
+            label: "SOL swap",
+            transaction,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () =>
+          MIN_SOL_SOURCE_BALANCE_LAMPORTS,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), false);
+    },
+  },
+  {
+    name: "prepare embedded solana requests rejects wrapped SOL source below hard minimum",
+    run: async () => {
+      const wrappedSolAccount = Keypair.generate().publicKey;
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: SPL_TOKEN_PROGRAM_ID,
+          keys: [
+            {
+              pubkey: wrappedSolAccount,
+              isSigner: false,
+              isWritable: true,
+            },
+          ],
+          data: Buffer.from([TOKEN_SYNC_NATIVE_INSTRUCTION]),
+        }),
+      ]);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "wrapped-sol-swap",
+                label: "Wrapped SOL swap",
+                transaction,
+              },
+            ],
+            fetchSponsorBalanceLamports: async () =>
+              MIN_SOL_SOURCE_BALANCE_LAMPORTS - 1n,
+          }),
+        /SOL balance is reserved for network fees/,
+      );
+    },
+  },
+  {
+    name: "prepare embedded solana requests does not hard reject account creation setup below SOL minimum",
+    run: async () => {
+      const transaction = serializeTransaction([
+        SystemProgram.createAccount({
+          fromPubkey: signerKeypair.publicKey,
+          newAccountPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+          space: 0,
+          programId: SystemProgram.programId,
+        }),
+      ]);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "account-setup",
+            label: "Account setup",
+            transaction,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () => BigInt(0),
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), true);
     },
   },
   {
@@ -354,6 +479,41 @@ const tests: TestCase[] = [
       assert.ok(request);
       assert.equal(sawError, true);
       assert.equal(getSponsor(request), true);
+    },
+  },
+  {
+    name: "prepare embedded solana requests fails closed for SOL source when balance fetch fails",
+    run: async () => {
+      const transaction = serializeTransaction([
+        SystemProgram.transfer({
+          fromPubkey: signerKeypair.publicKey,
+          toPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+        }),
+      ]);
+      let sawError = false;
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "sol-swap",
+                label: "SOL swap",
+                transaction,
+              },
+            ],
+            fetchSponsorBalanceLamports: async () => {
+              throw new Error("rpc down");
+            },
+            onSponsorBalanceFetchError: () => {
+              sawError = true;
+            },
+          }),
+        /Unable to verify Solana balance/,
+      );
+      assert.equal(sawError, true);
     },
   },
 ];

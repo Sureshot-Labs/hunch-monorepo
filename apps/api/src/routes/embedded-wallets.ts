@@ -302,7 +302,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           onSponsorBalanceFetchError: (error) => {
             app.log.warn(
               { error, userId: user.id, signer: context.signer },
-              "Embedded Solana sponsor balance fetch failed",
+              "Embedded Solana balance fetch failed",
             );
           },
         });
