@@ -308,9 +308,13 @@ implemented in code:
   typed frontend API helpers for the Phase 2B account-read routes.
 - `hunch-agent-tools` has `auth login`, `auth status`, `auth list`,
   `auth use`, `auth logout`, multi-profile local token storage, and
-  authenticated MCP/CLI account-read tools for notifications, wallets,
-  balances, positions/PnL, orders/order detail, venue status, readiness, and
-  deposit targets.
+  native MCP auth/profile tools (`hunch_auth_start_login`,
+  `hunch_auth_complete_login`, `hunch_auth_status`,
+  `hunch_auth_list_profiles`, `hunch_auth_use_profile`, and
+  `hunch_auth_logout`). The CLI remains a fallback, not the only auth path.
+- `hunch-agent-tools` has authenticated MCP/CLI account-read tools for
+  notifications, wallets, balances, positions/PnL, orders/order detail, venue
+  status, readiness, and deposit targets.
 - Account tool descriptions now explicitly separate source-of-truth semantics:
   positions for displayed holdings, PnL for account totals, readiness for
   user-facing tradability, venue status for diagnostics, wallet balances for raw
@@ -1339,6 +1343,8 @@ Phase 2B:
     funding instructions**.
 12. agent-tools authenticated account-read MCP tools and CLI commands;
     **implemented**.
+13. MCP-native auth/profile tools so agents do not need the skill CLI for
+    normal login, profile status/list/use, or logout; **implemented**.
 
 Phase 2B is now the current read-only account baseline. It intentionally stops
 before intents, trading, bridge routing, redemption, notification mutation, or
