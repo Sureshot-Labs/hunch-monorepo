@@ -11,7 +11,8 @@ export type AgentScope =
   | "read:orders"
   | "read:positions"
   | "read:funding"
-  | "read:notifications";
+  | "read:notifications"
+  | "prepare:intents";
 
 export type AgentGrant = {
   id: string;
@@ -157,12 +158,15 @@ const READ_SCOPES: readonly AgentScope[] = [
   "read:funding",
   "read:notifications",
 ];
-const READ_SCOPE_SET = new Set<AgentScope>(READ_SCOPES);
+const PREPARE_SCOPES: readonly AgentScope[] = ["prepare:intents"];
+const ALL_SCOPES: readonly AgentScope[] = [...READ_SCOPES, ...PREPARE_SCOPES];
+const ALL_SCOPE_SET = new Set<AgentScope>(ALL_SCOPES);
 const WALLET_SENSITIVE_SCOPES = new Set<AgentScope>([
   "read:wallets",
   "read:orders",
   "read:positions",
   "read:funding",
+  "prepare:intents",
 ]);
 const MAX_APPROVAL_ATTEMPTS = 20;
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -302,7 +306,7 @@ function normalizeScopes(values: readonly AgentScope[] | undefined) {
     : ["read:account"];
   const scopes = Array.from(new Set(source));
   for (const scope of scopes) {
-    if (!READ_SCOPE_SET.has(scope)) {
+    if (!ALL_SCOPE_SET.has(scope)) {
       throw new AgentAuthError("invalid_scope", `Unsupported scope: ${scope}`);
     }
   }
@@ -503,17 +507,47 @@ function grantName(input: {
   );
 }
 
-function expiresAtForDays(days: 1 | 7 | 30 | 90): Date {
-  const ttlMs = Math.min(
-    days * 24 * 60 * 60 * 1000,
-    env.agentGrantMaxReadTtlMs,
-  );
+function hasPrepareScope(scopes: readonly AgentScope[]): boolean {
+  return scopes.includes("prepare:intents");
+}
+
+function expiresAtForDays(
+  days: 1 | 7 | 30 | 90,
+  scopes: readonly AgentScope[],
+): Date {
+  if (hasPrepareScope(scopes) && days > 7) {
+    throw new AgentAuthError(
+      "invalid_grant_expiry",
+      "Intent preparation grants can expire in at most 7 days.",
+    );
+  }
+  const maxTtlMs = hasPrepareScope(scopes)
+    ? env.agentGrantMaxWriteTtlMs
+    : env.agentGrantMaxReadTtlMs;
+  const ttlMs = Math.min(days * 24 * 60 * 60 * 1000, maxTtlMs);
   return new Date(Date.now() + ttlMs);
 }
 
 export class AgentAuthService {
+  static allowedScopes(): AgentScope[] {
+    return [...ALL_SCOPES];
+  }
+
   static allowedReadScopes(): AgentScope[] {
     return [...READ_SCOPES];
+  }
+
+  static async recordAuditEvent(input: {
+    userId?: string | null;
+    grantId?: string | null;
+    deviceAuthorizationId?: string | null;
+    eventType: string;
+    actorType: "user" | "agent" | "system";
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await recordAgentAudit(pool, input);
   }
 
   static async startDeviceAuthorization(input: {
@@ -691,7 +725,7 @@ export class AgentAuthService {
           walletAddresses,
           venues,
           input.limits ?? {},
-          expiresAtForDays(input.expiresInDays),
+          expiresAtForDays(input.expiresInDays, scopes),
           input.userId,
           { grantName: input.grantName ?? null },
         ],

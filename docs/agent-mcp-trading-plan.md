@@ -1893,12 +1893,6 @@ until there is a separate product need for manual grant creation.
 ```ts
 type AgentIntent =
   | {
-      type: "venue_setup";
-      venue: "polymarket" | "kalshi" | "limitless";
-      walletAddress: string;
-      marketId?: string;
-    }
-  | {
       type: "trade";
       venue: "polymarket" | "kalshi" | "limitless";
       walletAddress: string;
@@ -1928,15 +1922,6 @@ type AgentIntent =
       maxSlippageBps?: number;
     }
   | {
-      type: "funding";
-      walletAddress: string;
-      venue?: "polymarket" | "kalshi" | "limitless";
-      asset: string;
-      amountRaw?: string;
-      preferredSourceChainId?: string;
-      source?: "external_deposit" | "bridge";
-    }
-  | {
       type: "redeem";
       venue: "polymarket" | "limitless";
       walletAddress: string;
@@ -1946,6 +1931,10 @@ type AgentIntent =
       outcome?: string;
     };
 ```
+
+Manual deposit/funding guidance is not an intent. Use funding-plan and deposit
+target tools for QR/address guidance. Bridge remains an intent because it is a
+future executable action once a selected route/quote is available.
 
 Store intents and events:
 
@@ -2078,12 +2067,8 @@ Write/intent tools:
 ```text
 hunch_quote_trade
 hunch_quote_bridge
-hunch_create_venue_setup_intent
-hunch_create_funding_intent
-hunch_create_trade_intent
-hunch_create_bridge_intent
-hunch_create_redemption_intent
-hunch_cancel_order_intent
+hunch_preview_intent
+hunch_create_intent
 hunch_sync_positions
 hunch_sync_orders
 hunch_execute_intent
@@ -2092,7 +2077,9 @@ hunch_list_pending_intents
 ```
 
 Tool descriptions must be explicit that creating an intent is not the same as
-executing a trade unless the returned intent status is `executed`.
+executing a trade, bridge, cancel, or redemption unless a future execution tool
+returns an executed terminal status. Manual deposit/funding guidance and generic
+venue setup readiness are not durable intent kinds.
 
 ## End-To-End Trading Coverage
 
@@ -2236,20 +2223,9 @@ backend-provided payload and must also print the plain address, chain, asset,
 and amount guidance. No agent, MCP client, or CLI may construct or override the
 target address.
 
-Venue setup should be its own intent type, not hidden inside trade execution:
-
-```ts
-type VenueSetupIntent = {
-  type: "venue_setup";
-  venue: "polymarket" | "kalshi" | "limitless";
-  walletAddress: string;
-  marketId?: string;
-};
-```
-
-For Polymarket and Limitless, this maps to the existing embedded
-`ensure-ready/prepare` and `ensure-ready/execute` flows. For Kalshi/DFlow, it is
-mostly readiness/proof/balance validation unless a future setup step is added.
+Venue setup is readiness guidance until there is a concrete executable setup
+action. Do not expose it as a durable intent type without a selected executable
+payload and approval semantics.
 
 ### 4. Quote
 
@@ -2419,40 +2395,75 @@ baseline. This phase is not a trading phase.
 - Add frontend tests for logged-out redirect/return, approve, deny, revoke, and
   no-token-exposure behavior. **Still pending.**
 
-### Current Next Steps After Phase 2B
+### Current Status After Phase 3A
 
-1. Run a focused pre-merge QA pass for the Phase 2B read-only baseline:
-   backend typecheck/lint/build, frontend `bun check`, agent-tools
-   typecheck/lint/test/release smoke, and one local auth read flow after
-   migration.
+Rollout policy: keep the agent-tools work local-only until the complete plan is
+implemented and tested phase by phase, including trading, confirmation-required
+execution, and the delegated-signing/automation decision. Do not deploy the
+Phase 2B/3A surface to production as a standalone partial rollout unless this
+policy is explicitly changed.
+
+Phase 3A implemented locally:
+
+- Hunch monorepo adds `agent_intents`, `prepare:intents`,
+  `/agent/intents/preview`, `/agent/intents`, `/agent/intents/:id`,
+  `/agent/intents/review/:reviewToken`, and `/agent/funding-plan`.
+- Intent previews are non-executing. They can return blockers, warnings,
+  policy decisions, top-of-book estimate context, funding targets, and Hunch
+  review URLs, but cannot sign, submit, bridge, cancel, or redeem.
+- Frontend adds typed agent-intent helpers, clamps `prepare:intents` grants to
+  1 or 7 days in the approval UI, and adds a minimal authenticated intent
+  review page.
+- Agent tools add MCP and CLI support for auth preset `intent-preview`,
+  `hunch_preview_intent`, `hunch_create_intent`, `hunch_get_intent`, and
+  `hunch_get_funding_plan`.
+
+Current next steps:
+
+1. Apply migration `0107_agent_intents.sql` in local/staging and run a local
+   smoke flow: MCP auth with `intent-preview`, preview a small trade, create an
+   intent, and open the returned review URL in the frontend.
 2. Add or backfill missing frontend tests for `/agent/approve/:approvalToken`,
    `/settings/agents`, revoke, deny, logged-out redirect, and "token never
-   appears in browser response" behavior.
+   appears in browser response" behavior. Add review-page render tests once the
+   UI test harness is ready.
 3. Tighten operational rollout docs: required env vars, migration order,
    feature flag state, local/prod plugin release process, and rollback steps.
 4. Decide whether generated OpenAPI types should become the agent-tools API
    boundary before Phase 3. This is useful but should not block Phase 2B if the
    current narrow schemas remain covered by tests.
-5. Treat `discovery_map(level=1)` empty results as a backend/data follow-up, not
-   an MCP schema blocker.
-6. Start Phase 3 only after Phase 2B is stable in production. Phase 3 should add
-   preview/intent records and funding-plan reads; it must still avoid direct
-   MCP-side transaction construction or unattended signing.
+5. Treat `discovery_map(level=1)` empty results on local as expected when the
+   local map is not populated; it is not an MCP schema blocker.
+6. Start Phase 3B only after Phase 3A smoke passes. Phase 3B should improve
+   quote accuracy and readiness integration by extracting shared quote/prepare
+   service functions, still without MCP-side transaction construction or
+   unattended signing.
 
 ### Phase 3: Preview And Intent Records
 
-- Add `/agent/intents/preview` and `/agent/intents`.
+- Add `/agent/intents/preview` and `/agent/intents`. **Implemented in Phase
+  3A.**
 - Add `/agent/funding-plan` for deposit address, QR payload, bridge suggestion,
   missing-balance guidance, and a canonical Hunch-hosted funding page URL.
+  **Implemented for deposit-target guidance; bridge suggestions stay empty
+  until Phase 3B.**
 - Normalize venue setup, funding, trade, bridge, cancel, and redemption requests
-  into one intent model.
+  into one intent model. **Implemented.**
 - Reuse existing market lookup, quote, bridge, and venue preparation services.
+  **Partially implemented: market/order lookup is reused; trade quote is a
+  top-of-book estimate; bridge/venue preparation remains Phase 3B.**
 - Add policy evaluation using grant limits and user trading preferences.
-- Add audit events.
+  **Partially implemented for per-trade grant limits. User trading
+  preferences remain Phase 3B/4.**
+- Add audit events. **Implemented for preview, create/block, and funding-plan
+  preview.**
 - Enforce non-null idempotency keys and backend-derived funding/bridge targets.
+  **Implemented for idempotency and deposit targets; bridge targets remain
+  guidance-only.**
 - Add tests for limit decisions, idempotency, unsupported venues, missing
   wallet, expired market handling, backend-derived funding targets, and venue
-  readiness blockers.
+  readiness blockers. **Partially implemented for schemas/tooling; add DB route
+  integration tests in Phase 3B.**
 
 ### Phase 4: Confirmation-Required Execution
 

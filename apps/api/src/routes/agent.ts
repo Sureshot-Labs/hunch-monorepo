@@ -75,6 +75,12 @@ import {
   agentVenueStatusQuerySchema,
   agentWalletBalancesQuerySchema,
 } from "../schemas/agent.js";
+import {
+  agentFundingPlanBodySchema,
+  agentIntentParamsSchema,
+  agentIntentRequestSchema,
+  agentIntentReviewParamsSchema,
+} from "../schemas/agent-intents.js";
 import { notificationsQuerySchema } from "../schemas/notifications.js";
 import {
   positionsPnlSummaryQuerySchema,
@@ -88,6 +94,19 @@ import {
   createAgentAuthMiddleware,
   summarizeAgentGrant,
 } from "../services/agent-auth.js";
+import {
+  buildAgentFundingPlan,
+  createAgentIntent,
+  getAgentIntentById,
+  getAgentIntentReview,
+  previewAgentIntent,
+} from "../services/agent-intents.js";
+import {
+  buildAgentDepositTargets,
+  buildDepositPageUrl,
+  type AgentWalletVenue,
+  venuesForWallet,
+} from "../services/agent-deposit-targets.js";
 import { outcomeLabelOrSide } from "../services/wallet-intel-helpers.js";
 
 function readRequestUserAgent(request: FastifyRequest): string | null {
@@ -138,26 +157,9 @@ async function requireAgentAuthEnabled(
 
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const KALSHI_LOW_SOL_BUFFER_LAMPORTS = 2_000_000n;
-const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
-const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 
 type AgentGrantContext = NonNullable<FastifyRequest["agentGrant"]>;
-type AgentWalletVenue = "polymarket" | "kalshi" | "limitless";
 type AgentWalletMetadata = ReturnType<typeof buildAuthWalletPayloads>[number];
-type AgentDepositAsset = {
-  id: string;
-  symbol: string;
-  name: string;
-  address: string | null;
-  mint: string | null;
-  decimals: number;
-  chainId: string;
-  chainName: string;
-  isNative: boolean;
-  preferred: boolean;
-  purpose: "collateral" | "convertible" | "native_fee";
-  aliases: string[];
-};
 type AgentBlocker =
   | "missing_wallet"
   | "wallet_not_in_grant"
@@ -197,12 +199,6 @@ function uniqueWalletKeys(wallets: readonly string[] | undefined): string[] {
 function inferWalletType(wallet: UserWallet): "ethereum" | "solana" {
   if (wallet.walletType === "solana") return "solana";
   return "ethereum";
-}
-
-function venuesForWallet(wallet: UserWallet): AgentWalletVenue[] {
-  return inferWalletType(wallet) === "solana"
-    ? ["kalshi"]
-    : ["polymarket", "limitless"];
 }
 
 function walletMetadataKey(wallet: {
@@ -692,182 +688,6 @@ function buildAgentPositionsFilterPayload(input: {
     countScope:
       "positions summary counts apply these filters before limit; pnl counts do not apply minSize or display filters",
   };
-}
-
-function buildDepositPageUrl(input: {
-  venue: AgentWalletVenue;
-  targetAddress: string;
-  asset?: AgentDepositAsset;
-}): string {
-  const url = new URL("/", env.agentAppBaseUrl);
-  url.searchParams.set("deposit", "manual");
-  url.searchParams.set("depositVenue", input.venue);
-  url.searchParams.set("depositTarget", input.targetAddress);
-  if (input.asset) {
-    url.searchParams.set("depositAsset", input.asset.id);
-    url.searchParams.set("depositChainId", input.asset.chainId);
-    url.searchParams.set(
-      "depositToken",
-      input.asset.address ?? input.asset.mint ?? "",
-    );
-  }
-  return url.toString();
-}
-
-function normalizeAssetLookup(value: string | null | undefined): string {
-  return (value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_.-]+/g, "");
-}
-
-function depositAssetsForVenue(venue: AgentWalletVenue): AgentDepositAsset[] {
-  if (venue === "polymarket") {
-    return [
-      {
-        id: "polymarket-pusd",
-        symbol: "pUSD",
-        name: "Polymarket collateral",
-        address: env.polymarketUsdcAddress,
-        mint: null,
-        decimals: 6,
-        chainId: "137",
-        chainName: "Polygon",
-        isNative: false,
-        preferred: true,
-        purpose: "collateral",
-        aliases: ["pusd", "polymarket-usdc", "collateral"],
-      },
-      {
-        id: "polygon-usdce",
-        symbol: "USDC.e",
-        name: "Bridged USDC",
-        address: env.polymarketUsdceAddress,
-        mint: null,
-        decimals: 6,
-        chainId: "137",
-        chainName: "Polygon",
-        isNative: false,
-        preferred: false,
-        purpose: "convertible",
-        aliases: ["usdce", "usdc.e", "bridged-usdc"],
-      },
-      {
-        id: "polygon-usdc",
-        symbol: "USDC",
-        name: "Native USDC",
-        address: POLYGON_NATIVE_USDC_ADDRESS,
-        mint: null,
-        decimals: 6,
-        chainId: "137",
-        chainName: "Polygon",
-        isNative: false,
-        preferred: false,
-        purpose: "convertible",
-        aliases: ["usdc", "native-usdc", "polygon-usdc"],
-      },
-      {
-        id: "polygon-pol",
-        symbol: "POL",
-        name: "Polygon native gas",
-        address: EVM_NATIVE_ADDRESS,
-        mint: null,
-        decimals: 18,
-        chainId: "137",
-        chainName: "Polygon",
-        isNative: true,
-        preferred: false,
-        purpose: "native_fee",
-        aliases: ["pol", "matic", "gas"],
-      },
-    ];
-  }
-
-  if (venue === "limitless") {
-    return [
-      {
-        id: "base-usdc",
-        symbol: "USDC",
-        name: "Base USDC",
-        address: env.limitlessUsdcAddress,
-        mint: null,
-        decimals: 6,
-        chainId: "8453",
-        chainName: "Base",
-        isNative: false,
-        preferred: true,
-        purpose: "collateral",
-        aliases: ["usdc", "base-usdc"],
-      },
-      {
-        id: "base-eth",
-        symbol: "ETH",
-        name: "Base native gas",
-        address: EVM_NATIVE_ADDRESS,
-        mint: null,
-        decimals: 18,
-        chainId: "8453",
-        chainName: "Base",
-        isNative: true,
-        preferred: false,
-        purpose: "native_fee",
-        aliases: ["eth", "base-eth", "gas"],
-      },
-    ];
-  }
-
-  return [
-    {
-      id: "solana-usdc",
-      symbol: "USDC",
-      name: "Solana USDC",
-      address: null,
-      mint: env.solanaUsdcMint,
-      decimals: 6,
-      chainId: "7565164",
-      chainName: "Solana",
-      isNative: false,
-      preferred: true,
-      purpose: "collateral",
-      aliases: ["usdc", "solana-usdc"],
-    },
-    {
-      id: "solana-sol",
-      symbol: "SOL",
-      name: "Solana native fees",
-      address: null,
-      mint: SOLANA_NATIVE_ADDRESS,
-      decimals: 9,
-      chainId: "7565164",
-      chainName: "Solana",
-      isNative: true,
-      preferred: false,
-      purpose: "native_fee",
-      aliases: ["sol", "gas"],
-    },
-  ];
-}
-
-function filterDepositAssets(
-  venue: AgentWalletVenue,
-  assetQuery: string | undefined,
-): AgentDepositAsset[] {
-  const assets = depositAssetsForVenue(venue);
-  const normalizedQuery = normalizeAssetLookup(assetQuery);
-  if (!normalizedQuery) return assets;
-  return assets.filter((asset) => {
-    const values = [
-      asset.id,
-      asset.symbol,
-      asset.name,
-      asset.address,
-      asset.mint,
-      ...asset.aliases,
-    ];
-    return values.some(
-      (value) => normalizeAssetLookup(value) === normalizedQuery,
-    );
-  });
 }
 
 function baseBalance(
@@ -1680,16 +1500,20 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
   const agentFundingAuth = createAgentAuthMiddleware({
     requiredScopes: ["read:funding"],
   });
+  const agentIntentPrepareAuth = createAgentAuthMiddleware({
+    requiredScopes: ["prepare:intents"],
+  });
 
   r.get("/agent/capabilities", async (_request, reply) => {
     reply.header("Content-Type", "application/json; charset=utf-8");
     return reply.send({
       ok: true,
       enabled: env.agentAuthEnabled,
-      scopes: AgentAuthService.allowedReadScopes(),
+      scopes: AgentAuthService.allowedScopes(),
       approvalTtlMs: env.agentAuthApprovalTtlMs,
       defaultGrantTtlMs: env.agentGrantDefaultTtlMs,
       maxReadGrantTtlMs: env.agentGrantMaxReadTtlMs,
+      maxWriteGrantTtlMs: env.agentGrantMaxWriteTtlMs,
       pollIntervalSec: Math.ceil(env.agentAuthPollIntervalMs / 1000),
     });
   });
@@ -1943,6 +1767,170 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
         request.query.limit,
       );
       return reply.send({ ok: true, items });
+    },
+  );
+
+  r.post(
+    "/agent/intents/preview",
+    {
+      preHandler: agentIntentPrepareAuth,
+      schema: { body: agentIntentRequestSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const grant = request.agentGrant;
+      if (!user || !grant) {
+        reply.code(401);
+        return reply.send({ error: "agent_auth_required" });
+      }
+      try {
+        const preview = await previewAgentIntent({
+          db: pool,
+          user,
+          grant,
+          request: request.body,
+        });
+        await AgentAuthService.recordAuditEvent({
+          userId: user.id,
+          grantId: grant.id,
+          eventType: "agent_intent_previewed",
+          actorType: "agent",
+          userAgent: readRequestUserAgent(request),
+          metadata: {
+            kind: request.body.kind,
+            venue: request.body.venue ?? null,
+            marketId: request.body.marketId ?? null,
+            decision: preview.policy.decision,
+            blockers: preview.blockers,
+          },
+        });
+        return reply.send({ ok: true, preview });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/agent/intents",
+    {
+      preHandler: agentIntentPrepareAuth,
+      schema: { body: agentIntentRequestSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const grant = request.agentGrant;
+      if (!user || !grant) {
+        reply.code(401);
+        return reply.send({ error: "agent_auth_required" });
+      }
+      try {
+        const result = await createAgentIntent({
+          db: pool,
+          user,
+          grant,
+          request: request.body,
+        });
+        return reply.send({
+          ok: true,
+          intent: result.intent,
+          preview: result.preview,
+          created: result.created,
+        });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/agent/funding-plan",
+    {
+      preHandler: agentIntentPrepareAuth,
+      schema: { body: agentFundingPlanBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const grant = request.agentGrant;
+      if (!user || !grant) {
+        reply.code(401);
+        return reply.send({ error: "agent_auth_required" });
+      }
+      try {
+        const fundingPlan = await buildAgentFundingPlan({
+          db: pool,
+          user,
+          grant,
+          request: request.body,
+        });
+        await AgentAuthService.recordAuditEvent({
+          userId: user.id,
+          grantId: grant.id,
+          eventType: "agent_funding_plan_previewed",
+          actorType: "agent",
+          userAgent: readRequestUserAgent(request),
+          metadata: {
+            venue: request.body.venue ?? null,
+            marketId: request.body.marketId ?? null,
+            walletRequested: Boolean(request.body.walletAddress),
+          },
+        });
+        return reply.send({ ok: true, fundingPlan });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
+    },
+  );
+
+  r.get(
+    "/agent/intents/review/:reviewToken",
+    {
+      preHandler: [requireAgentAuthEnabled, browserAuth],
+      schema: { params: agentIntentReviewParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      const intent = await getAgentIntentReview({
+        db: pool,
+        user,
+        reviewToken: request.params.reviewToken,
+      });
+      if (!intent) {
+        reply.code(404);
+        return reply.send({ error: "agent_intent_not_found" });
+      }
+      return reply.send({ ok: true, intent });
+    },
+  );
+
+  r.get(
+    "/agent/intents/:id",
+    {
+      preHandler: agentIntentPrepareAuth,
+      schema: { params: agentIntentParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const grant = request.agentGrant;
+      if (!user || !grant) {
+        reply.code(401);
+        return reply.send({ error: "agent_auth_required" });
+      }
+      const intent = await getAgentIntentById({
+        db: pool,
+        user,
+        grant,
+        id: request.params.id,
+      });
+      if (!intent) {
+        reply.code(404);
+        return reply.send({ error: "agent_intent_not_found" });
+      }
+      return reply.send({ ok: true, intent });
     },
   );
 
@@ -2677,81 +2665,17 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: query.walletAddress,
           wallets: query.wallets,
         });
-        const requestedVenue = query.venue;
-        const items = (
-          await Promise.all(
-            wallets.flatMap((wallet) => {
-              const walletType = inferWalletType(wallet);
-              const venues =
-                requestedVenue != null
-                  ? [requestedVenue]
-                  : venuesForWallet(wallet);
-              return venues.flatMap((venue) => {
-                if (venue === "kalshi" && walletType !== "solana") return null;
-                if (venue !== "kalshi" && walletType !== "ethereum")
-                  return null;
-                return filterDepositAssets(venue, query.asset).map(
-                  async (asset) => {
-                    let targetAddress = wallet.walletAddress;
-                    let targetKind: "trading_wallet" | "venue_funder" =
-                      "trading_wallet";
-                    if (venue === "polymarket") {
-                      const creds = await AuthService.getVenueCredentialsInfo(
-                        user.id,
-                        "polymarket",
-                        wallet.walletAddress,
-                      );
-                      if (creds?.funderAddress) {
-                        targetAddress = creds.funderAddress;
-                        targetKind = "venue_funder";
-                      }
-                    }
-                    return {
-                      venue,
-                      walletAddress: wallet.walletAddress,
-                      walletType,
-                      targetAddress,
-                      targetKind,
-                      chainId: asset.chainId,
-                      chainName: asset.chainName,
-                      asset: {
-                        id: asset.id,
-                        symbol: asset.symbol,
-                        name: asset.name,
-                        address: asset.address,
-                        mint: asset.mint,
-                        decimals: asset.decimals,
-                        isNative: asset.isNative,
-                        preferred: asset.preferred,
-                        purpose: asset.purpose,
-                      },
-                      depositUri: null,
-                      qrPayload: targetAddress,
-                      depositPageUrl: buildDepositPageUrl({
-                        venue,
-                        targetAddress,
-                        asset,
-                      }),
-                      warnings:
-                        asset.purpose === "convertible"
-                          ? [
-                              "This asset may need conversion before it can be used as venue collateral.",
-                            ]
-                          : [],
-                    };
-                  },
-                );
-              });
-            }),
-          )
-        ).filter((item): item is NonNullable<typeof item> => Boolean(item));
+        const depositTargets = await buildAgentDepositTargets({
+          userId: user.id,
+          wallets,
+          venue: query.venue,
+          asset: query.asset,
+        });
         return reply.send({
           ok: true,
-          items,
-          warnings:
-            query.asset && items.length === 0
-              ? [`No deposit target supports asset '${query.asset}'.`]
-              : [],
+          items: depositTargets.items,
+          blockers: depositTargets.blockers,
+          warnings: depositTargets.warnings,
         });
       } catch (error) {
         return handleAgentError(error, reply);
