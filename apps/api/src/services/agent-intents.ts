@@ -13,6 +13,14 @@ import {
   venuesForWallet,
 } from "./agent-deposit-targets.js";
 import {
+  prepareAgentBridgeQuote,
+  prepareAgentRedeemPlan,
+  prepareAgentTradeQuote,
+  resolveAgentTradeOutcomeSide,
+  resolveAgentTradeOutcomeToken,
+  type AgentIntentPreparationDeps,
+} from "./agent-intent-preparation.js";
+import {
   fetchMarketDetails,
   type MarketDetailsRow,
 } from "../repos/unified-read.js";
@@ -30,7 +38,12 @@ type AgentIntentStatus =
   | "pending_confirmation"
   | "blocked"
   | "expired"
-  | "cancelled";
+  | "cancelled"
+  | "approved"
+  | "rejected"
+  | "executing"
+  | "executed"
+  | "failed";
 type PolicyDecision = "allowed_with_confirmation" | "blocked";
 
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -53,8 +66,12 @@ type AgentIntentRow = {
   resolved_payload: Record<string, unknown>;
   funding_plan: Record<string, unknown>;
   policy_result: Record<string, unknown>;
+  execution_result: Record<string, unknown>;
   blockers: string[];
   warnings: string[];
+  approved_at: Date | null;
+  rejected_at: Date | null;
+  executed_at: Date | null;
   expires_at: Date;
   created_at: Date;
   updated_at: Date;
@@ -241,43 +258,6 @@ function mapMarket(row: MarketDetailsRow): Record<string, unknown> {
   };
 }
 
-function resolveOutcomeToken(
-  row: MarketDetailsRow,
-  outcome: "YES" | "NO" | undefined,
-): string | null {
-  if (outcome === "NO") return row.token_no;
-  return row.token_yes;
-}
-
-function resolveOutcomeSide(input: {
-  row: MarketDetailsRow;
-  outcome: "YES" | "NO" | undefined;
-  tokenId: string | undefined;
-}): "YES" | "NO" | undefined {
-  if (input.outcome) return input.outcome;
-  if (!input.tokenId) return "YES";
-  if (input.tokenId === input.row.token_yes) return "YES";
-  if (input.tokenId === input.row.token_no) return "NO";
-  return undefined;
-}
-
-function priceForOutcome(
-  row: MarketDetailsRow,
-  side: "BUY" | "SELL",
-  outcome: "YES" | "NO" | undefined,
-): number | null {
-  const yes = outcome !== "NO";
-  const raw =
-    side === "BUY"
-      ? yes
-        ? (row.best_ask_yes ?? row.best_ask ?? row.last_price)
-        : (row.best_ask_no ?? row.last_price)
-      : yes
-        ? (row.best_bid_yes ?? row.best_bid ?? row.last_price)
-        : (row.best_bid_no ?? row.last_price);
-  return asNumber(raw);
-}
-
 function maxTradeUsdFromLimits(limits: Record<string, unknown>): number | null {
   for (const key of ["maxTradeUsd", "maxOrderUsd", "tradeUsd", "perTradeUsd"]) {
     const value = asNumber(limits[key]);
@@ -374,6 +354,7 @@ export async function previewAgentIntent(input: {
   user: User;
   grant: AgentGrant;
   request: AgentIntentRequest;
+  preparation?: AgentIntentPreparationDeps;
 }): Promise<IntentPreview> {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -414,7 +395,7 @@ export async function previewAgentIntent(input: {
       blockers.push("market_not_accepting_orders");
     }
     const resolvedOutcome = market
-      ? resolveOutcomeSide({
+      ? resolveAgentTradeOutcomeSide({
           row: market,
           outcome: input.request.outcome,
           tokenId: input.request.tokenId,
@@ -422,45 +403,28 @@ export async function previewAgentIntent(input: {
       : input.request.outcome;
     const tokenId =
       input.request.tokenId ??
-      (market ? resolveOutcomeToken(market, resolvedOutcome) : null);
+      (market ? resolveAgentTradeOutcomeToken(market, resolvedOutcome) : null);
     if (!tokenId) blockers.push("token_required");
     if (market && input.request.tokenId && !resolvedOutcome) {
       blockers.push("token_not_in_market");
     }
-    const price =
-      input.request.orderType === "limit"
-        ? (input.request.limitPrice ?? null)
-        : market && resolvedOutcome
-          ? priceForOutcome(market, input.request.side, resolvedOutcome)
-          : null;
-    if (price == null || price <= 0) blockers.push("quote_unavailable");
-    const shares =
-      price != null && price > 0
-        ? input.request.amountType === "usd"
-          ? input.request.amount / price
-          : input.request.amount
-        : null;
-    notionalUsd =
-      input.request.amountType === "usd"
-        ? input.request.amount
-        : shares != null && price != null
-          ? shares * price
-          : null;
-    quote = {
-      source:
-        venue === "limitless" ? "orderbook_estimate" : "top_of_book_estimate",
-      side: input.request.side,
-      outcome: resolvedOutcome ?? null,
-      tokenId,
-      amountType: input.request.amountType,
-      amount: input.request.amount,
-      estimatedPrice: price,
-      estimatedShares: shares,
-      estimatedNotionalUsd: notionalUsd,
-      orderType: input.request.orderType,
-      limitPrice: input.request.limitPrice ?? null,
-      slippageBps: input.request.slippageBps ?? null,
-    };
+    if (market && resolvedOutcome && tokenId) {
+      const prepared = await prepareAgentTradeQuote({
+        db: input.db,
+        user: input.user,
+        wallet,
+        market,
+        venue,
+        request: input.request,
+        outcome: resolvedOutcome,
+        tokenId,
+        preparation: input.preparation,
+      });
+      quote = prepared.quote;
+      notionalUsd = prepared.notionalUsd;
+      blockers.push(...prepared.blockers);
+      warnings.push(...prepared.warnings);
+    }
     if (venue && wallet) {
       fundingPlan = await buildAgentFundingPlan({
         db: input.db,
@@ -476,23 +440,18 @@ export async function previewAgentIntent(input: {
       });
     }
   } else if (input.request.kind === "bridge") {
-    warnings.push(
-      "Bridge execution is disabled in this preview phase; this intent records the requested bridge route for review.",
-    );
-    fundingPlan = {
-      source: {
-        chainId: input.request.srcChainId ?? null,
-        token: input.request.srcToken ?? null,
-        amountIn: input.request.amountIn ?? null,
-      },
-      destination: {
-        chainId: input.request.dstChainId ?? null,
-        token: input.request.dstToken ?? null,
-        venue: venue ?? null,
-      },
-      bridgeSuggestions: [],
-      note: "No bridge order was created in this phase.",
-    };
+    const prepared = await prepareAgentBridgeQuote({
+      db: input.db,
+      user: input.user,
+      wallet,
+      venue,
+      request: input.request,
+      preparation: input.preparation,
+    });
+    quote = prepared.quote;
+    fundingPlan = prepared.fundingPlan;
+    blockers.push(...prepared.blockers);
+    warnings.push(...prepared.warnings);
   } else if (input.request.kind === "cancel_order") {
     if (!wallet) {
       blockers.push("missing_wallet");
@@ -515,18 +474,18 @@ export async function previewAgentIntent(input: {
       }
     }
   } else if (input.request.kind === "redeem") {
-    warnings.push(
-      "Redemption execution is not available in Phase 3; this preview validates market context only.",
-    );
-    if (!input.request.marketId && !input.request.tokenId) {
-      blockers.push("market_or_token_required");
-    }
-    if (
-      market?.redemption_status &&
-      market.redemption_status !== "redeemable"
-    ) {
-      blockers.push("not_redeemable");
-    }
+    const prepared = await prepareAgentRedeemPlan({
+      db: input.db,
+      user: input.user,
+      wallet,
+      market,
+      venue,
+      request: input.request,
+      preparation: input.preparation,
+    });
+    quote = prepared.quote;
+    blockers.push(...prepared.blockers);
+    warnings.push(...prepared.warnings);
   }
 
   blockers.push(...stringArrayField(fundingPlan, "blockers"));
@@ -576,8 +535,12 @@ function mapIntent(row: AgentIntentRow, reviewUrl?: string | null) {
     preview: row.resolved_payload,
     fundingPlan: row.funding_plan,
     policy: row.policy_result,
+    executionResult: row.execution_result,
     blockers: row.blockers,
     warnings: row.warnings,
+    approvedAt: row.approved_at?.toISOString() ?? null,
+    rejectedAt: row.rejected_at?.toISOString() ?? null,
+    executedAt: row.executed_at?.toISOString() ?? null,
     reviewUrl: reviewUrl ?? null,
     expiresAt: row.expires_at.toISOString(),
     createdAt: row.created_at.toISOString(),
@@ -625,6 +588,7 @@ export async function createAgentIntent(input: {
   user: User;
   grant: AgentGrant;
   request: AgentIntentRequest;
+  preparation?: AgentIntentPreparationDeps;
 }): Promise<CreateIntentResult> {
   const existing = assertIdempotentIntentRequest(
     await loadExistingIntentByIdempotency({

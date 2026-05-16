@@ -327,11 +327,13 @@ implemented in code:
 
 Still not implemented:
 
-- Intent, trading, bridge, redemption, or delegated signing flows.
+- Confirmation-required execution for trade, bridge, cancel, and redemption
+  intents.
 - Generated OpenAPI-derived client types for the external `hunch-agent-tools`
   repo boundary.
 - Full automated install/release path for public npm/plugin distribution beyond
   local release artifacts.
+- Delegated signing / no-confirmation automation.
 
 ### Skill Runtime Wrapper And Session
 
@@ -620,7 +622,8 @@ Wallet selection needs one Phase 2B adjustment before private account routes are
 useful. A device request with wallet-sensitive scopes (`read:wallets`,
 `read:positions`, `read:orders`, or `read:funding`) and no
 `requested_wallet_addresses` should mean "let the signed-in user choose linked
-wallets on the approval page", not "the agent can never receive wallet access".
+wallets on the grant approval page", not "the agent can never receive wallet
+access".
 If the request does include specific wallet addresses, approval must still be a
 subset of those requested addresses. This keeps explicit narrow requests strict,
 while allowing a simple `hunch auth login --scopes read:account,read:wallets`
@@ -1081,9 +1084,9 @@ Frontend/client grounding:
   Phase 2B frontend additions should go in `Hunch_App/src/lib/api/agent.ts` and
   call `/api/hunch/agent/*` through the existing catch-all proxy. No new Next
   proxy route is required.
-- The approval page currently displays requested scopes/wallets and approves
-  exactly the requested wallet list. For 2B, it must render a minimal wallet
-  selector whenever wallet-sensitive scopes are requested. If the agent
+- The grant approval page currently displays requested scopes/wallets and
+  approves exactly the requested wallet list. For 2B, it must render a minimal
+  wallet selector whenever wallet-sensitive scopes are requested. If the agent
   requested specific wallets, only those linked wallets are selectable. If it
   requested wallet-sensitive scopes with no specific wallets, all linked wallets
   are selectable and the user must select at least one before approval.
@@ -1469,24 +1472,31 @@ For v1, use `always` and `policy` with policy execution limited to operations
 that do not require a wallet signature. Trade/bridge execution should remain
 confirmation-required unless delegated signing is explicitly added.
 
-## Browser Approval Links
+## Browser Grant And Intent Links
 
 The agent should not ask users to paste secrets into chat. For login and write
-approval, it should return a Hunch link.
+review, it should return a Hunch link.
 
-Auth link:
+Agent grant approval link:
 
 ```text
 https://app.hunch.trade/agent/approve/<approval-token>
 ```
 
-Intent approval link:
+This page approves or denies the agent grant: scopes, wallets, venues, limits,
+and expiry. It does not approve a trade, bridge, cancel, or redemption.
+
+Intent review link:
 
 ```text
-https://app.hunch.trade/agent/intents/<intent-id>
+https://app.hunch.trade/agent/intents/<review-token>
 ```
 
-The approval page should show:
+This page reviews one prepared executable action. The browser loads it through
+the review token, while the agent may still fetch the same intent by UUID from
+the agent-token API.
+
+The intent review page should show:
 
 - requesting agent/grant name;
 - action type;
@@ -1495,7 +1505,8 @@ The approval page should show:
 - market/event;
 - side/outcome;
 - amount, price, slippage, fees, and quote age;
-- funding target if funds are missing;
+- funding/readiness guidance if funds are missing, clearly labeled as guidance
+  rather than selected execution steps;
 - policy decision and remaining limits;
 - whether the action will execute once or update an automation policy.
 
@@ -1533,7 +1544,7 @@ complex automation-policy builder, or Tailwind breakpoint prefixes such as
 stacked responsive layout with constrained content width, clear loading/error
 states, and compact cards or tables matching existing app surfaces.
 
-### 1. Agent Approval Flow
+### 1. Agent Grant Approval Flow
 
 Add a browser route such as:
 
@@ -1544,7 +1555,7 @@ Add a browser route such as:
 Responsibilities:
 
 - if the user is not logged in, use the existing Hunch/Privy auth flow and
-  return to the same approval URL after login;
+  return to the same grant approval URL after login;
 - load the pending device/auth session from the backend;
 - show the requesting agent name, client/app metadata, requested scopes,
   requested wallets/venues, expiry, and requested policy limits;
@@ -1569,6 +1580,9 @@ Required states:
 The backend returns the agent token only to the polling MCP/CLI session after
 approval. The frontend only approves or denies the pending session with the
 user's normal Hunch session.
+
+Do not call this an "intent approval" page in code, copy, docs, or tests. This
+route approves agent access only.
 
 ### 2. Agent Access Settings
 
@@ -1597,7 +1611,7 @@ agent without using the CLI or MCP client.
 Add a browser route such as:
 
 ```text
-/agent/intents/:intentId
+/agent/intents/:reviewToken
 ```
 
 Responsibilities:
@@ -1619,6 +1633,11 @@ Responsibilities:
 
 Later, this page can offer `approve similar actions within limits`, but the
 first version should default to explicit per-intent confirmation.
+
+Do not use `/agent/approve/:approvalToken` for intent review. The backend agent
+API may expose `GET /agent/intents/:id` for the agent token, but browser users
+should open the review-token URL so the raw intent UUID is not the only bearer
+of the review link.
 
 ### 4. Frontend API Integration
 
@@ -1664,7 +1683,7 @@ The first frontend milestone should ship only:
 
 1. `/agent/approve/:approvalToken`;
 2. `/settings/agents`;
-3. `/agent/intents/:intentId`.
+3. `/agent/intents/:reviewToken`.
 
 Avoid a complex automation-policy builder until confirmation-required intents
 are working end to end. A compact policy summary plus revoke controls are enough
@@ -1743,8 +1762,10 @@ and intent APIs to the agent.
 
 User flow:
 
-1. User opens `/agent/approve/:approvalToken` or `/agent/intents/:id`.
-2. User selects automatic execution and limits.
+1. User opens `/agent/approve/:approvalToken` to approve the agent grant, or
+   `/agent/intents/:reviewToken` to review one prepared action.
+2. User selects automatic execution and limits only from the grant/policy UI;
+   a one-off intent review should not silently widen the grant.
 3. Hunch creates or reuses an app authorization key / key quorum and asks Privy
    to add it as a signer for the selected Trading Wallet, with policy IDs that
    match the user's selected limits.
@@ -1841,9 +1862,10 @@ POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
 POST /agent/intents/:id/approve
+POST /agent/intents/:id/reject
 POST /agent/intents/:id/execute
 GET  /agent/audit
-GET  /agent/funding-plan
+POST /agent/funding-plan
 ```
 
 These routes have three different auth contexts:
@@ -1865,7 +1887,7 @@ POST /agent/intents/preview
 POST /agent/intents
 GET  /agent/intents/:id
 POST /agent/intents/:id/execute
-GET  /agent/funding-plan
+POST /agent/funding-plan
 ```
 
 Browser-user session routes:
@@ -1876,13 +1898,18 @@ POST /agent/device/approve
 POST /agent/device/deny
 GET  /agent/grants
 DELETE /agent/grants/:id
+GET  /agent/intents/review/:reviewToken
 POST /agent/intents/:id/approve
+POST /agent/intents/:id/reject
 GET  /agent/audit
 ```
 
 Do not let an agent token approve its own device login, widen its own grant, or
-approve its own pending intent. Those actions require the user's normal Hunch
-session and, when signing is needed, Privy authorization in the browser.
+approve/reject its own pending intent. Those actions require the user's normal
+Hunch session and, when signing is needed, Privy authorization in the browser.
+Execution may be requested by the agent only after approval and policy checks,
+but the execution endpoint must use the persisted approved intent rather than a
+fresh agent-supplied payload.
 
 For Phase 2, grants are created only through device approval plus the first
 successful token poll. Do not add a separate `POST /agent/grants` creation path
@@ -1980,8 +2007,9 @@ create index if not exists idx_agent_audit_events_intent_created
 
 Intent idempotency and state-machine rules:
 
-- clients may provide an idempotency key, but the backend generates one if
-  absent before inserting the intent;
+- clients must provide a non-null idempotency key for durable write intents;
+  backend-generated keys can be added later only if every tool/client echoes the
+  generated key back to the user and tests cover retry behavior;
 - all write execution uses the persisted intent row and never reconstructs an
   independent venue action from a duplicate request;
 - `pending_confirmation` can only become `approved`, `rejected`, `expired`, or
@@ -2420,24 +2448,126 @@ Phase 3A implemented locally:
 
 Current next steps:
 
-1. Apply migration `0107_agent_intents.sql` in local/staging and run a local
-   smoke flow: MCP auth with `intent-preview`, preview a small trade, create an
-   intent, and open the returned review URL in the frontend.
-2. Add or backfill missing frontend tests for `/agent/approve/:approvalToken`,
-   `/settings/agents`, revoke, deny, logged-out redirect, and "token never
-   appears in browser response" behavior. Add review-page render tests once the
-   UI test harness is ready.
-3. Tighten operational rollout docs: required env vars, migration order,
+1. Keep `0107_agent_intents.sql` mutable until production deployment. It is
+   still WIP and should be edited rather than followed by compatibility
+   migrations if Phase 4 needs status or column changes.
+2. Repeat the local smoke flow after each rebase: MCP auth with
+   `intent-preview`, preview a small trade, create an intent, and open the
+   returned `/agent/intents/:reviewToken` URL in the frontend.
+3. Add or backfill missing frontend tests for the agent grant page
+   `/agent/approve/:approvalToken`, `/settings/agents`, revoke, deny,
+   logged-out redirect, and "token never appears in browser response"
+   behavior. Add separate intent review-page tests for
+   `/agent/intents/:reviewToken`.
+4. Tighten operational rollout docs: required env vars, migration order,
    feature flag state, local/prod plugin release process, and rollback steps.
-4. Decide whether generated OpenAPI types should become the agent-tools API
+5. Decide whether generated OpenAPI types should become the agent-tools API
    boundary before Phase 3. This is useful but should not block Phase 2B if the
    current narrow schemas remain covered by tests.
-5. Treat `discovery_map(level=1)` empty results on local as expected when the
+6. Treat `discovery_map(level=1)` empty results on local as expected when the
    local map is not populated; it is not an MCP schema blocker.
-6. Start Phase 3B only after Phase 3A smoke passes. Phase 3B should improve
+7. Start Phase 3B only after Phase 3A smoke passes. Phase 3B should improve
    quote accuracy and readiness integration by extracting shared quote/prepare
    service functions, still without MCP-side transaction construction or
    unattended signing.
+
+### Phase 3B Code Research Findings
+
+This pass inspected the current frontend and backend implementations on the
+`agents` branch after `develop` was merged.
+
+Route terminology is now fixed for implementation planning:
+
+- `/agent/approve/:approvalToken` is the browser agent grant approval page. It
+  currently uses `Hunch_App/src/app/agent/approve/[approvalToken]`, Privy auth,
+  the existing browser-session proxy, and wallet selection for
+  wallet-sensitive scopes. It should never approve a trade/bridge/cancel/redeem
+  intent.
+- `/agent/intents/:reviewToken` is the browser intent review page. It currently
+  uses `Hunch_App/src/app/agent/intents/[reviewToken]` and the backend
+  `GET /agent/intents/review/:reviewToken` route. It is preview-only today and
+  has no confirm/reject/execute controls.
+- `GET /agent/intents/:id` is an agent-token API lookup by UUID. It is not the
+  same browser route as the review URL.
+
+Frontend execution UI grounding:
+
+- Normal trade confirmation is centered on `ConfirmationDialog`,
+  `useConfirmationDialogModel`, `useVenueTradeAdapters`, and
+  `useConfirmationSteps`. Phase 4 should reuse or extract these models rather
+  than build a parallel trading confirmation stack.
+- Venue readiness and missing-step UI already model auth, wallet type, chain
+  mismatch, connect/setup, approvals, insufficient balance, bridge suggestions,
+  and native-fee funding. The agent intent page should present the same concepts
+  from backend-prepared intent data.
+- The existing deposit dialog is opened from root query params such as
+  `deposit=manual`, `depositVenue`, `depositTarget`, `depositAsset`,
+  `depositChainId`, and `depositToken` through `HeaderWallet`. A bare root URL
+  may look like the normal homepage until the user is authenticated and wallet
+  rows are mounted. For agent funding links, Phase 3B/4 should either harden
+  this root-prefill flow after login or add a dedicated first-party funding page
+  that does not depend on the header wallet menu being visible.
+- Frontend work must keep the existing app style, use compact cards/tables, and
+  avoid Tailwind breakpoint prefixes because project breakpoints are disabled.
+
+Backend intent grounding:
+
+- `agent_intents` currently stores only `trade`, `bridge`, `cancel_order`, and
+  `redeem`. Manual deposit/funding guidance and generic venue setup are
+  intentionally not durable intent kinds.
+- Current statuses are `pending_confirmation`, `blocked`, `expired`, and
+  `cancelled`. Phase 4 needs `approved`, `rejected`, `executing`, `executed`,
+  and `failed` plus execution-result/audit fields before deployment.
+- `createAgentIntent` now checks idempotency before preview work and returns the
+  persisted row for same-payload retries. Keep that invariant for future
+  execution endpoints.
+- Current trade previews are top-of-book estimates. Phase 3B must extract shared
+  quote/prepare services from existing venue routes instead of making the agent
+  preview call private HTTP routes or reimplement venue math.
+
+Venue-specific implementation facts:
+
+- Polymarket routes already provide `/trade/polymarket/quote`,
+  `/trade/polymarket/redemption-plan`,
+  `/trade/polymarket/embedded/ensure-ready/prepare`,
+  `/trade/polymarket/embedded/ensure-ready/execute`,
+  `POST /trade/polymarket/order`, and `DELETE /trade/polymarket/order`.
+  Execution requires an EVM signer, stored CLOB credentials, the configured
+  funder/vault, pUSD collateral, signer/funder approvals, fee authorization
+  where applicable, CLOB V2 order hash validation, and sell-balance rechecks.
+- Kalshi uses DFlow under `/trade/kalshi` and `/trade/dflow`: `/quote`,
+  `/order`, `/swap`, `/submit`, `/executions`, `/order-status`, and
+  `/tx-status`. It is Solana-based, uses input/output mints instead of CLOB
+  token IDs, enforces proof/geofence policy for buy flows, and may have
+  sponsored native-fee behavior for embedded Solana wallets.
+- Limitless routes already provide embedded readiness, embedded order signing,
+  `/trade/limitless/amm/quote`, `POST /trade/limitless/order`,
+  `/trade/limitless/redemption-plan`, `/trade/limitless/redemption/status`,
+  and cancel endpoints. Execution depends on partner HMAC/profile readiness,
+  EVM/Base wallet state, AMM vs CLOB mode, token validation by market slug, and
+  conditional-token/NegRisk adapter approvals.
+- Bridge routes already provide `/bridge/quote`, `/bridge/order`,
+  `/bridge/submit`, and `/bridge/orders` for deBridge/Across, same-chain and
+  cross-chain swaps. A bridge intent should freeze a selected backend-derived
+  route/quote and later execute only that route, recording the `bridgeOrderId`
+  and transaction hashes.
+- Redemption execution is not a single existing backend route for every venue.
+  Polymarket and Limitless have redemption-plan endpoints that return on-chain
+  target/data; current frontend hooks execute those plans with wallet/relayer
+  flows. Phase 4 should either extract shared backend redemption execution
+  services or keep browser-side execution on the intent review page while still
+  writing terminal intent/audit state through the agent intent API.
+
+Phase 3B implementation requirement:
+
+- Build backend `prepare` services that return normalized, user-facing preview
+  data for trade, bridge, cancel, and redeem, using the existing venue logic
+  above.
+- These services must not require MCP-side transaction construction and must not
+  store raw Privy authorization signatures, raw signed transactions, bearer
+  tokens, or venue partner credentials.
+- The intent review page should show backend-prepared data only in Phase 3B.
+  Confirm/reject/execute controls belong to Phase 4.
 
 ### Phase 3: Preview And Intent Records
 
@@ -2447,8 +2577,10 @@ Current next steps:
   missing-balance guidance, and a canonical Hunch-hosted funding page URL.
   **Implemented for deposit-target guidance; bridge suggestions stay empty
   until Phase 3B.**
-- Normalize venue setup, funding, trade, bridge, cancel, and redemption requests
-  into one intent model. **Implemented.**
+- Normalize trade, bridge, cancel, and redemption requests into one intent
+  model. **Implemented for those executable intent kinds. Funding/manual
+  deposit guidance and generic venue setup were intentionally removed from the
+  durable intent model.**
 - Reuse existing market lookup, quote, bridge, and venue preparation services.
   **Partially implemented: market/order lookup is reused; trade quote is a
   top-of-book estimate; bridge/venue preparation remains Phase 3B.**
@@ -2467,17 +2599,37 @@ Current next steps:
 
 ### Phase 4: Confirmation-Required Execution
 
-- Add `/agent/intents/:intentId` for pending agent intents.
+- Expand the WIP `agent_intents` schema before production deployment or add a
+  migration if it has already shipped. Required additions are statuses
+  `approved`, `rejected`, `executing`, `executed`, and `failed`, durable
+  `execution_result`, `approved_at`, `rejected_at`, and `executed_at`, plus an
+  audit/intents link if not already present.
+- Add browser-session routes for `GET /agent/intents/review/:reviewToken`,
+  `POST /agent/intents/:id/approve`, and `POST /agent/intents/:id/reject`.
+  The review route is implemented; approve/reject are pending.
+- Add execution through `POST /agent/intents/:id/execute` using the persisted
+  intent row. The agent may call execute only after approval/policy allows it;
+  the endpoint must not accept a fresh venue payload that can differ from the
+  approved intent.
 - User approval should run the same Privy authorization-signature flow used by
-  normal trading.
-- Execution should dispatch to existing venue/bridge routes or extracted shared
-  service functions.
+  normal trading. The browser intent page should reuse/extract
+  `ConfirmationDialog`, `useConfirmationDialogModel`, `useVenueTradeAdapters`,
+  and venue missing-step models where practical.
+- Execution should dispatch to extracted shared service functions from the
+  existing venue/bridge routes. Avoid backend route-to-route HTTP calls and
+  avoid duplicating Polymarket, DFlow, Limitless, bridge, or redemption math in
+  the agent service.
+- Bind approval to the exact persisted payload. If quote economics, funding, or
+  market status are stale, return a required-refresh response and show the user
+  the changed economics before approval or execution.
 - Add tests that a trade intent cannot execute without approval/signatures and
   that approval binds to the exact prepared payload.
 - Add tests for legal/illegal status transitions, row locking, duplicate execute
-  calls, and terminal-result replay.
+  calls, terminal-result replay, expiry, stale quote refresh, revoked grant, and
+  wallet unlink after intent creation.
 - Add frontend tests for intent details, reject, confirm, stale quote handling,
-  insufficient-funds/funding guidance, and Privy authorization errors.
+  insufficient-funds/funding guidance, deposit-link behavior after login, and
+  Privy authorization errors.
 
 ### Phase 5: Policy Automation
 

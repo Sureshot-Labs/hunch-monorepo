@@ -6,7 +6,17 @@ CREATE TABLE IF NOT EXISTS agent_intents (
     kind IN ('trade', 'bridge', 'cancel_order', 'redeem')
   ),
   status text NOT NULL CHECK (
-    status IN ('pending_confirmation', 'blocked', 'expired', 'cancelled')
+    status IN (
+      'pending_confirmation',
+      'blocked',
+      'expired',
+      'cancelled',
+      'approved',
+      'rejected',
+      'executing',
+      'executed',
+      'failed'
+    )
   ),
   idempotency_key text NOT NULL,
   venue text,
@@ -19,10 +29,14 @@ CREATE TABLE IF NOT EXISTS agent_intents (
   resolved_payload jsonb NOT NULL DEFAULT '{}',
   funding_plan jsonb NOT NULL DEFAULT '{}',
   policy_result jsonb NOT NULL DEFAULT '{}',
+  execution_result jsonb NOT NULL DEFAULT '{}',
   blockers text[] NOT NULL DEFAULT '{}',
   warnings text[] NOT NULL DEFAULT '{}',
   review_token_hash text NOT NULL,
   expires_at timestamptz NOT NULL,
+  approved_at timestamptz,
+  rejected_at timestamptz,
+  executed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (grant_id, idempotency_key)

@@ -101,6 +101,7 @@ import {
   getAgentIntentReview,
   previewAgentIntent,
 } from "../services/agent-intents.js";
+import { createDefaultAgentIntentPreparationDeps } from "../services/agent-intent-preparation.js";
 import {
   buildAgentDepositTargets,
   buildDepositPageUrl,
@@ -1481,6 +1482,7 @@ async function loadMarketReadinessBlockers(input: {
 
 export const agentRoutes: FastifyPluginAsync = async (app) => {
   const r = app.withTypeProvider<ZodTypeProvider>();
+  const agentIntentPreparation = createDefaultAgentIntentPreparationDeps();
   const browserAuth = createAuthMiddleware();
   const agentAccountAuth = createAgentAuthMiddleware({
     requiredScopes: ["read:account"],
@@ -1789,6 +1791,7 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           user,
           grant,
           request: request.body,
+          preparation: agentIntentPreparation,
         });
         await AgentAuthService.recordAuditEvent({
           userId: user.id,
@@ -1830,6 +1833,7 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
           user,
           grant,
           request: request.body,
+          preparation: agentIntentPreparation,
         });
         return reply.send({
           ok: true,

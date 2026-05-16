@@ -24,6 +24,9 @@ import {
   getAgentIntentById,
   previewAgentIntent,
 } from "./services/agent-intents.js";
+import type { AgentIntentPreparationDeps } from "./services/agent-intent-preparation.js";
+import { createDefaultAgentIntentPreparationDeps } from "./services/agent-intent-preparation.js";
+import { polymarketClient } from "./services/polymarket-client.js";
 import {
   buildAgentDepositTargets,
   buildDepositPageUrl,
@@ -168,8 +171,12 @@ function makeIntentRow(
     resolved_payload: resolved,
     funding_plan: {},
     policy_result: {},
+    execution_result: {},
     blockers: ["persisted"],
     warnings: [],
+    approved_at: null,
+    rejected_at: null,
+    executed_at: null,
     expires_at: new Date("2026-05-15T01:00:00.000Z"),
     created_at: new Date("2026-05-15T00:00:00.000Z"),
     updated_at: new Date("2026-05-15T00:00:00.000Z"),
@@ -332,6 +339,33 @@ await test("trade intent previews expose resolved outcome side", async () => {
     AuthService.getVenueCredentialsInfo = async () => null;
     await withAgentIntentStubs([testEvmWallet], async () => {
       const market = makeMarketRow();
+      const preparation: AgentIntentPreparationDeps = {
+        tradeQuoteProvider: async (input) => {
+          const estimatedPrice = input.outcome === "NO" ? 0.59 : 0.41;
+          const estimatedShares =
+            input.request.amountType === "usd"
+              ? input.request.amount / estimatedPrice
+              : input.request.amount;
+          const estimatedNotionalUsd =
+            input.request.amountType === "usd"
+              ? input.request.amount
+              : estimatedShares * estimatedPrice;
+          return {
+            quote: {
+              source: "test_venue_quote",
+              quoteStatus: "quoted",
+              outcome: input.outcome,
+              tokenId: input.tokenId,
+              estimatedPrice,
+              estimatedShares,
+              estimatedNotionalUsd,
+            },
+            notionalUsd: estimatedNotionalUsd,
+            blockers: [],
+            warnings: [],
+          };
+        },
+      };
       const defaultYes = await previewAgentIntent({
         db: fakePool([{ rows: [market] }, { rows: [market] }]),
         user: testUser,
@@ -345,10 +379,12 @@ await test("trade intent previews expose resolved outcome side", async () => {
           amount: 1,
           orderType: "market",
         },
+        preparation,
       });
       assert.equal(defaultYes.quote?.outcome, "YES");
       assert.equal(defaultYes.quote?.tokenId, "yes-token");
       assert.equal(defaultYes.quote?.estimatedPrice, 0.41);
+      assert.equal(defaultYes.quote?.source, "test_venue_quote");
 
       const explicitNoToken = await previewAgentIntent({
         db: fakePool([{ rows: [market] }, { rows: [market] }]),
@@ -364,6 +400,7 @@ await test("trade intent previews expose resolved outcome side", async () => {
           amount: 1,
           orderType: "market",
         },
+        preparation,
       });
       assert.equal(explicitNoToken.quote?.outcome, "NO");
       assert.equal(explicitNoToken.quote?.tokenId, "no-token");
@@ -372,6 +409,210 @@ await test("trade intent previews expose resolved outcome side", async () => {
   } finally {
     AuthService.getVenueCredentialsInfo = originalGetVenueCredentialsInfo;
   }
+});
+
+await test("trade intent preview uses venue quote preparation shape", async () => {
+  const originalGetVenueCredentialsInfo = AuthService.getVenueCredentialsInfo;
+  const polymarketClientForTest = polymarketClient as unknown as {
+    getOrderBook: typeof polymarketClient.getOrderBook;
+  };
+  const originalGetOrderBook = polymarketClientForTest.getOrderBook;
+  try {
+    AuthService.getVenueCredentialsInfo = async () => null;
+    polymarketClientForTest.getOrderBook = async () => ({
+      bids: [{ price: "0.39", size: "100" }],
+      asks: [{ price: "0.42", size: "100" }],
+      tickSize: 0.01,
+      minOrderSize: 5,
+      negRisk: false,
+    });
+    await withAgentIntentStubs([testEvmWallet], async () => {
+      const market = makeMarketRow({ best_ask_yes: 0.5 });
+      const preview = await previewAgentIntent({
+        db: fakePool([
+          { rows: [market] },
+          {
+            rows: [
+              {
+                polymarket_id: "market-1",
+                unified_market_id: "polymarket:market-1",
+                condition_id: "condition-1",
+                clob_token_ids: JSON.stringify(["yes-token", "no-token"]),
+                neg_risk: false,
+                order_price_min_tick_size: 0.01,
+                order_min_size: 5,
+                accepting_orders: true,
+                taker_fee_bps: null,
+                maker_fee_bps: null,
+              },
+            ],
+          },
+          { rows: [market] },
+        ]),
+        user: testUser,
+        grant: polymarketIntentGrant,
+        request: {
+          kind: "trade",
+          idempotencyKey: "trade-venue-quote-123",
+          marketId: "polymarket:market-1",
+          side: "BUY",
+          outcome: "YES",
+          amountType: "usd",
+          amount: 1,
+          orderType: "market",
+        },
+        preparation: createDefaultAgentIntentPreparationDeps(),
+      });
+      assert.deepEqual(preview.blockers, []);
+      assert.equal(preview.quote?.source, "polymarket_clob_quote");
+      assert.equal(preview.quote?.bestAsk, 0.42);
+      assert.equal(preview.quote?.estimatedPrice, 0.42);
+      assert.equal(preview.quote?.orderMinSize, 5);
+    });
+  } finally {
+    AuthService.getVenueCredentialsInfo = originalGetVenueCredentialsInfo;
+    polymarketClientForTest.getOrderBook = originalGetOrderBook;
+  }
+});
+
+await test("bridge intent preview freezes backend quote shape", async () => {
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const preview = await previewAgentIntent({
+      db: fakePool(),
+      user: testUser,
+      grant: polymarketIntentGrant,
+      request: {
+        kind: "bridge",
+        idempotencyKey: "bridge-preview-123",
+        venue: "polymarket",
+        walletAddress: testEvmWallet.walletAddress,
+        srcChainId: "8453",
+        dstChainId: "137",
+        srcToken: "base-usdc",
+        dstToken: "polymarket-pusd",
+        amountIn: "1000000",
+      },
+      preparation: {
+        bridgeQuoteProvider: async ({ swapType, request }) => ({
+          source: "test_bridge_quote",
+          quoteStatus: "quoted",
+          provider: "debridge",
+          swapType,
+          amountIn: request.amountIn,
+          dstAmountOut: "990000",
+        }),
+      },
+    });
+    assert.deepEqual(preview.blockers, []);
+    assert.equal(preview.quote?.source, "test_bridge_quote");
+    assert.equal(preview.quote?.swapType, "cross_chain");
+    assert.deepEqual(
+      (preview.fundingPlan?.bridgeQuote as Record<string, unknown>)
+        ?.dstAmountOut,
+      "990000",
+    );
+  });
+});
+
+await test("cancel intent preview validates order ownership scope and open status", async () => {
+  const closedOrder = {
+    id: "order-closed",
+    kind: "order",
+    venue: "polymarket",
+    wallet_address: testEvmWallet.walletAddress,
+    venue_order_id: "venue-order-1",
+    token_id: "yes-token",
+    side: "BUY",
+    outcome: "YES",
+    order_type: "limit",
+    price: "0.50",
+    size: "10",
+    status: "fulfilled",
+    filled_size: null,
+    average_fill_price: null,
+    expires_at: null,
+    created_at: null,
+    updated_at: null,
+    filled_at: null,
+    cancelled_at: null,
+    unified_market_id: "polymarket:market-1",
+    input_mint: null,
+    output_mint: null,
+    amount_in: null,
+    amount_out: null,
+    input_decimals: null,
+    output_decimals: null,
+    tx_signature: null,
+  } satisfies UnifiedOrderRow;
+
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const db = fakePool([{ rows: [closedOrder] }]);
+    const preview = await previewAgentIntent({
+      db,
+      user: testUser,
+      grant: polymarketIntentGrant,
+      request: {
+        kind: "cancel_order",
+        idempotencyKey: "cancel-closed-123",
+        orderId: "order-closed",
+        walletAddress: testEvmWallet.walletAddress,
+      },
+    });
+    assert.equal(preview.blockers.includes("order_not_open"), true);
+    assert.deepEqual(db.calls[0]?.values?.[1], [testEvmWallet.walletAddress]);
+  });
+
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const db = fakePool([{ rows: [{ ...closedOrder, status: "open" }] }]);
+    const preview = await previewAgentIntent({
+      db,
+      user: testUser,
+      grant: polymarketIntentGrant,
+      request: {
+        kind: "cancel_order",
+        idempotencyKey: "cancel-open-123",
+        orderId: "order-open",
+        walletAddress: testEvmWallet.walletAddress,
+      },
+    });
+    assert.equal(preview.blockers.includes("order_not_open"), false);
+    assert.equal(preview.quote?.action, "cancel_order");
+  });
+});
+
+await test("redeem intent preview uses redemption-plan blockers", async () => {
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const preview = await previewAgentIntent({
+      db: fakePool([
+        { rows: [makeMarketRow({ redemption_status: "redeemable" })] },
+      ]),
+      user: testUser,
+      grant: polymarketIntentGrant,
+      request: {
+        kind: "redeem",
+        idempotencyKey: "redeem-plan-123",
+        venue: "polymarket",
+        marketId: "polymarket:market-1",
+        walletAddress: testEvmWallet.walletAddress,
+        outcome: "YES",
+      },
+      preparation: {
+        redemptionPlanProvider: async () => ({
+          ok: true,
+          venue: "polymarket",
+          redeemable: false,
+          reason: "condition_unresolved",
+          reasonMessage: "Condition not resolved on-chain yet.",
+        }),
+      },
+    });
+    assert.equal(preview.blockers.includes("condition_unresolved"), true);
+    assert.equal(preview.quote?.action, "redeem");
+    assert.deepEqual(
+      (preview.quote?.redemptionPlan as Record<string, unknown>)?.reason,
+      "condition_unresolved",
+    );
+  });
 });
 
 await test("funding plan reports missing approved wallets", async () => {
