@@ -3,7 +3,16 @@ CREATE TABLE IF NOT EXISTS agent_intents (
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   grant_id uuid NOT NULL REFERENCES agent_grants(id) ON DELETE CASCADE,
   kind text NOT NULL CHECK (
-    kind IN ('trade', 'bridge', 'cancel_order', 'redeem')
+    kind IN (
+      'trade',
+      'bridge',
+      'cancel_order',
+      'redeem',
+      'rewards_claim',
+      'transfer',
+      'convert',
+      'withdraw'
+    )
   ),
   status text NOT NULL CHECK (
     status IN (
@@ -30,10 +39,16 @@ CREATE TABLE IF NOT EXISTS agent_intents (
   funding_plan jsonb NOT NULL DEFAULT '{}',
   policy_result jsonb NOT NULL DEFAULT '{}',
   execution_result jsonb NOT NULL DEFAULT '{}',
+  execution_attempts jsonb NOT NULL DEFAULT '[]',
   blockers text[] NOT NULL DEFAULT '{}',
   warnings text[] NOT NULL DEFAULT '{}',
   review_token_hash text NOT NULL,
   expires_at timestamptz NOT NULL,
+  approved_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  approved_payload_hash text,
+  last_execution_error text,
+  terminal_order_id text,
+  terminal_tx_hash text,
   approved_at timestamptz,
   rejected_at timestamptz,
   executed_at timestamptz,

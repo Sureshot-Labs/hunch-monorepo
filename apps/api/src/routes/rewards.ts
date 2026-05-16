@@ -6,11 +6,6 @@ import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import {
-  parseUsdcToMicro,
-  usdcDecimalStringHasValidScale,
-  usdcMicroToDecimalString,
-} from "../lib/usdc.js";
-import {
   rewardsClaimBodySchema,
   rewardsReferralAttachBodySchema,
   rewardsLeaderboardQuerySchema,
@@ -23,13 +18,11 @@ import { authErrorResponseSchema } from "../schemas/auth.js";
 import {
   attachReferralCodeForExistingUser,
   claimOnboardingShareBonus,
-  createRewardClaim,
   dismissRewardsTutorial,
   getOrCreateReferralCode,
   getRewardsLeaderboard,
   getRewardsPolicy,
   getReferralAttachmentStatus,
-  getRewardsClaimableByChainMicro,
   getRewardsReferrals,
   getRewardsSummary,
   getRewardsTutorialState,
@@ -40,6 +33,7 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import { collectAnalyticsEvent } from "../services/analytics-forwarding.js";
+import { createRewardsClaimForUser } from "../services/rewards-claim.js";
 
 function buildRewardsClaimCollectorPayload(inputs: {
   attemptId: string;
@@ -367,85 +361,15 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
-      const targetWallet = body.walletAddress?.trim() || walletAddress.trim();
-      if (!targetWallet) {
-        reply.code(400);
-        return reply.send({ error: "Missing wallet address" });
-      }
-
-      const wallet = await AuthService.getUserWalletByAddress(
-        user.id,
-        targetWallet,
-      );
-      if (!wallet) {
-        reply.code(403);
-        return reply.send({
-          error: "Wallet is not linked to this user",
-        });
-      }
-
       const chainId = body.chainId;
-      const walletType = wallet.walletType?.toLowerCase() ?? "";
-      const isSolanaChain = chainId === "solana";
-      if (isSolanaChain && walletType !== "solana") {
-        reply.code(400);
-        return reply.send({
-          error: "Solana payouts require a Solana wallet",
-        });
-      }
-      if (!isSolanaChain && walletType === "solana") {
-        reply.code(400);
-        return reply.send({
-          error: "EVM payouts require an EVM wallet",
-        });
-      }
 
       try {
-        const claim = await tx(pool, async (client: PoolClient) => {
-          await acquireRewardsUserAdvisoryXactLock(client, user.id);
-
-          const claimableByChain = await getRewardsClaimableByChainMicro(
-            client,
-            { userId: user.id },
-          );
-          const claimableMicro = claimableByChain[chainId] ?? 0n;
-          if (claimableMicro <= 0n) {
-            const error = new Error("No claimable cashback available");
-            (error as Error & { statusCode?: number }).statusCode = 400;
-            throw error;
-          }
-
-          if (body.amount && !usdcDecimalStringHasValidScale(body.amount)) {
-            const error = new Error("Claim amount supports up to 6 decimals");
-            (error as Error & { statusCode?: number }).statusCode = 400;
-            throw error;
-          }
-
-          const requestedAmountMicro = body.amount
-            ? parseUsdcToMicro(body.amount)
-            : claimableMicro;
-          if (!requestedAmountMicro || requestedAmountMicro <= 0n) {
-            const error = new Error("Invalid claim amount");
-            (error as Error & { statusCode?: number }).statusCode = 400;
-            throw error;
-          }
-
-          if (requestedAmountMicro > claimableMicro) {
-            const error = new Error("Claim amount exceeds claimable balance");
-            (error as Error & { statusCode?: number }).statusCode = 400;
-            throw error;
-          }
-
-          const requestedAmountUsd =
-            usdcMicroToDecimalString(requestedAmountMicro);
-
-          const claim = await createRewardClaim(client, {
-            userId: user.id,
-            walletAddress: targetWallet,
-            chainId,
-            amountUsd: requestedAmountUsd,
-          });
-          return { claimId: claim.claimId, amountUsd: requestedAmountUsd };
+        const claim = await createRewardsClaimForUser(pool, {
+          userId: user.id,
+          fallbackWalletAddress: walletAddress,
+          walletAddress: body.walletAddress,
+          chainId,
+          amount: body.amount,
         });
 
         const amountNumber = Number(claim.amountUsd);
@@ -458,7 +382,7 @@ export const rewardsRoutes: FastifyPluginAsync = async (app) => {
             amountUsd: Number.isFinite(amountNumber) ? amountNumber : 0,
             chainId,
             claimId: claim.claimId,
-            walletAddress: targetWallet,
+            walletAddress: claim.walletAddress,
           }),
           request.log,
         );

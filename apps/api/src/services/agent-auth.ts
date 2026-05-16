@@ -12,7 +12,8 @@ export type AgentScope =
   | "read:positions"
   | "read:funding"
   | "read:notifications"
-  | "prepare:intents";
+  | "prepare:intents"
+  | "execute:intents";
 
 export type AgentGrant = {
   id: string;
@@ -158,8 +159,11 @@ const READ_SCOPES: readonly AgentScope[] = [
   "read:funding",
   "read:notifications",
 ];
-const PREPARE_SCOPES: readonly AgentScope[] = ["prepare:intents"];
-const ALL_SCOPES: readonly AgentScope[] = [...READ_SCOPES, ...PREPARE_SCOPES];
+const INTENT_SCOPES: readonly AgentScope[] = [
+  "prepare:intents",
+  "execute:intents",
+];
+const ALL_SCOPES: readonly AgentScope[] = [...READ_SCOPES, ...INTENT_SCOPES];
 const ALL_SCOPE_SET = new Set<AgentScope>(ALL_SCOPES);
 const WALLET_SENSITIVE_SCOPES = new Set<AgentScope>([
   "read:wallets",
@@ -167,6 +171,7 @@ const WALLET_SENSITIVE_SCOPES = new Set<AgentScope>([
   "read:positions",
   "read:funding",
   "prepare:intents",
+  "execute:intents",
 ]);
 const MAX_APPROVAL_ATTEMPTS = 20;
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -507,21 +512,23 @@ function grantName(input: {
   );
 }
 
-function hasPrepareScope(scopes: readonly AgentScope[]): boolean {
-  return scopes.includes("prepare:intents");
+function hasIntentWriteScope(scopes: readonly AgentScope[]): boolean {
+  return (
+    scopes.includes("prepare:intents") || scopes.includes("execute:intents")
+  );
 }
 
 function expiresAtForDays(
   days: 1 | 7 | 30 | 90,
   scopes: readonly AgentScope[],
 ): Date {
-  if (hasPrepareScope(scopes) && days > 7) {
+  if (hasIntentWriteScope(scopes) && days > 7) {
     throw new AgentAuthError(
       "invalid_grant_expiry",
-      "Intent preparation grants can expire in at most 7 days.",
+      "Intent preparation or execution grants can expire in at most 7 days.",
     );
   }
-  const maxTtlMs = hasPrepareScope(scopes)
+  const maxTtlMs = hasIntentWriteScope(scopes)
     ? env.agentGrantMaxWriteTtlMs
     : env.agentGrantMaxReadTtlMs;
   const ttlMs = Math.min(days * 24 * 60 * 60 * 1000, maxTtlMs);

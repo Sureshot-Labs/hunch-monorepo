@@ -95,11 +95,14 @@ import {
   summarizeAgentGrant,
 } from "../services/agent-auth.js";
 import {
+  approveAgentIntent,
   buildAgentFundingPlan,
   createAgentIntent,
+  executeAgentIntent,
   getAgentIntentById,
   getAgentIntentReview,
   previewAgentIntent,
+  rejectAgentIntent,
 } from "../services/agent-intents.js";
 import { createDefaultAgentIntentPreparationDeps } from "../services/agent-intent-preparation.js";
 import {
@@ -1505,6 +1508,9 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
   const agentIntentPrepareAuth = createAgentAuthMiddleware({
     requiredScopes: ["prepare:intents"],
   });
+  const agentIntentExecuteAuth = createAgentAuthMiddleware({
+    requiredScopes: ["execute:intents"],
+  });
 
   r.get("/agent/capabilities", async (_request, reply) => {
     reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1908,6 +1914,98 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "agent_intent_not_found" });
       }
       return reply.send({ ok: true, intent });
+    },
+  );
+
+  r.post(
+    "/agent/intents/:id/approve",
+    {
+      preHandler: [requireAgentAuthEnabled, browserAuth],
+      schema: { params: agentIntentParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const intent = await approveAgentIntent({
+          db: pool,
+          user,
+          id: request.params.id,
+          userAgent: readRequestUserAgent(request),
+        });
+        if (!intent) {
+          reply.code(404);
+          return reply.send({ error: "agent_intent_not_found" });
+        }
+        return reply.send({ ok: true, intent });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/agent/intents/:id/reject",
+    {
+      preHandler: [requireAgentAuthEnabled, browserAuth],
+      schema: { params: agentIntentParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const intent = await rejectAgentIntent({
+          db: pool,
+          user,
+          id: request.params.id,
+          userAgent: readRequestUserAgent(request),
+        });
+        if (!intent) {
+          reply.code(404);
+          return reply.send({ error: "agent_intent_not_found" });
+        }
+        return reply.send({ ok: true, intent });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
+    },
+  );
+
+  r.post(
+    "/agent/intents/:id/execute",
+    {
+      preHandler: agentIntentExecuteAuth,
+      schema: { params: agentIntentParamsSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const grant = request.agentGrant;
+      if (!user || !grant) {
+        reply.code(401);
+        return reply.send({ error: "agent_auth_required" });
+      }
+      try {
+        const result = await executeAgentIntent({
+          db: pool,
+          user,
+          grant,
+          id: request.params.id,
+          userAgent: readRequestUserAgent(request),
+        });
+        if (!result) {
+          reply.code(404);
+          return reply.send({ error: "agent_intent_not_found" });
+        }
+        return reply.send({ ok: true, ...result });
+      } catch (error) {
+        return handleAgentError(error, reply);
+      }
     },
   );
 

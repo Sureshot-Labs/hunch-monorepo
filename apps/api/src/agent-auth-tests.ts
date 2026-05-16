@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 import { AuthService, type User, type UserWallet } from "./auth.js";
@@ -19,8 +20,10 @@ import {
   type AgentGrant,
 } from "./services/agent-auth.js";
 import {
+  approveAgentIntent,
   buildAgentFundingPlan,
   createAgentIntent,
+  executeAgentIntent,
   getAgentIntentById,
   previewAgentIntent,
 } from "./services/agent-intents.js";
@@ -172,8 +175,14 @@ function makeIntentRow(
     funding_plan: {},
     policy_result: {},
     execution_result: {},
+    execution_attempts: [],
     blockers: ["persisted"],
     warnings: [],
+    approved_by_user_id: null,
+    approved_payload_hash: null,
+    last_execution_error: null,
+    terminal_order_id: null,
+    terminal_tx_hash: null,
     approved_at: null,
     rejected_at: null,
     executed_at: null,
@@ -181,6 +190,45 @@ function makeIntentRow(
     created_at: new Date("2026-05-15T00:00:00.000Z"),
     updated_at: new Date("2026-05-15T00:00:00.000Z"),
   };
+}
+
+function stableJsonStringifyForTest(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringifyForTest).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map(
+      (key) => `${JSON.stringify(key)}:${stableJsonStringifyForTest(record[key])}`,
+    )
+    .join(",")}}`;
+}
+
+function approvedPayloadHashForTest(row: {
+  request_payload: unknown;
+  resolved_payload: unknown;
+  funding_plan: unknown;
+  policy_result: unknown;
+  blockers: unknown;
+  warnings: unknown;
+}) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      stableJsonStringifyForTest({
+        request: row.request_payload,
+        preview: row.resolved_payload,
+        fundingPlan: row.funding_plan,
+        policy: row.policy_result,
+        blockers: row.blockers,
+        warnings: row.warnings,
+      }),
+    )
+    .digest("hex");
 }
 
 function makeMarketRow(overrides: Record<string, unknown> = {}) {
@@ -244,12 +292,26 @@ await test("allows read scopes plus prepare-only intent scope", () => {
     "read:funding",
     "read:notifications",
     "prepare:intents",
+    "execute:intents",
   ]);
 
   const invalid = agentDeviceStartBodySchema.safeParse({
     requestedScopes: ["submit:trade"],
   });
   assert.equal(invalid.success, false);
+});
+
+await test("intent schema accepts rewards claim execution model", () => {
+  const parsed = agentIntentRequestSchema.parse({
+    kind: "rewards_claim",
+    idempotencyKey: "claim-123",
+    walletAddress: testEvmWallet.walletAddress,
+    chainId: "137",
+    amount: "1.25",
+  });
+  assert.equal(parsed.kind, "rewards_claim");
+  assert.equal(parsed.chainId, "137");
+  assert.equal(parsed.amount, "1.25");
 });
 
 await test("approval schema keeps bounded read-only grant expiries", () => {
@@ -808,14 +870,255 @@ await test("intent idempotency rejects mismatched retry payloads", async () => {
 });
 
 await test("agent intent reads include recoverable review URLs", async () => {
-  const row = makeIntentRow();
-  const intent = await getAgentIntentById({
-    db: fakePool([{ rows: [row] }]),
-    user: testUser,
-    grant: intentGrant,
-    id: row.id,
+  await withAgentIntentStubs([testWallet], async () => {
+    const row = makeIntentRow();
+    const intent = await getAgentIntentById({
+      db: fakePool([{ rows: [row] }]),
+      user: testUser,
+      grant: intentGrant,
+      id: row.id,
+    });
+    assert.match(intent?.reviewUrl ?? "", /\/agent\/intents\/air_/);
   });
-  assert.match(intent?.reviewUrl ?? "", /\/agent\/intents\/air_/);
+});
+
+await test("agent intent approval stores a persisted payload hash", async () => {
+  const originalRecordAuditEvent = AgentAuthService.recordAuditEvent;
+  try {
+    AgentAuthService.recordAuditEvent = async () => undefined;
+    const pending = {
+      ...makeIntentRow(),
+      status: "pending_confirmation",
+      blockers: [],
+      resolved_payload: {
+        kind: "cancel_order",
+        market: null,
+        wallet: null,
+        quote: null,
+        readiness: null,
+        fundingPlan: null,
+        policy: {
+          decision: "allowed_with_confirmation",
+          reasons: [],
+          limitsChecked: {},
+        },
+        blockers: [],
+        warnings: [],
+      },
+      policy_result: {
+        decision: "allowed_with_confirmation",
+        reasons: [],
+        limitsChecked: {},
+      },
+      expires_at: new Date(Date.now() + 60_000),
+    };
+    const approved = {
+      ...pending,
+      status: "approved",
+      approved_by_user_id: testUser.id,
+      approved_at: new Date("2026-05-15T00:10:00.000Z"),
+    };
+    const db = fakePool([{ rows: [pending] }, { rows: [approved] }]);
+    const intent = await approveAgentIntent({
+      db,
+      user: testUser,
+      id: pending.id,
+    });
+    assert.equal(intent?.status, "approved");
+    assert.match(String(db.calls[1]?.values?.[3] ?? ""), /^[a-f0-9]{64}$/);
+  } finally {
+    AgentAuthService.recordAuditEvent = originalRecordAuditEvent;
+  }
+});
+
+await test("approved intent execution can use a separate execute grant", async () => {
+  const request = {
+    kind: "transfer",
+    idempotencyKey: "transfer-exec-123",
+    walletAddress: testEvmWallet.walletAddress,
+    asset: "USDC",
+    amount: "1",
+    toAddress: "0x0000000000000000000000000000000000000002",
+  } as const;
+  const approved = {
+    ...makeIntentRow({ request }),
+    grant_id: "prepare-grant-1",
+    kind: "transfer",
+    status: "approved",
+    wallet_address: testEvmWallet.walletAddress,
+    blockers: [],
+    warnings: [],
+    policy_result: {
+      decision: "allowed_with_confirmation",
+      reasons: [],
+      limitsChecked: {},
+    },
+    resolved_payload: {
+      kind: "transfer",
+      market: null,
+      wallet: { address: testEvmWallet.walletAddress },
+      quote: { action: "transfer" },
+      readiness: null,
+      fundingPlan: null,
+      policy: {
+        decision: "allowed_with_confirmation",
+        reasons: [],
+        limitsChecked: {},
+      },
+      blockers: [],
+      warnings: [],
+    },
+    approved_by_user_id: testUser.id,
+    approved_at: new Date("2026-05-15T00:10:00.000Z"),
+    expires_at: new Date(Date.now() + 60_000),
+  };
+  const approvedWithHash = {
+    ...approved,
+    approved_payload_hash: approvedPayloadHashForTest(approved),
+  };
+  const executing = { ...approvedWithHash, status: "executing" };
+  const failed = {
+    ...executing,
+    status: "failed",
+    last_execution_error: "transfer execution is not enabled for agent intents yet.",
+  };
+  const executeGrant: AgentGrant = {
+    ...polymarketIntentGrant,
+    id: "execute-grant-1",
+    scopes: [
+      "read:account",
+      "read:wallets",
+      "read:orders",
+      "read:funding",
+      "prepare:intents",
+      "execute:intents",
+    ],
+  };
+
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const db = fakePool([
+      { rows: [approvedWithHash] },
+      { rows: [executing] },
+      { rows: [failed] },
+    ]);
+    const result = await executeAgentIntent({
+      db,
+      user: testUser,
+      grant: executeGrant,
+      id: approvedWithHash.id,
+    });
+    assert.equal(result?.failed, true);
+    assert.equal(result?.intent.status, "failed");
+    assert.equal(db.calls[0]?.values?.[0], approvedWithHash.id);
+    assert.equal(db.calls[0]?.values?.[1], testUser.id);
+    assert.equal(db.calls[0]?.values?.length, 2);
+  });
+});
+
+await test("approved intent execution rejects unapproved wallet grants", async () => {
+  const request = {
+    kind: "transfer",
+    idempotencyKey: "transfer-wallet-block-123",
+    walletAddress: testEvmWallet.walletAddress,
+    asset: "USDC",
+    amount: "1",
+    toAddress: "0x0000000000000000000000000000000000000002",
+  } as const;
+  const approved = {
+    ...makeIntentRow({ request }),
+    kind: "transfer",
+    status: "approved",
+    wallet_address: testEvmWallet.walletAddress,
+    blockers: [],
+    warnings: [],
+    policy_result: {
+      decision: "allowed_with_confirmation",
+      reasons: [],
+      limitsChecked: {},
+    },
+    resolved_payload: {
+      kind: "transfer",
+      market: null,
+      wallet: { address: testEvmWallet.walletAddress },
+      quote: { action: "transfer" },
+      readiness: null,
+      fundingPlan: null,
+      policy: {
+        decision: "allowed_with_confirmation",
+        reasons: [],
+        limitsChecked: {},
+      },
+      blockers: [],
+      warnings: [],
+    },
+    approved_by_user_id: testUser.id,
+    approved_at: new Date("2026-05-15T00:10:00.000Z"),
+    expires_at: new Date(Date.now() + 60_000),
+  };
+  const approvedWithHash = {
+    ...approved,
+    approved_payload_hash: approvedPayloadHashForTest(approved),
+  };
+  const executeGrant: AgentGrant = {
+    ...polymarketIntentGrant,
+    id: "execute-grant-2",
+    walletAddresses: ["0x00000000000000000000000000000000000000ff"],
+    scopes: [
+      "read:account",
+      "read:wallets",
+      "read:orders",
+      "read:funding",
+      "prepare:intents",
+      "execute:intents",
+    ],
+  };
+
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const db = fakePool([{ rows: [approvedWithHash] }]);
+    await assert.rejects(
+      () =>
+        executeAgentIntent({
+          db,
+          user: testUser,
+          grant: executeGrant,
+          id: approvedWithHash.id,
+        }),
+      (error: unknown) =>
+        error instanceof AgentAuthError &&
+        error.code === "wallet_not_in_grant" &&
+        error.statusCode === 403,
+    );
+    assert.equal(db.calls.length, 1);
+  });
+
+  await withAgentIntentStubs([testEvmWallet], async () => {
+    const db = fakePool([
+      {
+        rows: [
+          {
+            ...approvedWithHash,
+            status: "executed",
+            execution_result: { ok: true },
+            executed_at: new Date("2026-05-15T00:20:00.000Z"),
+          },
+        ],
+      },
+    ]);
+    await assert.rejects(
+      () =>
+        executeAgentIntent({
+          db,
+          user: testUser,
+          grant: executeGrant,
+          id: approvedWithHash.id,
+        }),
+      (error: unknown) =>
+        error instanceof AgentAuthError &&
+        error.code === "wallet_not_in_grant" &&
+        error.statusCode === 403,
+    );
+    assert.equal(db.calls.length, 1);
+  });
 });
 
 await test("account position and order schemas expose agent-friendly filters", () => {

@@ -6,6 +6,10 @@ export const agentIntentKindSchema = z.enum([
   "bridge",
   "cancel_order",
   "redeem",
+  "rewards_claim",
+  "transfer",
+  "convert",
+  "withdraw",
 ]);
 
 const zOptionalString = z
@@ -74,11 +78,46 @@ const zRedeemIntent = zBaseIntent.extend({
   outcome: z.enum(["YES", "NO"]).optional(),
 });
 
+const zRewardsClaimIntent = zBaseIntent.extend({
+  kind: z.literal("rewards_claim"),
+  chainId: z.string().trim().min(1, "chainId is required"),
+  amount: zOptionalString,
+});
+
+const zTransferIntent = zBaseIntent.extend({
+  kind: z.literal("transfer"),
+  srcChainId: zOptionalString,
+  srcToken: zOptionalString,
+  amountIn: zOptionalString,
+  recipientAddress: zOptionalString,
+});
+
+const zConvertIntent = zBaseIntent.extend({
+  kind: z.literal("convert"),
+  srcChainId: zOptionalString,
+  srcToken: zOptionalString,
+  dstToken: zOptionalString,
+  amountIn: zOptionalString,
+});
+
+const zWithdrawIntent = zBaseIntent.extend({
+  kind: z.literal("withdraw"),
+  venue: zVenue.optional(),
+  srcChainId: zOptionalString,
+  srcToken: zOptionalString,
+  amountIn: zOptionalString,
+  recipientAddress: zOptionalString,
+});
+
 export const agentIntentRequestSchema = z.discriminatedUnion("kind", [
   zTradeIntent,
   zBridgeIntent,
   zCancelOrderIntent,
   zRedeemIntent,
+  zRewardsClaimIntent,
+  zTransferIntent,
+  zConvertIntent,
+  zWithdrawIntent,
 ]);
 
 export const agentFundingPlanBodySchema = z.object({

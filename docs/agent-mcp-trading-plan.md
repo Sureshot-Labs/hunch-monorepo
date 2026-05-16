@@ -2631,6 +2631,65 @@ Phase 3B implementation requirement:
   insufficient-funds/funding guidance, deposit-link behavior after login, and
   Privy authorization errors.
 
+### Current Status After Phase 3C Local Execution Smoke
+
+Phase 3 has moved beyond preview-only records, but the rollout policy remains
+local-only until the full agent trading plan is completed and tested. Do not
+deploy this surface to production as a standalone partial rollout unless the
+rollout policy is explicitly changed.
+
+Implemented locally after Phase 3A/3B:
+
+- `agent_intents` now has approval/execution statuses and metadata:
+  `approved`, `rejected`, `executing`, `executed`, `failed`,
+  `execution_result`, `execution_attempts`, `approved_by_user_id`,
+  `approved_payload_hash`, `last_execution_error`, `terminal_order_id`, and
+  `terminal_tx_hash`.
+- Browser review routes now support `POST /agent/intents/:id/approve` and
+  `POST /agent/intents/:id/reject` using the normal Hunch browser session.
+- Agent-token execution now supports `POST /agent/intents/:id/execute` with
+  `execute:intents`. Execution is bound to the persisted approved payload hash
+  and rejects changed or expired payloads.
+- Execution grants may be separate from prepare grants. The executing grant is
+  authorized by same user plus wallet/venue scope, not by matching the original
+  prepare grant ID.
+- Backend-only executable intent kinds currently enabled: `cancel_order` and
+  `rewards_claim`.
+- Preview/approval-only modeled kinds currently not executable:
+  `trade`, `bridge`, `redeem`, `transfer`, `convert`, and `withdraw`.
+- Frontend `/agent/intents/:reviewToken` now shows approve/reject controls,
+  terminal execution status, and explicit copy that wallet-signing actions are
+  still preview-only.
+- Agent tools now expose `execute:intents`, `intent-execute`, and
+  `hunch_execute_intent`.
+
+Local smoke verified:
+
+- Created a `rewards_claim` intent with a prepare grant.
+- Approved the intent in the browser review page.
+- Created a separate `execute:intents` grant.
+- Executed the approved intent through the agent tool.
+- Backend created pending rewards claim
+  `72068beb-14ae-4649-a0b9-0702a90d6fb3` for `$0.028640` on chain `137`.
+- Re-running execution returned the same terminal `executed` intent without a
+  second execution attempt.
+
+Remaining before Phase 3 can be considered merge-ready:
+
+- Add route-level integration tests for approve/reject/execute, including
+  browser auth failures, agent-token failures, wrong-wallet/wrong-venue grants,
+  expiry, terminal replay, and concurrent execute attempts.
+- Add frontend tests for the intent review page confirm/reject states, terminal
+  states, blocked intents, and auth redirect behavior.
+- Add a live/sandbox smoke for `cancel_order`; unit tests cover the shared
+  cancel service shape but the local smoke only exercised `rewards_claim`.
+- Decide whether concurrent duplicate execute calls should return terminal
+  replay or a transient `409 state_changed`; current behavior avoids duplicate
+  terminal execution but is not yet polished for UX.
+- Keep trade, bridge, redeem, transfer, convert, and withdraw execution out of
+  scope until their shared signing/execution services are explicitly extracted
+  and covered by tests.
+
 ### Phase 5: Policy Automation
 
 - Only after Phase 4 is stable, allow low-risk automation where no wallet

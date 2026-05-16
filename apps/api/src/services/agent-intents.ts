@@ -33,6 +33,9 @@ import type {
   AgentFundingPlanRequest,
   AgentIntentRequest,
 } from "../schemas/agent-intents.js";
+import { agentIntentRequestSchema } from "../schemas/agent-intents.js";
+import { cancelVenueOrder } from "./order-cancel.js";
+import { createRewardsClaimForUser } from "./rewards-claim.js";
 
 type AgentIntentStatus =
   | "pending_confirmation"
@@ -67,8 +70,14 @@ type AgentIntentRow = {
   funding_plan: Record<string, unknown>;
   policy_result: Record<string, unknown>;
   execution_result: Record<string, unknown>;
+  execution_attempts: Record<string, unknown>[];
   blockers: string[];
   warnings: string[];
+  approved_by_user_id: string | null;
+  approved_payload_hash: string | null;
+  last_execution_error: string | null;
+  terminal_order_id: string | null;
+  terminal_tx_hash: string | null;
   approved_at: Date | null;
   rejected_at: Date | null;
   executed_at: Date | null;
@@ -130,6 +139,12 @@ function asNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function hashIntentToken(token: string): string {
   const secret = env.agentTokenHashSecret;
   if (!secret) {
@@ -140,6 +155,36 @@ function hashIntentToken(token: string): string {
     );
   }
   return crypto.createHmac("sha256", secret).update(token).digest("hex");
+}
+
+function stableJsonStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringify).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJsonStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function buildApprovedPayloadHash(row: AgentIntentRow): string {
+  return crypto
+    .createHash("sha256")
+    .update(
+      stableJsonStringify({
+        request: row.request_payload,
+        preview: row.resolved_payload,
+        fundingPlan: row.funding_plan,
+        policy: row.policy_result,
+        blockers: row.blockers,
+        warnings: row.warnings,
+      }),
+    )
+    .digest("hex");
 }
 
 function deterministicReviewToken(input: {
@@ -183,18 +228,27 @@ async function loadApprovedWallets(input: {
   walletAddress?: string;
   wallets?: string[];
 }): Promise<UserWallet[]> {
-  const approved = new Set(
-    input.grant.walletAddresses.map((wallet) => normalizeWalletAddress(wallet)),
-  );
-  if (approved.size === 0) return [];
-  const linked = await AuthService.getUserWallets(input.userId);
-  const approvedWallets = linked.filter((wallet) =>
-    approved.has(normalizeWalletAddress(wallet.walletAddress)),
-  );
   const requested = uniqueStrings([
     ...(input.walletAddress ? [input.walletAddress] : []),
     ...(input.wallets ?? []),
   ]).map(normalizeWalletAddress);
+  const approved = new Set(
+    input.grant.walletAddresses.map((wallet) => normalizeWalletAddress(wallet)),
+  );
+  if (approved.size === 0) {
+    if (requested.length > 0) {
+      throw new AgentAuthError(
+        "wallet_not_in_grant",
+        "Wallet is not approved for this agent grant",
+        403,
+      );
+    }
+    return [];
+  }
+  const linked = await AuthService.getUserWallets(input.userId);
+  const approvedWallets = linked.filter((wallet) =>
+    approved.has(normalizeWalletAddress(wallet.walletAddress)),
+  );
   if (requested.length === 0) return approvedWallets;
 
   const byAddress = new Map(
@@ -486,6 +540,34 @@ export async function previewAgentIntent(input: {
     quote = prepared.quote;
     blockers.push(...prepared.blockers);
     warnings.push(...prepared.warnings);
+  } else if (input.request.kind === "rewards_claim") {
+    quote = {
+      action: "rewards_claim",
+      chainId: input.request.chainId,
+      amount: input.request.amount ?? null,
+      walletAddress: wallet?.walletAddress ?? input.request.walletAddress ?? null,
+      note: "Creates a pending rewards claim if approved and executed. It does not sign a payout transaction.",
+    };
+  } else if (
+    input.request.kind === "transfer" ||
+    input.request.kind === "convert" ||
+    input.request.kind === "withdraw"
+  ) {
+    quote = {
+      action: input.request.kind,
+      srcChainId: input.request.srcChainId ?? null,
+      srcToken: input.request.srcToken ?? null,
+      dstToken:
+        input.request.kind === "convert" ? input.request.dstToken ?? null : null,
+      amountIn: input.request.amountIn ?? null,
+      recipientAddress:
+        input.request.kind === "transfer" ||
+        input.request.kind === "withdraw"
+          ? input.request.recipientAddress ?? null
+          : null,
+      note: "This intent kind is modeled for future execution, but execution is not enabled yet.",
+    };
+    blockers.push("execution_not_supported");
   }
 
   blockers.push(...stringArrayField(fundingPlan, "blockers"));
@@ -536,8 +618,13 @@ function mapIntent(row: AgentIntentRow, reviewUrl?: string | null) {
     fundingPlan: row.funding_plan,
     policy: row.policy_result,
     executionResult: row.execution_result,
+    executionAttempts: row.execution_attempts,
+    lastExecutionError: row.last_execution_error,
+    terminalOrderId: row.terminal_order_id,
+    terminalTxHash: row.terminal_tx_hash,
     blockers: row.blockers,
     warnings: row.warnings,
+    approvedByUserId: row.approved_by_user_id,
     approvedAt: row.approved_at?.toISOString() ?? null,
     rejectedAt: row.rejected_at?.toISOString() ?? null,
     executedAt: row.executed_at?.toISOString() ?? null,
@@ -615,6 +702,11 @@ export async function createAgentIntent(input: {
     preview.policy.decision === "blocked" ? "blocked" : "pending_confirmation";
   const market = preview.market;
   const quote = preview.quote;
+  const quoteOrder = asRecord(quote?.order);
+  const resolvedVenue =
+    input.request.venue ??
+    (typeof market?.venue === "string" ? market.venue : null) ??
+    (typeof quoteOrder.venue === "string" ? quoteOrder.venue : null);
   const { rows } = await input.db.query<AgentIntentRow>(
     `
       insert into agent_intents (
@@ -652,8 +744,7 @@ export async function createAgentIntent(input: {
       input.request.kind,
       status,
       input.request.idempotencyKey,
-      input.request.venue ??
-        (typeof market?.venue === "string" ? market.venue : null),
+      resolvedVenue,
       input.request.walletAddress ?? null,
       input.request.marketId ??
         (typeof market?.marketId === "string" ? market.marketId : null),
@@ -731,13 +822,18 @@ export async function getAgentIntentById(input: {
       from agent_intents
       where id = $1
         and user_id = $2
-        and grant_id = $3
       limit 1
     `,
-    [input.id, input.user.id, input.grant.id],
+    [input.id, input.user.id],
   );
   const row = rows[0];
-  return row ? mapIntent(row, buildReviewUrlForIntent(row)) : null;
+  if (!row) return null;
+  const accessible = await grantCanAccessIntent({
+    user: input.user,
+    grant: input.grant,
+    row,
+  });
+  return accessible ? mapIntent(row, buildReviewUrlForIntent(row)) : null;
 }
 
 export async function getAgentIntentReview(input: {
@@ -763,4 +859,527 @@ export async function getAgentIntentReview(input: {
       ? "expired"
       : row.status;
   return mapIntent({ ...row, status }, buildReviewUrlForIntent(row));
+}
+
+async function loadIntentForUser(input: {
+  db: Pool;
+  userId: string;
+  id: string;
+}): Promise<AgentIntentRow | null> {
+  const { rows } = await input.db.query<AgentIntentRow>(
+    `
+      select *
+      from agent_intents
+      where id = $1
+        and user_id = $2
+      limit 1
+    `,
+    [input.id, input.userId],
+  );
+  return rows[0] ?? null;
+}
+
+function assertIntentPendingForApproval(row: AgentIntentRow): void {
+  if (row.expires_at.getTime() <= Date.now()) {
+    throw new AgentAuthError(
+      "agent_intent_expired",
+      "Agent intent expired. Ask the agent to prepare a fresh intent.",
+      409,
+    );
+  }
+  if (row.status !== "pending_confirmation") {
+    throw new AgentAuthError(
+      "agent_intent_not_pending",
+      `Agent intent cannot be approved from status ${row.status}.`,
+      409,
+    );
+  }
+  if (row.blockers.length > 0) {
+    throw new AgentAuthError(
+      "agent_intent_blocked",
+      "Blocked agent intents cannot be approved.",
+      409,
+    );
+  }
+}
+
+export async function approveAgentIntent(input: {
+  db: Pool;
+  user: User;
+  id: string;
+  userAgent?: string | null;
+}) {
+  const row = await loadIntentForUser({
+    db: input.db,
+    userId: input.user.id,
+    id: input.id,
+  });
+  if (!row) return null;
+  assertIntentPendingForApproval(row);
+  const approvedPayloadHash = buildApprovedPayloadHash(row);
+  const { rows } = await input.db.query<AgentIntentRow>(
+    `
+      update agent_intents
+      set status = 'approved',
+          approved_by_user_id = $3,
+          approved_payload_hash = $4,
+          approved_at = now(),
+          rejected_at = null,
+          last_execution_error = null
+      where id = $1
+        and user_id = $2
+        and status = 'pending_confirmation'
+      returning *
+    `,
+    [input.id, input.user.id, input.user.id, approvedPayloadHash],
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new AgentAuthError(
+      "agent_intent_state_changed",
+      "Agent intent changed before approval completed.",
+      409,
+    );
+  }
+  await AgentAuthService.recordAuditEvent({
+    userId: input.user.id,
+    grantId: updated.grant_id,
+    eventType: "agent_intent_approved",
+    actorType: "user",
+    userAgent: input.userAgent ?? undefined,
+    metadata: {
+      intentId: updated.id,
+      kind: updated.kind,
+      venue: updated.venue,
+      marketId: updated.market_id,
+    },
+  });
+  return mapIntent(updated, buildReviewUrlForIntent(updated));
+}
+
+export async function rejectAgentIntent(input: {
+  db: Pool;
+  user: User;
+  id: string;
+  userAgent?: string | null;
+}) {
+  const row = await loadIntentForUser({
+    db: input.db,
+    userId: input.user.id,
+    id: input.id,
+  });
+  if (!row) return null;
+  if (
+    ![
+      "pending_confirmation",
+      "approved",
+      "blocked",
+      "expired",
+    ].includes(row.status)
+  ) {
+    throw new AgentAuthError(
+      "agent_intent_terminal",
+      `Agent intent cannot be rejected from status ${row.status}.`,
+      409,
+    );
+  }
+  const { rows } = await input.db.query<AgentIntentRow>(
+    `
+      update agent_intents
+      set status = 'rejected',
+          rejected_at = now()
+      where id = $1
+        and user_id = $2
+        and status in ('pending_confirmation', 'approved', 'blocked', 'expired')
+      returning *
+    `,
+    [input.id, input.user.id],
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new AgentAuthError(
+      "agent_intent_state_changed",
+      "Agent intent changed before rejection completed.",
+      409,
+    );
+  }
+  await AgentAuthService.recordAuditEvent({
+    userId: input.user.id,
+    grantId: updated.grant_id,
+    eventType: "agent_intent_rejected",
+    actorType: "user",
+    userAgent: input.userAgent ?? undefined,
+    metadata: {
+      intentId: updated.id,
+      kind: updated.kind,
+      venue: updated.venue,
+      marketId: updated.market_id,
+    },
+  });
+  return mapIntent(updated, buildReviewUrlForIntent(updated));
+}
+
+function mapExecutionError(error: unknown): {
+  message: string;
+  statusCode: number;
+  details: Record<string, unknown>;
+} {
+  if (error instanceof AgentAuthError) {
+    return {
+      message: error.message,
+      statusCode: error.statusCode,
+      details: { code: error.code },
+    };
+  }
+  if (error instanceof Error) {
+    const record = error as Error & {
+      statusCode?: number;
+      status?: number;
+      payload?: unknown;
+      reason?: unknown;
+      signer?: unknown;
+    };
+    const statusCode =
+      typeof record.statusCode === "number" && Number.isFinite(record.statusCode)
+        ? record.statusCode
+        : 500;
+    return {
+      message: error.message || "Agent intent execution failed",
+      statusCode,
+      details: {
+        status: record.status ?? null,
+        reason: record.reason ?? null,
+        signer: record.signer ?? null,
+        payload: record.payload ?? null,
+      },
+    };
+  }
+  return {
+    message: "Agent intent execution failed",
+    statusCode: 500,
+    details: {},
+  };
+}
+
+async function runApprovedIntentExecution(input: {
+  db: Pool;
+  user: User;
+  row: AgentIntentRow;
+  request: AgentIntentRequest;
+}): Promise<{
+  result: Record<string, unknown>;
+  terminalOrderId: string | null;
+  terminalTxHash: string | null;
+}> {
+  const request = input.request;
+
+  if (request.kind === "cancel_order") {
+    const venue = input.row.venue ?? request.venue ?? null;
+    if (!venue) {
+      throw new AgentAuthError(
+        "agent_intent_missing_venue",
+        "Cancel intent is missing a resolved venue.",
+        409,
+      );
+    }
+    const cancelled = await cancelVenueOrder(input.db, {
+      userId: input.user.id,
+      venue,
+      orderId: request.orderId,
+      requestedWalletAddress: input.row.wallet_address ?? request.walletAddress,
+    });
+    return {
+      result: {
+        action: "cancel_order",
+        ...cancelled,
+      },
+      terminalOrderId: cancelled.orderId,
+      terminalTxHash: null,
+    };
+  }
+
+  if (request.kind === "rewards_claim") {
+    const claim = await createRewardsClaimForUser(input.db, {
+      userId: input.user.id,
+      fallbackWalletAddress: input.row.wallet_address,
+      walletAddress: request.walletAddress,
+      chainId: request.chainId,
+      amount: request.amount,
+    });
+    return {
+      result: {
+        action: "rewards_claim",
+        claim: {
+          id: claim.claimId,
+          amount: Number(claim.amountUsd),
+          amountUsd: claim.amountUsd,
+          status: "pending",
+          chainId: claim.chainId,
+          walletAddress: claim.walletAddress,
+        },
+      },
+      terminalOrderId: claim.claimId,
+      terminalTxHash: null,
+    };
+  }
+
+  throw new AgentAuthError(
+    "agent_intent_execution_not_supported",
+    `${request.kind} execution is not enabled for agent intents yet.`,
+    409,
+  );
+}
+
+export async function executeAgentIntent(input: {
+  db: Pool;
+  user: User;
+  grant: AgentGrant;
+  id: string;
+  userAgent?: string | null;
+}) {
+  const row = await getAgentIntentRowForExecution(input);
+  if (!row) return null;
+  const request = await assertGrantCanAccessIntent({
+    user: input.user,
+    grant: input.grant,
+    row,
+  });
+
+  if (["executed", "failed", "rejected", "expired"].includes(row.status)) {
+    return {
+      intent: mapIntent(row, buildReviewUrlForIntent(row)),
+      terminal: true,
+    };
+  }
+  if (row.status !== "approved") {
+    throw new AgentAuthError(
+      "agent_intent_not_approved",
+      `Agent intent cannot be executed from status ${row.status}.`,
+      409,
+    );
+  }
+  if (row.expires_at.getTime() <= Date.now()) {
+    const expired = await updateAgentIntentStatus(input.db, row, {
+      status: "expired",
+      executionResult: row.execution_result,
+    });
+    return {
+      intent: mapIntent(expired, buildReviewUrlForIntent(expired)),
+      terminal: true,
+    };
+  }
+
+  const approvedPayloadHash = row.approved_payload_hash;
+  if (!approvedPayloadHash) {
+    throw new AgentAuthError(
+      "agent_intent_missing_approval_hash",
+      "Approved intent is missing its approval payload hash.",
+      409,
+    );
+  }
+  if (approvedPayloadHash !== buildApprovedPayloadHash(row)) {
+    throw new AgentAuthError(
+      "agent_intent_payload_changed",
+      "Approved intent payload changed after approval.",
+      409,
+    );
+  }
+
+  const executing = await markAgentIntentExecuting(input.db, row);
+  try {
+    const execution = await runApprovedIntentExecution({
+      db: input.db,
+      user: input.user,
+      row: executing,
+      request,
+    });
+    const updated = await updateAgentIntentStatus(input.db, executing, {
+      status: "executed",
+      executionResult: execution.result,
+      terminalOrderId: execution.terminalOrderId,
+      terminalTxHash: execution.terminalTxHash,
+    });
+    await AgentAuthService.recordAuditEvent({
+      userId: input.user.id,
+      grantId: input.grant.id,
+      eventType: "agent_intent_executed",
+      actorType: "agent",
+      userAgent: input.userAgent ?? undefined,
+      metadata: {
+        intentId: updated.id,
+        kind: updated.kind,
+        venue: updated.venue,
+        terminalOrderId: updated.terminal_order_id,
+        terminalTxHash: updated.terminal_tx_hash,
+      },
+    });
+    return {
+      intent: mapIntent(updated, buildReviewUrlForIntent(updated)),
+      terminal: true,
+    };
+  } catch (error) {
+    const mappedError = mapExecutionError(error);
+    const updated = await updateAgentIntentStatus(input.db, executing, {
+      status: "failed",
+      executionResult: {
+        ok: false,
+        error: mappedError.message,
+        details: mappedError.details,
+      },
+      lastExecutionError: mappedError.message,
+    });
+    await AgentAuthService.recordAuditEvent({
+      userId: input.user.id,
+      grantId: input.grant.id,
+      eventType: "agent_intent_failed",
+      actorType: "agent",
+      userAgent: input.userAgent ?? undefined,
+      metadata: {
+        intentId: updated.id,
+        kind: updated.kind,
+        venue: updated.venue,
+        error: mappedError.message,
+      },
+    });
+    return {
+      intent: mapIntent(updated, buildReviewUrlForIntent(updated)),
+      terminal: true,
+      failed: true,
+    };
+  }
+}
+
+async function assertGrantCanAccessIntent(input: {
+  user: User;
+  grant: AgentGrant;
+  row: AgentIntentRow;
+}): Promise<AgentIntentRequest> {
+  const request = agentIntentRequestSchema.parse(input.row.request_payload);
+  await loadApprovedWallets({
+    userId: input.user.id,
+    grant: input.grant,
+    walletAddress: input.row.wallet_address ?? request.walletAddress,
+  });
+  const venueBlockers = assertVenueAllowed(input.grant, input.row.venue);
+  if (venueBlockers.length > 0) {
+    throw new AgentAuthError(
+      "agent_intent_venue_not_allowed",
+      "Intent venue is not allowed by this grant.",
+      403,
+    );
+  }
+  return request;
+}
+
+async function grantCanAccessIntent(input: {
+  user: User;
+  grant: AgentGrant;
+  row: AgentIntentRow;
+}): Promise<boolean> {
+  try {
+    await assertGrantCanAccessIntent(input);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof AgentAuthError &&
+      (error.code === "wallet_not_in_grant" ||
+        error.code === "agent_intent_venue_not_allowed")
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function getAgentIntentRowForExecution(input: {
+  db: Pool;
+  user: User;
+  grant: AgentGrant;
+  id: string;
+}): Promise<AgentIntentRow | null> {
+  const { rows } = await input.db.query<AgentIntentRow>(
+    `
+      select *
+      from agent_intents
+      where id = $1
+        and user_id = $2
+      limit 1
+    `,
+    [input.id, input.user.id],
+  );
+  return rows[0] ?? null;
+}
+
+async function markAgentIntentExecuting(
+  db: Pool,
+  row: AgentIntentRow,
+): Promise<AgentIntentRow> {
+  const attempt = {
+    status: "executing",
+    at: new Date().toISOString(),
+  };
+  const { rows } = await db.query<AgentIntentRow>(
+    `
+      update agent_intents
+      set status = 'executing',
+          execution_attempts = execution_attempts || $2::jsonb,
+          last_execution_error = null
+      where id = $1
+        and status = 'approved'
+      returning *
+    `,
+    [row.id, JSON.stringify([attempt])],
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new AgentAuthError(
+      "agent_intent_state_changed",
+      "Agent intent changed before execution started.",
+      409,
+    );
+  }
+  return updated;
+}
+
+async function updateAgentIntentStatus(
+  db: Pool,
+  row: AgentIntentRow,
+  input: {
+    status: AgentIntentStatus;
+    executionResult: Record<string, unknown>;
+    lastExecutionError?: string | null;
+    terminalOrderId?: string | null;
+    terminalTxHash?: string | null;
+  },
+): Promise<AgentIntentRow> {
+  const { rows } = await db.query<AgentIntentRow>(
+    `
+      update agent_intents
+      set status = $2,
+          execution_result = $3::jsonb,
+          last_execution_error = $4,
+          terminal_order_id = $5,
+          terminal_tx_hash = $6,
+          executed_at = case when $2 = 'executed' then now() else executed_at end
+      where id = $1
+      returning *
+    `,
+    [
+      row.id,
+      input.status,
+      input.executionResult,
+      input.lastExecutionError ?? null,
+      input.terminalOrderId ?? row.terminal_order_id,
+      input.terminalTxHash ?? row.terminal_tx_hash,
+    ],
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new AgentAuthError(
+      "agent_intent_update_failed",
+      "Agent intent status update failed.",
+      500,
+    );
+  }
+  return updated;
 }

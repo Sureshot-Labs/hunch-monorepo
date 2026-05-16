@@ -16,6 +16,7 @@ const zScope = z.enum([
   "read:funding",
   "read:notifications",
   "prepare:intents",
+  "execute:intents",
 ]);
 
 const zWalletAddress = z.string().trim().min(1).max(128);
