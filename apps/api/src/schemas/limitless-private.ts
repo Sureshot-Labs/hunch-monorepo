@@ -114,6 +114,7 @@ export const limitlessMarketExchangeQuerySchema = z.object({
 export const limitlessHistoryQuerySchema = z.object({
   page: zPage,
   limit: zLimit,
+  cursor: z.string().trim().min(1).optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   wallets: zCsvString("wallets is required").optional(),

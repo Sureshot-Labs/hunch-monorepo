@@ -9,7 +9,11 @@ import {
   normalizeLimitlessScopedTokenId,
 } from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
-import { storeOrder } from "../repos/orders-repo.js";
+import {
+  expireStaleLimitlessFokOrders,
+  normalizeLimitlessFokOrderSizesForMarket,
+  storeOrder,
+} from "../repos/orders-repo.js";
 import {
   fetchErc1155BalancesByOwner,
   fetchEvmCode,
@@ -43,6 +47,11 @@ import { tryRecordReferralFirstTradeConversion } from "../services/analytics-ref
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import { syncLimitlessHistoryForWallet } from "../services/limitless-history.js";
+import {
+  deriveLimitlessSignedOrderSize,
+  normalizeLimitlessMaybeRawAmount,
+  normalizeLimitlessRawAmount,
+} from "../services/limitless-order-normalization.js";
 import {
   buildEmbeddedPersonalSignRequest,
   createEmbeddedPrivyWalletRpcRequest,
@@ -358,11 +367,6 @@ function normalizeLimitlessPrice(value: number | null): number | null {
   return normalized;
 }
 
-function normalizeLimitlessAmount(value: number | null): number | null {
-  if (value == null || !Number.isFinite(value) || value <= 0) return null;
-  return value >= 1_000_000 ? value / 1_000_000 : value;
-}
-
 function extractLimitlessImmediateFill(
   payload: unknown,
   side: "BUY" | "SELL",
@@ -375,14 +379,12 @@ function extractLimitlessImmediateFill(
     : null;
   if (!record) return null;
 
-  const outcomeShares = normalizeLimitlessAmount(
-    parseNumberish(
-      record.outcomeTokenAmount ??
-        record.outcome_token_amount ??
-        record.size ??
-        record.amount ??
-        record.quantity,
-    ),
+  const outcomeShares = normalizeLimitlessMaybeRawAmount(
+    record.outcomeTokenAmount ??
+      record.outcome_token_amount ??
+      record.size ??
+      record.amount ??
+      record.quantity,
   );
   const sideAmountRaw = parseNumberish(
     side === "BUY" ? record.takerAmount : record.makerAmount,
@@ -390,7 +392,7 @@ function extractLimitlessImmediateFill(
   const sideShares =
     side === "BUY" && sideAmountRaw != null && sideAmountRaw <= 1
       ? null
-      : normalizeLimitlessAmount(sideAmountRaw);
+      : normalizeLimitlessRawAmount(sideAmountRaw);
   const sharesCandidates = [outcomeShares, fallback.size, sideShares];
   const shares = sharesCandidates.find(
     (value): value is number =>
@@ -417,10 +419,10 @@ function extractLimitlessImmediateFill(
     ) ?? null;
 
   const notionalCandidates = [
-    normalizeLimitlessAmount(
-      parseNumberish(record.collateralAmount ?? record.collateral_amount),
+    normalizeLimitlessMaybeRawAmount(
+      record.collateralAmount ?? record.collateral_amount,
     ),
-    normalizeLimitlessAmount(
+    normalizeLimitlessRawAmount(
       parseNumberish(side === "BUY" ? record.makerAmount : record.takerAmount),
     ),
     unitPrice != null ? unitPrice * shares : null,
@@ -501,18 +503,12 @@ function deriveSize(
   makerAmount: number | null,
   takerAmount: number | null,
 ): number | null {
-  if (!side) return null;
-  if (orderType !== "GTC" && orderType !== "FOK") return null;
-  const shares = side === "BUY" ? takerAmount : makerAmount;
-  if (shares == null) return null;
-  const normalized = normalizeLimitlessAmount(shares);
-  if (normalized == null || !Number.isFinite(normalized) || normalized <= 0) {
-    return null;
-  }
-  if (orderType === "FOK" && side === "BUY" && shares <= 1) {
-    return null;
-  }
-  return normalized;
+  return deriveLimitlessSignedOrderSize({
+    orderType,
+    side,
+    makerAmount,
+    takerAmount,
+  });
 }
 
 function readOrderField(
@@ -3086,6 +3082,70 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         if (result.kind === "exists") alreadyKnown += 1;
       }
 
+      const normalizedFokSizes = await normalizeLimitlessFokOrderSizesForMarket(
+        pool,
+        {
+          userId: user.id,
+          walletAddress: signer,
+          marketSlug: request.query.slug,
+        },
+      );
+      let historyStats: Awaited<
+        ReturnType<typeof syncLimitlessHistoryForWallet>
+      > | null = null;
+      let historyError: string | null = null;
+      let expiredStaleFok = 0;
+      let metricsError: string | null = null;
+
+      try {
+        historyStats = await syncLimitlessHistoryForWallet(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          authContext: partnerAuth.authContext,
+          page: 1,
+          limit: 100,
+        });
+        expiredStaleFok = await expireStaleLimitlessFokOrders(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          marketSlug: request.query.slug,
+          activeVenueOrderIds: orderIds,
+        });
+      } catch (error) {
+        historyError =
+          error instanceof Error
+            ? error.message
+            : "Limitless history sync failed.";
+        app.log.warn(
+          {
+            error,
+            userId: user.id,
+            walletAddress: signer,
+            marketSlug: request.query.slug,
+          },
+          "Limitless order history sync failed during order sync",
+        );
+      }
+
+      if (historyStats || expiredStaleFok > 0) {
+        try {
+          await recomputePositionMetricsForWallet(pool, {
+            userId: user.id,
+            walletAddress: signer,
+            venue: "limitless",
+          });
+        } catch (error) {
+          metricsError =
+            error instanceof Error
+              ? error.message
+              : "Limitless position metrics update failed.";
+          app.log.error(
+            { error, userId: user.id, walletAddress: signer },
+            "Limitless position metrics update failed during order sync",
+          );
+        }
+      }
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
@@ -3095,6 +3155,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         storedNew,
         alreadyKnown,
         skippedNoId,
+        normalizedFokSizes,
+        expiredStaleFok,
+        history: historyStats,
+        historyError,
+        metricsError,
         sampleVenueOrderIds: orderIds.slice(0, 10),
       });
     },
@@ -3134,6 +3199,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         walletAddress: string;
         status: "ok" | "error" | "skipped";
         fetched?: number;
+        nextCursor?: string | null;
         storedNew?: number;
         alreadyKnown?: number;
         skippedNoId?: number;
@@ -3205,6 +3271,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             authContext,
             page: query.page,
             limit: query.limit,
+            cursor: query.cursor,
             from: query.from,
             to: query.to,
           });
@@ -3239,6 +3306,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: wallet,
           status: "ok",
           fetched: stats.fetched,
+          nextCursor: stats.nextCursor,
           storedNew: stats.storedNew,
           alreadyKnown: stats.alreadyKnown,
           skippedNoId: stats.skippedNoId,
@@ -3256,6 +3324,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         venue: "limitless",
         page: query.page,
         limit: query.limit,
+        cursor: query.cursor ?? null,
         results,
         summary: {
           synced,

@@ -337,7 +337,7 @@ export async function findLimitlessHistoryMatch(
         and side = $3
         and (wallet_address is null or wallet_address = $4 or signer_address = $4)
         and ($5::text is null or order_type is null or order_type = $5)
-        and status in ('submitted', 'open', 'pending', 'matched', 'filled')
+        and status in ('submitted', 'open', 'pending', 'matched', 'filled', 'expired')
         and (venue_order_id is null or venue_order_id not like 'history:%')
         and posted_at between $6 and $7
       order by posted_at desc nulls last
@@ -400,10 +400,16 @@ export async function updateOrderFromHistory(
         price = coalesce($3, price),
         size = coalesce($4, size),
         filled_size = coalesce($5, filled_size),
+        average_fill_price = coalesce($3, average_fill_price),
         filled_at = coalesce($6, filled_at),
         last_update = coalesce($7, last_update),
         order_hash = coalesce($8, order_hash),
-        order_payload = coalesce(order_payload, $9)
+        order_payload = case
+          when $9::jsonb is null then order_payload
+          when order_payload is null then $9::jsonb
+          when order_payload ? 'history' then order_payload
+          else jsonb_build_object('submitted', order_payload, 'history', $9::jsonb)
+        end
       where id = $1
     `,
     [
@@ -415,9 +421,80 @@ export async function updateOrderFromHistory(
       inputs.filledAt,
       inputs.lastUpdate,
       inputs.orderHash,
-      inputs.orderPayload ?? null,
+      inputs.orderPayload == null ? null : JSON.stringify(inputs.orderPayload),
     ],
   );
+}
+
+export async function expireStaleLimitlessFokOrders(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    marketSlug: string;
+    activeVenueOrderIds: string[];
+    olderThanMs?: number;
+  },
+): Promise<number> {
+  const olderThanMs = inputs.olderThanMs ?? 2 * 60 * 1000;
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const { rowCount } = await pool.query(
+    `
+      update orders
+      set status = 'expired',
+          last_update = now()
+      where user_id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        and (wallet_address is null or wallet_address = $2 or signer_address = $2)
+        and coalesce(order_payload->>'marketSlug', '') = $3
+        and (venue_order_id is null or venue_order_id <> all($4::text[]))
+        and (venue_order_id is null or (
+          venue_order_id not like 'amm:%'
+          and venue_order_id not like 'history:%'
+        ))
+        and posted_at < $5
+    `,
+    [
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.marketSlug,
+      inputs.activeVenueOrderIds,
+      cutoff,
+    ],
+  );
+
+  return rowCount ?? 0;
+}
+
+export async function normalizeLimitlessFokOrderSizesForMarket(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    marketSlug: string;
+  },
+): Promise<number> {
+  const { rowCount } = await pool.query(
+    `
+      update orders
+      set size = ((order_payload->'order'->>'makerAmount')::numeric / 1000000),
+          last_update = now()
+      where user_id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and side = 'SELL'
+        and size is not null
+        and size >= 1000
+        and (wallet_address is null or wallet_address = $2 or signer_address = $2)
+        and coalesce(order_payload->>'marketSlug', '') = $3
+        and (order_payload->'order'->>'makerAmount') ~ '^[0-9]+$'
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.marketSlug],
+  );
+
+  return rowCount ?? 0;
 }
 
 export async function fetchOrdersForUser(

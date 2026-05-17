@@ -36,6 +36,38 @@ function computeBuyAveragePrice(fills: TradeFill[]): number | null {
   return Number.isFinite(average) && average > 0 ? average : null;
 }
 
+function computeOpenBuyAveragePrice(
+  fills: TradeFill[],
+  currentSize: number,
+): number | null {
+  if (!Number.isFinite(currentSize) || currentSize <= 0) {
+    return computeBuyAveragePrice(fills);
+  }
+
+  let remaining = currentSize;
+  let shares = 0;
+  let usdc = 0;
+  const buys = fills
+    .filter((fill) => fill.side === "BUY")
+    .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+  for (const fill of buys) {
+    if (remaining <= 0) break;
+    const usedShares = Math.min(fill.shares, remaining);
+    const fillPrice = fill.usdc / fill.shares;
+    if (!Number.isFinite(fillPrice) || fillPrice <= 0) continue;
+    shares += usedShares;
+    usdc += usedShares * fillPrice;
+    remaining -= usedShares;
+  }
+
+  if (!Number.isFinite(shares) || shares <= 0) return null;
+  if (!Number.isFinite(usdc) || usdc <= 0) return null;
+
+  const average = usdc / shares;
+  return Number.isFinite(average) && average > 0 ? average : null;
+}
+
 type MarkRow = {
   token_id: string;
   best_bid: string | null;
@@ -230,35 +262,93 @@ function buildPolymarketFill(row: {
   };
 }
 
-function buildDflowFill(row: {
+function extractDflowSettlementAmounts(row: {
+  raw?: unknown;
+  input_mint: string | null;
+  output_mint: string | null;
+  amount_in: string | null;
+  amount_out: string | null;
+}): { amountIn: unknown; amountOut: unknown } {
+  const raw = normalizePayload(row.raw);
+  const settlement = isRecord(raw?.settlement) ? raw.settlement : null;
+
+  if (settlement) {
+    const inAmount = settlement.inAmount ?? settlement.in_amount;
+    const outAmount = settlement.outAmount ?? settlement.out_amount;
+    if (inAmount != null && outAmount != null) {
+      return { amountIn: inAmount, amountOut: outAmount };
+    }
+
+    const fills = Array.isArray(settlement.fills) ? settlement.fills : [];
+    let inTotal = 0n;
+    let outTotal = 0n;
+    let matched = false;
+    for (const fill of fills) {
+      if (!isRecord(fill)) continue;
+      const inputMint =
+        typeof fill.inputMint === "string"
+          ? fill.inputMint
+          : typeof fill.input_mint === "string"
+            ? fill.input_mint
+            : null;
+      const outputMint =
+        typeof fill.outputMint === "string"
+          ? fill.outputMint
+          : typeof fill.output_mint === "string"
+            ? fill.output_mint
+            : null;
+      if (inputMint !== row.input_mint || outputMint !== row.output_mint) {
+        continue;
+      }
+      const inRaw = parseBigInt(fill.inAmount ?? fill.in_amount);
+      const outRaw = parseBigInt(fill.outAmount ?? fill.out_amount);
+      if (inRaw == null || outRaw == null) continue;
+      inTotal += inRaw;
+      outTotal += outRaw;
+      matched = true;
+    }
+    if (matched) {
+      return { amountIn: inTotal.toString(), amountOut: outTotal.toString() };
+    }
+  }
+
+  return { amountIn: row.amount_in, amountOut: row.amount_out };
+}
+
+export function buildDflowFill(row: {
   side: string | null;
+  status?: string | null;
   input_mint: string | null;
   output_mint: string | null;
   amount_in: string | null;
   amount_out: string | null;
   input_decimals: number | null;
   output_decimals: number | null;
+  raw?: unknown;
   created_at: Date;
 }): TradeFill | null {
   const side = normalizeSide(row.side);
   if (!side) return null;
+  const status = row.status?.toLowerCase() ?? "";
+  if (status && status !== "fulfilled" && status !== "closed") return null;
 
   let tokenId: string | null = null;
   let sharesRaw: number | null = null;
   let usdcRaw: number | null = null;
   const inputDecimals = row.input_decimals ?? USDC_DECIMALS;
   const outputDecimals = row.output_decimals ?? USDC_DECIMALS;
+  const settlementAmounts = extractDflowSettlementAmounts(row);
 
   if (side === "BUY") {
     if (!row.output_mint) return null;
     tokenId = `sol:${row.output_mint}`;
-    sharesRaw = parseRawAmount(row.amount_out, outputDecimals);
-    usdcRaw = parseRawAmount(row.amount_in, inputDecimals);
+    sharesRaw = parseRawAmount(settlementAmounts.amountOut, outputDecimals);
+    usdcRaw = parseRawAmount(settlementAmounts.amountIn, inputDecimals);
   } else {
     if (!row.input_mint) return null;
     tokenId = `sol:${row.input_mint}`;
-    sharesRaw = parseRawAmount(row.amount_in, inputDecimals);
-    usdcRaw = parseRawAmount(row.amount_out, outputDecimals);
+    sharesRaw = parseRawAmount(settlementAmounts.amountIn, inputDecimals);
+    usdcRaw = parseRawAmount(settlementAmounts.amountOut, outputDecimals);
   }
 
   if (tokenId == null || sharesRaw == null || usdcRaw == null) return null;
@@ -561,28 +651,33 @@ async function fetchDflowFills(
 
   const { rows } = await pool.query<{
     side: string | null;
+    status: string | null;
     input_mint: string | null;
     output_mint: string | null;
     amount_in: string | null;
     amount_out: string | null;
     input_decimals: number | null;
     output_decimals: number | null;
+    raw: unknown;
     created_at: Date;
   }>(
     `
       select
         side,
+        status,
         input_mint,
         output_mint,
         amount_in,
         amount_out,
         input_decimals,
         output_decimals,
+        raw,
         created_at
       from executions
       where user_id = $1
         and (wallet_address is null or wallet_address = $2)
         and venue = 'kalshi'
+        and lower(coalesce(status, '')) in ('fulfilled', 'closed')
         and (
           input_mint = any($3::text[])
           or output_mint = any($3::text[])
@@ -691,11 +786,10 @@ export async function recomputePositionMetricsForWallet(
     const sizeDelta = Math.abs(position.size - computedSize);
     const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
     const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
-    const fallbackAveragePrice =
-      !reliable &&
-      (inputs.venue === "polymarket" || inputs.venue === "limitless")
-        ? computeBuyAveragePrice(tokenFills)
-        : null;
+    const fallbackAveragePrice = !reliable
+      ? (computeOpenBuyAveragePrice(tokenFills, position.size) ??
+        computeBuyAveragePrice(tokenFills))
+      : null;
     const averagePriceValue = reliable ? averagePrice : fallbackAveragePrice;
 
     return {

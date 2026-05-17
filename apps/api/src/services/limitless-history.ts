@@ -18,6 +18,7 @@ import {
   buildLimitlessRequestAuthInputs,
   type LimitlessAuthContext,
 } from "./limitless-auth.js";
+import { normalizeLimitlessMaybeRawAmount } from "./limitless-order-normalization.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
@@ -25,6 +26,7 @@ import {
 
 export type LimitlessHistorySyncStats = {
   fetched: number;
+  nextCursor: string | null;
   storedNew: number;
   alreadyKnown: number;
   skippedNoId: number;
@@ -76,6 +78,13 @@ function extractLimitlessHistoryEntries(
   return [];
 }
 
+function extractLimitlessNextCursor(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.nextCursor !== "string") return null;
+  const cursor = payload.nextCursor.trim();
+  return cursor.length ? cursor : null;
+}
+
 function normalizeHistoryStrategy(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -118,11 +127,7 @@ function normalizeHistoryPrice(value: unknown): number | null {
 }
 
 function normalizeHistoryAmount(value: unknown): number | null {
-  const parsed = parseNumberish(value);
-  if (parsed == null) return null;
-  const normalized = parsed > 1_000_000 ? parsed / 1_000_000 : parsed;
-  if (!Number.isFinite(normalized)) return null;
-  return normalized;
+  return normalizeLimitlessMaybeRawAmount(value);
 }
 
 function normalizeHistorySize(
@@ -300,33 +305,36 @@ export async function syncLimitlessHistoryForWallet(
     authContext: LimitlessAuthContext;
     page: number;
     limit: number;
+    cursor?: string;
     from?: string;
     to?: string;
   },
 ): Promise<LimitlessHistorySyncStats> {
-  const params = new URLSearchParams({
-    page: String(inputs.page),
-    limit: String(inputs.limit),
-  });
-  if (inputs.from?.trim()) params.set("from", inputs.from.trim());
-  if (inputs.to?.trim()) params.set("to", inputs.to.trim());
+  const params = new URLSearchParams({ limit: String(inputs.limit) });
+  if (inputs.cursor?.trim()) params.set("cursor", inputs.cursor.trim());
+
+  const profileId = inputs.authContext.storedProfile?.id;
+  const headers =
+    profileId != null ? { "x-on-behalf-of": String(profileId) } : undefined;
 
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/portfolio/history?${params.toString()}`,
     ...buildLimitlessRequestAuthInputs(inputs.authContext),
+    headers,
   });
 
   if (!upstream.ok) {
     const message = extractLimitlessMessage(upstream.payload);
     throw new Error(
       message
-        ? `Limitless history sync failed: ${message}`
-        : "Limitless history sync failed.",
+        ? `Limitless history sync failed (${upstream.status}): ${message}`
+        : `Limitless history sync failed (${upstream.status}).`,
     );
   }
 
   const entries = extractLimitlessHistoryEntries(upstream.payload);
+  const nextCursor = extractLimitlessNextCursor(upstream.payload);
   const marketIds = new Set<string>();
   const marketSlugs = new Set<string>();
   for (const entry of entries) {
@@ -558,6 +566,7 @@ export async function syncLimitlessHistoryForWallet(
 
   return {
     fetched: entries.length,
+    nextCursor,
     storedNew,
     alreadyKnown,
     skippedNoId,
