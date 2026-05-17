@@ -8,17 +8,19 @@ import { log } from "./log.js";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
-
-type OrderbookEntry = {
-  price?: string | number | null;
-  size?: string | number | null;
-};
+import {
+  applyClobBookUpdate,
+  buildClobBookSnapshot,
+  createClobBookState,
+  type ClobBookEntry,
+  type ClobBookState,
+} from "./clobBook.js";
 
 type OrderbookUpdate = {
   marketSlug?: string;
   orderbook?: {
-    bids?: OrderbookEntry[];
-    asks?: OrderbookEntry[];
+    bids?: ClobBookEntry[];
+    asks?: ClobBookEntry[];
     tokenId?: string;
   };
   timestamp?: number | string;
@@ -73,18 +75,25 @@ const expectedDisconnectKinds = new Set<WsSocketKind>();
 
 const addressTokens = new Map<string, TokenPair>();
 const marketIdTokens = new Map<string, TokenPair>();
+const clobBooks = new Map<string, ClobBookState>();
 const missingAddressRetryAt = new Map<string, number>();
 const missingMarketIdRetryAt = new Map<string, number>();
 const MISSING_TOKEN_RETRY_MS = 10_000;
 
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
-    void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
-      log.warn("Deferred top tick publish failed", {
-        tokenId,
-        error: String(error),
-      });
-    });
+    const book = clobBooks.get(tokenId);
+    const snapshot = book
+      ? buildClobBookSnapshot(tokenId, book, String(tsMs))
+      : undefined;
+    void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs, snapshot).catch(
+      (error) => {
+        log.warn("Deferred top tick publish failed", {
+          tokenId,
+          error: String(error),
+        });
+      },
+    );
   },
 });
 
@@ -119,36 +128,16 @@ function prefixLimitlessToken(tokenId?: string | null): string | undefined {
   return tokenId.startsWith("limitless:") ? tokenId : `limitless:${tokenId}`;
 }
 
-function parsePrice(value: unknown): number | null {
-  if (typeof value !== "string" && typeof value !== "number") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function bestBid(levels: OrderbookEntry[] | undefined): number | null {
-  if (!levels || levels.length === 0) return null;
-  let best: number | null = null;
-  for (const level of levels) {
-    const p = parsePrice(level.price);
-    if (p == null) continue;
-    if (best == null || p > best) best = p;
-  }
-  return best;
-}
-
-function bestAsk(levels: OrderbookEntry[] | undefined): number | null {
-  if (!levels || levels.length === 0) return null;
-  let best: number | null = null;
-  for (const level of levels) {
-    const p = parsePrice(level.price);
-    if (p == null) continue;
-    if (best == null || p < best) best = p;
-  }
-  return best;
-}
-
 function buildBookSide(best: number | null) {
   return best != null ? [{ price: String(best), size: "NA" }] : [];
+}
+
+function getClobBook(tokenId: string): ClobBookState {
+  const existing = clobBooks.get(tokenId);
+  if (existing) return existing;
+  const next = createClobBookState();
+  clobBooks.set(tokenId, next);
+  return next;
 }
 
 async function publishTokenTop(
@@ -414,7 +403,7 @@ function createSocket(kind: WsSocketKind): Socket {
     log.info("Limitless WS connected", { kind, label, url: wsUrl });
     bindRedisErrorOnce();
     await ensureRedis();
-    syncSubscriptions(kind, socket, desiredTargets);
+    syncSubscriptions(kind, socket, desiredTargets, { force: true });
   });
 
   if (kind === "clob") {
@@ -428,10 +417,13 @@ function createSocket(kind: WsSocketKind): Socket {
 
           const bids = orderbook?.bids ?? [];
           const asks = orderbook?.asks ?? [];
-          const bb = bestBid(bids);
-          const ba = bestAsk(asks);
+          const book = getClobBook(tokenId);
+          const { bestBid, bestAsk } = applyClobBookUpdate(book, {
+            bids,
+            asks,
+          });
 
-          if (bb == null && ba == null) return;
+          if (bestBid == null && bestAsk == null) return;
           const tsRaw = payload.timestamp;
           const tsNum =
             typeof tsRaw === "number"
@@ -440,13 +432,15 @@ function createSocket(kind: WsSocketKind): Socket {
                 ? Number(tsRaw)
                 : Date.now();
           const ts = new Date(Number.isFinite(tsNum) ? tsNum : Date.now());
+          const timestamp = ts.getTime().toString();
 
-          await publishTokenTop(tokenId, bb, ba, ts, {
-            token_id: tokenId,
-            bids,
-            asks,
-            timestamp: ts.getTime().toString(),
-          });
+          await publishTokenTop(
+            tokenId,
+            bestBid,
+            bestAsk,
+            ts,
+            buildClobBookSnapshot(tokenId, book, timestamp),
+          );
         })
         .catch((err) => log.warn("WS orderbook handler error", { kind, err }));
     });
@@ -524,7 +518,7 @@ function createSocket(kind: WsSocketKind): Socket {
   });
 
   socket.io.on("reconnect", () => {
-    syncSubscriptions(kind, socket, desiredTargets);
+    syncSubscriptions(kind, socket, desiredTargets, { force: true });
   });
 
   socket.io.on("reconnect_error", (err) => {
@@ -542,6 +536,7 @@ export function startMarketWS(initialTargets: WsTargets): void {
   desiredTargets = normalizeTargets(initialTargets);
   state.clob = [];
   state.amm = [];
+  clobBooks.clear();
 
   currentSockets.clob?.disconnect();
   currentSockets.amm?.disconnect();
