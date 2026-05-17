@@ -25,6 +25,7 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { applyVenueConfirmedPositionTrade } from "./positions-optimistic.js";
+import { recordLimitlessVolumeEvent } from "./limitless-volume-events.js";
 
 export type LimitlessHistorySyncStats = {
   fetched: number;
@@ -33,6 +34,8 @@ export type LimitlessHistorySyncStats = {
   alreadyKnown: number;
   positionUpdates: number;
   positionUpdateErrors: number;
+  volumeEventsInserted: number;
+  volumeEventErrors: number;
   skippedNoId: number;
   skippedNoSide: number;
   skippedNoOutcome: number;
@@ -352,6 +355,20 @@ function buildHistoryVenueOrderId(
   return `history:${marketKey}:${ts}:${suffix}:${strat}`;
 }
 
+function buildHistoryVolumeSourceId(inputs: {
+  entry: Record<string, unknown>;
+  strategy: string | null;
+  tokenId: string;
+  venueOrderId: string;
+}): string {
+  const txHash = extractHistoryTxHash(inputs.entry);
+  const strategy = inputs.strategy?.trim().toLowerCase();
+  if (txHash && (strategy === "buy" || strategy === "sell")) {
+    return `amm:${txHash}:${inputs.tokenId}`;
+  }
+  return inputs.venueOrderId;
+}
+
 export async function syncLimitlessHistoryForWallet(
   pool: Pool,
   inputs: {
@@ -443,6 +460,8 @@ export async function syncLimitlessHistoryForWallet(
   let alreadyKnown = 0;
   let positionUpdates = 0;
   let positionUpdateErrors = 0;
+  let volumeEventsInserted = 0;
+  let volumeEventErrors = 0;
   let skippedNoId = 0;
   let skippedNoSide = 0;
   let skippedNoOutcome = 0;
@@ -536,6 +555,31 @@ export async function syncLimitlessHistoryForWallet(
     );
     const orderType = normalizeHistoryOrderType(strategy);
     const orderHash = extractHistoryTxHash(entry);
+    const notionalUsd = deriveHistoryNotionalUsd({
+      collateralAmount: entry.collateralAmount ?? entry.collateral_amount,
+      price,
+      size,
+    });
+    const volumeSourceId = buildHistoryVolumeSourceId({
+      entry,
+      strategy,
+      tokenId,
+      venueOrderId,
+    });
+
+    async function recordHistoryVolumeEvent(): Promise<void> {
+      try {
+        volumeEventsInserted += await recordLimitlessVolumeEvent(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          sourceId: volumeSourceId,
+          notionalUsd,
+          createdAt: timestamp,
+        });
+      } catch {
+        volumeEventErrors += 1;
+      }
+    }
 
     if (timestamp) {
       const match = await findLimitlessHistoryMatch(pool, {
@@ -597,6 +641,7 @@ export async function syncLimitlessHistoryForWallet(
             positionUpdateErrors += 1;
           }
         }
+        await recordHistoryVolumeEvent();
         alreadyKnown += 1;
         continue;
       }
@@ -644,6 +689,7 @@ export async function syncLimitlessHistoryForWallet(
         positionUpdateErrors += 1;
       }
     }
+    await recordHistoryVolumeEvent();
 
     void createNotificationSafe(
       pool,
@@ -668,6 +714,8 @@ export async function syncLimitlessHistoryForWallet(
     alreadyKnown,
     positionUpdates,
     positionUpdateErrors,
+    volumeEventsInserted,
+    volumeEventErrors,
     skippedNoId,
     skippedNoSide,
     skippedNoOutcome,

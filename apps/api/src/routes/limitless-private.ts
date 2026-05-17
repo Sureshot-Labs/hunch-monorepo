@@ -53,6 +53,7 @@ import {
   normalizeLimitlessMaybeRawAmount,
   normalizeLimitlessRawAmount,
 } from "../services/limitless-order-normalization.js";
+import { recordLimitlessVolumeEvent } from "../services/limitless-volume-events.js";
 import {
   buildEmbeddedPersonalSignRequest,
   createEmbeddedPrivyWalletRpcRequest,
@@ -2972,6 +2973,25 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             ? price * size
             : null;
       if (stored.kind === "stored" && fallbackNotional != null) {
+        try {
+          await recordLimitlessVolumeEvent(pool, {
+            userId: user.id,
+            walletAddress: signer,
+            sourceId: venueOrderId,
+            notionalUsd: fallbackNotional,
+            createdAt: now,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
+              userId: user.id,
+              walletAddress: signer,
+              orderId: venueOrderId,
+            },
+            "Limitless AMM volume event insert failed",
+          );
+        }
         try {
           const optimisticResult = await applyOptimisticPositionTrade(pool, {
             userId: user.id,
