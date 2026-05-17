@@ -140,6 +140,17 @@ function getClobBook(tokenId: string): ClobBookState {
   return next;
 }
 
+function clearClobBooks(reason: string): void {
+  if (clobBooks.size === 0) return;
+  const cleared = clobBooks.size;
+  clobBooks.clear();
+  log.info("Limitless CLOB book cache cleared", { reason, cleared });
+}
+
+function clearSocketBookState(kind: WsSocketKind, reason: string): void {
+  if (kind === "clob") clearClobBooks(reason);
+}
+
 async function publishTokenTop(
   tokenId: string,
   bestBid: number | null,
@@ -321,6 +332,7 @@ function restartSocket(kind: WsSocketKind, reason: string): void {
     current.disconnect();
   }
   state[kind] = [];
+  clearSocketBookState(kind, `restart:${reason}`);
   currentSockets[kind] = createSocket(kind);
   log.info("Limitless WS restart", { kind, reason });
 }
@@ -403,6 +415,7 @@ function createSocket(kind: WsSocketKind): Socket {
     log.info("Limitless WS connected", { kind, label, url: wsUrl });
     bindRedisErrorOnce();
     await ensureRedis();
+    clearSocketBookState(kind, "connect");
     syncSubscriptions(kind, socket, desiredTargets, { force: true });
   });
 
@@ -518,6 +531,7 @@ function createSocket(kind: WsSocketKind): Socket {
   });
 
   socket.io.on("reconnect", () => {
+    clearSocketBookState(kind, "reconnect");
     syncSubscriptions(kind, socket, desiredTargets, { force: true });
   });
 

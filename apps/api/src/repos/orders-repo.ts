@@ -392,8 +392,7 @@ export async function markOrderPositionDeltaApplied(
               '_hunchPositionDeltaAppliedAt',
               $2::text
             )
-        end,
-        last_update = now()
+        end
       where id = $1
     `,
     [inputs.id, appliedAt],

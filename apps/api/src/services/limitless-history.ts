@@ -19,7 +19,7 @@ import {
   buildLimitlessRequestAuthInputs,
   type LimitlessAuthContext,
 } from "./limitless-auth.js";
-import { normalizeLimitlessMaybeRawAmount } from "./limitless-order-normalization.js";
+import { normalizeLimitlessHistoryAmount } from "./limitless-order-normalization.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
@@ -131,7 +131,7 @@ function normalizeHistoryPrice(value: unknown): number | null {
 }
 
 function normalizeHistoryAmount(value: unknown): number | null {
-  return normalizeLimitlessMaybeRawAmount(value);
+  return normalizeLimitlessHistoryAmount(value);
 }
 
 function normalizeHistorySize(
@@ -596,8 +596,6 @@ export async function syncLimitlessHistoryForWallet(
           } catch {
             positionUpdateErrors += 1;
           }
-        } else {
-          await markOrderPositionDeltaApplied(pool, { id: match.id });
         }
         alreadyKnown += 1;
         continue;

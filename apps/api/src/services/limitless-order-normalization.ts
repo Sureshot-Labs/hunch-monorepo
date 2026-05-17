@@ -34,6 +34,12 @@ export function normalizeLimitlessMaybeRawAmount(
   return parsed;
 }
 
+export function normalizeLimitlessHistoryAmount(value: unknown): number | null {
+  const parsed = parseNumberish(value);
+  if (parsed == null || !Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 export function deriveLimitlessSignedOrderSize(inputs: {
   orderType: string | null;
   side: "BUY" | "SELL" | null;

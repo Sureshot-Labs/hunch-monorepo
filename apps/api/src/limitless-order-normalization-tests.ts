@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import {
   deriveLimitlessSignedOrderSize,
+  normalizeLimitlessHistoryAmount,
   normalizeLimitlessMaybeRawAmount,
 } from "./services/limitless-order-normalization.js";
 
@@ -41,8 +42,14 @@ test("deriveLimitlessSignedOrderSize does not treat FOK buy sentinel as size", (
   );
 });
 
-test("normalizeLimitlessMaybeRawAmount handles history raw and decimal values", () => {
+test("normalizeLimitlessMaybeRawAmount handles order raw and decimal values", () => {
   assert.equal(normalizeLimitlessMaybeRawAmount("1000000"), 1);
   assert.equal(normalizeLimitlessMaybeRawAmount("970000"), 0.97);
   assert.equal(normalizeLimitlessMaybeRawAmount("1.0901"), 1.0901);
+});
+
+test("normalizeLimitlessHistoryAmount treats history values as human-readable", () => {
+  assert.equal(normalizeLimitlessHistoryAmount("1000"), 1000);
+  assert.equal(normalizeLimitlessHistoryAmount("1000000"), 1000000);
+  assert.equal(normalizeLimitlessHistoryAmount("1.0901"), 1.0901);
 });
