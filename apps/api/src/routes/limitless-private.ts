@@ -11,6 +11,7 @@ import {
 import { isRecord } from "../lib/type-guards.js";
 import {
   expireStaleLimitlessFokOrders,
+  markOrderPositionDeltaApplied,
   normalizeLimitlessFokOrderSizesForMarket,
   storeOrder,
 } from "../repos/orders-repo.js";
@@ -2747,6 +2748,28 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           upstream.payload.order.status) ||
         "submitted";
 
+      const immediateFill =
+        request.body.orderType === "FOK"
+          ? extractLimitlessImmediateFill(upstream.payload, side, {
+              price,
+              size,
+            })
+          : null;
+      const confirmedImmediateFill =
+        immediateFill != null && isLimitlessTerminalFillStatus(status)
+          ? immediateFill
+          : null;
+      const storedPrice =
+        confirmedImmediateFill && confirmedImmediateFill.shares > 0
+          ? (price ??
+            confirmedImmediateFill.notionalUsd / confirmedImmediateFill.shares)
+          : price;
+      const storedSize =
+        confirmedImmediateFill && confirmedImmediateFill.shares > 0
+          ? (size ?? confirmedImmediateFill.shares)
+          : size;
+      const confirmedFillAt = confirmedImmediateFill ? new Date() : null;
+
       const stored = await storeOrder(pool, {
         userId: user.id,
         walletAddress: signer,
@@ -2756,12 +2779,14 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         tokenId: tokenId ?? null,
         side,
         orderType: request.body.orderType,
-        price,
-        size,
+        price: storedPrice,
+        size: storedSize,
         status,
         errorMessage: null,
         rawError: null,
         orderPayload,
+        lastUpdate: confirmedFillAt,
+        filledAt: confirmedFillAt,
       });
 
       let referralFirstTrade = null;
@@ -2770,15 +2795,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         request.body.orderType === "FOK" &&
         tokenId
       ) {
-        const immediateFill = extractLimitlessImmediateFill(
-          upstream.payload,
-          side,
-          {
-            price,
-            size,
-          },
-        );
-        if (immediateFill && isLimitlessTerminalFillStatus(status)) {
+        if (confirmedImmediateFill) {
           referralFirstTrade = await tryRecordReferralFirstTradeConversion(
             pool,
             {
@@ -2793,7 +2810,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           );
         }
         let optimisticApplied = false;
-        if (immediateFill) {
+        if (confirmedImmediateFill) {
           try {
             const optimisticResult = await applyOptimisticPositionTrade(pool, {
               userId: user.id,
@@ -2801,10 +2818,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               venue: "limitless",
               tokenId,
               side,
-              shares: immediateFill.shares,
-              notionalUsd: immediateFill.notionalUsd,
+              shares: confirmedImmediateFill.shares,
+              notionalUsd: confirmedImmediateFill.notionalUsd,
             });
             optimisticApplied = optimisticResult.applied;
+            if (optimisticResult.applied) {
+              await markOrderPositionDeltaApplied(pool, {
+                id: stored.order.id,
+              });
+            }
           } catch (error) {
             app.log.warn(
               {
@@ -2839,8 +2861,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           venue: "limitless",
           status,
           side,
-          size,
-          price,
+          size: storedSize,
+          price: storedPrice,
           orderId: venueOrderId,
           tokenId: tokenId ?? null,
           walletAddress: signer,
@@ -2951,7 +2973,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             : null;
       if (stored.kind === "stored" && fallbackNotional != null) {
         try {
-          await applyOptimisticPositionTrade(pool, {
+          const optimisticResult = await applyOptimisticPositionTrade(pool, {
             userId: user.id,
             walletAddress: signer,
             venue: "limitless",
@@ -2960,6 +2982,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             shares: size,
             notionalUsd: fallbackNotional,
           });
+          if (optimisticResult.applied) {
+            await markOrderPositionDeltaApplied(pool, { id: stored.order.id });
+          }
         } catch (error) {
           app.log.warn(
             {

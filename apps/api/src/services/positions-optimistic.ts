@@ -239,6 +239,20 @@ export async function applyOptimisticPositionTrade(
   pool: Pool,
   input: OptimisticPositionTradeInput,
 ): Promise<OptimisticPositionTradeResult> {
+  return applyPositionTradeDelta(pool, input);
+}
+
+export async function applyVenueConfirmedPositionTrade(
+  pool: Pool,
+  input: OptimisticPositionTradeInput,
+): Promise<OptimisticPositionTradeResult> {
+  return applyPositionTradeDelta(pool, input);
+}
+
+async function applyPositionTradeDelta(
+  pool: Pool,
+  input: OptimisticPositionTradeInput,
+): Promise<OptimisticPositionTradeResult> {
   const walletAddress = input.walletAddress.trim();
   const tokenId = input.tokenId.trim();
   const shares = clampPositive(input.shares);

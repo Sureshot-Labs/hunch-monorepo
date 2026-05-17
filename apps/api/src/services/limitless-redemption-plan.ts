@@ -1,5 +1,6 @@
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
+import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import {
   buildPreflightFailurePlan,
   buildReadyRedemptionPlan,
@@ -108,10 +109,11 @@ export async function buildLimitlessRedemptionPlan(
     env.limitlessConditionalTokensAddress,
   );
   const indexSet = inputs.outcome === "YES" ? 1n : 2n;
+  const rawTokenId = normalizeLimitlessRawTokenId(inputs.tokenId);
 
   let tokenId: bigint;
   try {
-    tokenId = BigInt(inputs.tokenId);
+    tokenId = BigInt(rawTokenId ?? "");
   } catch {
     return buildUnavailableRedemptionPlan({
       venue: "limitless",

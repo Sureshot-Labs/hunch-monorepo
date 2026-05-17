@@ -319,7 +319,11 @@ export async function findLimitlessHistoryMatch(
     postedAt: Date;
     windowMs?: number;
   },
-): Promise<{ id: string; postedAt: Date | null } | null> {
+): Promise<{
+  id: string;
+  postedAt: Date | null;
+  positionDeltaApplied: boolean;
+} | null> {
   const windowMs = inputs.windowMs ?? 2 * 60 * 1000;
   const from = new Date(inputs.postedAt.getTime() - windowMs);
   const to = new Date(inputs.postedAt.getTime() + windowMs);
@@ -327,9 +331,14 @@ export async function findLimitlessHistoryMatch(
   const { rows } = await pool.query<{
     id: string;
     posted_at: Date | null;
+    position_delta_applied: boolean;
   }>(
     `
-      select id, posted_at
+      select
+        id,
+        posted_at,
+        coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
+          as position_delta_applied
       from orders
       where user_id = $1
         and venue = 'limitless'
@@ -355,7 +364,40 @@ export async function findLimitlessHistoryMatch(
   );
 
   if (rows.length !== 1) return null;
-  return { id: rows[0].id, postedAt: rows[0].posted_at ?? null };
+  return {
+    id: rows[0].id,
+    postedAt: rows[0].posted_at ?? null,
+    positionDeltaApplied: rows[0].position_delta_applied,
+  };
+}
+
+export async function markOrderPositionDeltaApplied(
+  pool: Pool,
+  inputs: { id: string; appliedAt?: Date },
+): Promise<void> {
+  const appliedAt = (inputs.appliedAt ?? new Date()).toISOString();
+  await pool.query(
+    `
+      update orders
+      set
+        order_payload = case
+          when order_payload is null then
+            jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+          when jsonb_typeof(order_payload) = 'object' then
+            order_payload || jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+          else
+            jsonb_build_object(
+              'payload',
+              order_payload,
+              '_hunchPositionDeltaAppliedAt',
+              $2::text
+            )
+        end,
+        last_update = now()
+      where id = $1
+    `,
+    [inputs.id, appliedAt],
+  );
 }
 
 export async function deleteHistoryOrder(
