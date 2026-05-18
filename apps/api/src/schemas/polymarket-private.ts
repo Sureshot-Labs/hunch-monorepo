@@ -174,6 +174,25 @@ export const polymarketOpenOrdersQuerySchema = z.object({
   id: z.string().optional(),
 });
 
+export const polymarketBalanceAllowanceSyncBodySchema = z
+  .object({
+    assetType: z.preprocess(
+      (v) => (typeof v === "string" ? v.toUpperCase() : v),
+      z.enum(["COLLATERAL", "CONDITIONAL"]),
+    ),
+    signatureType: z.coerce.number().int().min(0).max(3).optional(),
+    tokenId: z.string().trim().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.assetType === "CONDITIONAL" && !value.tokenId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "tokenId is required for conditional balance sync",
+        path: ["tokenId"],
+      });
+    }
+  });
+
 export const polymarketMarketInfoQuerySchema = z
   .object({
     tokenId: z.string().optional(),

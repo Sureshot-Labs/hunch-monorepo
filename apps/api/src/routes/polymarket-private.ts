@@ -14,6 +14,7 @@ import {
 } from "../repos/orders-repo.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import {
+  polymarketBalanceAllowanceSyncBodySchema,
   polymarketCancelOrderBodySchema,
   polymarketFunderDeriveBatchBodySchema,
   polymarketAccountQuerySchema,
@@ -3369,6 +3370,94 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         venue: "polymarket",
         count: orders.length,
         orders,
+      });
+    },
+  );
+
+  /**
+   * POST /balance-allowance/sync
+   * Refresh Polymarket's CLOB balance cache after wallet funding/approvals.
+   */
+  z.post(
+    "/balance-allowance/sync",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketBalanceAllowanceSyncBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket balance sync requires an EVM wallet address",
+        });
+      }
+
+      const creds = await AuthService.getVenueCredentials(
+        user.id,
+        "polymarket",
+        signer,
+      );
+      if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket credentials not found (connect first)",
+        });
+      }
+
+      const body = request.body;
+      const params = new URLSearchParams({
+        asset_type: body.assetType,
+      });
+      if (body.signatureType != null) {
+        params.set("signature_type", body.signatureType.toString());
+      }
+      if (body.tokenId) {
+        params.set("token_id", body.tokenId);
+      }
+
+      const upstream = await polymarketL2Request({
+        baseUrl: env.polymarketClobBase,
+        timeoutMs: 10_000,
+        address: signer,
+        creds: {
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+          apiPassphrase: creds.apiPassphrase,
+        },
+        method: "GET",
+        requestPath: `/balance-allowance/update?${params.toString()}`,
+      });
+
+      if (!upstream.ok) {
+        const responseStatus =
+          upstream.status >= 500
+            ? 502
+            : upstream.status >= 400
+              ? upstream.status
+              : 400;
+        reply.code(responseStatus);
+        return reply.send({
+          error: "Polymarket balance sync failed",
+          status: upstream.status,
+          payload: upstream.payload,
+        });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        venue: "polymarket",
+        assetType: body.assetType,
+        signatureType: body.signatureType ?? null,
+        tokenId: body.tokenId ?? null,
+        payload: upstream.payload,
       });
     },
   );
