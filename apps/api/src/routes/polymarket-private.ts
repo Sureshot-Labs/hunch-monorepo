@@ -22,6 +22,7 @@ import {
   polymarketEmbeddedEnsureReadyExecuteBodySchema,
   polymarketEmbeddedSignFeeAuthBodySchema,
   polymarketEmbeddedSignOrderBodySchema,
+  polymarketEmbeddedSignTypedDataBodySchema,
   polymarketFunderDeriveQuerySchema,
   polymarketMarketInfoQuerySchema,
   polymarketOrderHashBodySchema,
@@ -50,9 +51,11 @@ import {
   buildEmbeddedPolymarketFeeAuthRequest,
   buildEmbeddedPolymarketOrderRequest,
   buildEmbeddedPolymarketConnectRequest,
+  buildEmbeddedPolymarketTypedDataRequest,
   executeEmbeddedPolymarketConnectRequest,
   executeEmbeddedPolymarketFeeAuthRequest,
   executeEmbeddedPolymarketOrderRequest,
+  executeEmbeddedPolymarketTypedDataRequest,
   executeEmbeddedSignerApprovalRequests,
   prepareEmbeddedPolymarketSignerApprovalRequests,
   resolveEmbeddedPolymarketWalletContext,
@@ -395,8 +398,8 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
       : null);
   const canPreserveDistinctCandidate = Boolean(
     desiredDistinctCandidate?.deployed &&
-    (desiredDistinctCandidate.signatureType === 1 ||
-      desiredDistinctCandidate.signatureType === 2 ||
+    (desiredDistinctCandidate.signatureType === 2 ||
+      desiredDistinctCandidate.signatureType === 3 ||
       desiredDistinctCandidate.contractKind === "SAFE_LIKE"),
   );
   const effectiveDistinctFunder = canPreserveDistinctCandidate
@@ -578,6 +581,16 @@ function extractPolymarketUpstreamMessage(payload: unknown): string | null {
   return null;
 }
 
+function isPolymarketDepositWalletRequiredMessage(
+  message: string | null,
+): boolean {
+  const normalized = message?.toLowerCase() ?? "";
+  return (
+    normalized.includes("maker address not allowed") &&
+    normalized.includes("deposit wallet")
+  );
+}
+
 function extractPolymarketOrderStatus(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
   const direct = payload.status;
@@ -653,6 +666,81 @@ function normalizeSignatureType(value: unknown): number | null {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return null;
   return Math.trunc(parsed);
+}
+
+type PolymarketOrderWalletValidation =
+  | { ok: true; orderSigner: string; maker: string; depositWallet: boolean }
+  | { ok: false; error: string };
+
+function validatePolymarketOrderWallets(inputs: {
+  order: Record<string, unknown>;
+  selectedSigner: string;
+  configuredFunder: string;
+}): PolymarketOrderWalletValidation {
+  const orderSigner =
+    typeof inputs.order.signer === "string" ? inputs.order.signer : "";
+  const maker =
+    typeof inputs.order.maker === "string" ? inputs.order.maker : "";
+  const signatureType = normalizeSignatureType(inputs.order.signatureType);
+  const depositWallet = signatureType === 3;
+  const legacySafe = signatureType === 2;
+  const selectedSigner = normalizeAddress(inputs.selectedSigner);
+  const configuredFunder = normalizeAddress(inputs.configuredFunder);
+  const normalizedOrderSigner = normalizeAddress(orderSigner);
+  const normalizedMaker = normalizeAddress(maker);
+
+  if (!normalizedOrderSigner || !normalizedMaker) {
+    return { ok: false, error: "Order signer and maker are required" };
+  }
+
+  if (depositWallet) {
+    if (!configuredFunder || configuredFunder === selectedSigner) {
+      return {
+        ok: false,
+        error:
+          "Polymarket deposit-wallet orders require a configured deposit wallet funder",
+      };
+    }
+    if (
+      normalizedOrderSigner !== configuredFunder ||
+      normalizedMaker !== configuredFunder
+    ) {
+      return {
+        ok: false,
+        error:
+          "Deposit-wallet orders must use the configured Polymarket funder as maker and signer",
+      };
+    }
+    return { ok: true, orderSigner, maker, depositWallet };
+  }
+
+  if (!legacySafe) {
+    return {
+      ok: false,
+      error:
+        "Polymarket orders require a deposit wallet or deployed legacy Safe funder",
+    };
+  }
+
+  if (!configuredFunder || configuredFunder === selectedSigner) {
+    return {
+      ok: false,
+      error: "Polymarket legacy Safe orders require a configured Safe funder",
+    };
+  }
+
+  if (normalizedOrderSigner !== selectedSigner) {
+    return { ok: false, error: "Order signer must match the selected wallet" };
+  }
+  if (normalizedMaker !== configuredFunder) {
+    return {
+      ok: false,
+      error:
+        "Order maker does not match the configured Polymarket funder/vault",
+    };
+  }
+
+  return { ok: true, orderSigner, maker, depositWallet };
 }
 
 function normalizeOrderType(value: unknown): PolymarketOrderType | null {
@@ -1655,27 +1743,20 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const orderSigner = typeof order.signer === "string" ? order.signer : "";
-      if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
-        reply.code(400);
-        return reply.send({
-          error: "Order signer must match the selected wallet",
-        });
-      }
-
       const credsInfo = await AuthService.getVenueCredentialsInfo(
         user.id,
         "polymarket",
         signer,
       );
       const funder = credsInfo?.funderAddress ?? signer;
-      const maker = typeof order.maker === "string" ? order.maker : "";
-      if (normalizeAddress(maker) !== normalizeAddress(funder)) {
+      const walletValidation = validatePolymarketOrderWallets({
+        order,
+        selectedSigner: signer,
+        configuredFunder: funder,
+      });
+      if (!walletValidation.ok) {
         reply.code(400);
-        return reply.send({
-          error:
-            "Order maker does not match the configured Polymarket funder/vault",
-        });
+        return reply.send({ error: walletValidation.error });
       }
 
       const side = normalizeOrderSide(order.side);
@@ -2269,6 +2350,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
         const negRiskAdapterAddress =
           env.polymarketNegRiskAdapterAddress?.trim() || "";
+        const funderDistinctFromSigner =
+          normalizeEvmAddress(funder) !== normalizeEvmAddress(signer);
         const computePromise = (async (): Promise<PolymarketAccountPayload> => {
           const [code, snapshot] = await Promise.all([
             fetchEvmCode({
@@ -2281,6 +2364,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               timeoutMs: env.polygonRpcTimeoutMs,
               signer,
               funder,
+              includeSignerUsdc: funderDistinctFromSigner,
               includeFeeCollectorNonce: true,
               negRiskAdapterAddress,
               feeCollectorAddress,
@@ -2288,7 +2372,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           ]);
 
           const pusdBalance = snapshot.pusdBalance;
+          const usdceBalance = snapshot.usdceBalance;
           const nativeUsdcBalance = snapshot.nativeUsdcBalance;
+          const signerPusdBalance =
+            snapshot.signerPusdBalance ?? snapshot.pusdBalance;
+          const signerUsdceBalance =
+            snapshot.signerUsdceBalance ?? snapshot.usdceBalance;
+          const signerNativeUsdcBalance =
+            snapshot.signerNativeUsdcBalance ?? snapshot.nativeUsdcBalance;
           const allowanceExchange = snapshot.allowanceExchange;
           const allowanceNegRisk = snapshot.allowanceNegRisk;
           const okExchange = snapshot.okExchange;
@@ -2360,6 +2451,36 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               decimals: 6,
               balance: ethers.formatUnits(nativeUsdcBalance, 6),
               balanceRaw: nativeUsdcBalance.toString(),
+            },
+            usdce: {
+              tokenAddress: env.polymarketUsdceAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(usdceBalance, 6),
+              balanceRaw: usdceBalance.toString(),
+            },
+            signerPusd: {
+              tokenAddress: env.polymarketUsdcAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(signerPusdBalance, 6),
+              balanceRaw: signerPusdBalance.toString(),
+            },
+            signerUsdc: {
+              tokenAddress: env.polymarketUsdcAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(signerPusdBalance, 6),
+              balanceRaw: signerPusdBalance.toString(),
+            },
+            signerUsdce: {
+              tokenAddress: env.polymarketUsdceAddress,
+              decimals: 6,
+              balance: ethers.formatUnits(signerUsdceBalance, 6),
+              balanceRaw: signerUsdceBalance.toString(),
+            },
+            signerNativeUsdc: {
+              tokenAddress: POLYGON_NATIVE_USDC_ADDRESS,
+              decimals: 6,
+              balance: ethers.formatUnits(signerNativeUsdcBalance, 6),
+              balanceRaw: signerNativeUsdcBalance.toString(),
             },
             conditionalTokens: {
               contractAddress: env.polymarketConditionalTokensAddress,
@@ -2893,6 +3014,92 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.post(
+    "/embedded/sign-typed-data/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: {
+        body: polymarketEmbeddedSignTypedDataBodySchema.omit({
+          authorizationSignature: true,
+        }),
+      },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketTypedDataRequest({
+          context,
+          typedData: request.body.typedData,
+          id: request.body.id,
+          label: request.body.label,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, request: authorizationRequest });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare typed-data signature",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/embedded/sign-typed-data",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketEmbeddedSignTypedDataBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedPolymarketWalletContext({
+          user,
+          signer,
+        });
+        const authorizationRequest = buildEmbeddedPolymarketTypedDataRequest({
+          context,
+          typedData: request.body.typedData,
+          id: request.body.id,
+          label: request.body.label,
+        });
+        const signature = await executeEmbeddedPolymarketTypedDataRequest({
+          request: authorizationRequest,
+          authorizationSignature: request.body.authorizationSignature,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, signature });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to sign typed data",
+        });
+      }
+    },
+  );
+
   /**
    * POST /orders/sync
    * Fetch open orders from Polymarket CLOB using stored L2 credentials and upsert them into `orders`.
@@ -3204,23 +3411,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
       const order = body.order;
 
-      const orderSigner = typeof order.signer === "string" ? order.signer : "";
-      if (normalizeAddress(orderSigner) !== normalizeAddress(signer)) {
-        reply.code(400);
-        return reply.send({
-          error: "Order signer must match the selected wallet",
-        });
-      }
-
       const funder = creds.funderAddress ?? signer;
-      const maker = typeof order.maker === "string" ? order.maker : "";
-      if (normalizeAddress(maker) !== normalizeAddress(funder)) {
+      const walletValidation = validatePolymarketOrderWallets({
+        order,
+        selectedSigner: signer,
+        configuredFunder: funder,
+      });
+      if (!walletValidation.ok) {
         reply.code(400);
-        return reply.send({
-          error:
-            "Order maker does not match the configured Polymarket funder/vault",
-        });
+        return reply.send({ error: walletValidation.error });
       }
+      const orderSigner = walletValidation.orderSigner;
+      const maker = walletValidation.maker;
 
       const side = normalizeOrderSide(order.side);
       if (!side) {
@@ -3513,6 +3715,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(responseStatus);
         return reply.send({
           error: "Polymarket order placement failed",
+          ...(isPolymarketDepositWalletRequiredMessage(upstreamMessage)
+            ? {
+                code: "polymarket_deposit_wallet_required",
+                message:
+                  "This Polymarket wallet must trade through its deposit wallet. Configure the deposit wallet funder and retry.",
+              }
+            : {}),
           status: upstream.status,
           payload: upstream.payload,
         });

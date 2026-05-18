@@ -137,6 +137,22 @@ function isSafeFunderCandidateForBalanceLookup(
   );
 }
 
+function resolvePolymarketFunderExecutionKind(
+  candidate: PolymarketFunderCandidate | null | undefined,
+): "safe" | "magic" | "deposit_wallet" | null {
+  if (!candidate) return null;
+  if (candidate.source === "magic_proxy") return "magic";
+  if (candidate.source === "safe_proxy") return "safe";
+  if (candidate.source === "stored") {
+    if (candidate.signatureType === 3) return "deposit_wallet";
+    if (candidate.signatureType === 2 && candidate.contractKind === "SAFE_LIKE") {
+      return "safe";
+    }
+    if (candidate.signatureType === 1) return "magic";
+  }
+  return null;
+}
+
 function getVenueStatusCacheKey(inputs: {
   userId: string;
   walletAddress: string;
@@ -1296,6 +1312,34 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         timeoutMs: env.polygonRpcTimeoutMs,
                         address: walletAddress,
                       });
+                      const funderCandidatePromise =
+                        polymarketCreds?.funderAddress && !signerMatchesFunder
+                          ? derivePolymarketFunders({
+                              signer: walletAddress,
+                              storedFunder: funder,
+                              includeMagicProxy: true,
+                              bypassCodeCache: false,
+                            })
+                              .then((result) => {
+                                const normalizedFunder = funder.toLowerCase();
+                                return (
+                                  result.candidates.find(
+                                    (candidate) =>
+                                      candidate.funder.toLowerCase() ===
+                                      normalizedFunder,
+                                  ) ?? null
+                                );
+                              })
+                              .catch((error) => {
+                                app.log.warn(
+                                  { error, walletAddress, funder },
+                                  "Polymarket funder execution kind lookup failed",
+                                );
+                                return null;
+                              })
+                          : Promise.resolve<PolymarketFunderCandidate | null>(
+                              null,
+                            );
                       const funderCodePromise = signerMatchesFunder
                         ? signerCodePromise
                         : fetchEvmCode({
@@ -1310,6 +1354,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         snapshot,
                         funderNativeBalance,
                         signerNativeBalance,
+                        funderCandidate,
                       ] = await Promise.all([
                         signerCodePromise,
                         funderCodePromise,
@@ -1334,6 +1379,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                               address: walletAddress,
                             })
                           : Promise.resolve<bigint | null>(null),
+                        funderCandidatePromise,
                       ]);
 
                       const pusdBalance = snapshot.pusdBalance;
@@ -1473,6 +1519,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         signerIsContract,
                         funder,
                         funderSource,
+                        funderSignatureType:
+                          funderCandidate?.signatureType ?? null,
+                        funderContractKind:
+                          funderCandidate?.contractKind ?? null,
+                        funderExecutionKind:
+                          resolvePolymarketFunderExecutionKind(funderCandidate),
                         funderIsContract,
                         relayerEnabled,
                         pusd: pusdStatus,

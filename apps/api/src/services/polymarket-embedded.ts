@@ -4,6 +4,7 @@ import type { User } from "../auth.js";
 import { env } from "../env.js";
 import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
+import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
 
 const POLY_CHAIN_ID = 137;
 const POLY_CAIP2 = "eip155:137";
@@ -142,6 +143,7 @@ const SAFE_PROXY_FACTORY_ABI = new Interface([
 
 const TOKEN_APPROVAL_ABI = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",
+  "function transfer(address to,uint256 value) returns (bool)",
   "function setApprovalForAll(address operator,bool approved)",
   "function allowance(address owner,address spender) view returns (uint256)",
   "function isApprovedForAll(address account,address operator) view returns (bool)",
@@ -219,6 +221,14 @@ export type EmbeddedPrivyAuthorizationRequest = {
 export type EmbeddedPrivyAuthorizationSignature = {
   id: string;
   signature: string;
+};
+
+export type EmbeddedPolymarketTypedData = {
+  primaryType?: string;
+  primary_type?: string;
+  domain: Record<string, unknown>;
+  types: Record<string, Array<{ name: string; type: string }>>;
+  message: Record<string, unknown>;
 };
 
 export type EmbeddedPolymarketWalletContext = {
@@ -783,6 +793,265 @@ function createPrivyWalletRpcRequest(args: {
   };
 }
 
+function readTypedDataPrimaryType(typedData: EmbeddedPolymarketTypedData) {
+  const primaryType = typedData.primaryType ?? typedData.primary_type;
+  return typeof primaryType === "string" ? primaryType.trim() : "";
+}
+
+function readTypedDataString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readTypedDataNumberString(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value).toString();
+  }
+  if (typeof value === "bigint") return value.toString();
+  return readTypedDataString(value);
+}
+
+function normalizeTypedDataHex(value: unknown): string | null {
+  return normalizeHex(typeof value === "string" ? value : null);
+}
+
+function normalizeTypedDataAddress(value: unknown): string | null {
+  return normalizeAddress(typeof value === "string" ? value : null);
+}
+
+function addressesEqual(left: string | null, right: string | null) {
+  return Boolean(left && right && left.toLowerCase() === right.toLowerCase());
+}
+
+function requireTypedDataChainId(value: unknown, context: string) {
+  const chainId = readTypedDataNumberString(value);
+  if (chainId !== POLY_CHAIN_ID.toString()) {
+    throw new Error(`${context} must use Polygon chainId ${POLY_CHAIN_ID}.`);
+  }
+}
+
+function allowedPolymarketOperators() {
+  return new Set(
+    [
+      env.polymarketExchangeAddress,
+      env.polymarketNegRiskExchangeAddress,
+      env.polymarketNegRiskAdapterAddress,
+    ]
+      .map((value) => normalizeAddress(value))
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase()),
+  );
+}
+
+function allowedDepositWalletTransferTokens() {
+  return new Set(
+    [
+      env.polymarketUsdcAddress,
+      env.polymarketUsdceAddress,
+      POLYGON_NATIVE_USDC_ADDRESS,
+    ]
+      .map((value) => normalizeAddress(value))
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase()),
+  );
+}
+
+function validateDepositWalletBatchCall(call: unknown) {
+  if (typeof call !== "object" || call === null) {
+    throw new Error("Invalid deposit wallet call.");
+  }
+  const record = call as Record<string, unknown>;
+  const target = normalizeTypedDataAddress(record.target);
+  const data = normalizeTypedDataHex(record.data);
+  const value = readTypedDataNumberString(record.value || "0");
+  if (!target || !data) {
+    throw new Error("Deposit wallet calls require target and data.");
+  }
+  if (value !== "0") {
+    throw new Error("Deposit wallet approval calls cannot send native value.");
+  }
+
+  let decoded: ethers.TransactionDescription | null = null;
+  try {
+    decoded = TOKEN_APPROVAL_ABI.parseTransaction({ data, value: 0n });
+  } catch {
+    decoded = null;
+  }
+  if (!decoded) {
+    throw new Error(
+      "Deposit wallet batch only supports approval or pUSD transfer calls.",
+    );
+  }
+
+  const allowedOperators = allowedPolymarketOperators();
+  if (decoded.name === "approve") {
+    const token = normalizeAddress(env.polymarketUsdcAddress);
+    const spender = normalizeAddress(String(decoded.args[0] ?? ""));
+    if (
+      !addressesEqual(target, token) ||
+      !spender ||
+      !allowedOperators.has(spender.toLowerCase())
+    ) {
+      throw new Error("Unsupported deposit wallet ERC20 approval target.");
+    }
+    return;
+  }
+
+  if (decoded.name === "transfer") {
+    const allowedTransferTokens = allowedDepositWalletTransferTokens();
+    const recipient = normalizeAddress(String(decoded.args[0] ?? ""));
+    let amount = 0n;
+    try {
+      amount = BigInt(String(decoded.args[1] ?? "0"));
+    } catch {
+      amount = 0n;
+    }
+    if (
+      !allowedTransferTokens.has(target.toLowerCase()) ||
+      !recipient ||
+      addressesEqual(recipient, ZERO_ADDRESS) ||
+      amount <= 0n
+    ) {
+      throw new Error("Unsupported deposit wallet ERC20 transfer call.");
+    }
+    return;
+  }
+
+  if (decoded.name === "setApprovalForAll") {
+    const conditionalTokens = normalizeAddress(
+      env.polymarketConditionalTokensAddress,
+    );
+    const operator = normalizeAddress(String(decoded.args[0] ?? ""));
+    const approved = Boolean(decoded.args[1]);
+    if (
+      !addressesEqual(target, conditionalTokens) ||
+      !operator ||
+      !allowedOperators.has(operator.toLowerCase()) ||
+      !approved
+    ) {
+      throw new Error("Unsupported deposit wallet conditional-token approval.");
+    }
+    return;
+  }
+
+  throw new Error(
+    "Deposit wallet batch only supports approval or pUSD transfer calls.",
+  );
+}
+
+function validateDepositWalletBatchTypedData(
+  typedData: EmbeddedPolymarketTypedData,
+) {
+  const domain = typedData.domain;
+  const message = typedData.message;
+  if (readTypedDataString(domain.name) !== "DepositWallet") {
+    throw new Error("Deposit wallet batch has an invalid domain.");
+  }
+  if (readTypedDataString(domain.version) !== "1") {
+    throw new Error("Deposit wallet batch has an invalid domain version.");
+  }
+  requireTypedDataChainId(domain.chainId, "Deposit wallet batch");
+
+  const verifyingContract = normalizeTypedDataAddress(domain.verifyingContract);
+  const wallet = normalizeTypedDataAddress(message.wallet);
+  if (!addressesEqual(verifyingContract, wallet)) {
+    throw new Error("Deposit wallet batch wallet mismatch.");
+  }
+
+  const nonce = readTypedDataNumberString(message.nonce);
+  const deadline = readTypedDataNumberString(message.deadline);
+  if (!/^\d+$/.test(nonce) || !/^\d+$/.test(deadline)) {
+    throw new Error("Deposit wallet batch requires numeric nonce/deadline.");
+  }
+
+  const calls = Array.isArray(message.calls) ? message.calls : [];
+  if (calls.length < 1 || calls.length > 24) {
+    throw new Error("Deposit wallet batch call count is invalid.");
+  }
+  for (const call of calls) {
+    validateDepositWalletBatchCall(call);
+  }
+}
+
+function validateDepositWalletTypedDataSign(
+  typedData: EmbeddedPolymarketTypedData,
+) {
+  const domain = typedData.domain;
+  const message = typedData.message;
+  const appName = readTypedDataString(domain.name);
+  if (appName !== "Polymarket CTF Exchange") {
+    throw new Error("Unsupported Polymarket deposit wallet typed data.");
+  }
+  requireTypedDataChainId(domain.chainId, "Polymarket typed data");
+
+  if (readTypedDataString(message.name) !== "DepositWallet") {
+    throw new Error("Polymarket typed data must target a deposit wallet.");
+  }
+  if (readTypedDataString(message.version) !== "1") {
+    throw new Error("Invalid deposit wallet typed-data version.");
+  }
+  requireTypedDataChainId(message.chainId, "Deposit wallet typed data");
+  const depositWallet = normalizeTypedDataAddress(message.verifyingContract);
+  const contents =
+    typeof message.contents === "object" && message.contents !== null
+      ? (message.contents as Record<string, unknown>)
+      : null;
+  if (!depositWallet || !contents) {
+    throw new Error("Deposit wallet typed data is missing contents.");
+  }
+
+  const maker = normalizeTypedDataAddress(contents.maker);
+  const signer = normalizeTypedDataAddress(contents.signer);
+  const signatureType = readTypedDataNumberString(contents.signatureType);
+  if (
+    signatureType !== "3" ||
+    !addressesEqual(maker, depositWallet) ||
+    !addressesEqual(signer, depositWallet)
+  ) {
+    throw new Error("Invalid deposit wallet order typed data.");
+  }
+}
+
+function validateEmbeddedPolymarketTypedData(
+  typedData: EmbeddedPolymarketTypedData,
+) {
+  const primaryType = readTypedDataPrimaryType(typedData);
+  if (primaryType === "Batch") {
+    validateDepositWalletBatchTypedData(typedData);
+    return;
+  }
+  if (primaryType === "TypedDataSign") {
+    validateDepositWalletTypedDataSign(typedData);
+    return;
+  }
+  throw new Error("Unsupported embedded Polymarket typed data.");
+}
+
+export function buildEmbeddedPolymarketTypedDataRequest(inputs: {
+  context: EmbeddedPolymarketWalletContext;
+  typedData: EmbeddedPolymarketTypedData;
+  id?: string | null;
+  label?: string | null;
+}): EmbeddedPrivyAuthorizationRequest {
+  validateEmbeddedPolymarketTypedData(inputs.typedData);
+  const primaryType = readTypedDataPrimaryType(inputs.typedData);
+  return createPrivyWalletRpcRequest({
+    id: inputs.id?.trim() || "polymarket-typed-data-signature",
+    label: inputs.label?.trim() || "Polymarket typed-data signature",
+    walletId: inputs.context.walletId,
+    body: {
+      method: "eth_signTypedData_v4",
+      params: {
+        typed_data: {
+          primary_type: primaryType,
+          domain: inputs.typedData.domain,
+          types: inputs.typedData.types,
+          message: inputs.typedData.message,
+        },
+      },
+    },
+  });
+}
+
 export function buildEmbeddedPolymarketConnectRequest(inputs: {
   context: EmbeddedPolymarketWalletContext;
   timestamp: string;
@@ -824,6 +1093,12 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
   if (typedPayload.signer.toLowerCase() !== inputs.signer.toLowerCase()) {
     throw new Error(
       "Embedded Polymarket order signer must match the selected Trading Wallet.",
+    );
+  }
+  const signatureType = readTypedDataNumberString(typedPayload.signatureType);
+  if (signatureType !== "2") {
+    throw new Error(
+      "Embedded Polymarket orders must use a deposit wallet or deployed legacy Safe.",
     );
   }
   const isV2Order = isPolymarketOrderPayloadV2(typedPayload);
@@ -981,6 +1256,17 @@ export async function executeEmbeddedPolymarketOrderRequest(inputs: {
 }
 
 export async function executeEmbeddedPolymarketFeeAuthRequest(inputs: {
+  request: EmbeddedPrivyAuthorizationRequest;
+  authorizationSignature: string;
+}): Promise<string> {
+  const payload = await executePreparedPrivyAuthorizationRequest(
+    inputs.request,
+    inputs.authorizationSignature,
+  );
+  return parsePrivyRpcSignatureResponse(payload);
+}
+
+export async function executeEmbeddedPolymarketTypedDataRequest(inputs: {
   request: EmbeddedPrivyAuthorizationRequest;
   authorizationSignature: string;
 }): Promise<string> {

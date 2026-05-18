@@ -44,6 +44,7 @@ import {
   normalizeAcrossStatusPayload,
   resolveAcrossAppFeeForRoute,
   resolveAcrossRoute,
+  isAcrossSupportedToken,
 } from "../services/across-bridge.js";
 import {
   acrossRequest,
@@ -926,10 +927,14 @@ async function validateAcrossSwapApiSupport(inputs: {
 
   const srcTokenKey = `${srcAcrossChain}:${inputs.srcToken.toLowerCase()}`;
   const dstTokenKey = `${dstAcrossChain}:${inputs.dstToken.toLowerCase()}`;
-  if (
-    !discovery.tokens.has(srcTokenKey) ||
-    !discovery.tokens.has(dstTokenKey)
-  ) {
+  // Across discovery can lag quote support; keep locally quote-verified tokens usable.
+  const srcTokenSupported =
+    discovery.tokens.has(srcTokenKey) ||
+    isAcrossSupportedToken(inputs.srcChainId, inputs.srcToken);
+  const dstTokenSupported =
+    discovery.tokens.has(dstTokenKey) ||
+    isAcrossSupportedToken(inputs.dstChainId, inputs.dstToken);
+  if (!srcTokenSupported || !dstTokenSupported) {
     return {
       ok: false,
       status: 400,

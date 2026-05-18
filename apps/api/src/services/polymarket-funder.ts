@@ -12,7 +12,7 @@ type ContractKind =
 
 export type PolymarketFunderCandidate = {
   funder: string;
-  signatureType: 0 | 1 | 2;
+  signatureType: 0 | 1 | 2 | 3;
   source: FunderSource;
   expectedContract: boolean;
   deployed: boolean;
@@ -426,22 +426,12 @@ export async function derivePolymarketFunders(inputs: {
 
   const storedFunder = normalizeEthAddress(inputs.storedFunder ?? null);
 
-  const signerCandidate: PolymarketFunderCandidate = {
-    funder: signerAddress,
-    signatureType: 0,
-    source: "signer",
-    expectedContract: false,
-    deployed: true,
-    contractKind: "EOA",
-  };
   const addCandidate = (candidate: PolymarketFunderCandidate): void => {
     const key = candidate.funder.toLowerCase();
     if (candidateKeys.has(key)) return;
     candidateKeys.add(key);
     candidates.push(candidate);
   };
-
-  addCandidate(signerCandidate);
 
   const safeFunder = derivedAddresses.safeProxy;
   const magicFunder = derivedAddresses.magicProxy;
@@ -461,9 +451,9 @@ export async function derivePolymarketFunders(inputs: {
   ) {
     addCandidate({
       funder: storedFunder,
-      signatureType: storedMatchesMagic ? 1 : 2,
+      signatureType: storedMatchesMagic ? 1 : 3,
       source: "stored",
-      expectedContract: storedMatchesMagic || storedMatchesSafe,
+      expectedContract: true,
       deployed: false,
       contractKind: "UNKNOWN",
     });
@@ -510,23 +500,39 @@ export async function derivePolymarketFunders(inputs: {
       if (inspection.contractKind === "EOA") {
         candidate.signatureType = 0;
         candidate.expectedContract = false;
-      } else {
+      } else if (inspection.contractKind === "SAFE_LIKE") {
         candidate.signatureType = 2;
+        candidate.expectedContract = true;
+      } else {
+        candidate.signatureType = 3;
         candidate.expectedContract = true;
       }
     }
   }
 
+  const isSupportedExecutionCandidate = (
+    candidate: PolymarketFunderCandidate | null | undefined,
+  ) =>
+    Boolean(
+      candidate?.deployed &&
+      (candidate.signatureType === 3 ||
+        (candidate.signatureType === 2 && candidate.contractKind !== "EOA")),
+    );
+  const storedRecommended = findCandidateByAddress(candidates, storedFunder);
   const recommended =
-    findCandidateByAddress(candidates, storedFunder) ??
-    candidates.find((candidate) => candidate.source === "stored") ??
+    (isSupportedExecutionCandidate(storedRecommended)
+      ? storedRecommended
+      : null) ??
+    candidates.find(
+      (candidate) =>
+        candidate.source === "stored" &&
+        isSupportedExecutionCandidate(candidate),
+    ) ??
     candidates.find(
       (candidate) =>
         candidate.source === "safe_proxy" &&
-        candidate.deployed &&
-        candidate.contractKind !== "EOA",
+        isSupportedExecutionCandidate(candidate),
     ) ??
-    candidates.find((candidate) => candidate.source === "signer") ??
     null;
 
   if (storedFunder && storedFunder !== signerAddress) {
@@ -535,7 +541,7 @@ export async function derivePolymarketFunders(inputs: {
     );
     if (storedCandidate?.contractKind === "EOA") {
       warnings.push(
-        "Stored funder is an EOA; ensure approvals are granted from that wallet.",
+        "Stored Polymarket funder is an EOA and can no longer execute trades. Deploy a deposit wallet.",
       );
     }
   }
@@ -566,6 +572,11 @@ export async function validatePolymarketFunderSelection(inputs: {
   if (!funderAddress) {
     return { funderAddress: null, candidate: null };
   }
+  if (funderAddress === signer) {
+    throw new Error(
+      "Polymarket requires a deposit wallet or deployed legacy Safe funder.",
+    );
+  }
 
   const result = await derivePolymarketFunders({
     signer,
@@ -574,6 +585,15 @@ export async function validatePolymarketFunderSelection(inputs: {
     bypassCodeCache: true,
   });
   const candidate = findCandidateByAddress(result.candidates, funderAddress);
+  if (
+    !candidate ||
+    candidate.signatureType === 0 ||
+    candidate.signatureType === 1
+  ) {
+    throw new Error(
+      "Polymarket requires a deposit wallet or deployed legacy Safe funder.",
+    );
+  }
   if (candidate?.expectedContract && candidate.deployed === false) {
     throw new Error("Polymarket wallet is not deployed yet.");
   }

@@ -283,3 +283,27 @@ export const polymarketEmbeddedSignFeeAuthBodySchema = z.object({
   feeCollectorAddress: zEthAddressRequired,
   authorizationSignature: zRequiredString("authorizationSignature is required"),
 });
+
+const polymarketTypedDataFieldSchema = z.object({
+  name: z.string().trim().min(1),
+  type: z.string().trim().min(1),
+});
+
+const polymarketEmbeddedTypedDataSchema = z
+  .object({
+    primaryType: z.string().trim().min(1).optional(),
+    primary_type: z.string().trim().min(1).optional(),
+    domain: z.record(z.string(), z.unknown()),
+    types: z.record(z.string(), z.array(polymarketTypedDataFieldSchema)),
+    message: z.record(z.string(), z.unknown()),
+  })
+  .refine((value) => Boolean(value.primaryType ?? value.primary_type), {
+    message: "primaryType is required",
+  });
+
+export const polymarketEmbeddedSignTypedDataBodySchema = z.object({
+  id: z.string().trim().min(1).max(128).optional(),
+  label: z.string().trim().min(1).max(160).optional(),
+  typedData: polymarketEmbeddedTypedDataSchema,
+  authorizationSignature: zRequiredString("authorizationSignature is required"),
+});

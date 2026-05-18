@@ -32,10 +32,11 @@ const ACROSS_SOLANA_SPOKE_POOL = "DLv3NggMiSaef97YCkew5xKUHDh13tVGZ7tydt3ZeAru";
 const ACROSS_SOLANA_STATE_SEED = 0n;
 const SOLANA_MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
-const ACROSS_USDC_ADDRESSES: Record<string, Set<string>> = {
+const ACROSS_SUPPORTED_TOKEN_ADDRESSES: Record<string, Set<string>> = {
   "137": new Set([
     "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
     "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    normalizeAddress(env.polymarketPusdAddress),
   ]),
   "8453": new Set(["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"]),
   [HUNCH_SOLANA_CHAIN_ID]: new Set([
@@ -115,11 +116,11 @@ export function isAcrossSolanaRoute(inputs: {
   );
 }
 
-function isAcrossSupportedToken(
+export function isAcrossSupportedToken(
   chainId: string,
   tokenAddress: string,
 ): boolean {
-  const supported = ACROSS_USDC_ADDRESSES[chainId];
+  const supported = ACROSS_SUPPORTED_TOKEN_ADDRESSES[chainId];
   if (!supported) return false;
   return supported.has(normalizeAddress(tokenAddress));
 }
@@ -181,11 +182,11 @@ export function resolveAcrossRoute(inputs: {
       message: "Across route is not allowlisted",
     };
   }
-  const sourceIsAcrossUsdc = isAcrossSupportedToken(
+  const sourceIsAcrossToken = isAcrossSupportedToken(
     inputs.srcChainId,
     inputs.srcToken,
   );
-  const destinationIsAcrossUsdc = isAcrossSupportedToken(
+  const destinationIsAcrossToken = isAcrossSupportedToken(
     inputs.dstChainId,
     inputs.dstToken,
   );
@@ -195,8 +196,8 @@ export function resolveAcrossRoute(inputs: {
   );
 
   if (
-    !(sourceIsAcrossUsdc || sourceIsSolanaNative) ||
-    !destinationIsAcrossUsdc
+    !(sourceIsAcrossToken || sourceIsSolanaNative) ||
+    !destinationIsAcrossToken
   ) {
     return {
       ok: false,
