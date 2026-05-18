@@ -1466,25 +1466,6 @@ async function syncPolymarketPositionsFromPolygon(
     prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
   },
 ): Promise<PositionsSyncResult> {
-  if (inputs.positionScope !== "followed") {
-    try {
-      await syncPolymarketTradesForSigner(
-        pool,
-        {
-          userId: inputs.userId,
-          signerAddress: inputs.walletAddress,
-        },
-        {
-          syncPositionsOnFill: false,
-          positionScope: inputs.positionScope,
-          prefetchedBalances: inputs.prefetchedBalances ?? null,
-        },
-      );
-    } catch (error) {
-      console.error("Polymarket trade sync failed", error);
-    }
-  }
-
   return syncPolymarketStoredPositionsFromPolygon(pool, inputs);
 }
 
