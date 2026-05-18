@@ -71,6 +71,7 @@ import {
   adminRewardsPolicySchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
+  adminUserAnalyticsQuerySchema,
   adminUserKalshiProofBypassSchema,
   adminUserReferralCodeSchema,
   adminUserActivityQuerySchema,
@@ -295,6 +296,31 @@ function toOptionalNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function isAnalyticsPayloadRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readAnalyticsPayloadString(
+  payload: unknown,
+  key: string,
+): string | null {
+  if (!isAnalyticsPayloadRecord(payload)) return null;
+  const value = payload[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readAnalyticsPayloadNumber(
+  payload: unknown,
+  key: string,
+): number | null {
+  if (!isAnalyticsPayloadRecord(payload)) return null;
+  return toOptionalNumber(payload[key]);
 }
 
 async function fetchIndexCount(
@@ -1859,6 +1885,180 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           createdAt: row.created_at,
           amountUsd: row.amount_usd != null ? Number(row.amount_usd) : null,
           ref: row.ref,
+        })),
+      });
+    },
+  );
+
+  z.get(
+    "/admin/users/:id/analytics",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermissions: ["users:read", "analytics:read"],
+      }),
+      schema: {
+        params: adminUserParamsSchema,
+        querystring: adminUserAnalyticsQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const limit = request.query.limit ?? 50;
+
+      const { rows: userRows } = await pool.query<{ id: string }>(
+        `select id from users where id = $1 limit 1`,
+        [id],
+      );
+      if (!userRows.length) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      const [
+        { rows: summaryRows },
+        { rows: eventRows },
+        { rows: byEventRows },
+        { rows: byVenueRows },
+        { rows: byStatusRows },
+      ] = await Promise.all([
+        pool.query<{
+          distinct_event_count: string;
+          first_seen_at: Date | null;
+          last_seen_at: Date | null;
+          total_events: string;
+        }>(
+          `
+            select
+              count(*)::text as total_events,
+              count(distinct event_name)::text as distinct_event_count,
+              min(created_at) as first_seen_at,
+              max(created_at) as last_seen_at
+            from analytics_server_events
+            where user_id = $1
+          `,
+          [id],
+        ),
+        pool.query<{
+          analytics_schema_version: string;
+          attempt_id: string | null;
+          created_at: Date;
+          event_name: string;
+          event_slug: string | null;
+          id: string;
+          origin: "backend" | "browser";
+          payload: unknown;
+          referred_user_key: string | null;
+          source: string | null;
+          status: string | null;
+          venue: string | null;
+        }>(
+          `
+            select
+              id::text,
+              event_name,
+              event_slug,
+              source,
+              status,
+              venue,
+              referred_user_key,
+              attempt_id,
+              analytics_schema_version,
+              origin,
+              payload,
+              created_at
+            from analytics_server_events
+            where user_id = $1
+            order by created_at desc
+            limit $2
+          `,
+          [id, limit],
+        ),
+        pool.query<{ count: string; event_name: string }>(
+          `
+            select event_name, count(*)::text as count
+            from analytics_server_events
+            where user_id = $1
+            group by event_name
+            order by count(*) desc, event_name asc
+            limit 30
+          `,
+          [id],
+        ),
+        pool.query<{ count: string; venue: string }>(
+          `
+            select venue, count(*)::text as count
+            from analytics_server_events
+            where user_id = $1 and venue is not null
+            group by venue
+            order by count(*) desc, venue asc
+            limit 20
+          `,
+          [id],
+        ),
+        pool.query<{ count: string; event_name: string; status: string }>(
+          `
+            select event_name, status, count(*)::text as count
+            from analytics_server_events
+            where user_id = $1 and status is not null
+            group by event_name, status
+            order by count(*) desc, event_name asc, status asc
+            limit 30
+          `,
+          [id],
+        ),
+      ]);
+
+      const summary = summaryRows[0];
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        summary: {
+          totalEvents: Number(summary?.total_events ?? 0),
+          distinctEvents: Number(summary?.distinct_event_count ?? 0),
+          firstSeenAt: summary?.first_seen_at ?? null,
+          lastSeenAt: summary?.last_seen_at ?? null,
+        },
+        breakdowns: {
+          byEvent: byEventRows.map((row) => ({
+            eventName: row.event_name,
+            count: Number(row.count),
+          })),
+          byVenue: byVenueRows.map((row) => ({
+            venue: row.venue,
+            count: Number(row.count),
+          })),
+          byStatus: byStatusRows.map((row) => ({
+            eventName: row.event_name,
+            status: row.status,
+            count: Number(row.count),
+          })),
+        },
+        events: eventRows.map((row) => ({
+          id: row.id,
+          eventName: row.event_name,
+          eventSlug: row.event_slug,
+          source: row.source,
+          status: row.status,
+          venue: row.venue,
+          referredUserKey: row.referred_user_key,
+          attemptId: row.attempt_id,
+          analyticsSchemaVersion: row.analytics_schema_version,
+          origin: row.origin,
+          createdAt: row.created_at,
+          page: readAnalyticsPayloadString(row.payload, "page"),
+          marketSlug: readAnalyticsPayloadString(row.payload, "market_slug"),
+          eventId: readAnalyticsPayloadString(row.payload, "event_id"),
+          amountUsd: readAnalyticsPayloadNumber(row.payload, "amount_usd"),
+          shares: readAnalyticsPayloadNumber(row.payload, "shares"),
+          price: readAnalyticsPayloadNumber(row.payload, "price"),
+          errorMessage: readAnalyticsPayloadString(
+            row.payload,
+            "error_message",
+          ),
+          txHash: readAnalyticsPayloadString(row.payload, "tx_hash"),
+          walletType: readAnalyticsPayloadString(row.payload, "wallet_type"),
+          chainId: readAnalyticsPayloadString(row.payload, "chain_id"),
+          payload: row.payload,
         })),
       });
     },

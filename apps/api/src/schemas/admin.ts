@@ -169,6 +169,10 @@ export const adminUserActivityQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
+export const adminUserAnalyticsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+
 export const adminUserAdminSchema = z.object({
   isAdmin: z.coerce.boolean(),
 });
@@ -325,6 +329,9 @@ export type AdminUsersQuery = z.infer<typeof adminUsersQuerySchema>;
 export type AdminUserParams = z.infer<typeof adminUserParamsSchema>;
 export type AdminUserActivityQuery = z.infer<
   typeof adminUserActivityQuerySchema
+>;
+export type AdminUserAnalyticsQuery = z.infer<
+  typeof adminUserAnalyticsQuerySchema
 >;
 export type AdminUserAdminBody = z.infer<typeof adminUserAdminSchema>;
 export type AdminUserActiveBody = z.infer<typeof adminUserActiveSchema>;
