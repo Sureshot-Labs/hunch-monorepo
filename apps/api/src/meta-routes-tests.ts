@@ -216,6 +216,10 @@ async function main() {
   const categoryAlpha = `facet-alpha-${suiteId}`;
   const categoryGamma = `facet-gamma-${suiteId}`;
   const categorySearch = `facet-search-${suiteId}`;
+  const categoryYear = `facet-year-${suiteId}`;
+  const categoryYearPrefix = `facet-year-prefix-${suiteId}`;
+  const categoryBit = `facet-bit-${suiteId}`;
+  const categorySingleChar = `facet-x-${suiteId}`;
   const categoryScope = `facet-scope-${suiteId}`;
   const categoryProb = `facet-prob-${suiteId}`;
   const searchNeedle = `needle-${suiteId}`;
@@ -303,6 +307,42 @@ async function main() {
       venueEventId: makeId("venue-event"),
       category: categoryProb,
       title: `Facet high prob ${suiteId}`,
+      startDate: new Date(now - 6 * 60 * 60 * 1000),
+      endDate: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      category: categoryYear,
+      title: `Facet 2026 exact ${suiteId}`,
+      startDate: new Date(now - 6 * 60 * 60 * 1000),
+      endDate: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      category: categoryYearPrefix,
+      title: `Facet 20260 prefix guard ${suiteId}`,
+      startDate: new Date(now - 6 * 60 * 60 * 1000),
+      endDate: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      category: categoryBit,
+      title: `Bitcoin facet prefix ${suiteId}`,
+      startDate: new Date(now - 6 * 60 * 60 * 1000),
+      endDate: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      category: categorySingleChar,
+      title: `X facet exact ${suiteId}`,
       startDate: new Date(now - 6 * 60 * 60 * 1000),
       endDate: new Date(now + 18 * 60 * 60 * 1000),
     },
@@ -419,6 +459,42 @@ async function main() {
       bestBid: 0.74,
       bestAsk: 0.9,
     },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[9].id,
+      title: `Facet 2026 market ${suiteId}`,
+      closeTime: new Date(now + 18 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[10].id,
+      title: `Facet 20260 market ${suiteId}`,
+      closeTime: new Date(now + 18 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[11].id,
+      title: `Bitcoin facet market ${suiteId}`,
+      closeTime: new Date(now + 18 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 18 * 60 * 60 * 1000),
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[12].id,
+      title: `X facet market ${suiteId}`,
+      closeTime: new Date(now + 18 * 60 * 60 * 1000),
+      expirationTime: new Date(now + 18 * 60 * 60 * 1000),
+    },
   ];
 
   try {
@@ -509,6 +585,52 @@ async function main() {
         polymarket: 1,
       },
     });
+
+    {
+      const facetResponse = await app.inject({
+        method: "GET",
+        url: `/meta/categories/facets?${buildQuery({ q: "2026" })}`,
+      });
+      assert.equal(facetResponse.statusCode, 200);
+      const facetPayload = facetResponse.json<CategoriesFacetPayload>();
+      assert.equal(findCategory(facetPayload, categoryYear).events, 1);
+      assert.equal(findCategory(facetPayload, categoryYearPrefix).events, 0);
+    }
+
+    await assertFacetParity({
+      app,
+      query: {
+        q: "bit",
+      },
+      category: categoryBit,
+      expectedEvents: 1,
+      expectedVenues: {
+        polymarket: 1,
+      },
+    });
+
+    {
+      const facetResponse = await app.inject({
+        method: "GET",
+        url: `/meta/categories/facets?${buildQuery({ q: "x" })}`,
+      });
+      assert.equal(facetResponse.statusCode, 200);
+      const facetPayload = facetResponse.json<CategoriesFacetPayload>();
+      assert.equal(findCategory(facetPayload, categorySingleChar).events, 1);
+      assert.equal(findCategory(facetPayload, categoryAlpha).events, 0);
+    }
+
+    {
+      for (const q of ["will", "this"]) {
+        const facetResponse = await app.inject({
+          method: "GET",
+          url: `/meta/categories/facets?${buildQuery({ q })}`,
+        });
+        assert.equal(facetResponse.statusCode, 200);
+        const facetPayload = facetResponse.json<CategoriesFacetPayload>();
+        assert.equal(findCategory(facetPayload, categoryAlpha).events, 3);
+      }
+    }
 
     await assertFacetParity({
       app,

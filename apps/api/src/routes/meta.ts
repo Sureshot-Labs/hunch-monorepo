@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
 import { fetchFeedCategoryFacetRows } from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
 import {
@@ -175,33 +176,48 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             ).toISOString()
           : undefined;
 
-      const [facetRowsResult, universeRowsResult] = await Promise.all([
-        fetchFeedCategoryFacetRows(pool, {
-          minVol,
-          minLiquidity,
-          q: search,
-          view,
-          eventScope,
-          venues,
-          filter,
-          minProb,
-          maxProb,
-          maxSpread,
-          endWithin,
-          ageSince,
-          nowParam,
-          sevenDaysAgo,
-          sevenDaysFromNow,
-        }),
-        pool.query<{ category: string }>(`
-          select distinct lower(category) as category
-          from unified_events
-          where status = 'ACTIVE'
-            and category is not null
-            and btrim(category) <> ''
-          order by lower(category) asc
-        `),
-      ]);
+      let facetRowsResult: Awaited<
+        ReturnType<typeof fetchFeedCategoryFacetRows>
+      >;
+      let universeRowsResult: { rows: Array<{ category: string }> };
+      try {
+        [facetRowsResult, universeRowsResult] = await Promise.all([
+          fetchFeedCategoryFacetRows(pool, {
+            minVol,
+            minLiquidity,
+            q: search,
+            view,
+            eventScope,
+            venues,
+            filter,
+            minProb,
+            maxProb,
+            maxSpread,
+            endWithin,
+            ageSince,
+            nowParam,
+            sevenDaysAgo,
+            sevenDaysFromNow,
+          }),
+          pool.query<{ category: string }>(`
+            select distinct lower(category) as category
+            from unified_events
+            where status = 'ACTIVE'
+              and category is not null
+              and btrim(category) <> ''
+            order by lower(category) asc
+          `),
+        ]);
+      } catch (error) {
+        if (isSearchStatementTimeout(error, search)) {
+          req.log.warn(
+            { error, q: search, view },
+            "Category facet search timed out",
+          );
+          return reply.code(504).send({ error: "Search timed out" });
+        }
+        throw error;
+      }
 
       const categoriesMap = new Map<
         string,

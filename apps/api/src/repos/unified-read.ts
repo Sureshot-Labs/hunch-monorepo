@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import type { QueryResultRow } from "pg";
+import { env } from "../env.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
 
@@ -47,6 +48,8 @@ export type FavoriteFeedEventPage = {
 
 const LIMITLESS_AMM_STALE_FALLBACK_INTERVAL = "interval '15 minutes'";
 const FEED_HEAVY_QUERY_WORK_MEM = "32MB";
+const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
+const FEED_SEARCH_PREFIX_MAX_CHARS = 6;
 
 function buildLimitlessAmmFallbackAllowedExpr(
   nowParam: string,
@@ -92,8 +95,17 @@ type FeedSearchContext = {
   searchCte: string;
   searchEventJoin: string;
   searchMarketJoin: string;
-  eventRankExpr: string;
+  searchFilterExpr: string;
   joinedRankExpr: string;
+};
+
+type FeedSearchMode = "ranked" | "membership";
+
+type FeedSearchPlan = {
+  hasSearch: boolean;
+  rankMode: FeedSearchMode;
+  searchText: string;
+  prefixQueryText: string | null;
 };
 
 type FeedEventFilterInputs = Pick<
@@ -167,13 +179,151 @@ function buildFeedSearchDocumentExpr(alias: string): string {
   `;
 }
 
-function buildFeedSearchPrefixQuery(q?: string): string | null {
-  const terms = (q?.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-    .filter((term) => term.length >= 2)
-    .slice(0, 8);
-  const uniqueTerms = Array.from(new Set(terms));
-  if (!uniqueTerms.length) return null;
-  return uniqueTerms.map((term) => `${term}:*`).join(" & ");
+function extractFeedSearchPrefixTerms(q?: string): string[] {
+  const terms = (q?.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
+    (term) => term.length >= 2,
+  );
+  return Array.from(new Set(terms)).slice(0, 8);
+}
+
+function shouldUseFeedSearchPrefix(
+  q: string | undefined,
+  term: string,
+): boolean {
+  const rawTerms = q?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return (
+    rawTerms.length === 1 &&
+    term.length >= FEED_SEARCH_PREFIX_MIN_CHARS &&
+    term.length <= FEED_SEARCH_PREFIX_MAX_CHARS &&
+    !/^\d+$/.test(term)
+  );
+}
+
+function buildFeedSearchPlan(q?: string): FeedSearchPlan {
+  const searchText = q?.trim() ?? "";
+  const prefixTerms = extractFeedSearchPrefixTerms(searchText);
+  const rawTerms = searchText.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const prefixTerm =
+    prefixTerms.length === 1 &&
+    shouldUseFeedSearchPrefix(searchText, prefixTerms[0])
+      ? prefixTerms[0]
+      : null;
+  return {
+    hasSearch: searchText.length > 0,
+    rankMode: rawTerms.length >= 2 ? "ranked" : "membership",
+    searchText,
+    prefixQueryText: prefixTerm ? `${prefixTerm}:*` : null,
+  };
+}
+
+function buildFeedSearchMatchesSql(args: {
+  mode: FeedSearchMode;
+  matchLimit?: number | null;
+  nowParam: string;
+  nowCloseParam: string;
+  eventSearchDocExpr: string;
+  marketSearchDocExpr: string;
+  renderableMarketExpr: string;
+}): string {
+  const {
+    mode,
+    matchLimit = null,
+    nowParam,
+    nowCloseParam,
+    eventSearchDocExpr,
+    marketSearchDocExpr,
+    renderableMarketExpr,
+  } = args;
+  const needsScore = mode === "ranked" || matchLimit != null;
+  const selectColumns = needsScore ? "id, max(rank) as rank" : "distinct id";
+  const marketRankFactor = mode === "ranked" ? " * 2" : "";
+  const eventRankFactor = mode === "ranked" ? " * 2" : "";
+  const eventMembershipScore =
+    "coalesce(e.volume_total, e.open_interest, e.liquidity, 0)";
+  const marketMembershipScore =
+    "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
+  const aggregateClause = needsScore
+    ? `
+      group by id
+      order by rank desc nulls last, id
+      ${matchLimit != null ? `limit ${matchLimit}` : ""}
+    `
+    : "";
+
+  return `
+    select
+      ${selectColumns}
+    from (
+      select
+        e.id,
+        ${
+          mode === "ranked"
+            ? `ts_rank_cd((${eventSearchDocExpr}), sq.query)${eventRankFactor}`
+            : eventMembershipScore
+        } as rank
+      from unified_events e
+      cross join search_query sq
+      where querytree(sq.query) <> ''
+        and e.status = 'ACTIVE'
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and (${eventSearchDocExpr}) @@ sq.query
+      union all
+      select
+        e.id,
+        ${
+          mode === "ranked"
+            ? `ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query)`
+            : eventMembershipScore
+        } as rank
+      from unified_events e
+      cross join search_query sq
+      where sq.prefix_query is not null
+        and querytree(sq.prefix_query) <> ''
+        and e.status = 'ACTIVE'
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and (${eventSearchDocExpr}) @@ sq.prefix_query
+      union all
+      select
+        m.event_id as id,
+        ${
+          mode === "ranked"
+            ? `ts_rank_cd((${marketSearchDocExpr}), sq.query)${marketRankFactor}`
+            : marketMembershipScore
+        } as rank
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      cross join search_query sq
+      where querytree(sq.query) <> ''
+        and m.status = 'ACTIVE'
+        and e.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and ${renderableMarketExpr}
+        and (${marketSearchDocExpr}) @@ sq.query
+      union all
+      select
+        m.event_id as id,
+        ${
+          mode === "ranked"
+            ? `ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query)`
+            : marketMembershipScore
+        } as rank
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      cross join search_query sq
+      where sq.prefix_query is not null
+        and querytree(sq.prefix_query) <> ''
+        and m.status = 'ACTIVE'
+        and e.status = 'ACTIVE'
+        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+        and ${renderableMarketExpr}
+        and (${marketSearchDocExpr}) @@ sq.prefix_query
+    ) matches
+    ${aggregateClause}
+  `;
 }
 
 function buildFeedSearchContext(args: {
@@ -182,6 +332,8 @@ function buildFeedSearchContext(args: {
   nowParam: string;
   nowCloseParam?: string;
   renderableMarketExpr: string;
+  mode?: FeedSearchMode;
+  matchLimit?: number | null;
 }): FeedSearchContext {
   const {
     add,
@@ -189,95 +341,75 @@ function buildFeedSearchContext(args: {
     nowParam,
     nowCloseParam = nowParam,
     renderableMarketExpr,
+    mode = "ranked",
+    matchLimit = null,
   } = args;
-  const hasSearch = Boolean(q);
-  const searchParam = hasSearch ? add(q ?? "") : null;
-  const prefixParam = hasSearch ? add(buildFeedSearchPrefixQuery(q)) : null;
+  const plan = buildFeedSearchPlan(q);
+  const searchParam = plan.hasSearch ? add(plan.searchText) : null;
+  const prefixParam = plan.hasSearch ? add(plan.prefixQueryText) : null;
   const eventSearchDocExpr = buildFeedSearchDocumentExpr("e");
   const marketSearchDocExpr = buildFeedSearchDocumentExpr("m");
-  const searchCte = hasSearch
+  const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
+  const searchMatchesSql = plan.hasSearch
+    ? buildFeedSearchMatchesSql({
+        mode: effectiveMode,
+        matchLimit,
+        nowParam,
+        nowCloseParam,
+        eventSearchDocExpr,
+        marketSearchDocExpr,
+        renderableMarketExpr,
+      })
+    : "";
+  const searchCte = plan.hasSearch
     ? `
       search_query as materialized (
         select
-          websearch_to_tsquery('english', ${searchParam}::text) as query,
-          case
-            when ${prefixParam}::text is null then null::tsquery
-            else to_tsquery('english', ${prefixParam}::text)
-          end as prefix_query
-      ),
-      search_events as materialized (
-        select
-          id,
-          max(rank) as rank
+          prepared.query,
+          prepared.prefix_query,
+          (
+            querytree(prepared.query) <> ''
+            or (prepared.prefix_query is not null and querytree(prepared.prefix_query) <> '')
+          ) as applies
         from (
           select
-            e.id,
-            ts_rank_cd((${eventSearchDocExpr}), sq.query) * 2 as rank
-          from unified_events e
-          cross join search_query sq
-          where querytree(sq.query) <> ''
-            and e.status = 'ACTIVE'
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-            and (${eventSearchDocExpr}) @@ sq.query
-          union all
-          select
-            e.id,
-            ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query) as rank
-          from unified_events e
-          cross join search_query sq
-          where sq.prefix_query is not null
-            and querytree(sq.prefix_query) <> ''
-            and e.status = 'ACTIVE'
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-            and (${eventSearchDocExpr}) @@ sq.prefix_query
-          union all
-          select
-            m.event_id as id,
-            ts_rank_cd((${marketSearchDocExpr}), sq.query) * 2 as rank
-          from unified_markets m
-          join unified_events e on e.id = m.event_id
-          cross join search_query sq
-          where querytree(sq.query) <> ''
-            and m.status = 'ACTIVE'
-            and e.status = 'ACTIVE'
-            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-            and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-            and ${renderableMarketExpr}
-            and (${marketSearchDocExpr}) @@ sq.query
-          union all
-          select
-            m.event_id as id,
-            ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query) as rank
-          from unified_markets m
-          join unified_events e on e.id = m.event_id
-          cross join search_query sq
-          where sq.prefix_query is not null
-            and querytree(sq.prefix_query) <> ''
-            and m.status = 'ACTIVE'
-            and e.status = 'ACTIVE'
-            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-            and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-            and ${renderableMarketExpr}
-            and (${marketSearchDocExpr}) @@ sq.prefix_query
-        ) matches
-        group by id
+            raw.query,
+            case
+              when querytree(raw.query) = '' then null::tsquery
+              else raw.prefix_query
+            end as prefix_query
+          from (
+            select
+              websearch_to_tsquery('english', ${searchParam}::text) as query,
+              case
+                when ${prefixParam}::text is null then null::tsquery
+                else to_tsquery('english', ${prefixParam}::text)
+              end as prefix_query
+          ) raw
+        ) prepared
+      ),
+      search_events as materialized (
+        ${searchMatchesSql}
       )
     `
     : "";
 
   return {
-    hasSearch,
+    hasSearch: plan.hasSearch,
     searchCte,
-    searchEventJoin: hasSearch ? "join search_events se on se.id = e.id" : "",
-    searchMarketJoin: hasSearch
-      ? "join search_events se on se.id = m.event_id"
+    searchEventJoin: plan.hasSearch
+      ? "cross join search_query sq left join search_events se on se.id = e.id"
       : "",
-    eventRankExpr: hasSearch
-      ? "coalesce((select se_rank.rank from search_events se_rank where se_rank.id = e.id), 0)"
-      : "0",
-    joinedRankExpr: hasSearch ? "coalesce(se.rank, 0)" : "0",
+    searchMarketJoin: plan.hasSearch
+      ? "cross join search_query sq left join search_events se on se.id = m.event_id"
+      : "",
+    searchFilterExpr: plan.hasSearch
+      ? "(not sq.applies or se.id is not null)"
+      : "true",
+    joinedRankExpr:
+      plan.hasSearch && effectiveMode === "ranked"
+        ? "case when sq.applies then coalesce(se.rank, 0) else 0 end"
+        : "0::double precision",
   };
 }
 
@@ -287,6 +419,8 @@ function buildFeedEventWhere(args: {
   nowParam: string;
   hasSearch: boolean;
   requireNamedCategory?: boolean;
+  includeSearchCondition?: boolean;
+  searchFilterExpr?: string;
 }): string[] {
   const {
     add,
@@ -294,6 +428,8 @@ function buildFeedEventWhere(args: {
     nowParam,
     hasSearch,
     requireNamedCategory = false,
+    includeSearchCondition = true,
+    searchFilterExpr = "e.id in (select id from search_events)",
   } = args;
   const where: string[] = [
     "e.status = 'ACTIVE'",
@@ -311,8 +447,8 @@ function buildFeedEventWhere(args: {
   } else if (inputs.category) {
     where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
   }
-  if (hasSearch) {
-    where.push("e.id in (select id from search_events)");
+  if (hasSearch && includeSearchCondition) {
+    where.push(searchFilterExpr);
   }
   if (inputs.filter === "newest") {
     where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
@@ -420,6 +556,8 @@ function buildFeedMarketViewContext(args: {
   nowCloseParam: string;
   expressions: FeedSqlExpressions;
   requireNamedCategory?: boolean;
+  searchMode?: FeedSearchMode;
+  searchMatchLimit?: number | null;
 }) {
   const {
     add,
@@ -428,6 +566,8 @@ function buildFeedMarketViewContext(args: {
     nowCloseParam,
     expressions,
     requireNamedCategory = false,
+    searchMode = "ranked",
+    searchMatchLimit = null,
   } = args;
   const {
     marketVolumeDisplayExpr,
@@ -445,6 +585,8 @@ function buildFeedMarketViewContext(args: {
     nowParam,
     nowCloseParam,
     renderableMarketExpr,
+    mode: searchMode,
+    matchLimit: searchMatchLimit,
   });
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
@@ -456,6 +598,7 @@ function buildFeedMarketViewContext(args: {
       ${search.searchMarketJoin}
       where m.status = 'ACTIVE'
         ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
+        ${search.hasSearch ? `and ${search.searchFilterExpr}` : ""}
         and e.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
@@ -477,6 +620,9 @@ function buildFeedMarketViewContext(args: {
 
   if (requireNamedCategory) {
     where.push("e.category is not null", "btrim(e.category) <> ''");
+  }
+  if (search.hasSearch) {
+    where.push(search.searchFilterExpr);
   }
   if (marketIdsParam) {
     where.push(`m.id = ANY(${marketIdsParam}::text[])`);
@@ -540,6 +686,36 @@ function isSafeLocalWorkMem(value: string): boolean {
   return /^[1-9][0-9]*(kB|MB|GB)$/i.test(value);
 }
 
+function isSafeStatementTimeoutMs(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value <= 120_000;
+}
+
+function feedSearchWorkMem(): string {
+  return `${env.feedSearchWorkMemMb}MB`;
+}
+
+function feedSearchStatementTimeoutMs(): number {
+  return env.feedSearchTimeoutMs;
+}
+
+function feedSearchResultMatchLimit(): number {
+  return env.feedSearchResultMatchLimit;
+}
+
+function feedSearchResultMatchLimitForInputs(
+  inputs: Pick<FeedInputs, "category" | "categories" | "venues" | "marketIds">,
+): number | null {
+  if (
+    inputs.category ||
+    inputs.categories?.length ||
+    inputs.venues?.length ||
+    inputs.marketIds?.length
+  ) {
+    return null;
+  }
+  return feedSearchResultMatchLimit();
+}
+
 async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   pool: Pool,
   sql: string,
@@ -547,11 +723,13 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   options?: {
     useSearchHint?: boolean;
     workMem?: string | null;
+    statementTimeoutMs?: number | null;
   },
 ): Promise<T[]> {
   const useSearchHint = options?.useSearchHint ?? false;
   const workMem = options?.workMem ?? null;
-  if (!useSearchHint && !workMem) {
+  const statementTimeoutMs = options?.statementTimeoutMs ?? null;
+  if (!useSearchHint && !workMem && !statementTimeoutMs) {
     const { rows } = await pool.query<T>(sql, params);
     return rows;
   }
@@ -567,6 +745,16 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
         throw new Error(`Unsafe local work_mem value: ${workMem}`);
       }
       await client.query(`SET LOCAL work_mem = '${workMem}'`);
+    }
+    if (statementTimeoutMs) {
+      if (!isSafeStatementTimeoutMs(statementTimeoutMs)) {
+        throw new Error(
+          `Unsafe local statement_timeout value: ${statementTimeoutMs}`,
+        );
+      }
+      await client.query(
+        `SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`,
+      );
     }
     const { rows } = await client.query<T>(sql, params);
     await client.query("COMMIT");
@@ -589,10 +777,12 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   params: PgParams,
   useSearchHint: boolean,
   workMem?: string | null,
+  statementTimeoutMs?: number | null,
 ): Promise<T[]> {
   return queryRowsWithLocalSettings<T>(pool, sql, params, {
     useSearchHint,
     workMem,
+    statementTimeoutMs,
   });
 }
 
@@ -676,6 +866,7 @@ export async function fetchFeedCategoryFacetRows(
       nowCloseParam,
       expressions,
       requireNamedCategory: true,
+      searchMode: "membership",
     });
 
     const withParts: string[] = [];
@@ -706,6 +897,8 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       marketContext.hasSearch,
+      marketContext.hasSearch ? feedSearchWorkMem() : null,
+      marketContext.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -725,6 +918,7 @@ export async function fetchFeedCategoryFacetRows(
     q: inputs.q,
     nowParam,
     renderableMarketExpr,
+    mode: "membership",
   });
   const eventWhere = buildFeedEventWhere({
     add,
@@ -732,6 +926,7 @@ export async function fetchFeedCategoryFacetRows(
     nowParam,
     hasSearch: search.hasSearch,
     requireNamedCategory: true,
+    searchFilterExpr: search.searchFilterExpr,
   });
   const requiresMarketJoin = requiresFeedEventMarketJoin(inputs);
 
@@ -765,6 +960,7 @@ export async function fetchFeedCategoryFacetRows(
         lower(e.category) as category,
         count(*)::int as events
       from unified_events e
+      ${search.searchEventJoin}
       where ${eventOnlyWhere.join(" and ")}
       group by e.venue, lower(e.category)
     `;
@@ -774,6 +970,8 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       search.hasSearch,
+      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -793,6 +991,7 @@ export async function fetchFeedCategoryFacetRows(
         e.venue,
         lower(e.category) as category
       from unified_events e
+      ${search.searchEventJoin}
       join unified_markets m on m.event_id = e.id
         and m.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
@@ -826,6 +1025,8 @@ export async function fetchFeedCategoryFacetRows(
     sql,
     params,
     search.hasSearch,
+    search.hasSearch ? feedSearchWorkMem() : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
   );
 }
 
@@ -852,12 +1053,14 @@ export async function fetchFeedEventIds(
     q: inputs.q,
     nowParam,
     renderableMarketExpr,
+    matchLimit: feedSearchResultMatchLimitForInputs(inputs),
   });
   const eventWhere = buildFeedEventWhere({
     add,
     inputs,
     nowParam,
     hasSearch: search.hasSearch,
+    searchFilterExpr: search.searchFilterExpr,
   });
   const filterRequiresMarketJoin = requiresFeedEventMarketJoin(inputs);
   const requiresMarketJoin =
@@ -882,6 +1085,7 @@ export async function fetchFeedEventIds(
       filtered_events as (
         select e.id
         from unified_events e
+        ${search.searchEventJoin}
         ${eventChangeWhere.length ? "where " + eventChangeWhere.join(" and ") : ""}
       )
     `);
@@ -902,7 +1106,8 @@ export async function fetchFeedEventIds(
       eventChangeSql,
       params,
       search.hasSearch,
-      FEED_HEAVY_QUERY_WORK_MEM,
+      search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -932,7 +1137,7 @@ export async function fetchFeedEventIds(
     const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
     let eventOnlyOrder = "";
     const eventOnlySearchOrder = search.hasSearch
-      ? `${search.eventRankExpr} desc nulls last, `
+      ? `${search.joinedRankExpr} desc nulls last, `
       : "";
     if (inputs.sort === "totalvol")
       eventOnlyOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
@@ -963,13 +1168,20 @@ export async function fetchFeedEventIds(
       select
         e.id
       from unified_events e
+      ${search.searchEventJoin}
       ${eventOnlyWhere.length ? "where " + eventOnlyWhere.join(" and ") : ""}
       ${eventOnlyOrder ? `order by ${eventOnlyOrder}` : ""}
       limit ${inputs.limit} offset ${inputs.offset}
     `;
 
-    const { rows } = await pool.query<{ id: string }>(eventOnlySql, params);
-    return rows;
+    return await queryRowsWithSearchHint<{ id: string }>(
+      pool,
+      eventOnlySql,
+      params,
+      search.hasSearch,
+      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+    );
   }
   const having = buildFeedEventJoinHaving({
     add,
@@ -989,7 +1201,7 @@ export async function fetchFeedEventIds(
 
   let eventOrder = "";
   const eventSearchOrder = search.hasSearch
-    ? `${search.eventRankExpr} desc nulls last, `
+    ? `max(${search.joinedRankExpr}) desc nulls last, `
     : "";
   if (inputs.sort === "totalvol")
     eventOrder = `(${eventVolumeSortExpr}) ${sortDir} nulls last, e.id`;
@@ -1034,6 +1246,7 @@ export async function fetchFeedEventIds(
     select
       e.id
     from unified_events e
+    ${search.searchEventJoin}
     join unified_markets m on m.event_id = e.id
       and m.status = 'ACTIVE'
       and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
@@ -1054,7 +1267,12 @@ export async function fetchFeedEventIds(
     eventSql,
     params,
     search.hasSearch,
-    inputs.sort === "change24h" ? FEED_HEAVY_QUERY_WORK_MEM : null,
+    search.hasSearch
+      ? feedSearchWorkMem()
+      : inputs.sort === "change24h"
+        ? FEED_HEAVY_QUERY_WORK_MEM
+        : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
   );
 }
 
@@ -1432,6 +1650,7 @@ export async function fetchFeedMarketsDirect(
     nowParam,
     nowCloseParam,
     expressions,
+    searchMatchLimit: feedSearchResultMatchLimitForInputs(inputs),
   });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
@@ -1499,13 +1718,11 @@ export async function fetchFeedMarketsDirect(
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
 
-  const marketOrderExpr = marketOrder || "m.venue_market_id";
-  const marketCandidatesSql = `
+  const marketCandidatesInnerSql = `
     select
       m.id,
       m.event_id
       ${inputs.sort === "change24h" ? `, (${change24hCandidateExpr}) as change_24h` : ""}
-      , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
     ${marketContext.searchEventJoin}
@@ -1515,6 +1732,12 @@ export async function fetchFeedMarketsDirect(
     where ${where.join(" and ")}
     ${marketOrder ? `order by ${marketOrder}` : ""}
     limit ${limitParam} offset ${offsetParam}
+  `;
+  const marketCandidatesSql = `
+    select
+      page.*,
+      row_number() over () as ord
+    from (${marketCandidatesInnerSql}) page
   `;
 
   const marketBaseSql = `
@@ -1653,12 +1876,17 @@ export async function fetchFeedMarketsDirect(
     marketSql,
     params,
     {
-      workMem:
-        inputs.sort === "change24h" ||
-        inputs.sort === "trending" ||
-        inputs.sort === "trending_v2"
+      useSearchHint: marketContext.hasSearch,
+      workMem: marketContext.hasSearch
+        ? feedSearchWorkMem()
+        : inputs.sort === "change24h" ||
+            inputs.sort === "trending" ||
+            inputs.sort === "trending_v2"
           ? FEED_HEAVY_QUERY_WORK_MEM
           : null,
+      statementTimeoutMs: marketContext.hasSearch
+        ? feedSearchStatementTimeoutMs()
+        : null,
     },
   );
 }
@@ -1693,6 +1921,7 @@ export async function fetchFavoriteFeedEventPage(
       ${search.searchMarketJoin}
       where m.status = 'ACTIVE'
         and m.id = ANY(${marketIdsParam}::text[])
+        ${search.hasSearch ? `and ${search.searchFilterExpr}` : ""}
         and e.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
@@ -1736,6 +1965,9 @@ export async function fetchFavoriteFeedEventPage(
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
   ];
+  if (search.hasSearch) {
+    where.push(search.searchFilterExpr);
+  }
 
   if (inputs.venues?.length) {
     where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -1890,7 +2122,14 @@ export async function fetchFavoriteFeedEventPage(
     total_markets: number;
     total_events: number;
     event_ids: string[] | null;
-  }>(pool, sql, params, search.hasSearch);
+  }>(
+    pool,
+    sql,
+    params,
+    search.hasSearch,
+    search.hasSearch ? feedSearchWorkMem() : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+  );
   const row = rows[0];
   if (!row) return { eventIds: [], totalEvents: 0, totalMarkets: 0 };
 

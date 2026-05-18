@@ -8,6 +8,7 @@ import { pool } from "../db.js";
 import { getRedis, getRedisStatus } from "../redis.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
@@ -399,14 +400,25 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       let rows: FeedMarketRow[] = [];
       let eventIds: string[] = [];
-      if (view === "markets") {
-        rows = await fetchFeedMarketsDirect(pool, inputs);
-      } else {
-        const eventRows = await fetchFeedEventIds(pool, inputs);
-        eventIds = eventRows.map((row) => row.id);
-        if (eventIds.length) {
-          rows = await fetchFeedMarkets(pool, inputs, eventIds);
+      try {
+        if (view === "markets") {
+          rows = await fetchFeedMarketsDirect(pool, inputs);
+        } else {
+          const eventRows = await fetchFeedEventIds(pool, inputs);
+          eventIds = eventRows.map((row) => row.id);
+          if (eventIds.length) {
+            rows = await fetchFeedMarkets(pool, inputs, eventIds);
+          }
         }
+      } catch (error) {
+        if (isSearchStatementTimeout(error, search)) {
+          req.log.warn(
+            { error, q: search, view, sort, limit, offset },
+            "Feed search timed out",
+          );
+          return reply.code(504).send({ error: "Search timed out" });
+        }
+        throw error;
       }
 
       if (!rows.length) {

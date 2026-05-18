@@ -218,6 +218,36 @@ async function main() {
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
       volumeTotal: 75,
     },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Formula 2026 championship ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 25,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Formula 20260 championship ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 20,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `X search marker ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 15,
+    },
   ];
 
   const markets: SeededMarket[] = [
@@ -271,6 +301,36 @@ async function main() {
       expirationTime: events[4].endDate,
       volumeTotal: 75,
     },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[5].id,
+      title: `Formula 2026 market ${needle}`,
+      closeTime: events[5].endDate,
+      expirationTime: events[5].endDate,
+      volumeTotal: 25,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[6].id,
+      title: `Formula 20260 market ${needle}`,
+      closeTime: events[6].endDate,
+      expirationTime: events[6].endDate,
+      volumeTotal: 20,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[7].id,
+      title: `X marker market ${needle}`,
+      closeTime: events[7].endDate,
+      expirationTime: events[7].endDate,
+      volumeTotal: 15,
+    },
   ];
 
   try {
@@ -299,6 +359,66 @@ async function main() {
         assert.ok(
           payload.data.some((event) => event.eventId === events[4].id),
           `expected ${q} to match bitcoin event`,
+        );
+      }
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "2026",
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(eventIds.includes(events[5].id));
+      assert.ok(
+        !eventIds.includes(events[6].id),
+        "complete numeric tokens should not use broad prefix search",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "x",
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(eventIds.includes(events[7].id));
+      assert.ok(
+        !eventIds.includes(events[0].id),
+        "one-character search should not fall back to the unfiltered feed",
+      );
+    }
+
+    {
+      for (const q of ["will", "this"]) {
+        const response = await app.inject({
+          method: "GET",
+          url: `/feed?${buildQuery({
+            q,
+            view: "events",
+            category,
+            limit: 10,
+          })}`,
+        });
+        assert.equal(response.statusCode, 200);
+        const payload = response.json<FeedPayload>();
+        assert.ok(
+          payload.data.length > 0,
+          `${q} should fall back to normal feed results when Postgres querytree is empty`,
         );
       }
     }

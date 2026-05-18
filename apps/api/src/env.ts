@@ -686,6 +686,24 @@ export const env = {
     60_000,
   ),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  feedSearchWorkMemMb: optionalIntInRange(
+    "FEED_SEARCH_WORK_MEM_MB",
+    64,
+    1,
+    512,
+  ),
+  feedSearchTimeoutMs: optionalIntInRange(
+    "FEED_SEARCH_TIMEOUT_MS",
+    15_000,
+    1_000,
+    120_000,
+  ),
+  feedSearchResultMatchLimit: optionalIntInRange(
+    "FEED_SEARCH_RESULT_MATCH_LIMIT",
+    500,
+    100,
+    50_000,
+  ),
   authAccessState,
   adminAuthEnabled,
   adminAuthLegacyFallback,
