@@ -563,36 +563,8 @@ async function upsertLongPositionsInTx(
       from unnest($5::text[], $6::text[]) as v(token_id, size)
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
-        side = case
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'FLAT'
-            and positions.size = 0
-            and excluded.size > 0
-          then positions.side
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'LONG'
-            and positions.size > excluded.size
-            and excluded.size > 0
-          then positions.side
-          else 'LONG'
-        end,
-        size = case
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'FLAT'
-            and positions.size = 0
-            and excluded.size > 0
-          then positions.size
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'LONG'
-            and positions.size > excluded.size
-            and excluded.size > 0
-          then positions.size
-          else excluded.size
-        end,
+        side = 'LONG',
+        size = excluded.size,
         position_scope = case
           when positions.position_scope = 'own' or excluded.position_scope = 'own'
             then 'own'
@@ -600,6 +572,22 @@ async function upsertLongPositionsInTx(
         end,
         last_updated_at = now(),
         updated_at = now()
+      where not (
+        $7::int > 0
+        and positions.last_updated_at > now() - ($7::int * interval '1 second')
+        and (
+          (
+            positions.side = 'FLAT'
+            and positions.size = 0
+            and excluded.size > 0
+          )
+          or (
+            positions.side = 'LONG'
+            and positions.size > excluded.size
+            and excluded.size > 0
+          )
+        )
+      )
     `,
     [
       inputs.userId,

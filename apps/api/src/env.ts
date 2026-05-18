@@ -622,7 +622,7 @@ const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
 );
 const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
-  positionsSyncFlattenGraceSec,
+  15,
 );
 const rewardsTreasuryMinSweepUsdRaw =
   process.env.HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD?.trim() || "0";
