@@ -3250,7 +3250,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddress: signer,
           authContext: partnerAuth.authContext,
-          page: 1,
           limit: 100,
         });
         expiredStaleFok = await expireStaleLimitlessFokOrders(pool, {
@@ -3417,11 +3416,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             userId: user.id,
             walletAddress: wallet,
             authContext,
-            page: query.page,
             limit: query.limit,
             cursor: query.cursor,
-            from: query.from,
-            to: query.to,
           });
         } catch (error) {
           errors += 1;
@@ -3470,7 +3466,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         venue: "limitless",
-        page: query.page,
         limit: query.limit,
         cursor: query.cursor ?? null,
         results,

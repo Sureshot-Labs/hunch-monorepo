@@ -20,7 +20,6 @@ const zOrderType = z.preprocess(
   z.enum(["GTC", "FOK"]),
 );
 
-const zPage = z.coerce.number().int().min(1).catch(1);
 const zLimit = z.coerce.number().int().min(1).max(200).catch(100);
 const zOptionalBool = z
   .union([z.boolean(), z.string(), z.undefined()])
@@ -112,11 +111,8 @@ export const limitlessMarketExchangeQuerySchema = z.object({
 });
 
 export const limitlessHistoryQuerySchema = z.object({
-  page: zPage,
   limit: zLimit,
   cursor: z.string().trim().min(1).optional(),
-  from: z.string().optional(),
-  to: z.string().optional(),
   wallets: zCsvString("wallets is required").optional(),
 });
 

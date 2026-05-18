@@ -375,11 +375,8 @@ export async function syncLimitlessHistoryForWallet(
     userId: string;
     walletAddress: string;
     authContext: LimitlessAuthContext;
-    page: number;
     limit: number;
     cursor?: string;
-    from?: string;
-    to?: string;
   },
 ): Promise<LimitlessHistorySyncStats> {
   const params = new URLSearchParams({ limit: String(inputs.limit) });

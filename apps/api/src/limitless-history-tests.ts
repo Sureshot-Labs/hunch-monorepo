@@ -51,7 +51,6 @@ await test("syncLimitlessHistoryForWallet uses cursor pagination and delegated p
           account: "0x17cac6e4b08c8d95a2890a8df7cb0e7d83711387",
         },
       },
-      page: 7,
       limit: 25,
       cursor: "abc",
     });

@@ -1512,7 +1512,6 @@ async function syncLimitlessPositionsFromPortfolio(
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
       authContext,
-      page: 1,
       limit: 50,
     });
   } catch (error) {
