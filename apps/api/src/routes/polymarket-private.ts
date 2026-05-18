@@ -503,7 +503,7 @@ function buildEmbeddedEnsureReadyResponse(args: {
   approvalExecution?: {
     signer: string;
     funder: string;
-    funderKind: "signer" | "safe" | "magic";
+    funderKind: "signer" | "safe" | "magic" | "deposit_wallet";
     transactionHashes: string[];
   } | null;
 }) {
@@ -3042,6 +3042,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           typedData: request.body.typedData,
           id: request.body.id,
           label: request.body.label,
+          depositWalletBatchPurpose: request.body.depositWalletBatchPurpose,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ ok: true, request: authorizationRequest });
@@ -3081,6 +3082,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           typedData: request.body.typedData,
           id: request.body.id,
           label: request.body.label,
+          depositWalletBatchPurpose: request.body.depositWalletBatchPurpose,
         });
         const signature = await executeEmbeddedPolymarketTypedDataRequest({
           request: authorizationRequest,

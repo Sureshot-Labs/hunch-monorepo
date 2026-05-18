@@ -232,6 +232,8 @@ export type EmbeddedPolymarketTypedData = {
   message: Record<string, unknown>;
 };
 
+export type DepositWalletBatchPurpose = "withdraw";
+
 export type EmbeddedPolymarketWalletContext = {
   signer: string;
   walletProfile: PrivyWalletProfile;
@@ -861,9 +863,11 @@ function validateDepositWalletBatchCall(
   {
     depositWallet,
     signer,
+    purpose,
   }: {
     depositWallet: string;
     signer: string;
+    purpose?: DepositWalletBatchPurpose | null;
   },
 ) {
   if (typeof call !== "object" || call === null) {
@@ -892,6 +896,30 @@ function validateDepositWalletBatchCall(
     );
   }
 
+  if (purpose === "withdraw") {
+    if (decoded.name !== "transfer") {
+      throw new Error(
+        "Deposit wallet withdraw batches only support transfer calls.",
+      );
+    }
+    const allowedTransferTokens = allowedDepositWalletTransferTokens();
+    const recipient = normalizeAddress(String(decoded.args[0] ?? ""));
+    let amount = 0n;
+    try {
+      amount = BigInt(String(decoded.args[1] ?? "0"));
+    } catch {
+      amount = 0n;
+    }
+    if (
+      !allowedTransferTokens.has(target.toLowerCase()) ||
+      !recipient ||
+      amount <= 0n
+    ) {
+      throw new Error("Unsupported deposit wallet ERC20 transfer call.");
+    }
+    return;
+  }
+
   const allowedOperators = allowedPolymarketOperators();
   if (decoded.name === "approve") {
     const pusdToken = normalizeAddress(env.polymarketUsdcAddress);
@@ -906,10 +934,7 @@ function validateDepositWalletBatchCall(
     const approvesUsdceWrap =
       addressesEqual(target, usdceToken) &&
       (spender ? addressesEqual(spender, collateralOnramp) : false);
-    if (
-      !approvesPusdOperator &&
-      !approvesUsdceWrap
-    ) {
+    if (!approvesPusdOperator && !approvesUsdceWrap) {
       throw new Error("Unsupported deposit wallet ERC20 approval target.");
     }
     return;
@@ -983,6 +1008,7 @@ function validateDepositWalletBatchCall(
 function validateDepositWalletBatchTypedData(
   typedData: EmbeddedPolymarketTypedData,
   context: EmbeddedPolymarketWalletContext,
+  purpose?: DepositWalletBatchPurpose | null,
 ) {
   const domain = typedData.domain;
   const message = typedData.message;
@@ -1015,7 +1041,11 @@ function validateDepositWalletBatchTypedData(
     throw new Error("Deposit wallet batch call count is invalid.");
   }
   for (const call of calls) {
-    validateDepositWalletBatchCall(call, { depositWallet: wallet, signer });
+    validateDepositWalletBatchCall(call, {
+      depositWallet: wallet,
+      signer,
+      purpose,
+    });
   }
 }
 
@@ -1061,11 +1091,21 @@ function validateDepositWalletTypedDataSign(
 function validateEmbeddedPolymarketTypedData(
   typedData: EmbeddedPolymarketTypedData,
   context: EmbeddedPolymarketWalletContext,
+  options: {
+    depositWalletBatchPurpose?: DepositWalletBatchPurpose | null;
+  } = {},
 ) {
   const primaryType = readTypedDataPrimaryType(typedData);
   if (primaryType === "Batch") {
-    validateDepositWalletBatchTypedData(typedData, context);
+    validateDepositWalletBatchTypedData(
+      typedData,
+      context,
+      options.depositWalletBatchPurpose,
+    );
     return;
+  }
+  if (options.depositWalletBatchPurpose) {
+    throw new Error("Deposit wallet batch purpose is only valid for batches.");
   }
   if (primaryType === "TypedDataSign") {
     validateDepositWalletTypedDataSign(typedData);
@@ -1079,8 +1119,11 @@ export function buildEmbeddedPolymarketTypedDataRequest(inputs: {
   typedData: EmbeddedPolymarketTypedData;
   id?: string | null;
   label?: string | null;
+  depositWalletBatchPurpose?: DepositWalletBatchPurpose | null;
 }): EmbeddedPrivyAuthorizationRequest {
-  validateEmbeddedPolymarketTypedData(inputs.typedData, inputs.context);
+  validateEmbeddedPolymarketTypedData(inputs.typedData, inputs.context, {
+    depositWalletBatchPurpose: inputs.depositWalletBatchPurpose,
+  });
   const primaryType = readTypedDataPrimaryType(inputs.typedData);
   return createPrivyWalletRpcRequest({
     id: inputs.id?.trim() || "polymarket-typed-data-signature",
@@ -1626,21 +1669,8 @@ export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
     feeCollectorAllowanceOk: boolean;
   };
 }): EmbeddedPrivyAuthorizationRequest[] {
-  const funder = requireAddress(inputs.funder, "Invalid Polymarket funder.");
-  if (funder.toLowerCase() !== inputs.context.signer.toLowerCase()) {
-    return [];
-  }
-  const tasks = buildApprovalTasks({
-    funder,
-    currentApprovals: inputs.currentApprovals,
-  });
-  return tasks.map((task, index) =>
-    buildEmbeddedSignerApprovalRequest({
-      context: inputs.context,
-      task,
-      requestId: `approval-${index + 1}`,
-    }),
-  );
+  requireAddress(inputs.funder, "Invalid Polymarket funder.");
+  return [];
 }
 
 export async function executeEmbeddedSignerApprovalRequests(inputs: {

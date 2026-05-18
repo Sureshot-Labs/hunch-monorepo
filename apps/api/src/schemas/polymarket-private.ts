@@ -305,5 +305,6 @@ export const polymarketEmbeddedSignTypedDataBodySchema = z.object({
   id: z.string().trim().min(1).max(128).optional(),
   label: z.string().trim().min(1).max(160).optional(),
   typedData: polymarketEmbeddedTypedDataSchema,
+  depositWalletBatchPurpose: z.enum(["withdraw"]).optional(),
   authorizationSignature: zRequiredString("authorizationSignature is required"),
 });

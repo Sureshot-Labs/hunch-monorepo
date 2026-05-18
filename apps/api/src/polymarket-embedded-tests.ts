@@ -195,6 +195,71 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "embedded deposit wallet withdraw batch allows transfer to arbitrary Polygon address",
+    run: () => {
+      const request = buildEmbeddedPolymarketTypedDataRequest({
+        context: walletContext,
+        depositWalletBatchPurpose: "withdraw",
+        typedData: buildDepositWalletBatchTypedData({
+          target: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+          value: "0",
+          data: tokenInterface.encodeFunctionData("transfer", [
+            "0x709b6aa591a26acd1ea6181192043f50c796d8d9",
+            1_103_536n,
+          ]),
+        }),
+      });
+
+      assert.equal(request.id, "polymarket-typed-data-signature");
+    },
+  },
+  {
+    name: "embedded deposit wallet withdraw batch rejects approvals",
+    run: () => {
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            depositWalletBatchPurpose: "withdraw",
+            typedData: buildDepositWalletBatchTypedData({
+              target: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+              value: "0",
+              data: tokenInterface.encodeFunctionData("approve", [
+                "0xe2222d279d744050d28e00520010520000310F59",
+                1_103_536n,
+              ]),
+            }),
+          }),
+        /withdraw batches only support transfer calls/,
+      );
+    },
+  },
+  {
+    name: "embedded deposit wallet withdraw batch rejects wraps",
+    run: () => {
+      const onramp = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+      const usdce = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+      const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            depositWalletBatchPurpose: "withdraw",
+            typedData: buildDepositWalletBatchTypedData({
+              target: onramp,
+              value: "0",
+              data: tokenInterface.encodeFunctionData("wrap", [
+                usdce,
+                depositWallet,
+                1_103_536n,
+              ]),
+            }),
+          }),
+        /withdraw batches only support transfer calls/,
+      );
+    },
+  },
+  {
     name: "embedded deposit wallet batch allows USDC.e wrap calls",
     run: () => {
       const onramp = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
