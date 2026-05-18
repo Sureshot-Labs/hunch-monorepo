@@ -6,6 +6,7 @@ import {
   buildEmbeddedPolymarketConnectPayload,
   buildEmbeddedPolymarketConnectRequest,
   buildEmbeddedPolymarketTypedDataRequest,
+  prepareEmbeddedPolymarketSignerApprovalRequests,
   type EmbeddedPolymarketTypedData,
   type EmbeddedPolymarketWalletContext,
 } from "./services/polymarket-embedded.js";
@@ -126,6 +127,53 @@ const tests: TestCase[] = [
         { name: "version", type: "string" },
         { name: "chainId", type: "uint256" },
       ]);
+    },
+  },
+  {
+    name: "embedded signer readiness builds approval requests when signer is funder",
+    run: () => {
+      const requests = prepareEmbeddedPolymarketSignerApprovalRequests({
+        context: walletContext,
+        funder: walletContext.signer,
+        currentApprovals: {
+          exchangeApproved: false,
+          negRiskExchangeApproved: false,
+          negRiskAdapterApproved: false,
+          feeCollectorApproved: false,
+          exchangeAllowanceOk: false,
+          negRiskExchangeAllowanceOk: false,
+          negRiskAdapterAllowanceOk: false,
+          feeCollectorAllowanceOk: false,
+        },
+      });
+
+      assert.ok(requests.length >= 4);
+      assert.equal(requests[0]?.id, "approval-0");
+      assert.equal(requests[0]?.input.body["method"], "eth_sendTransaction");
+      assert.ok(
+        requests.every((request) => request.id.startsWith("approval-")),
+      );
+    },
+  },
+  {
+    name: "embedded signer readiness skips approval requests for distinct funder",
+    run: () => {
+      const requests = prepareEmbeddedPolymarketSignerApprovalRequests({
+        context: walletContext,
+        funder: "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A",
+        currentApprovals: {
+          exchangeApproved: false,
+          negRiskExchangeApproved: false,
+          negRiskAdapterApproved: false,
+          feeCollectorApproved: false,
+          exchangeAllowanceOk: false,
+          negRiskExchangeAllowanceOk: false,
+          negRiskAdapterAllowanceOk: false,
+          feeCollectorAllowanceOk: false,
+        },
+      });
+
+      assert.deepEqual(requests, []);
     },
   },
   {

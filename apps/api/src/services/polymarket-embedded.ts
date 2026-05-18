@@ -838,6 +838,7 @@ function allowedPolymarketOperators() {
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
       env.polymarketNegRiskAdapterAddress,
+      env.feeCollectorAddress,
     ]
       .map((value) => normalizeAddress(value))
       .filter((value): value is string => Boolean(value))
@@ -1669,8 +1670,20 @@ export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
     feeCollectorAllowanceOk: boolean;
   };
 }): EmbeddedPrivyAuthorizationRequest[] {
-  requireAddress(inputs.funder, "Invalid Polymarket funder.");
-  return [];
+  const funder = requireAddress(inputs.funder, "Invalid Polymarket funder.");
+  if (funder.toLowerCase() !== inputs.context.signer.toLowerCase()) {
+    return [];
+  }
+  return buildApprovalTasks({
+    funder,
+    currentApprovals: inputs.currentApprovals,
+  }).map((task, index) =>
+    buildEmbeddedSignerApprovalRequest({
+      context: inputs.context,
+      task,
+      requestId: `approval-${index}`,
+    }),
+  );
 }
 
 export async function executeEmbeddedSignerApprovalRequests(inputs: {
