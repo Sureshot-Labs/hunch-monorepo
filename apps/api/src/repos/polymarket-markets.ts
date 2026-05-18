@@ -22,7 +22,35 @@ export async function fetchPolymarketMarketInfo(
   const conditionId = inputs.conditionId?.trim();
 
   if (tokenId) {
-    const { rows } = await pool.query<PolymarketMarketInfoRow>(
+    const fastResult = await pool.query<PolymarketMarketInfoRow>(
+      `
+        select
+          pm.id as polymarket_id,
+          m.id as unified_market_id,
+          pm.condition_id,
+          pm.clob_token_ids,
+          pm.neg_risk,
+          pm.order_price_min_tick_size,
+          pm.order_min_size,
+          pm.accepting_orders,
+          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
+          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
+        from unified_tokens ut
+        join unified_markets m
+          on m.id = ut.market_id
+         and m.venue = 'polymarket'
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where ut.token_id = $1
+          and ut.venue = 'polymarket'
+        limit 1
+      `,
+      [tokenId],
+    );
+
+    if (fastResult.rows[0]) return fastResult.rows[0];
+
+    const fallbackResult = await pool.query<PolymarketMarketInfoRow>(
       `
         select
           pm.id as polymarket_id,
@@ -48,7 +76,7 @@ export async function fetchPolymarketMarketInfo(
       [tokenId],
     );
 
-    return rows[0] ?? null;
+    return fallbackResult.rows[0] ?? null;
   }
 
   if (conditionId) {
