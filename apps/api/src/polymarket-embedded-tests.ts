@@ -28,7 +28,9 @@ const walletContext: EmbeddedPolymarketWalletContext = {
 };
 
 const tokenInterface = new Interface([
+  "function approve(address spender,uint256 value) returns (bool)",
   "function transfer(address to,uint256 value) returns (bool)",
+  "function wrap(address _asset,address _to,uint256 _amount)",
 ]);
 
 function buildDepositWalletBatchTypedData(
@@ -142,7 +144,7 @@ const tests: TestCase[] = [
             target: token,
             value: "0",
             data: tokenInterface.encodeFunctionData("transfer", [
-              "0x709b6aa591a26acd1ea6181192043f50c796d8d9",
+              walletContext.signer,
               1_103_536n,
             ]),
           }),
@@ -163,12 +165,113 @@ const tests: TestCase[] = [
               target: "0x0000000000000000000000000000000000000001",
               value: "0",
               data: tokenInterface.encodeFunctionData("transfer", [
+                walletContext.signer,
+                1_103_536n,
+              ]),
+            }),
+          }),
+        /Unsupported deposit wallet ERC20 transfer call/,
+      );
+    },
+  },
+  {
+    name: "embedded deposit wallet batch rejects transfer to non-signer",
+    run: () => {
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            typedData: buildDepositWalletBatchTypedData({
+              target: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+              value: "0",
+              data: tokenInterface.encodeFunctionData("transfer", [
                 "0x709b6aa591a26acd1ea6181192043f50c796d8d9",
                 1_103_536n,
               ]),
             }),
           }),
         /Unsupported deposit wallet ERC20 transfer call/,
+      );
+    },
+  },
+  {
+    name: "embedded deposit wallet batch allows USDC.e wrap calls",
+    run: () => {
+      const onramp = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+      const usdce = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+      const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
+      for (const call of [
+        {
+          target: usdce,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("approve", [
+            onramp,
+            1_103_536n,
+          ]),
+        },
+        {
+          target: onramp,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("wrap", [
+            usdce,
+            depositWallet,
+            1_103_536n,
+          ]),
+        },
+      ]) {
+        const request = buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          typedData: buildDepositWalletBatchTypedData(call),
+        });
+
+        assert.equal(request.id, "polymarket-typed-data-signature");
+      }
+    },
+  },
+  {
+    name: "embedded deposit wallet batch rejects wrap to non-wallet",
+    run: () => {
+      const onramp = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+      const usdce = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            typedData: buildDepositWalletBatchTypedData({
+              target: onramp,
+              value: "0",
+              data: tokenInterface.encodeFunctionData("wrap", [
+                usdce,
+                walletContext.signer,
+                1_103_536n,
+              ]),
+            }),
+          }),
+        /Unsupported deposit wallet pUSD wrap call/,
+      );
+    },
+  },
+  {
+    name: "embedded deposit wallet batch rejects native USDC wrap calls",
+    run: () => {
+      const onramp = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+      const nativeUsdc = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
+      const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            typedData: buildDepositWalletBatchTypedData({
+              target: onramp,
+              value: "0",
+              data: tokenInterface.encodeFunctionData("wrap", [
+                nativeUsdc,
+                depositWallet,
+                1_103_536n,
+              ]),
+            }),
+          }),
+        /Unsupported deposit wallet pUSD wrap call/,
       );
     },
   },

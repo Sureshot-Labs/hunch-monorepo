@@ -144,6 +144,7 @@ const SAFE_PROXY_FACTORY_ABI = new Interface([
 const TOKEN_APPROVAL_ABI = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",
   "function transfer(address to,uint256 value) returns (bool)",
+  "function wrap(address _asset,address _to,uint256 _amount)",
   "function setApprovalForAll(address operator,bool approved)",
   "function allowance(address owner,address spender) view returns (uint256)",
   "function isApprovedForAll(address account,address operator) view returns (bool)",
@@ -855,7 +856,16 @@ function allowedDepositWalletTransferTokens() {
   );
 }
 
-function validateDepositWalletBatchCall(call: unknown) {
+function validateDepositWalletBatchCall(
+  call: unknown,
+  {
+    depositWallet,
+    signer,
+  }: {
+    depositWallet: string;
+    signer: string;
+  },
+) {
   if (typeof call !== "object" || call === null) {
     throw new Error("Invalid deposit wallet call.");
   }
@@ -878,20 +888,53 @@ function validateDepositWalletBatchCall(call: unknown) {
   }
   if (!decoded) {
     throw new Error(
-      "Deposit wallet batch only supports approval or pUSD transfer calls.",
+      "Deposit wallet batch only supports approval, pUSD transfer, or USDC.e wrap calls.",
     );
   }
 
   const allowedOperators = allowedPolymarketOperators();
   if (decoded.name === "approve") {
-    const token = normalizeAddress(env.polymarketUsdcAddress);
+    const pusdToken = normalizeAddress(env.polymarketUsdcAddress);
+    const usdceToken = normalizeAddress(env.polymarketUsdceAddress);
+    const collateralOnramp = normalizeAddress(
+      env.polymarketCollateralOnrampAddress,
+    );
     const spender = normalizeAddress(String(decoded.args[0] ?? ""));
+    const approvesPusdOperator =
+      addressesEqual(target, pusdToken) &&
+      (spender ? allowedOperators.has(spender.toLowerCase()) : false);
+    const approvesUsdceWrap =
+      addressesEqual(target, usdceToken) &&
+      (spender ? addressesEqual(spender, collateralOnramp) : false);
     if (
-      !addressesEqual(target, token) ||
-      !spender ||
-      !allowedOperators.has(spender.toLowerCase())
+      !approvesPusdOperator &&
+      !approvesUsdceWrap
     ) {
       throw new Error("Unsupported deposit wallet ERC20 approval target.");
+    }
+    return;
+  }
+
+  if (decoded.name === "wrap") {
+    const collateralOnramp = normalizeAddress(
+      env.polymarketCollateralOnrampAddress,
+    );
+    const usdceToken = normalizeAddress(env.polymarketUsdceAddress);
+    const asset = normalizeAddress(String(decoded.args[0] ?? ""));
+    const recipient = normalizeAddress(String(decoded.args[1] ?? ""));
+    let amount = 0n;
+    try {
+      amount = BigInt(String(decoded.args[2] ?? "0"));
+    } catch {
+      amount = 0n;
+    }
+    if (
+      !addressesEqual(target, collateralOnramp) ||
+      !addressesEqual(asset, usdceToken) ||
+      !addressesEqual(recipient, depositWallet) ||
+      amount <= 0n
+    ) {
+      throw new Error("Unsupported deposit wallet pUSD wrap call.");
     }
     return;
   }
@@ -907,8 +950,7 @@ function validateDepositWalletBatchCall(call: unknown) {
     }
     if (
       !allowedTransferTokens.has(target.toLowerCase()) ||
-      !recipient ||
-      addressesEqual(recipient, ZERO_ADDRESS) ||
+      !addressesEqual(recipient, signer) ||
       amount <= 0n
     ) {
       throw new Error("Unsupported deposit wallet ERC20 transfer call.");
@@ -934,12 +976,13 @@ function validateDepositWalletBatchCall(call: unknown) {
   }
 
   throw new Error(
-    "Deposit wallet batch only supports approval or pUSD transfer calls.",
+    "Deposit wallet batch only supports approval, pUSD transfer, or USDC.e wrap calls.",
   );
 }
 
 function validateDepositWalletBatchTypedData(
   typedData: EmbeddedPolymarketTypedData,
+  context: EmbeddedPolymarketWalletContext,
 ) {
   const domain = typedData.domain;
   const message = typedData.message;
@@ -956,6 +999,10 @@ function validateDepositWalletBatchTypedData(
   if (!addressesEqual(verifyingContract, wallet)) {
     throw new Error("Deposit wallet batch wallet mismatch.");
   }
+  const signer = normalizeAddress(context.signer);
+  if (!wallet || !signer) {
+    throw new Error("Deposit wallet batch requires wallet and signer.");
+  }
 
   const nonce = readTypedDataNumberString(message.nonce);
   const deadline = readTypedDataNumberString(message.deadline);
@@ -968,7 +1015,7 @@ function validateDepositWalletBatchTypedData(
     throw new Error("Deposit wallet batch call count is invalid.");
   }
   for (const call of calls) {
-    validateDepositWalletBatchCall(call);
+    validateDepositWalletBatchCall(call, { depositWallet: wallet, signer });
   }
 }
 
@@ -1013,10 +1060,11 @@ function validateDepositWalletTypedDataSign(
 
 function validateEmbeddedPolymarketTypedData(
   typedData: EmbeddedPolymarketTypedData,
+  context: EmbeddedPolymarketWalletContext,
 ) {
   const primaryType = readTypedDataPrimaryType(typedData);
   if (primaryType === "Batch") {
-    validateDepositWalletBatchTypedData(typedData);
+    validateDepositWalletBatchTypedData(typedData, context);
     return;
   }
   if (primaryType === "TypedDataSign") {
@@ -1032,7 +1080,7 @@ export function buildEmbeddedPolymarketTypedDataRequest(inputs: {
   id?: string | null;
   label?: string | null;
 }): EmbeddedPrivyAuthorizationRequest {
-  validateEmbeddedPolymarketTypedData(inputs.typedData);
+  validateEmbeddedPolymarketTypedData(inputs.typedData, inputs.context);
   const primaryType = readTypedDataPrimaryType(inputs.typedData);
   return createPrivyWalletRpcRequest({
     id: inputs.id?.trim() || "polymarket-typed-data-signature",
