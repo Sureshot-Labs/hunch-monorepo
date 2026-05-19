@@ -448,6 +448,9 @@ export async function getRewardsTreasuryReport(
     ...Object.keys(liabilityByChain),
     ...Object.keys(claimsByChain),
   ]);
+  if (chainFilter) {
+    chainIds.add(chainFilter);
+  }
 
   const includePending = env.rewardsTreasuryIncludePending;
   const chains: RewardsTreasuryReport["chains"] = [];

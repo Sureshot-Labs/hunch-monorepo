@@ -96,9 +96,9 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         builderMakerFeeBps: polymarketSnapshot?.builderMakerFeeBps ?? null,
         venueFeeShareBps: limitlessConfig?.shareBps ?? null,
         collectorAddress:
-          venue === "polymarket"
-            ? null
-            : env.feeCollectorAddress || null,
+          collectionMode === "fee_auth"
+            ? env.feeCollectorAddress || null
+            : null,
         feeAccount: venue === "kalshi" ? env.dflowFeeAccount || null : null,
       });
     },

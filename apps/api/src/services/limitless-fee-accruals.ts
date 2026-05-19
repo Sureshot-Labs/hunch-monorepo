@@ -22,17 +22,17 @@ const UUID_RE =
 const SETTLED_STATUSES = new Set(["MINED", "CONFIRMED"]);
 const FAILED_STATUSES = new Set(["FAILED"]);
 
-type LimitlessFeeShareConfig = {
+export type LimitlessFeeShareConfig = {
   active: boolean;
   shareBps: number;
 };
 
-type LimitlessOrderStatusItem = {
+export type LimitlessOrderStatusItem = {
   orderId: string;
   payload: Record<string, unknown>;
 };
 
-type LimitlessAccrualOrderRow = {
+export type LimitlessAccrualOrderRow = {
   id: string;
   user_id: string;
   wallet_address: string | null;
@@ -52,6 +52,28 @@ type LimitlessAccrualRow = {
   venue_order_id: string | null;
   fee_rate_bps: number;
 };
+
+function hasPositiveContractsFee(totals: Record<string, unknown>): boolean {
+  const contractsFee = rawDigits(totals.contractsFee);
+  return contractsFee != null && contractsFee > 0n;
+}
+
+function limitlessUsdFeeFailureReason(
+  totals: Record<string, unknown> | null,
+  venueFeeRaw: bigint | null,
+  notionalRaw: bigint | null,
+): string {
+  if (!totals) return "Limitless fee totals missing";
+  if (venueFeeRaw == null) return "Limitless USD fee total missing";
+  if (venueFeeRaw <= 0n && hasPositiveContractsFee(totals)) {
+    return "Limitless fee was contract-denominated; not unlockable as USDC";
+  }
+  if (venueFeeRaw <= 0n) return "Limitless USD fee is zero";
+  if (notionalRaw == null || notionalRaw <= 0n) {
+    return "Limitless USD notional missing or zero";
+  }
+  return "Limitless fee totals missing or zero";
+}
 
 function clampShareBps(value: number | null | undefined): number {
   if (!Number.isFinite(value ?? NaN)) return 0;
@@ -154,7 +176,7 @@ function settlementStatus(execution: Record<string, unknown>): string | null {
   return status ? status.toUpperCase() : null;
 }
 
-function buildAccrualFromStatus(inputs: {
+export function buildLimitlessVenueShareAccrualFromStatus(inputs: {
   order: LimitlessAccrualOrderRow;
   status: LimitlessOrderStatusItem;
   config: LimitlessFeeShareConfig;
@@ -312,7 +334,11 @@ export async function backfillLimitlessVenueShareAccruals(
       skipped += 1;
       continue;
     }
-    const accrual = buildAccrualFromStatus({ order: row, status, config });
+    const accrual = buildLimitlessVenueShareAccrualFromStatus({
+      order: row,
+      status,
+      config,
+    });
     if (!accrual) skipped += 1;
     accruals.push(accrual);
   }
@@ -339,7 +365,7 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
 ): Promise<{ upserted: number }> {
   const config = await resolveLimitlessFeeShareConfig(pool);
   if (!config.active) return { upserted: 0 };
-  const accrual = buildAccrualFromStatus({
+  const accrual = buildLimitlessVenueShareAccrualFromStatus({
     order: {
       id: inputs.orderId,
       user_id: inputs.userId,
@@ -435,11 +461,14 @@ export async function verifyLimitlessVenueShareAccruals(
         `
           update venue_fee_accruals
           set status = 'failed',
-              verification_error = 'Limitless fee totals missing or zero',
+              verification_error = $2,
               updated_at = now()
           where id = $1
         `,
-        [row.id],
+        [
+          row.id,
+          limitlessUsdFeeFailureReason(totals, venueFeeRaw, notionalRaw),
+        ],
       );
       continue;
     }
