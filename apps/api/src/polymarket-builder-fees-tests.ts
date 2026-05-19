@@ -6,6 +6,7 @@ import {
   buildPolymarketBuilderFeeAccrual,
   type PolymarketBuilderFeeConfig,
   type PolymarketFeePolicySnapshot,
+  validatePolymarketOrderBuilderCodeForConfig,
 } from "./services/polymarket-builder-fees.js";
 
 function test(name: string, fn: () => void) {
@@ -106,4 +107,35 @@ test("falls back to current config only for older orders without a snapshot", ()
   assert.ok(accrual);
   assert.equal(accrual.attributionCode, fallbackConfig.builderCode);
   assert.equal(accrual.feeRateBps, fallbackConfig.takerFeeBps);
+});
+
+test("allows builder attribution when configured rates are zero", () => {
+  const zeroRateConfig: PolymarketBuilderFeeConfig = {
+    active: true,
+    builderCode:
+      "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    takerFeeBps: 0,
+    makerFeeBps: 0,
+  };
+
+  const validation = validatePolymarketOrderBuilderCodeForConfig(
+    zeroRateConfig.builderCode,
+    zeroRateConfig,
+  );
+  assert.equal(validation.ok, true);
+
+  const accrual = buildPolymarketBuilderFeeAccrual(
+    {
+      ...baseInput(),
+      orderBuilderCode: zeroRateConfig.builderCode,
+      feePolicySnapshot: {
+        ...builderSnapshot,
+        builderCode: zeroRateConfig.builderCode,
+        builderTakerFeeBps: 0,
+        builderMakerFeeBps: 0,
+      },
+    },
+    zeroRateConfig,
+  );
+  assert.equal(accrual, null);
 });

@@ -375,6 +375,15 @@ export function capTreasurySweepAmountMicro(
   return sweepableNowMicro > maxMicro ? maxMicro : sweepableNowMicro;
 }
 
+export function reserveTreasurySweepAmountMicro(
+  sweepableNowMicro: bigint,
+  reserveMicro: bigint,
+): bigint {
+  if (sweepableNowMicro <= 0n) return 0n;
+  if (reserveMicro <= 0n) return sweepableNowMicro;
+  return max0Micro(sweepableNowMicro - reserveMicro);
+}
+
 export type RewardsTreasuryReport = {
   liabilityMode: "event_time_frozen";
   includePending: boolean;

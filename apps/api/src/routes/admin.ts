@@ -88,6 +88,8 @@ const MAX_POLY_BUILDER_TAKER_FEE_BPS = 100;
 const MAX_POLY_BUILDER_MAKER_FEE_BPS = 50;
 const MAX_FEE_COLLECT_ATTEMPTS = 5;
 const DEBRIDGE_CONFIG_TTL_MS = 30_000;
+const ZERO_BYTES32 =
+  "0x0000000000000000000000000000000000000000000000000000000000000000";
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
@@ -312,7 +314,19 @@ function normalizePolymarketBuilderCode(
 ): string | null {
   const trimmed = value?.trim() ?? "";
   if (!trimmed) return null;
-  return /^0x[0-9a-fA-F]{64}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+  const normalized = /^0x[0-9a-fA-F]{64}$/.test(trimmed)
+    ? trimmed.toLowerCase()
+    : null;
+  return normalized === ZERO_BYTES32 ? null : normalized;
+}
+
+function resolvePolymarketBuilderCodeForDisplay(
+  value: string | null | undefined,
+): string | null {
+  return (
+    normalizePolymarketBuilderCode(value) ??
+    normalizePolymarketBuilderCode(env.polymarketBuilderCode)
+  );
 }
 
 function toOptionalNumber(value: unknown): number | null {
@@ -2548,8 +2562,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       const polyFeeBps = clampFeeBps(poly?.fee_bps ?? env.feeBpsPolymarket);
-      const polyBuilderCode = normalizePolymarketBuilderCode(
-        poly?.polymarket_builder_code ?? env.polymarketBuilderCode,
+      const polyBuilderCode = resolvePolymarketBuilderCodeForDisplay(
+        poly?.polymarket_builder_code,
       );
       const polyBuilderTakerFeeBps = clampFeeBpsForMax(
         poly?.polymarket_builder_taker_fee_bps ??
@@ -2561,9 +2575,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           env.polymarketBuilderMakerFeeBps,
         MAX_POLY_BUILDER_MAKER_FEE_BPS,
       );
-      const polyBuilderActive =
-        Boolean(polyBuilderCode) &&
-        (polyBuilderTakerFeeBps > 0 || polyBuilderMakerFeeBps > 0);
+      const polyBuilderActive = Boolean(polyBuilderCode);
       return reply.send({
         ok: true,
         fees: {
@@ -2613,8 +2625,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           ? body.polymarketBuilderCode !== undefined
             ? normalizePolymarketBuilderCode(body.polymarketBuilderCode)
             : normalizePolymarketBuilderCode(
-                currentPolymarket?.polymarket_builder_code ??
-                  env.polymarketBuilderCode,
+                resolvePolymarketBuilderCodeForDisplay(
+                  currentPolymarket?.polymarket_builder_code,
+                ),
               )
           : null;
       const polymarketBuilderTakerFeeBps =

@@ -189,14 +189,21 @@ function buildPolymarketBuilderFeeConfig(inputs: {
     inputs.makerFeeBps ?? 0,
     MAX_MAKER_BUILDER_FEE_BPS,
   );
-  const active =
-    builderCode !== ZERO_BYTES32 && (takerFeeBps > 0 || makerFeeBps > 0);
+  const active = builderCode !== ZERO_BYTES32;
   return {
     active,
     builderCode: active ? builderCode : ZERO_BYTES32,
     takerFeeBps: active ? takerFeeBps : 0,
     makerFeeBps: active ? makerFeeBps : 0,
   };
+}
+
+function resolveBuilderCodeWithEnvFallback(
+  policyBuilderCode: string | null | undefined,
+): string {
+  const policyCode = normalizeBytes32(policyBuilderCode);
+  if (policyCode !== ZERO_BYTES32) return policyCode;
+  return normalizeBytes32(env.polymarketBuilderCode);
 }
 
 function buildPolymarketBuilderFeeConfigFromSnapshot(
@@ -223,7 +230,9 @@ export async function resolvePolymarketBuilderFeeConfig(
 ): Promise<PolymarketBuilderFeeConfig> {
   const policy = await fetchActiveFeePolicy(pool, "polymarket");
   return buildPolymarketBuilderFeeConfig({
-    builderCode: policy?.polymarket_builder_code ?? env.polymarketBuilderCode,
+    builderCode: resolveBuilderCodeWithEnvFallback(
+      policy?.polymarket_builder_code,
+    ),
     takerFeeBps:
       policy?.polymarket_builder_taker_fee_bps ??
       env.polymarketBuilderTakerFeeBps,
@@ -250,7 +259,9 @@ export async function resolvePolymarketFeePolicySnapshot(
 ): Promise<PolymarketFeePolicySnapshot> {
   const policy = await fetchActiveFeePolicy(pool, "polymarket");
   const builderConfig = buildPolymarketBuilderFeeConfig({
-    builderCode: policy?.polymarket_builder_code ?? env.polymarketBuilderCode,
+    builderCode: resolveBuilderCodeWithEnvFallback(
+      policy?.polymarket_builder_code,
+    ),
     takerFeeBps:
       policy?.polymarket_builder_taker_fee_bps ??
       env.polymarketBuilderTakerFeeBps,
@@ -800,6 +811,26 @@ export async function unlockPolymarketBuilderFeeAccruals(
   } = {},
 ): Promise<{ considered: number; unlocked: number; skipped: number; budgetMicro: string }> {
   const run = async () => {
+    const hasVerifiedRows = await pool.query<{ exists: number }>(
+      `
+        select 1 as exists
+        from venue_fee_accruals
+        where venue = 'polymarket'
+          and fee_program = 'builder'
+          and status = 'verified'
+          and fee_event_id is null
+        limit 1
+      `,
+    );
+    if (!hasVerifiedRows.rows.length) {
+      return {
+        considered: 0,
+        unlocked: 0,
+        skipped: 0,
+        budgetMicro: "0",
+      };
+    }
+
     assertExpectedPolygonHotWallet();
     const report = await getRewardsTreasuryReport(pool, {
       chainId: POLYGON_CHAIN_ID,

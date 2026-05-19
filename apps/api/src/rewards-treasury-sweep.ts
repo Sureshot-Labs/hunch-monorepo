@@ -20,6 +20,7 @@ import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 import {
   capTreasurySweepAmountMicro,
   getRewardsTreasuryReport,
+  reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
 import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
 import { unlockPolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
@@ -134,6 +135,8 @@ type PlannedSweepAction = {
   hotBalanceLeftIfApplied: string | null;
   reserveFloorNow: string | null;
   sweepableNow: string | null;
+  sweepableAfterBuilderReserve: string | null;
+  builderAccrualReserve: string | null;
   shouldSweep: boolean;
   reason: string | null;
   executed: boolean;
@@ -547,6 +550,21 @@ function deriveRunStatus(actions: PlannedSweepAction[]): SweepRunStatus {
   return "partial";
 }
 
+async function fetchPolymarketBuilderAccrualReserveMicro(): Promise<bigint> {
+  const { rows } = await pool.query<{ reserve_micro: string | null }>(
+    `
+      select coalesce(sum(fee_amount_raw::numeric), 0)::text as reserve_micro
+      from venue_fee_accruals
+      where venue = 'polymarket'
+        and fee_program = 'builder'
+        and status in ('accrued', 'verified')
+        and fee_event_id is null
+        and fee_amount_raw ~ '^[0-9]+$'
+    `,
+  );
+  return BigInt(rows[0]?.reserve_micro ?? "0");
+}
+
 export async function runRewardsTreasurySweep(
   options: RewardsTreasurySweepOptions,
 ) {
@@ -582,13 +600,25 @@ export async function runRewardsTreasurySweep(
     }
 
     const minSweepMicro = env.rewardsTreasuryMinSweepMicro;
+    const polygonBuilderAccrualReserveMicro = lockTargets.includes("137")
+      ? await fetchPolymarketBuilderAccrualReserveMicro()
+      : 0n;
 
     const actions: PlannedSweepAction[] = report.chains.map((chain) => {
       const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
       const reserveFloorMicro = BigInt(chain.reserveFloorMicro);
       const hotBalanceNowMicro = BigInt(chain.controlledHotBalanceMicro);
+      const builderAccrualReserveMicro =
+        normalizeRewardsChainId(chain.chainId) === "137"
+          ? polygonBuilderAccrualReserveMicro
+          : 0n;
+      const sweepableAfterBuilderReserveMicro =
+        reserveTreasurySweepAmountMicro(
+          sweepableNowMicro,
+          builderAccrualReserveMicro,
+        );
       const amountMicro = capTreasurySweepAmountMicro(
-        sweepableNowMicro,
+        sweepableAfterBuilderReserveMicro,
         options.maxMicro,
       );
       const hotBalanceLeftIfAppliedMicro =
@@ -601,6 +631,12 @@ export async function runRewardsTreasurySweep(
       if (!shouldSweep) {
         if (!chain.hotBalanceAvailable) {
           reason = `hot_balance_unavailable:${chain.hotBalanceError ?? "unknown"}`;
+        } else if (
+          amountMicro === 0n &&
+          sweepableNowMicro > 0n &&
+          builderAccrualReserveMicro > 0n
+        ) {
+          reason = "reserved_for_polymarket_builder_accruals";
         } else if (amountMicro === 0n) {
           reason = "no_surplus";
         } else {
@@ -624,6 +660,12 @@ export async function runRewardsTreasurySweep(
         ),
         reserveFloorNow: usdcMicroToDecimalString(reserveFloorMicro),
         sweepableNow: usdcMicroToDecimalString(sweepableNowMicro),
+        sweepableAfterBuilderReserve: usdcMicroToDecimalString(
+          sweepableAfterBuilderReserveMicro,
+        ),
+        builderAccrualReserve: usdcMicroToDecimalString(
+          builderAccrualReserveMicro,
+        ),
         shouldSweep,
         reason,
         executed: false,

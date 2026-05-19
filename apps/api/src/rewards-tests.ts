@@ -27,6 +27,7 @@ import {
 import {
   capTreasurySweepAmountMicro,
   computeTreasuryChainMath,
+  reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
 import { resolveBlockedRewardsMigrations } from "./rewards-migration-preflight.js";
 
@@ -388,6 +389,14 @@ const tests: TestCase[] = [
       );
       assert.equal(capTreasurySweepAmountMicro(999_999n, 1_000_000n), 999_999n);
       assert.equal(capTreasurySweepAmountMicro(999_999n, undefined), 999_999n);
+    },
+  },
+  {
+    name: "treasury sweep reserves waiting builder accruals",
+    run: () => {
+      assert.equal(reserveTreasurySweepAmountMicro(1_000n, 250n), 750n);
+      assert.equal(reserveTreasurySweepAmountMicro(1_000n, 1_250n), 0n);
+      assert.equal(reserveTreasurySweepAmountMicro(0n, 250n), 0n);
     },
   },
   {
