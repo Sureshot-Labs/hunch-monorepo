@@ -544,8 +544,8 @@ export async function getRewardsTreasuryReport(
     liabilityMode: "event_time_frozen",
     includePending,
     sources: {
-      rewardsLiabilityVenues: ["polymarket", "kalshi"],
-      excludedFeeStreams: ["bridge", "limitless"],
+      rewardsLiabilityVenues: ["polymarket", "kalshi", "limitless"],
+      excludedFeeStreams: ["bridge"],
     },
     chains,
   };

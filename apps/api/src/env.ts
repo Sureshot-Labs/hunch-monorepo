@@ -1204,6 +1204,12 @@ export const env = {
     process.env.POLYMARKET_BUILDER_MAKER_FEE_BPS?.trim()
       ? optionalNonNegativeInt("POLYMARKET_BUILDER_MAKER_FEE_BPS", 0)
       : null,
+  limitlessFeeShareBps: optionalIntInRange(
+    "LIMITLESS_FEE_SHARE_BPS",
+    0,
+    0,
+    10_000,
+  ),
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
   feeScaleKalshi: optionalNonNegativeNumber("HUNCH_FEE_SCALE_KALSHI", 0),
   feePolicyTtlSec: optionalPositiveInt(

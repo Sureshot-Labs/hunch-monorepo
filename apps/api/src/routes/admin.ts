@@ -627,14 +627,14 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         liabilityCollectedMicro: string;
         outstandingCollectedPayable: string;
         outstandingCollectedPayableMicro: string;
-        builderAccrued?: string;
-        builderAccruedMicro?: string;
-        builderVerified?: string;
-        builderVerifiedMicro?: string;
-        builderUnlockableNow?: string;
-        builderUnlockableNowMicro?: string;
-        builderReserveGap?: string;
-        builderReserveGapMicro?: string;
+        feeAccrued?: string;
+        feeAccruedMicro?: string;
+        feeVerified?: string;
+        feeVerifiedMicro?: string;
+        feeUnlockableNow?: string;
+        feeUnlockableNowMicro?: string;
+        feeReserveGap?: string;
+        feeReserveGapMicro?: string;
       };
       const emptyTreasurySummary: RewardsTreasuryAdminSummary = {
         claimableNow: "0.000000",
@@ -1084,36 +1084,43 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         `,
       );
 
-      const [rewardsTreasuryReport, builderFeeRows] = await Promise.all([
+      const [rewardsTreasuryReport, feeAccrualRows] = await Promise.all([
         getRewardsTreasuryReport(pool),
         pool.query<{
+          chain_id: string | null;
           status: string;
           amount: string | null;
           count: string;
         }>(
           `
-            select status,
+            select chain_id,
+                   status,
                    coalesce(sum(fee_amount), 0)::text as amount,
                    count(*)::text as count
             from venue_fee_accruals
-            where venue = 'polymarket'
-              and fee_program = 'builder'
-              and status in ('accrued', 'verified')
-            group by status
+            where status in ('accrued', 'verified')
+              and fee_event_id is null
+            group by chain_id, status
           `,
         ),
       ]);
 
-      const builderAccruedMicro =
-        parseUsdcToMicroFloor(
-          builderFeeRows.rows.find((row) => row.status === "accrued")
-            ?.amount ?? "0",
-        ) ?? 0n;
-      const builderVerifiedMicro =
-        parseUsdcToMicroFloor(
-          builderFeeRows.rows.find((row) => row.status === "verified")
-            ?.amount ?? "0",
-        ) ?? 0n;
+      const feeAccrualMicroByChain = new Map<
+        string,
+        { accrued: bigint; verified: bigint }
+      >();
+      for (const row of feeAccrualRows.rows) {
+        const chainId = row.chain_id ?? "unknown";
+        const current =
+          feeAccrualMicroByChain.get(chainId) ?? {
+            accrued: 0n,
+            verified: 0n,
+          };
+        const amount = parseUsdcToMicroFloor(row.amount ?? "0") ?? 0n;
+        if (row.status === "accrued") current.accrued += amount;
+        if (row.status === "verified") current.verified += amount;
+        feeAccrualMicroByChain.set(chainId, current);
+      }
 
       const applyTreasurySummary = (
         chainId: "137" | "8453" | "solana",
@@ -1124,14 +1131,17 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         );
         if (!chain) return;
         const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
-        const builderUnlockableNowMicro =
-          chainId === "137"
-            ? minBigint(builderVerifiedMicro, sweepableNowMicro)
-            : 0n;
-        const builderReserveGapMicro =
-          chainId === "137"
-            ? max0Bigint(builderVerifiedMicro - sweepableNowMicro)
-            : 0n;
+        const feeAccrual = feeAccrualMicroByChain.get(chainId) ?? {
+          accrued: 0n,
+          verified: 0n,
+        };
+        const feeUnlockableNowMicro = minBigint(
+          feeAccrual.verified,
+          sweepableNowMicro,
+        );
+        const feeReserveGapMicro = max0Bigint(
+          feeAccrual.verified - sweepableNowMicro,
+        );
         wallet.treasury = {
           claimableNow: chain.claimableNow.toString(),
           claimableNowMicro: chain.claimableNowMicro,
@@ -1149,21 +1159,14 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             chain.outstandingCollectedPayable.toString(),
           outstandingCollectedPayableMicro:
             chain.outstandingCollectedPayableMicro,
-          ...(chainId === "137"
-            ? {
-                builderAccrued: microAmountToDisplay(builderAccruedMicro),
-                builderAccruedMicro: builderAccruedMicro.toString(),
-                builderVerified: microAmountToDisplay(builderVerifiedMicro),
-                builderVerifiedMicro: builderVerifiedMicro.toString(),
-                builderUnlockableNow: microAmountToDisplay(
-                  builderUnlockableNowMicro,
-                ),
-                builderUnlockableNowMicro:
-                  builderUnlockableNowMicro.toString(),
-                builderReserveGap: microAmountToDisplay(builderReserveGapMicro),
-                builderReserveGapMicro: builderReserveGapMicro.toString(),
-              }
-            : {}),
+          feeAccrued: microAmountToDisplay(feeAccrual.accrued),
+          feeAccruedMicro: feeAccrual.accrued.toString(),
+          feeVerified: microAmountToDisplay(feeAccrual.verified),
+          feeVerifiedMicro: feeAccrual.verified.toString(),
+          feeUnlockableNow: microAmountToDisplay(feeUnlockableNowMicro),
+          feeUnlockableNowMicro: feeUnlockableNowMicro.toString(),
+          feeReserveGap: microAmountToDisplay(feeReserveGapMicro),
+          feeReserveGapMicro: feeReserveGapMicro.toString(),
         };
       };
 
@@ -2606,9 +2609,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }),
     },
     async (_request, reply) => {
-      const [poly, kalshi] = await Promise.all([
+      const [poly, kalshi, limitless] = await Promise.all([
         fetchActiveFeePolicy(pool, "polymarket"),
         fetchActiveFeePolicy(pool, "kalshi"),
+        fetchActiveFeePolicy(pool, "limitless"),
       ]);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -2646,6 +2650,22 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             feeScale: clampFeeScale(kalshi?.fee_scale ?? env.feeScaleKalshi),
             effectiveAt: kalshi?.effective_at ?? null,
             source: kalshi ? "db" : "env",
+          },
+          limitless: {
+            feeBps: 0,
+            feeScale: null,
+            venueFeeShareBps: clampFeeBps(
+              limitless?.limitless_fee_share_bps ?? env.limitlessFeeShareBps,
+            ),
+            collectionMode:
+              clampFeeBps(
+                limitless?.limitless_fee_share_bps ??
+                  env.limitlessFeeShareBps,
+              ) > 0
+                ? "venue_share"
+                : "none",
+            effectiveAt: limitless?.effective_at ?? null,
+            source: limitless ? "db" : "env",
           },
         },
       });
@@ -2699,6 +2719,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               MAX_POLY_BUILDER_MAKER_FEE_BPS,
             )
           : null;
+      const limitlessFeeShareBps =
+        body.venue === "limitless"
+          ? clampFeeBps(body.limitlessFeeShareBps ?? env.limitlessFeeShareBps)
+          : null;
 
       const row = await insertFeePolicy(pool, {
         venue: body.venue,
@@ -2707,6 +2731,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         polymarketBuilderCode,
         polymarketBuilderTakerFeeBps,
         polymarketBuilderMakerFeeBps,
+        limitlessFeeShareBps,
         effectiveAt,
       });
 
@@ -2720,6 +2745,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           builderCode: row.polymarket_builder_code,
           builderTakerFeeBps: row.polymarket_builder_taker_fee_bps,
           builderMakerFeeBps: row.polymarket_builder_maker_fee_bps,
+          venueFeeShareBps: row.limitless_fee_share_bps,
           effectiveAt: row.effective_at,
           createdAt: row.created_at,
         },

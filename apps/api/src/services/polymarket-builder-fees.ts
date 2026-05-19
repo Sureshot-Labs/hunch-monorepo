@@ -1,11 +1,14 @@
 import { ethers } from "ethers";
-import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import type { Pool } from "@hunch/infra";
 import { env } from "../env.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
-import { resolveFeeEventSnapshotAtWrite } from "./rewards-fee-snapshot.js";
-import { getRewardsTreasuryReport } from "./rewards-treasury.js";
+import {
+  unlockVenueFeeAccruals,
+  upsertVenueFeeAccruals,
+  type VenueFeeAccrualInput,
+} from "./venue-fee-accruals.js";
 
 const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -61,32 +64,6 @@ export type PolymarketBuilderFeeAccrualInput = {
   feePolicySnapshot: unknown | null;
 };
 
-type VenueFeeAccrualInput = {
-  userId: string;
-  walletAddress: string | null;
-  signerAddress: string | null;
-  venue: string;
-  feeProgram: string;
-  chainId: string;
-  orderId: string;
-  orderHash: string;
-  venueOrderId: string | null;
-  venueFillId: string;
-  venueTradeId: string | null;
-  txHash: string | null;
-  tokenId: string | null;
-  side: "BUY" | "SELL";
-  role: "maker" | "taker";
-  attributionCode: string | null;
-  feeRateBps: number;
-  notionalAmountRaw: string;
-  notionalAmount: string;
-  feeAmountRaw: string;
-  feeAmount: string;
-  feeAsset: string;
-  filledAt: Date;
-};
-
 function clampBps(value: number, max: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(Math.max(Math.trunc(value), 0), max);
@@ -116,33 +93,6 @@ function normalizeHash(value: string | null | undefined): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
-function maybeDerivePolygonHotAddress(): string | null {
-  const privateKey =
-    env.rewardsPayoutPrivateKeyPolygon || env.rewardsPayoutPrivateKey;
-  if (!privateKey) return null;
-  try {
-    return new ethers.Wallet(privateKey).address;
-  } catch {
-    return null;
-  }
-}
-
-function assertExpectedPolygonHotWallet(): void {
-  const expected = normalizeAddress(env.financePolygonHot);
-  if (!expected) return;
-  const actual = maybeDerivePolygonHotAddress();
-  if (!actual) {
-    throw new Error(
-      "HUNCH_FINANCE_POLYGON_HOT is configured, but the Polygon rewards payout wallet cannot be derived",
-    );
-  }
-  if (normalizeAddress(actual) !== expected) {
-    throw new Error(
-      "HUNCH_FINANCE_POLYGON_HOT does not match the Polygon rewards payout wallet",
-    );
-  }
 }
 
 function decimalToScaled(value: string | number | null | undefined): bigint | null {
@@ -402,6 +352,7 @@ export function buildPolymarketBuilderFeeAccrual(
     role: input.role,
     attributionCode: config.builderCode,
     feeRateBps,
+    feeBasis: "notional",
     notionalAmountRaw: notionalRaw.toString(),
     notionalAmount: microToDecimal(notionalRaw),
     feeAmountRaw: feeRaw.toString(),
@@ -411,112 +362,11 @@ export function buildPolymarketBuilderFeeAccrual(
   };
 }
 
-type BuiltVenueFeeAccrual = NonNullable<
-  ReturnType<typeof buildPolymarketBuilderFeeAccrual>
->;
-
 export async function upsertPolymarketBuilderFeeAccruals(
   pool: Pool,
   inputs: Array<ReturnType<typeof buildPolymarketBuilderFeeAccrual>>,
 ): Promise<{ upserted: number }> {
-  const rows = inputs.filter(
-    (input): input is BuiltVenueFeeAccrual => input != null,
-  );
-  if (!rows.length) return { upserted: 0 };
-
-  const result = await pool.query(
-    `
-      with input as (
-        select *
-        from unnest(
-          $1::uuid[],
-          $2::text[],
-          $3::text[],
-          $4::text[],
-          $5::text[],
-          $6::text[],
-          $7::uuid[],
-          $8::text[],
-          $9::text[],
-          $10::text[],
-          $11::text[],
-          $12::text[],
-          $13::text[],
-          $14::text[],
-          $15::text[],
-          $16::text[],
-          $17::text[],
-          $18::integer[],
-          $19::numeric[],
-          $20::text[],
-          $21::numeric[],
-          $22::text[],
-          $23::timestamptz[]
-        ) as t(
-          user_id, wallet_address, signer_address, venue, fee_program, chain_id,
-          order_id, order_hash, venue_order_id, venue_fill_id, venue_trade_id,
-          tx_hash, token_id, side, role, attribution_code, fee_asset,
-          fee_rate_bps, notional_amount, notional_amount_raw, fee_amount,
-          fee_amount_raw, filled_at
-        )
-      )
-      insert into venue_fee_accruals (
-        user_id, wallet_address, signer_address, venue, fee_program, chain_id,
-        order_id, order_hash, venue_order_id, venue_fill_id, venue_trade_id,
-        tx_hash, token_id, side, role, attribution_code, fee_asset,
-        fee_rate_bps, notional_amount, notional_amount_raw, fee_amount,
-        fee_amount_raw, filled_at, status, created_at, updated_at
-      )
-      select
-        user_id, wallet_address, signer_address, venue, fee_program, chain_id,
-        order_id, order_hash, venue_order_id, venue_fill_id, venue_trade_id,
-        tx_hash, token_id, side, role, attribution_code, fee_asset,
-        fee_rate_bps, notional_amount, notional_amount_raw, fee_amount,
-        fee_amount_raw, filled_at, 'accrued', now(), now()
-      from input
-      on conflict (venue, fee_program, order_id, venue_fill_id)
-      do update set
-        tx_hash = coalesce(excluded.tx_hash, venue_fee_accruals.tx_hash),
-        venue_trade_id = coalesce(excluded.venue_trade_id, venue_fee_accruals.venue_trade_id),
-        attribution_code = excluded.attribution_code,
-        fee_rate_bps = excluded.fee_rate_bps,
-        notional_amount = excluded.notional_amount,
-        notional_amount_raw = excluded.notional_amount_raw,
-        fee_amount = excluded.fee_amount,
-        fee_amount_raw = excluded.fee_amount_raw,
-        filled_at = excluded.filled_at,
-        updated_at = now()
-      where venue_fee_accruals.status in ('accrued', 'verified')
-      returning id
-    `,
-    [
-      rows.map((row) => row.userId),
-      rows.map((row) => row.walletAddress),
-      rows.map((row) => row.signerAddress),
-      rows.map((row) => row.venue),
-      rows.map((row) => row.feeProgram),
-      rows.map((row) => row.chainId),
-      rows.map((row) => row.orderId),
-      rows.map((row) => row.orderHash),
-      rows.map((row) => row.venueOrderId),
-      rows.map((row) => row.venueFillId),
-      rows.map((row) => row.venueTradeId),
-      rows.map((row) => row.txHash),
-      rows.map((row) => row.tokenId),
-      rows.map((row) => row.side),
-      rows.map((row) => row.role),
-      rows.map((row) => row.attributionCode),
-      rows.map((row) => row.feeAsset),
-      rows.map((row) => row.feeRateBps),
-      rows.map((row) => row.notionalAmount),
-      rows.map((row) => row.notionalAmountRaw),
-      rows.map((row) => row.feeAmount),
-      rows.map((row) => row.feeAmountRaw),
-      rows.map((row) => row.filledAt),
-    ],
-  );
-
-  return { upserted: result.rowCount ?? 0 };
+  return upsertVenueFeeAccruals(pool, inputs);
 }
 
 type BuilderFeeAccrualRow = {
@@ -725,83 +575,6 @@ export async function verifyPolymarketBuilderFeeAccruals(
   return { checked, verified, failed, skipped };
 }
 
-async function insertCollectedFeeEventForAccrual(
-  client: PoolClient,
-  row: BuilderFeeAccrualRow,
-): Promise<string> {
-  const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
-    userId: row.user_id,
-    eventTime: row.filled_at,
-    feeUsd: row.fee_amount,
-  });
-  const sourceId = `${row.venue}:${row.fee_program}:${row.order_hash}:${row.venue_fill_id}`;
-  const result = await client.query<{ id: string }>(
-    `
-      insert into fee_events (
-        id,
-        user_id,
-        wallet_address,
-        venue,
-        chain_id,
-        source_type,
-        source_id,
-        fee_amount,
-        fee_asset,
-        fee_usd,
-        cashback_bps_applied,
-        referral_bps_applied,
-        cashback_earned_usdc,
-        referral_earned_usdc,
-        liability_snapshot_source,
-        tx_hash,
-        collected_at,
-        status,
-        created_at,
-        updated_at
-      )
-      values (
-        gen_random_uuid(),
-        $1, $2, $3, $4, 'order', $5,
-        $6, $7, $6, $8, $9, $10, $11, $12, $13, now(), 'collected', now(), now()
-      )
-      on conflict (user_id, source_type, source_id)
-      do update set
-        tx_hash = excluded.tx_hash,
-        collected_at = excluded.collected_at,
-        status = excluded.status,
-        updated_at = now()
-      where fee_events.fee_amount = excluded.fee_amount
-        and fee_events.fee_usd = excluded.fee_usd
-        and fee_events.cashback_bps_applied = excluded.cashback_bps_applied
-        and fee_events.referral_bps_applied = excluded.referral_bps_applied
-        and fee_events.cashback_earned_usdc = excluded.cashback_earned_usdc
-        and fee_events.referral_earned_usdc = excluded.referral_earned_usdc
-        and fee_events.liability_snapshot_source = excluded.liability_snapshot_source
-      returning id
-    `,
-    [
-      row.user_id,
-      row.wallet_address,
-      row.venue,
-      row.chain_id ?? POLYGON_CHAIN_ID,
-      sourceId,
-      row.fee_amount,
-      row.fee_asset,
-      snapshot.cashbackBpsApplied,
-      snapshot.referralBpsApplied,
-      snapshot.cashbackEarnedUsdc,
-      snapshot.referralEarnedUsdc,
-      snapshot.liabilitySnapshotSource,
-      row.tx_hash,
-    ],
-  );
-  const feeEventId = result.rows[0]?.id;
-  if (!feeEventId) {
-    throw new Error(`fee_events immutable economic mismatch for ${sourceId}`);
-  }
-  return feeEventId;
-}
-
 export async function unlockPolymarketBuilderFeeAccruals(
   pool: Pool,
   options: {
@@ -810,108 +583,14 @@ export async function unlockPolymarketBuilderFeeAccruals(
     assumeRewardsChainLock?: boolean;
   } = {},
 ): Promise<{ considered: number; unlocked: number; skipped: number; budgetMicro: string }> {
-  const run = async () => {
-    const hasVerifiedRows = await pool.query<{ exists: number }>(
-      `
-        select 1 as exists
-        from venue_fee_accruals
-        where venue = 'polymarket'
-          and fee_program = 'builder'
-          and status = 'verified'
-          and fee_event_id is null
-        limit 1
-      `,
-    );
-    if (!hasVerifiedRows.rows.length) {
-      return {
-        considered: 0,
-        unlocked: 0,
-        skipped: 0,
-        budgetMicro: "0",
-      };
-    }
-
-    assertExpectedPolygonHotWallet();
-    const report = await getRewardsTreasuryReport(pool, {
-      chainId: POLYGON_CHAIN_ID,
-    });
-    const polygon = report.chains.find((chain) => chain.chainId === POLYGON_CHAIN_ID);
-    const budgetMicro = BigInt(polygon?.sweepableNowMicro ?? "0");
-    if (budgetMicro <= 0n) {
-      return {
-        considered: 0,
-        unlocked: 0,
-        skipped: 0,
-        budgetMicro: budgetMicro.toString(),
-      };
-    }
-
-    const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 250));
-    return tx(pool, async (client) => {
-      const { rows } = await client.query<BuilderFeeAccrualRow>(
-        `
-          select id, user_id, wallet_address, venue, fee_program, chain_id,
-                 order_hash, venue_fill_id, venue_trade_id, tx_hash, token_id, side,
-                 attribution_code, fee_rate_bps, fee_amount, fee_amount_raw,
-                 fee_asset, filled_at
-          from venue_fee_accruals
-          where venue = 'polymarket'
-            and fee_program = 'builder'
-            and status = 'verified'
-            and fee_event_id is null
-          order by filled_at asc, created_at asc
-          limit $1
-          for update skip locked
-        `,
-        [limit],
-      );
-
-      let remainingMicro = budgetMicro;
-      let unlocked = 0;
-      let skipped = 0;
-      for (const row of rows) {
-        const feeMicro = BigInt(row.fee_amount_raw || "0");
-        if (feeMicro <= 0n) {
-          skipped += 1;
-          continue;
-        }
-        if (feeMicro > remainingMicro) {
-          skipped += 1;
-          continue;
-        }
-        if (options.dryRun) {
-          remainingMicro -= feeMicro;
-          unlocked += 1;
-          continue;
-        }
-
-        const feeEventId = await insertCollectedFeeEventForAccrual(client, row);
-        await client.query(
-          `
-            update venue_fee_accruals
-            set fee_event_id = $2,
-                collected_at = now(),
-                status = 'collected',
-                updated_at = now()
-            where id = $1
-          `,
-          [row.id, feeEventId],
-        );
-        remainingMicro -= feeMicro;
-        unlocked += 1;
-      }
-
-      return {
-        considered: rows.length,
-        unlocked,
-        skipped,
-        budgetMicro: budgetMicro.toString(),
-      };
-    });
-  };
-
-  if (options.assumeRewardsChainLock) return run();
-  return withRewardsChainLocks(pool, [POLYGON_CHAIN_ID], run);
+  return unlockVenueFeeAccruals(pool, {
+    chainId: POLYGON_CHAIN_ID,
+    venue: POLYMARKET_VENUE,
+    feeProgram: POLYMARKET_BUILDER_FEE_PROGRAM,
+    limit: options.limit,
+    dryRun: options.dryRun,
+    assumeRewardsChainLock: options.assumeRewardsChainLock,
+  });
 }
 
 export async function reconcilePolymarketBuilderFeeAccruals(

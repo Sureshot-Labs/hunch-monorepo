@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const feePolicyVenueSchema = z.enum(["polymarket", "kalshi"]);
+const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
 
 export const adminFeePolicySchema = z.object({
   venue: feePolicyVenueSchema,
@@ -13,6 +13,7 @@ export const adminFeePolicySchema = z.object({
     .or(z.literal("")),
   polymarketBuilderTakerFeeBps: z.coerce.number().int().min(0).max(100).optional(),
   polymarketBuilderMakerFeeBps: z.coerce.number().int().min(0).max(50).optional(),
+  limitlessFeeShareBps: z.coerce.number().int().min(0).max(10_000).optional(),
   effectiveAt: z.string().datetime().optional(),
 });
 

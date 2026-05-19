@@ -5,6 +5,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
+import { resolveLimitlessFeeShareConfig } from "../services/limitless-fee-accruals.js";
 import { resolvePolymarketFeePolicySnapshot } from "../services/polymarket-builder-fees.js";
 
 const MAX_FEE_BPS = 10_000;
@@ -47,8 +48,14 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         venue === "polymarket"
           ? await resolvePolymarketFeePolicySnapshot(pool)
           : null;
+      const limitlessConfig =
+        venue === "limitless"
+          ? await resolveLimitlessFeeShareConfig(pool)
+          : null;
       const activePolicy =
-        venue === "polymarket" ? null : await fetchActiveFeePolicy(pool, venue);
+        venue === "polymarket" || venue === "limitless"
+          ? null
+          : await fetchActiveFeePolicy(pool, venue);
       const feeBpsRaw =
         polymarketSnapshot?.legacyFeeBps ??
         activePolicy?.fee_bps ??
@@ -65,9 +72,16 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       const collectionMode =
         venue === "polymarket"
           ? (polymarketSnapshot?.collectionMode ?? "none")
-          : "fee_auth";
+          : venue === "limitless"
+            ? limitlessConfig?.active
+              ? "venue_share"
+              : "none"
+            : "fee_auth";
       const effectiveFeeBps =
-        venue === "polymarket" && collectionMode !== "fee_auth" ? 0 : feeBps;
+        (venue === "polymarket" && collectionMode !== "fee_auth") ||
+        venue === "limitless"
+          ? 0
+          : feeBps;
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
@@ -80,6 +94,7 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         builderCode: polymarketSnapshot?.builderCode ?? null,
         builderTakerFeeBps: polymarketSnapshot?.builderTakerFeeBps ?? null,
         builderMakerFeeBps: polymarketSnapshot?.builderMakerFeeBps ?? null,
+        venueFeeShareBps: limitlessConfig?.shareBps ?? null,
         collectorAddress:
           venue === "polymarket"
             ? null

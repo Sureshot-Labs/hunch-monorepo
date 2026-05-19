@@ -2,19 +2,20 @@ import type { Pool } from "@hunch/infra";
 
 export type FeePolicyRow = {
   id: string;
-  venue: "polymarket" | "kalshi";
+  venue: "polymarket" | "kalshi" | "limitless";
   fee_bps: number;
   fee_scale: number | null;
   polymarket_builder_code: string | null;
   polymarket_builder_taker_fee_bps: number | null;
   polymarket_builder_maker_fee_bps: number | null;
+  limitless_fee_share_bps: number | null;
   effective_at: Date;
   created_at: Date;
 };
 
 export async function fetchActiveFeePolicy(
   pool: Pool,
-  venue: "polymarket" | "kalshi",
+  venue: "polymarket" | "kalshi" | "limitless",
 ): Promise<FeePolicyRow | null> {
   const { rows } = await pool.query<FeePolicyRow>(
     `
@@ -26,6 +27,7 @@ export async function fetchActiveFeePolicy(
         polymarket_builder_code,
         polymarket_builder_taker_fee_bps,
         polymarket_builder_maker_fee_bps,
+        limitless_fee_share_bps,
         effective_at,
         created_at
       from fee_policy
@@ -42,12 +44,13 @@ export async function fetchActiveFeePolicy(
 export async function insertFeePolicy(
   pool: Pool,
   inputs: {
-    venue: "polymarket" | "kalshi";
+    venue: "polymarket" | "kalshi" | "limitless";
     feeBps: number;
     feeScale: number | null;
     polymarketBuilderCode?: string | null;
     polymarketBuilderTakerFeeBps?: number | null;
     polymarketBuilderMakerFeeBps?: number | null;
+    limitlessFeeShareBps?: number | null;
     effectiveAt: Date;
   },
 ): Promise<FeePolicyRow> {
@@ -60,9 +63,10 @@ export async function insertFeePolicy(
         polymarket_builder_code,
         polymarket_builder_taker_fee_bps,
         polymarket_builder_maker_fee_bps,
+        limitless_fee_share_bps,
         effective_at
       )
-      values ($1, $2, $3, $4, $5, $6, $7)
+      values ($1, $2, $3, $4, $5, $6, $7, $8)
       returning
         id,
         venue,
@@ -71,6 +75,7 @@ export async function insertFeePolicy(
         polymarket_builder_code,
         polymarket_builder_taker_fee_bps,
         polymarket_builder_maker_fee_bps,
+        limitless_fee_share_bps,
         effective_at,
         created_at
     `,
@@ -81,6 +86,7 @@ export async function insertFeePolicy(
       inputs.polymarketBuilderCode ?? null,
       inputs.polymarketBuilderTakerFeeBps ?? null,
       inputs.polymarketBuilderMakerFeeBps ?? null,
+      inputs.limitlessFeeShareBps ?? null,
       inputs.effectiveAt,
     ],
   );

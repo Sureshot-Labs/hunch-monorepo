@@ -3,6 +3,7 @@
 import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { reconcileSolanaFeeEvents } from "./services/fee-reconcile.js";
+import { reconcileLimitlessVenueShareAccruals } from "./services/limitless-fee-accruals.js";
 import { reconcilePolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
 
 export type ReconcileFeesOptions = {
@@ -47,6 +48,11 @@ export async function runReconcileFees(options: ReconcileFeesOptions) {
     dryRun: options.dryRun,
     limit: options.limit,
   });
+  const limitlessVenueShare = await reconcileLimitlessVenueShareAccruals(pool, {
+    dryRun: options.dryRun,
+    limit: options.limit,
+    minAgeSec: options.minAgeSec,
+  });
   console.log(
     [
       "Reconcile fees (Solana)",
@@ -72,7 +78,24 @@ export async function runReconcileFees(options: ReconcileFeesOptions) {
       `dryRun=${options.dryRun ? 1 : 0}`,
     ].join(" "),
   );
-  return { solana: summary, polymarketBuilder };
+  console.log(
+    [
+      "Reconcile fees (Limitless venue share)",
+      `backfillChecked=${limitlessVenueShare.backfill.checked}`,
+      `backfillUpserted=${limitlessVenueShare.backfill.upserted}`,
+      `backfillSkipped=${limitlessVenueShare.backfill.skipped}`,
+      `checked=${limitlessVenueShare.verify.checked}`,
+      `verified=${limitlessVenueShare.verify.verified}`,
+      `failed=${limitlessVenueShare.verify.failed}`,
+      `skipped=${limitlessVenueShare.verify.skipped}`,
+      `unlockConsidered=${limitlessVenueShare.unlock.considered}`,
+      `unlocked=${limitlessVenueShare.unlock.unlocked}`,
+      `unlockSkipped=${limitlessVenueShare.unlock.skipped}`,
+      `budgetMicro=${limitlessVenueShare.unlock.budgetMicro}`,
+      `dryRun=${options.dryRun ? 1 : 0}`,
+    ].join(" "),
+  );
+  return { solana: summary, polymarketBuilder, limitlessVenueShare };
 }
 
 function isDirectExecution(metaUrl: string): boolean {

@@ -23,7 +23,10 @@ import {
   reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
 import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
-import { unlockPolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
+import {
+  fetchVenueFeeAccrualReserveMicro,
+  unlockVenueFeeAccruals,
+} from "./services/venue-fee-accruals.js";
 
 export type RewardsTreasurySweepOptions = {
   execute: boolean;
@@ -135,8 +138,8 @@ type PlannedSweepAction = {
   hotBalanceLeftIfApplied: string | null;
   reserveFloorNow: string | null;
   sweepableNow: string | null;
-  sweepableAfterBuilderReserve: string | null;
-  builderAccrualReserve: string | null;
+  sweepableAfterFeeAccrualReserve: string | null;
+  feeAccrualReserve: string | null;
   shouldSweep: boolean;
   reason: string | null;
   executed: boolean;
@@ -550,21 +553,6 @@ function deriveRunStatus(actions: PlannedSweepAction[]): SweepRunStatus {
   return "partial";
 }
 
-async function fetchPolymarketBuilderAccrualReserveMicro(): Promise<bigint> {
-  const { rows } = await pool.query<{ reserve_micro: string | null }>(
-    `
-      select coalesce(sum(fee_amount_raw::numeric), 0)::text as reserve_micro
-      from venue_fee_accruals
-      where venue = 'polymarket'
-        and fee_program = 'builder'
-        and status in ('accrued', 'verified')
-        and fee_event_id is null
-        and fee_amount_raw ~ '^[0-9]+$'
-    `,
-  );
-  return BigInt(rows[0]?.reserve_micro ?? "0");
-}
-
 export async function runRewardsTreasurySweep(
   options: RewardsTreasurySweepOptions,
 ) {
@@ -579,14 +567,15 @@ export async function runRewardsTreasurySweep(
     ? [normalizedChainId]
     : REWARDS_CHAIN_IDS;
   return withRewardsChainLocks(pool, lockTargets, async () => {
-    if (lockTargets.includes("137")) {
-      const unlock = await unlockPolymarketBuilderFeeAccruals(pool, {
+    for (const chainId of lockTargets) {
+      const unlock = await unlockVenueFeeAccruals(pool, {
+        chainId,
         dryRun: options.dryRun,
         assumeRewardsChainLock: true,
       });
       if (unlock.considered || unlock.unlocked) {
         console.log(
-          `Polymarket builder fee accrual unlock: considered=${unlock.considered} unlocked=${unlock.unlocked} skipped=${unlock.skipped} budgetMicro=${unlock.budgetMicro}`,
+          `Venue fee accrual unlock (${chainId}): considered=${unlock.considered} unlocked=${unlock.unlocked} skipped=${unlock.skipped} budgetMicro=${unlock.budgetMicro}`,
         );
       }
     }
@@ -600,25 +589,31 @@ export async function runRewardsTreasurySweep(
     }
 
     const minSweepMicro = env.rewardsTreasuryMinSweepMicro;
-    const polygonBuilderAccrualReserveMicro = lockTargets.includes("137")
-      ? await fetchPolymarketBuilderAccrualReserveMicro()
-      : 0n;
+    const feeAccrualReserveByChain = new Map<RewardsChainId, bigint>();
+    await Promise.all(
+      lockTargets.map(async (chainId) => {
+        feeAccrualReserveByChain.set(
+          chainId,
+          await fetchVenueFeeAccrualReserveMicro(pool, { chainId }),
+        );
+      }),
+    );
 
     const actions: PlannedSweepAction[] = report.chains.map((chain) => {
       const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
       const reserveFloorMicro = BigInt(chain.reserveFloorMicro);
       const hotBalanceNowMicro = BigInt(chain.controlledHotBalanceMicro);
-      const builderAccrualReserveMicro =
-        normalizeRewardsChainId(chain.chainId) === "137"
-          ? polygonBuilderAccrualReserveMicro
-          : 0n;
-      const sweepableAfterBuilderReserveMicro =
+      const normalizedActionChainId = normalizeRewardsChainId(chain.chainId);
+      const feeAccrualReserveMicro = normalizedActionChainId
+        ? (feeAccrualReserveByChain.get(normalizedActionChainId) ?? 0n)
+        : 0n;
+      const sweepableAfterFeeAccrualReserveMicro =
         reserveTreasurySweepAmountMicro(
           sweepableNowMicro,
-          builderAccrualReserveMicro,
+          feeAccrualReserveMicro,
         );
       const amountMicro = capTreasurySweepAmountMicro(
-        sweepableAfterBuilderReserveMicro,
+        sweepableAfterFeeAccrualReserveMicro,
         options.maxMicro,
       );
       const hotBalanceLeftIfAppliedMicro =
@@ -634,9 +629,9 @@ export async function runRewardsTreasurySweep(
         } else if (
           amountMicro === 0n &&
           sweepableNowMicro > 0n &&
-          builderAccrualReserveMicro > 0n
+          feeAccrualReserveMicro > 0n
         ) {
-          reason = "reserved_for_polymarket_builder_accruals";
+          reason = "reserved_for_fee_accruals";
         } else if (amountMicro === 0n) {
           reason = "no_surplus";
         } else {
@@ -660,11 +655,11 @@ export async function runRewardsTreasurySweep(
         ),
         reserveFloorNow: usdcMicroToDecimalString(reserveFloorMicro),
         sweepableNow: usdcMicroToDecimalString(sweepableNowMicro),
-        sweepableAfterBuilderReserve: usdcMicroToDecimalString(
-          sweepableAfterBuilderReserveMicro,
+        sweepableAfterFeeAccrualReserve: usdcMicroToDecimalString(
+          sweepableAfterFeeAccrualReserveMicro,
         ),
-        builderAccrualReserve: usdcMicroToDecimalString(
-          builderAccrualReserveMicro,
+        feeAccrualReserve: usdcMicroToDecimalString(
+          feeAccrualReserveMicro,
         ),
         shouldSweep,
         reason,

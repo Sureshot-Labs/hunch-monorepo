@@ -55,6 +55,7 @@ import {
   normalizeLimitlessRawAmount,
 } from "../services/limitless-order-normalization.js";
 import { recordLimitlessVolumeEvent } from "../services/limitless-volume-events.js";
+import { upsertLimitlessVenueShareAccrualFromOrderPayload } from "../services/limitless-fee-accruals.js";
 import {
   buildEmbeddedPersonalSignRequest,
   createEmbeddedPrivyWalletRpcRequest,
@@ -2564,6 +2565,19 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           order.feeRateBps ?? 0,
           "feeRateBps",
         );
+        const profileFeeRateBps = profile.rank?.feeRateBps;
+        if (
+          profileFeeRateBps != null &&
+          Number.isFinite(profileFeeRateBps) &&
+          profileFeeRateBps >= 0 &&
+          feeRateBps != null &&
+          feeRateBps !== Math.trunc(profileFeeRateBps)
+        ) {
+          reply.code(409);
+          return reply.send({
+            error: "Limitless fee rate changed. Refresh the order and try again.",
+          });
+        }
         const sideValue = coerceOrderNumber(order.side, "side");
         const signatureType = coerceOrderNumber(
           order.signatureType,
@@ -2891,6 +2905,35 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         lastUpdate: confirmedFillAt,
         filledAt: confirmedFillAt,
       });
+
+      if (stored.kind === "stored" && confirmedFillAt) {
+        try {
+          await upsertLimitlessVenueShareAccrualFromOrderPayload(pool, {
+            orderId: stored.order.id,
+            userId: user.id,
+            walletAddress: signer,
+            signerAddress: signer,
+            venueOrderId,
+            orderHash: null,
+            tokenId: tokenId ?? null,
+            side,
+            filledAt: confirmedFillAt,
+            lastUpdate: confirmedFillAt,
+            postedAt: stored.order.posted_at,
+            payload: upstream.payload,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
+              userId: user.id,
+              walletAddress: signer,
+              venueOrderId,
+            },
+            "Limitless venue fee share accrual upsert failed",
+          );
+        }
+      }
 
       let referralFirstTrade = null;
       if (
