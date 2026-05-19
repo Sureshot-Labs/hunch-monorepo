@@ -14,6 +14,7 @@ import {
   fetchRewardsLeaderboardRows,
   fetchReferralsForUser,
   fetchUserPoints,
+  fetchUserQualificationPoints,
   fetchUserVolume,
   fetchUserReferralCode,
   lockUserReferralCodeByUserId,
@@ -879,9 +880,9 @@ export async function getRewardsReferrals(
   }>;
   policy: RewardsPolicy;
 }> {
-  const [policy, referrerPoints] = await Promise.all([
+  const [policy, referrerQualificationPoints] = await Promise.all([
     getRewardsPolicy(pool),
-    fetchUserPoints(pool, inputs.userId),
+    fetchUserQualificationPoints(pool, inputs.userId),
   ]);
   await markQualifiedReferralsForUser(pool, {
     userId: inputs.userId,
@@ -893,8 +894,8 @@ export async function getRewardsReferrals(
     const tier = resolveTier(row.points, policy.tiers);
     const status = resolveEffectiveReferralStatus({
       storedStatus: row.status,
-      referrerPoints,
-      referredPoints: row.points,
+      referrerPoints: referrerQualificationPoints,
+      referredPoints: row.qualificationPoints,
       threshold: OBSERVER_THRESHOLD,
     });
     return {

@@ -143,6 +143,10 @@ function buildRealPointsContributionSql(alias: string): string {
   return buildPointsContributionSql(alias, "exclude_all");
 }
 
+function buildQualificationPointsContributionSql(alias: string): string {
+  return buildPointsContributionSql(alias, "include_all");
+}
+
 function decimalToMicroFloor(value: string | null | undefined): bigint {
   const raw = value?.trim() ?? "0";
   if (!raw) return 0n;
@@ -578,6 +582,21 @@ export async function fetchUserPoints(
   return Number(rows[0]?.total ?? 0);
 }
 
+export async function fetchUserQualificationPoints(
+  pool: DbQuery,
+  userId: string,
+): Promise<number> {
+  const { rows } = await pool.query<{ total: string | null }>(
+    `
+      select coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+    `,
+    [userId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
 export async function fetchUserVolume(
   pool: DbQuery,
   userId: string,
@@ -811,7 +830,7 @@ export async function fetchQualifiedReferralCount(
       with points as (
         select
           ve.user_id,
-          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         group by ve.user_id
       )
@@ -900,6 +919,7 @@ export async function fetchReferralsForUser(
     wallet_address: string | null;
     points: number;
     bonus: number;
+    qualificationPoints: number;
   }>
 > {
   const orderByClause = resolveRewardsReferralsOrderBy(inputs);
@@ -911,6 +931,7 @@ export async function fetchReferralsForUser(
     created_at: Date;
     wallet_address: string | null;
     points: string | null;
+    qualification_points: string | null;
     bonus: string | null;
   }>(
     `
@@ -928,6 +949,15 @@ export async function fetchReferralsForUser(
         select
           ve.user_id,
           coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      qualification_points as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         join referral_rows rr
           on rr.referred_user_id = ve.user_id
@@ -952,6 +982,7 @@ export async function fetchReferralsForUser(
         rr.created_at,
         w.wallet_address,
         coalesce(p.points, 0)::text as points,
+        coalesce(qp.points, 0)::text as qualification_points,
         coalesce(rb.total_bonus, 0)::text as bonus
       from referral_rows rr
       left join user_wallets w
@@ -959,6 +990,8 @@ export async function fetchReferralsForUser(
        and w.is_primary = true
       left join points p
         on p.user_id = rr.referred_user_id
+      left join qualification_points qp
+        on qp.user_id = rr.referred_user_id
       left join referral_bonus rb
         on rb.user_id = rr.referred_user_id
       order by ${orderByClause}
@@ -975,6 +1008,7 @@ export async function fetchReferralsForUser(
     created_at: row.created_at,
     wallet_address: row.wallet_address ?? null,
     points: Number(row.points ?? 0),
+    qualificationPoints: Number(row.qualification_points ?? 0),
     bonus: Number(row.bonus ?? 0),
   }));
 }
@@ -1096,7 +1130,7 @@ export async function markQualifiedReferralsForUser(
       with points as (
         select
           ve.user_id,
-          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         group by ve.user_id
       )
