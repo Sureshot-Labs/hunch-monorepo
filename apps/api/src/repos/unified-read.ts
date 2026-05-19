@@ -2715,7 +2715,7 @@ export async function fetchMarketsByTokenIds(
       token_yes.token_id as token_yes,
       token_no.token_id as token_no,
       m.clob_token_ids,
-      m.condition_id,
+      coalesce(m.condition_id, pm.condition_id) as condition_id,
       m.market_ledger,
       m.settlement_mint,
       m.is_initialized,
