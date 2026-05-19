@@ -2308,8 +2308,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         signer,
       );
 
-      const funder = credsInfo?.funderAddress ?? signer;
-      const funderSource = credsInfo?.funderAddress ? "credentials" : "signer";
+      const requestedFunder = request.query.funderAddress;
+      const funder = requestedFunder ?? credsInfo?.funderAddress ?? signer;
+      const funderSource = requestedFunder
+        ? "query"
+        : credsInfo?.funderAddress
+          ? "credentials"
+          : "signer";
       const credentialsUpdatedAtValue =
         credsInfo?.updatedAt instanceof Date
           ? credsInfo.updatedAt.toISOString()

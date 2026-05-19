@@ -205,6 +205,7 @@ export const polymarketMarketInfoQuerySchema = z
 
 export const polymarketAccountQuerySchema = z.object({
   refresh: zOptionalBool.optional(),
+  funderAddress: zEthAddress.optional(),
 });
 
 export const polymarketRedemptionPlanQuerySchema = z.object({
@@ -324,6 +325,6 @@ export const polymarketEmbeddedSignTypedDataBodySchema = z.object({
   id: z.string().trim().min(1).max(128).optional(),
   label: z.string().trim().min(1).max(160).optional(),
   typedData: polymarketEmbeddedTypedDataSchema,
-  depositWalletBatchPurpose: z.enum(["withdraw"]).optional(),
+  depositWalletBatchPurpose: z.enum(["withdraw", "redeem"]).optional(),
   authorizationSignature: zRequiredString("authorizationSignature is required"),
 });

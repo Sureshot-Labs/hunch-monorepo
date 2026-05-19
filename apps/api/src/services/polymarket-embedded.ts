@@ -146,6 +146,8 @@ const TOKEN_APPROVAL_ABI = new Interface([
   "function transfer(address to,uint256 value) returns (bool)",
   "function wrap(address _asset,address _to,uint256 _amount)",
   "function setApprovalForAll(address operator,bool approved)",
+  "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
+  "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
   "function allowance(address owner,address spender) view returns (uint256)",
   "function isApprovedForAll(address account,address operator) view returns (bool)",
 ]);
@@ -232,7 +234,7 @@ export type EmbeddedPolymarketTypedData = {
   message: Record<string, unknown>;
 };
 
-export type DepositWalletBatchPurpose = "withdraw";
+export type DepositWalletBatchPurpose = "withdraw" | "redeem";
 
 export type EmbeddedPolymarketWalletContext = {
   signer: string;
@@ -916,6 +918,29 @@ function validateDepositWalletBatchCall(
       amount <= 0n
     ) {
       throw new Error("Unsupported deposit wallet ERC20 transfer call.");
+    }
+    return;
+  }
+
+  if (purpose === "redeem") {
+    if (decoded.name !== "redeemPositions") {
+      throw new Error(
+        "Deposit wallet redeem batches only support redemption calls.",
+      );
+    }
+    const conditionalTokens = normalizeAddress(
+      env.polymarketConditionalTokensAddress,
+    );
+    const negRiskAdapter = normalizeAddress(
+      env.polymarketNegRiskAdapterAddress,
+    );
+    const inputCount = decoded.fragment.inputs.length;
+    const standardCtfRedeem =
+      addressesEqual(target, conditionalTokens) && inputCount === 4;
+    const negRiskRedeem =
+      addressesEqual(target, negRiskAdapter) && inputCount === 2;
+    if (!standardCtfRedeem && !negRiskRedeem) {
+      throw new Error("Unsupported deposit wallet redemption call.");
     }
     return;
   }
