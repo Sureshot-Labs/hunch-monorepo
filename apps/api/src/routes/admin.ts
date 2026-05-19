@@ -26,9 +26,11 @@ import {
   fetchActiveRewardsMultiplierPolicy,
   fetchActiveRewardsPolicy,
   fetchAdminManualVolumeEvents,
+  HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX,
   insertRewardsMultiplierPolicy,
   listRewardsMultiplierOverrides,
   upsertRewardsMultiplierOverride,
+  VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX,
 } from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
 import {
@@ -3309,7 +3311,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const walletAddress =
         walletInput ?? (await fetchPrimaryWallet(userId)) ?? null;
       const sourceType = body.sourceType ?? "execution";
-      const sourceId = body.sourceId?.trim() ?? `manual:${randomUUID()}`;
+      const visible = body.visible ?? false;
+      const sourceId = `${visible ? VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX : HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX}${randomUUID()}`;
       const venue = body.venue?.trim() ?? "admin";
 
       const inserted = await insertVolumeEventsWithMultiplier(pool, {
@@ -3345,6 +3348,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           sourceType,
           sourceId,
           amount: body.amount,
+          visible,
         },
       });
     },
@@ -3379,6 +3383,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           sourceId: item.source_id,
           amount: Number(item.notional_usd ?? 0),
           pointsAwarded: Number(item.points_awarded ?? 0),
+          visible: item.visible,
           createdAt: item.created_at,
         })),
         total: result.total,
@@ -3418,6 +3423,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           sourceId: deleted.source_id,
           amount: Number(deleted.notional_usd ?? 0),
           pointsAwarded: Number(deleted.points_awarded ?? 0),
+          visible: deleted.visible,
           createdAt: deleted.created_at,
         },
       });

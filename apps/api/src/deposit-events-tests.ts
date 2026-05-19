@@ -25,6 +25,7 @@ type MockDbOptions = {
     id: string;
     userId: string;
     venue: string;
+    match?: "any" | "exact" | "settlement";
   } | null;
   depositInsertConflict?: boolean;
   existingDepositStatus?: string;
@@ -100,6 +101,14 @@ function createMockDb(options: MockDbOptions): MockDb {
 
     if (/from executions/i.test(sql)) {
       if (!options.execution) return { rows: [] };
+      const settlementQuery = /jsonb_array_elements/i.test(sql);
+      const match = options.execution.match ?? "any";
+      if (
+        (settlementQuery && match === "exact") ||
+        (!settlementQuery && match === "settlement")
+      ) {
+        return { rows: [] };
+      }
       return {
         rows: [
           {
@@ -344,6 +353,56 @@ const tests: TestCase[] = [
         assert.equal(result.ignored, true);
         assert.equal(result.status, "ignored_venue");
         assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "DFlow settlement-matched Solana deposit records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "8JtStScw3jBKQoobn6JMP6QBryCF48U6Qj2TqQVoFw35";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          execution: {
+            id: "execution-1",
+            userId: "user-1",
+            venue: "kalshi",
+            match: "settlement",
+          },
+        });
+        const payload = {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          sender: "dflow-market-ledger-order-vault",
+          recipient: solanaWallet,
+          transaction_hash:
+            "3kMZy9qbV84ZQeGYnNQHYqbQEyZAU3sbQHLgGdyducwmL1qAFG5Ut94hCrbBHJGk7N56wrgf7V5CoEivfFWB7p6M",
+          idempotency_key: "deposit-key-dflow-refund",
+        };
+
+        const result = await handlePrivyDepositWebhook(db, payload);
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_venue");
+        assert.deepEqual(db.notificationInserts, []);
+        assert.ok(
+          db.calls.some(
+            (call) =>
+              /from executions/i.test(call.sql) &&
+              /jsonb_array_elements/i.test(call.sql) &&
+              /settlement,reverts/i.test(call.sql),
+          ),
+          "expected DFlow settlement signature lookup",
+        );
       });
     },
   },

@@ -239,7 +239,7 @@ async function findExecutionByTxHash(
   const evmMatch = trimmed.startsWith("0x")
     ? "or lower(tx_signature) = lower($1)"
     : "";
-  const { rows } = await db.query<ExecutionMatch>(
+  const exact = await db.query<ExecutionMatch>(
     `
       select id, user_id, venue, status
       from executions
@@ -250,7 +250,41 @@ async function findExecutionByTxHash(
     `,
     [trimmed],
   );
-  return rows[0] ?? null;
+  if (exact.rows[0]) return exact.rows[0];
+
+  const settlement = await db.query<ExecutionMatch>(
+    `
+      select id, user_id, venue, status
+      from executions
+      where venue = 'kalshi'
+        and exists (
+          select 1
+          from jsonb_array_elements(
+            (
+              case
+                when jsonb_typeof(raw #> '{settlement,fills}') = 'array'
+                  then raw #> '{settlement,fills}'
+                else '[]'::jsonb
+              end
+            ) ||
+            (
+              case
+                when jsonb_typeof(raw #> '{settlement,reverts}') = 'array'
+                  then raw #> '{settlement,reverts}'
+                else '[]'::jsonb
+              end
+            )
+          ) settlement(entry)
+          where settlement.entry->>'signature' = $1
+             or settlement.entry->>'txSignature' = $1
+             or settlement.entry->>'tx_signature' = $1
+        )
+      order by created_at desc
+      limit 1
+    `,
+    [trimmed],
+  );
+  return settlement.rows[0] ?? null;
 }
 
 async function insertDepositEvent(

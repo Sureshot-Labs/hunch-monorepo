@@ -101,13 +101,24 @@ export type AdminManualVolumeEvent = {
   source_id: string;
   notional_usd: string | null;
   points_awarded: string | null;
+  visible: boolean;
   created_at: Date;
 };
 
 const USDC_MICRO_FACTOR = 1_000_000n;
+export const HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX = "manual:";
+export const VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX = "manual-visible:";
 
-function buildManualAdminVolumeEventPredicate(alias: string): string {
-  return `${alias}.source_id like 'manual:%'`;
+export function isHiddenManualVolumeSourceId(sourceId: string): boolean {
+  return sourceId.startsWith(HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX);
+}
+
+function buildHiddenManualAdminVolumeEventPredicate(alias: string): string {
+  return `${alias}.source_id like '${HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX}%'`;
+}
+
+function buildAdminManualVolumeEventPredicate(alias: string): string {
+  return `(${buildHiddenManualAdminVolumeEventPredicate(alias)} or ${alias}.source_id like '${VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX}%')`;
 }
 
 function buildVolumeEventsCreatedAtClause(
@@ -126,7 +137,7 @@ function buildVolumeContributionSql(
   if (manualMode === "include_all") {
     return `${alias}.notional_usd`;
   }
-  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.notional_usd else 0 end`;
+  return `case when not (${buildHiddenManualAdminVolumeEventPredicate(alias)}) then ${alias}.notional_usd else 0 end`;
 }
 
 function buildPointsContributionSql(
@@ -136,11 +147,15 @@ function buildPointsContributionSql(
   if (manualMode !== "exclude_all") {
     return `${alias}.points_awarded`;
   }
-  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
+  return `case when not (${buildHiddenManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
 }
 
 function buildRealPointsContributionSql(alias: string): string {
   return buildPointsContributionSql(alias, "exclude_all");
+}
+
+function buildQualificationPointsContributionSql(alias: string): string {
+  return buildPointsContributionSql(alias, "include_all");
 }
 
 function decimalToMicroFloor(value: string | null | undefined): bigint {
@@ -578,6 +593,21 @@ export async function fetchUserPoints(
   return Number(rows[0]?.total ?? 0);
 }
 
+export async function fetchUserQualificationPoints(
+  pool: DbQuery,
+  userId: string,
+): Promise<number> {
+  const { rows } = await pool.query<{ total: string | null }>(
+    `
+      select coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+    `,
+    [userId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
 export async function fetchUserVolume(
   pool: DbQuery,
   userId: string,
@@ -587,7 +617,7 @@ export async function fetchUserVolume(
       select coalesce(sum(notional_usd), 0)::text as total
       from volume_events ve
       where ve.user_id = $1
-        and not (${buildManualAdminVolumeEventPredicate("ve")})
+        and not (${buildHiddenManualAdminVolumeEventPredicate("ve")})
     `,
     [userId],
   );
@@ -811,7 +841,7 @@ export async function fetchQualifiedReferralCount(
       with points as (
         select
           ve.user_id,
-          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         group by ve.user_id
       )
@@ -900,6 +930,7 @@ export async function fetchReferralsForUser(
     wallet_address: string | null;
     points: number;
     bonus: number;
+    qualificationPoints: number;
   }>
 > {
   const orderByClause = resolveRewardsReferralsOrderBy(inputs);
@@ -911,6 +942,7 @@ export async function fetchReferralsForUser(
     created_at: Date;
     wallet_address: string | null;
     points: string | null;
+    qualification_points: string | null;
     bonus: string | null;
   }>(
     `
@@ -928,6 +960,15 @@ export async function fetchReferralsForUser(
         select
           ve.user_id,
           coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      qualification_points as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         join referral_rows rr
           on rr.referred_user_id = ve.user_id
@@ -952,6 +993,7 @@ export async function fetchReferralsForUser(
         rr.created_at,
         w.wallet_address,
         coalesce(p.points, 0)::text as points,
+        coalesce(qp.points, 0)::text as qualification_points,
         coalesce(rb.total_bonus, 0)::text as bonus
       from referral_rows rr
       left join user_wallets w
@@ -959,6 +1001,8 @@ export async function fetchReferralsForUser(
        and w.is_primary = true
       left join points p
         on p.user_id = rr.referred_user_id
+      left join qualification_points qp
+        on qp.user_id = rr.referred_user_id
       left join referral_bonus rb
         on rb.user_id = rr.referred_user_id
       order by ${orderByClause}
@@ -975,6 +1019,7 @@ export async function fetchReferralsForUser(
     created_at: row.created_at,
     wallet_address: row.wallet_address ?? null,
     points: Number(row.points ?? 0),
+    qualificationPoints: Number(row.qualification_points ?? 0),
     bonus: Number(row.bonus ?? 0),
   }));
 }
@@ -1007,7 +1052,7 @@ export async function fetchAdminManualVolumeEvents(
   },
 ): Promise<{ total: number; items: AdminManualVolumeEvent[] }> {
   const params: PgParams = [];
-  const whereParts = [buildManualAdminVolumeEventPredicate("ve")];
+  const whereParts = [buildAdminManualVolumeEventPredicate("ve")];
 
   if (inputs.userId?.trim()) {
     params.push(inputs.userId.trim());
@@ -1046,6 +1091,7 @@ export async function fetchAdminManualVolumeEvents(
         ve.source_id,
         ve.notional_usd::text as notional_usd,
         ve.points_awarded::text as points_awarded,
+        not (${buildHiddenManualAdminVolumeEventPredicate("ve")}) as visible,
         ve.created_at
       from volume_events ve
       ${whereSql}
@@ -1069,7 +1115,7 @@ export async function deleteAdminManualVolumeEvent(
     `
       delete from volume_events ve
       where ve.id = $1
-        and ${buildManualAdminVolumeEventPredicate("ve")}
+        and ${buildAdminManualVolumeEventPredicate("ve")}
       returning
         ve.id,
         ve.user_id,
@@ -1079,6 +1125,7 @@ export async function deleteAdminManualVolumeEvent(
         ve.source_id,
         ve.notional_usd::text as notional_usd,
         ve.points_awarded::text as points_awarded,
+        not (${buildHiddenManualAdminVolumeEventPredicate("ve")}) as visible,
         ve.created_at
     `,
     [id],
@@ -1096,7 +1143,7 @@ export async function markQualifiedReferralsForUser(
       with points as (
         select
           ve.user_id,
-          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         group by ve.user_id
       )
