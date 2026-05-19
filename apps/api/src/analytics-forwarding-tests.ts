@@ -216,6 +216,62 @@ const tests: TestCase[] = [
       }
     },
   },
+  {
+    name: "redemption collector keeps submit, success, and error statuses separately",
+    run: async () => {
+      setAnalyticsDeliveryModeForTests("database");
+      const pool = createMockDbQuery();
+
+      try {
+        const statuses = [
+          "redemption_submit",
+          "redemption_success",
+          "redemption_fail",
+        ] as const;
+        for (const status of statuses) {
+          const result = await collectAnalyticsEvent(pool, {
+            event: "hf_redemption_action",
+            origin: "browser",
+            userId: "user-3",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              source: "portfolio_positions",
+              status,
+              attempt_id: "redeem-1",
+            },
+          });
+          assertAccepted(result);
+          assert.equal(result.deduped, false);
+        }
+
+        const duplicateSuccess = await collectAnalyticsEvent(pool, {
+          event: "hf_redemption_action",
+          origin: "browser",
+          userId: "user-3",
+          payload: {
+            analytics_schema_version: "frontend-v1",
+            source: "portfolio_positions",
+            status: "redemption_success",
+            attempt_id: "redeem-1",
+          },
+        });
+        assertAccepted(duplicateSuccess);
+
+        assert.deepEqual(
+          pool.inserts.map((entry) => entry.dedupeKey),
+          [
+            "hf_redemption_action:redeem-1:redemption_submit",
+            "hf_redemption_action:redeem-1:redemption_success",
+            "hf_redemption_action:redeem-1:redemption_fail",
+            "hf_redemption_action:redeem-1:redemption_success",
+          ],
+        );
+        assert.equal(duplicateSuccess.deduped, true);
+      } finally {
+        setAnalyticsDeliveryModeForTests(null);
+      }
+    },
+  },
 ];
 
 let passed = 0;

@@ -10,6 +10,7 @@ export const forwardedAnalyticsEventNameSchema = z.enum([
   "hf_portfolio_order_cancel",
   "hf_portfolio_share_action",
   "hf_referral_link_landing",
+  "hf_redemption_action",
   "hf_rewards_claim_action",
   "hf_rewards_referral_action",
 ]);

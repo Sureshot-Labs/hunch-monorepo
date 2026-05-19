@@ -11,6 +11,7 @@ const COLLECTED_ANALYTICS_EVENTS = [
   "hf_portfolio_order_cancel",
   "hf_portfolio_share_action",
   "hf_referral_link_landing",
+  "hf_redemption_action",
   "hf_rewards_claim_action",
   "hf_rewards_referral_action",
 ] as const;
@@ -82,6 +83,11 @@ const REWARDS_CLAIM_STATUSES = new Set([
   "claim_submit",
   "claim_success",
 ]);
+const REDEMPTION_STATUSES = new Set([
+  "redemption_fail",
+  "redemption_submit",
+  "redemption_success",
+]);
 const BACKEND_ANALYTICS_SCHEMA_VERSION = "backend-collector-v1";
 
 function resolveTerminalDedupeKey(
@@ -91,6 +97,7 @@ function resolveTerminalDedupeKey(
 ): string {
   if (
     (event === "hf_portfolio_order_cancel" ||
+      event === "hf_redemption_action" ||
       event === "hf_rewards_claim_action") &&
     status
   ) {
@@ -142,6 +149,7 @@ function isTerminalCollectedEvent(event: CollectedAnalyticsEventName): boolean {
     TERMINAL_ORDER_EVENTS.has(event) ||
     TERMINAL_BRIDGE_EVENTS.has(event) ||
     event === "hf_portfolio_order_cancel" ||
+    event === "hf_redemption_action" ||
     event === "hf_rewards_claim_action"
   );
 }
@@ -162,6 +170,9 @@ function isCollectableEventForOrigin(
     if (status == null || !REWARDS_CLAIM_STATUSES.has(status)) return false;
     if (origin === "backend") return status !== "claim_submit";
     return status === "claim_submit";
+  }
+  if (event === "hf_redemption_action") {
+    return status != null && REDEMPTION_STATUSES.has(status);
   }
   return true;
 }
