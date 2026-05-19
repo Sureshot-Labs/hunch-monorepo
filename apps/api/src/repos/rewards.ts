@@ -101,13 +101,24 @@ export type AdminManualVolumeEvent = {
   source_id: string;
   notional_usd: string | null;
   points_awarded: string | null;
+  visible: boolean;
   created_at: Date;
 };
 
 const USDC_MICRO_FACTOR = 1_000_000n;
+export const HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX = "manual:";
+export const VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX = "manual-visible:";
 
-function buildManualAdminVolumeEventPredicate(alias: string): string {
-  return `${alias}.source_id like 'manual:%'`;
+export function isHiddenManualVolumeSourceId(sourceId: string): boolean {
+  return sourceId.startsWith(HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX);
+}
+
+function buildHiddenManualAdminVolumeEventPredicate(alias: string): string {
+  return `${alias}.source_id like '${HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX}%'`;
+}
+
+function buildAdminManualVolumeEventPredicate(alias: string): string {
+  return `(${buildHiddenManualAdminVolumeEventPredicate(alias)} or ${alias}.source_id like '${VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX}%')`;
 }
 
 function buildVolumeEventsCreatedAtClause(
@@ -126,7 +137,7 @@ function buildVolumeContributionSql(
   if (manualMode === "include_all") {
     return `${alias}.notional_usd`;
   }
-  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.notional_usd else 0 end`;
+  return `case when not (${buildHiddenManualAdminVolumeEventPredicate(alias)}) then ${alias}.notional_usd else 0 end`;
 }
 
 function buildPointsContributionSql(
@@ -136,7 +147,7 @@ function buildPointsContributionSql(
   if (manualMode !== "exclude_all") {
     return `${alias}.points_awarded`;
   }
-  return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
+  return `case when not (${buildHiddenManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
 }
 
 function buildRealPointsContributionSql(alias: string): string {
@@ -606,7 +617,7 @@ export async function fetchUserVolume(
       select coalesce(sum(notional_usd), 0)::text as total
       from volume_events ve
       where ve.user_id = $1
-        and not (${buildManualAdminVolumeEventPredicate("ve")})
+        and not (${buildHiddenManualAdminVolumeEventPredicate("ve")})
     `,
     [userId],
   );
@@ -1041,7 +1052,7 @@ export async function fetchAdminManualVolumeEvents(
   },
 ): Promise<{ total: number; items: AdminManualVolumeEvent[] }> {
   const params: PgParams = [];
-  const whereParts = [buildManualAdminVolumeEventPredicate("ve")];
+  const whereParts = [buildAdminManualVolumeEventPredicate("ve")];
 
   if (inputs.userId?.trim()) {
     params.push(inputs.userId.trim());
@@ -1080,6 +1091,7 @@ export async function fetchAdminManualVolumeEvents(
         ve.source_id,
         ve.notional_usd::text as notional_usd,
         ve.points_awarded::text as points_awarded,
+        not (${buildHiddenManualAdminVolumeEventPredicate("ve")}) as visible,
         ve.created_at
       from volume_events ve
       ${whereSql}
@@ -1103,7 +1115,7 @@ export async function deleteAdminManualVolumeEvent(
     `
       delete from volume_events ve
       where ve.id = $1
-        and ${buildManualAdminVolumeEventPredicate("ve")}
+        and ${buildAdminManualVolumeEventPredicate("ve")}
       returning
         ve.id,
         ve.user_id,
@@ -1113,6 +1125,7 @@ export async function deleteAdminManualVolumeEvent(
         ve.source_id,
         ve.notional_usd::text as notional_usd,
         ve.points_awarded::text as points_awarded,
+        not (${buildHiddenManualAdminVolumeEventPredicate("ve")}) as visible,
         ve.created_at
     `,
     [id],

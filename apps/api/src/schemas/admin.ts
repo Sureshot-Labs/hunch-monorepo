@@ -257,9 +257,9 @@ export const adminPointsSchema = z
     userId: z.string().uuid().optional(),
     walletAddress: z.string().min(1).optional(),
     amount: z.coerce.number().finite().positive(),
-    sourceId: z.string().min(1).optional(),
     sourceType: z.enum(["order", "execution"]).optional(),
     venue: z.string().min(1).optional(),
+    visible: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     if (!value.userId && !value.walletAddress) {

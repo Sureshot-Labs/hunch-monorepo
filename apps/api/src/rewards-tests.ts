@@ -20,9 +20,11 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  fetchAdminManualVolumeEvents,
   fetchReferralsForUser,
   fetchQualifiedReferralCount,
   fetchUserPoints,
+  fetchUserVolume,
   markQualifiedReferralsForUser,
   resolveRewardsReferralsOrderBy,
 } from "./repos/rewards.js";
@@ -292,6 +294,56 @@ function createUserPointsDb(seed: {
         return { rows: [{ total: seed.total }] };
       }
       throw new Error(`Unhandled SQL in user points test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
+function createAdminManualPointsDb(seed: {
+  capture?: { countSql?: string; listSql?: string; params: unknown[][] };
+}): import("./db.js").DbQuery {
+  let calls = 0;
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      calls += 1;
+      seed.capture?.params.push(Array.isArray(params) ? [...params] : []);
+      if (sql.includes("select count(*)::text as total")) {
+        if (seed.capture) seed.capture.countSql = sql;
+        return { rows: [{ total: "2" }] };
+      }
+      if (sql.includes("from volume_events ve") && sql.includes("order by")) {
+        if (seed.capture) seed.capture.listSql = sql;
+        return {
+          rows: [
+            {
+              id: "hidden-event",
+              user_id: "user-a",
+              wallet_address: "0xabc",
+              venue: "admin",
+              source_type: "execution",
+              source_id: "manual:hidden",
+              notional_usd: "500",
+              points_awarded: "500",
+              visible: false,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+            {
+              id: "visible-event",
+              user_id: "user-a",
+              wallet_address: "0xabc",
+              venue: "admin",
+              source_type: "execution",
+              source_id: "manual-visible:visible",
+              notional_usd: "250",
+              points_awarded: "250",
+              visible: true,
+              created_at: new Date("2026-01-02T00:00:00.000Z"),
+            },
+          ],
+        };
+      }
+      throw new Error(
+        `Unhandled SQL in admin manual points test db call ${calls}: ${sql}`,
+      );
     },
   } as import("./db.js").DbQuery;
 }
@@ -801,6 +853,21 @@ const tests: TestCase[] = [
 
       assert.equal(points, 750);
       assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.doesNotMatch(capture.sql ?? "", /manual-visible:%/);
+      assert.deepEqual(capture.params, ["user-a"]);
+    },
+  },
+  {
+    name: "fetchUserVolume excludes hidden manual events but leaves visible manual events",
+    run: async () => {
+      const capture: { sql?: string; params?: unknown[] } = {};
+      const db = createUserPointsDb({ total: "250", capture });
+
+      const volume = await fetchUserVolume(db, "user-a");
+
+      assert.equal(volume, 250);
+      assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.doesNotMatch(capture.sql ?? "", /manual-visible:%/);
       assert.deepEqual(capture.params, ["user-a"]);
     },
   },
@@ -972,6 +1039,35 @@ const tests: TestCase[] = [
         }),
         "rr.created_at desc, rr.id desc",
       );
+    },
+  },
+  {
+    name: "manual points listing includes hidden and visible manual grants",
+    run: async () => {
+      const capture: {
+        countSql?: string;
+        listSql?: string;
+        params: unknown[][];
+      } = { params: [] };
+      const db = createAdminManualPointsDb({ capture });
+
+      const result = await fetchAdminManualVolumeEvents(db, {
+        userId: "user-a",
+        walletAddress: null,
+        limit: 10,
+        offset: 0,
+      });
+
+      assert.equal(result.total, 2);
+      assert.equal(result.items.length, 2);
+      assert.equal(result.items[0]?.visible, false);
+      assert.equal(result.items[1]?.visible, true);
+      assert.match(capture.countSql ?? "", /source_id like 'manual:%'/);
+      assert.match(capture.countSql ?? "", /source_id like 'manual-visible:%'/);
+      assert.match(capture.listSql ?? "", /source_id like 'manual:%'/);
+      assert.match(capture.listSql ?? "", /source_id like 'manual-visible:%'/);
+      assert.deepEqual(capture.params[0], ["user-a"]);
+      assert.deepEqual(capture.params[1], ["user-a", 10, 0]);
     },
   },
   {
