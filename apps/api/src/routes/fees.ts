@@ -5,6 +5,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
+import { resolvePolymarketFeePolicySnapshot } from "../services/polymarket-builder-fees.js";
 
 const MAX_FEE_BPS = 10_000;
 const MAX_FEE_SCALE = 10_000;
@@ -42,10 +43,16 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const venue = request.query.venue;
-      const activePolicy = await fetchActiveFeePolicy(pool, venue);
+      const polymarketSnapshot =
+        venue === "polymarket"
+          ? await resolvePolymarketFeePolicySnapshot(pool)
+          : null;
+      const activePolicy =
+        venue === "polymarket" ? null : await fetchActiveFeePolicy(pool, venue);
       const feeBpsRaw =
+        polymarketSnapshot?.legacyFeeBps ??
         activePolicy?.fee_bps ??
-        (venue === "polymarket" ? env.feeBpsPolymarket : env.feeBpsKalshi);
+        env.feeBpsKalshi;
       const feeBps = clampFeeBps(feeBpsRaw);
       const feeScaleRaw =
         venue === "kalshi"
@@ -55,15 +62,28 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
 
       const ttlMs = env.feePolicyTtlSec * MS_PER_SEC;
       const deadline = new Date(Date.now() + ttlMs).toISOString();
+      const collectionMode =
+        venue === "polymarket"
+          ? (polymarketSnapshot?.collectionMode ?? "none")
+          : "fee_auth";
+      const effectiveFeeBps =
+        venue === "polymarket" && collectionMode !== "fee_auth" ? 0 : feeBps;
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
         venue,
-        feeBps,
+        feeBps: effectiveFeeBps,
         feeScale: feeScale > 0 ? feeScale : null,
         deadline,
-        collectorAddress: env.feeCollectorAddress || null,
+        collectionMode,
+        builderCode: polymarketSnapshot?.builderCode ?? null,
+        builderTakerFeeBps: polymarketSnapshot?.builderTakerFeeBps ?? null,
+        builderMakerFeeBps: polymarketSnapshot?.builderMakerFeeBps ?? null,
+        collectorAddress:
+          venue === "polymarket"
+            ? null
+            : env.feeCollectorAddress || null,
         feeAccount: venue === "kalshi" ? env.dflowFeeAccount || null : null,
       });
     },

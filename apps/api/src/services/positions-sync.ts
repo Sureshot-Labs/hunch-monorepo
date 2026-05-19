@@ -34,6 +34,11 @@ import {
   resolveLimitlessAuthContext,
 } from "./limitless-auth.js";
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
+import {
+  buildPolymarketBuilderFeeAccrual,
+  resolvePolymarketBuilderFeeConfig,
+  upsertPolymarketBuilderFeeAccruals,
+} from "./polymarket-builder-fees.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_RECENT_FLAT_PROTECT_SEC = 15;
@@ -1071,12 +1076,30 @@ export async function syncPolymarketTradesForSigner(
     };
   }
 
-  const { rows: orderRows } = await pool.query<{
+  type LocalPolymarketOrderRow = {
     id: string;
     venue_order_id: string;
-  }>(
+    wallet_address: string | null;
+    signer_address: string | null;
+    token_id: string | null;
+    side: string | null;
+    order_hash: string | null;
+    order_payload: Record<string, unknown> | null;
+    fee_policy_snapshot: Record<string, unknown> | null;
+  };
+
+  const { rows: orderRows } = await pool.query<LocalPolymarketOrderRow>(
     `
-      select id, venue_order_id
+      select
+        id,
+        venue_order_id,
+        wallet_address,
+        signer_address,
+        token_id,
+        side,
+        order_hash,
+        case when jsonb_typeof(order_payload) = 'object' then order_payload else null end as order_payload,
+        case when jsonb_typeof(fee_policy_snapshot) = 'object' then fee_policy_snapshot else null end as fee_policy_snapshot
       from orders
       where user_id = $1
         and venue = 'polymarket'
@@ -1092,10 +1115,10 @@ export async function syncPolymarketTradesForSigner(
     };
   }
 
-  const orderMap = new Map<string, string>();
+  const orderMap = new Map<string, LocalPolymarketOrderRow>();
   for (const row of orderRows) {
     if (row.venue_order_id) {
-      orderMap.set(row.venue_order_id, row.id);
+      orderMap.set(row.venue_order_id, row);
     }
   }
 
@@ -1111,6 +1134,51 @@ export async function syncPolymarketTradesForSigner(
   const volumeSourceIds: string[] = [];
   const volumeNotionals: number[] = [];
   const volumeTimes: Date[] = [];
+  const builderFeeConfig = await resolvePolymarketBuilderFeeConfig(pool);
+  const builderFeeAccruals: Array<
+    ReturnType<typeof buildPolymarketBuilderFeeAccrual>
+  > = [];
+  const builderFeeAccrualKeySet = new Set<string>();
+
+  const maybeQueueBuilderAccrual = (params: {
+    order: LocalPolymarketOrderRow;
+    venueFillId: string;
+    venueTradeId: string;
+    txHash: string | null;
+    side: "BUY" | "SELL";
+    role: "maker" | "taker";
+    size: string | number | null;
+    price: string | number | null;
+    filledAt: Date;
+  }) => {
+    const key = `${params.order.id}:${params.venueFillId}`;
+    if (builderFeeAccrualKeySet.has(key)) return;
+    builderFeeAccrualKeySet.add(key);
+    const payload = params.order.order_payload;
+    if (!payload || !isRecord(payload)) return;
+    const builder =
+      typeof payload.builder === "string" ? payload.builder : null;
+    const accrual = buildPolymarketBuilderFeeAccrual({
+      userId: inputs.userId,
+      walletAddress: params.order.wallet_address,
+      signerAddress: params.order.signer_address,
+      orderId: params.order.id,
+      orderHash: params.order.order_hash ?? "",
+      venueOrderId: params.order.venue_order_id,
+      venueFillId: params.venueFillId,
+      venueTradeId: params.venueTradeId,
+      txHash: params.txHash,
+      tokenId: params.order.token_id,
+      side: params.side,
+      role: params.role,
+      size: params.size,
+      price: params.price,
+      filledAt: params.filledAt,
+      orderBuilderCode: builder,
+      feePolicySnapshot: params.order.fee_policy_snapshot,
+    }, builderFeeConfig);
+    if (accrual) builderFeeAccruals.push(accrual);
+  };
 
   for (const trade of trades) {
     const tradeId = trade.id;
@@ -1125,8 +1193,9 @@ export async function syncPolymarketTradesForSigner(
       const size = parseNumber(trade.size);
       const price = parseNumber(trade.price);
       if (side && size != null && size > 0 && price != null && price > 0) {
-        const internalOrderId = orderMap.get(takerOrderId);
-        if (!internalOrderId) continue;
+        const localOrder = orderMap.get(takerOrderId);
+        if (!localOrder) continue;
+        const internalOrderId = localOrder.id;
         const venueFillId = `${tradeId}:taker`;
         const key = `${internalOrderId}:${venueFillId}`;
         if (!fillKeySet.has(key)) {
@@ -1143,6 +1212,17 @@ export async function syncPolymarketTradesForSigner(
           volumeNotionals.push(size * price);
           volumeTimes.push(filledAt);
         }
+        maybeQueueBuilderAccrual({
+          order: localOrder,
+          venueFillId,
+          venueTradeId: tradeId,
+          txHash: trade.transactionHash,
+          side,
+          role: "taker",
+          size: trade.size,
+          price: trade.price,
+          filledAt,
+        });
       }
     }
 
@@ -1152,8 +1232,9 @@ export async function syncPolymarketTradesForSigner(
       const size = parseNumber(maker.matchedAmount);
       const price = parseNumber(maker.price);
       if (side && size != null && size > 0 && price != null && price > 0) {
-        const internalOrderId = orderMap.get(maker.orderId);
-        if (!internalOrderId) continue;
+        const localOrder = orderMap.get(maker.orderId);
+        if (!localOrder) continue;
+        const internalOrderId = localOrder.id;
         const venueFillId = `${tradeId}:${maker.orderId}`;
         const key = `${internalOrderId}:${venueFillId}`;
         if (!fillKeySet.has(key)) {
@@ -1170,8 +1251,23 @@ export async function syncPolymarketTradesForSigner(
           volumeNotionals.push(size * price);
           volumeTimes.push(filledAt);
         }
+        maybeQueueBuilderAccrual({
+          order: localOrder,
+          venueFillId,
+          venueTradeId: tradeId,
+          txHash: trade.transactionHash,
+          side,
+          role: "maker",
+          size: maker.matchedAmount,
+          price: maker.price,
+          filledAt,
+        });
       }
     }
+  }
+
+  if (builderFeeAccruals.length) {
+    await upsertPolymarketBuilderFeeAccruals(pool, builderFeeAccruals);
   }
 
   if (!fillOrderIds.length) {

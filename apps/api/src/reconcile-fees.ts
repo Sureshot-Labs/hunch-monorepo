@@ -3,6 +3,7 @@
 import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { reconcileSolanaFeeEvents } from "./services/fee-reconcile.js";
+import { reconcilePolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
 
 export type ReconcileFeesOptions = {
   dryRun: boolean;
@@ -42,6 +43,10 @@ export function parseReconcileFeesArgs(
 
 export async function runReconcileFees(options: ReconcileFeesOptions) {
   const summary = await reconcileSolanaFeeEvents(pool, options);
+  const polymarketBuilder = await reconcilePolymarketBuilderFeeAccruals(pool, {
+    dryRun: options.dryRun,
+    limit: options.limit,
+  });
   console.log(
     [
       "Reconcile fees (Solana)",
@@ -53,7 +58,21 @@ export async function runReconcileFees(options: ReconcileFeesOptions) {
       `dryRun=${options.dryRun ? 1 : 0}`,
     ].join(" "),
   );
-  return summary;
+  console.log(
+    [
+      "Reconcile fees (Polymarket builder)",
+      `checked=${polymarketBuilder.verify.checked}`,
+      `verified=${polymarketBuilder.verify.verified}`,
+      `failed=${polymarketBuilder.verify.failed}`,
+      `skipped=${polymarketBuilder.verify.skipped}`,
+      `unlockConsidered=${polymarketBuilder.unlock.considered}`,
+      `unlocked=${polymarketBuilder.unlock.unlocked}`,
+      `unlockSkipped=${polymarketBuilder.unlock.skipped}`,
+      `budgetMicro=${polymarketBuilder.unlock.budgetMicro}`,
+      `dryRun=${options.dryRun ? 1 : 0}`,
+    ].join(" "),
+  );
+  return { solana: summary, polymarketBuilder };
 }
 
 function isDirectExecution(metaUrl: string): boolean {

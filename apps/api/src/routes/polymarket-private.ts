@@ -49,12 +49,10 @@ import { derivePolymarketFunders } from "../services/polymarket-funder.js";
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import {
-  buildEmbeddedPolymarketFeeAuthRequest,
   buildEmbeddedPolymarketOrderRequest,
   buildEmbeddedPolymarketConnectRequest,
   buildEmbeddedPolymarketTypedDataRequest,
   executeEmbeddedPolymarketConnectRequest,
-  executeEmbeddedPolymarketFeeAuthRequest,
   executeEmbeddedPolymarketOrderRequest,
   executeEmbeddedPolymarketTypedDataRequest,
   executeEmbeddedSignerApprovalRequests,
@@ -86,6 +84,10 @@ import {
   normalizeOpenOrder,
   polymarketL2Request,
 } from "../services/polymarket-clob-l2.js";
+import {
+  resolvePolymarketFeePolicySnapshot,
+  validatePolymarketOrderBuilderCodeForConfig,
+} from "../services/polymarket-builder-fees.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const POLY_DECIMALS = 6;
@@ -316,10 +318,6 @@ function writePolymarketAccountCache(
   });
 }
 
-function normalizeHex(value: string): string {
-  return value.trim().toLowerCase();
-}
-
 function parseOptionalBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value !== "string") return undefined;
@@ -450,9 +448,9 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
     timeoutMs: env.polygonRpcTimeoutMs,
     signer: inputs.signer,
     funder: effectiveFunder,
-    includeFeeCollectorNonce: true,
+    includeFeeCollectorNonce: false,
     negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress,
-    feeCollectorAddress: env.feeCollectorAddress,
+    feeCollectorAddress: null,
   });
 
   const approvalRequests = prepareEmbeddedPolymarketSignerApprovalRequests({
@@ -476,11 +474,7 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
             snapshot.allowanceNegRiskAdapter ?? null,
           )
         : true,
-      feeCollectorAllowanceOk: env.feeCollectorAddress
-        ? approvalSatisfiesEmbeddedAutomation(
-            snapshot.allowanceFeeCollector ?? null,
-          )
-        : true,
+      feeCollectorAllowanceOk: true,
     },
   });
 
@@ -1689,13 +1683,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const nowMs = Date.now().toString();
       const zeroBytes32 =
         "0x0000000000000000000000000000000000000000000000000000000000000000";
+      const feePolicySnapshot = await resolvePolymarketFeePolicySnapshot(pool);
       return reply.send({
         ok: true,
         version: "polymarket_clob_v2",
         tokenId,
         timestamp: nowMs,
         metadata: zeroBytes32,
-        builder: zeroBytes32,
+        builder: feePolicySnapshot.builderCode,
         exchangeAddress:
           marketInfo?.neg_risk === true
             ? env.polymarketNegRiskExchangeAddress
@@ -1703,6 +1698,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         collateralAddress: env.polymarketUsdcAddress,
         takerFeeBps: Number.isFinite(takerFeeBps) ? takerFeeBps : 0,
         makerFeeBps: Number.isFinite(makerFeeBps) ? makerFeeBps : 0,
+        builderCollectionMode: feePolicySnapshot.collectionMode,
+        builderTakerFeeBps: feePolicySnapshot.builderTakerFeeBps,
+        builderMakerFeeBps: feePolicySnapshot.builderMakerFeeBps,
       });
     },
   );
@@ -2348,7 +2346,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
         const negRiskAdapterAddress =
           env.polymarketNegRiskAdapterAddress?.trim() || "";
         const funderDistinctFromSigner =
@@ -2366,9 +2363,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               signer,
               funder,
               includeSignerUsdc: funderDistinctFromSigner,
-              includeFeeCollectorNonce: true,
+              includeFeeCollectorNonce: false,
               negRiskAdapterAddress,
-              feeCollectorAddress,
+              feeCollectorAddress: null,
             }),
           ]);
 
@@ -2387,8 +2384,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           const okNegRisk = snapshot.okNegRisk;
           const okNegRiskAdapter = snapshot.okNegRiskAdapter;
           const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
-          const allowanceFeeCollector = snapshot.allowanceFeeCollector;
-          const feeCollectorNonce = snapshot.feeCollectorNonce;
 
           const isContract = typeof code === "string" && code.length > 2;
           const pusdStatus = {
@@ -2416,18 +2411,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                         6,
                       ),
                       allowanceRaw: (allowanceNegRiskAdapter ?? 0n).toString(),
-                    },
-                  }
-                : {}),
-              ...(feeCollectorAddress
-                ? {
-                    feeCollector: {
-                      spender: feeCollectorAddress,
-                      allowance: ethers.formatUnits(
-                        allowanceFeeCollector ?? 0n,
-                        6,
-                      ),
-                      allowanceRaw: (allowanceFeeCollector ?? 0n).toString(),
                     },
                   }
                 : {}),
@@ -2493,14 +2476,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                   : {}),
               },
             },
-            ...(feeCollectorAddress
-              ? {
-                  feeCollector: {
-                    address: feeCollectorAddress,
-                    nonce: feeCollectorNonce?.toString() ?? null,
-                  },
-                }
-              : {}),
             hasCredentials: Boolean(credsInfo),
           };
         })();
@@ -2949,27 +2924,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      try {
-        const context = await resolveEmbeddedPolymarketWalletContext({
-          user,
-          signer,
-        });
-        const authorizationRequest = buildEmbeddedPolymarketFeeAuthRequest({
-          context,
-          payload: request.body.feeAuth,
-          feeCollectorAddress: request.body.feeCollectorAddress,
-        });
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, request: authorizationRequest });
-      } catch (error) {
-        reply.code(400);
-        return reply.send({
-          error:
-            error instanceof Error
-              ? error.message
-              : "Failed to prepare fee authorization",
-        });
-      }
+      reply.code(410);
+      return reply.send({
+        error:
+          "Polymarket fee-auth signing is disabled; configure builder fees or submit without a Hunch fee.",
+      });
     },
   );
 
@@ -2987,31 +2946,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      try {
-        const context = await resolveEmbeddedPolymarketWalletContext({
-          user,
-          signer,
-        });
-        const authorizationRequest = buildEmbeddedPolymarketFeeAuthRequest({
-          context,
-          payload: request.body.feeAuth,
-          feeCollectorAddress: request.body.feeCollectorAddress,
-        });
-        const signature = await executeEmbeddedPolymarketFeeAuthRequest({
-          request: authorizationRequest,
-          authorizationSignature: request.body.authorizationSignature,
-        });
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, signature });
-      } catch (error) {
-        reply.code(400);
-        return reply.send({
-          error:
-            error instanceof Error
-              ? error.message
-              : "Failed to sign fee authorization",
-        });
-      }
+      reply.code(410);
+      return reply.send({
+        error:
+          "Polymarket fee-auth signing is disabled; configure builder fees or submit without a Hunch fee.",
+      });
     },
   );
 
@@ -3512,8 +3451,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({ error: walletValidation.error });
       }
-      const orderSigner = walletValidation.orderSigner;
-      const maker = walletValidation.maker;
 
       const side = normalizeOrderSide(order.side);
       if (!side) {
@@ -3532,6 +3469,21 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           error:
             "Polymarket CLOB V1 order payloads are no longer supported. Build and sign a CLOB V2 order with timestamp, metadata, and builder fields.",
         });
+      }
+      const feePolicySnapshot = await resolvePolymarketFeePolicySnapshot(pool);
+      const builderFeeConfig = {
+        active: feePolicySnapshot.collectionMode === "builder",
+        builderCode: feePolicySnapshot.builderCode,
+        takerFeeBps: feePolicySnapshot.builderTakerFeeBps,
+        makerFeeBps: feePolicySnapshot.builderMakerFeeBps,
+      };
+      const builderValidation = validatePolymarketOrderBuilderCodeForConfig(
+        typeof order.builder === "string" ? order.builder : null,
+        builderFeeConfig,
+      );
+      if (!builderValidation.ok) {
+        reply.code(400);
+        return reply.send({ error: builderValidation.error });
       }
       let marketInfo = null;
       if (orderTokenId) {
@@ -3575,6 +3527,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const feeAuth = body.feeAuth;
       const feeAuthSig =
         typeof body.feeAuthSig === "string" ? body.feeAuthSig.trim() : "";
+      if (feeAuth || feeAuthSig) {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Polymarket fee-auth orders are disabled; configure builder fees or submit without a Hunch fee.",
+        });
+      }
       const exchangeAddress =
         (typeof body.exchangeAddress === "string" &&
           body.exchangeAddress.trim()) ||
@@ -3582,16 +3541,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           body.negRisk ?? marketInfo?.neg_risk ?? null,
         ) ||
         env.polymarketExchangeAddress;
-      const feeCollectorAddress =
-        (typeof body.feeCollectorAddress === "string" &&
-          body.feeCollectorAddress.trim()) ||
-        env.feeCollectorAddress?.trim() ||
-        "";
-
       let orderHash = "";
-      let feeBps: number | null = null;
-      let feeDeadline: number | null = null;
-      let feeAuthStored: Record<string, unknown> | null = null;
+      const feeBps: number | null = null;
+      const feeDeadline: number | null = null;
+      const feeAuthStored: Record<string, unknown> | null = null;
 
       if (!normalizedForHash) {
         reply.code(400);
@@ -3647,89 +3600,6 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             exchangeAddress,
             order: normalizedForHash as NormalizedPolymarketOrderV1,
           });
-
-      if (feeAuth || feeAuthSig) {
-        if (!feeAuth || !feeAuthSig) {
-          reply.code(400);
-          return reply.send({
-            error: "feeAuth and feeAuthSig are both required when using fees",
-          });
-        }
-
-        if (!feeCollectorAddress) {
-          reply.code(400);
-          return reply.send({
-            error: "Fee collector address is required for fee-auth orders",
-          });
-        }
-
-        if (
-          env.feeCollectorAddress &&
-          normalizeAddress(feeCollectorAddress) !==
-            normalizeAddress(env.feeCollectorAddress)
-        ) {
-          reply.code(400);
-          return reply.send({
-            error: "Fee collector address does not match configured policy",
-          });
-        }
-
-        const feeAuthSigner =
-          typeof feeAuth.signer === "string" ? feeAuth.signer : "";
-        const feeAuthVault =
-          typeof feeAuth.vault === "string" ? feeAuth.vault : "";
-        const feeAuthExchange =
-          typeof feeAuth.exchange === "string" ? feeAuth.exchange : "";
-        const feeAuthOrderHash =
-          typeof feeAuth.orderHash === "string" ? feeAuth.orderHash : "";
-        if (normalizeAddress(feeAuthSigner) !== normalizeAddress(orderSigner)) {
-          reply.code(400);
-          return reply.send({
-            error: "feeAuth.signer must match the order signer",
-          });
-        }
-        if (normalizeAddress(feeAuthVault) !== normalizeAddress(maker)) {
-          reply.code(400);
-          return reply.send({
-            error: "feeAuth.vault must match the order maker",
-          });
-        }
-        if (
-          normalizeAddress(feeAuthExchange) !==
-          normalizeAddress(exchangeAddress)
-        ) {
-          reply.code(400);
-          return reply.send({
-            error: "feeAuth.exchange must match the order exchange",
-          });
-        }
-        if (normalizeHex(feeAuthOrderHash) !== normalizeHex(orderHash)) {
-          reply.code(400);
-          return reply.send({
-            error: "feeAuth.orderHash does not match the computed order hash",
-          });
-        }
-
-        const feeBpsRaw = parseNumberish(feeAuth.feeBps);
-        feeBps = feeBpsRaw != null ? Math.trunc(feeBpsRaw) : null;
-        const deadlineRaw = parseNumberish(feeAuth.deadline);
-        feeDeadline = deadlineRaw != null ? Math.trunc(deadlineRaw) : null;
-
-        feeAuthStored = {
-          signer: feeAuthSigner,
-          vault: feeAuthVault,
-          exchange: feeAuthExchange,
-          orderHash,
-          feeBps: normalizeNumberishString(feeAuth.feeBps) ?? feeAuth.feeBps,
-          ...("nonce" in feeAuth
-            ? {
-                nonce: normalizeNumberishString(feeAuth.nonce) ?? feeAuth.nonce,
-              }
-            : {}),
-          deadline:
-            normalizeNumberishString(feeAuth.deadline) ?? feeAuth.deadline,
-        };
-      }
 
       const payload = {
         order: normalizedOrder,
@@ -3904,9 +3774,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         orderHash,
         feeBps,
         feeAuth: feeAuthStored,
-        feeAuthSig: feeAuthSig || null,
-        feeCollectorAddress: feeAuth ? feeCollectorAddress || null : null,
+        feeAuthSig: null,
+        feeCollectorAddress: null,
         feeDeadline,
+        feePolicySnapshot,
       });
 
       const referralFirstTrade =

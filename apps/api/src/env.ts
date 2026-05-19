@@ -1193,6 +1193,15 @@ export const env = {
 
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
+  polymarketBuilderCode: process.env.POLYMARKET_BUILDER_CODE?.trim() || "",
+  polymarketBuilderTakerFeeBps:
+    process.env.POLYMARKET_BUILDER_TAKER_FEE_BPS?.trim()
+      ? optionalNonNegativeInt("POLYMARKET_BUILDER_TAKER_FEE_BPS", 0)
+      : null,
+  polymarketBuilderMakerFeeBps:
+    process.env.POLYMARKET_BUILDER_MAKER_FEE_BPS?.trim()
+      ? optionalNonNegativeInt("POLYMARKET_BUILDER_MAKER_FEE_BPS", 0)
+      : null,
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
   feeScaleKalshi: optionalNonNegativeNumber("HUNCH_FEE_SCALE_KALSHI", 0),
   feePolicyTtlSec: optionalPositiveInt(
@@ -1239,6 +1248,7 @@ export const env = {
     "",
   rewardsPayoutPrivateKey:
     process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
+  financePolygonHot: process.env.HUNCH_FINANCE_POLYGON_HOT?.trim() || "",
   rewardsPayoutTokenAddressPolygon:
     process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() || "",
   rewardsAutoWrapUsdcePolygon:

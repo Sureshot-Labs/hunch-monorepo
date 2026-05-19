@@ -838,7 +838,6 @@ function allowedPolymarketOperators() {
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
       env.polymarketNegRiskAdapterAddress,
-      env.feeCollectorAddress,
     ]
       .map((value) => normalizeAddress(value))
       .filter((value): value is string => Boolean(value))
@@ -1613,17 +1612,6 @@ function buildApprovalTasks(inputs: {
       target: env.polymarketUsdcAddress,
       data: encodeApprove(env.polymarketNegRiskAdapterAddress),
       description: "USDC neg-risk adapter approval",
-    });
-  }
-  if (
-    env.feeCollectorAddress &&
-    !inputs.currentApprovals.feeCollectorAllowanceOk
-  ) {
-    tasks.push({
-      kind: "erc20_approve",
-      target: env.polymarketUsdcAddress,
-      data: encodeApprove(env.feeCollectorAddress),
-      description: "USDC fee collector approval",
     });
   }
   if (!inputs.currentApprovals.exchangeApproved) {

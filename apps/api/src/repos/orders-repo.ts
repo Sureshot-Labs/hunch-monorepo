@@ -124,6 +124,7 @@ async function storeOrderInTx(
     feeAuthSig?: string | null;
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
+    feePolicySnapshot?: unknown | null;
     orderPayload?: unknown | null;
     orderPayloadVersion?: string | null;
     postedAt?: Date | null;
@@ -149,8 +150,9 @@ async function storeOrderInTx(
     size: number | null;
     order_payload: unknown | null;
     order_payload_version: string | null;
+    fee_policy_snapshot: unknown | null;
   }>(
-    `SELECT id, wallet_address, signer_address, price, size, order_payload, order_payload_version
+    `SELECT id, wallet_address, signer_address, price, size, order_payload, order_payload_version, fee_policy_snapshot
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
      ORDER BY
@@ -203,6 +205,11 @@ async function storeOrderInTx(
       updates.push(`order_payload_version = $${paramCount}`);
       params.push(inputs.orderPayloadVersion);
     }
+    if (!existing.fee_policy_snapshot && inputs.feePolicySnapshot != null) {
+      paramCount += 1;
+      updates.push(`fee_policy_snapshot = $${paramCount}`);
+      params.push(JSON.stringify(inputs.feePolicySnapshot));
+    }
     if (updates.length) {
       paramCount += 1;
       params.push(existing.id);
@@ -225,12 +232,12 @@ async function storeOrderInTx(
     `INSERT INTO orders (
         id, user_id, wallet_address, signer_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
-        order_payload, order_payload_version, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline,
+        order_payload, order_payload_version, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline, fee_policy_snapshot,
         filled_at, cancelled_at, posted_at, last_update
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, COALESCE($24, now()), COALESCE($25, now())
+        $22, $23, $24, COALESCE($25, now()), COALESCE($26, now())
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
       inputs.userId,
@@ -254,6 +261,7 @@ async function storeOrderInTx(
       inputs.feeAuthSig ?? null,
       inputs.feeCollectorAddress ?? null,
       inputs.feeDeadline ?? null,
+      inputs.feePolicySnapshot ?? null,
       inputs.filledAt ?? null,
       inputs.cancelledAt ?? null,
       inputs.postedAt ?? null,
@@ -286,6 +294,7 @@ export async function storeOrder(
     feeAuthSig?: string | null;
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
+    feePolicySnapshot?: unknown | null;
     orderPayload?: unknown | null;
     orderPayloadVersion?: string | null;
     postedAt?: Date | null;

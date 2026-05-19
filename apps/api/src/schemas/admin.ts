@@ -6,6 +6,13 @@ export const adminFeePolicySchema = z.object({
   venue: feePolicyVenueSchema,
   feeBps: z.coerce.number().int().min(0).max(10_000),
   feeScale: z.coerce.number().min(0).max(10_000).optional(),
+  polymarketBuilderCode: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/)
+    .optional()
+    .or(z.literal("")),
+  polymarketBuilderTakerFeeBps: z.coerce.number().int().min(0).max(100).optional(),
+  polymarketBuilderMakerFeeBps: z.coerce.number().int().min(0).max(50).optional(),
   effectiveAt: z.string().datetime().optional(),
 });
 

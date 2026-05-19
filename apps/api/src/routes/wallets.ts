@@ -1277,7 +1277,6 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               const shouldFetchSignerUsdc =
                 signerNormalized !== funderNormalized;
 
-              const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
               const negRiskAdapterAddress =
                 env.polymarketNegRiskAdapterAddress?.trim() || "";
 
@@ -1365,7 +1364,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           funder,
                           includeSignerUsdc: shouldFetchSignerUsdc,
                           negRiskAdapterAddress,
-                          feeCollectorAddress,
+                          feeCollectorAddress: null,
                         }),
                         fetchEvmBalance({
                           rpcUrl: env.polygonRpcUrl,
@@ -1396,8 +1395,6 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                       const okNegRiskAdapter = snapshot.okNegRiskAdapter;
                       const allowanceNegRiskAdapter =
                         snapshot.allowanceNegRiskAdapter;
-                      const allowanceFeeCollector =
-                        snapshot.allowanceFeeCollector;
 
                       const signerIsContract =
                         typeof signerCode === "string" && signerCode.length > 2;
@@ -1476,20 +1473,6 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                                   ),
                                   allowanceRaw: (
                                     allowanceNegRiskAdapter ?? 0n
-                                  ).toString(),
-                                },
-                              }
-                            : {}),
-                          ...(feeCollectorAddress
-                            ? {
-                                feeCollector: {
-                                  spender: feeCollectorAddress,
-                                  allowance: ethers.formatUnits(
-                                    allowanceFeeCollector ?? 0n,
-                                    6,
-                                  ),
-                                  allowanceRaw: (
-                                    allowanceFeeCollector ?? 0n
                                   ).toString(),
                                 },
                               }

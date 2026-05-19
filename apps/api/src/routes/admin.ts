@@ -11,6 +11,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { abis } from "../lib/contracts.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
+import { parseUsdcToMicroFloor, usdcMicroToDecimalString } from "../lib/usdc.js";
 import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
 import {
@@ -82,6 +83,8 @@ import {
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
+const MAX_POLY_BUILDER_TAKER_FEE_BPS = 100;
+const MAX_POLY_BUILDER_MAKER_FEE_BPS = 50;
 const MAX_FEE_COLLECT_ATTEMPTS = 5;
 const DEBRIDGE_CONFIG_TTL_MS = 30_000;
 const POLYGON_MULTICALL_ADDRESS =
@@ -284,6 +287,31 @@ function clampFeeBps(value: number): number {
 function clampFeeScale(value: number | undefined): number | null {
   if (value == null || !Number.isFinite(value)) return null;
   return Math.min(Math.max(value, 0), MAX_FEE_SCALE);
+}
+
+function microAmountToDisplay(value: bigint): string {
+  return usdcMicroToDecimalString(value > 0n ? value : 0n);
+}
+
+function minBigint(a: bigint, b: bigint): bigint {
+  return a < b ? a : b;
+}
+
+function max0Bigint(value: bigint): bigint {
+  return value > 0n ? value : 0n;
+}
+
+function clampFeeBpsForMax(value: number | null | undefined, max: number): number {
+  if (value == null || !Number.isFinite(value)) return 0;
+  return Math.min(Math.max(Math.trunc(value), 0), max);
+}
+
+function normalizePolymarketBuilderCode(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  return /^0x[0-9a-fA-F]{64}$/.test(trimmed) ? trimmed.toLowerCase() : null;
 }
 
 function toOptionalNumber(value: unknown): number | null {
@@ -538,6 +566,46 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       let dflowFeeError: string | null = null;
       let dflowFeeOwner: string | null = null;
       let dflowFeeMint: string | null = null;
+      type RewardsTreasuryAdminSummary = {
+        claimableNow: string;
+        claimableNowMicro: string;
+        sweepableNow: string;
+        sweepableNowMicro: string;
+        deficitNow: string;
+        deficitNowMicro: string;
+        reserveFloor: string;
+        reserveFloorMicro: string;
+        liabilityPending: string;
+        liabilityPendingMicro: string;
+        liabilityCollected: string;
+        liabilityCollectedMicro: string;
+        outstandingCollectedPayable: string;
+        outstandingCollectedPayableMicro: string;
+        builderAccrued?: string;
+        builderAccruedMicro?: string;
+        builderVerified?: string;
+        builderVerifiedMicro?: string;
+        builderUnlockableNow?: string;
+        builderUnlockableNowMicro?: string;
+        builderReserveGap?: string;
+        builderReserveGapMicro?: string;
+      };
+      const emptyTreasurySummary: RewardsTreasuryAdminSummary = {
+        claimableNow: "0.000000",
+        claimableNowMicro: "0",
+        sweepableNow: "0.000000",
+        sweepableNowMicro: "0",
+        deficitNow: "0.000000",
+        deficitNowMicro: "0",
+        reserveFloor: "0.000000",
+        reserveFloorMicro: "0",
+        liabilityPending: "0.000000",
+        liabilityPendingMicro: "0",
+        liabilityCollected: "0.000000",
+        liabilityCollectedMicro: "0",
+        outstandingCollectedPayable: "0.000000",
+        outstandingCollectedPayableMicro: "0",
+      };
       const rewardsHotWallets: {
         polygon: {
           chainId: "137";
@@ -554,6 +622,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
         base: {
@@ -569,6 +638,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
         solana: {
@@ -584,6 +654,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
       } = {
@@ -607,6 +678,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             env.rewardsPayoutTokenAddressPolygon?.trim() ||
             env.polymarketPusdAddress,
           coldAddress: env.rewardsTreasuryColdAddressPolygon || null,
+          treasury: { ...emptyTreasurySummary },
           error: null,
         },
         base: {
@@ -623,6 +695,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutTokenAddress:
             env.rewardsUsdcAddressBase || env.limitlessUsdcAddress,
           coldAddress: env.rewardsTreasuryColdAddressBase || null,
+          treasury: { ...emptyTreasurySummary },
           error: null,
         },
         solana: {
@@ -638,6 +711,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: "USDC",
           payoutTokenAddress: env.solanaUsdcMint,
           coldAddress: env.rewardsTreasuryColdAddressSolana || null,
+          treasury: { ...emptyTreasurySummary },
           error: null,
         },
       };
@@ -938,6 +1012,93 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           where status = 'pending'
         `,
       );
+
+      const [rewardsTreasuryReport, builderFeeRows] = await Promise.all([
+        getRewardsTreasuryReport(pool),
+        pool.query<{
+          status: string;
+          amount: string | null;
+          count: string;
+        }>(
+          `
+            select status,
+                   coalesce(sum(fee_amount), 0)::text as amount,
+                   count(*)::text as count
+            from venue_fee_accruals
+            where venue = 'polymarket'
+              and fee_program = 'builder'
+              and status in ('accrued', 'verified')
+            group by status
+          `,
+        ),
+      ]);
+
+      const builderAccruedMicro =
+        parseUsdcToMicroFloor(
+          builderFeeRows.rows.find((row) => row.status === "accrued")
+            ?.amount ?? "0",
+        ) ?? 0n;
+      const builderVerifiedMicro =
+        parseUsdcToMicroFloor(
+          builderFeeRows.rows.find((row) => row.status === "verified")
+            ?.amount ?? "0",
+        ) ?? 0n;
+
+      const applyTreasurySummary = (
+        chainId: "137" | "8453" | "solana",
+        wallet: { treasury: RewardsTreasuryAdminSummary },
+      ) => {
+        const chain = rewardsTreasuryReport.chains.find(
+          (entry) => entry.chainId === chainId,
+        );
+        if (!chain) return;
+        const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
+        const builderUnlockableNowMicro =
+          chainId === "137"
+            ? minBigint(builderVerifiedMicro, sweepableNowMicro)
+            : 0n;
+        const builderReserveGapMicro =
+          chainId === "137"
+            ? max0Bigint(builderVerifiedMicro - sweepableNowMicro)
+            : 0n;
+        wallet.treasury = {
+          claimableNow: chain.claimableNow.toString(),
+          claimableNowMicro: chain.claimableNowMicro,
+          sweepableNow: chain.sweepableNow.toString(),
+          sweepableNowMicro: chain.sweepableNowMicro,
+          deficitNow: chain.deficitNow.toString(),
+          deficitNowMicro: chain.deficitNowMicro,
+          reserveFloor: chain.reserveFloor.toString(),
+          reserveFloorMicro: chain.reserveFloorMicro,
+          liabilityPending: chain.liabilityPending.toString(),
+          liabilityPendingMicro: chain.liabilityPendingMicro,
+          liabilityCollected: chain.liabilityCollected.toString(),
+          liabilityCollectedMicro: chain.liabilityCollectedMicro,
+          outstandingCollectedPayable:
+            chain.outstandingCollectedPayable.toString(),
+          outstandingCollectedPayableMicro:
+            chain.outstandingCollectedPayableMicro,
+          ...(chainId === "137"
+            ? {
+                builderAccrued: microAmountToDisplay(builderAccruedMicro),
+                builderAccruedMicro: builderAccruedMicro.toString(),
+                builderVerified: microAmountToDisplay(builderVerifiedMicro),
+                builderVerifiedMicro: builderVerifiedMicro.toString(),
+                builderUnlockableNow: microAmountToDisplay(
+                  builderUnlockableNowMicro,
+                ),
+                builderUnlockableNowMicro:
+                  builderUnlockableNowMicro.toString(),
+                builderReserveGap: microAmountToDisplay(builderReserveGapMicro),
+                builderReserveGapMicro: builderReserveGapMicro.toString(),
+              }
+            : {}),
+        };
+      };
+
+      applyTreasurySummary("137", rewardsHotWallets.polygon);
+      applyTreasurySummary("8453", rewardsHotWallets.base);
+      applyTreasurySummary("solana", rewardsHotWallets.solana);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
@@ -2186,12 +2347,34 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       ]);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
+      const polyFeeBps = clampFeeBps(poly?.fee_bps ?? env.feeBpsPolymarket);
+      const polyBuilderCode = normalizePolymarketBuilderCode(
+        poly?.polymarket_builder_code ?? env.polymarketBuilderCode,
+      );
+      const polyBuilderTakerFeeBps = clampFeeBpsForMax(
+        poly?.polymarket_builder_taker_fee_bps ??
+          env.polymarketBuilderTakerFeeBps,
+        MAX_POLY_BUILDER_TAKER_FEE_BPS,
+      );
+      const polyBuilderMakerFeeBps = clampFeeBpsForMax(
+        poly?.polymarket_builder_maker_fee_bps ??
+          env.polymarketBuilderMakerFeeBps,
+        MAX_POLY_BUILDER_MAKER_FEE_BPS,
+      );
+      const polyBuilderActive =
+        Boolean(polyBuilderCode) &&
+        (polyBuilderTakerFeeBps > 0 || polyBuilderMakerFeeBps > 0);
       return reply.send({
         ok: true,
         fees: {
           polymarket: {
-            feeBps: clampFeeBps(poly?.fee_bps ?? env.feeBpsPolymarket),
+            feeBps: polyFeeBps,
             feeScale: null,
+            builderCode: polyBuilderCode,
+            builderTakerFeeBps: polyBuilderTakerFeeBps,
+            builderMakerFeeBps: polyBuilderMakerFeeBps,
+            builderActive: polyBuilderActive,
+            collectionMode: polyBuilderActive ? "builder" : "none",
             effectiveAt: poly?.effective_at ?? null,
             source: poly ? "db" : "env",
           },
@@ -2221,11 +2404,45 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         : new Date();
       const feeScale =
         body.venue === "kalshi" ? clampFeeScale(body.feeScale) : null;
+      const currentPolymarket =
+        body.venue === "polymarket"
+          ? await fetchActiveFeePolicy(pool, "polymarket")
+          : null;
+      const polymarketBuilderCode =
+        body.venue === "polymarket"
+          ? body.polymarketBuilderCode !== undefined
+            ? normalizePolymarketBuilderCode(body.polymarketBuilderCode)
+            : normalizePolymarketBuilderCode(
+                currentPolymarket?.polymarket_builder_code ??
+                  env.polymarketBuilderCode,
+              )
+          : null;
+      const polymarketBuilderTakerFeeBps =
+        body.venue === "polymarket"
+          ? clampFeeBpsForMax(
+              body.polymarketBuilderTakerFeeBps ??
+                currentPolymarket?.polymarket_builder_taker_fee_bps ??
+                env.polymarketBuilderTakerFeeBps,
+              MAX_POLY_BUILDER_TAKER_FEE_BPS,
+            )
+          : null;
+      const polymarketBuilderMakerFeeBps =
+        body.venue === "polymarket"
+          ? clampFeeBpsForMax(
+              body.polymarketBuilderMakerFeeBps ??
+                currentPolymarket?.polymarket_builder_maker_fee_bps ??
+                env.polymarketBuilderMakerFeeBps,
+              MAX_POLY_BUILDER_MAKER_FEE_BPS,
+            )
+          : null;
 
       const row = await insertFeePolicy(pool, {
         venue: body.venue,
         feeBps: clampFeeBps(body.feeBps),
         feeScale,
+        polymarketBuilderCode,
+        polymarketBuilderTakerFeeBps,
+        polymarketBuilderMakerFeeBps,
         effectiveAt,
       });
 
@@ -2236,6 +2453,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           venue: row.venue,
           feeBps: row.fee_bps,
           feeScale: row.fee_scale,
+          builderCode: row.polymarket_builder_code,
+          builderTakerFeeBps: row.polymarket_builder_taker_fee_bps,
+          builderMakerFeeBps: row.polymarket_builder_maker_fee_bps,
           effectiveAt: row.effective_at,
           createdAt: row.created_at,
         },

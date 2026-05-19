@@ -22,6 +22,7 @@ import {
   getRewardsTreasuryReport,
 } from "./services/rewards-treasury.js";
 import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
+import { unlockPolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
 
 export type RewardsTreasurySweepOptions = {
   execute: boolean;
@@ -560,6 +561,18 @@ export async function runRewardsTreasurySweep(
     ? [normalizedChainId]
     : REWARDS_CHAIN_IDS;
   return withRewardsChainLocks(pool, lockTargets, async () => {
+    if (lockTargets.includes("137")) {
+      const unlock = await unlockPolymarketBuilderFeeAccruals(pool, {
+        dryRun: options.dryRun,
+        assumeRewardsChainLock: true,
+      });
+      if (unlock.considered || unlock.unlocked) {
+        console.log(
+          `Polymarket builder fee accrual unlock: considered=${unlock.considered} unlocked=${unlock.unlocked} skipped=${unlock.skipped} budgetMicro=${unlock.budgetMicro}`,
+        );
+      }
+    }
+
     const report = await getRewardsTreasuryReport(pool, {
       chainId: normalizedChainId,
     });
