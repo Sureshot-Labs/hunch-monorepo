@@ -96,6 +96,9 @@ async function readConditionPayout(inputs: {
   conditionResolved: boolean;
   resolvedOutcome: "YES" | "NO" | null;
   resolvedOutcomePct: number | null;
+  payoutDenominator: bigint;
+  yesPayoutNumerator: bigint;
+  noPayoutNumerator: bigint;
 }> {
   const payoutDenominator = await safeEvmReadContract<bigint>({
     rpcUrl: inputs.rpcUrl,
@@ -111,6 +114,9 @@ async function readConditionPayout(inputs: {
       conditionResolved: false,
       resolvedOutcome: null,
       resolvedOutcomePct: null,
+      payoutDenominator,
+      yesPayoutNumerator: 0n,
+      noPayoutNumerator: 0n,
     };
   }
 
@@ -142,6 +148,9 @@ async function readConditionPayout(inputs: {
     conditionResolved: true,
     resolvedOutcome,
     resolvedOutcomePct: Number.isFinite(pctBasisPoints) ? pctBasisPoints : null,
+    payoutDenominator,
+    yesPayoutNumerator: yesRaw,
+    noPayoutNumerator: noRaw,
   };
 }
 
@@ -200,11 +209,21 @@ async function buildStandardConditionalRedemptionPlan(inputs: {
     inputs.conditionId,
     [inputs.indexSet],
   ]);
+  const payoutNumerator =
+    inputs.indexSet === 1n
+      ? inputs.payout.yesPayoutNumerator
+      : inputs.payout.noPayoutNumerator;
+  const payoutAmountRaw =
+    inputs.payout.payoutDenominator > 0n && payoutNumerator > 0n
+      ? (balance * payoutNumerator) / inputs.payout.payoutDenominator
+      : 0n;
   return buildReadyRedemptionPlan({
     venue: "polymarket",
     chainId: POLY_CHAIN_ID,
     targetAddress: inputs.conditionalTokensAddress,
     data,
+    collateralTokenAddress: inputs.collateralTokenAddress,
+    payoutAmountRaw: payoutAmountRaw.toString(),
     conditionResolved: true,
     resolvedOutcome: inputs.payout.resolvedOutcome,
     resolvedOutcomePct: inputs.payout.resolvedOutcomePct,
@@ -441,6 +460,14 @@ export async function buildPolymarketRedemptionPlan(
 
     const amounts =
       inputs.outcome === "YES" ? [selectedBalance, 0n] : [0n, selectedBalance];
+    const payoutNumerator =
+      inputs.outcome === "YES"
+        ? payout.yesPayoutNumerator
+        : payout.noPayoutNumerator;
+    const payoutAmountRaw =
+      payout.payoutDenominator > 0n && payoutNumerator > 0n
+        ? (selectedBalance * payoutNumerator) / payout.payoutDenominator
+        : 0n;
     const data = negRiskAdapterIface.encodeFunctionData("redeemPositions", [
       selectedConditionId,
       amounts,
@@ -450,6 +477,8 @@ export async function buildPolymarketRedemptionPlan(
       chainId: POLY_CHAIN_ID,
       targetAddress: negRiskAdapterAddress,
       data,
+      collateralTokenAddress: wrappedCollateralAddress,
+      payoutAmountRaw: payoutAmountRaw.toString(),
       conditionResolved: true,
       resolvedOutcome: payout.resolvedOutcome,
       resolvedOutcomePct: payout.resolvedOutcomePct,

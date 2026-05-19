@@ -923,26 +923,73 @@ function validateDepositWalletBatchCall(
   }
 
   if (purpose === "redeem") {
-    if (decoded.name !== "redeemPositions") {
-      throw new Error(
-        "Deposit wallet redeem batches only support redemption calls.",
-      );
-    }
     const conditionalTokens = normalizeAddress(
       env.polymarketConditionalTokensAddress,
     );
     const negRiskAdapter = normalizeAddress(
       env.polymarketNegRiskAdapterAddress,
     );
-    const inputCount = decoded.fragment.inputs.length;
-    const standardCtfRedeem =
-      addressesEqual(target, conditionalTokens) && inputCount === 4;
-    const negRiskRedeem =
-      addressesEqual(target, negRiskAdapter) && inputCount === 2;
-    if (!standardCtfRedeem && !negRiskRedeem) {
-      throw new Error("Unsupported deposit wallet redemption call.");
+    if (decoded.name === "redeemPositions") {
+      const inputCount = decoded.fragment.inputs.length;
+      const standardCtfRedeem =
+        addressesEqual(target, conditionalTokens) && inputCount === 4;
+      const negRiskRedeem =
+        addressesEqual(target, negRiskAdapter) && inputCount === 2;
+      if (!standardCtfRedeem && !negRiskRedeem) {
+        throw new Error("Unsupported deposit wallet redemption call.");
+      }
+      return;
     }
-    return;
+
+    if (decoded.name === "approve") {
+      const usdceToken = normalizeAddress(env.polymarketUsdceAddress);
+      const collateralOnramp = normalizeAddress(
+        env.polymarketCollateralOnrampAddress,
+      );
+      const spender = normalizeAddress(String(decoded.args[0] ?? ""));
+      let amount = 0n;
+      try {
+        amount = BigInt(String(decoded.args[1] ?? "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (
+        !addressesEqual(target, usdceToken) ||
+        !addressesEqual(spender, collateralOnramp) ||
+        amount <= 0n
+      ) {
+        throw new Error("Unsupported deposit wallet redemption wrap approval.");
+      }
+      return;
+    }
+
+    if (decoded.name === "wrap") {
+      const collateralOnramp = normalizeAddress(
+        env.polymarketCollateralOnrampAddress,
+      );
+      const usdceToken = normalizeAddress(env.polymarketUsdceAddress);
+      const asset = normalizeAddress(String(decoded.args[0] ?? ""));
+      const recipient = normalizeAddress(String(decoded.args[1] ?? ""));
+      let amount = 0n;
+      try {
+        amount = BigInt(String(decoded.args[2] ?? "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (
+        !addressesEqual(target, collateralOnramp) ||
+        !addressesEqual(asset, usdceToken) ||
+        !addressesEqual(recipient, depositWallet) ||
+        amount <= 0n
+      ) {
+        throw new Error("Unsupported deposit wallet redemption pUSD wrap call.");
+      }
+      return;
+    }
+
+    throw new Error(
+      "Deposit wallet redeem batches only support redemption and USDC.e wrap calls.",
+    );
   }
 
   const allowedOperators = allowedPolymarketOperators();
