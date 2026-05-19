@@ -75,6 +75,19 @@ const DEFAULT_POLICY = {
 
 const OBSERVER_THRESHOLD = 500;
 
+function resolveEffectiveReferralStatus(inputs: {
+  storedStatus: string;
+  referrerPoints: number;
+  referredPoints: number;
+  threshold: number;
+}): string {
+  if (inputs.storedStatus === "blocked") return "blocked";
+  return inputs.referrerPoints >= inputs.threshold &&
+    inputs.referredPoints >= inputs.threshold
+    ? "qualified"
+    : "pending";
+}
+
 type RewardsTier = {
   tier: number;
   name: string;
@@ -866,7 +879,10 @@ export async function getRewardsReferrals(
   }>;
   policy: RewardsPolicy;
 }> {
-  const policy = await getRewardsPolicy(pool);
+  const [policy, referrerPoints] = await Promise.all([
+    getRewardsPolicy(pool),
+    fetchUserPoints(pool, inputs.userId),
+  ]);
   await markQualifiedReferralsForUser(pool, {
     userId: inputs.userId,
     threshold: OBSERVER_THRESHOLD,
@@ -875,11 +891,17 @@ export async function getRewardsReferrals(
   const rows = await fetchReferralsForUser(pool, inputs);
   const referrals = rows.map((row) => {
     const tier = resolveTier(row.points, policy.tiers);
+    const status = resolveEffectiveReferralStatus({
+      storedStatus: row.status,
+      referrerPoints,
+      referredPoints: row.points,
+      threshold: OBSERVER_THRESHOLD,
+    });
     return {
       id: row.id,
       walletAddress: row.wallet_address ?? null,
-      status: row.status,
-      qualifiedAt: row.qualified_at,
+      status,
+      qualifiedAt: status === "qualified" ? row.qualified_at : null,
       createdAt: row.created_at,
       points: row.points,
       bonus: row.bonus,

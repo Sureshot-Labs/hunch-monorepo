@@ -14,6 +14,7 @@ import {
   attachReferralCodeForExistingUser,
   computeCashbackBreakdown,
   getReferralAttachmentStatus,
+  getRewardsReferrals,
   resolveEffectiveBps,
   setReferralCodeForUser,
   type RewardsPolicy,
@@ -21,6 +22,7 @@ import {
 import {
   fetchReferralsForUser,
   fetchQualifiedReferralCount,
+  fetchUserPoints,
   markQualifiedReferralsForUser,
   resolveRewardsReferralsOrderBy,
 } from "./repos/rewards.js";
@@ -221,6 +223,7 @@ function createQualifiedReferralCountDb(seed: {
     status: "pending" | "qualified" | "blocked";
   }>;
   points: Record<string, number>;
+  capture?: { countSql?: string; updateSql?: string };
 }): import("./db.js").DbQuery {
   return {
     query: async (sql: string, params?: unknown[]) => {
@@ -231,6 +234,7 @@ function createQualifiedReferralCountDb(seed: {
         sql.includes("from referrals r") &&
         sql.includes("left join points pref")
       ) {
+        if (seed.capture) seed.capture.countSql = sql;
         const userId = String(values[0] ?? "");
         const threshold = Number(values[1] ?? 0);
         const total = seed.referrals.filter((row) => {
@@ -247,6 +251,7 @@ function createQualifiedReferralCountDb(seed: {
         sql.includes("update referrals r") &&
         sql.includes("set status = 'qualified'")
       ) {
+        if (seed.capture) seed.capture.updateSql = sql;
         const userId = String(values[0] ?? "");
         const threshold = Number(values[1] ?? 0);
         for (const row of seed.referrals) {
@@ -269,6 +274,28 @@ function createQualifiedReferralCountDb(seed: {
   } as import("./db.js").DbQuery;
 }
 
+function createUserPointsDb(seed: {
+  total: string | null;
+  capture?: { sql?: string; params?: unknown[] };
+}): import("./db.js").DbQuery {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      if (seed.capture) {
+        seed.capture.sql = sql;
+        seed.capture.params = Array.isArray(params) ? params : [];
+      }
+      if (
+        sql.includes("from volume_events ve") &&
+        sql.includes("where ve.user_id = $1") &&
+        sql.includes("as total")
+      ) {
+        return { rows: [{ total: seed.total }] };
+      }
+      throw new Error(`Unhandled SQL in user points test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
 function createFetchReferralsDb(seed: {
   rows: Array<{
     id: string;
@@ -280,6 +307,7 @@ function createFetchReferralsDb(seed: {
     points: string | null;
     bonus: string | null;
   }>;
+  referrerPoints?: string | null;
   capture?: { sql?: string; params?: unknown[] };
 }): import("./db.js").DbQuery {
   return {
@@ -290,6 +318,32 @@ function createFetchReferralsDb(seed: {
       }
       if (sql.includes("with referral_rows as")) {
         return { rows: seed.rows };
+      }
+      if (sql.includes("from rewards_policy")) {
+        return {
+          rows: [
+            {
+              id: "policy-1",
+              effective_at: null,
+              tiers: samplePolicy.tiers,
+              referral_bonus: samplePolicy.referralBonus,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        };
+      }
+      if (
+        sql.includes("from volume_events ve") &&
+        sql.includes("where ve.user_id = $1") &&
+        sql.includes("as total")
+      ) {
+        return { rows: [{ total: seed.referrerPoints ?? "0" }] };
+      }
+      if (
+        sql.includes("update referrals r") &&
+        sql.includes("set status = 'qualified'")
+      ) {
+        return { rows: [] };
       }
       throw new Error(`Unhandled SQL in fetch referrals test db: ${sql}`);
     },
@@ -737,9 +791,24 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "fetchUserPoints excludes manual admin volume events",
+    run: async () => {
+      const capture: { sql?: string; params?: unknown[] } = {};
+      const db = createUserPointsDb({ total: "750", capture });
+
+      const points = await fetchUserPoints(db, "user-a");
+
+      assert.equal(points, 750);
+      assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.deepEqual(capture.params, ["user-a"]);
+    },
+  },
+  {
     name: "qualified referral count uses effective qualification from current points",
     run: async () => {
+      const capture: { countSql?: string } = {};
       const db = createQualifiedReferralCountDb({
+        capture,
         referrals: [
           {
             referrer_user_id: "user-a",
@@ -777,12 +846,40 @@ const tests: TestCase[] = [
       });
 
       assert.equal(total, 2);
+      assert.match(capture.countSql ?? "", /source_id like 'manual:%'/);
+    },
+  },
+  {
+    name: "qualified referral count ignores manual-only points",
+    run: async () => {
+      const db = createQualifiedReferralCountDb({
+        referrals: [
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-b",
+            status: "pending",
+          },
+        ],
+        points: {
+          "user-a": 499,
+          "user-b": 499,
+        },
+      });
+
+      const total = await fetchQualifiedReferralCount(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      assert.equal(total, 0);
     },
   },
   {
     name: "mark qualified referrals upgrades pending rows once threshold is met",
     run: async () => {
+      const capture: { updateSql?: string } = {};
       const db = createQualifiedReferralCountDb({
+        capture,
         referrals: [
           {
             referrer_user_id: "user-a",
@@ -813,6 +910,37 @@ const tests: TestCase[] = [
       });
 
       assert.equal(total, 1);
+      assert.match(capture.updateSql ?? "", /source_id like 'manual:%'/);
+    },
+  },
+  {
+    name: "mark qualified referrals does not upgrade manual-only rows",
+    run: async () => {
+      const db = createQualifiedReferralCountDb({
+        referrals: [
+          {
+            referrer_user_id: "user-a",
+            referred_user_id: "user-b",
+            status: "pending",
+          },
+        ],
+        points: {
+          "user-a": 499,
+          "user-b": 499,
+        },
+      });
+
+      await markQualifiedReferralsForUser(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      const total = await fetchQualifiedReferralCount(db, {
+        userId: "user-a",
+        threshold: 500,
+      });
+
+      assert.equal(total, 0);
     },
   },
   {
@@ -820,7 +948,7 @@ const tests: TestCase[] = [
     run: () => {
       assert.equal(
         resolveRewardsReferralsOrderBy({ sortBy: "bonus", sortDir: "desc" }),
-        "coalesce(rb.total_bonus, 0) desc, rr.created_at desc, rr.id desc",
+        "coalesce(rb.total_bonus, 0) desc, coalesce(p.points, 0) desc, rr.created_at desc, rr.id desc",
       );
     },
   },
@@ -829,7 +957,7 @@ const tests: TestCase[] = [
     run: () => {
       assert.equal(
         resolveRewardsReferralsOrderBy({ sortBy: "bonus", sortDir: "asc" }),
-        "coalesce(rb.total_bonus, 0) asc, rr.created_at asc, rr.id asc",
+        "coalesce(rb.total_bonus, 0) asc, coalesce(p.points, 0) asc, rr.created_at asc, rr.id asc",
       );
     },
   },
@@ -874,6 +1002,7 @@ const tests: TestCase[] = [
       });
 
       assert.match(capture.sql ?? "", /sum\(fe\.referral_earned_usdc\)/);
+      assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
       assert.match(
         capture.sql ?? "",
         /fe\.liability_snapshot_source = 'event_time_frozen'/,
@@ -884,6 +1013,40 @@ const tests: TestCase[] = [
       assert.equal(rows[0]?.points, 1250);
       assert.equal(rows[0]?.bonus, 4.25);
       assert.equal(rows[0]?.wallet_address, "0xabc");
+    },
+  },
+  {
+    name: "getRewardsReferrals exposes effective pending status for manual-only qualified rows",
+    run: async () => {
+      const db = createFetchReferralsDb({
+        referrerPoints: "499",
+        rows: [
+          {
+            id: "ref-1",
+            referred_user_id: "user-b",
+            status: "qualified",
+            qualified_at: new Date("2026-02-02T00:00:00.000Z"),
+            created_at: new Date("2026-02-01T00:00:00.000Z"),
+            wallet_address: "0xabc",
+            points: "499",
+            bonus: "0",
+          },
+        ],
+      });
+
+      const result = await getRewardsReferrals(db, {
+        userId: "user-a",
+        sortBy: "bonus",
+        sortDir: "desc",
+        limit: 10,
+        offset: 0,
+      });
+
+      assert.equal(result.referrals.length, 1);
+      assert.equal(result.referrals[0]?.status, "pending");
+      assert.equal(result.referrals[0]?.qualifiedAt, null);
+      assert.equal(result.referrals[0]?.points, 499);
+      assert.equal(result.referrals[0]?.tier.tier, 0);
     },
   },
 ];

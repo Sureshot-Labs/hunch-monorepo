@@ -139,6 +139,10 @@ function buildPointsContributionSql(
   return `case when not (${buildManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
 }
 
+function buildRealPointsContributionSql(alias: string): string {
+  return buildPointsContributionSql(alias, "exclude_all");
+}
+
 function decimalToMicroFloor(value: string | null | undefined): bigint {
   const raw = value?.trim() ?? "0";
   if (!raw) return 0n;
@@ -564,7 +568,11 @@ export async function fetchUserPoints(
   userId: string,
 ): Promise<number> {
   const { rows } = await pool.query<{ total: string | null }>(
-    `select coalesce(sum(points_awarded), 0)::text as total from volume_events where user_id = $1`,
+    `
+      select coalesce(sum(${buildRealPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+    `,
     [userId],
   );
   return Number(rows[0]?.total ?? 0);
@@ -801,9 +809,11 @@ export async function fetchQualifiedReferralCount(
   const { rows } = await pool.query<{ total: string }>(
     `
       with points as (
-        select user_id, coalesce(sum(points_awarded), 0) as points
-        from volume_events
-        group by user_id
+        select
+          ve.user_id,
+          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        group by ve.user_id
       )
       select count(*)::text as total
       from referrals r
@@ -917,7 +927,7 @@ export async function fetchReferralsForUser(
       points as (
         select
           ve.user_id,
-          coalesce(sum(ve.points_awarded), 0) as points
+          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
         from volume_events ve
         join referral_rows rr
           on rr.referred_user_id = ve.user_id
@@ -977,13 +987,13 @@ export function resolveRewardsReferralsOrderBy(inputs: {
 
   switch (inputs.sortBy) {
     case "bonus":
-      return `coalesce(rb.total_bonus, 0) ${direction}, rr.created_at ${direction}, rr.id ${direction}`;
+      return `coalesce(rb.total_bonus, 0) ${direction}, coalesce(p.points, 0) ${direction}, rr.created_at ${direction}, rr.id ${direction}`;
     case "points":
       return `coalesce(p.points, 0) ${direction}, rr.created_at ${direction}, rr.id ${direction}`;
     case "createdAt":
       return `rr.created_at ${direction}, rr.id ${direction}`;
     default:
-      return `coalesce(rb.total_bonus, 0) desc, rr.created_at desc, rr.id desc`;
+      return `coalesce(rb.total_bonus, 0) desc, coalesce(p.points, 0) desc, rr.created_at desc, rr.id desc`;
   }
 }
 
@@ -1084,9 +1094,11 @@ export async function markQualifiedReferralsForUser(
   await pool.query(
     `
       with points as (
-        select user_id, coalesce(sum(points_awarded), 0) as points
-        from volume_events
-        group by user_id
+        select
+          ve.user_id,
+          coalesce(sum(${buildRealPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        group by ve.user_id
       )
       update referrals r
       set status = 'qualified',
