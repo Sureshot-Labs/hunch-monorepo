@@ -594,6 +594,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     async (_request, reply) => {
       const feeCollectorAddress = env.feeCollectorAddress?.trim() || "";
       const feeCollectorPrivateKey = env.feeCollectorPrivateKey?.trim() || "";
+      const polymarketBuilderAddress =
+        env.polymarketBuilderAddress?.trim() || "";
       const dflowFeeAccount = env.dflowFeeAccount?.trim() || "";
       let feeCollectorError: string | null = null;
       let feeCollectorTreasury: string | null = null;
@@ -602,6 +604,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       let feeCollectorSignerAddress: string | null = null;
       let feeCollectorSignerBalance: bigint | null = null;
       let feeCollectorSignerError: string | null = null;
+      let polymarketBuilderChecksumAddress: string | null = null;
+      let polymarketBuilderPusdBalance: bigint | null = null;
+      let polymarketBuilderNativeBalance: bigint | null = null;
+      let polymarketBuilderError: string | null = null;
       let dflowFeeBalance: bigint | null = null;
       let dflowFeeError: string | null = null;
       let dflowFeeOwner: string | null = null;
@@ -867,6 +873,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Fee collector signer fetch failed";
+        }
+      }
+
+      if (polymarketBuilderAddress) {
+        try {
+          polymarketBuilderChecksumAddress = ethers.getAddress(
+            polymarketBuilderAddress,
+          );
+          const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+          const [pusdBalance, nativeBalance] = await Promise.all([
+            fetchErc20Balance({
+              tokenAddress: env.polymarketPusdAddress,
+              owner: polymarketBuilderChecksumAddress,
+              rpcUrl: env.polygonRpcUrl,
+              multicallAddress: POLYGON_MULTICALL_ADDRESS,
+            }),
+            provider.getBalance(polymarketBuilderChecksumAddress),
+          ]);
+          polymarketBuilderPusdBalance = pusdBalance;
+          polymarketBuilderNativeBalance = nativeBalance;
+        } catch (error) {
+          polymarketBuilderError =
+            error instanceof Error
+              ? error.message
+              : "Polymarket builder balance fetch failed";
         }
       }
 
@@ -1167,6 +1198,26 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           signerBalanceRaw: feeCollectorSignerBalance?.toString() ?? null,
           error: feeCollectorError,
           signerError: feeCollectorSignerError,
+        },
+        polymarketBuilder: {
+          address: polymarketBuilderChecksumAddress,
+          configured: Boolean(polymarketBuilderAddress),
+          chainId: 137,
+          tokenAddress: env.polymarketPusdAddress,
+          tokenSymbol: resolvePolygonTokenSymbol(env.polymarketPusdAddress),
+          balance:
+            polymarketBuilderPusdBalance !== null
+              ? ethers.formatUnits(polymarketBuilderPusdBalance, 6)
+              : null,
+          balanceRaw: polymarketBuilderPusdBalance?.toString() ?? null,
+          nativeSymbol: "POL",
+          nativeBalance:
+            polymarketBuilderNativeBalance !== null
+              ? ethers.formatEther(polymarketBuilderNativeBalance)
+              : null,
+          nativeBalanceRaw:
+            polymarketBuilderNativeBalance?.toString() ?? null,
+          error: polymarketBuilderError,
         },
         dflowFeeAccount: {
           address: dflowFeeAccount || null,

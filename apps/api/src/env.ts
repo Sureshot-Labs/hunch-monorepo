@@ -1194,6 +1194,8 @@ export const env = {
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
   polymarketBuilderCode: process.env.POLYMARKET_BUILDER_CODE?.trim() || "",
+  polymarketBuilderAddress:
+    process.env.POLYMARKET_BUILDER_ADDRESS?.trim() || "",
   polymarketBuilderTakerFeeBps:
     process.env.POLYMARKET_BUILDER_TAKER_FEE_BPS?.trim()
       ? optionalNonNegativeInt("POLYMARKET_BUILDER_TAKER_FEE_BPS", 0)
