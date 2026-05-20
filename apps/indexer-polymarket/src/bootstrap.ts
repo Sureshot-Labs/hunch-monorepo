@@ -25,6 +25,7 @@ import {
   enqueueEmbedItems,
   getPriceRefreshQueueBacklog,
   isPgSetupIssue,
+  publishMarketState,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -70,6 +71,36 @@ function bestAsk(levels: Array<{ price: string }> | undefined): number | null {
     if (best == null || p < best) best = p;
   }
   return best;
+}
+
+function clobTokenPair(
+  market: TPolymarketMarket,
+): { yes: string | null; no: string | null } {
+  const raw = market.clobTokenIds;
+  if (Array.isArray(raw)) {
+    return { yes: raw[0] ?? null, no: raw[1] ?? null };
+  }
+  if (typeof raw !== "string") return { yes: null, no: null };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return { yes: null, no: null };
+    return {
+      yes: typeof parsed[0] === "string" ? parsed[0] : null,
+      no: typeof parsed[1] === "string" ? parsed[1] : null,
+    };
+  } catch {
+    return { yes: null, no: null };
+  }
+}
+
+function publishedMarketStatus(
+  market: ReturnType<typeof mapToUnifiedMarket> | undefined,
+): string | null {
+  if (!market) return null;
+  if (market.resolved_outcome || market.resolved_outcome_pct != null) {
+    return "SETTLED";
+  }
+  return market.status ?? null;
 }
 
 type SyncCounters = {
@@ -372,16 +403,18 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
             const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
             await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
             await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
+            const tickJson = JSON.stringify({
+              token_id: b.asset_id,
+              best_bid: bb,
+              best_ask: ba,
+              ts: ts.getTime(),
+            });
             await redis.set(
               `top:${b.asset_id}`,
-              JSON.stringify({
-                token_id: b.asset_id,
-                best_bid: bb,
-                best_ask: ba,
-                ts: ts.getTime(),
-              }),
+              tickJson,
               { EX: 60 },
             );
+            await redis.publish(`prices:${b.asset_id}`, tickJson);
           }
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;
@@ -573,6 +606,36 @@ async function refreshMarketRefs(
   if (unifiedTokenRows.length) {
     await upsertUnifiedTokens(pool, unifiedTokenRows);
   }
+
+  const tsMs = Date.now();
+  const stateQueue = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    parsed.flatMap(({ market }, index) => {
+      const unifiedMarket = unifiedMarketRows[index];
+      const { yes, no } = clobTokenPair(market);
+      const tokenIds = [yes, no].filter((tokenId): tokenId is string =>
+        Boolean(tokenId),
+      );
+      return tokenIds.map((tokenId) =>
+        stateQueue.add(() =>
+          publishMarketState({
+            redis,
+            venue: "polymarket",
+            tokenId,
+            market: market.conditionId ?? null,
+            conditionId: market.conditionId ?? null,
+            status: publishedMarketStatus(unifiedMarket),
+            acceptingOrders:
+              typeof market.acceptingOrders === "boolean"
+                ? market.acceptingOrders
+                : null,
+            resolvedOutcome: unifiedMarket?.resolved_outcome ?? null,
+            tsMs,
+          }),
+        ),
+      );
+    }),
+  );
 
   return parsed.length;
 }

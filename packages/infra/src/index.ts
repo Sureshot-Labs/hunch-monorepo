@@ -32,7 +32,16 @@ export {
   PRICE_REFRESH_QUEUE_KEYS,
   requeuePriceRefreshTokens,
 } from "./price-refresh.js";
+export {
+  buildMarketStatePayload,
+  publishMarketState,
+} from "./market-state.js";
 export type { EmbedQueueItem, TopMarketCandidate } from "./ai-embed.js";
+export type {
+  MarketStatePayload,
+  MarketStateRedis,
+  PublishMarketStateInputs,
+} from "./market-state.js";
 export type {
   ClaimPriceRefreshInputs,
   EnqueuePriceRefreshInputs,

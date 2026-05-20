@@ -1,5 +1,6 @@
 import { env } from "./env.js";
 import { log } from "./log.js";
+import PQueue from "p-queue";
 import { fetchLimitlessAmmQuotePair } from "./ammQuote.js";
 import {
   buildWsTargets,
@@ -29,6 +30,7 @@ import {
   upsertUnifiedMarket,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
+  type UnifiedMarketRow,
 } from "@hunch/db";
 import {
   buildTopMarketsText,
@@ -37,6 +39,7 @@ import {
   enqueueEmbedItems,
   getPriceRefreshQueueBacklog,
   isPgSetupIssue,
+  publishMarketState,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -117,6 +120,40 @@ async function publishTokenTopNow(
     writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
+}
+
+async function publishLimitlessMarketStates(
+  markets: UnifiedMarketRow[],
+): Promise<void> {
+  if (!markets.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      return tokenIds.map((tokenId) =>
+        q.add(() =>
+          publishMarketState({
+            redis,
+            venue: "limitless",
+            tokenId,
+            market: market.condition_id ?? market.venue_market_id ?? null,
+            conditionId: market.condition_id ?? null,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders: null,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            tsMs,
+          }),
+        ),
+      );
+    }),
+  );
 }
 
 function mergeMarket(
@@ -473,6 +510,7 @@ async function refreshLimitlessQueuedMarket(
   const mergedTop = mergeMarket(detail, null, row.trade_type ?? undefined);
   const result = await processLimitlessMarket(mergedTop, {
     refreshOrderbookTop: false,
+    publishMarketState: true,
   });
 
   try {
@@ -716,7 +754,7 @@ function resolveHotMarketRefs(
 
 async function processLimitlessMarket(
   mergedTop: TLimitlessMarket,
-  options: { refreshOrderbookTop?: boolean } = {},
+  options: { publishMarketState?: boolean; refreshOrderbookTop?: boolean } = {},
 ): Promise<{ eventId: string; marketCount: number }> {
   const eventRow = mapLimitlessEventRow(mergedTop);
   const eventId = await upsertLimitlessEvent(eventRow);
@@ -738,13 +776,7 @@ async function processLimitlessMarket(
       source: "limitless",
     },
   ];
-  const eventMarkets: Array<{
-    title?: string | null;
-    volume_24h?: number | null;
-    volume_total?: number | null;
-    liquidity?: number | null;
-    open_interest?: number | null;
-  }> = [];
+  const eventMarkets: UnifiedMarketRow[] = [];
 
   if (mergedTop.marketType === "single") {
     const marketRow = mapLimitlessMarketRow(eventId, mergedTop);
@@ -891,6 +923,10 @@ async function processLimitlessMarket(
   const topMarkets = buildTopMarketsText(eventMarkets, unifiedEventRow.title);
   if (topMarkets) {
     embedItems[0] = { ...embedItems[0], top_markets: topMarkets };
+  }
+
+  if (options.publishMarketState) {
+    await publishLimitlessMarketStates(eventMarkets);
   }
 
   if (embedItems.length) {

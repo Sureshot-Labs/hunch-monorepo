@@ -7,6 +7,7 @@ import {
   enqueueEmbedItems,
   getPriceRefreshQueueBacklog,
   createTopTickGate,
+  publishMarketState,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -65,6 +66,11 @@ type ProcessEventsOptions = {
 type MappedMarketGroup = {
   eventTicker: string | null;
   mappedMarkets: DflowMappedMarket[];
+};
+
+type MarketStatusRefreshOptions = {
+  includeSiblings?: boolean;
+  publishMarketState?: boolean;
 };
 
 const STATUS_BATCH_LIMIT = 100;
@@ -887,10 +893,44 @@ async function publishTokenTopsForTokenIds(
   return publish.length;
 }
 
+async function publishDflowMarketStates(
+  markets: UnifiedMarketRow[],
+): Promise<void> {
+  if (!markets.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      return tokenIds.map((tokenId) =>
+        q.add(() =>
+          publishMarketState({
+            redis,
+            venue: "kalshi",
+            tokenId,
+            market: market.condition_id ?? market.venue_market_id ?? null,
+            conditionId: market.condition_id ?? null,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders: null,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            tsMs,
+          }),
+        ),
+      );
+    }),
+  );
+}
+
 async function syncMarketStatusesForTokenIds(
   inputTokenIds: string[],
   context: string,
-  options: { includeSiblings?: boolean } = {},
+  options: MarketStatusRefreshOptions = {},
 ): Promise<{
   processedMarkets: number;
 }> {
@@ -1018,6 +1058,9 @@ async function syncMarketStatusesForTokenIds(
       if (tokenRows.length) {
         await upsertUnifiedTokens(pool, tokenRows);
       }
+      if (options.publishMarketState) {
+        await publishDflowMarketStates(unifiedMarketRows);
+      }
 
       if (unifiedMarketRows.length) {
         try {
@@ -1119,7 +1162,7 @@ export async function processPriceRefreshQueue(): Promise<{
     const result = await syncMarketStatusesForTokenIds(
       tokenIds,
       "price-refresh",
-      { includeSiblings: false },
+      { includeSiblings: false, publishMarketState: true },
     );
     marketRefreshed = result.processedMarkets;
     topRefreshed = await publishTokenTopsForTokenIds(tokenIds);
