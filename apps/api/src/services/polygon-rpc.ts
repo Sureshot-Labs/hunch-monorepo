@@ -323,6 +323,78 @@ export async function fetchErc1155BalancesByOwners(inputs: {
   return output;
 }
 
+export async function fetchErc1155BalancesForOwnerTokenPairs(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  pairs: Array<{ owner: string; tokenId: string }>;
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const pairs = Array.from(
+    new Map(
+      inputs.pairs.flatMap((pair) => {
+        let owner: string;
+        try {
+          owner = ethers.getAddress(pair.owner);
+        } catch {
+          return [];
+        }
+        const tokenId = pair.tokenId.trim();
+        if (!/^[0-9]+$/.test(tokenId)) return [];
+        const key = `${owner.toLowerCase()}:${tokenId}`;
+        return [[key, { owner, ownerKey: owner.toLowerCase(), tokenId }]];
+      }),
+    ).values(),
+  );
+  if (pairs.length === 0) return new Map();
+
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const maxPairsPerCall = Math.max(
+    1,
+    Math.trunc(inputs.maxPairsPerCall ?? 1000),
+  );
+
+  const output = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
+    const chunk = pairs.slice(i, i + maxPairsPerCall);
+    const accounts = chunk.map((pair) => pair.owner);
+    const ids = chunk.map((pair) => BigInt(pair.tokenId));
+    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
+      accounts,
+      ids,
+    ]);
+    inputs.onRpcCall?.();
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_call",
+      params: [{ to: contractAddress, data }, "latest"],
+    });
+
+    const decoded = erc1155Iface.decodeFunctionResult(
+      "balanceOfBatch",
+      result,
+    ) as unknown;
+    const balances = Array.isArray(decoded) ? decoded[0] : null;
+    if (!Array.isArray(balances)) {
+      throw new Error("Polygon RPC: invalid balanceOfBatch result");
+    }
+
+    for (let index = 0; index < chunk.length; index += 1) {
+      const pair = chunk[index];
+      const raw = balances[index] as unknown;
+      const value = typeof raw === "bigint" ? raw : null;
+      if (!pair || value == null) continue;
+      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
+      ownerBalances.set(pair.tokenId, value);
+      output.set(pair.ownerKey, ownerBalances);
+    }
+  }
+
+  return output;
+}
+
 export async function fetchEvmCode(inputs: {
   rpcUrl: string;
   timeoutMs: number;

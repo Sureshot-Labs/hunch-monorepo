@@ -801,48 +801,55 @@ export async function fetchSolanaTokenAccountOwners(inputs: {
   rpcUrls: string[];
   accounts: string[];
   timeoutMs: number;
+  onRpcCall?: (() => void) | null;
 }): Promise<Record<string, string | null>> {
   if (inputs.accounts.length === 0) return {};
 
-  const result = await solanaRpcRequest<{
-    value?: Array<{ data?: unknown } | null>;
-  }>({
-    rpcUrls: inputs.rpcUrls,
-    timeoutMs: inputs.timeoutMs,
-    method: "getMultipleAccounts",
-    params: [inputs.accounts, { encoding: "jsonParsed" }],
-  });
-
-  const values = Array.isArray(result?.value) ? result.value : [];
   const owners: Record<string, string | null> = {};
+  const chunkSize = 100;
 
-  for (let i = 0; i < inputs.accounts.length; i += 1) {
-    const account = inputs.accounts[i];
-    const entry = values[i];
-    if (!entry || !isRecord(entry)) {
-      owners[account] = null;
-      continue;
-    }
-    const data = entry.data;
-    if (!isRecord(data)) {
-      owners[account] = null;
-      continue;
-    }
-    const parsed = data.parsed;
-    if (!isRecord(parsed)) {
-      owners[account] = null;
-      continue;
-    }
-    const info = parsed.info;
-    if (!isRecord(info)) {
-      owners[account] = null;
-      continue;
-    }
-    const owner = info.owner;
-    if (typeof owner === "string" && owner.trim().length > 0) {
-      owners[account] = owner;
-    } else {
-      owners[account] = null;
+  for (let offset = 0; offset < inputs.accounts.length; offset += chunkSize) {
+    const accounts = inputs.accounts.slice(offset, offset + chunkSize);
+    inputs.onRpcCall?.();
+    const result = await solanaRpcRequest<{
+      value?: Array<{ data?: unknown } | null>;
+    }>({
+      rpcUrls: inputs.rpcUrls,
+      timeoutMs: inputs.timeoutMs,
+      method: "getMultipleAccounts",
+      params: [accounts, { encoding: "jsonParsed" }],
+    });
+
+    const values = Array.isArray(result?.value) ? result.value : [];
+
+    for (let i = 0; i < accounts.length; i += 1) {
+      const account = accounts[i];
+      const entry = values[i];
+      if (!entry || !isRecord(entry)) {
+        owners[account] = null;
+        continue;
+      }
+      const data = entry.data;
+      if (!isRecord(data)) {
+        owners[account] = null;
+        continue;
+      }
+      const parsed = data.parsed;
+      if (!isRecord(parsed)) {
+        owners[account] = null;
+        continue;
+      }
+      const info = parsed.info;
+      if (!isRecord(info)) {
+        owners[account] = null;
+        continue;
+      }
+      const owner = info.owner;
+      if (typeof owner === "string" && owner.trim().length > 0) {
+        owners[account] = owner;
+      } else {
+        owners[account] = null;
+      }
     }
   }
 

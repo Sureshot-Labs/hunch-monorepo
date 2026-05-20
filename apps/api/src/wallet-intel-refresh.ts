@@ -5,7 +5,7 @@ import { isAbortError, isRpcRateLimit } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { fetchMarketHolderData } from "./services/holders-core.js";
+import { fetchMarketHolderDataBatch } from "./services/holders-core.js";
 import { isRecord } from "./lib/type-guards.js";
 import { limitlessRequest } from "./services/limitless-client.js";
 import { fetchErc1155BalancesByOwner } from "./services/polygon-rpc.js";
@@ -16,7 +16,8 @@ import {
 } from "./services/solana-rpc.js";
 import {
   estimateErc1155BalanceRpcCalls,
-  prefetchFollowedPolymarketOwnerBalances,
+  estimateErc1155OwnerTokenPairRpcCalls,
+  prefetchPolymarketOwnerBalancesForWallets,
   readPrefetchRpcTelemetry,
   syncPositionsForUserWallet,
   type PrefetchedPolymarketOwnerBalances,
@@ -52,7 +53,10 @@ type WalletIntelRefreshTelemetry = {
   holdersPolymarket: WalletIntelRetryTelemetry;
   holdersAlchemyPolygon: WalletIntelRetryTelemetry;
   holdersAlchemyBase: WalletIntelRetryTelemetry;
+  holdersLimitlessBalanceVerify: WalletIntelRetryTelemetry;
   holdersSolana: WalletIntelRetryTelemetry;
+  holdersSolanaLargestAccounts: WalletIntelRetryTelemetry;
+  holdersSolanaOwnerLookup: WalletIntelRetryTelemetry;
   followedPrefetchPolymarket: WalletIntelRetryTelemetry;
   followedPositionsPolymarket: WalletIntelRetryTelemetry;
   followedPositionsLimitless: WalletIntelRetryTelemetry;
@@ -116,7 +120,16 @@ function createRefreshTelemetry(): WalletIntelRefreshTelemetry {
       "holders_alchemy_polygon",
     ),
     holdersAlchemyBase: createWalletIntelRetryTelemetry("holders_alchemy_base"),
+    holdersLimitlessBalanceVerify: createWalletIntelRetryTelemetry(
+      "holders_limitless_balance_verify",
+    ),
     holdersSolana: createWalletIntelRetryTelemetry("holders_solana"),
+    holdersSolanaLargestAccounts: createWalletIntelRetryTelemetry(
+      "holders_solana_largest_accounts",
+    ),
+    holdersSolanaOwnerLookup: createWalletIntelRetryTelemetry(
+      "holders_solana_owner_lookup",
+    ),
     followedPrefetchPolymarket: createWalletIntelRetryTelemetry(
       "followed_prefetch_polymarket",
     ),
@@ -876,6 +889,28 @@ async function upsertWalletPositionSnapshot(
   );
 }
 
+async function clearSelectedMarketHolderSnapshots(
+  client: Queryable,
+  inputs: {
+    marketIds: string[];
+    snapshotAt: Date;
+  },
+): Promise<number> {
+  const marketIds = Array.from(new Set(inputs.marketIds));
+  if (marketIds.length === 0) return 0;
+
+  const { rowCount } = await client.query(
+    `
+      delete from wallet_position_snapshots
+      where snapshot_at = $1
+        and market_id = any($2::text[])
+        and coalesce(metadata->>'source', '') in ('polymarket', 'alchemy', 'solana')
+    `,
+    [inputs.snapshotAt, marketIds],
+  );
+  return rowCount ?? 0;
+}
+
 async function upsertWalletActivityEvent(
   client: Queryable,
   inputs: {
@@ -1062,7 +1097,7 @@ async function collectFollowedWalletSnapshotRows(
     followedByChain[followed.chain] += 1;
   }
 
-  const estPolygonHoldingsRpcCalls = estimateErc1155BalanceRpcCalls(
+  const estPolygonHoldingsRpcCalls = estimateErc1155OwnerTokenPairRpcCalls(
     followedByChain.polygon,
     inputs.tokenIdsByVenue.polymarket,
   );
@@ -1156,17 +1191,24 @@ async function collectFollowedWalletSnapshotRows(
     (row) => row.chain === "polygon",
   );
   if (polygonFollowedWallets.length > 0) {
+    const byUser = new Map<string, FollowedWalletRow[]>();
+    for (const followed of polygonFollowedWallets) {
+      const rows = byUser.get(followed.user_id) ?? [];
+      rows.push(followed);
+      byUser.set(followed.user_id, rows);
+    }
+
     await mapWithConcurrency(
-      polygonFollowedWallets,
+      Array.from(byUser.entries()),
       inputs.followedFetchConcurrency,
-      async (followed) => {
+      async ([userId, followedRows]) => {
         try {
           const prefetched = await runWithTelemetry(
             inputs.telemetry.followedPrefetchPolymarket,
             () =>
-              prefetchFollowedPolymarketOwnerBalances(inputs.poolClient, {
-                userId: followed.user_id,
-                walletAddress: followed.address,
+              prefetchPolymarketOwnerBalancesForWallets(inputs.poolClient, {
+                userId,
+                walletAddresses: followedRows.map((row) => row.address),
                 trackedTokenIds: inputs.tokenIdsByVenue.polymarket,
               }),
             { countActualCall: false },
@@ -1175,24 +1217,29 @@ async function collectFollowedWalletSnapshotRows(
             prefetched.rpcCallEstimate;
           inputs.telemetry.followedPrefetchPolymarket.actualCalls +=
             prefetched.rpcCallCount;
-          prefetchedPolymarketBalances.set(followed.wallet_id, prefetched);
+          for (const followed of followedRows) {
+            prefetchedPolymarketBalances.set(followed.wallet_id, prefetched);
+          }
         } catch (error) {
-          prefetchedPolymarketBalances.set(followed.wallet_id, null);
+          for (const followed of followedRows) {
+            prefetchedPolymarketBalances.set(followed.wallet_id, null);
+          }
           const rpcTelemetry = readPrefetchRpcTelemetry(error);
           inputs.telemetry.followedPrefetchPolymarket.estimatedCalls +=
             rpcTelemetry.estimatedCalls;
           inputs.telemetry.followedPrefetchPolymarket.actualCalls +=
             rpcTelemetry.actualCalls;
+          const sampleWallet = followedRows[0]?.address ?? userId;
           if (
             !recordRetryableFailure(
               followedPrefetchPolymarketRetryable,
-              followed.address,
+              sampleWallet,
               error,
             )
           ) {
             console.error(
               "[wallets:intel:refresh] prefetched polymarket balances failed",
-              { wallet: followed.address },
+              { wallets: followedRows.map((row) => row.address) },
               error,
             );
           }
@@ -3023,6 +3070,7 @@ async function selectMarketsPerVenue(
 }
 
 async function runSnapshot(snapshotAt: Date) {
+  const runStartedAt = new Date();
   const holderLimit = walletIntelRefreshPolicy.holderLimit;
   const marketLimit = walletIntelRefreshPolicy.marketLimit;
   const marketLimitPerVenue = walletIntelRefreshPolicy.marketLimitPerVenue;
@@ -3036,7 +3084,7 @@ async function runSnapshot(snapshotAt: Date) {
   );
 
   console.log(
-    `[wallets:intel:refresh] start markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency}`,
+    `[wallets:intel:refresh] start startedAt=${runStartedAt.toISOString()} markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency}`,
   );
 
   const client = await pool.connect();
@@ -3171,6 +3219,20 @@ async function runSnapshot(snapshotAt: Date) {
       whale: whaleMarkets.rows.length,
     });
     const selectedMarketIds = marketRows.map((row) => row.id);
+    const clearedHolderSnapshots = await clearSelectedMarketHolderSnapshots(
+      client,
+      {
+        marketIds: selectedMarketIds,
+        snapshotAt,
+      },
+    );
+    if (clearedHolderSnapshots > 0) {
+      console.log("[wallets:intel:refresh] cleared stale holder snapshots", {
+        snapshot: snapshotAt.toISOString(),
+        markets: selectedMarketIds.length,
+        rows: clearedHolderSnapshots,
+      });
+    }
     const limitlessPriceBackfills = await backfillLimitlessPrices(
       client,
       marketRows,
@@ -3204,31 +3266,29 @@ async function runSnapshot(snapshotAt: Date) {
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
 
-    const marketResults = await mapWithConcurrency(
-      marketRows,
-      marketFetchConcurrency,
-      async (market) => {
-        const chain = VENUE_CHAIN[market.venue] ?? null;
-        if (!chain) {
-          return { market, chain, data: null, error: null };
-        }
-        try {
-          const data = await fetchMarketHolderData({
-            marketId: market.id,
-            limit: holderLimit,
-            telemetry: {
-              holdersPolymarket: telemetry.holdersPolymarket,
-              holdersAlchemyPolygon: telemetry.holdersAlchemyPolygon,
-              holdersAlchemyBase: telemetry.holdersAlchemyBase,
-              holdersSolana: telemetry.holdersSolana,
-            },
-          });
-          return { market, chain, data, error: null };
-        } catch (error) {
-          return { market, chain, data: null, error };
-        }
-      },
-    );
+    const marketResults = (
+      await fetchMarketHolderDataBatch({
+        markets: marketRows,
+        limit: holderLimit,
+        client,
+        marketFetchConcurrency,
+        telemetry: {
+          holdersPolymarket: telemetry.holdersPolymarket,
+          holdersAlchemyPolygon: telemetry.holdersAlchemyPolygon,
+          holdersAlchemyBase: telemetry.holdersAlchemyBase,
+          holdersLimitlessBalanceVerify:
+            telemetry.holdersLimitlessBalanceVerify,
+          holdersSolana: telemetry.holdersSolana,
+          holdersSolanaLargestAccounts: telemetry.holdersSolanaLargestAccounts,
+          holdersSolanaOwnerLookup: telemetry.holdersSolanaOwnerLookup,
+        },
+      })
+    ).map((result) => ({
+      market: result.market,
+      chain: VENUE_CHAIN[result.market.venue] ?? null,
+      data: result.data,
+      error: result.error,
+    }));
 
     for (const result of marketResults) {
       const market = result.market;
@@ -3437,8 +3497,9 @@ async function runSnapshot(snapshotAt: Date) {
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
     logRefreshTelemetry(telemetry);
 
+    const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors}`,
     );
   } finally {
     client.release();

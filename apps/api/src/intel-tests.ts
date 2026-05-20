@@ -67,7 +67,10 @@ import {
   fetchWalletPerformanceSeries,
   resolveSparklineBucketHours,
 } from "./services/wallet-intel-series.js";
-import { fetchMarketHolderData } from "./services/holders-core.js";
+import {
+  fetchMarketHolderData,
+  fetchMarketHolderDataBatch,
+} from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
   normalizeOutcomeSideForStorage,
@@ -2820,6 +2823,199 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "market holder batch verifies Limitless holders in one sparse Base balance pass",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+      const originalBaseRpcUrl = env.baseRpcUrl;
+      const originalBaseRpcTimeoutMs = env.baseRpcTimeoutMs;
+
+      const ownerA = "0x1111111111111111111111111111111111111111";
+      const ownerB = "0x2222222222222222222222222222222222222222";
+      const ownerC = "0x3333333333333333333333333333333333333333";
+      const ownerD = "0x4444444444444444444444444444444444444444";
+      const balanceIface = new Interface([
+        "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+      ]);
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress =
+        "0xc9c98965297bc527861c898329ee280632b76e18";
+      env.baseRpcUrl = "https://base-rpc.example";
+      env.baseRpcTimeoutMs = 1_000;
+
+      let alchemyCalls = 0;
+      let baseRpcCalls = 0;
+      globalThis.fetch = async (input: string | URL | Request, init) => {
+        const url = String(input);
+        if (url.includes("getOwnersForNFT")) {
+          alchemyCalls += 1;
+          const tokenId = new URL(url).searchParams.get("tokenId");
+          const ownersByToken: Record<string, unknown[]> = {
+            "111": [{ ownerAddress: ownerA }, { ownerAddress: ownerB }],
+            "222": [{ ownerAddress: ownerA }, { ownerAddress: ownerC }],
+            "333": [{ ownerAddress: ownerB }],
+            "444": [{ ownerAddress: ownerD }],
+          };
+          return new Response(
+            JSON.stringify({ owners: ownersByToken[tokenId ?? ""] ?? [] }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        if (url === "https://base-rpc.example") {
+          baseRpcCalls += 1;
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            id?: number;
+            params?: Array<{ data?: string }>;
+          };
+          const data = body.params?.[0]?.data;
+          assert.ok(data);
+          const decoded = balanceIface.decodeFunctionData(
+            "balanceOfBatch",
+            data,
+          );
+          const accounts = decoded[0] as string[];
+          const ids = decoded[1] as bigint[];
+          const balances = accounts.map((account, index) => {
+            const key = `${account.toLowerCase()}:${ids[index]?.toString()}`;
+            if (key === `${ownerA.toLowerCase()}:111`) return 2_500_000n;
+            if (key === `${ownerA.toLowerCase()}:222`) return 1_750_000n;
+            if (key === `${ownerB.toLowerCase()}:333`) return 3_000_000n;
+            if (key === `${ownerD.toLowerCase()}:444`) return 250_000n;
+            return 0n;
+          });
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id ?? 1,
+              result: balanceIface.encodeFunctionResult("balanceOfBatch", [
+                balances,
+              ]),
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected fetch url: ${url}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market 1",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:111",
+                  token_no: "limitless:222",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+                {
+                  id: "limitless:market-2",
+                  venue: "limitless",
+                  title: "Test market 2",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:333",
+                  token_no: "limitless:444",
+                  clob_token_ids: null,
+                  best_bid: "0.40",
+                  best_ask: "0.50",
+                  last_price: "0.45",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                {
+                  market_id: "limitless:market-1",
+                  token_id: "limitless:111",
+                  side: "YES",
+                },
+                {
+                  market_id: "limitless:market-1",
+                  token_id: "limitless:222",
+                  side: "NO",
+                },
+                {
+                  market_id: "limitless:market-2",
+                  token_id: "limitless:333",
+                  side: "YES",
+                },
+                {
+                  market_id: "limitless:market-2",
+                  token_id: "limitless:444",
+                  side: "NO",
+                },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                { token_id: "limitless:111", best_bid: "0.50", best_ask: "0.70" },
+                { token_id: "limitless:222", best_bid: "0.25", best_ask: "0.35" },
+                { token_id: "limitless:333", best_bid: "0.30", best_ask: "0.40" },
+                { token_id: "limitless:444", best_bid: "0.55", best_ask: "0.65" },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const results = await fetchMarketHolderDataBatch({
+          markets: [
+            { id: "limitless:market-1", venue: "limitless" },
+            { id: "limitless:market-2", venue: "limitless" },
+          ],
+          limit: 10,
+          client: client as never,
+          marketFetchConcurrency: 2,
+        });
+
+        assert.equal(alchemyCalls, 4);
+        assert.equal(baseRpcCalls, 1);
+        assert.equal(results[0]?.data?.source, "alchemy");
+        assert.equal(results[1]?.data?.source, "alchemy");
+        assert.deepEqual(results[0]?.data?.holders, [
+          { wallet: ownerA, side: "YES", shares: 2.5 },
+          { wallet: ownerA, side: "NO", shares: 1.75 },
+        ]);
+        assert.deepEqual(results[1]?.data?.holders, [
+          { wallet: ownerB, side: "YES", shares: 3 },
+          { wallet: ownerD, side: "NO", shares: 0.25 },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+        env.baseRpcUrl = originalBaseRpcUrl;
+        env.baseRpcTimeoutMs = originalBaseRpcTimeoutMs;
+      }
+    },
+  },
+  {
     name: "market holder fetch rejects partial solana side coverage",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -2944,6 +3140,160 @@ const tests: TestCase[] = [
           YES: "mint-yes",
           NO: "mint-no",
         });
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.solanaRpcUrls = originalSolanaRpcUrls;
+        env.solanaRpcTimeoutMs = originalSolanaRpcTimeoutMs;
+      }
+    },
+  },
+  {
+    name: "market holder batch resolves Kalshi largest accounts with one owner lookup",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalSolanaRpcUrls = env.solanaRpcUrls;
+      const originalSolanaRpcTimeoutMs = env.solanaRpcTimeoutMs;
+
+      env.solanaRpcUrls = ["https://solana.example"];
+      env.solanaRpcTimeoutMs = 1_000;
+
+      let largestCalls = 0;
+      let ownerLookupCalls = 0;
+      globalThis.fetch = async (_input, init) => {
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        const method = body?.method;
+        const params = body?.params;
+
+        if (method === "getTokenLargestAccounts") {
+          largestCalls += 1;
+          const mint = String(params?.[0] ?? "");
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: [
+                  {
+                    address: `acct-${mint}`,
+                    amount: "2000",
+                    decimals: 3,
+                    uiAmountString: "2",
+                  },
+                ],
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        if (method === "getMultipleAccounts") {
+          ownerLookupCalls += 1;
+          const accounts = Array.isArray(params?.[0]) ? params[0] : [];
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: accounts.map((account: string) => ({
+                  data: {
+                    parsed: {
+                      info: {
+                        owner: `owner-${account}`,
+                      },
+                    },
+                  },
+                })),
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected solana rpc method: ${String(method)}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "kalshi:market-1",
+                  venue: "kalshi",
+                  title: "Test market 1",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "sol:mint-yes-1",
+                  token_no: "sol:mint-no-1",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+                {
+                  id: "kalshi:market-2",
+                  venue: "kalshi",
+                  title: "Test market 2",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "sol:mint-yes-2",
+                  token_no: "sol:mint-no-2",
+                  clob_token_ids: null,
+                  best_bid: "0.35",
+                  best_ask: "0.45",
+                  last_price: "0.4",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { market_id: "kalshi:market-1", token_id: "sol:mint-yes-1", side: "YES" },
+                { market_id: "kalshi:market-1", token_id: "sol:mint-no-1", side: "NO" },
+                { market_id: "kalshi:market-2", token_id: "sol:mint-yes-2", side: "YES" },
+                { market_id: "kalshi:market-2", token_id: "sol:mint-no-2", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return { rows: [] };
+          }
+          if (queryCount === 4) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const results = await fetchMarketHolderDataBatch({
+          markets: [
+            { id: "kalshi:market-1", venue: "kalshi" },
+            { id: "kalshi:market-2", venue: "kalshi" },
+          ],
+          limit: 10,
+          client: client as never,
+          marketFetchConcurrency: 2,
+        });
+
+        assert.equal(largestCalls, 4);
+        assert.equal(ownerLookupCalls, 1);
+        assert.equal(results[0]?.data?.holders.length, 2);
+        assert.equal(results[1]?.data?.holders.length, 2);
+        assert.equal(
+          results[0]?.data?.holders[0]?.wallet,
+          "owner-acct-mint-yes-1",
+        );
       } finally {
         globalThis.fetch = originalFetch;
         env.solanaRpcUrls = originalSolanaRpcUrls;
