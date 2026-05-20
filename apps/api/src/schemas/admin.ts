@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
+const adminCursorSchema = z.string().trim().min(1).max(2000);
+const adminPageLimitSchema = z.coerce.number().int().min(1).max(100);
 
 export const adminFeePolicySchema = z.object({
   venue: feePolicyVenueSchema,
@@ -119,7 +121,7 @@ export const adminRewardsMultiplierPolicySchema = z
 
 export const adminRewardsMultiplierOverridesQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
 
@@ -164,8 +166,9 @@ export const adminRewardsMultiplierOverrideParamsSchema = z.object({
 });
 
 export const adminUsersQuerySchema = z.object({
+  cursor: adminCursorSchema.optional(),
   q: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
 
@@ -174,11 +177,23 @@ export const adminUserParamsSchema = z.object({
 });
 
 export const adminUserActivityQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: adminCursorSchema.optional(),
+  limit: adminPageLimitSchema.optional(),
 });
 
+export const adminUserAnalyticsRangeSchema = z.enum([
+  "24h",
+  "7d",
+  "30d",
+  "90d",
+  "1y",
+  "all",
+]);
+
 export const adminUserAnalyticsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: adminCursorSchema.optional(),
+  limit: adminPageLimitSchema.optional(),
+  range: adminUserAnalyticsRangeSchema.optional(),
 });
 
 export const adminUserAdminSchema = z.object({
@@ -273,9 +288,10 @@ export const adminPointsSchema = z
 
 export const adminManualPointsQuerySchema = z
   .object({
+    cursor: adminCursorSchema.optional(),
     userId: z.string().uuid().optional(),
     walletAddress: z.string().min(1).optional(),
-    limit: z.coerce.number().int().min(1).max(100).optional(),
+    limit: adminPageLimitSchema.optional(),
     offset: z.coerce.number().int().min(0).optional(),
   })
   .superRefine((value, ctx) => {

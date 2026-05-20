@@ -90,6 +90,13 @@ const MAX_POLY_BUILDER_TAKER_FEE_BPS = 100;
 const MAX_POLY_BUILDER_MAKER_FEE_BPS = 50;
 const MAX_FEE_COLLECT_ATTEMPTS = 5;
 const DEBRIDGE_CONFIG_TTL_MS = 30_000;
+const ADMIN_USER_ANALYTICS_RANGE_MS = {
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+  "90d": 90 * 24 * 60 * 60 * 1000,
+  "1y": 365 * 24 * 60 * 60 * 1000,
+} as const;
 const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
 const POLYGON_MULTICALL_ADDRESS =
@@ -365,6 +372,111 @@ function readAnalyticsPayloadNumber(
 ): number | null {
   if (!isAnalyticsPayloadRecord(payload)) return null;
   return toOptionalNumber(payload[key]);
+}
+
+type AdminUserAnalyticsRange =
+  | keyof typeof ADMIN_USER_ANALYTICS_RANGE_MS
+  | "all";
+
+type AdminUserAnalyticsOutcome = "action" | "failure" | "success" | "timeout";
+
+type AdminKeysetCursor = {
+  createdAt: Date;
+  id: string;
+};
+
+type AdminCursorRow = {
+  created_at: Date;
+  id: string;
+};
+
+const ADMIN_USER_ANALYTICS_OUTCOME_SQL = `
+  case
+    when lower(event_name) like '%no_terminal%'
+      or lower(coalesce(status, '')) like '%timeout%' then 'timeout'
+    when right(lower(event_name), 5) = '_fail'
+      or right(lower(event_name), 6) = '_error'
+      or lower(coalesce(status, '')) like '%fail%'
+      or lower(coalesce(status, '')) like '%error%'
+      or lower(coalesce(status, '')) like '%missing%'
+      or lower(coalesce(status, '')) like '%unavailable%' then 'failure'
+    when right(lower(event_name), 8) = '_success'
+      or lower(event_name) like '%completed_funnel%'
+      or lower(coalesce(status, '')) like '%success%'
+      or lower(coalesce(status, '')) like '%completed%'
+      or lower(coalesce(status, '')) like '%captured%' then 'success'
+    else 'action'
+  end
+`;
+
+function resolveAdminUserAnalyticsRangeStart(
+  range: AdminUserAnalyticsRange,
+): Date | null {
+  if (range === "all") return null;
+  return new Date(Date.now() - ADMIN_USER_ANALYTICS_RANGE_MS[range]);
+}
+
+function resolveAdminUserAnalyticsTimelineGranularity(
+  range: AdminUserAnalyticsRange,
+) {
+  if (range === "24h") return "hour";
+  if (range === "90d") return "week";
+  if (range === "1y") return "month";
+  return "day";
+}
+
+function decodeAdminKeysetCursor(
+  encoded: string | undefined,
+): { cursor: AdminKeysetCursor | null; error: string | null } {
+  if (!encoded) return { cursor: null, error: null };
+
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(encoded, "base64url").toString("utf8"),
+    ) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return { cursor: null, error: "Invalid cursor" };
+    }
+
+    const record = parsed as Record<string, unknown>;
+    const createdAtValue = record.createdAt;
+    const idValue = record.id;
+    if (typeof createdAtValue !== "string" || typeof idValue !== "string") {
+      return { cursor: null, error: "Invalid cursor" };
+    }
+
+    const createdAt = new Date(createdAtValue);
+    if (!Number.isFinite(createdAt.getTime()) || !idValue.trim()) {
+      return { cursor: null, error: "Invalid cursor" };
+    }
+
+    return { cursor: { createdAt, id: idValue }, error: null };
+  } catch {
+    return { cursor: null, error: "Invalid cursor" };
+  }
+}
+
+function encodeAdminKeysetCursor(row: AdminCursorRow): string {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: row.created_at.toISOString(),
+      id: row.id,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function buildAdminCursorPage<T extends AdminCursorRow>(
+  rows: T[],
+  limit: number,
+) {
+  const items = rows.slice(0, limit);
+  const hasMore = rows.length > limit;
+  const nextCursor =
+    hasMore && items.length
+      ? encodeAdminKeysetCursor(items[items.length - 1])
+      : null;
+  return { hasMore, items, nextCursor };
 }
 
 async function fetchIndexCount(
@@ -1513,14 +1625,20 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const q = query.q?.trim();
       const limit = query.limit ?? 25;
       const offset = query.offset ?? 0;
+      const decodedCursor = decodeAdminKeysetCursor(query.cursor);
+      if (decodedCursor.error) {
+        reply.code(400);
+        return reply.send({ error: decodedCursor.error });
+      }
+      const cursor = decodedCursor.cursor;
 
-      const conditions: string[] = [];
-      const params: Array<string | number> = [];
+      const filterConditions: string[] = [];
+      const filterParams: Array<string | number> = [];
 
       if (q) {
-        params.push(q);
-        const idx = params.length;
-        conditions.push(
+        filterParams.push(q);
+        const idx = filterParams.length;
+        filterConditions.push(
           `
             (
               u.id::text = $${idx}
@@ -1538,24 +1656,43 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         );
       }
 
-      const whereClause = conditions.length
-        ? `where ${conditions.join(" and ")}`
+      const countWhereClause = filterConditions.length
+        ? `where ${filterConditions.join(" and ")}`
         : "";
 
-      const countParams = [...params];
       const { rows: countRows } = await pool.query<{ total: string }>(
         `
           select count(*)::text as total
           from users u
-          ${whereClause}
+          ${countWhereClause}
         `,
-        countParams,
+        filterParams,
       );
 
-      params.push(limit);
+      const dataConditions = [...filterConditions];
+      const params: Array<string | number | Date> = [...filterParams];
+      if (cursor) {
+        params.push(cursor.createdAt);
+        const cursorCreatedAtIdx = params.length;
+        params.push(cursor.id);
+        const cursorIdIdx = params.length;
+        dataConditions.push(
+          `(u.created_at, u.id) < ($${cursorCreatedAtIdx}, $${cursorIdIdx})`,
+        );
+      }
+
+      const whereClause = dataConditions.length
+        ? `where ${dataConditions.join(" and ")}`
+        : "";
+
+      params.push(limit + 1);
       const limitIdx = params.length;
-      params.push(offset);
-      const offsetIdx = params.length;
+      let offsetSql = "";
+      if (!cursor) {
+        params.push(offset);
+        const offsetIdx = params.length;
+        offsetSql = `offset $${offsetIdx}`;
+      }
 
       const { rows } = await pool.query<{
         id: string;
@@ -1617,16 +1754,18 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             where referrer_user_id = u.id
           ) refs on true
           ${whereClause}
-          order by u.created_at desc
-          limit $${limitIdx} offset $${offsetIdx}
+          order by u.created_at desc, u.id desc
+          limit $${limitIdx}
+          ${offsetSql}
         `,
         params,
       );
+      const page = buildAdminCursorPage(rows, limit);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        users: rows.map((row) => ({
+        users: page.items.map((row) => ({
           id: row.id,
           email: row.email,
           username: row.username,
@@ -1646,6 +1785,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         total: Number(countRows[0]?.total ?? 0),
         limit,
         offset,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor,
       });
     },
   );
@@ -2019,6 +2160,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params;
       const limit = request.query.limit ?? 20;
+      const decodedCursor = decodeAdminKeysetCursor(request.query.cursor);
+      if (decodedCursor.error) {
+        reply.code(400);
+        return reply.send({ error: decodedCursor.error });
+      }
+      const cursor = decodedCursor.cursor;
       const polymarketUsdc = env.polymarketUsdcAddress;
       const limitlessUsdc = env.limitlessUsdcAddress;
       const solanaUsdc = env.solanaUsdcMint;
@@ -2031,6 +2178,23 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         reply.code(404);
         return reply.send({ error: "User not found" });
       }
+
+      const params: Array<string | number | Date> = [
+        id,
+        polymarketUsdc,
+        limitlessUsdc,
+        solanaUsdc,
+      ];
+      let cursorSql = "";
+      if (cursor) {
+        params.push(cursor.createdAt);
+        const cursorCreatedAtIdx = params.length;
+        params.push(cursor.id);
+        const cursorIdIdx = params.length;
+        cursorSql = `where (activity.created_at, activity.id) < ($${cursorCreatedAtIdx}, $${cursorIdIdx})`;
+      }
+      params.push(limit + 1);
+      const limitIdx = params.length;
 
       const { rows } = await pool.query<{
         id: string;
@@ -2070,12 +2234,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               e.wallet_address as wallet_address,
               e.created_at as created_at,
               case
+                when e.input_mint is not null and lower(e.input_mint) = lower($2) then (e.amount_in / 1000000)
+                when e.output_mint is not null and lower(e.output_mint) = lower($2) then (e.amount_out / 1000000)
                 when e.input_mint is not null and lower(e.input_mint) = lower($3) then (e.amount_in / 1000000)
                 when e.output_mint is not null and lower(e.output_mint) = lower($3) then (e.amount_out / 1000000)
-                when e.input_mint is not null and lower(e.input_mint) = lower($4) then (e.amount_in / 1000000)
-                when e.output_mint is not null and lower(e.output_mint) = lower($4) then (e.amount_out / 1000000)
-                when e.input_mint = $5 then (e.amount_in / 1000000)
-                when e.output_mint = $5 then (e.amount_out / 1000000)
+                when e.input_mint = $4 then (e.amount_in / 1000000)
+                when e.output_mint = $4 then (e.amount_out / 1000000)
                 else null
               end as amount_usd,
               coalesce(e.tx_signature, e.venue_order_id) as ref
@@ -2097,16 +2261,18 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             from reward_claims c
             where c.user_id = $1
           ) activity
-          order by created_at desc
-          limit $2
+          ${cursorSql}
+          order by created_at desc, id desc
+          limit $${limitIdx}
         `,
-        [id, limit, polymarketUsdc, limitlessUsdc, solanaUsdc],
+        params,
       );
+      const page = buildAdminCursorPage(rows, limit);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        items: rows.map((row) => ({
+        items: page.items.map((row) => ({
           id: row.id,
           type: row.type,
           venue: row.venue,
@@ -2117,6 +2283,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           amountUsd: row.amount_usd != null ? Number(row.amount_usd) : null,
           ref: row.ref,
         })),
+        hasMore: page.hasMore,
+        limit,
+        nextCursor: page.nextCursor,
       });
     },
   );
@@ -2135,6 +2304,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const { id } = request.params;
       const limit = request.query.limit ?? 50;
+      const decodedCursor = decodeAdminKeysetCursor(request.query.cursor);
+      if (decodedCursor.error) {
+        reply.code(400);
+        return reply.send({ error: decodedCursor.error });
+      }
+      const cursor = decodedCursor.cursor;
+      const range = request.query.range ?? "all";
+      const rangeStart = resolveAdminUserAnalyticsRangeStart(range);
+      const whereSql = rangeStart
+        ? "user_id = $1 and created_at >= $2"
+        : "user_id = $1";
+      const whereParams = rangeStart ? [id, rangeStart] : [id];
+      const eventParams: Array<string | Date | number> = [...whereParams];
+      let eventWhereSql = whereSql;
+      if (cursor) {
+        eventParams.push(cursor.createdAt);
+        const cursorCreatedAtIdx = eventParams.length;
+        eventParams.push(cursor.id);
+        const cursorIdIdx = eventParams.length;
+        eventWhereSql += ` and (created_at, id) < ($${cursorCreatedAtIdx}, $${cursorIdIdx})`;
+      }
+      eventParams.push(limit + 1);
+      const eventLimitPlaceholder = `$${eventParams.length}`;
+      const timelineGranularity =
+        resolveAdminUserAnalyticsTimelineGranularity(range);
 
       const { rows: userRows } = await pool.query<{ id: string }>(
         `select id from users where id = $1 limit 1`,
@@ -2150,7 +2344,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         { rows: eventRows },
         { rows: byEventRows },
         { rows: byVenueRows },
+        { rows: bySourceRows },
         { rows: byStatusRows },
+        { rows: timelineRows },
       ] = await Promise.all([
         pool.query<{
           distinct_event_count: string;
@@ -2165,9 +2361,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               min(created_at) as first_seen_at,
               max(created_at) as last_seen_at
             from analytics_server_events
-            where user_id = $1
+            where ${whereSql}
           `,
-          [id],
+          whereParams,
         ),
         pool.query<{
           analytics_schema_version: string;
@@ -2198,51 +2394,118 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               payload,
               created_at
             from analytics_server_events
-            where user_id = $1
-            order by created_at desc
-            limit $2
+            where ${eventWhereSql}
+            order by created_at desc, id desc
+            limit ${eventLimitPlaceholder}
           `,
-          [id, limit],
+          eventParams,
         ),
         pool.query<{ count: string; event_name: string }>(
           `
             select event_name, count(*)::text as count
             from analytics_server_events
-            where user_id = $1
+            where ${whereSql}
             group by event_name
             order by count(*) desc, event_name asc
             limit 30
           `,
-          [id],
+          whereParams,
         ),
         pool.query<{ count: string; venue: string }>(
           `
             select venue, count(*)::text as count
             from analytics_server_events
-            where user_id = $1 and venue is not null
+            where ${whereSql} and venue is not null
             group by venue
             order by count(*) desc, venue asc
             limit 20
           `,
-          [id],
+          whereParams,
+        ),
+        pool.query<{ count: string; source: string }>(
+          `
+            select source, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql} and source is not null
+            group by source
+            order by count(*) desc, source asc
+            limit 20
+          `,
+          whereParams,
         ),
         pool.query<{ count: string; event_name: string; status: string }>(
           `
             select event_name, status, count(*)::text as count
             from analytics_server_events
-            where user_id = $1 and status is not null
+            where ${whereSql} and status is not null
             group by event_name, status
             order by count(*) desc, event_name asc, status asc
             limit 30
           `,
-          [id],
+          whereParams,
+        ),
+        pool.query<{
+          bucket_start_at: Date;
+          count: string;
+          outcome: AdminUserAnalyticsOutcome;
+        }>(
+          `
+            select
+              date_trunc('${timelineGranularity}', created_at) as bucket_start_at,
+              ${ADMIN_USER_ANALYTICS_OUTCOME_SQL} as outcome,
+              count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by 1, 2
+            order by bucket_start_at asc
+          `,
+          whereParams,
         ),
       ]);
 
       const summary = summaryRows[0];
+      const timelineByBucket = new Map<
+        string,
+        {
+          action: number;
+          bucketStartAt: Date;
+          failure: number;
+          success: number;
+          timeout: number;
+          total: number;
+        }
+      >();
+      for (const row of timelineRows) {
+        const key = row.bucket_start_at.toISOString();
+        const bucket =
+          timelineByBucket.get(key) ??
+          ({
+            action: 0,
+            bucketStartAt: row.bucket_start_at,
+            failure: 0,
+            success: 0,
+            timeout: 0,
+            total: 0,
+          } satisfies {
+            action: number;
+            bucketStartAt: Date;
+            failure: number;
+            success: number;
+            timeout: number;
+            total: number;
+          });
+        const count = Number(row.count);
+        bucket[row.outcome] += count;
+        bucket.total += count;
+        timelineByBucket.set(key, bucket);
+      }
+      const eventsPage = buildAdminCursorPage(eventRows, limit);
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
+        range,
+        rangeStartAt: rangeStart,
         summary: {
           totalEvents: Number(summary?.total_events ?? 0),
           distinctEvents: Number(summary?.distinct_event_count ?? 0),
@@ -2263,8 +2526,22 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             status: row.status,
             count: Number(row.count),
           })),
+          bySource: bySourceRows.map((row) => ({
+            source: row.source,
+            count: Number(row.count),
+          })),
+          timeline: [...timelineByBucket.entries()]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, bucket]) => ({
+              bucketStartAt: bucket.bucketStartAt,
+              action: bucket.action,
+              failure: bucket.failure,
+              success: bucket.success,
+              timeout: bucket.timeout,
+              total: bucket.total,
+            })),
         },
-        events: eventRows.map((row) => ({
+        events: eventsPage.items.map((row) => ({
           id: row.id,
           eventName: row.event_name,
           eventSlug: row.event_slug,
@@ -2291,6 +2568,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           chainId: readAnalyticsPayloadString(row.payload, "chain_id"),
           payload: row.payload,
         })),
+        eventsPage: {
+          hasMore: eventsPage.hasMore,
+          limit,
+          nextCursor: eventsPage.nextCursor,
+        },
       });
     },
   );
@@ -3364,17 +3646,26 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const query = request.query;
+      const decodedCursor = decodeAdminKeysetCursor(query.cursor);
+      if (decodedCursor.error) {
+        reply.code(400);
+        return reply.send({ error: decodedCursor.error });
+      }
+      const cursor = decodedCursor.cursor;
+      const limit = query.limit ?? 25;
       const result = await fetchAdminManualVolumeEvents(pool, {
+        cursor,
         userId: query.userId ?? null,
         walletAddress: query.walletAddress?.trim() ?? null,
-        limit: query.limit ?? 25,
+        limit: limit + 1,
         offset: query.offset ?? 0,
       });
+      const page = buildAdminCursorPage(result.items, limit);
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        items: result.items.map((item) => ({
+        items: page.items.map((item) => ({
           id: item.id,
           userId: item.user_id,
           walletAddress: item.wallet_address ?? null,
@@ -3386,8 +3677,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           visible: item.visible,
           createdAt: item.created_at,
         })),
+        hasMore: page.hasMore,
         total: result.total,
-        limit: query.limit ?? 25,
+        limit,
+        nextCursor: page.nextCursor,
         offset: query.offset ?? 0,
       });
     },

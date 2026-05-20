@@ -1045,6 +1045,7 @@ export function resolveRewardsReferralsOrderBy(inputs: {
 export async function fetchAdminManualVolumeEvents(
   pool: DbQuery,
   inputs: {
+    cursor?: { createdAt: Date; id: string } | null;
     userId?: string | null;
     walletAddress?: string | null;
     limit: number;
@@ -1064,21 +1065,38 @@ export async function fetchAdminManualVolumeEvents(
     whereParts.push(`ve.wallet_address = $${params.length}`);
   }
 
+  const countWhereSql = `where ${whereParts.join(" and ")}`;
+  const countParams = [...params];
+
+  if (inputs.cursor) {
+    params.push(inputs.cursor.createdAt);
+    const cursorCreatedAtIdx = params.length;
+    params.push(inputs.cursor.id);
+    const cursorIdIdx = params.length;
+    whereParts.push(
+      `(ve.created_at, ve.id) < ($${cursorCreatedAtIdx}, $${cursorIdIdx})`,
+    );
+  }
+
   const whereSql = `where ${whereParts.join(" and ")}`;
 
   const countResult = await pool.query<{ total: string | null }>(
     `
       select count(*)::text as total
       from volume_events ve
-      ${whereSql}
+      ${countWhereSql}
     `,
-    params,
+    countParams,
   );
 
   params.push(inputs.limit);
   const limitIdx = params.length;
-  params.push(inputs.offset);
-  const offsetIdx = params.length;
+  let offsetSql = "";
+  if (!inputs.cursor) {
+    params.push(inputs.offset);
+    const offsetIdx = params.length;
+    offsetSql = `offset $${offsetIdx}`;
+  }
 
   const { rows } = await pool.query<AdminManualVolumeEvent>(
     `
@@ -1096,7 +1114,8 @@ export async function fetchAdminManualVolumeEvents(
       from volume_events ve
       ${whereSql}
       order by ve.created_at desc, ve.id desc
-      limit $${limitIdx} offset $${offsetIdx}
+      limit $${limitIdx}
+      ${offsetSql}
     `,
     params,
   );
