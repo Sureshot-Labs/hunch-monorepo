@@ -296,7 +296,8 @@ async function fetchAlchemyOwners(inputs: {
 
 function normalizeEvmAddress(value: string): string | null {
   try {
-    return ethers.getAddress(value);
+    const address = ethers.getAddress(value);
+    return address === ethers.ZeroAddress ? null : address;
   } catch {
     return null;
   }

@@ -2835,6 +2835,7 @@ const tests: TestCase[] = [
       const ownerB = "0x2222222222222222222222222222222222222222";
       const ownerC = "0x3333333333333333333333333333333333333333";
       const ownerD = "0x4444444444444444444444444444444444444444";
+      const zeroOwner = "0x0000000000000000000000000000000000000000";
       const balanceIface = new Interface([
         "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
       ]);
@@ -2853,10 +2854,14 @@ const tests: TestCase[] = [
           alchemyCalls += 1;
           const tokenId = new URL(url).searchParams.get("tokenId");
           const ownersByToken: Record<string, unknown[]> = {
-            "111": [{ ownerAddress: ownerA }, { ownerAddress: ownerB }],
+            "111": [
+              { ownerAddress: ownerA },
+              { ownerAddress: zeroOwner },
+              { ownerAddress: ownerB },
+            ],
             "222": [{ ownerAddress: ownerA }, { ownerAddress: ownerC }],
             "333": [{ ownerAddress: ownerB }],
-            "444": [{ ownerAddress: ownerD }],
+            "444": [{ ownerAddress: zeroOwner }, { ownerAddress: ownerD }],
           };
           return new Response(
             JSON.stringify({ owners: ownersByToken[tokenId ?? ""] ?? [] }),
@@ -2881,6 +2886,12 @@ const tests: TestCase[] = [
           );
           const accounts = decoded[0] as string[];
           const ids = decoded[1] as bigint[];
+          assert.equal(
+            accounts.some(
+              (account) => account.toLowerCase() === zeroOwner.toLowerCase(),
+            ),
+            false,
+          );
           const balances = accounts.map((account, index) => {
             const key = `${account.toLowerCase()}:${ids[index]?.toString()}`;
             if (key === `${ownerA.toLowerCase()}:111`) return 2_500_000n;

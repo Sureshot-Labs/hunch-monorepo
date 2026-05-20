@@ -4,6 +4,8 @@ import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
+import { isRecord } from "../lib/type-guards.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchMarketSignalPricingByIds } from "../repos/unified-read.js";
 import {
@@ -56,6 +58,91 @@ function buildPrivateCacheControl(ttlSec: number): string {
   return ttlSec > 0
     ? `private, max-age=${ttlSec}, stale-while-revalidate=${ttlSec * 2}`
     : "no-store";
+}
+
+function readRefreshString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function addMarketMapTokenRef(
+  tokenRefs: Array<{ tokenId: string; venue: string | null }>,
+  tokenId: unknown,
+  venue: string | null,
+): void {
+  const normalized = readRefreshString(tokenId);
+  if (!normalized) return;
+  tokenRefs.push({ tokenId: normalized, venue });
+}
+
+function collectMarketMapRefreshRefs(
+  value: unknown,
+  refs: {
+    tokenRefs: Array<{ tokenId: string; venue: string | null }>;
+    marketIds: Set<string>;
+  },
+  venueHint: string | null = null,
+): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectMarketMapRefreshRefs(entry, refs, venueHint);
+    }
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  const venue = readRefreshString(value.venue) ?? venueHint;
+  addMarketMapTokenRef(refs.tokenRefs, value.tokenYes, venue);
+  addMarketMapTokenRef(refs.tokenRefs, value.tokenNo, venue);
+
+  for (const key of [
+    "marketId",
+    "representativeMarketId",
+    "heroMarketId",
+    "targetMarketId",
+  ]) {
+    const marketId = readRefreshString(value[key]);
+    if (marketId) refs.marketIds.add(marketId);
+  }
+
+  for (const key of [
+    "items",
+    "eventsPreview",
+    "marketsPreview",
+    "trendingNow",
+    "volumeMovers24h",
+    "liquidityMovers24h",
+    "topMovers24h",
+    "signalsPreview",
+    "childrenPreview",
+  ]) {
+    collectMarketMapRefreshRefs(value[key], refs, venue);
+  }
+  collectMarketMapRefreshRefs(value.targetMarket, refs, venue);
+  collectMarketMapRefreshRefs(value.node, refs, venue);
+}
+
+function requestMarketMapPayloadRefresh(
+  payload: unknown,
+  logLabel: string,
+): void {
+  const refs = {
+    tokenRefs: [] as Array<{ tokenId: string; venue: string | null }>,
+    marketIds: new Set<string>(),
+  };
+  collectMarketMapRefreshRefs(payload, refs);
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    tokenRefs: refs.tokenRefs,
+    marketIds: Array.from(refs.marketIds),
+    logLabel,
+  });
+}
+
+function requestMarketMapBodyRefresh(body: string, logLabel: string): void {
+  const payload = safeJsonParse<unknown>(body);
+  if (payload != null) requestMarketMapPayloadRefresh(payload, logLabel);
 }
 
 function metricForEvent(
@@ -1842,6 +1929,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const cachedBody = await redis.get(cacheKey);
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
+          requestMarketMapBodyRefresh(cachedBody, "market-map");
           if (request.headers["if-none-match"] === etag) {
             reply.header("ETag", etag);
             reply.code(304);
@@ -2223,6 +2311,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           perVenueMin: effective.mergePerVenueMinDefault,
         },
       };
+      requestMarketMapPayloadRefresh(payload, "market-map");
       const body = JSON.stringify(payload);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {
@@ -2357,6 +2446,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           const cachedBody = await sidebarRedis.get(cacheKey);
           if (cachedBody) {
             const etag = buildWeakEtag(cachedBody);
+            requestMarketMapBodyRefresh(cachedBody, "market-map:sidebars");
             if (request.headers["if-none-match"] === etag) {
               reply.header("ETag", etag);
               reply.code(304);
@@ -2488,6 +2578,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           ),
         };
       }
+      requestMarketMapPayloadRefresh(payload, "market-map:sidebars");
       const body = JSON.stringify(payload);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {
@@ -2536,6 +2627,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       if (!node) {
         return reply.code(404).send({ error: "Market map node not found" });
       }
+      requestMarketMapPayloadRefresh({ node }, "market-map:node");
       return { runId, node };
     },
   );
@@ -2603,6 +2695,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const cachedBody = await redis.get(cacheKey);
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
+          requestMarketMapBodyRefresh(cachedBody, "market-map:node-events");
           if (request.headers["if-none-match"] === etag) {
             reply.header("ETag", etag);
             reply.code(304);
@@ -2701,6 +2794,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         venues: selectedVenues,
         items: itemsWithLiveMarket,
       };
+      requestMarketMapPayloadRefresh(payload, "market-map:node-events");
       const body = JSON.stringify(payload);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {

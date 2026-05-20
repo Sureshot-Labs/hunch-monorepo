@@ -1690,10 +1690,24 @@ async function loadWhaleRowsByIds(
           w2.address as owner_address,
           w2.label as owner_label
         from wallets w2
-        where w.metadata->>'kind' = 'safe'
-          and w2.metadata->>'kind' = 'safe_owner'
-          and w2.metadata->>'derivedFrom' = w.address
-          and w2.chain = w.chain
+        where w2.chain = w.chain
+          and (
+            (
+              w.metadata->>'linkedOwnerAddress' is not null
+              and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+            )
+            or (
+              w.metadata->>'kind' = 'safe'
+              and w2.metadata->>'kind' = 'safe_owner'
+              and w2.metadata->>'derivedFrom' = w.address
+            )
+          )
+        order by case
+          when w.metadata->>'linkedOwnerAddress' is not null
+            and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+          then 0
+          else 1
+        end
         limit 1
       ) owner on true
       left join lateral (

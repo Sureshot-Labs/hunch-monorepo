@@ -340,6 +340,7 @@ export async function fetchErc1155BalancesForOwnerTokenPairs(inputs: {
         } catch {
           return [];
         }
+        if (owner === ethers.ZeroAddress) return [];
         const tokenId = pair.tokenId.trim();
         if (!/^[0-9]+$/.test(tokenId)) return [];
         const key = `${owner.toLowerCase()}:${tokenId}`;

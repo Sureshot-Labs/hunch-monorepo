@@ -9,7 +9,11 @@ import { fetchMarketHolderDataBatch } from "./services/holders-core.js";
 import { isRecord } from "./lib/type-guards.js";
 import { limitlessRequest } from "./services/limitless-client.js";
 import { fetchErc1155BalancesByOwner } from "./services/polygon-rpc.js";
-import { inspectSafeWalletStrict } from "./services/polymarket-funder.js";
+import {
+  derivePolymarketFunders,
+  inspectSafeWalletStrict,
+  type PolymarketFunderCandidate,
+} from "./services/polymarket-funder.js";
 import {
   fetchSolanaTokenBalancesByOwner,
   type SolanaTokenBalance,
@@ -2596,6 +2600,14 @@ type SafeOwnerLinkResult = {
   errors: number;
 };
 
+type PolymarketProxyLinkResult = {
+  selected: number;
+  inspected: number;
+  linked: number;
+  skipped: number;
+  errors: number;
+};
+
 function emptySafeOwnerLinkResult(): SafeOwnerLinkResult {
   return {
     selected: 0,
@@ -2607,7 +2619,17 @@ function emptySafeOwnerLinkResult(): SafeOwnerLinkResult {
   };
 }
 
-async function updateWalletSafeLinkMetadata(
+function emptyPolymarketProxyLinkResult(): PolymarketProxyLinkResult {
+  return {
+    selected: 0,
+    inspected: 0,
+    linked: 0,
+    skipped: 0,
+    errors: 0,
+  };
+}
+
+async function updateWalletMetadata(
   client: Queryable,
   walletId: string,
   metadata: Record<string, unknown>,
@@ -2680,7 +2702,7 @@ async function linkSafeOwnersForWhales(
     const safeInfo = await inspectSafeWalletStrict({ address });
     if (safeInfo.status === "error") {
       result.errors += 1;
-      await updateWalletSafeLinkMetadata(client, row.id, {
+      await updateWalletMetadata(client, row.id, {
         safeOwnerCheckedAt: checkedAt,
         safeOwnerCheckStatus: "error",
         safeOwnerCheckError: safeInfo.error,
@@ -2690,7 +2712,7 @@ async function linkSafeOwnersForWhales(
 
     if (safeInfo.status === "not_safe") {
       result.notSafe += 1;
-      await updateWalletSafeLinkMetadata(client, row.id, {
+      await updateWalletMetadata(client, row.id, {
         safeOwnerCheckedAt: checkedAt,
         safeOwnerCheckStatus: "not_safe",
         safeOwnerCheckError: null,
@@ -2702,7 +2724,7 @@ async function linkSafeOwnersForWhales(
     const owners = safeInfo.owners
       .map((owner) => normalizeAddress(owner, "polygon"))
       .filter((owner): owner is string => Boolean(owner));
-    await updateWalletSafeLinkMetadata(client, row.id, {
+    await updateWalletMetadata(client, row.id, {
       kind: "safe",
       owners,
       threshold: safeInfo.threshold,
@@ -2727,6 +2749,206 @@ async function linkSafeOwnersForWhales(
       },
     });
     result.linked += 1;
+  }
+
+  return result;
+}
+
+type PolymarketProxyKind = "safe" | "magic" | "deposit_wallet";
+
+function resolvePolymarketProxyKind(
+  candidate: PolymarketFunderCandidate | null | undefined,
+): PolymarketProxyKind | null {
+  if (!candidate?.deployed) return null;
+  if (candidate.signatureType === 1) return "magic";
+  if (
+    candidate.source === "safe_proxy" ||
+    (candidate.signatureType === 2 && candidate.contractKind === "SAFE_LIKE")
+  ) {
+    return "safe";
+  }
+  if (candidate.signatureType === 3 && candidate.contractKind === "CONTRACT") {
+    return "deposit_wallet";
+  }
+  return null;
+}
+
+function findPolymarketFunderCandidate(
+  candidates: PolymarketFunderCandidate[],
+  proxyAddress: string,
+): PolymarketFunderCandidate | null {
+  return (
+    candidates.find(
+      (candidate) =>
+        normalizeAddress(candidate.funder, "polygon") === proxyAddress,
+    ) ?? null
+  );
+}
+
+async function linkPolymarketProxyOwnersForKnownWallets(
+  client: Queryable,
+): Promise<PolymarketProxyLinkResult> {
+  const limit = walletIntelRefreshPolicy.safeLinkLimit;
+  if (limit <= 0) return emptyPolymarketProxyLinkResult();
+
+  const staleBefore = new Date(
+    Date.now() - walletIntelRefreshPolicy.safeLinkStaleHours * 60 * 60 * 1000,
+  );
+  const errorStaleBefore = new Date(
+    Date.now() -
+      walletIntelRefreshPolicy.safeLinkErrorStaleHours * 60 * 60 * 1000,
+  );
+  const proxyRows = await client.query<{
+    proxy_wallet_id: string;
+    proxy_address: string;
+    signer_address: string;
+    user_id: string;
+    source: "current_funder" | "order_wallet";
+  }>(
+    `
+      with known as (
+        select
+          uvc.user_id,
+          lower(uvc.wallet_address) as signer_address,
+          lower(uvc.funder_address) as proxy_address,
+          'current_funder'::text as source,
+          coalesce(uvc.funder_updated_at, uvc.updated_at, uvc.created_at) as seen_at
+        from user_venue_credentials uvc
+        where uvc.venue = 'polymarket'
+          and uvc.is_active = true
+          and uvc.wallet_address ~* '^0x[0-9a-f]{40}$'
+          and uvc.funder_address ~* '^0x[0-9a-f]{40}$'
+          and lower(uvc.funder_address) <> lower(uvc.wallet_address)
+        union all
+        select
+          o.user_id,
+          lower(o.signer_address) as signer_address,
+          lower(o.wallet_address) as proxy_address,
+          'order_wallet'::text as source,
+          max(coalesce(o.last_update, o.posted_at)) as seen_at
+        from orders o
+        where o.venue = 'polymarket'
+          and o.signer_address ~* '^0x[0-9a-f]{40}$'
+          and o.wallet_address ~* '^0x[0-9a-f]{40}$'
+          and lower(o.wallet_address) <> lower(o.signer_address)
+        group by o.user_id, lower(o.signer_address), lower(o.wallet_address)
+      ),
+      ranked as (
+        select
+          known.*,
+          row_number() over (
+            partition by known.proxy_address
+            order by
+              (known.source = 'current_funder') desc,
+              known.seen_at desc nulls last,
+              known.signer_address
+          ) as rn
+        from known
+      )
+      select
+        w.id as proxy_wallet_id,
+        w.address as proxy_address,
+        ranked.signer_address,
+        ranked.user_id,
+        ranked.source::text as source
+      from ranked
+      join wallets w
+        on w.chain = 'polygon'
+       and lower(w.address) = ranked.proxy_address
+      where ranked.rn = 1
+        and case
+          when (w.metadata->>'polymarketProxyOwnerCheckedAt') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+            then true
+          when w.metadata->>'polymarketProxyOwnerCheckStatus' = 'error'
+            then w.metadata->>'polymarketProxyOwnerCheckedAt' < $2::text
+          when w.metadata->>'polymarketProxyOwnerCheckStatus' in ('linked', 'skipped')
+            then w.metadata->>'polymarketProxyOwnerCheckedAt' < $1::text
+          else true
+        end
+      order by w.last_seen_at desc nulls last, w.id
+      limit $3
+    `,
+    [staleBefore.toISOString(), errorStaleBefore.toISOString(), limit],
+  );
+
+  const result: PolymarketProxyLinkResult = {
+    ...emptyPolymarketProxyLinkResult(),
+    selected: proxyRows.rows.length,
+  };
+
+  for (const row of proxyRows.rows) {
+    const proxyAddress = normalizeAddress(row.proxy_address, "polygon");
+    const signerAddress = normalizeAddress(row.signer_address, "polygon");
+    if (!proxyAddress || !signerAddress || proxyAddress === signerAddress) {
+      continue;
+    }
+    result.inspected += 1;
+    const checkedAt = new Date().toISOString();
+
+    try {
+      const funderResult = await derivePolymarketFunders({
+        signer: signerAddress,
+        storedFunder: proxyAddress,
+        includeMagicProxy: true,
+      });
+      const candidate = findPolymarketFunderCandidate(
+        funderResult.candidates,
+        proxyAddress,
+      );
+      const proxyKind = resolvePolymarketProxyKind(candidate);
+
+      if (!proxyKind) {
+        result.skipped += 1;
+        await updateWalletMetadata(client, row.proxy_wallet_id, {
+          polymarketProxyOwnerCheckedAt: checkedAt,
+          polymarketProxyOwnerCheckStatus: "skipped",
+          polymarketProxyOwnerCheckError: null,
+          polymarketProxyKind: null,
+          polymarketSignerAddress: signerAddress,
+          linkedOwnerAddress: null,
+          linkedOwnerSource: row.source,
+          linkedOwnerAt: null,
+        });
+        continue;
+      }
+
+      await upsertWalletWithMetadata(client, {
+        address: signerAddress,
+        chain: "polygon",
+        metadata: {
+          polymarketProxyOwner: true,
+          polymarketProxyOwnerLinkedAt: checkedAt,
+          polymarketProxyOwnerSource: row.source,
+        },
+      });
+
+      await updateWalletMetadata(client, row.proxy_wallet_id, {
+        ...(proxyKind === "safe"
+          ? {
+              kind: "safe",
+              owners: candidate?.safeOwners ?? [signerAddress],
+              threshold: candidate?.safeThreshold ?? 1,
+            }
+          : {}),
+        polymarketProxyKind: proxyKind,
+        polymarketSignerAddress: signerAddress,
+        linkedOwnerAddress: signerAddress,
+        linkedOwnerSource: row.source,
+        linkedOwnerAt: checkedAt,
+        polymarketProxyOwnerCheckedAt: checkedAt,
+        polymarketProxyOwnerCheckStatus: "linked",
+        polymarketProxyOwnerCheckError: null,
+      });
+      result.linked += 1;
+    } catch (error) {
+      result.errors += 1;
+      await updateWalletMetadata(client, row.proxy_wallet_id, {
+        polymarketProxyOwnerCheckedAt: checkedAt,
+        polymarketProxyOwnerCheckStatus: "error",
+        polymarketProxyOwnerCheckError:
+          error instanceof Error ? error.message.slice(0, 240) : String(error),
+      });
+    }
   }
 
   return result;
@@ -3495,11 +3717,13 @@ async function runSnapshot(snapshotAt: Date) {
     deltaUpdates += artifactRefresh.deltaUpdates;
 
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
+    const polymarketProxyOwnersLinked =
+      await linkPolymarketProxyOwnersForKnownWallets(client);
     logRefreshTelemetry(telemetry);
 
     const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors}`,
     );
   } finally {
     client.release();

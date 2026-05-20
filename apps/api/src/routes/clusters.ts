@@ -15,6 +15,7 @@ import {
   resolveAiClustersPolicy,
   resolveArbitrageDefaultsPolicy,
 } from "../services/runtime-policies.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import {
   aggClustersQuerySchema,
   clusterParamsSchema,
@@ -156,6 +157,23 @@ function compareClustersBySort(
 
   if (left.score !== right.score) return right.score - left.score;
   return left.id.localeCompare(right.id);
+}
+
+function requestClusterMarketRefresh(
+  clusters: Array<{ markets: ClusterMarketSummary[] }>,
+  logLabel: string,
+): void {
+  const marketIds = new Set<string>();
+  for (const cluster of clusters) {
+    for (const market of cluster.markets) {
+      if (market.marketId) marketIds.add(market.marketId);
+    }
+  }
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    marketIds: Array.from(marketIds),
+    logLabel,
+  });
 }
 
 export const clustersRoutes: FastifyPluginAsync = async (app) => {
@@ -310,10 +328,12 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const limit = query.limit ?? defaults.limit;
+      const items = filtered.slice(0, limit);
+      requestClusterMarketRefresh(items, "clusters");
       return {
         generatedAt,
         defaults,
-        items: filtered.slice(0, limit),
+        items,
       };
     },
   );
@@ -332,12 +352,14 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           baseUrl: env.aggMarketBaseUrl,
           timeoutMs: env.aggMarketTimeoutMs,
         });
-        return await getAggClusterListResponseCached({
+        const response = await getAggClusterListResponseCached({
           query: request.query,
           client,
           db: pool,
           ttlSec: env.aggClustersCacheTtlSec,
         });
+        requestClusterMarketRefresh(response.items, "clusters:agg");
+        return response;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -474,6 +496,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           ? ordered.filter((market) => !outlierSet.has(market.marketId))
           : ordered;
 
+      requestMarketRefreshForMarketRefs({
+        db: pool,
+        marketIds: visibleMarkets.map((market) => market.marketId),
+        logLabel: "clusters:detail",
+      });
       return { cluster, markets: visibleMarkets };
     },
   );

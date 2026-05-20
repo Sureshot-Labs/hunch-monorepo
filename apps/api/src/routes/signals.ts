@@ -8,6 +8,7 @@ import {
   type SignalsQuery,
   signalsQuerySchema,
 } from "../schemas/signals.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 
 type SignalStatus = "active" | "superseded" | "retracted";
 type SignalType = "catalyst" | "risk" | "update";
@@ -183,6 +184,32 @@ type SignalListResponse = {
   offset: number;
   hasMore: boolean;
 };
+
+function requestSignalsMarketRefresh(items: SignalListItem[]): void {
+  const marketIds = new Set<string>();
+  const eventIds = new Set<string>();
+
+  for (const item of items) {
+    if (item.market?.marketId) marketIds.add(item.market.marketId);
+    if (item.market?.eventId) eventIds.add(item.market.eventId);
+    if (item.event?.eventId) eventIds.add(item.event.eventId);
+    for (const target of item.targets) {
+      if (target.kind === "market") marketIds.add(target.id);
+      if (target.kind === "event") eventIds.add(target.id);
+    }
+    for (const market of item.similarMarkets) {
+      if (market.marketId) marketIds.add(market.marketId);
+      if (market.eventId) eventIds.add(market.eventId);
+    }
+  }
+
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    marketIds: Array.from(marketIds),
+    eventIds: Array.from(eventIds),
+    logLabel: "signals",
+  });
+}
 
 function toNumber(value: unknown): number | null {
   if (value == null) return null;
@@ -660,6 +687,8 @@ async function fetchSignals(params: {
       })),
     };
   });
+
+  requestSignalsMarketRefresh(items);
 
   return {
     items,

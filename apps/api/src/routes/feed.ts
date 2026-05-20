@@ -8,6 +8,7 @@ import { pool } from "../db.js";
 import { getRedis, getRedisStatus } from "../redis.js";
 import { computeAcceptingOrders } from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
@@ -52,6 +53,48 @@ type ForYouInteractionRow = {
 };
 
 type ForYouEventFilterMode = "volume_or_liquidity" | "volume_only" | "none";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function collectFeedTokenIdsFromData(data: unknown): string[] {
+  if (!Array.isArray(data)) return [];
+
+  const tokenIds = new Set<string>();
+  for (const event of data) {
+    if (!isRecord(event) || !Array.isArray(event.markets)) continue;
+    for (const market of event.markets) {
+      if (!isRecord(market) || !isRecord(market.tokens)) continue;
+      const yes = market.tokens.yes;
+      const no = market.tokens.no;
+      if (typeof yes === "string" && yes.trim()) tokenIds.add(yes);
+      if (typeof no === "string" && no.trim()) tokenIds.add(no);
+    }
+  }
+  return Array.from(tokenIds);
+}
+
+function enqueueFeedMarketRefreshForData(data: unknown): void {
+  const tokenIds = collectFeedTokenIdsFromData(data);
+  if (!tokenIds.length) return;
+
+  void Promise.all([
+    markHotTokens({ tokenIds }),
+    requestPriceRefreshForTokens({ tokenIds }),
+  ]).catch((error) => {
+    console.warn("[feed] market refresh enqueue failed", error);
+  });
+}
+
+function enqueueFeedMarketRefreshForBody(body: string): void {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (isRecord(parsed)) enqueueFeedMarketRefreshForData(parsed.data);
+  } catch {
+    // Cache body is controlled by this route. If it is somehow invalid, skip warming.
+  }
+}
 
 function parseTimestampMs(value: unknown): number | null {
   if (value == null) return null;
@@ -326,6 +369,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             .createHash("sha1")
             .update(cachedBody)
             .digest("hex")}"`;
+          enqueueFeedMarketRefreshForBody(cachedBody);
           if (req.headers["if-none-match"] === etag) {
             applyFeedCacheHeaders({
               reply,
@@ -535,17 +579,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data,
       };
 
-      if (data.length) {
-        const tokenIds: string[] = [];
-        for (const event of data) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(data);
 
       // serialize once, hash those exact bytes for ETag, then cache/send same bytes
       const body = JSON.stringify(payload);
@@ -766,17 +800,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         responseCount = totalEvents;
       }
 
-      if (data.length) {
-        const tokenIds: string[] = [];
-        for (const event of data) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(data);
 
       return reply.send({
         count: responseCount,
@@ -1402,17 +1426,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data: page,
       };
 
-      if (page.length) {
-        const tokenIds: string[] = [];
-        for (const event of page) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(page);
 
       reply.header("Cache-Control", "no-store");
       reply.header("Content-Type", "application/json; charset=utf-8");

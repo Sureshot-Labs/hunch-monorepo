@@ -1444,10 +1444,24 @@ function buildSlimWhaleSelectorSql(
               left join lateral (
                 select w2.address as owner_address
                 from wallets w2
-                where w.metadata->>'kind' = 'safe'
-                  and w2.metadata->>'kind' = 'safe_owner'
-                  and w2.metadata->>'derivedFrom' = w.address
-                  and w2.chain = w.chain
+                where w2.chain = w.chain
+                  and (
+                    (
+                      w.metadata->>'linkedOwnerAddress' is not null
+                      and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                    )
+                    or (
+                      w.metadata->>'kind' = 'safe'
+                      and w2.metadata->>'kind' = 'safe_owner'
+                      and w2.metadata->>'derivedFrom' = w.address
+                    )
+                  )
+                order by case
+                  when w.metadata->>'linkedOwnerAddress' is not null
+                    and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                  then 0
+                  else 1
+                end
                 limit 1
               ) owner on true${inferredJoin}
               where activity.last_activity_at is not null
@@ -1519,10 +1533,24 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
               left join lateral (
                 select w2.address as owner_address
                 from wallets w2
-                where w.metadata->>'kind' = 'safe'
-                  and w2.metadata->>'kind' = 'safe_owner'
-                  and w2.metadata->>'derivedFrom' = w.address
-                  and w2.chain = w.chain
+                where w2.chain = w.chain
+                  and (
+                    (
+                      w.metadata->>'linkedOwnerAddress' is not null
+                      and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                    )
+                    or (
+                      w.metadata->>'kind' = 'safe'
+                      and w2.metadata->>'kind' = 'safe_owner'
+                      and w2.metadata->>'derivedFrom' = w.address
+                    )
+                  )
+                order by case
+                  when w.metadata->>'linkedOwnerAddress' is not null
+                    and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                  then 0
+                  else 1
+                end
                 limit 1
               ) owner on true${inferredJoin}
               where wis.last_activity_at is not null
@@ -3033,10 +3061,24 @@ async function loadWalletPageStateByIds(
           w2.label as owner_label,
           w2.id as owner_wallet_id
         from wallets w2
-        where w.metadata->>'kind' = 'safe'
-          and w2.metadata->>'kind' = 'safe_owner'
-          and w2.metadata->>'derivedFrom' = w.address
-          and w2.chain = w.chain
+        where w2.chain = w.chain
+          and (
+            (
+              w.metadata->>'linkedOwnerAddress' is not null
+              and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+            )
+            or (
+              w.metadata->>'kind' = 'safe'
+              and w2.metadata->>'kind' = 'safe_owner'
+              and w2.metadata->>'derivedFrom' = w.address
+            )
+          )
+        order by case
+          when w.metadata->>'linkedOwnerAddress' is not null
+            and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+          then 0
+          else 1
+        end
         limit 1
       ) owner on true
     `,
@@ -5236,10 +5278,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                       w2.label as owner_label,
                       w2.id as owner_wallet_id
                     from wallets w2
-                    where w.metadata->>'kind' = 'safe'
-                      and w2.metadata->>'kind' = 'safe_owner'
-                      and w2.metadata->>'derivedFrom' = w.address
-                      and w2.chain = w.chain
+                    where w2.chain = w.chain
+                      and (
+                        (
+                          w.metadata->>'linkedOwnerAddress' is not null
+                          and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                        )
+                        or (
+                          w.metadata->>'kind' = 'safe'
+                          and w2.metadata->>'kind' = 'safe_owner'
+                          and w2.metadata->>'derivedFrom' = w.address
+                        )
+                      )
+                    order by case
+                      when w.metadata->>'linkedOwnerAddress' is not null
+                        and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                      then 0
+                      else 1
+                    end
                     limit 1
                   ) owner on true
                   left join wallet_profiles wp on wp.wallet_id = w.id
@@ -5280,10 +5336,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
             const deduped = new Map<string, WhaleWalletItem>();
             for (const row of filteredByActivity) {
-              const dedupeKey =
-                row.isSafe && row.ownerAddress
-                  ? row.ownerAddress.toLowerCase()
-                  : row.address.toLowerCase();
+              const dedupeKey = row.ownerAddress
+                ? row.ownerAddress.toLowerCase()
+                : row.address.toLowerCase();
               const existing = deduped.get(dedupeKey);
               if (!existing) {
                 deduped.set(dedupeKey, row);
