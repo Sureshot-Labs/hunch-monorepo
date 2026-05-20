@@ -119,6 +119,24 @@ function mapLimitlessUpstreamStatus(status: number): number {
 const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
 const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
+const LIMITLESS_CONNECT_LOCK_PREFIX = "lock:limitless:connect:";
+const LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS = [
+  100, 250, 500, 1_000,
+] as const;
+
+type LimitlessConnectResult =
+  | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
+  | {
+      ok: false;
+      httpStatus: number;
+      error: string;
+      status?: number;
+      payload?: unknown;
+    };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function isLimitlessFokUnmatchedMessage(message: string | null): boolean {
   return message?.toLowerCase().includes("market order unmatched") ?? false;
@@ -1088,6 +1106,100 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
+  const withLimitlessConnectAdvisoryLock = async <T>(
+    userId: string,
+    walletAddress: string,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    const lockKey = `${LIMITLESS_CONNECT_LOCK_PREFIX}${userId.trim().toLowerCase()}:${normalizeAddress(walletAddress)}`;
+    const client = await pool.connect();
+    let locked = false;
+    try {
+      await client.query("select pg_advisory_lock(hashtext($1)::bigint)", [
+        lockKey,
+      ]);
+      locked = true;
+      return await run();
+    } finally {
+      if (locked) {
+        try {
+          await client.query(
+            "select pg_advisory_unlock(hashtext($1)::bigint)",
+            [lockKey],
+          );
+        } catch (error) {
+          app.log.error(
+            { error, lockKey },
+            "Failed to release Limitless connect advisory lock",
+          );
+        }
+      }
+      client.release();
+    }
+  };
+
+  const normalizeLimitlessProfileForAccount = (inputs: {
+    profile: LimitlessProfile | null;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): LimitlessProfile | null => {
+    if (!inputs.profile?.id) return null;
+    if (
+      inputs.profile.account &&
+      normalizeAddress(inputs.profile.account) !==
+        normalizeAddress(inputs.account)
+    ) {
+      return null;
+    }
+
+    return {
+      ...inputs.profile,
+      account: inputs.profile.account ?? inputs.account,
+      client: inputs.profile.client ?? inputs.clientType,
+    };
+  };
+
+  const loadStoredLimitlessProfileForAccount = async (inputs: {
+    userId: string;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<LimitlessProfile | null> => {
+    const authContext = await resolveLimitlessAuthContext(
+      inputs.userId,
+      inputs.account,
+    );
+    if (!authContext) return null;
+
+    const verification = await verifyLimitlessAuthContext({
+      authContext,
+      walletAddress: inputs.account,
+    });
+    if (!verification.ok) return null;
+
+    return normalizeLimitlessProfileForAccount({
+      profile: verification.profile ?? authContext.storedProfile,
+      account: inputs.account,
+      clientType: inputs.clientType,
+    });
+  };
+
+  const waitForStoredLimitlessProfileForAccount = async (inputs: {
+    userId: string;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<LimitlessProfile | null> => {
+    const immediate = await loadStoredLimitlessProfileForAccount(inputs);
+    if (immediate) return immediate;
+
+    for (const delayMs of LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS) {
+      await sleep(delayMs);
+      const profile = await loadStoredLimitlessProfileForAccount(inputs);
+      if (profile) return profile;
+    }
+
+    return null;
+  };
+
   const connectLimitlessPartnerAccount = async (inputs: {
     userId: string;
     signer: string;
@@ -1095,16 +1207,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     signingMessage: string;
     signature: string;
     clientType: "eoa" | "base" | "etherspot";
-  }): Promise<
-    | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
-    | {
-        ok: false;
-        httpStatus: number;
-        error: string;
-        status?: number;
-        payload?: unknown;
-      }
-  > => {
+  }): Promise<LimitlessConnectResult> => {
     const checksumAccount = toChecksumAddress(inputs.account);
     if (!checksumAccount) {
       return {
@@ -1114,207 +1217,196 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       };
     }
 
-    const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
-      inputs.signingMessage,
-    );
-    const upstream = await limitlessRequest({
-      method: "POST",
-      requestPath: "/profiles/partner-accounts",
-      auth: "partner_hmac",
-      body: {
-        displayName: checksumAccount,
-      },
-      headers: {
-        "x-account": checksumAccount,
-        "x-signing-message": encodedSigningMessage,
-        "x-signature": inputs.signature,
-      },
-    });
-
-    if (!upstream.ok) {
-      if (upstream.status === 409) {
-        const upstreamExistingProfile = extractLimitlessProfile(
-          upstream.payload,
-        );
-        if (
-          upstreamExistingProfile?.id &&
-          (!upstreamExistingProfile.account ||
-            normalizeAddress(upstreamExistingProfile.account) ===
-              normalizeAddress(checksumAccount))
-        ) {
-          const recoveredProfile: LimitlessProfile = {
-            ...upstreamExistingProfile,
-            account: upstreamExistingProfile.account ?? checksumAccount,
-            client: upstreamExistingProfile.client ?? inputs.clientType,
-          };
-          try {
-            await persistLimitlessProfileForWallet({
-              userId: inputs.userId,
-              signer: inputs.signer,
-              account: recoveredProfile.account ?? checksumAccount,
-              profile: recoveredProfile,
-            });
-          } catch (error) {
-            app.log.error(
-              { error, userId: inputs.userId, signer: inputs.signer },
-              "Failed to store recovered Limitless credentials from 409 response",
-            );
-            return {
-              ok: false,
-              httpStatus: 500,
-              error: "Failed to store recovered Limitless credentials",
-            };
-          }
-
-          return {
-            ok: true,
-            authMode: "partner_hmac",
-            profile: recoveredProfile,
-          };
-        }
-
-        const existingCreds = await AuthService.getVenueCredentials(
-          inputs.userId,
-          "limitless",
-          inputs.signer,
-        );
-        const storedExistingProfile = existingCreds
-          ? extractLimitlessProfile(existingCreds.additionalData ?? null)
-          : null;
-        if (
-          storedExistingProfile?.id &&
-          (!storedExistingProfile.account ||
-            normalizeAddress(storedExistingProfile.account) ===
-              normalizeAddress(checksumAccount))
-        ) {
-          const recoveredProfile: LimitlessProfile = {
-            ...storedExistingProfile,
-            account: storedExistingProfile.account ?? checksumAccount,
-            client: storedExistingProfile.client ?? inputs.clientType,
-          };
-          try {
-            await persistLimitlessProfileForWallet({
-              userId: inputs.userId,
-              signer: inputs.signer,
-              account: recoveredProfile.account ?? checksumAccount,
-              profile: recoveredProfile,
-            });
-          } catch (error) {
-            app.log.error(
-              { error, userId: inputs.userId, signer: inputs.signer },
-              "Failed to store recovered Limitless credentials from existing mapping",
-            );
-            return {
-              ok: false,
-              httpStatus: 500,
-              error: "Failed to store recovered Limitless credentials",
-            };
-          }
-
-          return {
-            ok: true,
-            authMode: "partner_hmac",
-            profile: recoveredProfile,
-          };
-        }
-
-        const profileLookup = await limitlessRequest({
-          method: "GET",
-          requestPath: `/profiles/${checksumAccount}`,
-          auth: "partner_hmac",
+    return withLimitlessConnectAdvisoryLock(
+      inputs.userId,
+      checksumAccount,
+      async () => {
+        const storedProfile = await loadStoredLimitlessProfileForAccount({
+          userId: inputs.userId,
+          account: checksumAccount,
+          clientType: inputs.clientType,
         });
-        if (profileLookup.ok) {
-          const existingProfile = extractLimitlessProfile(
-            profileLookup.payload,
-          );
-          if (existingProfile?.id) {
-            const recoveredProfile: LimitlessProfile = {
-              ...existingProfile,
-              account: existingProfile.account ?? checksumAccount,
-              client: existingProfile.client ?? inputs.clientType,
+        if (storedProfile) {
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile: storedProfile,
+          };
+        }
+
+        const persistAndReturnProfile = async (
+          profile: LimitlessProfile,
+          logMessage: string,
+          clientError = "Failed to store recovered Limitless credentials",
+        ): Promise<LimitlessConnectResult> => {
+          try {
+            await persistLimitlessProfileForWallet({
+              userId: inputs.userId,
+              signer: inputs.signer,
+              account: profile.account ?? checksumAccount,
+              profile,
+            });
+          } catch (error) {
+            app.log.error(
+              { error, userId: inputs.userId, signer: inputs.signer },
+              logMessage,
+            );
+            return {
+              ok: false,
+              httpStatus: 500,
+              error: clientError,
             };
-            try {
-              await persistLimitlessProfileForWallet({
-                userId: inputs.userId,
-                signer: inputs.signer,
-                account: recoveredProfile.account ?? checksumAccount,
-                profile: recoveredProfile,
-              });
-            } catch (error) {
-              app.log.error(
-                { error, userId: inputs.userId, signer: inputs.signer },
-                "Failed to store recovered Limitless credentials",
+          }
+
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile,
+          };
+        };
+
+        const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+          inputs.signingMessage,
+        );
+        const upstream = await limitlessRequest({
+          method: "POST",
+          requestPath: "/profiles/partner-accounts",
+          auth: "partner_hmac",
+          body: {
+            displayName: checksumAccount,
+          },
+          headers: {
+            "x-account": checksumAccount,
+            "x-signing-message": encodedSigningMessage,
+            "x-signature": inputs.signature,
+          },
+        });
+
+        if (!upstream.ok) {
+          if (upstream.status === 409) {
+            const upstreamExistingProfile = normalizeLimitlessProfileForAccount(
+              {
+                profile: extractLimitlessProfile(upstream.payload),
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              },
+            );
+            if (upstreamExistingProfile) {
+              return persistAndReturnProfile(
+                upstreamExistingProfile,
+                "Failed to store recovered Limitless credentials from 409 response",
               );
+            }
+
+            const storedAfterConflict =
+              await waitForStoredLimitlessProfileForAccount({
+                userId: inputs.userId,
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              });
+            if (storedAfterConflict) {
               return {
-                ok: false,
-                httpStatus: 500,
-                error: "Failed to store recovered Limitless credentials",
+                ok: true,
+                authMode: "partner_hmac",
+                profile: storedAfterConflict,
               };
             }
 
+            const profileLookup = await limitlessRequest({
+              method: "GET",
+              requestPath: `/profiles/${checksumAccount}`,
+              auth: "partner_hmac",
+            });
+            const profileLookupMessage = profileLookup.ok
+              ? null
+              : extractLimitlessMessage(profileLookup.payload);
+            if (profileLookup.ok) {
+              const existingProfile = normalizeLimitlessProfileForAccount({
+                profile: extractLimitlessProfile(profileLookup.payload),
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              });
+              if (existingProfile) {
+                return persistAndReturnProfile(
+                  existingProfile,
+                  "Failed to store recovered Limitless credentials from profile lookup",
+                );
+              }
+            }
+
+            const upstreamMessage = extractLimitlessMessage(upstream.payload);
+            app.log.warn(
+              {
+                userId: inputs.userId,
+                signer: inputs.signer,
+                account: checksumAccount,
+                upstreamStatus: upstream.status,
+                upstreamMessage,
+                profileLookupStatus: profileLookup.ok
+                  ? 200
+                  : profileLookup.status,
+                profileLookupMessage,
+              },
+              "Limitless profile exists but profile id could not be recovered",
+            );
+
             return {
-              ok: true,
-              authMode: "partner_hmac",
-              profile: recoveredProfile,
+              ok: false,
+              httpStatus: 409,
+              error:
+                "Limitless profile already exists but profile id could not be recovered",
+              status: upstream.status,
+              payload: {
+                code: "limitless_profile_exists_unrecoverable",
+                upstream: {
+                  status: upstream.status,
+                  message: upstreamMessage,
+                },
+                profileLookup: profileLookup.ok
+                  ? { status: 200, message: null }
+                  : {
+                      status: profileLookup.status,
+                      message: profileLookupMessage,
+                    },
+              },
             };
           }
+
+          return {
+            ok: false,
+            httpStatus:
+              upstream.status >= 400 && upstream.status < 500
+                ? upstream.status
+                : 502,
+            error: "Limitless connect failed",
+            status: upstream.status,
+            payload: upstream.payload,
+          };
         }
-      }
 
-      return {
-        ok: false,
-        httpStatus:
-          upstream.status >= 400 && upstream.status < 500
-            ? upstream.status
-            : 502,
-        error: "Limitless connect failed",
-        status: upstream.status,
-        payload: upstream.payload,
-      };
-    }
+        const profileSafe = normalizeLimitlessProfileForAccount({
+          profile: extractLimitlessProfile(upstream.payload),
+          account: checksumAccount,
+          clientType: inputs.clientType,
+        });
 
-    const profile = extractLimitlessProfile(upstream.payload);
-    const profileSafe: LimitlessProfile | null = profile
-      ? {
-          ...profile,
-          account: profile.account ?? checksumAccount,
-          client: profile.client ?? inputs.clientType,
+        if (!profileSafe?.id) {
+          return {
+            ok: false,
+            httpStatus: 502,
+            error:
+              "Limitless partner account creation did not return a profile id",
+            payload: upstream.payload,
+          };
         }
-      : { account: checksumAccount, client: inputs.clientType };
 
-    if (!profileSafe?.id) {
-      return {
-        ok: false,
-        httpStatus: 502,
-        error: "Limitless partner account creation did not return a profile id",
-        payload: upstream.payload,
-      };
-    }
-
-    try {
-      await persistLimitlessProfileForWallet({
-        userId: inputs.userId,
-        signer: inputs.signer,
-        account: profileSafe.account ?? checksumAccount,
-        profile: profileSafe,
-      });
-    } catch (error) {
-      app.log.error(
-        { error, userId: inputs.userId, signer: inputs.signer },
-        "Failed to store Limitless credentials",
-      );
-      return {
-        ok: false,
-        httpStatus: 500,
-        error: "Failed to store Limitless credentials",
-      };
-    }
-
-    return {
-      ok: true,
-      authMode: "partner_hmac",
-      profile: profileSafe,
-    };
+        return persistAndReturnProfile(
+          profileSafe,
+          "Failed to store Limitless credentials",
+          "Failed to store Limitless credentials",
+        );
+      },
+    );
   };
 
   const requireLimitlessPartnerAuth = async (inputs: {
@@ -1686,7 +1778,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               account: context.signer,
               signingMessage: request.body.signingMessage,
               signature,
-              clientType: "base",
+              clientType: "eoa",
             });
 
             if (!connectResult.ok) {

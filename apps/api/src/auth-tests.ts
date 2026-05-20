@@ -306,6 +306,76 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "extractWallets handles raw snake_case Privy user payloads",
+    run: () => {
+      const user = {
+        linked_accounts: [
+          {
+            type: "wallet",
+            address: "0x8874351140f84212436f4D049C2756972702B311",
+            chain_type: "ethereum",
+            wallet_client_type: "phantom",
+            connector_type: "injected",
+          },
+          {
+            id: "a0ozs3h5djalbx2wrqaffktp",
+            type: "wallet",
+            address: "0x975c31C0cbCF8DA36dAbA7a0d470bCf4C43377E5",
+            chain_type: "ethereum",
+            wallet_client_type: "privy",
+            connector_type: "embedded",
+            imported: false,
+          },
+          {
+            id: "g96u1ulpttg2lorgvxwjkwva",
+            type: "wallet",
+            address: "5zbXV4BrhBinAqyzv18rJod54WgK3Pfqb7m3XrHU69Fj",
+            chain_type: "solana",
+            wallet_client_type: "privy",
+            connector_type: "embedded",
+            imported: false,
+          },
+        ],
+        wallet: {
+          address: "0x8874351140f84212436f4D049C2756972702B311",
+          chain_type: "ethereum",
+        },
+      } as unknown as PrivyUser;
+
+      assert.deepEqual(PrivyService.extractWallets(user), [
+        {
+          address: "0x8874351140f84212436f4d049c2756972702b311",
+          walletType: "ethereum",
+        },
+        {
+          address: "0x975c31c0cbcf8da36daba7a0d470bcf4c43377e5",
+          walletType: "ethereum",
+        },
+        {
+          address: "5zbXV4BrhBinAqyzv18rJod54WgK3Pfqb7m3XrHU69Fj",
+          walletType: "solana",
+        },
+      ]);
+
+      const profiles = PrivyService.classifyWallets(user);
+      assert.equal(
+        profiles.find(
+          profile =>
+            profile.address ===
+            "0x975c31c0cbcf8da36daba7a0d470bcf4c43377e5"
+        )?.source,
+        "embedded"
+      );
+      assert.equal(
+        profiles.find(
+          profile =>
+            profile.address === "5zbXV4BrhBinAqyzv18rJod54WgK3Pfqb7m3XrHU69Fj"
+        )?.source,
+        "embedded"
+      );
+    },
+  },
+  {
     name: "verifyTokenAndGetUser waits for expected added wallets to appear",
     run: async () => {
       const privyAny = PrivyService as unknown as {
