@@ -71,6 +71,10 @@ export const positionsQuerySchema = z.object({
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
     .catch(false),
+  debug: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
 });
 
 export const positionsByTokenQuerySchema = z.object({

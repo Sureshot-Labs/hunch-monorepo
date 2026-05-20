@@ -244,6 +244,85 @@ export async function fetchErc1155BalancesByOwner(inputs: {
   return output;
 }
 
+export async function fetchErc1155BalancesByOwners(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  owners: string[];
+  tokenIds: string[];
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const owners = Array.from(
+    new Map(
+      inputs.owners.map((owner) => {
+        const checksummed = ethers.getAddress(owner);
+        return [checksummed.toLowerCase(), checksummed];
+      }),
+    ).values(),
+  );
+  const tokenIds = Array.from(
+    new Set(
+      inputs.tokenIds
+        .map((tokenId) => tokenId.trim())
+        .filter((tokenId) => /^[0-9]+$/.test(tokenId)),
+    ),
+  );
+  if (owners.length === 0 || tokenIds.length === 0) return new Map();
+
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const maxPairsPerCall = Math.max(
+    1,
+    Math.trunc(inputs.maxPairsPerCall ?? 1000),
+  );
+  const pairs: Array<{ owner: string; ownerKey: string; tokenId: string }> = [];
+  for (const owner of owners) {
+    const ownerKey = owner.toLowerCase();
+    for (const tokenId of tokenIds) {
+      pairs.push({ owner, ownerKey, tokenId });
+    }
+  }
+
+  const output = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
+    const chunk = pairs.slice(i, i + maxPairsPerCall);
+    const accounts = chunk.map((pair) => pair.owner);
+    const ids = chunk.map((pair) => BigInt(pair.tokenId));
+    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
+      accounts,
+      ids,
+    ]);
+    inputs.onRpcCall?.();
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_call",
+      params: [{ to: contractAddress, data }, "latest"],
+    });
+
+    const decoded = erc1155Iface.decodeFunctionResult(
+      "balanceOfBatch",
+      result,
+    ) as unknown;
+    const balances = Array.isArray(decoded) ? decoded[0] : null;
+    if (!Array.isArray(balances)) {
+      throw new Error("Polygon RPC: invalid balanceOfBatch result");
+    }
+
+    for (let index = 0; index < chunk.length; index += 1) {
+      const pair = chunk[index];
+      const raw = balances[index] as unknown;
+      const value = typeof raw === "bigint" ? raw : null;
+      if (!pair || value == null) continue;
+      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
+      ownerBalances.set(pair.tokenId, value);
+      output.set(pair.ownerKey, ownerBalances);
+    }
+  }
+
+  return output;
+}
+
 export async function fetchEvmCode(inputs: {
   rpcUrl: string;
   timeoutMs: number;

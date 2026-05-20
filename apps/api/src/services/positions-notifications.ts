@@ -37,10 +37,11 @@ export async function notifyResolvedPositions(
       join unified_markets m
         on m.id = ut.market_id and m.venue = p.venue
       where p.user_id = $1
-        and p.wallet_address = $2
+        and lower(p.wallet_address) = lower($2)
         and p.venue = $3
         and p.position_scope = 'own'
         and p.size > 0
+        and (p.is_hidden is null or p.is_hidden = false)
         and m.resolved_outcome is not null
         and upper(m.resolved_outcome) in ('YES', 'NO')
     `,

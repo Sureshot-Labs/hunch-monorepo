@@ -1123,6 +1123,14 @@ export const env = {
   polymarketDataApiBase:
     process.env.POLYMARKET_DATA_API_BASE?.trim() ||
     "https://data-api.polymarket.com",
+  polymarketDataApiPositionsTimeoutMs: optionalPositiveInt(
+    "POLYMARKET_DATA_API_POSITIONS_TIMEOUT_MS",
+    2_000,
+  ),
+  polymarketDataApiPositionsCacheTtlMs: optionalNonNegativeInt(
+    "POLYMARKET_DATA_API_POSITIONS_CACHE_TTL_MS",
+    30_000,
+  ),
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",

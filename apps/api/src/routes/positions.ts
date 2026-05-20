@@ -13,7 +13,11 @@ import {
   fetchPositionsForUserWalletByTokenIds,
   setPositionHidden,
 } from "../repos/positions-repo.js";
-import { syncPositionsForUserWallet } from "../services/positions-sync.js";
+import {
+  prefetchPolymarketOwnerBalancesForWallets,
+  syncPositionsForUserWallet,
+  type PrefetchedPolymarketOwnerBalances,
+} from "../services/positions-sync.js";
 import { getRedis } from "../redis.js";
 import {
   positionVisibilitySchema,
@@ -428,6 +432,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const venues = query.venues;
       const usingVenueList = Boolean(venues && venues.length);
       const forceSync = query.force === true;
+      const startedAt = Date.now();
       const allowPolymarketFunders =
         query.venue === "polymarket" ||
         venues?.includes("polymarket") ||
@@ -457,6 +462,21 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               skippedReason = "connect_first";
             }
 
+            const durationMs = Date.now() - startedAt;
+            const logPayload = {
+              userId: user.id,
+              walletAddress,
+              venue: query.venue ?? null,
+              durationMs,
+              status: result ? "ok" : "skipped",
+              skippedReason,
+            };
+            if (durationMs >= 5000) {
+              app.log.warn(logPayload, "Positions sync completed slowly");
+            } else {
+              app.log.info(logPayload, "Positions sync completed");
+            }
+            const includeDebug = query.debug || durationMs >= 5000;
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               message: "Positions synced",
@@ -466,6 +486,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 status: "skipped" as const,
                 skippedReason,
               }),
+              ...(includeDebug ? { durationMs } : {}),
             });
           }
         }
@@ -478,14 +499,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               { allowPolymarketFunders },
             )
           : [walletAddress];
-        const expandedWalletAddresses = query.wallets?.length
-          ? await resolveRequestedWalletAddresses(
-              user.id,
-              walletAddress,
-              query.wallets,
-              { allowPolymarketFunders },
-            )
-          : baseWalletAddresses;
+        const expandedWalletAddresses = baseWalletAddresses;
         if (baseWalletAddresses.length === 0) {
           reply.code(400);
           return reply.send({ error: "No wallets available to sync." });
@@ -510,6 +524,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           flattenedPositions?: number;
           skippedReason?: string;
           error?: string;
+          durationMs?: number;
+          timings?: Record<string, number>;
         }> = [];
 
         type SyncTask = {
@@ -518,7 +534,65 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           chain: "evm" | "solana";
         };
 
+        let polymarketPrefetchWallets: string[] = [];
+        let polymarketPrefetchPromise: Promise<PrefetchedPolymarketOwnerBalances> | null =
+          null;
+        let polymarketPrefetchValue: PrefetchedPolymarketOwnerBalances | null =
+          null;
+        let polymarketPrefetchAttempted = false;
+        let polymarketPrefetchDurationMs = 0;
+        let polymarketPrefetchFailed = false;
+
+        const isPolymarketEvmTask = (task: SyncTask): boolean =>
+          task.chain === "evm" &&
+          (task.venue === null || task.venue === "polymarket");
+
+        const enablePolymarketBatchPrefetch = (tasks: SyncTask[]) => {
+          if (!forceSync) {
+            polymarketPrefetchWallets = [];
+            return;
+          }
+          polymarketPrefetchWallets = Array.from(
+            new Map(
+              tasks
+                .filter(isPolymarketEvmTask)
+                .map((task) => [
+                  task.walletAddress.toLowerCase(),
+                  task.walletAddress,
+                ]),
+            ).values(),
+          );
+        };
+
+        const getPolymarketBatchPrefetch =
+          async (): Promise<PrefetchedPolymarketOwnerBalances | null> => {
+            if (polymarketPrefetchWallets.length === 0) return null;
+            if (!polymarketPrefetchPromise) {
+              const prefetchStartedAt = Date.now();
+              polymarketPrefetchAttempted = true;
+              polymarketPrefetchPromise =
+                prefetchPolymarketOwnerBalancesForWallets(pool, {
+                  userId: user.id,
+                  walletAddresses: polymarketPrefetchWallets,
+                })
+                  .then((prefetched) => {
+                    polymarketPrefetchDurationMs =
+                      Date.now() - prefetchStartedAt;
+                    polymarketPrefetchValue = prefetched;
+                    return prefetched;
+                  })
+                  .catch((error) => {
+                    polymarketPrefetchFailed = true;
+                    polymarketPrefetchDurationMs =
+                      Date.now() - prefetchStartedAt;
+                    throw error;
+                  });
+            }
+            return polymarketPrefetchPromise;
+          };
+
         const executeTask = async (task: SyncTask) => {
+          const taskStartedAt = Date.now();
           if (!forceSync && r && cooldownSec > 0) {
             const key = `positions:sync:${user.id}:${task.walletAddress}:${
               task.venue ?? "all"
@@ -533,15 +607,20 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 venue: task.venue ?? null,
                 status: "skipped" as const,
                 skippedReason: "cooldown",
+                durationMs: Date.now() - taskStartedAt,
               };
             }
           }
 
           try {
+            const prefetchedPolymarketBalances = isPolymarketEvmTask(task)
+              ? await getPolymarketBatchPrefetch()
+              : null;
             const result = await syncPositionsForUserWallet(pool, {
               userId: user.id,
               walletAddress: task.walletAddress,
               venue: task.venue ?? undefined,
+              prefetchedPolymarketBalances,
             });
             return {
               walletAddress: task.walletAddress,
@@ -551,6 +630,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               knownTokens: result.knownTokens,
               upsertedPositions: result.upsertedPositions,
               flattenedPositions: result.flattenedPositions,
+              durationMs: Date.now() - taskStartedAt,
+              timings: result.timings,
             };
           } catch (error) {
             const message =
@@ -561,6 +642,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 venue: task.venue ?? null,
                 status: "skipped" as const,
                 skippedReason: "connect_first",
+                durationMs: Date.now() - taskStartedAt,
               };
             }
             return {
@@ -568,6 +650,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               venue: task.venue ?? null,
               status: "error" as const,
               error: message,
+              durationMs: Date.now() - taskStartedAt,
             };
           }
         };
@@ -583,6 +666,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           }));
           const evmTasks = tasks.filter((task) => task.chain === "evm");
           const solTasks = tasks.filter((task) => task.chain === "solana");
+          enablePolymarketBatchPrefetch(evmTasks);
           const [evmResults, solResults] = await Promise.all([
             runWithConcurrency(evmTasks, evmConcurrency, executeTask),
             runWithConcurrency(solTasks, solanaConcurrency, executeTask),
@@ -662,6 +746,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
           const evmTasks = tasks.filter((task) => task.chain === "evm");
           const solTasks = tasks.filter((task) => task.chain === "solana");
+          enablePolymarketBatchPrefetch(evmTasks);
           const [evmResults, solResults] = await Promise.all([
             runWithConcurrency(evmTasks, evmConcurrency, executeTask),
             runWithConcurrency(solTasks, solanaConcurrency, executeTask),
@@ -679,11 +764,81 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           { synced: 0, skipped: 0, errors: 0 },
         );
 
+        let polymarketPrefetchStats: {
+          walletCount: number;
+          ownerCount: number;
+          candidateTokenCount: number;
+          rpcCallEstimate: number;
+          rpcCallCount: number;
+          durationMs: number;
+          failed: boolean;
+          sourceCounts:
+            | PrefetchedPolymarketOwnerBalances["sourceCounts"]
+            | null;
+          timings: PrefetchedPolymarketOwnerBalances["timings"] | null;
+        } | null = null;
+        if (polymarketPrefetchAttempted) {
+          const prefetchedForStats =
+            polymarketPrefetchValue as PrefetchedPolymarketOwnerBalances | null;
+          polymarketPrefetchStats = {
+            walletCount: polymarketPrefetchWallets.length,
+            ownerCount: prefetchedForStats?.owners.length ?? 0,
+            candidateTokenCount:
+              prefetchedForStats?.candidateTokenIds.length ?? 0,
+            rpcCallEstimate: prefetchedForStats?.rpcCallEstimate ?? 0,
+            rpcCallCount: prefetchedForStats?.rpcCallCount ?? 0,
+            durationMs: polymarketPrefetchDurationMs,
+            failed: polymarketPrefetchFailed,
+            sourceCounts: prefetchedForStats?.sourceCounts ?? null,
+            timings: prefetchedForStats?.timings ?? null,
+          };
+        }
+
+        const durationMs = Date.now() - startedAt;
+        const logPayload = {
+          userId: user.id,
+          walletAddress,
+          venue: query.venue ?? null,
+          venues: query.venues ?? null,
+          forceSync,
+          requestedWalletCount: query.wallets?.length ?? 0,
+          resolvedWalletCount: expandedWalletAddresses.length,
+          resultCount: results.length,
+          summary,
+          durationMs,
+          polymarketPrefetch: polymarketPrefetchStats,
+        };
+        if (durationMs >= 5000) {
+          app.log.warn(logPayload, "Positions sync completed slowly");
+        } else {
+          app.log.info(logPayload, "Positions sync completed");
+        }
+        const includeDebug = query.debug || durationMs >= 5000;
+        const responseResults = includeDebug
+          ? results
+          : results.map(({ durationMs: _durationMs, timings: _timings, ...result }) => result);
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           message: "Positions synced",
-          results,
+          results: responseResults,
           summary,
+          ...(includeDebug
+            ? {
+                durationMs,
+                debug: {
+                  polymarketPrefetch: polymarketPrefetchStats,
+                  taskTimings: results.map((result) => ({
+                    walletAddress: result.walletAddress,
+                    venue: result.venue,
+                    status: result.status,
+                    durationMs: result.durationMs ?? null,
+                    heldTokens: result.heldTokens ?? null,
+                    knownTokens: result.knownTokens ?? null,
+                    timings: result.timings ?? null,
+                  })),
+                },
+              }
+            : {}),
         });
       } catch (error) {
         const message =
@@ -706,6 +861,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               walletAddress,
               venue: query.venue,
               venues: query.venues,
+              durationMs: Date.now() - startedAt,
             },
             "Failed to sync positions",
           );

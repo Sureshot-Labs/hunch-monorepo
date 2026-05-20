@@ -503,6 +503,7 @@ export async function setPositionHidden(
 export type WalletTokenBalance = {
   tokenId: string;
   size: string;
+  averagePrice?: string | null;
 };
 
 type PositionScope = "own" | "followed";
@@ -522,6 +523,7 @@ async function upsertLongPositionsInTx(
 
   const tokenIds = inputs.positions.map((p) => p.tokenId);
   const sizes = inputs.positions.map((p) => p.size);
+  const averagePrices = inputs.positions.map((p) => p.averagePrice ?? null);
   const protectRecentFlatsSec =
     inputs.protectRecentFlatsSec != null &&
     Number.isFinite(inputs.protectRecentFlatsSec) &&
@@ -540,6 +542,7 @@ async function upsertLongPositionsInTx(
         token_id,
         side,
         size,
+        average_price,
         unrealized_pnl,
         realized_pnl,
         last_updated_at,
@@ -555,16 +558,18 @@ async function upsertLongPositionsInTx(
         v.token_id,
         'LONG',
         v.size::numeric,
+        v.average_price,
         0,
         0,
         now(),
         now(),
         now()
-      from unnest($5::text[], $6::text[]) as v(token_id, size)
+      from unnest($5::text[], $6::text[], $7::numeric[]) as v(token_id, size, average_price)
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
         side = 'LONG',
         size = excluded.size,
+        average_price = coalesce(excluded.average_price, positions.average_price),
         position_scope = case
           when positions.position_scope = 'own' or excluded.position_scope = 'own'
             then 'own'
@@ -573,8 +578,8 @@ async function upsertLongPositionsInTx(
         last_updated_at = now(),
         updated_at = now()
       where not (
-        $7::int > 0
-        and positions.last_updated_at > now() - ($7::int * interval '1 second')
+        $8::int > 0
+        and positions.last_updated_at > now() - ($8::int * interval '1 second')
         and (
           (
             positions.side = 'FLAT'
@@ -596,6 +601,7 @@ async function upsertLongPositionsInTx(
       inputs.positionScope,
       tokenIds,
       sizes,
+      averagePrices,
       protectRecentFlatsSec,
     ],
   );
@@ -615,7 +621,10 @@ async function markMissingPositionsFlatInTx(
     flattenGraceSec?: number;
   },
 ): Promise<number> {
-  let whereClause = "where user_id = $1 and wallet_address = $2 and venue = $3";
+  const walletClause = isEthAddress(inputs.walletAddress)
+    ? "lower(wallet_address) = lower($2)"
+    : "wallet_address = $2";
+  let whereClause = `where user_id = $1 and ${walletClause} and venue = $3`;
   const params: PgParams = [inputs.userId, inputs.walletAddress, inputs.venue];
   let paramCount = 3;
 
@@ -644,6 +653,7 @@ async function markMissingPositionsFlatInTx(
   }
 
   whereClause += " and (side <> 'FLAT' or size <> 0)";
+  whereClause += " and not (is_hidden = true and hidden_reason = 'auto_lost')";
 
   const result = await client.query(
     `
@@ -753,7 +763,7 @@ export async function autoHideResolvedLosingPositions(
       from unified_tokens ut
       join unified_markets m on m.id = ut.market_id
       where p.user_id = $1
-        and p.wallet_address = $2
+        and lower(p.wallet_address) = lower($2)
         and p.venue = $3
         and p.position_scope = 'own'
         and p.token_id = ut.token_id
@@ -796,7 +806,11 @@ export async function updatePositionMetrics(
     `
       update positions p
       set
-        average_price = v.average_price,
+        average_price = case
+          when v.average_price is not null then v.average_price
+          when p.size > 0 then p.average_price
+          else null
+        end,
         realized_pnl = v.realized_pnl,
         unrealized_pnl = v.unrealized_pnl,
         last_updated_at = now(),

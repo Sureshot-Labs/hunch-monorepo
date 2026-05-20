@@ -1,4 +1,8 @@
-import type { FastifyPluginAsync } from "fastify";
+import type {
+  FastifyBaseLogger,
+  FastifyPluginAsync,
+  FastifyReply,
+} from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { ethers } from "ethers";
@@ -103,6 +107,8 @@ const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_SELL_BALANCE_CHANGED_CODE = "POLYMARKET_SELL_BALANCE_CHANGED";
+const POLYMARKET_CREDENTIALS_INVALID_CODE =
+  "polymarket_credentials_invalid";
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -574,6 +580,82 @@ function extractPolymarketUpstreamMessage(payload: unknown): string | null {
   }
 
   return null;
+}
+
+function isPolymarketInvalidApiKeyResponse(inputs: {
+  status: number;
+  payload: unknown;
+}): boolean {
+  if (inputs.status !== 401) return false;
+  const message = extractPolymarketUpstreamMessage(inputs.payload);
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("unauthorized/invalid api key") ||
+    normalized.includes("invalid api key")
+  );
+}
+
+async function invalidatePolymarketCredentialsForInvalidApiKey(inputs: {
+  userId: string;
+  signer: string;
+  endpoint: string;
+  upstream: { status: number; payload: unknown };
+  log: FastifyBaseLogger;
+}): Promise<boolean> {
+  if (!isPolymarketInvalidApiKeyResponse(inputs.upstream)) return false;
+
+  const upstreamMessage = extractPolymarketUpstreamMessage(
+    inputs.upstream.payload,
+  );
+  let deactivated = 0;
+  try {
+    deactivated = await AuthService.deactivateVenueCredentials(
+      inputs.userId,
+      "polymarket",
+      inputs.signer,
+    );
+  } catch (error) {
+    inputs.log.error(
+      {
+        error,
+        userId: inputs.userId,
+        signer: inputs.signer,
+        endpoint: inputs.endpoint,
+        upstreamStatus: inputs.upstream.status,
+        upstreamMessage,
+      },
+      "Failed to deactivate stale Polymarket credentials",
+    );
+  }
+
+  inputs.log.warn(
+    {
+      userId: inputs.userId,
+      signer: inputs.signer,
+      endpoint: inputs.endpoint,
+      upstreamStatus: inputs.upstream.status,
+      upstreamMessage,
+      deactivated,
+    },
+    "Polymarket credentials invalidated after CLOB auth failure",
+  );
+
+  return true;
+}
+
+function sendPolymarketCredentialsInvalidResponse(
+  reply: FastifyReply,
+  upstream: { status: number; payload: unknown },
+) {
+  reply.code(401);
+  return reply.send({
+    error: "Reconnect Polymarket to refresh trading credentials.",
+    code: POLYMARKET_CREDENTIALS_INVALID_CODE,
+    reconnectRequired: true,
+    status: upstream.status,
+    payload: upstream.payload,
+  });
 }
 
 function isPolymarketDepositWalletRequiredMessage(
@@ -3112,6 +3194,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        if (
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            userId: user.id,
+            signer,
+            endpoint: "orders/sync",
+            upstream,
+            log: request.log,
+          })
+        ) {
+          return sendPolymarketCredentialsInvalidResponse(reply, upstream);
+        }
+
         reply.code(502);
         return reply.send({
           error: "Polymarket orders sync failed",
@@ -3298,6 +3392,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        if (
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            userId: user.id,
+            signer,
+            endpoint: "orders/open",
+            upstream,
+            log: request.log,
+          })
+        ) {
+          return sendPolymarketCredentialsInvalidResponse(reply, upstream);
+        }
+
         reply.code(502);
         return reply.send({
           error: "Polymarket open orders failed",
@@ -3380,6 +3486,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        if (
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            userId: user.id,
+            signer,
+            endpoint: "balance-allowance/sync",
+            upstream,
+            log: request.log,
+          })
+        ) {
+          return sendPolymarketCredentialsInvalidResponse(reply, upstream);
+        }
+
         const responseStatus =
           upstream.status >= 500
             ? 502
@@ -3657,6 +3775,18 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       if (!upstream.ok) {
+        if (
+          await invalidatePolymarketCredentialsForInvalidApiKey({
+            userId: user.id,
+            signer,
+            endpoint: "order",
+            upstream,
+            log: request.log,
+          })
+        ) {
+          return sendPolymarketCredentialsInvalidResponse(reply, upstream);
+        }
+
         const upstreamMessage = extractPolymarketUpstreamMessage(
           upstream.payload,
         );
@@ -3902,6 +4032,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       let resolvedPayload: unknown = null;
       let lastUpstreamFailure: { status: number; payload: unknown } | null =
         null;
+      let lastInvalidCredentialsFailure: {
+        status: number;
+        payload: unknown;
+      } | null = null;
       let lastCancelRejection: {
         signer: string;
         reason: string;
@@ -3940,6 +4074,22 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
 
         if (!upstream.ok) {
+          if (
+            await invalidatePolymarketCredentialsForInvalidApiKey({
+              userId: user.id,
+              signer,
+              endpoint: "order/cancel",
+              upstream,
+              log: request.log,
+            })
+          ) {
+            lastInvalidCredentialsFailure = {
+              status: upstream.status,
+              payload: upstream.payload,
+            };
+            continue;
+          }
+
           lastUpstreamFailure = {
             status: upstream.status,
             payload: upstream.payload,
@@ -4000,6 +4150,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             reason: lastCancelRejection.reason,
             payload: lastCancelRejection.payload,
           });
+        }
+
+        if (lastInvalidCredentialsFailure) {
+          return sendPolymarketCredentialsInvalidResponse(
+            reply,
+            lastInvalidCredentialsFailure,
+          );
         }
 
         if (lastUpstreamFailure) {
