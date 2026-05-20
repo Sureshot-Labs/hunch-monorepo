@@ -57,6 +57,18 @@ export type VenueFeeAccrualRow = {
   filled_at: Date;
 };
 
+export type VenueFeeBackfillAttemptStatus = "retry" | "skipped" | "failed";
+
+export type VenueFeeBackfillAttemptInput = {
+  venue: string;
+  feeProgram: string;
+  orderId: string;
+  venueOrderId: string | null;
+  status: VenueFeeBackfillAttemptStatus;
+  reason: string;
+  nextAttemptAt?: Date | null;
+};
+
 function microToDecimal(rawMicro: bigint): string {
   return usdcMicroToDecimalString(rawMicro);
 }
@@ -186,6 +198,102 @@ export async function upsertVenueFeeAccruals(
   return { upserted: result.rowCount ?? 0 };
 }
 
+export async function markVenueFeeBackfillAttempts(
+  pool: Pool,
+  inputs: VenueFeeBackfillAttemptInput[],
+  options: { maxRetryAttempts?: number } = {},
+): Promise<{ marked: number }> {
+  if (!inputs.length) return { marked: 0 };
+  const maxRetryAttempts = Math.max(
+    1,
+    Math.trunc(options.maxRetryAttempts ?? 8),
+  );
+  const result = await pool.query(
+    `
+      with input as (
+        select *
+        from unnest(
+          $1::text[],
+          $2::text[],
+          $3::uuid[],
+          $4::text[],
+          $5::text[],
+          $6::text[],
+          $7::timestamptz[]
+        ) as t(
+          venue, fee_program, order_id, venue_order_id, status, reason,
+          next_attempt_at
+        )
+      )
+      insert into venue_fee_backfill_attempts (
+        venue, fee_program, order_id, venue_order_id, status, reason, attempts,
+        next_attempt_at, first_attempted_at, last_attempted_at, created_at,
+        updated_at
+      )
+      select
+        venue, fee_program, order_id, venue_order_id, status, reason, 1,
+        next_attempt_at, now(), now(), now(), now()
+      from input
+      on conflict (venue, fee_program, order_id)
+      do update set
+        venue_order_id = coalesce(
+          excluded.venue_order_id,
+          venue_fee_backfill_attempts.venue_order_id
+        ),
+        status = case
+          when excluded.status = 'retry'
+            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            then 'failed'
+          else excluded.status
+        end,
+        reason = case
+          when excluded.status = 'retry'
+            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            then excluded.reason || ' (max attempts reached)'
+          else excluded.reason
+        end,
+        attempts = venue_fee_backfill_attempts.attempts + 1,
+        next_attempt_at = case
+          when excluded.status = 'retry'
+            and venue_fee_backfill_attempts.attempts + 1 >= $8::int
+            then null
+          else excluded.next_attempt_at
+        end,
+        last_attempted_at = now(),
+        updated_at = now()
+      returning id
+    `,
+    [
+      inputs.map((input) => input.venue),
+      inputs.map((input) => input.feeProgram),
+      inputs.map((input) => input.orderId),
+      inputs.map((input) => input.venueOrderId),
+      inputs.map((input) => input.status),
+      inputs.map((input) => input.reason),
+      inputs.map((input) => input.nextAttemptAt ?? null),
+      maxRetryAttempts,
+    ],
+  );
+  return { marked: result.rowCount ?? 0 };
+}
+
+export async function clearVenueFeeBackfillAttempts(
+  pool: Pool,
+  inputs: { venue: string; feeProgram: string; orderIds: string[] },
+): Promise<{ deleted: number }> {
+  if (!inputs.orderIds.length) return { deleted: 0 };
+  const result = await pool.query(
+    `
+      delete from venue_fee_backfill_attempts
+      where venue = $1
+        and fee_program = $2
+        and order_id = any($3::uuid[])
+    `,
+    [inputs.venue, inputs.feeProgram, inputs.orderIds],
+  );
+  return { deleted: result.rowCount ?? 0 };
+}
+
 async function insertCollectedFeeEventForAccrual(
   client: PoolClient,
   row: VenueFeeAccrualRow,
@@ -297,7 +405,12 @@ export async function unlockVenueFeeAccruals(
     dryRun?: boolean;
     assumeRewardsChainLock?: boolean;
   },
-): Promise<{ considered: number; unlocked: number; skipped: number; budgetMicro: string }> {
+): Promise<{
+  considered: number;
+  unlocked: number;
+  skipped: number;
+  budgetMicro: string;
+}> {
   const run = async () => {
     const params: string[] = [options.chainId];
     let filter = `
@@ -416,4 +529,3 @@ export async function unlockVenueFeeAccruals(
 export function venueFeeMicroToDecimal(rawMicro: bigint): string {
   return microToDecimal(rawMicro);
 }
-

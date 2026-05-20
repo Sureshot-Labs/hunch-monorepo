@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { randomUUID } from "node:crypto";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -2575,7 +2576,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         ) {
           reply.code(409);
           return reply.send({
-            error: "Limitless fee rate changed. Refresh the order and try again.",
+            error:
+              "Limitless fee rate changed. Refresh the order and try again.",
           });
         }
         const sideValue = coerceOrderNumber(order.side, "side");
@@ -2757,12 +2759,14 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         makerAmount,
         takerAmount,
       );
+      const clientOrderId = `hunch-${randomUUID()}`;
       const orderPayload = {
         order: orderForUpstream,
         orderType: request.body.orderType,
         marketSlug: request.body.marketSlug,
         ownerId,
         onBehalfOf: ownerId,
+        clientOrderId,
       };
 
       const upstream = await limitlessRequest({
@@ -2886,6 +2890,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           ? (size ?? confirmedImmediateFill.shares)
           : size;
       const confirmedFillAt = confirmedImmediateFill ? new Date() : null;
+      const storedOrderPayload = {
+        ...orderPayload,
+        _hunchUpstream: upstream.payload,
+      };
 
       const stored = await storeOrder(pool, {
         userId: user.id,
@@ -2901,12 +2909,12 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         status,
         errorMessage: null,
         rawError: null,
-        orderPayload,
+        orderPayload: storedOrderPayload,
         lastUpdate: confirmedFillAt,
         filledAt: confirmedFillAt,
       });
 
-      if (stored.kind === "stored" && confirmedFillAt) {
+      if (confirmedFillAt) {
         try {
           await upsertLimitlessVenueShareAccrualFromOrderPayload(pool, {
             orderId: stored.order.id,
@@ -3267,6 +3275,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           status,
           errorMessage: null,
           rawError: null,
+          orderPayload: order,
         });
 
         if (result.kind === "stored") storedNew += 1;

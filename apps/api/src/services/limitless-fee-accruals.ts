@@ -9,8 +9,11 @@ import {
   extractLimitlessMessage,
 } from "./limitless-client.js";
 import {
+  clearVenueFeeBackfillAttempts,
+  markVenueFeeBackfillAttempts,
   unlockVenueFeeAccruals,
   upsertVenueFeeAccruals,
+  type VenueFeeBackfillAttemptInput,
   type VenueFeeAccrualInput,
 } from "./venue-fee-accruals.js";
 
@@ -21,10 +24,15 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SETTLED_STATUSES = new Set(["MINED", "CONFIRMED"]);
 const FAILED_STATUSES = new Set(["FAILED"]);
+const BACKFILL_RETRY_DELAY_MS = 15 * 60 * 1000;
+const BACKFILL_MAX_RETRY_ATTEMPTS = 8;
+const LIMITLESS_STATUS_BATCH_MAX_ITEMS = 50;
 
 export type LimitlessFeeShareConfig = {
   active: boolean;
   shareBps: number;
+  effectiveAt: Date | null;
+  source: "db" | "env";
 };
 
 export type LimitlessOrderStatusItem = {
@@ -44,6 +52,9 @@ export type LimitlessAccrualOrderRow = {
   filled_at: Date | null;
   last_update: Date | null;
   posted_at: Date | null;
+  order_payload?: unknown | null;
+  client_order_id?: string | null;
+  fee_share_bps?: number | null;
 };
 
 type LimitlessAccrualRow = {
@@ -51,7 +62,19 @@ type LimitlessAccrualRow = {
   order_id: string;
   venue_order_id: string | null;
   fee_rate_bps: number;
+  order_payload?: unknown | null;
 };
+
+type LimitlessAccrualBuildResult =
+  | { accrual: VenueFeeAccrualInput; attempt: null }
+  | {
+      accrual: null;
+      attempt: {
+        status: VenueFeeBackfillAttemptInput["status"];
+        reason: string;
+        retryable: boolean;
+      };
+    };
 
 function hasPositiveContractsFee(totals: Record<string, unknown>): boolean {
   const contractsFee = rawDigits(totals.contractsFee);
@@ -125,12 +148,16 @@ function extractResults(payload: unknown): Record<string, unknown>[] {
   return [];
 }
 
-function extractStatusData(result: Record<string, unknown>): Record<string, unknown> | null {
+function extractStatusData(
+  result: Record<string, unknown>,
+): Record<string, unknown> | null {
   const data = isRecord(result.data) ? result.data : null;
   return data;
 }
 
-function extractOrderRecord(data: Record<string, unknown>): Record<string, unknown> | null {
+function extractOrderRecord(
+  data: Record<string, unknown>,
+): Record<string, unknown> | null {
   const orderWrapper = isRecord(data.order) ? data.order : null;
   if (orderWrapper && isRecord(orderWrapper.order)) return orderWrapper.order;
   return orderWrapper;
@@ -151,6 +178,36 @@ function extractTotalsRaw(
   execution: Record<string, unknown>,
 ): Record<string, unknown> | null {
   return isRecord(execution.totalsRaw) ? execution.totalsRaw : null;
+}
+
+function extractStoredLimitlessUpstreamPayload(
+  payload: unknown,
+): Record<string, unknown> | null {
+  if (!isRecord(payload)) return null;
+  if (isRecord(payload._hunchUpstream)) return payload._hunchUpstream;
+  if (isRecord(payload.submitted) && isRecord(payload.submitted._hunchUpstream)) {
+    return payload.submitted._hunchUpstream;
+  }
+  return null;
+}
+
+export function buildStoredLimitlessOrderStatusItem(
+  order: Pick<
+    LimitlessAccrualOrderRow,
+    "venue_order_id" | "client_order_id" | "order_payload"
+  >,
+): LimitlessOrderStatusItem | null {
+  const upstream = extractStoredLimitlessUpstreamPayload(order.order_payload);
+  if (!upstream) return null;
+  return {
+    orderId: order.venue_order_id,
+    payload: {
+      status: "found",
+      orderId: order.venue_order_id,
+      clientOrderId: order.client_order_id ?? undefined,
+      data: upstream,
+    },
+  };
 }
 
 function deriveUsdGrossRaw(totals: Record<string, unknown>): bigint | null {
@@ -176,31 +233,60 @@ function settlementStatus(execution: Record<string, unknown>): string | null {
   return status ? status.toUpperCase() : null;
 }
 
-export function buildLimitlessVenueShareAccrualFromStatus(inputs: {
+function buildLimitlessVenueShareAccrualResult(inputs: {
   order: LimitlessAccrualOrderRow;
   status: LimitlessOrderStatusItem;
   config: LimitlessFeeShareConfig;
-}): VenueFeeAccrualInput | null {
-  if (!inputs.config.active) return null;
+}): LimitlessAccrualBuildResult {
+  const terminal = (
+    reason: string,
+    status: VenueFeeBackfillAttemptInput["status"] = "skipped",
+  ): LimitlessAccrualBuildResult => ({
+    accrual: null,
+    attempt: {
+      status,
+      reason,
+      retryable: status === "retry",
+    },
+  });
+  const retry = (reason: string): LimitlessAccrualBuildResult =>
+    terminal(reason, "retry");
+
+  if (!inputs.config.active) return terminal("Limitless fee share inactive");
   const data = extractStatusData(inputs.status.payload);
-  if (!data) return null;
+  if (!data) return retry("Limitless order status data missing");
   const execution = extractExecutionRecord(data);
-  if (!execution) return null;
-  if (execution.matched !== true) return null;
+  if (!execution) return retry("Limitless execution missing");
+  if (execution.matched !== true) return retry("Limitless order not matched");
   const status = settlementStatus(execution);
-  if (!status || !SETTLED_STATUSES.has(status)) return null;
+  if (!status) return retry("Limitless settlement status missing");
+  if (FAILED_STATUSES.has(status)) {
+    return terminal("Limitless settlement failed", "failed");
+  }
+  if (!SETTLED_STATUSES.has(status)) {
+    return retry(`Limitless settlement is ${status}`);
+  }
   const totals = extractTotalsRaw(execution);
-  if (!totals) return null;
+  if (!totals) return terminal("Limitless fee totals missing");
 
   const venueFeeRaw = rawDigits(totals.usdFee);
   const notionalRaw = deriveUsdGrossRaw(totals);
-  if (venueFeeRaw == null || notionalRaw == null) return null;
+  if (venueFeeRaw == null || notionalRaw == null) {
+    return terminal(
+      limitlessUsdFeeFailureReason(totals, venueFeeRaw, notionalRaw),
+    );
+  }
   const feeRaw = floorBps(venueFeeRaw, inputs.config.shareBps);
-  if (venueFeeRaw <= 0n || notionalRaw <= 0n || feeRaw <= 0n) return null;
+  if (venueFeeRaw <= 0n || notionalRaw <= 0n) {
+    return terminal(
+      limitlessUsdFeeFailureReason(totals, venueFeeRaw, notionalRaw),
+    );
+  }
+  if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
 
   const orderRecord = extractOrderRecord(data);
   const side = normalizeSide(orderRecord?.side) ?? inputs.order.side;
-  if (!side) return null;
+  if (!side) return terminal("Limitless order side missing");
   const venueOrderId =
     textOrNull(inputs.status.payload.orderId) ?? inputs.order.venue_order_id;
   const venueTradeId = textOrNull(execution.tradeEventId);
@@ -208,45 +294,59 @@ export function buildLimitlessVenueShareAccrualFromStatus(inputs: {
   const venueFillId = venueTradeId ?? txHash ?? venueOrderId;
   const tokenId = textOrNull(orderRecord?.tokenId) ?? inputs.order.token_id;
   const filledAt =
-    inputs.order.filled_at ?? inputs.order.last_update ?? inputs.order.posted_at ?? new Date();
+    inputs.order.filled_at ??
+    inputs.order.last_update ??
+    inputs.order.posted_at ??
+    new Date();
   const venueFeeRateBps = numberOrNull(execution.feeRateBps);
   const venueEffectiveFeeBps = numberOrNull(execution.effectiveFeeBps);
 
   return {
-    userId: inputs.order.user_id,
-    walletAddress: inputs.order.wallet_address,
-    signerAddress: inputs.order.signer_address,
-    venue: LIMITLESS_VENUE,
-    feeProgram: LIMITLESS_FEE_PROGRAM,
-    chainId: BASE_CHAIN_ID,
-    orderId: inputs.order.id,
-    orderHash: inputs.order.order_hash ?? venueOrderId,
-    venueOrderId,
-    venueFillId,
-    venueTradeId,
-    txHash,
-    tokenId,
-    side,
-    role: "taker",
-    attributionCode: null,
-    feeRateBps: inputs.config.shareBps,
-    feeBasis: "venue_fee_share",
-    notionalAmountRaw: notionalRaw.toString(),
-    notionalAmount: microToDecimal(notionalRaw),
-    feeAmountRaw: feeRaw.toString(),
-    feeAmount: microToDecimal(feeRaw),
-    feeAsset: "USDC",
-    venueFeeRateBps,
-    venueEffectiveFeeBps,
-    venueFeeAmountRaw: venueFeeRaw.toString(),
-    venueFeeAmount: microToDecimal(venueFeeRaw),
-    filledAt,
+    accrual: {
+      userId: inputs.order.user_id,
+      walletAddress: inputs.order.wallet_address,
+      signerAddress: inputs.order.signer_address,
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_FEE_PROGRAM,
+      chainId: BASE_CHAIN_ID,
+      orderId: inputs.order.id,
+      orderHash: inputs.order.order_hash ?? venueOrderId,
+      venueOrderId,
+      venueFillId,
+      venueTradeId,
+      txHash,
+      tokenId,
+      side,
+      role: "taker",
+      attributionCode: null,
+      feeRateBps: inputs.config.shareBps,
+      feeBasis: "venue_fee_share",
+      notionalAmountRaw: notionalRaw.toString(),
+      notionalAmount: microToDecimal(notionalRaw),
+      feeAmountRaw: feeRaw.toString(),
+      feeAmount: microToDecimal(feeRaw),
+      feeAsset: "USDC",
+      venueFeeRateBps,
+      venueEffectiveFeeBps,
+      venueFeeAmountRaw: venueFeeRaw.toString(),
+      venueFeeAmount: microToDecimal(venueFeeRaw),
+      filledAt,
+    },
+    attempt: null,
   };
+}
+
+export function buildLimitlessVenueShareAccrualFromStatus(inputs: {
+  order: LimitlessAccrualOrderRow;
+  status: LimitlessOrderStatusItem;
+  config: LimitlessFeeShareConfig;
+}): VenueFeeAccrualInput | null {
+  return buildLimitlessVenueShareAccrualResult(inputs).accrual;
 }
 
 export function getLimitlessFeeShareConfig(): LimitlessFeeShareConfig {
   const shareBps = clampShareBps(env.limitlessFeeShareBps);
-  return { active: shareBps > 0, shareBps };
+  return { active: shareBps > 0, shareBps, effectiveAt: null, source: "env" };
 }
 
 export async function resolveLimitlessFeeShareConfig(
@@ -256,36 +356,59 @@ export async function resolveLimitlessFeeShareConfig(
   const shareBps = clampShareBps(
     policy?.limitless_fee_share_bps ?? env.limitlessFeeShareBps,
   );
-  return { active: shareBps > 0, shareBps };
+  return {
+    active: shareBps > 0,
+    shareBps,
+    effectiveAt: policy?.effective_at ?? null,
+    source: policy ? "db" : "env",
+  };
 }
 
 async function fetchLimitlessOrderStatusBatch(
-  orderIds: string[],
+  lookups: Array<{ orderId: string; clientOrderId?: string | null }>,
 ): Promise<Map<string, LimitlessOrderStatusItem>> {
-  if (!orderIds.length) return new Map();
-  const upstream = await limitlessRequest({
-    method: "POST",
-    requestPath: "/orders/status/batch",
-    auth: "partner_hmac",
-    body: {
-      items: orderIds.map((orderId) => ({ orderId })),
-    },
-  });
-  if (!upstream.ok) {
-    const message = extractLimitlessMessage(upstream.payload);
-    throw new Error(
-      message
-        ? `Limitless order status batch failed (${upstream.status}): ${message}`
-        : `Limitless order status batch failed (${upstream.status}).`,
-    );
-  }
-
+  if (!lookups.length) return new Map();
+  const items = lookups.flatMap((lookup) => [
+    { orderId: lookup.orderId },
+    ...(lookup.clientOrderId ? [{ clientOrderId: lookup.clientOrderId }] : []),
+  ]);
   const out = new Map<string, LimitlessOrderStatusItem>();
-  for (const result of extractResults(upstream.payload)) {
-    if (result.status !== "found") continue;
-    const orderId = textOrNull(result.orderId);
-    if (!orderId) continue;
-    out.set(orderId, { orderId, payload: result });
+  for (
+    let offset = 0;
+    offset < items.length;
+    offset += LIMITLESS_STATUS_BATCH_MAX_ITEMS
+  ) {
+    const batchItems = items.slice(
+      offset,
+      offset + LIMITLESS_STATUS_BATCH_MAX_ITEMS,
+    );
+    const upstream = await limitlessRequest({
+      method: "POST",
+      requestPath: "/orders/status/batch",
+      auth: "partner_hmac",
+      body: {
+        items: batchItems,
+      },
+    });
+    if (!upstream.ok) {
+      const message = extractLimitlessMessage(upstream.payload);
+      throw new Error(
+        message
+          ? `Limitless order status batch failed (${upstream.status}): ${message}`
+          : `Limitless order status batch failed (${upstream.status}).`,
+      );
+    }
+
+    for (const result of extractResults(upstream.payload)) {
+      if (result.status !== "found") continue;
+      const orderId = textOrNull(result.orderId);
+      const clientOrderId = textOrNull(result.clientOrderId);
+      const statusOrderId = orderId ?? clientOrderId;
+      if (!statusOrderId) continue;
+      const item = { orderId: statusOrderId, payload: result };
+      if (orderId) out.set(orderId, item);
+      if (clientOrderId) out.set(`client:${clientOrderId}`, item);
+    }
   }
   return out;
 }
@@ -295,54 +418,217 @@ export async function backfillLimitlessVenueShareAccruals(
   options: { limit?: number; minAgeSec?: number } = {},
 ): Promise<{ checked: number; upserted: number; skipped: number }> {
   const config = await resolveLimitlessFeeShareConfig(pool);
-  if (!config.active) return { checked: 0, upserted: 0, skipped: 0 };
+  if (!config.active && config.source === "env") {
+    return { checked: 0, upserted: 0, skipped: 0 };
+  }
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 50));
   const minAgeSec = Math.max(0, Math.trunc(options.minAgeSec ?? 60));
+  const useEnvFallback = config.source === "env" && config.shareBps > 0;
   const { rows } = await pool.query<LimitlessAccrualOrderRow>(
     `
-      select o.id, o.user_id, o.wallet_address, o.signer_address,
-             o.venue_order_id, o.order_hash, o.token_id,
-             case when o.side in ('BUY', 'SELL') then o.side else null end as side,
-             o.filled_at, o.last_update, o.posted_at
-      from orders o
-      where o.venue = 'limitless'
-        and o.venue_order_id ~* $1
-        and lower(o.status) in ('filled', 'matched', 'mined', 'confirmed')
-        and coalesce(o.filled_at, o.last_update, o.posted_at, now()) <= now() - ($3::int * interval '1 second')
-        and not exists (
-          select 1
-          from venue_fee_accruals a
-          where a.venue = 'limitless'
-            and a.fee_program = 'venue_share'
-            and a.order_id = o.id
-        )
-      order by coalesce(o.filled_at, o.last_update, o.posted_at) asc nulls last
+      with candidates as (
+        select o.id, o.user_id, o.wallet_address, o.signer_address,
+               o.venue_order_id, o.order_hash, o.token_id,
+               case when o.side in ('BUY', 'SELL') then o.side else null end as side,
+               o.filled_at, o.last_update, o.posted_at, o.order_payload,
+               coalesce(o.filled_at, o.last_update, o.posted_at) as candidate_time
+        from orders o
+        where o.venue = 'limitless'
+          and o.venue_order_id ~* $1
+          and lower(o.status) in ('filled', 'matched', 'mined', 'confirmed')
+          and coalesce(o.filled_at, o.last_update, o.posted_at, now()) <= now() - ($3::int * interval '1 second')
+          and not exists (
+            select 1
+            from venue_fee_accruals a
+            where a.venue = 'limitless'
+              and a.fee_program = 'venue_share'
+              and a.order_id = o.id
+          )
+          and not exists (
+            select 1
+            from venue_fee_backfill_attempts b
+            where b.venue = 'limitless'
+              and b.fee_program = 'venue_share'
+              and b.order_id = o.id
+              and (
+                b.status in ('skipped', 'failed')
+                or (
+                  b.status = 'retry'
+                  and coalesce(b.next_attempt_at, 'infinity'::timestamptz) > now()
+                  and not (
+                    jsonb_typeof(o.order_payload) = 'object'
+                    and (
+                      o.order_payload ? '_hunchUpstream'
+                      or (
+                        jsonb_typeof(o.order_payload->'submitted') = 'object'
+                        and (o.order_payload->'submitted') ? '_hunchUpstream'
+                      )
+                    )
+                  )
+                )
+              )
+          )
+      )
+      select c.id, c.user_id, c.wallet_address, c.signer_address,
+             c.venue_order_id, c.order_hash, c.token_id, c.side,
+             c.filled_at, c.last_update, c.posted_at, c.order_payload,
+             coalesce(
+               c.order_payload->>'clientOrderId',
+               c.order_payload->'submitted'->>'clientOrderId',
+               c.order_payload->'_hunchSubmitted'->>'clientOrderId',
+               c.order_payload->'_hunchUpstream'->'execution'->>'clientOrderId',
+               c.order_payload->'_hunchUpstream'->'order'->'execution'->>'clientOrderId'
+             ) as client_order_id,
+             coalesce(
+               active_policy.limitless_fee_share_bps,
+               case when $4::boolean then $5::int else null end
+             ) as fee_share_bps
+      from candidates c
+      left join lateral (
+        select p.limitless_fee_share_bps
+        from fee_policy p
+        where p.venue = 'limitless'
+          and p.effective_at <= c.candidate_time
+        order by p.effective_at desc, p.created_at desc
+        limit 1
+      ) active_policy on true
+      where coalesce(
+        active_policy.limitless_fee_share_bps,
+        case when $4::boolean then $5::int else null end,
+        0
+      ) > 0
+      order by c.candidate_time asc nulls last
       limit $2
     `,
-    [UUID_RE.source, limit, minAgeSec],
+    [UUID_RE.source, limit, minAgeSec, useEnvFallback, config.shareBps],
   );
   if (!rows.length) return { checked: 0, upserted: 0, skipped: 0 };
 
-  const statuses = await fetchLimitlessOrderStatusBatch(
-    rows.map((row) => row.venue_order_id),
-  );
   const accruals: Array<VenueFeeAccrualInput | null> = [];
+  const attempts: VenueFeeBackfillAttemptInput[] = [];
+  const rowsNeedingStatus: LimitlessAccrualOrderRow[] = [];
   let skipped = 0;
   for (const row of rows) {
-    const status = statuses.get(row.venue_order_id);
-    if (!status) {
+    const shareBps = clampShareBps(row.fee_share_bps);
+    if (shareBps <= 0) {
       skipped += 1;
+      attempts.push({
+        venue: LIMITLESS_VENUE,
+        feeProgram: LIMITLESS_FEE_PROGRAM,
+        orderId: row.id,
+        venueOrderId: row.venue_order_id,
+        status: "skipped",
+        reason: "Limitless fee share inactive at order time",
+        nextAttemptAt: null,
+      });
       continue;
     }
-    const accrual = buildLimitlessVenueShareAccrualFromStatus({
+
+    const storedStatus = buildStoredLimitlessOrderStatusItem(row);
+    if (!storedStatus) {
+      rowsNeedingStatus.push(row);
+      continue;
+    }
+
+    const result = buildLimitlessVenueShareAccrualResult({
+      order: row,
+      status: storedStatus,
+      config: {
+        ...config,
+        active: true,
+        shareBps,
+      },
+    });
+    const accrual = result.accrual;
+    if (accrual) {
+      accruals.push(accrual);
+      continue;
+    }
+    if (result.attempt) {
+      if (result.attempt.retryable) {
+        rowsNeedingStatus.push(row);
+      } else {
+        skipped += 1;
+        attempts.push({
+          venue: LIMITLESS_VENUE,
+          feeProgram: LIMITLESS_FEE_PROGRAM,
+          orderId: row.id,
+          venueOrderId: row.venue_order_id,
+          status: result.attempt.status,
+          reason: result.attempt.reason,
+          nextAttemptAt: null,
+        });
+      }
+    } else {
+      skipped += 1;
+    }
+  }
+
+  const statuses = await fetchLimitlessOrderStatusBatch(
+    rowsNeedingStatus.map((row) => ({
+      orderId: row.venue_order_id,
+      clientOrderId: row.client_order_id,
+    })),
+  );
+  for (const row of rowsNeedingStatus) {
+    const status =
+      statuses.get(row.venue_order_id) ??
+      (row.client_order_id
+        ? statuses.get(`client:${row.client_order_id}`)
+        : null);
+    if (!status) {
+      skipped += 1;
+      attempts.push({
+        venue: LIMITLESS_VENUE,
+        feeProgram: LIMITLESS_FEE_PROGRAM,
+        orderId: row.id,
+        venueOrderId: row.venue_order_id,
+        status: "retry",
+        reason: "Limitless order status not found",
+        nextAttemptAt: new Date(Date.now() + BACKFILL_RETRY_DELAY_MS),
+      });
+      continue;
+    }
+    const shareBps = clampShareBps(row.fee_share_bps);
+    const result = buildLimitlessVenueShareAccrualResult({
       order: row,
       status,
-      config,
+      config: {
+        ...config,
+        active: true,
+        shareBps,
+      },
     });
+    const accrual = result.accrual;
     if (!accrual) skipped += 1;
+    if (result.attempt) {
+      attempts.push({
+        venue: LIMITLESS_VENUE,
+        feeProgram: LIMITLESS_FEE_PROGRAM,
+        orderId: row.id,
+        venueOrderId: row.venue_order_id,
+        status: result.attempt.status,
+        reason: result.attempt.reason,
+        nextAttemptAt: result.attempt.retryable
+          ? new Date(Date.now() + BACKFILL_RETRY_DELAY_MS)
+          : null,
+      });
+    }
     accruals.push(accrual);
   }
   const upsert = await upsertVenueFeeAccruals(pool, accruals);
+  if (upsert.upserted > 0) {
+    await clearVenueFeeBackfillAttempts(pool, {
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_FEE_PROGRAM,
+      orderIds: accruals
+        .filter((accrual): accrual is VenueFeeAccrualInput => accrual != null)
+        .map((accrual) => accrual.orderId),
+    });
+  }
+  await markVenueFeeBackfillAttempts(pool, attempts, {
+    maxRetryAttempts: BACKFILL_MAX_RETRY_ATTEMPTS,
+  });
   return { checked: rows.length, upserted: upsert.upserted, skipped };
 }
 
@@ -395,18 +681,25 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
 export async function verifyLimitlessVenueShareAccruals(
   pool: Pool,
   options: { limit?: number } = {},
-): Promise<{ checked: number; verified: number; failed: number; skipped: number }> {
+): Promise<{
+  checked: number;
+  verified: number;
+  failed: number;
+  skipped: number;
+}> {
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 50));
   const { rows } = await pool.query<LimitlessAccrualRow>(
     `
-      select id, order_id, venue_order_id, fee_rate_bps
-      from venue_fee_accruals
-      where venue = 'limitless'
-        and fee_program = 'venue_share'
-        and status = 'accrued'
-        and venue_order_id is not null
-        and venue_order_id ~* $1
-      order by filled_at asc, created_at asc
+      select a.id, a.order_id, a.venue_order_id, a.fee_rate_bps,
+             o.order_payload
+      from venue_fee_accruals a
+      left join orders o on o.id = a.order_id
+      where a.venue = 'limitless'
+        and a.fee_program = 'venue_share'
+        and a.status = 'accrued'
+        and a.venue_order_id is not null
+        and a.venue_order_id ~* $1
+      order by a.filled_at asc, a.created_at asc
       limit $2
     `,
     [UUID_RE.source, limit],
@@ -415,8 +708,17 @@ export async function verifyLimitlessVenueShareAccruals(
 
   const statuses = await fetchLimitlessOrderStatusBatch(
     rows
+      .filter(
+        (row) =>
+          !buildStoredLimitlessOrderStatusItem({
+            venue_order_id: row.venue_order_id ?? "",
+            client_order_id: null,
+            order_payload: row.order_payload,
+          }),
+      )
       .map((row) => row.venue_order_id)
-      .filter((orderId): orderId is string => Boolean(orderId)),
+      .filter((orderId): orderId is string => Boolean(orderId))
+      .map((orderId) => ({ orderId })),
   );
 
   let checked = 0;
@@ -426,7 +728,14 @@ export async function verifyLimitlessVenueShareAccruals(
   for (const row of rows) {
     checked += 1;
     const orderId = row.venue_order_id;
-    const status = orderId ? statuses.get(orderId) : null;
+    const storedStatus = orderId
+      ? buildStoredLimitlessOrderStatusItem({
+          venue_order_id: orderId,
+          client_order_id: null,
+          order_payload: row.order_payload,
+        })
+      : null;
+    const status = storedStatus ?? (orderId ? statuses.get(orderId) : null);
     const data = status ? extractStatusData(status.payload) : null;
     const execution = data ? extractExecutionRecord(data) : null;
     const executionStatus = execution ? settlementStatus(execution) : null;

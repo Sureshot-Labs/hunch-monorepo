@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 
 import {
+  backfillLimitlessVenueShareAccruals,
+  buildStoredLimitlessOrderStatusItem,
   buildLimitlessVenueShareAccrualFromStatus,
   type LimitlessAccrualOrderRow,
   type LimitlessFeeShareConfig,
@@ -19,9 +21,21 @@ function test(name: string, fn: () => void) {
   }
 }
 
+async function testAsync(name: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+    console.log(`ok - ${name}`);
+  } catch (error) {
+    console.error(`not ok - ${name}`);
+    throw error;
+  }
+}
+
 const config: LimitlessFeeShareConfig = {
   active: true,
   shareBps: 1_000,
+  effectiveAt: null,
+  source: "env",
 };
 
 function baseOrder(): LimitlessAccrualOrderRow {
@@ -37,10 +51,13 @@ function baseOrder(): LimitlessAccrualOrderRow {
     filled_at: new Date("2026-05-19T00:00:00.000Z"),
     last_update: null,
     posted_at: null,
+    order_payload: null,
   };
 }
 
-function statusWithTotals(totalsRaw: Record<string, string>): LimitlessOrderStatusItem {
+function statusWithTotals(
+  totalsRaw: Record<string, string>,
+): LimitlessOrderStatusItem {
   return {
     orderId: "limitless-order-1",
     payload: {
@@ -121,3 +138,135 @@ test("does not create rewards accrual when fee share rounds to zero", () => {
 
   assert.equal(accrual, null);
 });
+
+test("builds Limitless status item from stored upstream payload", () => {
+  const order = {
+    ...baseOrder(),
+    client_order_id: "hunch-test-client-order",
+    order_payload: {
+      history: {},
+      submitted: {
+        clientOrderId: "hunch-test-client-order",
+        _hunchUpstream: {
+          order: {
+            execution: {
+              matched: true,
+              settlementStatus: "CONFIRMED",
+              totalsRaw: {
+                usdGross: "1000000",
+                usdFee: "10000",
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const status = buildStoredLimitlessOrderStatusItem(order);
+  assert.ok(status);
+  assert.equal(status.orderId, "limitless-order-1");
+  assert.equal(status.payload.clientOrderId, "hunch-test-client-order");
+  assert.deepEqual(status.payload.data, {
+    order: {
+      execution: {
+        matched: true,
+        settlementStatus: "CONFIRMED",
+        totalsRaw: {
+          usdGross: "1000000",
+          usdFee: "10000",
+        },
+      },
+    },
+  });
+});
+
+await testAsync(
+  "backfill filters candidates by order-time policy and backfill attempts",
+  async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const pool = {
+      async query(sql: string, params: unknown[] = []) {
+        queries.push({ sql, params });
+        if (sql.includes("from fee_policy") && !sql.includes("from orders o")) {
+          return {
+            rows: [
+              {
+                id: "00000000-0000-4000-8000-000000000010",
+                venue: "limitless",
+                fee_bps: 0,
+                fee_scale: null,
+                polymarket_builder_code: null,
+                polymarket_builder_taker_fee_bps: null,
+                polymarket_builder_maker_fee_bps: null,
+                limitless_fee_share_bps: 5_000,
+                effective_at: new Date("2026-05-19T00:00:00.000Z"),
+                created_at: new Date("2026-05-19T00:00:00.000Z"),
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      },
+    };
+
+    const result = await backfillLimitlessVenueShareAccruals(pool as never, {
+      limit: 7,
+      minAgeSec: 60,
+    });
+
+    assert.deepEqual(result, { checked: 0, upserted: 0, skipped: 0 });
+    const candidateQuery = queries.find((query) =>
+      query.sql.includes("from orders o"),
+    );
+    assert.ok(candidateQuery);
+    assert.match(candidateQuery.sql, /left join lateral/i);
+    assert.match(candidateQuery.sql, /p\.effective_at <= c\.candidate_time/i);
+    assert.match(candidateQuery.sql, /venue_fee_backfill_attempts/i);
+    assert.match(candidateQuery.sql, /_hunchUpstream/i);
+    assert.match(candidateQuery.sql, /o\.order_payload->'submitted'/i);
+    assert.equal(candidateQuery.params[1], 7);
+    assert.equal(candidateQuery.params[2], 60);
+    assert.equal(candidateQuery.params[3], false);
+    assert.equal(candidateQuery.params[4], 5_000);
+  },
+);
+
+await testAsync(
+  "backfill still scans historical DB policy windows when latest share is zero",
+  async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const pool = {
+      async query(sql: string, params: unknown[] = []) {
+        queries.push({ sql, params });
+        if (sql.includes("from fee_policy") && !sql.includes("from orders o")) {
+          return {
+            rows: [
+              {
+                id: "00000000-0000-4000-8000-000000000011",
+                venue: "limitless",
+                fee_bps: 0,
+                fee_scale: null,
+                polymarket_builder_code: null,
+                polymarket_builder_taker_fee_bps: null,
+                polymarket_builder_maker_fee_bps: null,
+                limitless_fee_share_bps: 0,
+                effective_at: new Date("2026-05-20T00:00:00.000Z"),
+                created_at: new Date("2026-05-20T00:00:00.000Z"),
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      },
+    };
+
+    const result = await backfillLimitlessVenueShareAccruals(pool as never, {
+      limit: 7,
+      minAgeSec: 60,
+    });
+
+    assert.deepEqual(result, { checked: 0, upserted: 0, skipped: 0 });
+    assert.ok(queries.some((query) => query.sql.includes("from orders o")));
+  },
+);

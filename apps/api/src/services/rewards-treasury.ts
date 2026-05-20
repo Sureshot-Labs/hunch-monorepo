@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
+  REWARDS_CHAIN_IDS,
   normalizeRewardsChainId,
   type RewardsChainId,
 } from "../lib/rewards-chain.js";
@@ -450,6 +451,10 @@ export async function getRewardsTreasuryReport(
   ]);
   if (chainFilter) {
     chainIds.add(chainFilter);
+  } else {
+    for (const chainId of REWARDS_CHAIN_IDS) {
+      chainIds.add(chainId);
+    }
   }
 
   const includePending = env.rewardsTreasuryIncludePending;

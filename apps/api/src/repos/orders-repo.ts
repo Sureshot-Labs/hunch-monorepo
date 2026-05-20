@@ -91,7 +91,15 @@ export async function fetchOrderHistoryRows(
 }
 
 export type StoreOrderResult =
-  | { kind: "exists" }
+  | {
+      kind: "exists";
+      order: {
+        id: string;
+        venue_order_id: string;
+        status: string;
+        posted_at: Date;
+      };
+    }
   | {
       kind: "stored";
       order: {
@@ -148,11 +156,13 @@ async function storeOrderInTx(
     signer_address: string | null;
     price: number | null;
     size: number | null;
+    status: string;
+    posted_at: Date | null;
     order_payload: unknown | null;
     order_payload_version: string | null;
     fee_policy_snapshot: unknown | null;
   }>(
-    `SELECT id, wallet_address, signer_address, price, size, order_payload, order_payload_version, fee_policy_snapshot
+    `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
      ORDER BY
@@ -218,7 +228,15 @@ async function storeOrderInTx(
         params,
       );
     }
-    return { kind: "exists" };
+    return {
+      kind: "exists",
+      order: {
+        id: existing.id,
+        venue_order_id: inputs.venueOrderId,
+        status: existing.status ?? inputs.status,
+        posted_at: existing.posted_at ?? inputs.postedAt ?? new Date(),
+      },
+    };
   }
 
   const orderType = inputs.orderType === undefined ? "GTC" : inputs.orderType;
