@@ -13,6 +13,8 @@ import {
   fetchPositionsForUserWalletByTokenIds,
   setPositionHidden,
 } from "../repos/positions-repo.js";
+import { fetchMarketsByTokenIds as fetchMarketRowsByTokenIds } from "../repos/unified-read.js";
+import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import {
   prefetchPolymarketOwnerBalancesForWallets,
   syncPositionsForUserWallet,
@@ -206,10 +208,43 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           void requestPriceRefreshForTokens({ tokenIds });
         }
 
+        let marketsByToken: ReturnType<typeof mapMarketsByTokenRows> | undefined;
+        if (query.includeMarkets && positions.length) {
+          const tokenIds = Array.from(
+            new Set(
+              positions
+                .map((position) => position.tokenId)
+                .filter((tokenId) => tokenId.length > 0),
+            ),
+          );
+          if (tokenIds.length) {
+            try {
+              const marketRows = await fetchMarketRowsByTokenIds(pool, {
+                tokenIds,
+                venue: responseVenue,
+                includeTop: true,
+              });
+              marketsByToken = mapMarketsByTokenRows(marketRows);
+            } catch (marketError) {
+              app.log.warn(
+                {
+                  error: marketError,
+                  userId: user.id,
+                  tokenCount: tokenIds.length,
+                  tokenSample: tokenIds.slice(0, 8),
+                },
+                "Failed to include market metadata with positions",
+              );
+            }
+          }
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (responseVenue)
-          return reply.send({ positions, venue: responseVenue });
-        return reply.send({ positions });
+        return reply.send({
+          positions,
+          ...(marketsByToken ? { marketsByToken } : {}),
+          ...(responseVenue ? { venue: responseVenue } : {}),
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress },

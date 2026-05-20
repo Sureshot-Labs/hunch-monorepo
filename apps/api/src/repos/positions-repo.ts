@@ -47,6 +47,38 @@ export type PositionPnlSummary = {
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
+const POSITION_TOKEN_MARKET_MATCH_SQL = `
+  select
+    token_market.market_id,
+    token_market.outcome_side
+  from (
+    select
+      ut.market_id,
+      upper(ut.side) as outcome_side
+    from unified_tokens ut
+    where ut.token_id = p.token_id
+      and ut.venue = p.venue
+    union all
+    select
+      umt.market_id,
+      upper(umt.outcome_side) as outcome_side
+    from unified_market_tokens umt
+    where umt.token_id = p.token_id
+      and umt.venue = p.venue
+  ) token_market
+  where token_market.outcome_side in ('YES', 'NO')
+`;
+
+const RESOLVED_POSITION_EXISTS_SQL = `
+  exists (
+    select 1
+    from (${POSITION_TOKEN_MARKET_MATCH_SQL}) token_market
+    join unified_markets m on m.id = token_market.market_id
+    where upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
+       or m.resolved_outcome_pct is not null
+  )
+`;
+
 function isEthAddress(address: string | null | undefined): address is string {
   if (!address) return false;
   return ETH_ADDRESS_RE.test(address);
@@ -242,7 +274,11 @@ export async function fetchPositionPnlSummaryForUserWallet(
     `
       select
         count(*)::text as positions_count,
-        count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
+        count(*) filter (
+          where p.side <> 'FLAT'
+            and p.size > 0
+            and not (${RESOLVED_POSITION_EXISTS_SQL})
+        )::text as open_positions_count,
         coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::text as total_pnl_all_time,
         coalesce(sum(case
           when p.side <> 'FLAT'
@@ -742,43 +778,6 @@ export async function syncWalletPositionsFromTokenBalances(
     upsertedPositions: result.upsertedPositions,
     flattenedPositions: result.flattenedPositions,
   };
-}
-
-export async function autoHideResolvedLosingPositions(
-  pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    venue: Position["venue"];
-  },
-): Promise<number> {
-  const result = await pool.query(
-    `
-      update positions p
-      set
-        is_hidden = true,
-        hidden_reason = 'auto_lost',
-        hidden_at = now(),
-        updated_at = now()
-      from unified_tokens ut
-      join unified_markets m on m.id = ut.market_id
-      where p.user_id = $1
-        and lower(p.wallet_address) = lower($2)
-        and p.venue = $3
-        and p.position_scope = 'own'
-        and p.token_id = ut.token_id
-        and ut.venue = $3
-        and (p.is_hidden is null or p.is_hidden = false)
-        and p.side <> 'FLAT'
-        and p.size > 0
-        and m.resolved_outcome is not null
-        and upper(m.resolved_outcome) in ('YES', 'NO')
-        and upper(m.resolved_outcome) <> ut.side
-    `,
-    [inputs.userId, inputs.walletAddress, inputs.venue],
-  );
-
-  return result.rowCount ?? 0;
 }
 
 export async function updatePositionMetrics(

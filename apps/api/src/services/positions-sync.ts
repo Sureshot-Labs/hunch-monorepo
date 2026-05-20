@@ -1,7 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
 import {
-  autoHideResolvedLosingPositions,
   expandPolymarketWallets,
   syncWalletPositionsFromTokenBalances,
   type WalletTokenBalance,
@@ -1597,7 +1596,6 @@ async function syncPolymarketStoredPositionsFromPolygon(
   let upsertedPositions = 0;
   let flattenedPositions = 0;
   let persistMs = 0;
-  let autoHideMs = 0;
 
   for (const owner of owners) {
     const held = heldByOwner.get(owner) ?? [];
@@ -1622,17 +1620,6 @@ async function syncPolymarketStoredPositionsFromPolygon(
     flattenedPositions += result.flattenedPositions;
 
     if (inputs.positionScope === "own") {
-      try {
-        const autoHideStartedAt = Date.now();
-        await autoHideResolvedLosingPositions(pool, {
-          userId: inputs.userId,
-          walletAddress: owner,
-          venue: "polymarket",
-        });
-        autoHideMs += Date.now() - autoHideStartedAt;
-      } catch (error) {
-        console.error("Polymarket resolved-loss auto-hide failed", error);
-      }
       void Promise.allSettled([
         recomputePositionMetricsForWallet(pool, {
           userId: inputs.userId,
@@ -1684,7 +1671,6 @@ async function syncPolymarketStoredPositionsFromPolygon(
       balanceMs,
       backfillMs,
       persistMs,
-      autoHideMs,
       totalMs: Date.now() - totalStartedAt,
     },
   };
