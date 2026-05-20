@@ -21,6 +21,8 @@ import {
   syncPositionsForUserWallet,
   type PrefetchedPolymarketOwnerBalances,
 } from "./services/positions-sync.js";
+import { markHotTokens } from "./lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "./lib/price-refresh.js";
 import {
   normalizeOutcomeSideForStorage,
   shouldSuppressLegacySideTransitionDelta,
@@ -45,6 +47,7 @@ import {
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
+type WalletIntelMarketRefreshVenue = "polymarket" | "dflow" | "limitless";
 type WalletIntelRefreshTelemetry = {
   holdersPolymarket: WalletIntelRetryTelemetry;
   holdersAlchemyPolygon: WalletIntelRetryTelemetry;
@@ -566,6 +569,48 @@ function normalizeOnchainTokenId(
 function capTokenIds(tokenIds: string[], limit: number): string[] {
   if (tokenIds.length <= limit) return tokenIds;
   return tokenIds.slice(0, limit);
+}
+
+function toWalletIntelMarketRefreshVenue(
+  venue: Venue,
+): WalletIntelMarketRefreshVenue {
+  return venue === "kalshi" ? "dflow" : venue;
+}
+
+async function enqueueWalletIntelMarketRefresh(
+  tokenIdsByVenue: Record<Venue, string[]>,
+): Promise<void> {
+  const counts: Record<Venue, number> = {
+    polymarket: tokenIdsByVenue.polymarket.length,
+    limitless: tokenIdsByVenue.limitless.length,
+    kalshi: tokenIdsByVenue.kalshi.length,
+  };
+
+  const venues: Venue[] = ["polymarket", "limitless", "kalshi"];
+  await Promise.all(
+    venues.map(async (venue) => {
+      const tokenIds = tokenIdsByVenue[venue];
+      if (!tokenIds.length) return;
+
+      const refreshVenue = toWalletIntelMarketRefreshVenue(venue);
+      try {
+        await markHotTokens({ tokenIds, venue: refreshVenue });
+        await requestPriceRefreshForTokens({
+          tokenIds,
+          venue: refreshVenue,
+        });
+      } catch (error) {
+        console.warn("[wallets:intel:refresh] market refresh enqueue failed", {
+          venue,
+          error,
+        });
+      }
+    }),
+  );
+
+  if (counts.polymarket || counts.limitless || counts.kalshi) {
+    console.log("[wallets:intel:refresh] market refresh queued", counts);
+  }
 }
 
 function parseMetadataSource(metadata: unknown): string | null {
@@ -3348,6 +3393,7 @@ async function runSnapshot(snapshotAt: Date) {
       tokenIdsByVenue.kalshi,
       walletIntelRefreshPolicy.tokenLimitKalshi,
     );
+    await enqueueWalletIntelMarketRefresh(tokenIdsByVenue);
 
     const followedWallets = await client.query<{
       user_id: string;
