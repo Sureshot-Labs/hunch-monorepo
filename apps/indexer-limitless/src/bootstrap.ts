@@ -365,7 +365,6 @@ async function resolveLimitlessMarketRowsForTokenIds(
         join unified_markets m on m.id = t.market_id
         left join unified_events e on e.id = m.event_id
         where m.venue = 'limitless'
-          and m.status = 'ACTIVE'
         group by
           m.id,
           m.slug,
@@ -448,6 +447,50 @@ function isPermanentLimitlessPriceRefreshError(error: unknown): boolean {
   return /Limitless 404\b/i.test(error.message);
 }
 
+function isLimitlessMarketLive(market: TLimitlessMarket): boolean {
+  if (market.expired) return false;
+  if (market.status === "RESOLVED") return false;
+  return true;
+}
+
+function resolveLimitlessMarketRef(row: HotLimitlessMarketRow): string | null {
+  const slug = row.slug?.trim();
+  if (slug) return slug;
+  const address = row.address?.trim();
+  return address || null;
+}
+
+async function refreshLimitlessQueuedMarket(
+  row: HotLimitlessMarketRow,
+): Promise<{
+  processedMarkets: number;
+  topUpdated: boolean;
+}> {
+  const ref = resolveLimitlessMarketRef(row);
+  if (!ref) return { processedMarkets: 0, topUpdated: false };
+
+  const detail = await fetchMarket(ref);
+  const mergedTop = mergeMarket(detail, null, row.trade_type ?? undefined);
+  const result = await processLimitlessMarket(mergedTop, {
+    refreshOrderbookTop: false,
+  });
+
+  try {
+    const topUpdated = await refreshLimitlessMarketTop({
+      ...row,
+      slug: row.slug ?? detail.slug ?? null,
+      address: row.address ?? detail.address?.toLowerCase() ?? null,
+      trade_type: detail.tradeType ?? row.trade_type,
+    });
+    return { processedMarkets: result.marketCount, topUpdated };
+  } catch (error) {
+    if (!isLimitlessMarketLive(detail)) {
+      return { processedMarkets: result.marketCount, topUpdated: false };
+    }
+    throw error;
+  }
+}
+
 export async function processPriceRefreshQueue(): Promise<{
   claimed: number;
   refreshed: number;
@@ -473,12 +516,16 @@ export async function processPriceRefreshQueue(): Promise<{
   const startedAt = Date.now();
   let refreshed = 0;
   let failed = 0;
+  let marketRefreshed = 0;
+  let topRefreshed = 0;
   const failedTokenIds: string[] = [];
   try {
     const rows = await resolveLimitlessMarketRowsForTokenIds(tokenIds);
     for (const row of rows) {
       try {
-        if (await refreshLimitlessMarketTop(row)) refreshed += 1;
+        const result = await refreshLimitlessQueuedMarket(row);
+        marketRefreshed += result.processedMarkets;
+        if (result.topUpdated) topRefreshed += 1;
       } catch (error) {
         failed += 1;
         const permanent = isPermanentLimitlessPriceRefreshError(error);
@@ -500,6 +547,7 @@ export async function processPriceRefreshQueue(): Promise<{
         );
       }
     }
+    refreshed = marketRefreshed + topRefreshed;
     if (failedTokenIds.length) {
       await requeuePriceRefreshTokens(redisClient, {
         venue: "limitless",
@@ -523,6 +571,8 @@ export async function processPriceRefreshQueue(): Promise<{
   log.info("Limitless price refresh queue processed", {
     claimed: tokenIds.length,
     refreshed,
+    marketRefreshed,
+    topRefreshed,
     failed,
     backlog,
     durationMs: Date.now() - startedAt,
@@ -666,6 +716,7 @@ function resolveHotMarketRefs(
 
 async function processLimitlessMarket(
   mergedTop: TLimitlessMarket,
+  options: { refreshOrderbookTop?: boolean } = {},
 ): Promise<{ eventId: string; marketCount: number }> {
   const eventRow = mapLimitlessEventRow(mergedTop);
   const eventId = await upsertLimitlessEvent(eventRow);
@@ -705,7 +756,10 @@ async function processLimitlessMarket(
       String(mergedTop.id),
       mergedTop,
     );
-    if (mergedTop.tradeType?.toLowerCase() === "clob") {
+    if (
+      (options.refreshOrderbookTop ?? true) &&
+      mergedTop.tradeType?.toLowerCase() === "clob"
+    ) {
       await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
     }
     await upsertUnifiedMarket(pool, unifiedMarketRow);
@@ -779,7 +833,10 @@ async function processLimitlessMarket(
         String(mergedTop.id),
         mergedTop,
       );
-      if (mergedSub.tradeType?.toLowerCase() === "clob") {
+      if (
+        (options.refreshOrderbookTop ?? true) &&
+        mergedSub.tradeType?.toLowerCase() === "clob"
+      ) {
         await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
       }
       await upsertUnifiedMarket(pool, unifiedMarketRow);

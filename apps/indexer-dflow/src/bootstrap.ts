@@ -832,8 +832,12 @@ async function refreshHotTokenTops(): Promise<number> {
   const tokenIds = await fetchHotTokenIds(
     clampHotProbeLimit(env.wsSubset * 10),
   );
-  if (!tokenIds.length) return 0;
+  return publishTokenTopsForTokenIds(tokenIds);
+}
 
+async function publishTokenTopsForTokenIds(
+  tokenIds: string[],
+): Promise<number> {
   const { rows } = await pool.query<{
     token_id: string;
     side: "YES" | "NO";
@@ -1109,13 +1113,17 @@ export async function processPriceRefreshQueue(): Promise<{
   const startedAt = Date.now();
   let refreshed = 0;
   let failed = 0;
+  let marketRefreshed = 0;
+  let topRefreshed = 0;
   try {
     const result = await syncMarketStatusesForTokenIds(
       tokenIds,
       "price-refresh",
       { includeSiblings: false },
     );
-    refreshed = result.processedMarkets;
+    marketRefreshed = result.processedMarkets;
+    topRefreshed = await publishTokenTopsForTokenIds(tokenIds);
+    refreshed = marketRefreshed + topRefreshed;
   } catch (error) {
     failed = tokenIds.length;
     await requeuePriceRefreshTokens(redisClient, {
@@ -1131,6 +1139,8 @@ export async function processPriceRefreshQueue(): Promise<{
   log.info("DFlow price refresh queue processed", {
     claimed: tokenIds.length,
     refreshed,
+    marketRefreshed,
+    topRefreshed,
     failed,
     backlog,
     durationMs: Date.now() - startedAt,

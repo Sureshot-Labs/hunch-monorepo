@@ -44,6 +44,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     const normalized = message.toLowerCase();
     return (
       normalized.includes("connect first") ||
+      (normalized.startsWith("connect ") &&
+        normalized.includes(" before syncing positions")) ||
       normalized.includes("session not found") ||
       normalized.includes("credentials not found") ||
       normalized.includes("ownerid not available")
@@ -208,7 +210,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           void requestPriceRefreshForTokens({ tokenIds });
         }
 
-        let marketsByToken: ReturnType<typeof mapMarketsByTokenRows> | undefined;
+        let marketsByToken:
+          | ReturnType<typeof mapMarketsByTokenRows>
+          | undefined;
         if (query.includeMarkets && positions.length) {
           const tokenIds = Array.from(
             new Set(
@@ -851,7 +855,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         const includeDebug = query.debug || durationMs >= 5000;
         const responseResults = includeDebug
           ? results
-          : results.map(({ durationMs: _durationMs, timings: _timings, ...result }) => result);
+          : results.map(
+              ({ durationMs: _durationMs, timings: _timings, ...result }) =>
+                result,
+            );
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           message: "Positions synced",

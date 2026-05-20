@@ -44,6 +44,8 @@ import {
 } from "./polymarket-builder-fees.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+type PositionRefreshVenue = "polymarket" | "dflow" | "limitless";
+const POSITION_REFRESH_STALE_MARKET_MINUTES = 15;
 const POLYMARKET_RECENT_FLAT_PROTECT_SEC = 15;
 const POLYMARKET_FLATTEN_GRACE_SEC = 15;
 const POLYMARKET_BALANCE_BATCH_MAX_PAIRS = 1000;
@@ -214,6 +216,128 @@ function normalizeNumericTokenIds(tokenIds: string[]): string[] {
         .map((tokenId) => tokenId.trim())
         .filter((tokenId) => tokenId.length > 0 && /^[0-9]+$/.test(tokenId)),
     ),
+  );
+}
+
+export function normalizePositionRefreshTokenIds(
+  venue: Position["venue"],
+  tokenIds: Array<string | null | undefined>,
+): string[] {
+  if (venue === "polymarket") {
+    return normalizeNumericTokenIds(
+      tokenIds.filter((tokenId): tokenId is string => Boolean(tokenId)),
+    );
+  }
+
+  const output = new Set<string>();
+  for (const rawTokenId of tokenIds) {
+    const tokenId = rawTokenId?.trim();
+    if (!tokenId) continue;
+    if (venue === "kalshi") {
+      if (tokenId.startsWith("sol:")) output.add(tokenId);
+      continue;
+    }
+    const scoped = normalizeLimitlessScopedTokenId(tokenId);
+    if (scoped) output.add(scoped);
+  }
+  return Array.from(output);
+}
+
+function toPositionRefreshVenue(
+  venue: Position["venue"],
+): PositionRefreshVenue {
+  return venue === "kalshi" ? "dflow" : venue;
+}
+
+function requestPositionMarketRefresh(inputs: {
+  venue: Position["venue"];
+  tokenIds: Array<string | null | undefined>;
+}) {
+  const tokenIds = normalizePositionRefreshTokenIds(
+    inputs.venue,
+    inputs.tokenIds,
+  );
+  if (!tokenIds.length) return;
+
+  const refreshVenue = toPositionRefreshVenue(inputs.venue);
+  void markHotTokens({
+    tokenIds,
+    venue: refreshVenue,
+  });
+  void requestPriceRefreshForTokens({ tokenIds, venue: refreshVenue });
+}
+
+async function fetchOpenPositionTokenIdsForRefresh(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: Position["venue"];
+    positionScope: PositionScope;
+    tokenIdLike?: string;
+  },
+): Promise<string[]> {
+  const walletClause = isEthAddress(inputs.walletAddress)
+    ? "lower(wallet_address) = lower($2)"
+    : "wallet_address = $2";
+  const params: Array<string> = [
+    inputs.userId,
+    inputs.walletAddress,
+    inputs.venue,
+    inputs.positionScope,
+  ];
+  let tokenLikeClause = "";
+  if (inputs.tokenIdLike) {
+    params.push(inputs.tokenIdLike);
+    tokenLikeClause = `and p.token_id like $${params.length}`;
+  }
+
+  params.push(POSITION_REFRESH_STALE_MARKET_MINUTES.toString());
+  const staleParam = params.length;
+
+  const { rows } = await pool.query<{ token_id: string | null }>(
+    `
+      select distinct p.token_id
+      from positions p
+      left join unified_tokens t
+        on t.venue = p.venue
+       and t.token_id = p.token_id
+      left join unified_markets m
+        on m.id = t.market_id
+       and m.venue = p.venue
+      where p.user_id = $1
+        and ${walletClause.replaceAll("wallet_address", "p.wallet_address")}
+        and p.venue = $3
+        and p.position_scope = $4
+        and p.side <> 'FLAT'
+        and p.size > 0
+        and (p.is_hidden is null or p.is_hidden = false)
+        and p.token_id is not null
+        and p.token_id <> ''
+        ${tokenLikeClause}
+        and (
+          m.id is null
+          or (
+            m.resolved_outcome is null
+            and m.resolved_outcome_pct is null
+            and (
+              coalesce(m.updated_at_db, m.updated_at, m.created_at_db)
+                < now() - ($${staleParam}::int * interval '1 minute')
+              or (
+                m.status = 'ACTIVE'
+                and coalesce(m.expiration_time, m.close_time) is not null
+                and coalesce(m.expiration_time, m.close_time) <= now()
+              )
+            )
+          )
+        )
+    `,
+    params,
+  );
+
+  return normalizePositionRefreshTokenIds(
+    inputs.venue,
+    rows.map((row) => row.token_id),
   );
 }
 
@@ -579,9 +703,7 @@ async function fetchPolymarketDataApiSnapshotsForOwners(
   for (const result of results) {
     output.set(
       result.owner.toLowerCase(),
-      new Map(
-        result.snapshots.map((snapshot) => [snapshot.tokenId, snapshot]),
-      ),
+      new Map(result.snapshots.map((snapshot) => [snapshot.tokenId, snapshot])),
     );
   }
 
@@ -1648,14 +1770,10 @@ async function syncPolymarketStoredPositionsFromPolygon(
     }
   }
 
-  if (allHeldTokens.size) {
-    const tokenIds = Array.from(allHeldTokens);
-    void markHotTokens({
-      tokenIds,
-      venue: "polymarket",
-    });
-    void requestPriceRefreshForTokens({ tokenIds, venue: "polymarket" });
-  }
+  requestPositionMarketRefresh({
+    venue: "polymarket",
+    tokenIds: [...tokenIds, ...allHeldTokens],
+  });
 
   return {
     venue: "polymarket",
@@ -1835,25 +1953,28 @@ export async function syncPolymarketTradesForSigner(
     if (!payload || !isRecord(payload)) return;
     const builder =
       typeof payload.builder === "string" ? payload.builder : null;
-    const accrual = buildPolymarketBuilderFeeAccrual({
-      userId: inputs.userId,
-      walletAddress: params.order.wallet_address,
-      signerAddress: params.order.signer_address,
-      orderId: params.order.id,
-      orderHash: params.order.order_hash ?? "",
-      venueOrderId: params.order.venue_order_id,
-      venueFillId: params.venueFillId,
-      venueTradeId: params.venueTradeId,
-      txHash: params.txHash,
-      tokenId: params.order.token_id,
-      side: params.side,
-      role: params.role,
-      size: params.size,
-      price: params.price,
-      filledAt: params.filledAt,
-      orderBuilderCode: builder,
-      feePolicySnapshot: params.order.fee_policy_snapshot,
-    }, builderFeeConfig);
+    const accrual = buildPolymarketBuilderFeeAccrual(
+      {
+        userId: inputs.userId,
+        walletAddress: params.order.wallet_address,
+        signerAddress: params.order.signer_address,
+        orderId: params.order.id,
+        orderHash: params.order.order_hash ?? "",
+        venueOrderId: params.order.venue_order_id,
+        venueFillId: params.venueFillId,
+        venueTradeId: params.venueTradeId,
+        txHash: params.txHash,
+        tokenId: params.order.token_id,
+        side: params.side,
+        role: params.role,
+        size: params.size,
+        price: params.price,
+        filledAt: params.filledAt,
+        orderBuilderCode: builder,
+        feePolicySnapshot: params.order.fee_policy_snapshot,
+      },
+      builderFeeConfig,
+    );
     if (accrual) builderFeeAccruals.push(accrual);
   };
 
@@ -2180,14 +2301,22 @@ async function syncKalshiPositionsFromSolana(
     backfillMs = Date.now() - backfillStartedAt;
   }
 
-  if (tokenBalances.length) {
-    const tokenIds = tokenBalances.map((balance) => balance.tokenId);
-    void markHotTokens({
-      tokenIds,
-      venue: "dflow",
-    });
-    void requestPriceRefreshForTokens({ tokenIds, venue: "dflow" });
-  }
+  const refreshCandidatesStartedAt = Date.now();
+  const openPositionTokenIds = await fetchOpenPositionTokenIdsForRefresh(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "kalshi",
+    positionScope: inputs.positionScope,
+    tokenIdLike: "sol:%",
+  });
+  const refreshCandidatesMs = Date.now() - refreshCandidatesStartedAt;
+  requestPositionMarketRefresh({
+    venue: "kalshi",
+    tokenIds: [
+      ...tokenBalances.map((balance) => balance.tokenId),
+      ...openPositionTokenIds,
+    ],
+  });
 
   const persistStartedAt = Date.now();
   const result = await syncWalletPositionsFromTokenBalances(pool, {
@@ -2242,6 +2371,7 @@ async function syncKalshiPositionsFromSolana(
     timings: {
       balanceMs,
       backfillMs,
+      refreshCandidatesMs,
       persistMs,
       postSyncMs,
       totalMs: Date.now() - totalStartedAt,
@@ -2345,14 +2475,22 @@ async function syncLimitlessPositionsFromPortfolio(
     onchainTokenBalances,
   );
 
-  if (tokenBalances.length) {
-    const tokenIds = tokenBalances.map((balance) => balance.tokenId);
-    void markHotTokens({
-      tokenIds,
-      venue: "limitless",
-    });
-    void requestPriceRefreshForTokens({ tokenIds, venue: "limitless" });
-  }
+  const refreshCandidatesStartedAt = Date.now();
+  const openPositionTokenIds = await fetchOpenPositionTokenIdsForRefresh(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "limitless",
+    positionScope: inputs.positionScope,
+    tokenIdLike: "limitless:%",
+  });
+  const refreshCandidatesMs = Date.now() - refreshCandidatesStartedAt;
+  requestPositionMarketRefresh({
+    venue: "limitless",
+    tokenIds: [
+      ...tokenBalances.map((balance) => balance.tokenId),
+      ...openPositionTokenIds,
+    ],
+  });
 
   const persistStartedAt = Date.now();
   const result = await syncWalletPositionsFromTokenBalances(pool, {
@@ -2411,6 +2549,7 @@ async function syncLimitlessPositionsFromPortfolio(
       positionsApiMs,
       historyMs,
       onchainMs,
+      refreshCandidatesMs,
       persistMs,
       postSyncMs,
       totalMs: Date.now() - totalStartedAt,
