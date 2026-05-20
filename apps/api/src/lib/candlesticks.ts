@@ -1,6 +1,6 @@
 import { isRecord } from "./type-guards.js";
 
-type CandleValues = {
+export type CandleValues = {
   t: number;
   o: number;
   h: number;
@@ -404,7 +404,7 @@ export function aggregateKalshiCandlesticks(
       if (current) aggregated.push(current);
       currentBucketEnd = bucketEnd;
       current = {
-        t: bucketEnd,
+        t: Math.min(bucketEnd, endTs),
         o: candle.o,
         h: candle.h,
         l: candle.l,

@@ -47,6 +47,12 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
+import {
+  loadDbCandlestickSeries,
+  resolveCandlestickHistorySource,
+  selectCandlestickSeries,
+  shouldUseDbCandlestickFallback,
+} from "../services/candlestick-history.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
@@ -1707,11 +1713,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                   },
                 });
 
-                if (!upstream.ok) {
-                  return { ...base, series: {} };
-                }
-
-                const rawCandles = parseKalshiCandlesticks(upstream.payload);
+                const upstreamOk = upstream.ok;
+                const rawCandles = upstreamOk
+                  ? parseKalshiCandlesticks(upstream.payload)
+                  : [];
                 const normalizedCandles =
                   intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
                     ? rawCandles.filter(
@@ -1725,23 +1730,77 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                         resolvedStartTs,
                         resolvedEndTs,
                       );
+                const noVenueCandles =
+                  deriveNoCandlesticksFromYes(normalizedCandles);
+                const needsDbFallback =
+                  !upstreamOk ||
+                  (includeYes &&
+                    shouldUseDbCandlestickFallback({
+                      candles: normalizedCandles,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    })) ||
+                  (includeNo &&
+                    shouldUseDbCandlestickFallback({
+                      candles: noVenueCandles,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    }));
+                const dbSeries = needsDbFallback
+                  ? await loadDbCandlestickSeries(pool, {
+                      venue: "kalshi",
+                      tokens: { YES: tokens.yes, NO: tokens.no },
+                      includeYes,
+                      includeNo,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    })
+                  : {};
+                const dbYesCandles = dbSeries.YES?.candles;
+                const dbActualNoCandles = dbSeries.NO?.candles;
+                const dbNoCandles =
+                  dbActualNoCandles && dbActualNoCandles.length > 0
+                    ? dbActualNoCandles
+                    : dbYesCandles && dbYesCandles.length > 0
+                      ? deriveNoCandlesticksFromYes(dbYesCandles)
+                      : undefined;
 
                 const series: Record<string, unknown> = {};
                 if (includeYes) {
-                  series.YES = {
+                  series.YES = selectCandlestickSeries({
                     tokenId: tokens.yes ?? null,
-                    candles: normalizedCandles,
-                  };
+                    venueCandles: normalizedCandles,
+                    dbCandles: dbSeries.YES?.candles,
+                    upstreamOk,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  });
                 }
                 if (includeNo) {
-                  series.NO = {
+                  series.NO = selectCandlestickSeries({
                     tokenId: tokens.no ?? null,
-                    candles: deriveNoCandlesticksFromYes(normalizedCandles),
+                    venueCandles: noVenueCandles,
+                    dbCandles: dbNoCandles,
+                    upstreamOk,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
                     derived: true,
-                  };
+                  });
                 }
 
-                return { ...base, series };
+                return {
+                  ...base,
+                  series,
+                  historySource: resolveCandlestickHistorySource([
+                    series.YES as ReturnType<typeof selectCandlestickSeries>,
+                    series.NO as ReturnType<typeof selectCandlestickSeries>,
+                  ]),
+                };
               }
 
               if (row.market_venue === "limitless") {
@@ -1766,14 +1825,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                   )}/historical-price?${query.toString()}`,
                 });
 
-                if (!upstream.ok) {
-                  return { ...base, series: {} };
-                }
-
-                const parsedBySide = parseLimitlessCandlesticksBySide(
-                  upstream.payload,
-                );
+                const upstreamOk = upstream.ok;
+                const parsedBySide = upstreamOk
+                  ? parseLimitlessCandlesticksBySide(upstream.payload)
+                  : { YES: [], NO: [] };
                 const shouldDeriveNo =
+                  upstreamOk &&
                   isLimitlessSingleSeriesPayload(upstream.payload) &&
                   parsedBySide.YES.length > 0;
                 const normalize = (candles: typeof parsedBySide.YES) =>
@@ -1795,26 +1852,82 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 const noCandles = shouldDeriveNo
                   ? deriveNoCandlesticksFromYes(yesCandles)
                   : rawNoCandles;
+                const needsDbFallback =
+                  !upstreamOk ||
+                  (includeYes &&
+                    shouldUseDbCandlestickFallback({
+                      candles: yesCandles,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    })) ||
+                  (includeNo &&
+                    shouldUseDbCandlestickFallback({
+                      candles: noCandles,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    }));
+                const dbSeries = needsDbFallback
+                  ? await loadDbCandlestickSeries(pool, {
+                      venue: "limitless",
+                      tokens: { YES: tokens.yes, NO: tokens.no },
+                      includeYes,
+                      includeNo,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    })
+                  : {};
+                const dbYesCandles = dbSeries.YES?.candles;
+                const dbActualNoCandles = dbSeries.NO?.candles;
+                const dbNoCandles =
+                  dbActualNoCandles && dbActualNoCandles.length > 0
+                    ? dbActualNoCandles
+                    : dbYesCandles && dbYesCandles.length > 0
+                      ? deriveNoCandlesticksFromYes(dbYesCandles)
+                      : undefined;
                 const series: Record<string, unknown> = {};
                 if (includeYes) {
-                  series.YES = {
+                  series.YES = selectCandlestickSeries({
                     tokenId: tokens.yes ?? null,
-                    candles: yesCandles,
-                  };
+                    venueCandles: yesCandles,
+                    dbCandles: dbSeries.YES?.candles,
+                    upstreamOk,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  });
                 }
                 if (includeNo) {
-                  series.NO = {
+                  series.NO = selectCandlestickSeries({
                     tokenId: tokens.no ?? null,
-                    candles: noCandles,
-                    ...(shouldDeriveNo ? { derived: true } : {}),
-                  };
+                    venueCandles: noCandles,
+                    dbCandles: dbNoCandles,
+                    upstreamOk,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                    derived: shouldDeriveNo,
+                  });
                 }
 
-                return { ...base, series };
+                return {
+                  ...base,
+                  series,
+                  historySource: resolveCandlestickHistorySource([
+                    series.YES as ReturnType<typeof selectCandlestickSeries>,
+                    series.NO as ReturnType<typeof selectCandlestickSeries>,
+                  ]),
+                };
               }
 
               if (row.market_venue === "polymarket") {
                 const historyBySide: { YES?: unknown; NO?: unknown } = {};
+                const upstreamOkBySide = {
+                  YES: !includeYes,
+                  NO: !includeNo,
+                };
                 const fetches: Array<Promise<void>> = [];
 
                 if (includeYes && tokens.yes) {
@@ -1828,6 +1941,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                       })
                       .then((history) => {
                         historyBySide.YES = history;
+                        upstreamOkBySide.YES = true;
+                      })
+                      .catch(() => {
+                        upstreamOkBySide.YES = false;
                       }),
                   );
                 }
@@ -1843,6 +1960,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                       })
                       .then((history) => {
                         historyBySide.NO = history;
+                        upstreamOkBySide.NO = true;
+                      })
+                      .catch(() => {
+                        upstreamOkBySide.NO = false;
                       }),
                   );
                 }
@@ -1865,20 +1986,74 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 };
 
                 const series: Record<string, unknown> = {};
-                if (includeYes && historyBySide.YES) {
-                  series.YES = {
+                const yesCandles =
+                  includeYes && historyBySide.YES
+                    ? normalize(historyBySide.YES)
+                    : [];
+                const noCandles =
+                  includeNo && historyBySide.NO
+                    ? normalize(historyBySide.NO)
+                    : [];
+                const needsDbFallback =
+                  (includeYes &&
+                    (!upstreamOkBySide.YES ||
+                      shouldUseDbCandlestickFallback({
+                        candles: yesCandles,
+                        startTs: resolvedStartTs,
+                        endTs: resolvedEndTs,
+                        bucketMinutes: intervalInfo.normalizedMinutes,
+                      }))) ||
+                  (includeNo &&
+                    (!upstreamOkBySide.NO ||
+                      shouldUseDbCandlestickFallback({
+                        candles: noCandles,
+                        startTs: resolvedStartTs,
+                        endTs: resolvedEndTs,
+                        bucketMinutes: intervalInfo.normalizedMinutes,
+                      })));
+                const dbSeries = needsDbFallback
+                  ? await loadDbCandlestickSeries(pool, {
+                      venue: "polymarket",
+                      tokens: { YES: tokens.yes, NO: tokens.no },
+                      includeYes,
+                      includeNo,
+                      startTs: resolvedStartTs,
+                      endTs: resolvedEndTs,
+                      bucketMinutes: intervalInfo.normalizedMinutes,
+                    })
+                  : {};
+
+                if (includeYes) {
+                  series.YES = selectCandlestickSeries({
                     tokenId: tokens.yes ?? null,
-                    candles: normalize(historyBySide.YES),
-                  };
+                    venueCandles: yesCandles,
+                    dbCandles: dbSeries.YES?.candles,
+                    upstreamOk: upstreamOkBySide.YES,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  });
                 }
-                if (includeNo && historyBySide.NO) {
-                  series.NO = {
+                if (includeNo) {
+                  series.NO = selectCandlestickSeries({
                     tokenId: tokens.no ?? null,
-                    candles: normalize(historyBySide.NO),
-                  };
+                    venueCandles: noCandles,
+                    dbCandles: dbSeries.NO?.candles,
+                    upstreamOk: upstreamOkBySide.NO,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  });
                 }
 
-                return { ...base, series };
+                return {
+                  ...base,
+                  series,
+                  historySource: resolveCandlestickHistorySource([
+                    series.YES as ReturnType<typeof selectCandlestickSeries>,
+                    series.NO as ReturnType<typeof selectCandlestickSeries>,
+                  ]),
+                };
               }
 
               return { ...base, series: {} };

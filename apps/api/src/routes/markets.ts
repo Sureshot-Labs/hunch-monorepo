@@ -54,6 +54,12 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "../services/limitless-client.js";
+import {
+  loadDbCandlestickSeries,
+  resolveCandlestickHistorySource,
+  selectCandlestickSeries,
+  shouldUseDbCandlestickFallback,
+} from "../services/candlestick-history.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
@@ -999,17 +1005,10 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               },
             });
 
-            if (!upstream.ok) {
-              reply.code(502);
-              return reply.send({
-                error: "Kalshi candlesticks fetch failed",
-                status: upstream.status,
-                message: extractDflowErrorMessage(upstream.payload),
-                payload: upstream.payload,
-              });
-            }
-
-            const rawCandles = parseKalshiCandlesticks(upstream.payload);
+            const upstreamOk = upstream.ok;
+            const rawCandles = upstreamOk
+              ? parseKalshiCandlesticks(upstream.payload)
+              : [];
             const normalizedCandles =
               intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
                 ? rawCandles.filter(
@@ -1022,26 +1021,86 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                     resolvedStartTs,
                     resolvedEndTs,
                   );
+            const noVenueCandles =
+              deriveNoCandlesticksFromYes(normalizedCandles);
+            const needsDbFallback =
+              !upstreamOk ||
+              (includeYes &&
+                shouldUseDbCandlestickFallback({
+                  candles: normalizedCandles,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                })) ||
+              (includeNo &&
+                shouldUseDbCandlestickFallback({
+                  candles: noVenueCandles,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                }));
+            const dbSeries = needsDbFallback
+              ? await loadDbCandlestickSeries(pool, {
+                  venue: "kalshi",
+                  tokens: {
+                    YES: market.token_yes ?? null,
+                    NO: market.token_no ?? null,
+                  },
+                  includeYes,
+                  includeNo,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                })
+              : {};
+            const dbYesCandles = dbSeries.YES?.candles;
+            const dbActualNoCandles = dbSeries.NO?.candles;
+            const dbNoCandles =
+              dbActualNoCandles && dbActualNoCandles.length > 0
+                ? dbActualNoCandles
+                : dbYesCandles && dbYesCandles.length > 0
+                  ? deriveNoCandlesticksFromYes(dbYesCandles)
+                  : undefined;
 
             const series: Record<string, unknown> = {};
             if (includeYes) {
-              series.YES = {
+              series.YES = selectCandlestickSeries({
                 tokenId: market.token_yes ?? null,
-                candles: normalizedCandles,
-              };
+                venueCandles: normalizedCandles,
+                dbCandles: dbSeries.YES?.candles,
+                upstreamOk,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
+              });
             }
             if (includeNo) {
-              series.NO = {
+              series.NO = selectCandlestickSeries({
                 tokenId: market.token_no ?? null,
-                candles: deriveNoCandlesticksFromYes(normalizedCandles),
+                venueCandles: noVenueCandles,
+                dbCandles: dbNoCandles,
+                upstreamOk,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
                 derived: true,
-              };
+              });
             }
 
+            const historySource = resolveCandlestickHistorySource([
+              series.YES as ReturnType<typeof selectCandlestickSeries>,
+              series.NO as ReturnType<typeof selectCandlestickSeries>,
+            ]);
+            const legacyEntry =
+              (side ?? "YES") === "NO"
+                ? (series.NO as ReturnType<typeof selectCandlestickSeries>)
+                : (series.YES as ReturnType<typeof selectCandlestickSeries>);
             const data =
+              upstreamOk &&
+              legacyEntry?.source === "venue" &&
               intervalInfo.normalizedMinutes === intervalInfo.baseMinutes
                 ? upstream.payload
-                : formatKalshiCandlesticks(normalizedCandles);
+                : formatKalshiCandlesticks(legacyEntry?.candles ?? []);
 
             const response = {
               ok: true,
@@ -1057,6 +1116,16 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                 endTs: resolvedEndTs,
               },
               series,
+              historySource,
+              ...(upstreamOk
+                ? {}
+                : {
+                    fallbackReason: "upstream_error",
+                    upstreamStatus: upstream.status,
+                    upstreamMessage: extractDflowErrorMessage(
+                      upstream.payload,
+                    ),
+                  }),
             };
             const responseBody = JSON.stringify(response);
 
@@ -1110,20 +1179,12 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               )}/historical-price?${query.toString()}`,
             });
 
-            if (!upstream.ok) {
-              reply.code(502);
-              return reply.send({
-                error: "Limitless candlesticks fetch failed",
-                status: upstream.status,
-                message: extractLimitlessMessage(upstream.payload),
-                payload: upstream.payload,
-              });
-            }
-
-            const parsedBySide = parseLimitlessCandlesticksBySide(
-              upstream.payload,
-            );
+            const upstreamOk = upstream.ok;
+            const parsedBySide = upstreamOk
+              ? parseLimitlessCandlesticksBySide(upstream.payload)
+              : { YES: [], NO: [] };
             const shouldDeriveNo =
+              upstreamOk &&
               isLimitlessSingleSeriesPayload(upstream.payload) &&
               parsedBySide.YES.length > 0;
             const normalize = (candles: typeof parsedBySide.YES) =>
@@ -1143,25 +1204,80 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             const noCandles = shouldDeriveNo
               ? deriveNoCandlesticksFromYes(yesCandles)
               : rawNoCandles;
+            const needsDbFallback =
+              !upstreamOk ||
+              (includeYes &&
+                shouldUseDbCandlestickFallback({
+                  candles: yesCandles,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                })) ||
+              (includeNo &&
+                shouldUseDbCandlestickFallback({
+                  candles: noCandles,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                }));
+            const dbSeries = needsDbFallback
+              ? await loadDbCandlestickSeries(pool, {
+                  venue: "limitless",
+                  tokens: {
+                    YES: market.token_yes ?? null,
+                    NO: market.token_no ?? null,
+                  },
+                  includeYes,
+                  includeNo,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                })
+              : {};
+            const dbYesCandles = dbSeries.YES?.candles;
+            const dbActualNoCandles = dbSeries.NO?.candles;
+            const dbNoCandles =
+              dbActualNoCandles && dbActualNoCandles.length > 0
+                ? dbActualNoCandles
+                : dbYesCandles && dbYesCandles.length > 0
+                  ? deriveNoCandlesticksFromYes(dbYesCandles)
+                  : undefined;
 
             const series: Record<string, unknown> = {};
             if (includeYes) {
-              series.YES = {
+              series.YES = selectCandlestickSeries({
                 tokenId: market.token_yes ?? null,
-                candles: yesCandles,
-              };
+                venueCandles: yesCandles,
+                dbCandles: dbSeries.YES?.candles,
+                upstreamOk,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
+              });
             }
             if (includeNo) {
-              series.NO = {
+              series.NO = selectCandlestickSeries({
                 tokenId: market.token_no ?? null,
-                candles: noCandles,
-                ...(shouldDeriveNo ? { derived: true } : {}),
-              };
+                venueCandles: noCandles,
+                dbCandles: dbNoCandles,
+                upstreamOk,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
+                derived: shouldDeriveNo,
+              });
             }
 
             const legacySide = side ?? "YES";
-            const legacyCandles = legacySide === "NO" ? noCandles : yesCandles;
-            const data = formatKalshiCandlesticks(legacyCandles);
+            const legacyEntry =
+              legacySide === "NO"
+                ? (series.NO as ReturnType<typeof selectCandlestickSeries>)
+                : (series.YES as ReturnType<typeof selectCandlestickSeries>);
+            const historySource = resolveCandlestickHistorySource([
+              series.YES as ReturnType<typeof selectCandlestickSeries>,
+              series.NO as ReturnType<typeof selectCandlestickSeries>,
+            ]);
+            const data = formatKalshiCandlesticks(legacyEntry?.candles ?? []);
 
             const response = {
               ok: true,
@@ -1177,6 +1293,16 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                 endTs: resolvedEndTs,
               },
               series,
+              historySource,
+              ...(upstreamOk
+                ? {}
+                : {
+                    fallbackReason: "upstream_error",
+                    upstreamStatus: upstream.status,
+                    upstreamMessage: extractLimitlessMessage(
+                      upstream.payload,
+                    ),
+                  }),
             };
             const responseBody = JSON.stringify(response);
 
@@ -1228,6 +1354,10 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               YES?: unknown;
               NO?: unknown;
             } = {};
+            const upstreamOkBySide = {
+              YES: !includeYes,
+              NO: !includeNo,
+            };
             const fetches: Array<Promise<void>> = [];
 
             if (includeYes && yesTokenId) {
@@ -1241,6 +1371,10 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                   })
                   .then((history) => {
                     historyBySide.YES = history;
+                    upstreamOkBySide.YES = true;
+                  })
+                  .catch(() => {
+                    upstreamOkBySide.YES = false;
                   }),
               );
             }
@@ -1256,6 +1390,10 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                   })
                   .then((history) => {
                     historyBySide.NO = history;
+                    upstreamOkBySide.NO = true;
+                  })
+                  .catch(() => {
+                    upstreamOkBySide.NO = false;
                   }),
               );
             }
@@ -1276,33 +1414,85 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             };
 
             const series: Record<string, unknown> = {};
-            if (includeYes && historyBySide.YES) {
-              series.YES = {
-                tokenId: yesTokenId,
-                candles: normalize(historyBySide.YES),
-              };
-            }
-            if (includeNo && historyBySide.NO) {
-              series.NO = {
-                tokenId: noTokenId,
-                candles: normalize(historyBySide.NO),
-              };
-            }
+            const yesCandles =
+              includeYes && historyBySide.YES
+                ? normalize(historyBySide.YES)
+                : [];
+            const noCandles =
+              includeNo && historyBySide.NO ? normalize(historyBySide.NO) : [];
+            const needsDbFallback =
+              (includeYes &&
+                (!upstreamOkBySide.YES ||
+                  shouldUseDbCandlestickFallback({
+                    candles: yesCandles,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  }))) ||
+              (includeNo &&
+                (!upstreamOkBySide.NO ||
+                  shouldUseDbCandlestickFallback({
+                    candles: noCandles,
+                    startTs: resolvedStartTs,
+                    endTs: resolvedEndTs,
+                    bucketMinutes: intervalInfo.normalizedMinutes,
+                  })));
+            const dbSeries = needsDbFallback
+              ? await loadDbCandlestickSeries(pool, {
+                  venue: "polymarket",
+                  tokens: {
+                    YES: yesTokenId,
+                    NO: noTokenId,
+                  },
+                  includeYes,
+                  includeNo,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                })
+              : {};
 
-            const legacySide = side ?? "YES";
-            const legacyHistory =
-              legacySide === "NO"
-                ? (historyBySide.NO ?? historyBySide.YES)
-                : (historyBySide.YES ?? historyBySide.NO);
-            if (!legacyHistory) {
-              reply.code(400);
-              return reply.send({
-                error: "Missing Polymarket price history for requested side.",
+            if (includeYes) {
+              series.YES = selectCandlestickSeries({
+                tokenId: yesTokenId,
+                venueCandles: yesCandles,
+                dbCandles: dbSeries.YES?.candles,
+                upstreamOk: upstreamOkBySide.YES,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
+              });
+            }
+            if (includeNo) {
+              series.NO = selectCandlestickSeries({
+                tokenId: noTokenId,
+                venueCandles: noCandles,
+                dbCandles: dbSeries.NO?.candles,
+                upstreamOk: upstreamOkBySide.NO,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+                bucketMinutes: intervalInfo.normalizedMinutes,
               });
             }
 
+            const legacySide = side ?? "YES";
+            const legacyEntry =
+              legacySide === "NO"
+                ? (series.NO as ReturnType<typeof selectCandlestickSeries>)
+                : (series.YES as ReturnType<typeof selectCandlestickSeries>);
+            const legacyHistory =
+              legacyEntry?.source === "venue"
+                ? legacySide === "NO"
+                  ? (historyBySide.NO ?? historyBySide.YES)
+                  : (historyBySide.YES ?? historyBySide.NO)
+                : formatKalshiCandlesticks(legacyEntry?.candles ?? []);
+
             const legacyTokenId =
               legacySide === "NO" ? (noTokenId ?? yesTokenId) : yesTokenId;
+            const historySource = resolveCandlestickHistorySource([
+              series.YES as ReturnType<typeof selectCandlestickSeries>,
+              series.NO as ReturnType<typeof selectCandlestickSeries>,
+            ]);
 
             const response = {
               ok: true,
@@ -1319,6 +1509,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                 endTs: resolvedEndTs,
               },
               series,
+              historySource,
             };
             const responseBody = JSON.stringify(response);
 
