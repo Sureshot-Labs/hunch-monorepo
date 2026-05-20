@@ -2,7 +2,11 @@
 
 import assert from "node:assert/strict";
 
-import { normalizePositionRefreshTokenIds } from "./services/positions-sync.js";
+import {
+  extractLimitlessTokenBalances,
+  isLimitlessPublicPortfolioUserNotFound,
+  normalizePositionRefreshTokenIds,
+} from "./services/positions-sync.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -50,5 +54,54 @@ test("normalizes Limitless refresh token candidates to scoped IDs", () => {
       "abc",
     ]),
     ["limitless:123", "limitless:456"],
+  );
+});
+
+test("extracts Limitless public portfolio CLOB and AMM balances", () => {
+  assert.deepEqual(
+    extractLimitlessTokenBalances({
+      clob: [
+        {
+          market: {
+            position_ids: ["111", "222"],
+          },
+          tokensBalance: {
+            yes: "2500000",
+            no: "0",
+          },
+        },
+      ],
+      amm: [
+        {
+          market: {
+            position_ids: ["333", "444"],
+          },
+          outcomeIndex: 1,
+          outcomeTokenAmount: "1750000",
+        },
+      ],
+    }),
+    [
+      { tokenId: "limitless:111", size: "2.5" },
+      { tokenId: "limitless:444", size: "1.75" },
+    ],
+  );
+});
+
+test("detects empty Limitless public portfolio responses", () => {
+  assert.equal(
+    isLimitlessPublicPortfolioUserNotFound({ message: "User not found" }),
+    true,
+  );
+  assert.equal(
+    isLimitlessPublicPortfolioUserNotFound({ error: "User not found" }),
+    true,
+  );
+  assert.equal(isLimitlessPublicPortfolioUserNotFound("User not found"), true);
+  assert.equal(
+    isLimitlessPublicPortfolioUserNotFound({
+      message: "Rate limit exceeded",
+    }),
+    false,
   );
 });

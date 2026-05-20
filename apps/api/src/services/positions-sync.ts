@@ -1171,7 +1171,9 @@ function extractLimitlessClobEntries(payload: unknown): unknown[] {
   return output;
 }
 
-function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
+export function extractLimitlessTokenBalances(
+  payload: unknown,
+): WalletTokenBalance[] {
   const clob = extractLimitlessClobEntries(payload).filter(isRecord);
   if (!clob.length) return [];
 
@@ -1213,10 +1215,33 @@ function extractLimitlessTokenBalances(payload: unknown): WalletTokenBalance[] {
         yesToken,
         noToken,
       );
+      continue;
+    }
+
+    const outcomeIndex =
+      typeof entry.outcomeIndex === "number"
+        ? entry.outcomeIndex
+        : typeof entry.outcome_index === "number"
+          ? entry.outcome_index
+          : null;
+    const outcomeToken =
+      outcomeIndex === 0 ? yesToken : outcomeIndex === 1 ? noToken : null;
+    const outcomeTokenAmount = normalizeLimitlessSnapshotBalance(
+      entry.outcomeTokenAmount ?? entry.outcome_token_amount,
+    );
+    if (outcomeToken && outcomeTokenAmount) {
+      addTokenBalance(output, seen, outcomeToken, outcomeTokenAmount);
     }
   }
 
   return output;
+}
+
+export function isLimitlessPublicPortfolioUserNotFound(
+  payload: unknown,
+): boolean {
+  const message = extractLimitlessMessage(payload);
+  return message?.toLowerCase() === "user not found";
 }
 
 async function backfillPolymarketUnifiedTokens(
@@ -2557,6 +2582,95 @@ async function syncLimitlessPositionsFromPortfolio(
   };
 }
 
+async function syncLimitlessFollowedPositionsFromPublicPortfolio(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    positionScope: PositionScope;
+  },
+): Promise<PositionsSyncResult> {
+  const totalStartedAt = Date.now();
+  const positionsApiStartedAt = Date.now();
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/portfolio/${encodeURIComponent(inputs.walletAddress)}/positions`,
+    auth: "none",
+  });
+  const positionsApiMs = Date.now() - positionsApiStartedAt;
+
+  if (!upstream.ok) {
+    if (isLimitlessPublicPortfolioUserNotFound(upstream.payload)) {
+      return {
+        venue: "limitless",
+        walletAddress: inputs.walletAddress,
+        heldTokens: 0,
+        knownTokens: 0,
+        upsertedPositions: 0,
+        flattenedPositions: 0,
+        timings: {
+          positionsApiMs,
+          totalMs: Date.now() - totalStartedAt,
+        },
+      };
+    }
+
+    const message = extractLimitlessMessage(upstream.payload);
+    throw new Error(
+      message
+        ? `Limitless followed positions sync failed: ${message}`
+        : "Limitless followed positions sync failed.",
+    );
+  }
+
+  const tokenBalances = extractLimitlessTokenBalances(upstream.payload);
+
+  const refreshCandidatesStartedAt = Date.now();
+  const openPositionTokenIds = await fetchOpenPositionTokenIdsForRefresh(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "limitless",
+    positionScope: inputs.positionScope,
+    tokenIdLike: "limitless:%",
+  });
+  const refreshCandidatesMs = Date.now() - refreshCandidatesStartedAt;
+  requestPositionMarketRefresh({
+    venue: "limitless",
+    tokenIds: [
+      ...tokenBalances.map((balance) => balance.tokenId),
+      ...openPositionTokenIds,
+    ],
+  });
+
+  const persistStartedAt = Date.now();
+  const result = await syncWalletPositionsFromTokenBalances(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "limitless",
+    positionScope: inputs.positionScope,
+    tokenBalances,
+    tokenIdLike: "limitless:%",
+    flattenGraceSec: env.limitlessPositionsSyncFlattenGraceSec,
+    protectRecentFlatsSec: env.limitlessPositionsSyncFlattenGraceSec,
+  });
+  const persistMs = Date.now() - persistStartedAt;
+
+  return {
+    venue: "limitless",
+    walletAddress: inputs.walletAddress,
+    heldTokens: result.heldTokens,
+    knownTokens: result.knownTokens,
+    upsertedPositions: result.upsertedPositions,
+    flattenedPositions: result.flattenedPositions,
+    timings: {
+      positionsApiMs,
+      refreshCandidatesMs,
+      persistMs,
+      totalMs: Date.now() - totalStartedAt,
+    },
+  };
+}
+
 export async function syncPositionsForUserWallet(
   pool: Pool,
   inputs: {
@@ -2589,6 +2703,13 @@ export async function syncPositionsForUserWallet(
       );
     }
     if (requestedVenue === "limitless") {
+      if (positionScope === "followed") {
+        return syncLimitlessFollowedPositionsFromPublicPortfolio(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          positionScope,
+        });
+      }
       return syncLimitlessPositionsFromPortfolio(pool, {
         userId: inputs.userId,
         walletAddress: inputs.walletAddress,

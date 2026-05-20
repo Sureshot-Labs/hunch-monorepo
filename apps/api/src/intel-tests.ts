@@ -2663,6 +2663,163 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "market holder fetch verifies Limitless Alchemy owners with Base balances",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+      const originalBaseRpcUrl = env.baseRpcUrl;
+      const originalBaseRpcTimeoutMs = env.baseRpcTimeoutMs;
+
+      const ownerA = "0x1111111111111111111111111111111111111111";
+      const ownerB = "0x2222222222222222222222222222222222222222";
+      const ownerC = "0x3333333333333333333333333333333333333333";
+      const balanceIface = new Interface([
+        "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+      ]);
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress =
+        "0xc9c98965297bc527861c898329ee280632b76e18";
+      env.baseRpcUrl = "https://base-rpc.example";
+      env.baseRpcTimeoutMs = 1_000;
+
+      let alchemyCalls = 0;
+      let baseRpcCalls = 0;
+      globalThis.fetch = async (input: string | URL | Request, init) => {
+        const url = String(input);
+        if (url.includes("getOwnersForNFT")) {
+          alchemyCalls += 1;
+          const tokenId = new URL(url).searchParams.get("tokenId");
+          const owners =
+            tokenId === "111"
+              ? [
+                  { ownerAddress: ownerA },
+                  { ownerAddress: ownerB },
+                  { ownerAddress: ownerA },
+                ]
+              : [{ ownerAddress: ownerA }, { ownerAddress: ownerC }];
+          return new Response(JSON.stringify({ owners }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+
+        if (url === "https://base-rpc.example") {
+          baseRpcCalls += 1;
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            id?: number;
+            params?: Array<{ data?: string }>;
+          };
+          const data = body.params?.[0]?.data;
+          assert.ok(data);
+          const decoded = balanceIface.decodeFunctionData(
+            "balanceOfBatch",
+            data,
+          );
+          const accounts = decoded[0] as string[];
+          const ids = decoded[1] as bigint[];
+          const balances = accounts.map((account, index) => {
+            const key = `${account.toLowerCase()}:${ids[index]?.toString()}`;
+            if (key === `${ownerA.toLowerCase()}:111`) return 2_500_000n;
+            if (key === `${ownerA.toLowerCase()}:222`) return 1_750_000n;
+            if (key === `${ownerC.toLowerCase()}:222`) return 500_000n;
+            return 0n;
+          });
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id ?? 1,
+              result: balanceIface.encodeFunctionResult("balanceOfBatch", [
+                balances,
+              ]),
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected fetch url: ${url}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:111",
+                  token_no: "limitless:222",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "limitless:111", side: "YES" },
+                { token_id: "limitless:222", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                {
+                  token_id: "limitless:111",
+                  best_bid: "0.50",
+                  best_ask: "0.70",
+                },
+                {
+                  token_id: "limitless:222",
+                  best_bid: "0.25",
+                  best_ask: "0.35",
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "limitless:market-1",
+          limit: 10,
+          client: client as never,
+        });
+
+        assert.equal(alchemyCalls, 2);
+        assert.equal(baseRpcCalls, 1);
+        assert.equal(result.source, "alchemy");
+        assert.deepEqual(result.holders, [
+          { wallet: ownerA, side: "YES", shares: 2.5 },
+          { wallet: ownerA, side: "NO", shares: 1.75 },
+          { wallet: ownerC, side: "NO", shares: 0.5 },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+        env.baseRpcUrl = originalBaseRpcUrl;
+        env.baseRpcTimeoutMs = originalBaseRpcTimeoutMs;
+      }
+    },
+  },
+  {
     name: "market holder fetch rejects partial solana side coverage",
     run: async () => {
       const originalFetch = globalThis.fetch;

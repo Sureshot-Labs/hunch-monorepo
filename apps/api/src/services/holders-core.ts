@@ -1,9 +1,11 @@
 import { isAbortError, isRpcRateLimit } from "@hunch/shared";
+import { ethers } from "ethers";
 import type { PoolClient } from "pg";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import { fetchErc1155BalancesByOwners } from "./polygon-rpc.js";
 import {
   fetchSolanaTokenAccountOwners,
   fetchSolanaTokenLargestAccounts,
@@ -152,6 +154,7 @@ function pickHolderWallet(holder: Record<string, unknown>): string | null {
     holder.proxyWallet,
     holder.wallet,
     holder.address,
+    holder.ownerAddress,
     holder.owner,
   ];
   for (const candidate of candidates) {
@@ -279,6 +282,71 @@ async function fetchAlchemyOwners(inputs: {
   }
 
   return owners;
+}
+
+function normalizeEvmAddress(value: string): string | null {
+  try {
+    return ethers.getAddress(value);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLimitlessVerifiedAlchemyHolders(inputs: {
+  yesId: string | null;
+  noId: string | null;
+  yesOwners: Array<{ wallet: string; shares: number }>;
+  noOwners: Array<{ wallet: string; shares: number }>;
+}): Promise<HolderEntry[]> {
+  const tokenIds = [inputs.yesId, inputs.noId].filter(
+    (tokenId): tokenId is string => Boolean(tokenId),
+  );
+  if (tokenIds.length === 0) return [];
+
+  const ownerByKey = new Map<string, string>();
+  for (const owner of [...inputs.yesOwners, ...inputs.noOwners]) {
+    const address = normalizeEvmAddress(owner.wallet);
+    if (!address) continue;
+    ownerByKey.set(address.toLowerCase(), address);
+  }
+  const owners = Array.from(ownerByKey.values());
+  if (owners.length === 0) return [];
+
+  const balancesByOwner = await fetchErc1155BalancesByOwners({
+    rpcUrl: env.baseRpcUrl,
+    timeoutMs: env.baseRpcTimeoutMs,
+    contractAddress: env.limitlessConditionalTokensAddress,
+    owners,
+    tokenIds,
+  });
+
+  const output: HolderEntry[] = [];
+  const appendSide = (
+    side: "YES" | "NO",
+    tokenId: string | null,
+    ownersForSide: Array<{ wallet: string; shares: number }>,
+  ) => {
+    if (!tokenId) return;
+    const seen = new Set<string>();
+    for (const owner of ownersForSide) {
+      const address = normalizeEvmAddress(owner.wallet);
+      if (!address) continue;
+      const ownerKey = address.toLowerCase();
+      if (seen.has(ownerKey)) continue;
+      seen.add(ownerKey);
+
+      const balance = balancesByOwner.get(ownerKey)?.get(tokenId) ?? 0n;
+      if (balance <= 0n) continue;
+      const shares = Number(ethers.formatUnits(balance, 6));
+      if (!Number.isFinite(shares) || shares <= 0) continue;
+      output.push({ wallet: address, side, shares });
+    }
+  };
+
+  appendSide("YES", inputs.yesId, inputs.yesOwners);
+  appendSide("NO", inputs.noId, inputs.noOwners);
+
+  return output;
 }
 
 async function fetchSolanaHolders(inputs: {
@@ -521,6 +589,19 @@ export async function fetchMarketHolderData(inputs: {
         ]);
         if (alchemyFailed) {
           source = "unavailable";
+        } else if (market.venue === "limitless") {
+          try {
+            holderEntries.push(
+              ...(await fetchLimitlessVerifiedAlchemyHolders({
+                yesId,
+                noId,
+                yesOwners,
+                noOwners,
+              })),
+            );
+          } catch {
+            source = "unavailable";
+          }
         } else {
           for (const owner of yesOwners) {
             holderEntries.push({
