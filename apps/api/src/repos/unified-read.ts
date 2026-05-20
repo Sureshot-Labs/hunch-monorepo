@@ -66,6 +66,13 @@ function buildLimitlessAmmFallbackAllowedExpr(
   `;
 }
 
+function buildNativeTradableMarketSql(alias: string): string {
+  return `(
+    ${alias}.venue <> 'kalshi'
+    or lower(coalesce(${alias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+  )`;
+}
+
 function createParamBuilder() {
   const params: PgParams = [];
   const add = (value: PgParams[number]): string => {
@@ -86,6 +93,7 @@ type FeedSqlExpressions = {
   eventOpenInterestExpr: string;
   eventVolumeSortExpr: string;
   supportedLimitlessMarketExpr: string;
+  nativeTradableMarketExpr: string;
   renderableMarketExpr: string;
   yesMidExpr: string;
 };
@@ -141,6 +149,7 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   const marketLiquidityDisplayExpr = `
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const eventOpenInterestExpr = `
     coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
   `;
@@ -165,6 +174,7 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
     eventOpenInterestExpr,
     eventVolumeSortExpr,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
     yesMidExpr,
   };
@@ -224,6 +234,7 @@ function buildFeedSearchMatchesSql(args: {
   eventSearchDocExpr: string;
   marketSearchDocExpr: string;
   renderableMarketExpr: string;
+  nativeTradableMarketExpr: string;
 }): string {
   const {
     mode,
@@ -233,6 +244,7 @@ function buildFeedSearchMatchesSql(args: {
     eventSearchDocExpr,
     marketSearchDocExpr,
     renderableMarketExpr,
+    nativeTradableMarketExpr,
   } = args;
   const needsScore = mode === "ranked" || matchLimit != null;
   const selectColumns = needsScore ? "id, max(rank) as rank" : "distinct id";
@@ -300,6 +312,7 @@ function buildFeedSearchMatchesSql(args: {
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${renderableMarketExpr}
+        and ${nativeTradableMarketExpr}
         and (${marketSearchDocExpr}) @@ sq.query
       union all
       select
@@ -320,6 +333,7 @@ function buildFeedSearchMatchesSql(args: {
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${renderableMarketExpr}
+        and ${nativeTradableMarketExpr}
         and (${marketSearchDocExpr}) @@ sq.prefix_query
     ) matches
     ${aggregateClause}
@@ -332,6 +346,7 @@ function buildFeedSearchContext(args: {
   nowParam: string;
   nowCloseParam?: string;
   renderableMarketExpr: string;
+  nativeTradableMarketExpr?: string;
   mode?: FeedSearchMode;
   matchLimit?: number | null;
 }): FeedSearchContext {
@@ -341,6 +356,7 @@ function buildFeedSearchContext(args: {
     nowParam,
     nowCloseParam = nowParam,
     renderableMarketExpr,
+    nativeTradableMarketExpr = buildNativeTradableMarketSql("m"),
     mode = "ranked",
     matchLimit = null,
   } = args;
@@ -359,6 +375,7 @@ function buildFeedSearchContext(args: {
         eventSearchDocExpr,
         marketSearchDocExpr,
         renderableMarketExpr,
+        nativeTradableMarketExpr,
       })
     : "";
   const searchCte = plan.hasSearch
@@ -573,6 +590,7 @@ function buildFeedMarketViewContext(args: {
     marketVolumeDisplayExpr,
     marketLiquidityDisplayExpr,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
     yesMidExpr,
   } = expressions;
@@ -604,6 +622,7 @@ function buildFeedMarketViewContext(args: {
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${nativeTradableMarketExpr}
         and ${renderableMarketExpr}
       group by m.event_id
     )
@@ -615,6 +634,7 @@ function buildFeedMarketViewContext(args: {
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
 
@@ -941,6 +961,7 @@ export async function fetchFeedCategoryFacetRows(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${buildNativeTradableMarketSql("m")}
           and ${renderableMarketExpr}
       )`,
     );
@@ -997,6 +1018,7 @@ export async function fetchFeedCategoryFacetRows(
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${buildNativeTradableMarketSql("m")}
         and ${renderableMarketExpr}
       where ${eventWhere.join(" and ")}
       group by
@@ -1122,6 +1144,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${buildNativeTradableMarketSql("m")}
           and ${renderableMarketExpr}
       )`,
     );
@@ -1252,6 +1275,7 @@ export async function fetchFeedEventIds(
       and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
       and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
+      and ${buildNativeTradableMarketSql("m")}
       and ${renderableMarketExpr}
     ${eventChangeJoin}
     ${tradeJoin}
@@ -1326,6 +1350,7 @@ export type FeedMarketRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   venue_exchange: string | null;
   venue_adapter: string | null;
   market_address: string | null;
@@ -1363,6 +1388,7 @@ export async function fetchFeedMarkets(
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
   const supportedLimitlessMarketExpr = "true";
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const eventVolumeWindowExpr = `
     coalesce(
@@ -1404,6 +1430,7 @@ export async function fetchFeedMarkets(
     `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
   if (marketIdsParam) {
@@ -1478,6 +1505,7 @@ export async function fetchFeedMarkets(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${nativeTradableMarketExpr}
       )
     `);
   }
@@ -1578,6 +1606,7 @@ export async function fetchFeedMarkets(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       coalesce(m.metadata->>'venueExchange', e.metadata->>'venueExchange') as venue_exchange,
       coalesce(m.metadata->>'venueAdapter', e.metadata->>'venueAdapter') as venue_adapter,
       m.metadata->>'address' as market_address,
@@ -1854,6 +1883,7 @@ export async function fetchFeedMarketsDirect(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       coalesce(m.metadata->>'venueExchange', e.metadata->>'venueExchange') as venue_exchange,
       coalesce(m.metadata->>'venueAdapter', e.metadata->>'venueAdapter') as venue_adapter,
       m.metadata->>'address' as market_address,
@@ -1901,6 +1931,7 @@ export async function fetchFavoriteFeedEventPage(
 
   const { params, add } = createParamBuilder();
   const supportedLimitlessMarketExpr = "true";
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const marketIdsParam = add(inputs.marketIds);
@@ -1927,6 +1958,7 @@ export async function fetchFavoriteFeedEventPage(
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${nativeTradableMarketExpr}
         and ${renderableMarketExpr}
       group by m.event_id
     )
@@ -1963,6 +1995,7 @@ export async function fetchFavoriteFeedEventPage(
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
   if (search.hasSearch) {
@@ -2371,6 +2404,7 @@ export type EventDetailsRow = {
 
 export type MarketSignalPricingRow = {
   market_id: string;
+  venue: string;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   close_time: unknown;
@@ -2382,6 +2416,7 @@ export type MarketSignalPricingRow = {
   best_bid_no: unknown;
   best_ask_no: unknown;
   last_price: unknown;
+  market_metadata: unknown;
   resolved_outcome: string | null;
   resolved_outcome_pct: unknown;
 };
@@ -2507,6 +2542,7 @@ export async function fetchMarketSignalPricingByIds(
   const sql = `
     SELECT
       m.id as market_id,
+      m.venue,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.close_time,
@@ -2518,6 +2554,7 @@ export async function fetchMarketSignalPricingByIds(
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
       m.last_price,
+      m.metadata as market_metadata,
       m.resolved_outcome,
       m.resolved_outcome_pct
     FROM unified_markets m

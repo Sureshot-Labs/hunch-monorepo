@@ -350,8 +350,6 @@ async function publishTokenTopNow(
   bestAsk: number | null,
   tsMs: number,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
-
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -376,6 +374,39 @@ async function publishTokenTopNow(
     writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
+}
+
+function isDflowNativeAcceptingOrders(metadata: unknown): boolean {
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return false;
+  }
+  return (
+    (metadata as Record<string, unknown>).dflowNativeAcceptingOrders === true
+  );
+}
+
+function isMarketTimeOpen(market: UnifiedMarketRow, nowMs: number): boolean {
+  const closeMs = market.close_time?.getTime();
+  const expirationMs = market.expiration_time?.getTime();
+  return (
+    (closeMs == null || closeMs > nowMs) &&
+    (expirationMs == null || expirationMs > nowMs)
+  );
+}
+
+function resolveDflowAcceptingOrders(
+  market: UnifiedMarketRow,
+  nowMs: number,
+): boolean {
+  return (
+    market.status === "ACTIVE" &&
+    isMarketTimeOpen(market, nowMs) &&
+    isDflowNativeAcceptingOrders(market.metadata)
+  );
 }
 
 function clampHotProbeLimit(limit: number): number {
@@ -849,9 +880,21 @@ async function publishTokenTopsForTokenIds(
     side: "YES" | "NO";
     best_bid: number | null;
     best_ask: number | null;
+    status: UnifiedMarketRow["status"];
+    close_time: Date | null;
+    expiration_time: Date | null;
+    metadata: unknown;
   }>(
     `
-      select t.token_id, t.side, m.best_bid, m.best_ask
+      select
+        t.token_id,
+        t.side,
+        m.best_bid,
+        m.best_ask,
+        m.status,
+        m.close_time,
+        m.expiration_time,
+        m.metadata
       from unified_tokens t
       join unified_markets m on m.id = t.market_id
       where t.token_id = any($1::text[])
@@ -862,24 +905,27 @@ async function publishTokenTopsForTokenIds(
   if (!rows.length) return 0;
 
   const ts = new Date();
-  const publish = rows
-    .map((row) => {
-      const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
-      const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
-      const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
-      const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
-      if (bestBid == null && bestAsk == null) return null;
-      return { tokenId: row.token_id, bestBid, bestAsk };
-    })
-    .filter(
-      (
-        row,
-      ): row is {
-        tokenId: string;
-        bestBid: number | null;
-        bestAsk: number | null;
-      } => Boolean(row),
+  const tsMs = ts.getTime();
+  const publish = rows.map((row) => {
+    const acceptingOrders = resolveDflowAcceptingOrders(
+      {
+        status: row.status,
+        close_time: row.close_time ?? undefined,
+        expiration_time: row.expiration_time ?? undefined,
+        metadata: row.metadata,
+      } as UnifiedMarketRow,
+      tsMs,
     );
+    if (!acceptingOrders) {
+      return { tokenId: row.token_id, bestBid: null, bestAsk: null };
+    }
+
+    const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
+    const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
+    const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
+    const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
+    return { tokenId: row.token_id, bestBid, bestAsk };
+  });
 
   if (!publish.length) return 0;
 
@@ -905,9 +951,10 @@ async function publishDflowMarketStates(
       const tokenIds = [market.token_yes, market.token_no].filter(
         (tokenId): tokenId is string => Boolean(tokenId),
       );
+      const acceptingOrders = resolveDflowAcceptingOrders(market, tsMs);
       return tokenIds.map((tokenId) =>
-        q.add(() =>
-          publishMarketState({
+        q.add(async () => {
+          await publishMarketState({
             redis,
             venue: "kalshi",
             tokenId,
@@ -917,11 +964,14 @@ async function publishDflowMarketStates(
               market.resolved_outcome || market.resolved_outcome_pct != null
                 ? "SETTLED"
                 : (market.status ?? null),
-            acceptingOrders: null,
+            acceptingOrders,
             resolvedOutcome: market.resolved_outcome ?? null,
             tsMs,
-          }),
-        ),
+          });
+          if (!acceptingOrders) {
+            await publishTokenTopNow(tokenId, null, null, tsMs);
+          }
+        }),
       );
     }),
   );

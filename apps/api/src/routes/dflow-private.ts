@@ -1,8 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { publishMarketState } from "@hunch/infra";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { getRedis } from "../redis.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import {
@@ -13,6 +15,7 @@ import {
 import { storeExecution } from "../repos/executions-repo.js";
 import {
   dflowRequest,
+  extractDflowErrorCode,
   extractDflowErrorMessage,
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
@@ -42,6 +45,16 @@ import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 
 const SOL_DECIMALS = 9;
 
+type RedisMulti = {
+  set: (key: string, value: string, options?: { EX?: number }) => RedisMulti;
+  publish: (channel: string, message: string) => RedisMulti;
+  exec: () => Promise<unknown>;
+};
+
+type PriceRedis = {
+  multi: () => RedisMulti;
+};
+
 type MintPair = {
   inputMint: string;
   outputMint: string;
@@ -64,6 +77,144 @@ function ensureDflowReady(reply: {
 
 function isBuyIntent(inputMint: string | null | undefined): boolean {
   return Boolean(inputMint && inputMint === env.solanaUsdcMint);
+}
+
+function isDflowRouteNotFound(payload: unknown): boolean {
+  const code = extractDflowErrorCode(payload);
+  if (code === "route_not_found") return true;
+  const message = extractDflowErrorMessage(payload)?.toLowerCase() ?? "";
+  return message.includes("route not found");
+}
+
+function buildClearedTopTick(tokenId: string, tsMs: number): string {
+  return JSON.stringify({
+    token_id: tokenId,
+    best_bid: null,
+    best_ask: null,
+    mid: null,
+    spread: null,
+    ts: tsMs,
+  });
+}
+
+async function markDflowRouteUnavailable(mints: string[]): Promise<void> {
+  const tokenIds = Array.from(
+    new Set(
+      mints
+        .map((mint) => mint.trim())
+        .filter((mint) => mint && mint !== env.solanaUsdcMint)
+        .map((mint) => `sol:${mint}`),
+    ),
+  );
+  if (!tokenIds.length) return;
+
+  const { rows: marketRows } = await pool.query<{
+    market_id: string;
+    venue_market_id: string | null;
+    status: string | null;
+    condition_id: string | null;
+    resolved_outcome: string | null;
+  }>(
+    `
+      with affected as (
+        select distinct market_id
+        from unified_market_tokens
+        where token_id = any($1::text[])
+      )
+      update unified_markets m
+      set
+        metadata = jsonb_set(
+          coalesce(m.metadata, '{}'::jsonb),
+          '{dflowNativeAcceptingOrders}',
+          'false'::jsonb,
+          true
+        ),
+        best_bid = null,
+        best_ask = null,
+        last_price = null,
+        updated_at_db = now()
+      from affected a
+      where m.id = a.market_id
+        and m.venue = 'kalshi'
+      returning
+        m.id as market_id,
+        m.venue_market_id,
+        m.status::text as status,
+        m.condition_id,
+        m.resolved_outcome
+    `,
+    [tokenIds],
+  );
+  if (!marketRows.length) return;
+
+  const marketIds = marketRows.map((row) => row.market_id);
+  const { rows: tokenRows } = await pool.query<{
+    token_id: string;
+    market_id: string;
+  }>(
+    `
+      select token_id, market_id
+      from unified_market_tokens
+      where market_id = any($1::text[])
+    `,
+    [marketIds],
+  );
+  if (!tokenRows.length) return;
+
+  const allTokenIds = tokenRows.map((row) => row.token_id);
+  await pool.query(
+    `
+      update unified_token_top_latest
+      set
+        best_bid = null,
+        best_ask = null,
+        mid = null,
+        spread = null,
+        ts = now(),
+        updated_at = now()
+      where token_id = any($1::text[])
+    `,
+    [allTokenIds],
+  );
+
+  const redis = (await getRedis()) as PriceRedis | null;
+  if (!redis) return;
+
+  const tsMs = Date.now();
+  const marketById = new Map(marketRows.map((row) => [row.market_id, row]));
+  await Promise.all(
+    tokenRows.map(async (row) => {
+      const market = marketById.get(row.market_id);
+      const tickJson = buildClearedTopTick(row.token_id, tsMs);
+      const multi = redis.multi();
+      multi.set(
+        `book:${row.token_id}`,
+        JSON.stringify({
+          token_id: row.token_id,
+          bids: [],
+          asks: [],
+          timestamp: String(tsMs),
+        }),
+        { EX: 5 },
+      );
+      multi.set(`top:${row.token_id}`, tickJson, { EX: 60 });
+      multi.publish(`prices:${row.token_id}`, tickJson);
+      await Promise.all([
+        multi.exec(),
+        publishMarketState({
+          redis,
+          venue: "kalshi",
+          tokenId: row.token_id,
+          market: market?.condition_id ?? market?.venue_market_id ?? null,
+          conditionId: market?.condition_id ?? null,
+          status: market?.status ?? null,
+          acceptingOrders: false,
+          resolvedOutcome: market?.resolved_outcome ?? null,
+          tsMs,
+        }),
+      ]);
+    }),
+  );
 }
 
 function isProofBypassed(user: { kalshiProofBypass: boolean }): boolean {
@@ -394,6 +545,14 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        if (isDflowRouteNotFound(upstream.payload)) {
+          void markDflowRouteUnavailable([
+            query.inputMint,
+            query.outputMint,
+          ]).catch((error) =>
+            app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
+          );
+        }
         const userMessage = formatDflowUserMessage(upstream.payload);
         reply.code(502);
         return reply.send({
@@ -559,6 +718,14 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       if (!upstream.ok) {
+        if (isDflowRouteNotFound(upstream.payload)) {
+          void markDflowRouteUnavailable([
+            query.inputMint,
+            query.outputMint,
+          ]).catch((error) =>
+            app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
+          );
+        }
         const userMessage = formatDflowUserMessage(upstream.payload);
         reply.code(502);
         return reply.send({

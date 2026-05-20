@@ -25,6 +25,22 @@ function differs(
   return Math.abs(left - right) > 1e-9;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function dflowNativeAcceptingOrders(metadata: unknown): boolean {
+  if (!isRecord(metadata)) return false;
+  return metadata.dflowNativeAcceptingOrders === true;
+}
+
+function canEnrichTradePrices(mapped: DflowMappedMarket): boolean {
+  return (
+    mapped.marketRow.status === "ACTIVE" &&
+    dflowNativeAcceptingOrders(mapped.marketRow.metadata)
+  );
+}
+
 export function applyKalshiPublicEventToMappedMarkets(
   mappedMarkets: DflowMappedMarket[],
   publicEvent: KalshiPublicEventData,
@@ -56,18 +72,31 @@ export function applyKalshiPublicEventToMappedMarkets(
     let row = mapped.marketRow;
     let snapshot = mapped.snapshot;
     let updated = false;
+    const allowTradePriceEnrichment = canEnrichTradePrices(mapped);
 
-    if (row.best_bid == null && publicMarket.bestBid != null) {
+    if (
+      allowTradePriceEnrichment &&
+      row.best_bid == null &&
+      publicMarket.bestBid != null
+    ) {
       row = { ...row, best_bid: publicMarket.bestBid };
       result.filledBestBid += 1;
       updated = true;
     }
-    if (row.best_ask == null && publicMarket.bestAsk != null) {
+    if (
+      allowTradePriceEnrichment &&
+      row.best_ask == null &&
+      publicMarket.bestAsk != null
+    ) {
       row = { ...row, best_ask: publicMarket.bestAsk };
       result.filledBestAsk += 1;
       updated = true;
     }
-    if (row.last_price == null && publicMarket.lastPrice != null) {
+    if (
+      allowTradePriceEnrichment &&
+      row.last_price == null &&
+      publicMarket.lastPrice != null
+    ) {
       row = { ...row, last_price: publicMarket.lastPrice };
       result.filledLastPrice += 1;
       updated = true;
@@ -105,7 +134,7 @@ export function applyKalshiPublicEventToMappedMarkets(
       updated = true;
     }
 
-    if (snapshot) {
+    if (snapshot && allowTradePriceEnrichment) {
       const nextSnapshot = { ...snapshot };
       let snapshotUpdated = false;
 

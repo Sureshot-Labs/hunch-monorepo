@@ -174,6 +174,10 @@ function normalizeStatus(value: unknown): string {
   return value.trim().toLowerCase();
 }
 
+function isNonTerminalAsk(value: number | undefined): boolean {
+  return value != null && value > 0 && value < 1;
+}
+
 export function mapDflowStatusToUnified(
   value: unknown,
 ): "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" {
@@ -485,6 +489,13 @@ export function mapToUnifiedMarket(
     typeof account?.isInitialized === "boolean"
       ? account.isInitialized
       : undefined;
+  const initializedForTrading = !requireInitialized || isInitialized === true;
+  const dflowNativeAcceptingOrders =
+    status === "ACTIVE" &&
+    initializedForTrading &&
+    (isNonTerminalAsk(yesAsk) || isNonTerminalAsk(noAsk));
+  const tradableYesBid = dflowNativeAcceptingOrders ? yesBid : undefined;
+  const tradableYesAsk = dflowNativeAcceptingOrders ? yesAsk : undefined;
 
   const normalizedVolume24h = volume24h ?? 0;
   const normalizedLiquidity =
@@ -565,6 +576,7 @@ export function mapToUnifiedMarket(
     result,
     scalarOutcomePct,
     marketType,
+    dflowNativeAcceptingOrders,
   });
 
   const image =
@@ -594,10 +606,12 @@ export function mapToUnifiedMarket(
     open_time,
     close_time,
     expiration_time,
-    best_bid: yesBid,
-    best_ask: yesAsk,
+    best_bid: tradableYesBid,
+    best_ask: tradableYesAsk,
     last_price:
-      yesBid != null && yesAsk != null ? (yesBid + yesAsk) / 2 : undefined,
+      tradableYesBid != null && tradableYesAsk != null
+        ? (tradableYesBid + tradableYesAsk) / 2
+        : undefined,
     volume_total: volumeTotal,
     volume_24h: normalizedVolume24h,
     open_interest: openInterest,
@@ -626,7 +640,9 @@ export function mapToUnifiedMarket(
   ];
 
   const snapshot: DflowMarketSnapshot | null =
-    status === "ACTIVE" && (!requireInitialized || isInitialized === true)
+    status === "ACTIVE" &&
+    dflowNativeAcceptingOrders &&
+    (!requireInitialized || isInitialized === true)
       ? {
           marketId: marketRow.id,
           yesTokenId,

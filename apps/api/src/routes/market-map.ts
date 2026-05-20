@@ -3,7 +3,10 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { getRedisStatus } from "../redis.js";
@@ -955,8 +958,10 @@ function mergeSignalsPreviewLists(params: {
 
 function normalizeSignalTargetMarket(params: {
   marketId: string;
+  venue: string | null;
   marketStatus: string | null;
   pmAcceptingOrders: boolean | null;
+  marketMetadata: unknown;
   closeTime: unknown;
   expirationTime: unknown;
   bestBid: unknown;
@@ -989,10 +994,14 @@ function normalizeSignalTargetMarket(params: {
     noBid,
     noAsk,
     acceptingOrders: computeAcceptingOrders({
+      venue: params.venue,
       status: params.marketStatus,
       closeTime: params.closeTime,
       expirationTime: params.expirationTime,
       pmAcceptingOrders: params.pmAcceptingOrders,
+      dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+        params.marketMetadata,
+      ),
     }),
     resolvedOutcome: params.resolvedOutcome,
     resolvedOutcomePct: toNumber(params.resolvedOutcomePct),
@@ -1026,8 +1035,10 @@ async function enrichSignalSummaryTargetMarkets(
       row.market_id,
       normalizeSignalTargetMarket({
         marketId: row.market_id,
+        venue: row.venue ?? null,
         marketStatus: row.market_status ?? null,
         pmAcceptingOrders: row.pm_accepting_orders ?? null,
+        marketMetadata: row.market_metadata,
         closeTime: row.close_time,
         expirationTime: row.expiration_time,
         bestBid: row.best_bid,

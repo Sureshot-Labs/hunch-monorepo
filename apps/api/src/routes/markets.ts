@@ -5,7 +5,10 @@ import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
@@ -411,10 +414,14 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               ? Number(market.pm_order_min_size)
               : null,
           acceptingOrders: computeAcceptingOrders({
+            venue: market.venue,
             status: market.market_status,
             closeTime: market.close_time,
             expirationTime: market.expiration_time,
             pmAcceptingOrders: market.pm_accepting_orders,
+            dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+              market.market_metadata,
+            ),
           }),
           negRisk:
             market.venue === "polymarket"

@@ -902,8 +902,6 @@ export async function writeUnifiedBookTop(
   bestAsk: number | null,
   ts: Date,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
-
   const runWrite = async (): Promise<void> => {
     const tsMs = ts.getTime();
     if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {

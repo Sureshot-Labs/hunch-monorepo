@@ -33,6 +33,7 @@ export type WatchlistRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   market_status: unknown;
   close_time: unknown;
   expiration_time: unknown;
@@ -88,6 +89,7 @@ export async function fetchWatchlistPage(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       m.status as market_status,
       m.close_time,
       m.expiration_time,

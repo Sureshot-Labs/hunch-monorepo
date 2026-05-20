@@ -6,7 +6,10 @@ import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { pool } from "../db.js";
 import { getRedis, getRedisStatus } from "../redis.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
@@ -187,10 +190,14 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
   const marketStatus =
     typeof rRow.market_status === "string" ? rRow.market_status : null;
   const acceptingOrders = computeAcceptingOrders({
+    venue: rRow.venue,
     status: marketStatus,
     closeTime: rRow.market_close_time,
     expirationTime: rRow.market_expiration_time,
     pmAcceptingOrders: rRow.pm_accepting_orders ?? null,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+      rRow.market_metadata,
+    ),
   });
 
   return {
@@ -356,7 +363,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v18:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v19:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;

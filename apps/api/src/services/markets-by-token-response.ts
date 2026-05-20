@@ -1,4 +1,7 @@
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import {
   parseMetadata,
   pickString,
@@ -92,9 +95,9 @@ export function mapMarketsByTokenRows(
         : null;
     const isLimitlessNegRisk = Boolean(
       limitlessMeta?.negRiskRequestId ||
-        limitlessMeta?.negRiskMarketId ||
-        limitlessMeta?.venueAdapter ||
-        limitlessMeta?.venueExchange,
+      limitlessMeta?.negRiskMarketId ||
+      limitlessMeta?.venueAdapter ||
+      limitlessMeta?.venueExchange,
     );
 
     let tokens = {
@@ -130,10 +133,14 @@ export function mapMarketsByTokenRows(
     }
 
     const acceptingOrders = computeAcceptingOrders({
+      venue: row.venue,
       status: row.market_status,
       closeTime: row.close_time,
       expirationTime: row.expiration_time,
       pmAcceptingOrders: row.pm_accepting_orders,
+      dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+        row.market_metadata,
+      ),
       nowMs: now.getTime(),
     });
     const tradeType =
@@ -181,10 +188,8 @@ export function mapMarketsByTokenRows(
             : row.best_ask != null
               ? Number(row.best_ask)
               : null,
-        bestBidYes:
-          row.best_bid_yes != null ? Number(row.best_bid_yes) : null,
-        bestAskYes:
-          row.best_ask_yes != null ? Number(row.best_ask_yes) : null,
+        bestBidYes: row.best_bid_yes != null ? Number(row.best_bid_yes) : null,
+        bestAskYes: row.best_ask_yes != null ? Number(row.best_ask_yes) : null,
         bestBidNo: row.best_bid_no != null ? Number(row.best_bid_no) : null,
         bestAskNo: row.best_ask_no != null ? Number(row.best_ask_no) : null,
         lastPrice: row.last_price != null ? Number(row.last_price) : null,
@@ -248,9 +253,7 @@ export function mapMarketsByTokenRows(
           eventLiquidity:
             row.event_liquidity != null ? Number(row.event_liquidity) : 0,
           eventVolume:
-            row.event_volume_total != null
-              ? Number(row.event_volume_total)
-              : 0,
+            row.event_volume_total != null ? Number(row.event_volume_total) : 0,
           eventVolume24h:
             row.event_volume_24h != null ? Number(row.event_volume_24h) : 0,
           eventOpenInterest:

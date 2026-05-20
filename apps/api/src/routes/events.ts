@@ -5,7 +5,10 @@ import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
@@ -215,10 +218,14 @@ function resolveTokenPair(row: EventDetailsRow): TokenPair {
 
 function isAcceptingOrders(row: EventDetailsRow): boolean {
   return computeAcceptingOrders({
+    venue: row.market_venue,
     status: row.market_status,
     closeTime: row.close_time,
     expirationTime: row.expiration_time,
     pmAcceptingOrders: row.pm_accepting_orders,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+      row.market_metadata,
+    ),
   });
 }
 
@@ -548,11 +555,39 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
           // Determine if market is accepting orders
           const acceptingOrders = computeAcceptingOrders({
+            venue: row.market_venue,
             status: row.market_status,
             closeTime: row.close_time,
             expirationTime: row.expiration_time,
             pmAcceptingOrders: row.pm_accepting_orders,
+            dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+              row.market_metadata,
+            ),
           });
+          const liveYesBid =
+            acceptingOrders && row.best_bid_yes != null
+              ? Number(row.best_bid_yes)
+              : acceptingOrders && row.best_bid != null
+                ? Number(row.best_bid)
+                : null;
+          const liveYesAsk =
+            acceptingOrders && row.best_ask_yes != null
+              ? Number(row.best_ask_yes)
+              : acceptingOrders && row.best_ask != null
+                ? Number(row.best_ask)
+                : null;
+          const liveNoBid =
+            acceptingOrders && row.best_bid_no != null
+              ? Number(row.best_bid_no)
+              : liveYesBid != null
+                ? Number(1 - liveYesBid)
+                : null;
+          const liveNoAsk =
+            acceptingOrders && row.best_ask_no != null
+              ? Number(row.best_ask_no)
+              : liveYesAsk != null
+                ? Number(1 - liveYesAsk)
+                : null;
 
           event.markets.push({
             marketId: row.market_id,
@@ -573,19 +608,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             openInterest:
               row.open_interest != null ? Number(row.open_interest) : 0,
             liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-            bestBid:
-              row.best_bid_yes != null
-                ? Number(row.best_bid_yes)
-                : row.best_bid != null
-                  ? Number(row.best_bid)
-                  : null,
-            bestAsk:
-              row.best_ask_yes != null
-                ? Number(row.best_ask_yes)
-                : row.best_ask != null
-                  ? Number(row.best_ask)
-                  : null,
-            lastPrice: row.last_price != null ? Number(row.last_price) : null,
+            bestBid: liveYesBid,
+            bestAsk: liveYesAsk,
+            lastPrice:
+              acceptingOrders && row.last_price != null
+                ? Number(row.last_price)
+                : null,
             outcomes,
             tokens,
             conditionId: row.condition_id || null,
@@ -629,34 +657,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 : null,
             marketAddress,
             top: {
-              yesBid:
-                row.best_bid_yes != null
-                  ? Number(row.best_bid_yes)
-                  : row.best_bid != null
-                    ? Number(row.best_bid)
-                    : null,
-              yesAsk:
-                row.best_ask_yes != null
-                  ? Number(row.best_ask_yes)
-                  : row.best_ask != null
-                    ? Number(row.best_ask)
-                    : null,
-              noBid:
-                row.best_bid_no != null
-                  ? Number(row.best_bid_no)
-                  : row.best_bid_yes != null
-                    ? Number(1 - Number(row.best_bid_yes))
-                    : row.best_bid != null
-                      ? Number(1 - Number(row.best_bid))
-                      : null,
-              noAsk:
-                row.best_ask_no != null
-                  ? Number(row.best_ask_no)
-                  : row.best_ask_yes != null
-                    ? Number(1 - Number(row.best_ask_yes))
-                    : row.best_ask != null
-                      ? Number(1 - Number(row.best_ask))
-                      : null,
+              yesBid: liveYesBid,
+              yesAsk: liveYesAsk,
+              noBid: liveNoBid,
+              noAsk: liveNoAsk,
             },
             openTime: row.open_time,
             closeTime: row.close_time,
