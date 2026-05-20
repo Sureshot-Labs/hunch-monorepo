@@ -59,6 +59,7 @@ import {
   parseMarketOutcomes,
 } from "../services/wallet-intel-helpers.js";
 import {
+  buildWalletIntelAcceptingOrdersSql,
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "../services/wallet-intel-market-eligibility.js";
@@ -252,6 +253,7 @@ type WalletPositionRouteRow = {
   expiration_time: Date | null;
   resolved_outcome: string | null;
   resolved_outcome_pct: string | null;
+  accepting_orders: boolean | null;
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
@@ -290,6 +292,7 @@ type WalletPositionBaseRouteItem = {
   expirationTime: string | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
+  acceptingOrders: boolean | null;
   outcomeSide: string | null;
   shares: number | null;
   sizeUsd: number | null;
@@ -581,6 +584,7 @@ type WalletActivitySignalItem = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   category: string | null;
   action: WalletActivityTopChange["action"];
   positionSide: string | null;
@@ -2003,6 +2007,7 @@ export function buildWalletSignalItemFromSignalRow(input: {
     closeTime: input.signalRow.closeTime,
     expirationTime: input.signalRow.expirationTime,
     resolvedOutcome: input.signalRow.resolvedOutcome,
+    acceptingOrders: input.signalRow.acceptingOrders,
     category: input.signalRow.category,
     action: input.signalRow.action,
     positionSide: input.signalRow.positionSide,
@@ -2077,6 +2082,7 @@ export function buildWalletSignalItemFromTopChange(input: {
     closeTime: input.change.closeTime ?? null,
     expirationTime: input.change.expirationTime ?? null,
     resolvedOutcome: input.change.resolvedOutcome ?? null,
+    acceptingOrders: input.change.acceptingOrders ?? null,
     category: input.change.category ?? null,
     action: input.change.action ?? null,
     positionSide: input.change.positionSide ?? null,
@@ -2146,6 +2152,7 @@ export function signalItemToTopChange(
     closeTime: item.closeTime,
     expirationTime: item.expirationTime,
     resolvedOutcome: item.resolvedOutcome,
+    acceptingOrders: item.acceptingOrders,
     outcomes: item.outcomes,
     category: item.category,
     action: item.action,
@@ -3290,6 +3297,7 @@ function mapWalletPositionBaseItems(
     resolvedOutcomePct: row.resolved_outcome_pct
       ? Number(row.resolved_outcome_pct)
       : null,
+    acceptingOrders: row.accepting_orders,
     outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
     shares: row.shares ? Number(row.shares) : null,
     sizeUsd: row.size_usd ? Number(row.size_usd) : null,
@@ -7297,6 +7305,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           close_time: Date | null;
           expiration_time: Date | null;
           resolved_outcome: string | null;
+          accepting_orders: boolean | null;
           outcome_side: string | null;
           action: string | null;
           delta_shares: string | null;
@@ -7334,6 +7343,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               um.close_time,
               um.expiration_time,
               um.resolved_outcome,
+              ${buildWalletIntelAcceptingOrdersSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+              })} as accepting_orders,
               wa.outcome_side,
               wa.action,
               wa.delta_shares,
@@ -7399,6 +7412,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? row.expiration_time.toISOString()
             : null,
           resolvedOutcome: row.resolved_outcome,
+          acceptingOrders: row.accepting_orders,
           outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
           action: row.action,
           deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
@@ -7554,6 +7568,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.expiration_time,
                 um.resolved_outcome,
                 um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -7616,6 +7634,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.expiration_time,
                 um.resolved_outcome,
                 um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -7753,6 +7775,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.expiration_time,
                 um.resolved_outcome,
                 um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -7836,6 +7862,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.expiration_time,
               tr.resolved_outcome,
               tr.resolved_outcome_pct,
+              tr.accepting_orders,
               tr.best_bid,
               tr.best_ask,
               tr.last_price,

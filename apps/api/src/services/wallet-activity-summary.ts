@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { env } from "../env.js";
+import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
 type WalletActivitySummaryDbRow = {
@@ -55,6 +56,7 @@ type WalletActivitySignalRowDbRow = {
   close_time: Date | null;
   expiration_time: Date | null;
   resolved_outcome: string | null;
+  accepting_orders: boolean | null;
   outcomes: string | null;
   category: string | null;
   change_action: WalletActivityTopChange["action"];
@@ -102,6 +104,7 @@ export type WalletActivityTopChange = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   outcomes: string[] | null;
   category: string | null;
   action: "OPENED" | "CLOSED" | "INCREASED" | "REDUCED" | null;
@@ -168,6 +171,7 @@ export type WalletActivitySignalRow = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   outcomes: string[] | null;
   category: string | null;
   action: WalletActivityTopChange["action"];
@@ -250,6 +254,7 @@ function mapWalletActivitySignalRow(
     closeTime: row.close_time,
     expirationTime: row.expiration_time,
     resolvedOutcome: row.resolved_outcome,
+    acceptingOrders: row.accepting_orders,
     outcomes: parseMarketOutcomes(row.outcomes),
     category: row.category,
     action: row.change_action,
@@ -464,6 +469,10 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
           : new Date(String(record.expirationTime)),
       resolvedOutcome:
         record.resolvedOutcome == null ? null : String(record.resolvedOutcome),
+      acceptingOrders:
+        typeof record.acceptingOrders === "boolean"
+          ? record.acceptingOrders
+          : null,
       outcomes: parseMarketOutcomes(record.outcomes),
       category: record.category == null ? null : String(record.category),
       action:
@@ -683,6 +692,10 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      ${buildWalletIntelAcceptingOrdersSql({
+        marketAlias: "um",
+        eventAlias: "ue",
+      })} as accepting_orders,
       um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.best_bid,
@@ -744,6 +757,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       cr.close_time,
       cr.expiration_time,
       cr.resolved_outcome,
+      cr.accepting_orders,
       cr.outcomes,
       cr.category,
       cr.signed_delta_shares,
@@ -850,6 +864,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       sc.*,
       case
         when sc.odds is not null
+         and sc.accepting_orders = true
          and sc.odds <= $5::numeric
          and coalesce(sc.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -861,6 +876,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       end as is_high_risk,
       case
         when sc.odds is not null
+         and sc.accepting_orders = true
          and sc.odds <= $5::numeric
          and coalesce(sc.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -895,6 +911,7 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
           'closeTime', cc.close_time,
           'expirationTime', cc.expiration_time,
           'resolvedOutcome', cc.resolved_outcome,
+          'acceptingOrders', cc.accepting_orders,
           'outcomes', case when cc.outcomes is not null then cc.outcomes::jsonb else null end,
           'category', cc.category,
           'action', cc.change_action,
@@ -1075,25 +1092,25 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
   select
     cc.wallet_id,
     count(*) filter (
-      where cc.rn <= $4 and cc.signal_score >= 0.9
+      where cc.rn <= $4 and cc.accepting_orders = true and cc.signal_score >= 0.9
     )::int as critical_signals_30d,
     avg(cc.signal_score) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     )::text as avg_signal_score_30d,
     bool_or(
       coalesce(cc.idle_days, 0) >= $12::numeric
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_reactivated_after_idle,
     bool_or(
       cc.entered_late or cc.late_bucket in ('late', 'very_late')
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_late_entry,
     bool_or(
       cc.late_bucket = 'very_late'
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_very_late_entry,
     bool_or(
       cc.unusual_size
@@ -1104,7 +1121,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       )
       or cc.is_high_risk
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_unusual_behavior
   from classified_changes cc
   group by cc.wallet_id
@@ -1134,6 +1151,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       sc.close_time,
       sc.expiration_time,
       sc.resolved_outcome,
+      sc.accepting_orders,
       sc.outcomes,
       sc.category,
       sc.change_action,
@@ -1170,6 +1188,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
         end,
         case
           when sc.odds is not null
+           and sc.accepting_orders = true
            and sc.odds <= $5::numeric
            and coalesce(sc.stake_usd, 0) >= $6::numeric
            and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -1181,6 +1200,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       ], null) as reason_codes
     from classified_changes sc
     where sc.signal_type is not null
+      and sc.accepting_orders = true
       and sc.change_action in ('OPENED', 'INCREASED')
       and upper(coalesce(sc.market_status::text, '')) = 'ACTIVE'
       and nullif(btrim(coalesce(sc.resolved_outcome, '')), '') is null
@@ -1204,6 +1224,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
     sr.close_time,
     sr.expiration_time,
     sr.resolved_outcome,
+    sr.accepting_orders,
     sr.outcomes,
     sr.category,
     sr.change_action,
@@ -1309,6 +1330,10 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      ${buildWalletIntelAcceptingOrdersSql({
+        marketAlias: "um",
+        eventAlias: "ue",
+      })} as accepting_orders,
       um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.last_price as market_last_price
@@ -1333,6 +1358,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       e.close_time,
       e.expiration_time,
       e.resolved_outcome,
+      e.accepting_orders,
       e.outcomes,
       e.category,
       e.change_action,
@@ -1495,6 +1521,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.close_time,
       sr.expiration_time,
       sr.resolved_outcome,
+      sr.accepting_orders,
       sr.outcomes,
       sr.category,
       sr.change_action,
@@ -1509,6 +1536,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.signal_score,
       case
         when sr.odds is not null
+         and sr.accepting_orders = true
          and sr.odds <= $5::numeric
          and coalesce(sr.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
@@ -1535,6 +1563,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
         case when sr.entered_late then 'late_entry' end,
         case
           when sr.odds is not null
+           and sr.accepting_orders = true
            and sr.odds <= $5::numeric
            and coalesce(sr.stake_usd, 0) >= $6::numeric
            and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
@@ -1561,6 +1590,8 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
     sr.close_time,
     sr.expiration_time,
     sr.resolved_outcome,
+    sr.accepting_orders,
+    sr.outcomes,
     sr.category,
     sr.change_action,
     sr.outcome_side,
@@ -1578,6 +1609,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
     sr.reason_codes
   from signal_rows sr
   where sr.signal_type is not null
+    and sr.accepting_orders = true
     and sr.change_action in ('OPENED', 'INCREASED')
     and upper(coalesce(sr.market_status::text, '')) = 'ACTIVE'
     and nullif(btrim(coalesce(sr.resolved_outcome, '')), '') is null

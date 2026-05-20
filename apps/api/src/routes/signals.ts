@@ -9,6 +9,7 @@ import {
   signalsQuerySchema,
 } from "../schemas/signals.js";
 import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
+import { buildWalletIntelAcceptingOrdersSql } from "../services/wallet-intel-market-eligibility.js";
 
 type SignalStatus = "active" | "superseded" | "retracted";
 type SignalType = "catalyst" | "risk" | "update";
@@ -47,6 +48,7 @@ type SignalRow = {
   target_market_best_bid: unknown;
   target_market_best_ask: unknown;
   target_market_last_price: unknown;
+  target_market_accepting_orders: boolean | null;
   target_market_volume_24h: unknown;
   target_market_volume_total: unknown;
   target_market_liquidity: unknown;
@@ -84,6 +86,7 @@ type SimilarMarketRow = {
   best_bid: unknown;
   best_ask: unknown;
   last_price: unknown;
+  accepting_orders: boolean | null;
   volume_24h: unknown;
   volume_total: unknown;
   liquidity: unknown;
@@ -144,6 +147,7 @@ type SignalListItem = {
     bestBid: number | null;
     bestAsk: number | null;
     lastPrice: number | null;
+    acceptingOrders: boolean | null;
     volume24h: number;
     volumeTotal: number;
     liquidity: number;
@@ -167,6 +171,7 @@ type SignalListItem = {
     bestBid: number | null;
     bestAsk: number | null;
     lastPrice: number | null;
+    acceptingOrders: boolean | null;
     volume24h: number;
     volumeTotal: number;
     liquidity: number;
@@ -327,6 +332,23 @@ function buildSignalsWhereClause(params: {
   const clauses: string[] = [
     "n.note_type = 'signal'",
     "n.producer_type = 'map_signals'",
+    `not exists (
+      select 1
+      from ai_note_targets am_target
+      left join unified_markets am
+        on am.id = am_target.target_id
+       and am_target.target_kind = 'market'
+      left join unified_events ae on ae.id = am.event_id
+      where am_target.note_id = n.id
+        and am_target.target_kind = 'market'
+        and (
+          am.id is null
+          or not ${buildWalletIntelAcceptingOrdersSql({
+            marketAlias: "am",
+            eventAlias: "ae",
+          })}
+        )
+    )`,
   ];
 
   if (params.status && params.status !== "all") {
@@ -454,6 +476,13 @@ async function fetchSignals(params: {
         m.best_bid as target_market_best_bid,
         m.best_ask as target_market_best_ask,
         m.last_price as target_market_last_price,
+        case
+          when m.id is not null then ${buildWalletIntelAcceptingOrdersSql({
+            marketAlias: "m",
+            eventAlias: "me",
+          })}
+          else null
+        end as target_market_accepting_orders,
         m.volume_24h as target_market_volume_24h,
         m.volume_total as target_market_volume_total,
         m.liquidity as target_market_liquidity,
@@ -549,6 +578,10 @@ async function fetchSignals(params: {
           m.best_bid,
           m.best_ask,
           m.last_price,
+          ${buildWalletIntelAcceptingOrdersSql({
+            marketAlias: "m",
+            eventAlias: "e",
+          })} as accepting_orders,
           m.volume_24h,
           m.volume_total,
           m.liquidity,
@@ -556,7 +589,12 @@ async function fetchSignals(params: {
           m.image,
           m.icon
         from unified_markets m
+        left join unified_events e on e.id = m.event_id
         where m.event_id = any($1::text[])
+          and ${buildWalletIntelAcceptingOrdersSql({
+            marketAlias: "m",
+            eventAlias: "e",
+          })}
       `,
       [eventIdsForSimilar],
     );
@@ -652,6 +690,7 @@ async function fetchSignals(params: {
             bestBid: toNumber(row.target_market_best_bid),
             bestAsk: toNumber(row.target_market_best_ask),
             lastPrice: toNumber(row.target_market_last_price),
+            acceptingOrders: row.target_market_accepting_orders,
             volume24h: toNonNegativeNumber(row.target_market_volume_24h),
             volumeTotal: toNonNegativeNumber(row.target_market_volume_total),
             liquidity: toNonNegativeNumber(row.target_market_liquidity),
@@ -678,6 +717,7 @@ async function fetchSignals(params: {
         bestBid: toNumber(candidate.best_bid),
         bestAsk: toNumber(candidate.best_ask),
         lastPrice: toNumber(candidate.last_price),
+        acceptingOrders: candidate.accepting_orders,
         volume24h: toNonNegativeNumber(candidate.volume_24h),
         volumeTotal: toNonNegativeNumber(candidate.volume_total),
         liquidity: toNonNegativeNumber(candidate.liquidity),

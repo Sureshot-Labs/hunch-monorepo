@@ -10,6 +10,38 @@ type SnapshotDeltaActivitySqlOptions = {
   eventAlias?: string | null;
 };
 
+export function buildWalletIntelAcceptingOrdersSql({
+  marketAlias = "m",
+  eventAlias = "e",
+  asOfSql = "now()",
+}: TrackableMarketSqlOptions = {}): string {
+  const eventClause = eventAlias
+    ? `
+        and (
+          ${eventAlias}.id is null
+          or (
+            ${eventAlias}.status = 'ACTIVE'
+            and (${eventAlias}.end_date is null or ${eventAlias}.end_date > ${asOfSql})
+          )
+        )
+      `
+    : "";
+
+  return `
+    (
+      ${marketAlias}.status = 'ACTIVE'
+      and ${marketAlias}.resolved_outcome is null
+      and (${marketAlias}.close_time is null or ${marketAlias}.close_time > ${asOfSql})
+      and (${marketAlias}.expiration_time is null or ${marketAlias}.expiration_time > ${asOfSql})
+      and (
+        lower(coalesce(${marketAlias}.venue, '')) <> 'kalshi'
+        or lower(coalesce(${marketAlias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+      )
+      ${eventClause}
+    )
+  `;
+}
+
 export function buildWalletIntelTrackableMarketSql({
   marketAlias = "m",
   eventAlias = "e",

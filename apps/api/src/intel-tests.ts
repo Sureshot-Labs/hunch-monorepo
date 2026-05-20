@@ -197,6 +197,7 @@ function createTestSignalRow(
     closeTime: new Date("2026-01-03T00:00:00.000Z"),
     expirationTime: null,
     resolvedOutcome: null,
+    acceptingOrders: true,
     category: "crypto",
     action: "OPENED",
     positionSide: "YES",
