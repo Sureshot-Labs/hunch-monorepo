@@ -2311,9 +2311,12 @@ async function refreshWalletPositionExposure(
     asOf: Date;
   },
 ) {
-  if (inputs.walletIds.length === 0) return;
-  await client.query(
-    `
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0) return;
+
+  for (const chunk of chunkArray(walletIds, 100)) {
+    await client.query(
+      `
       with wallet_set as (
         select unnest($1::uuid[]) as wallet_id
       ),
@@ -2323,7 +2326,7 @@ async function refreshWalletPositionExposure(
           ws.venue,
           max(ws.snapshot_at) as snapshot_at
         from wallet_position_snapshots ws
-        where ws.wallet_id = any($1::uuid[])
+        join wallet_set input on input.wallet_id = ws.wallet_id
         group by ws.wallet_id, ws.venue
       ),
       latest_rows as (
@@ -2425,8 +2428,9 @@ async function refreshWalletPositionExposure(
         as_of = excluded.as_of,
         updated_at = now()
     `,
-    [inputs.walletIds, inputs.asOf],
-  );
+      [chunk, inputs.asOf],
+    );
+  }
 }
 
 async function refreshWalletInferredOutcomes(
