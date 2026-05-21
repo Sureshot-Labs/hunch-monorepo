@@ -7490,21 +7490,27 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       let where = "";
       let idx = 2;
       const userParam = 1;
+      let walletParam: number | null = null;
+      let venueParam: number | null = null;
+      let sinceParam: number | null = null;
 
       if (query.walletId) {
-        where += `ws.wallet_id = $${idx++}`;
+        walletParam = idx++;
+        where += `ws.wallet_id = $${walletParam}`;
         params.push(query.walletId);
       } else {
         where += `ws.wallet_id in (select wallet_id from wallet_follows where user_id = $${userParam})`;
       }
 
       if (query.venue) {
-        where += ` and ws.venue = $${idx++}`;
+        venueParam = idx++;
+        where += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
       }
 
       if (query.since) {
-        where += ` and ws.snapshot_at >= $${idx++}`;
+        sinceParam = idx++;
+        where += ` and ws.snapshot_at >= $${sinceParam}`;
         params.push(query.since);
       }
 
@@ -7534,7 +7540,100 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const latestOnly = query.latest ?? true;
         const sql = latestOnly
-          ? `
+          ? walletParam != null
+            ? `
+              with candidate_venues(venue) as (
+                ${
+                  venueParam != null
+                    ? `select $${venueParam}::text`
+                    : "values ('polymarket'), ('limitless'), ('kalshi')"
+                }
+              ),
+              latest_snapshots as (
+                select
+                  cv.venue,
+                  latest.snapshot_at
+                from candidate_venues cv
+                join lateral (
+                  select ws.snapshot_at
+                  from wallet_position_snapshots ws
+                  where ws.wallet_id = $${walletParam}::uuid
+                    and ws.venue = cv.venue
+                    ${
+                      sinceParam != null
+                        ? `and ws.snapshot_at >= $${sinceParam}::timestamptz`
+                        : ""
+                    }
+                  order by ws.snapshot_at desc
+                  limit 1
+                ) latest on true
+              )
+              select
+                ws.wallet_id,
+                w.address,
+                w.chain,
+                w.label,
+                wn.name as user_name,
+                wl.label as user_label,
+                wl.color as user_label_color,
+                wp.profile->>'label_short' as profile_label,
+                ws.venue,
+                ws.market_id,
+                um.title as market_title,
+                um.outcomes,
+                um.image as market_image,
+                um.icon as market_icon,
+                um.event_id as event_id,
+                ue.title as event_title,
+                ue.image as event_image,
+                ue.icon as event_icon,
+                um.status as market_status,
+                um.close_time,
+                um.expiration_time,
+                um.resolved_outcome,
+                um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
+                um.best_bid,
+                um.best_ask,
+                um.last_price,
+                ws.outcome_side,
+                ws.shares,
+                ws.size_usd,
+                ws.price,
+                ws.snapshot_at,
+                ws.metadata
+              from latest_snapshots ls
+              join wallet_position_snapshots ws
+                on ws.wallet_id = $${walletParam}::uuid
+               and ws.venue = ls.venue
+               and ws.snapshot_at = ls.snapshot_at
+              join wallets w on w.id = ws.wallet_id
+              left join wallet_user_labels wl
+                on wl.wallet_id = w.id
+               and wl.user_id = $${userParam}
+              left join wallet_user_names wn
+                on wn.wallet_id = w.id
+               and wn.user_id = $${userParam}
+              left join wallet_profiles wp on wp.wallet_id = w.id
+              left join unified_markets um on um.id = ws.market_id
+              left join unified_events ue on ue.id = um.event_id
+              where ${positionFilterSql}
+                and ${buildWalletIntelTrackableMarketSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })}
+              order by
+                ws.snapshot_at desc,
+                ws.size_usd desc nulls last,
+                ws.shares desc nulls last,
+                coalesce(um.title, ws.market_id) asc
+              limit $${limitParam}
+              offset $${offsetParam}
+            `
+            : `
               with latest_snapshots as (
                 select
                   ws.wallet_id,
@@ -7714,7 +7813,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       let historyWhere = `ws.wallet_id = $${walletParam}`;
       if (query.venue) {
-        historyWhere += ` and ws.venue = $${idx++}`;
+        const venueParam = idx++;
+        historyWhere += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
       }
 
@@ -7750,38 +7850,43 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const rows = await client.query<WalletPositionRouteRow>(
           `
-            with candidate_rows as (
-              select
-                ws.wallet_id,
-                w.address,
-                w.chain,
-                w.label,
-                wn.name as user_name,
-                wl.label as user_label,
-                wl.color as user_label_color,
-                wp.profile->>'label_short' as profile_label,
+            with position_keys as (
+              select distinct
                 ws.venue,
                 ws.market_id,
-                um.title as market_title,
-                um.outcomes,
-                um.image as market_image,
-                um.icon as market_icon,
-                um.event_id as event_id,
-                ue.title as event_title,
-                ue.image as event_image,
-                ue.icon as event_icon,
-                um.status as market_status,
-                um.close_time,
-                um.expiration_time,
-                um.resolved_outcome,
-                um.resolved_outcome_pct::text as resolved_outcome_pct,
-                ${buildWalletIntelAcceptingOrdersSql({
-                  marketAlias: "um",
-                  eventAlias: "ue",
-                })} as accepting_orders,
-                um.best_bid,
-                um.best_ask,
-                um.last_price,
+                ws.outcome_side
+              from wallet_position_snapshots ws
+              where ${historyWhere}
+                and (
+                  coalesce(ws.shares, 0) > 0
+                  or greatest(
+                    coalesce(ws.size_usd, 0),
+                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+                  ) > 0
+                )
+            ),
+            market_keys as (
+              select
+                pk.venue,
+                pk.market_id,
+                pk.outcome_side,
+                coalesce(um.close_time, um.expiration_time) as terminal_at
+              from position_keys pk
+              join unified_markets um on um.id = pk.market_id
+              where (
+                  um.resolved_outcome is not null
+                  or upper(coalesce(um.status::text, '')) in ('CLOSED', 'SETTLED', 'ARCHIVED')
+                  or (
+                    coalesce(um.close_time, um.expiration_time) is not null
+                    and coalesce(um.close_time, um.expiration_time) < now()
+                  )
+                )
+            ),
+            terminal_rows as (
+              select
+                ws.wallet_id,
+                ws.venue,
+                ws.market_id,
                 case
                   when upper(coalesce(ws.outcome_side::text, '')) in ('YES', 'NO')
                     then upper(coalesce(ws.outcome_side::text, ''))
@@ -7792,80 +7897,60 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.price,
                 ws.snapshot_at,
                 ws.metadata
-              from wallet_position_snapshots ws
-              join wallets w on w.id = ws.wallet_id
-              left join wallet_user_labels wl
-                on wl.wallet_id = w.id
-               and wl.user_id = $${userParam}
-              left join wallet_user_names wn
-                on wn.wallet_id = w.id
-               and wn.user_id = $${userParam}
-              left join wallet_profiles wp on wp.wallet_id = w.id
-              left join unified_markets um on um.id = ws.market_id
-              left join unified_events ue on ue.id = um.event_id
-              where ${historyWhere}
-                and (
-                  coalesce(ws.shares, 0) > 0
-                  or greatest(
-                    coalesce(ws.size_usd, 0),
-                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
-                  ) > 0
-                )
-                and (
-                  um.resolved_outcome is not null
-                  or upper(coalesce(um.status::text, '')) in ('CLOSED', 'SETTLED', 'ARCHIVED')
-                  or (
-                    coalesce(um.close_time, um.expiration_time) is not null
-                    and coalesce(um.close_time, um.expiration_time) < now()
+              from market_keys mk
+              join lateral (
+                select ws.*
+                from wallet_position_snapshots ws
+                where ws.wallet_id = $${walletParam}::uuid
+                  and ws.venue = mk.venue
+                  and ws.market_id = mk.market_id
+                  and ws.outcome_side = mk.outcome_side
+                  and (
+                    coalesce(ws.shares, 0) > 0
+                    or greatest(
+                      coalesce(ws.size_usd, 0),
+                      abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+                    ) > 0
                   )
-                )
-                and (
-                  coalesce(um.close_time, um.expiration_time) is null
-                  or ws.snapshot_at <= coalesce(um.close_time, um.expiration_time)
-                )
-            ),
-            terminal_rows as (
-              select distinct on (
-                candidate_rows.venue,
-                candidate_rows.market_id,
-                coalesce(candidate_rows.outcome_side, '')
-              )
-                *
-              from candidate_rows
-              order by
-                candidate_rows.venue,
-                candidate_rows.market_id,
-                coalesce(candidate_rows.outcome_side, ''),
-                candidate_rows.snapshot_at desc
+                  and (
+                    mk.terminal_at is null
+                    or ws.snapshot_at <= mk.terminal_at
+                  )
+                order by ws.snapshot_at desc
+                limit 1
+              ) ws on true
             )
             select
               tr.wallet_id,
-              tr.address,
-              tr.chain,
-              tr.label,
-              tr.user_name,
-              tr.user_label,
-              tr.user_label_color,
-              tr.profile_label,
+              w.address,
+              w.chain,
+              w.label,
+              wn.name as user_name,
+              wl.label as user_label,
+              wl.color as user_label_color,
+              wp.profile->>'label_short' as profile_label,
               tr.venue,
               tr.market_id,
-              tr.market_title,
-              tr.outcomes,
-              tr.market_image,
-              tr.market_icon,
-              tr.event_id,
-              tr.event_title,
-              tr.event_image,
-              tr.event_icon,
-              tr.market_status,
-              tr.close_time,
-              tr.expiration_time,
-              tr.resolved_outcome,
-              tr.resolved_outcome_pct,
-              tr.accepting_orders,
-              tr.best_bid,
-              tr.best_ask,
-              tr.last_price,
+              um.title as market_title,
+              um.outcomes,
+              um.image as market_image,
+              um.icon as market_icon,
+              um.event_id as event_id,
+              ue.title as event_title,
+              ue.image as event_image,
+              ue.icon as event_icon,
+              um.status as market_status,
+              um.close_time,
+              um.expiration_time,
+              um.resolved_outcome,
+              um.resolved_outcome_pct::text as resolved_outcome_pct,
+              ${buildWalletIntelAcceptingOrdersSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+              })} as accepting_orders,
+              um.best_bid,
+              um.best_ask,
+              um.last_price,
               tr.outcome_side,
               tr.shares,
               tr.size_usd,
@@ -7873,12 +7958,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.snapshot_at,
               tr.metadata
             from terminal_rows tr
+            join wallets w on w.id = tr.wallet_id
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $${userParam}
+            left join wallet_user_names wn
+              on wn.wallet_id = w.id
+             and wn.user_id = $${userParam}
+            left join wallet_profiles wp on wp.wallet_id = w.id
+            left join unified_markets um on um.id = tr.market_id
+            left join unified_events ue on ue.id = um.event_id
             ${outerWhere}
             order by
               tr.snapshot_at desc,
               tr.size_usd desc nulls last,
               tr.shares desc nulls last,
-              coalesce(tr.market_title, tr.market_id) asc
+              coalesce(um.title, tr.market_id) asc
             limit $${limitParam}
             offset $${offsetParam}
           `,

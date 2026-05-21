@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { ethers } from "ethers";
-import { isAbortError, isRpcRateLimit } from "@hunch/shared";
+import { chunkArray, isAbortError, isRpcRateLimit } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
@@ -391,17 +391,27 @@ async function backfillLimitlessPrices(
   );
 
   let updated = 0;
+  let skipped = 0;
+  let fetchCandidates = 0;
 
   for (const row of rows.rows) {
     const hasPrice =
       row.best_bid != null || row.best_ask != null || row.last_price != null;
-    if (hasPrice) continue;
-    if (!row.slug) continue;
+    if (hasPrice) {
+      skipped += 1;
+      continue;
+    }
+    if (!row.slug) {
+      skipped += 1;
+      continue;
+    }
 
     let bestBid: number | null = null;
     let bestAsk: number | null = null;
     let lastPrice: number | null = null;
 
+    fetchCandidates += 1;
+    if (telemetry) telemetry.estimatedCalls += 1;
     const orderbook = await fetchLimitlessOrderbook(
       row.slug,
       telemetry ?? null,
@@ -413,6 +423,7 @@ async function backfillLimitlessPrices(
     }
 
     if (bestBid == null && bestAsk == null && lastPrice == null) {
+      if (telemetry) telemetry.estimatedCalls += 1;
       const detail = await fetchLimitlessMarketDetail(
         row.slug,
         telemetry ?? null,
@@ -446,6 +457,17 @@ async function backfillLimitlessPrices(
       [row.id, bestBid, bestAsk, lastPrice],
     );
     updated += 1;
+  }
+
+  if (telemetry) telemetry.skipped += skipped;
+  if (limitlessIds.length > 0) {
+    console.log("[wallets:intel:refresh] limitless price backfill scan", {
+      selected: limitlessIds.length,
+      scanned: rows.rows.length,
+      skipped,
+      fetchCandidates,
+      updated,
+    });
   }
 
   return updated;
@@ -2411,18 +2433,24 @@ async function refreshWalletInferredOutcomes(
   client: Queryable,
   inputs: { walletIds: string[] },
 ) {
-  if (inputs.walletIds.length === 0) return;
-  await client.query(
-    `
-      with latest as (
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0) return;
+
+  for (const chunk of chunkArray(walletIds, 250)) {
+    await client.query(
+      `
+      with input_wallets as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      latest as (
         select distinct on (ws.wallet_id, ws.market_id, ws.outcome_side)
           ws.wallet_id,
           ws.market_id,
           ws.outcome_side,
           ws.shares
         from wallet_position_snapshots ws
-        where ws.wallet_id = any($1::uuid[])
-          and ws.shares > 0
+        join input_wallets iw on iw.wallet_id = ws.wallet_id
+        where ws.shares > 0
         order by ws.wallet_id, ws.market_id, ws.outcome_side, ws.snapshot_at desc
       ),
       agg as (
@@ -2469,18 +2497,20 @@ async function refreshWalletInferredOutcomes(
         total
       )
       select
-        wallet_id,
-        wins,
-        total
-      from summary
+        iw.wallet_id,
+        coalesce(summary.wins, 0),
+        coalesce(summary.total, 0)
+      from input_wallets iw
+      left join summary on summary.wallet_id = iw.wallet_id
       on conflict (wallet_id)
       do update set
         wins = excluded.wins,
         total = excluded.total,
         updated_at = now()
     `,
-    [inputs.walletIds],
-  );
+      [chunk],
+    );
+  }
 }
 
 async function refreshSystemTags(
