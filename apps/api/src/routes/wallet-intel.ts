@@ -652,6 +652,12 @@ function normalizeAddress(address: string): string {
   return trimmed;
 }
 
+function walletAddressIdentityKey(address: string): string {
+  const trimmed = address.trim();
+  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
+  return trimmed;
+}
+
 function isZeroEvmWalletAddress(address: string): boolean {
   return address.toLowerCase() === ethers.ZeroAddress;
 }
@@ -1391,6 +1397,76 @@ function buildWalletIntelWhaleScoreSql(alias: string): string {
   `;
 }
 
+function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
+  const ownerColumns = includeDetails
+    ? `
+          w2.address as owner_address,
+          w2.label as owner_label,
+          w2.id as owner_wallet_id`
+    : `
+          w2.address as owner_address`;
+  const resolvedColumns = includeDetails
+    ? `
+          coalesce(
+            linked_owner_evm.owner_address,
+            linked_owner_exact.owner_address,
+            safe_owner.owner_address
+          ) as owner_address,
+          coalesce(
+            linked_owner_evm.owner_label,
+            linked_owner_exact.owner_label,
+            safe_owner.owner_label
+          ) as owner_label,
+          coalesce(
+            linked_owner_evm.owner_wallet_id,
+            linked_owner_exact.owner_wallet_id,
+            safe_owner.owner_wallet_id
+          ) as owner_wallet_id`
+    : `
+          coalesce(
+            linked_owner_evm.owner_address,
+            linked_owner_exact.owner_address,
+            safe_owner.owner_address
+          ) as owner_address`;
+
+  return `
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where w.chain <> 'solana'
+                  and w.metadata->>'linkedOwnerAddress' ~* '^0x[0-9a-f]{40}$'
+                  and w2.chain = w.chain
+                  and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                limit 1
+              ) linked_owner_evm on true
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where w.metadata->>'linkedOwnerAddress' is not null
+                  and (
+                    w.chain = 'solana'
+                    or w.metadata->>'linkedOwnerAddress' !~* '^0x[0-9a-f]{40}$'
+                  )
+                  and w2.chain = w.chain
+                  and w2.address = w.metadata->>'linkedOwnerAddress'
+                limit 1
+              ) linked_owner_exact on true
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where linked_owner_evm.owner_address is null
+                  and linked_owner_exact.owner_address is null
+                  and w.metadata->>'kind' = 'safe'
+                  and w2.chain = w.chain
+                  and w2.metadata->>'kind' = 'safe_owner'
+                  and w2.metadata->>'derivedFrom' = w.address
+                limit 1
+              ) safe_owner on true
+              left join lateral (
+                select${resolvedColumns}
+              ) owner on true`;
+}
+
 function buildSlimWhaleSelectorSql(
   orderBy: string,
   includeInferred: boolean,
@@ -1429,46 +1505,15 @@ function buildSlimWhaleSelectorSql(
                 wis.two_sided_markets,
                 ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
                 owner.owner_address,
-                activity.last_activity_at,
-                activity.has_trade_activity,
-                activity.has_holder_activity${inferredSelect}
+                wis.last_activity_at,
+                null::boolean as has_trade_activity,
+                null::boolean as has_holder_activity${inferredSelect}
               from wallets w
               join wallet_tag_map tm on tm.wallet_id = w.id
                and tm.tag_id = $3::uuid
-              left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-              left join lateral (
-                select
-                  max(wah.last_occurred_at) as last_activity_at,
-                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
-                  bool_or(wah.activity_type = 'holder') as has_holder_activity
-                from wallet_activity_hourly wah
-                where wah.wallet_id = w.id
-                  and wah.hour_bucket >= now() - ($2::text || ' days')::interval
-              ) activity on true
-              left join lateral (
-                select w2.address as owner_address
-                from wallets w2
-                where w2.chain = w.chain
-                  and (
-                    (
-                      w.metadata->>'linkedOwnerAddress' is not null
-                      and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                    )
-                    or (
-                      w.metadata->>'kind' = 'safe'
-                      and w2.metadata->>'kind' = 'safe_owner'
-                      and w2.metadata->>'derivedFrom' = w.address
-                    )
-                  )
-                order by case
-                  when w.metadata->>'linkedOwnerAddress' is not null
-                    and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                  then 0
-                  else 1
-                end
-                limit 1
-              ) owner on true${inferredJoin}
-              where activity.last_activity_at is not null
+              join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+              ${buildWalletOwnerResolutionJoinSql()}${inferredJoin}
+              where wis.last_activity_at >= now() - ($2::text || ' days')::interval
               order by ${orderBy}
               limit $1
             `;
@@ -1499,7 +1544,7 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                 join wallet_tag_map tm on tm.wallet_id = w.id
                  and tm.tag_id = $3::uuid
                 join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-                where wis.last_activity_at is not null
+                where wis.last_activity_at >= now() - ($4::text || ' days')::interval
                 order by
                   wis.last_activity_at desc nulls last,
                   whale_score desc nulls last,
@@ -1534,30 +1579,8 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
               from shortlist s
               join wallets w on w.id = s.id
               left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-              left join lateral (
-                select w2.address as owner_address
-                from wallets w2
-                where w2.chain = w.chain
-                  and (
-                    (
-                      w.metadata->>'linkedOwnerAddress' is not null
-                      and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                    )
-                    or (
-                      w.metadata->>'kind' = 'safe'
-                      and w2.metadata->>'kind' = 'safe_owner'
-                      and w2.metadata->>'derivedFrom' = w.address
-                    )
-                  )
-                order by case
-                  when w.metadata->>'linkedOwnerAddress' is not null
-                    and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                  then 0
-                  else 1
-                end
-                limit 1
-              ) owner on true${inferredJoin}
-              where wis.last_activity_at is not null
+              ${buildWalletOwnerResolutionJoinSql()}${inferredJoin}
+              where wis.last_activity_at >= now() - ($4::text || ' days')::interval
               order by ${orderBy}
               limit $2
             `;
@@ -3062,32 +3085,7 @@ async function loadWalletPageStateByIds(
       from wallet_set ws
       join wallets w on w.id = ws.wallet_id
       left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
-      left join lateral (
-        select
-          w2.address as owner_address,
-          w2.label as owner_label,
-          w2.id as owner_wallet_id
-        from wallets w2
-        where w2.chain = w.chain
-          and (
-            (
-              w.metadata->>'linkedOwnerAddress' is not null
-              and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-            )
-            or (
-              w.metadata->>'kind' = 'safe'
-              and w2.metadata->>'kind' = 'safe_owner'
-              and w2.metadata->>'derivedFrom' = w.address
-            )
-          )
-        order by case
-          when w.metadata->>'linkedOwnerAddress' is not null
-            and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-          then 0
-          else 1
-        end
-        limit 1
-      ) owner on true
+      ${buildWalletOwnerResolutionJoinSql(true)}
     `,
     [userId, walletIds],
   );
@@ -5165,7 +5163,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               labelsFilter.length === 0;
             const useSnapshotWhaleShortlist =
               useSlimWhaleSelector && query.sort === "last_activity";
-            const whaleActivityOrderExpr = useSnapshotWhaleShortlist
+            const whaleActivityOrderExpr = useSlimWhaleSelector
               ? "wis.last_activity_at"
               : "activity.last_activity_at";
             const orderBy = (() => {
@@ -5210,6 +5208,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                         snapshotWhaleShortlistLimit,
                         maxScanCandidates + 1,
                         whaleTagId,
+                        query.windowDays,
                       ]
                     : [maxScanCandidates + 1, query.windowDays, whaleTagId],
                 )
@@ -5280,32 +5279,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     where wah.wallet_id = w.id
                       and wah.hour_bucket >= now() - ($3::text || ' days')::interval
                   ) activity on true
-                  left join lateral (
-                    select
-                      w2.address as owner_address,
-                      w2.label as owner_label,
-                      w2.id as owner_wallet_id
-                    from wallets w2
-                    where w2.chain = w.chain
-                      and (
-                        (
-                          w.metadata->>'linkedOwnerAddress' is not null
-                          and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                        )
-                        or (
-                          w.metadata->>'kind' = 'safe'
-                          and w2.metadata->>'kind' = 'safe_owner'
-                          and w2.metadata->>'derivedFrom' = w.address
-                        )
-                      )
-                    order by case
-                      when w.metadata->>'linkedOwnerAddress' is not null
-                        and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
-                      then 0
-                      else 1
-                    end
-                    limit 1
-                  ) owner on true
+                  ${buildWalletOwnerResolutionJoinSql(true)}
                   left join wallet_profiles wp on wp.wallet_id = w.id
                   left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
                   where ($4::text[] is null or wp.profile->'categories' ?| $4::text[])
@@ -5345,8 +5319,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             const deduped = new Map<string, WhaleWalletItem>();
             for (const row of filteredByActivity) {
               const dedupeKey = row.ownerAddress
-                ? row.ownerAddress.toLowerCase()
-                : row.address.toLowerCase();
+                ? walletAddressIdentityKey(row.ownerAddress)
+                : walletAddressIdentityKey(row.address);
               const existing = deduped.get(dedupeKey);
               if (!existing) {
                 deduped.set(dedupeKey, row);
@@ -5537,7 +5511,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
             const pagedIds = pagedRows.map((row) => row.walletId);
 
-            if (useSnapshotWhaleShortlist && pagedIds.length > 0) {
+            if (useSlimWhaleSelector && pagedIds.length > 0) {
               const activityStateMap = await loadWalletActivityStateByIds(
                 client,
                 pagedIds,
