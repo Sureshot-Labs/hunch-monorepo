@@ -186,7 +186,19 @@ function fakeClient(args: {
 
 function fakeDb(rows: Array<ReturnType<typeof dbRow>>): DbQuery {
   return {
-    async query() {
+    async query(sql?: unknown, values?: unknown[]) {
+      const text = typeof sql === "string" ? sql : "";
+      const seedId = Array.isArray(values) ? values[0] : null;
+      if (
+        typeof seedId === "string" &&
+        text.includes("order by case when m.id = $1")
+      ) {
+        return {
+          rows: rows.filter(
+            (row) => row.id === seedId || row.venue_market_id === seedId,
+          ),
+        };
+      }
       return { rows };
     },
   } as unknown as DbQuery;
@@ -485,6 +497,92 @@ await test("builds market alternatives from an AGG matched group", async () => {
   );
 });
 
+await test("returns alternatives symmetrically for each seed in a three-venue group", async () => {
+  const poly = market({
+    id: "agg-poly-avs",
+    venue: "polymarket",
+    externalIdentifier: "553828",
+    question: "Colorado Avalanche",
+  });
+  const limitless = market({
+    id: "agg-limitless-avs",
+    venue: "limitless",
+    externalIdentifier: "29749",
+    question: "Colorado Avalanche",
+  });
+  const kalshi = market({
+    id: "agg-kalshi-avs",
+    venue: "kalshi",
+    externalIdentifier: "KXNHL-26-COL",
+    question: "Colorado Avalanche",
+  });
+  poly.matchedVenueMarkets = [limitless, kalshi];
+
+  const db = fakeDb([
+    dbRow({
+      id: "polymarket:553828",
+      venue: "polymarket",
+      venueMarketId: "553828",
+      title: "Colorado Avalanche",
+      eventTitle: "2026 NHL Stanley Cup Champion",
+      bestBid: 0.35,
+      bestAsk: 0.37,
+    }),
+    dbRow({
+      id: "limitless:29749",
+      venue: "limitless",
+      venueMarketId: "29749",
+      title: "Colorado Avalanche",
+      eventTitle: "Colorado Avalanche",
+      bestBid: 0.4,
+      bestAsk: 0.42,
+    }),
+    dbRow({
+      id: "kalshi:KXNHL-26-COL",
+      venue: "kalshi",
+      venueMarketId: "KXNHL-26-COL",
+      title: "Colorado Avalanche",
+      eventTitle: "Stanley Cup Champion?",
+      bestBid: 0.31,
+      bestAsk: 0.33,
+    }),
+  ]);
+  const client = fakeClient({
+    markets: [poly],
+    midpoints: [
+      midpoint("agg-poly-avs", 0.36),
+      midpoint("agg-limitless-avs", 0.41),
+      midpoint("agg-kalshi-avs", 0.32),
+    ],
+  });
+
+  for (const seed of [
+    "polymarket:553828",
+    "limitless:29749",
+    "kalshi:KXNHL-26-COL",
+  ]) {
+    const response = await buildAggMarketAlternativesResponse({
+      marketId: seed,
+      query: { limit: 5 },
+      client,
+      db,
+    });
+
+    assert.ok(response);
+    assert.equal(response.status, "matched");
+    assert.equal(response.markets[0]?.marketId, seed);
+    assert.equal(response.alternatives.length, 2);
+    assert.deepEqual(
+      new Set(response.markets.map((row) => row.marketId)),
+      new Set([
+        "polymarket:553828",
+        "limitless:29749",
+        "kalshi:KXNHL-26-COL",
+      ]),
+    );
+  }
+});
+
 await test("drops opposite participant market alternatives", async () => {
   const limitlessSenegal = market({
     id: "agg-limitless-senegal",
@@ -659,6 +757,46 @@ await test("bounds the market alternatives cache", async () => {
   assert.equal(calls.venueMarkets, callsAfterFill + 1);
 });
 
+await test("does not cache not_found market alternatives", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const client = fakeClient({
+    markets: [],
+    midpoints: [],
+    calls,
+  });
+  const db = fakeDb([
+    dbRow({
+      id: "polymarket:101",
+      venue: "polymarket",
+      venueMarketId: "101",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+  ]);
+
+  const first = await getAggMarketAlternativesResponseCached({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 60,
+  });
+  const callsAfterFirst = calls.venueMarkets;
+
+  const second = await getAggMarketAlternativesResponseCached({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 60,
+  });
+
+  assert.equal(first?.status, "not_found");
+  assert.equal(second?.status, "not_found");
+  assert.ok(calls.venueMarkets > callsAfterFirst);
+});
+
 await test("rejects unsupported market alternatives venues before AGG calls", async () => {
   const calls = { venueMarkets: 0, midpoints: 0 };
   await assert.rejects(
@@ -679,40 +817,80 @@ await test("rejects unsupported market alternatives venues before AGG calls", as
   assert.equal(calls.midpoints, 0);
 });
 
-await test("does not issue live broad market alternatives fallback", async () => {
+await test("uses bounded broad AGG fallback after targeted misses", async () => {
   clearAggClustersCacheForTests();
+  const poly = market({
+    id: "agg-poly-aliens",
+    venue: "polymarket",
+    externalIdentifier: "703257",
+    question: "December 31",
+  });
+  const kalshi = market({
+    id: "agg-kalshi-aliens",
+    venue: "kalshi",
+    externalIdentifier: "KXALIENS-27",
+    question: "Before 2027",
+  });
+  poly.matchedVenueMarkets = [kalshi];
+
   const venueMarketParams: unknown[] = [];
   const response = await buildAggMarketAlternativesResponse({
-    marketId: "polymarket:101",
-    query: { limit: 5 },
-    client: fakeClient({
-      markets: [],
-      midpoints: [],
-      venueMarketParams,
-    }),
+    marketId: "polymarket:703257",
+    query: { limit: 5, sourceLimit: 50 },
+    client: {
+      async getVenueMarkets(params) {
+        venueMarketParams.push(params);
+        return !params.venue && !params.venueEventId && !params.search
+          ? [poly]
+          : [];
+      },
+      async getMidpoints(ids) {
+        const wanted = new Set(ids);
+        return [
+          midpoint("agg-poly-aliens", 0.145),
+          midpoint("agg-kalshi-aliens", 0.184),
+        ].filter((row) => wanted.has(row.venueMarketId));
+      },
+    },
     db: fakeDb([
       dbRow({
-        id: "polymarket:101",
+        id: "polymarket:703257",
         venue: "polymarket",
-        venueMarketId: "101",
-        title: "PSG",
-        eventTitle: "Champions League Winner",
+        venueMarketId: "703257",
+        title: "December 31",
+        eventTitle: "Will the US confirm that aliens exist by...?",
+        bestBid: 0.14,
+        bestAsk: 0.15,
+      }),
+      dbRow({
+        id: "kalshi:KXALIENS-27",
+        venue: "kalshi",
+        venueMarketId: "KXALIENS-27",
+        title: "Before 2027",
+        eventTitle: "Will the U.S. confirm that aliens exist?",
+        bestBid: 0.18,
+        bestAsk: 0.188,
       }),
     ]),
   });
 
   assert.ok(response);
-  assert.equal(response.status, "not_found");
+  assert.equal(response.status, "matched");
+  assert.deepEqual(
+    response.markets.map((row) => row.marketId),
+    ["polymarket:703257", "kalshi:KXALIENS-27"],
+  );
   assert.ok(venueMarketParams.length > 0);
   assert.equal(
     venueMarketParams.some((params) => {
       const query = params as {
         search?: string;
+        venue?: string;
         venueEventId?: string;
       };
-      return !query.search && !query.venueEventId;
+      return !query.venue && !query.search && !query.venueEventId;
     }),
-    false,
+    true,
   );
 });
 

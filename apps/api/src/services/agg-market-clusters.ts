@@ -878,13 +878,31 @@ function findCachedClusterForMarket(params: {
   }
 
   return (
-    candidates.sort((left, right) => {
-      if (left.marketCount !== right.marketCount) {
-        return right.marketCount - left.marketCount;
-      }
-      if (left.score !== right.score) return right.score - left.score;
-      return left.id.localeCompare(right.id);
-    })[0] ?? null
+    candidates.sort(compareAlternativeClusters)[0] ?? null
+  );
+}
+
+function compareAlternativeClusters(
+  left: AggClusterSummary,
+  right: AggClusterSummary,
+): number {
+  if (left.marketCount !== right.marketCount) {
+    return right.marketCount - left.marketCount;
+  }
+  if (left.score !== right.score) return right.score - left.score;
+  return left.id.localeCompare(right.id);
+}
+
+function findClusterForMarket(
+  clusters: AggClusterSummary[],
+  marketId: string,
+): AggClusterSummary | null {
+  return (
+    clusters
+      .filter((entry) =>
+        entry.markets.some((market) => market.marketId === marketId),
+      )
+      .sort(compareAlternativeClusters)[0] ?? null
   );
 }
 
@@ -1161,17 +1179,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       db: params.db,
       generatedAt,
     });
-    const cluster = clusters
-      .filter((entry) =>
-        entry.markets.some((market) => market.marketId === seed.marketId),
-      )
-      .sort((left, right) => {
-        if (left.marketCount !== right.marketCount) {
-          return right.marketCount - left.marketCount;
-        }
-        if (left.score !== right.score) return right.score - left.score;
-        return left.id.localeCompare(right.id);
-      })[0];
+    const cluster = findClusterForMarket(clusters, seed.marketId);
     if (!cluster) continue;
 
     const response = buildMatchedAlternativesResponseFromCluster({
@@ -1197,6 +1205,34 @@ export async function buildAggMarketAlternativesResponse(params: {
       outputLimit,
     });
     if (response) return response;
+  }
+
+  const broadVenueMarkets = await params.client.getVenueMarkets({
+    status: "open",
+    matchStatus: ["matched", "verified"],
+    limit: sourceLimit,
+    sortBy: "volume",
+    sortDir: "desc",
+  });
+  if (broadVenueMarkets.length) {
+    const clusters = await buildAggClustersFromVenueMarkets({
+      venueMarkets: broadVenueMarkets,
+      venues,
+      client: params.client,
+      db: params.db,
+      generatedAt,
+    });
+    const cluster = findClusterForMarket(clusters, seed.marketId);
+    if (cluster) {
+      const response = buildMatchedAlternativesResponseFromCluster({
+        generatedAt,
+        seed,
+        cluster,
+        venues,
+        outputLimit,
+      });
+      if (response) return response;
+    }
   }
 
   return buildNotFoundAlternativesResponse({
@@ -1278,7 +1314,7 @@ export async function getAggMarketAlternativesResponseCached(params: {
     db: params.db,
   });
 
-  if (value && params.ttlSec > 0) {
+  if (value?.status === "matched" && params.ttlSec > 0) {
     pruneAlternativesCache(now);
     alternativesCache.set(key, {
       expiresAt: now + params.ttlSec * 1000,
