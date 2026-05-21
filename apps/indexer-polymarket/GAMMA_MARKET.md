@@ -31,7 +31,7 @@ Note: the sample payload you provided looks like a market object with nested `ev
 
 ## Writes: Polymarket-specific tables
 
-Data is written into `polymarket_events` and `polymarket_markets`. Both tables store the full raw JSON object in a `raw` column for complete fidelity.
+Data is written into `polymarket_events` and `polymarket_markets`. Market rows store the full market raw JSON. Event rows store event-level raw JSON, but omit the nested `markets` array because each market already has its own raw row in `polymarket_markets`.
 
 ### `polymarket_events` (from each event)
 
@@ -115,6 +115,6 @@ Gamma provides many fields that are not normalized into columns or unified metad
 - `xAxisValue`, `yAxisValue`, `denominationToken`
 - `closedTime`, `wideFormat`, `mailchimpTag`, `curationOrder`
 - `makerBaseFee`, `takerBaseFee`, `notificationsEnabled`, `score`
-- Nested expansions like `events`, `series`, `collections`, `tags`, `categories`, `imageOptimized`, `iconOptimized`
+- Event-level expansions like `events`, `series`, `collections`, `tags`, `categories`, `imageOptimized`, `iconOptimized`
 
 These values are still available in `polymarket_events.raw` or `polymarket_markets.raw`.

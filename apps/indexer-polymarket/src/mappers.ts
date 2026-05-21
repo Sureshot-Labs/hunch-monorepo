@@ -549,6 +549,14 @@ export function mapTokens(
   return rows;
 }
 
+function slimPolymarketEventRaw(
+  event: TPolymarketEvent,
+): Record<string, unknown> {
+  const raw = { ...(event as Record<string, unknown>) };
+  delete raw.markets;
+  return raw;
+}
+
 // New Polymarket-specific mappers
 export function mapPolymarketEventRow(e: TPolymarketEvent) {
   return {
@@ -585,7 +593,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
     liquidity_clob: n(e.liquidityClob),
     neg_risk: e.negRisk ?? false,
     comment_count: n(e.commentCount),
-    raw: e,
+    raw: slimPolymarketEventRaw(e),
   };
 }
 

@@ -16,6 +16,7 @@ import {
   upsertPolymarketMarkets,
 } from "./polymarket-repo.js";
 
+const eventUpsertQueue = new PQueue({ concurrency: 1 });
 const marketUpsertQueue = new PQueue({ concurrency: 1 });
 
 type UpsertMarketsConsistentlyOptions = {
@@ -30,7 +31,27 @@ export type UpsertMarketsConsistentlyResult = {
 export type UpsertEventsConsistentlyResult = {
   unified: UpsertUnifiedEventsResult;
   polymarket: PolymarketUpsertStats;
+  timings: {
+    queueWaitMs: number;
+    unifiedEventsMs: number;
+    polymarketEventsMs: number;
+    writeMs: number;
+    totalMs: number;
+  };
+  payloadBytes: {
+    unified: number;
+    polymarket: number;
+    total: number;
+  };
 };
+
+async function timed<T>(
+  run: () => Promise<T>,
+): Promise<{ durationMs: number; value: T }> {
+  const startedAt = Date.now();
+  const value = await run();
+  return { durationMs: Date.now() - startedAt, value };
+}
 
 export async function upsertEventsConsistently(
   pool: Pool,
@@ -39,12 +60,41 @@ export async function upsertEventsConsistently(
     polymarket: PolymarketEventRow[];
   },
 ): Promise<UpsertEventsConsistentlyResult> {
-  const unified = await upsertUnifiedEvents(pool, rows.unified);
-  const polymarket = await upsertPolymarketEvents(rows.polymarket);
-  return {
-    unified,
-    polymarket,
+  const queuedAt = Date.now();
+  const payloadBytes = {
+    unified: Buffer.byteLength(JSON.stringify(rows.unified)),
+    polymarket: Buffer.byteLength(JSON.stringify(rows.polymarket)),
+    total: 0,
   };
+  payloadBytes.total = payloadBytes.unified + payloadBytes.polymarket;
+
+  const result = await eventUpsertQueue.add(async () => {
+    const writeStartedAt = Date.now();
+    const queueWaitMs = writeStartedAt - queuedAt;
+    const unified = await timed(() => upsertUnifiedEvents(pool, rows.unified));
+    const polymarket = await timed(() =>
+      upsertPolymarketEvents(rows.polymarket),
+    );
+    const writeMs = Date.now() - writeStartedAt;
+
+    return {
+      unified: unified.value,
+      polymarket: polymarket.value,
+      timings: {
+        queueWaitMs,
+        unifiedEventsMs: unified.durationMs,
+        polymarketEventsMs: polymarket.durationMs,
+        writeMs,
+        totalMs: Date.now() - queuedAt,
+      },
+      payloadBytes,
+    };
+  });
+
+  if (!result) {
+    throw new Error("Polymarket event upsert queue returned no result");
+  }
+  return result;
 }
 
 export async function upsertMarketsConsistently(

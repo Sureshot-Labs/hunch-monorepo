@@ -188,15 +188,23 @@ async function timedPhase<T>(
   try {
     return await run();
   } finally {
-    const durationMs = Date.now() - startedAt;
-    timings[phase] = (timings[phase] ?? 0) + durationMs;
-    if (durationMs >= env.slowPhaseWarnMs) {
-      log.warn("Polymarket slow phase", {
-        phase,
-        durationMs,
-        ...context,
-      });
-    }
+    recordPhaseDuration(timings, phase, Date.now() - startedAt, context);
+  }
+}
+
+function recordPhaseDuration(
+  timings: Record<string, number>,
+  phase: string,
+  durationMs: number,
+  context: Record<string, unknown> = {},
+): void {
+  timings[phase] = (timings[phase] ?? 0) + durationMs;
+  if (durationMs >= env.slowPhaseWarnMs) {
+    log.warn("Polymarket slow phase", {
+      phase,
+      durationMs,
+      ...context,
+    });
   }
 }
 
@@ -269,7 +277,43 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     polymarketSkippedRows: eventUpsertResult.polymarket.skippedRows,
     polymarketUpsertedRows: eventUpsertResult.polymarket.upsertedRows,
     polymarketBatches: eventUpsertResult.polymarket.batches,
+    queueWaitMs: eventUpsertResult.timings.queueWaitMs,
+    unifiedEventsMs: eventUpsertResult.timings.unifiedEventsMs,
+    polymarketEventsMs: eventUpsertResult.timings.polymarketEventsMs,
+    writeMs: eventUpsertResult.timings.writeMs,
+    totalMs: eventUpsertResult.timings.totalMs,
+    unifiedPayloadBytes: eventUpsertResult.payloadBytes.unified,
+    polymarketPayloadBytes: eventUpsertResult.payloadBytes.polymarket,
+    totalPayloadBytes: eventUpsertResult.payloadBytes.total,
   });
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.queueWait",
+    eventUpsertResult.timings.queueWaitMs,
+    { events: parsedEvents.length },
+  );
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.unifiedEvents",
+    eventUpsertResult.timings.unifiedEventsMs,
+    {
+      events: parsedEvents.length,
+      inputRows: eventUpsertResult.unified.inputRows,
+      changedRows: eventUpsertResult.unified.changedRows,
+      payloadBytes: eventUpsertResult.payloadBytes.unified,
+    },
+  );
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.polymarketEvents",
+    eventUpsertResult.timings.polymarketEventsMs,
+    {
+      events: parsedEvents.length,
+      inputRows: eventUpsertResult.polymarket.inputRows,
+      changedRows: eventUpsertResult.polymarket.changedRows,
+      payloadBytes: eventUpsertResult.payloadBytes.polymarket,
+    },
+  );
 
   const marketUpsertResult = await timedPhase(
     timings,
