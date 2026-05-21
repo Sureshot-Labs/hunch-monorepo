@@ -200,12 +200,9 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             sevenDaysFromNow,
           }),
           pool.query<{ category: string }>(`
-            select distinct lower(category) as category
-            from unified_events
-            where status = 'ACTIVE'
-              and category is not null
-              and btrim(category) <> ''
-            order by lower(category) asc
+            select category
+            from unified_event_active_categories
+            order by category asc
           `),
         ]);
       } catch (error) {

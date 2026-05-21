@@ -122,6 +122,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         open_interest,
         outcomes,
         slug,
+        metadata,
         created_at,
         updated_at
       )
@@ -129,7 +130,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         $1, $2, $3, $4, $5, null, null, 'ACTIVE', 'binary',
         now() - interval '1 hour', $6, $7,
         $8, $9, $10, $11, $12, $13, $14,
-        '["Yes","No"]', $15, now(), now()
+        '["Yes","No"]', $15, $16::jsonb, now(), now()
       )
     `,
     [
@@ -148,6 +149,9 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       liquidity,
       openInterest,
       makeId("slug"),
+      JSON.stringify(
+        market.venue === "kalshi" ? { dflowNativeAcceptingOrders: true } : {},
+      ),
     ],
   );
 }
@@ -506,6 +510,7 @@ async function main() {
       await insertMarket(market);
       seededMarketIds.push(market.id);
     }
+    await pool.query("select refresh_unified_event_active_categories()");
 
     await assertFacetParity({
       app,
@@ -705,6 +710,7 @@ async function main() {
         [seededEventIds],
       );
     }
+    await pool.query("select refresh_unified_event_active_categories()");
     await app.close();
   }
 }
