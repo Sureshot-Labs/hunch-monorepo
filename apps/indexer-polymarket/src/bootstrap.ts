@@ -15,7 +15,12 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
-import { upsertUnifiedTokens, writeUnifiedBookTops } from "@hunch/db";
+import {
+  upsertUnifiedTokens,
+  writeUnifiedBookTops,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 import {
   upsertEventsConsistently,
   upsertMarketsConsistently,
@@ -27,6 +32,7 @@ import {
   getPriceRefreshQueueBacklog,
   isPgSetupIssue,
   publishMarketState,
+  publishMarketUpdate,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -104,6 +110,56 @@ function publishedMarketStatus(
     return "SETTLED";
   }
   return market.status ?? null;
+}
+
+type MarketUpdateEventMetrics = Pick<
+  UnifiedEventRow,
+  "volume_total" | "volume_24h" | "liquidity" | "open_interest"
+>;
+
+async function publishPolymarketMarketUpdates(
+  rows: Array<{
+    sourceMarket: TPolymarketMarket;
+    market: UnifiedMarketRow;
+    event?: MarketUpdateEventMetrics;
+  }>,
+): Promise<void> {
+  if (!rows.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    rows.map(({ sourceMarket, market, event }) => {
+      const { yes, no } = clobTokenPair(sourceMarket);
+      return q.add(() =>
+        publishMarketUpdate({
+          redis,
+          venue: "polymarket",
+          tokenIds: [yes, no],
+          marketId: market.id,
+          eventId: market.event_id,
+          conditionId: market.condition_id ?? null,
+          volumeTotal: market.volume_total,
+          volume24h: market.volume_24h,
+          liquidity: market.liquidity,
+          openInterest: market.open_interest,
+          lastPrice: market.last_price,
+          status: publishedMarketStatus(market),
+          acceptingOrders:
+            typeof sourceMarket.acceptingOrders === "boolean"
+              ? sourceMarket.acceptingOrders
+              : null,
+          resolvedOutcome: market.resolved_outcome ?? null,
+          resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+          eventVolumeTotal: event?.volume_total,
+          eventVolume24h: event?.volume_24h,
+          eventLiquidity: event?.liquidity,
+          eventOpenInterest: event?.open_interest,
+          tsMs,
+        }),
+      );
+    }),
+  );
 }
 
 type SyncCounters = {
@@ -266,6 +322,37 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       upsertedRows: tokenUpsertResult.upsertedRows,
       batches: tokenUpsertResult.batches,
     });
+  }
+
+  try {
+    const eventById = new Map(unifiedEventRows.map((row) => [row.id, row]));
+    const updateRows: Array<{
+      sourceMarket: TPolymarketMarket;
+      market: UnifiedMarketRow;
+      event?: UnifiedEventRow;
+    }> = [];
+    let marketIndex = 0;
+    for (const event of parsedEvents) {
+      for (const market of event.markets) {
+        const unifiedMarket = unifiedMarketRows[marketIndex];
+        if (unifiedMarket) {
+          updateRows.push({
+            sourceMarket: market,
+            market: unifiedMarket,
+            event: eventById.get(unifiedMarket.event_id),
+          });
+        }
+        marketIndex += 1;
+      }
+    }
+    await timedPhase(
+      timings,
+      "processEvents.publishMarketUpdates",
+      () => publishPolymarketMarketUpdates(updateRows),
+      { markets: updateRows.length },
+    );
+  } catch (error) {
+    log.warn("Polymarket market update publish failed", { error });
   }
 
   try {
@@ -845,6 +932,19 @@ async function refreshMarketRefs(
   const unifiedMarketRows = parsed.map(({ eventId, market }) =>
     mapToUnifiedMarket(market, eventId),
   );
+  const eventById = new Map<string, MarketUpdateEventMetrics>(
+    events.map(
+      (event) =>
+        [
+          `polymarket:${event.id}`,
+          {
+            volume_total: parsePrice(event.volume) ?? undefined,
+            volume_24h: parsePrice(event.volume24hr) ?? undefined,
+            liquidity: parsePrice(event.liquidity) ?? undefined,
+          },
+        ] as const,
+    ),
+  );
   const unifiedTokenRows = parsed.flatMap(({ market }) => {
     const [yes, no] = Array.isArray(market.clobTokenIds)
       ? market.clobTokenIds
@@ -941,6 +1041,34 @@ async function refreshMarketRefs(
       ),
     { markets: parsed.length },
   );
+
+  try {
+    await timedPhase(
+      timings,
+      "refreshMarketRefs.publishMarketUpdates",
+      () =>
+        publishPolymarketMarketUpdates(
+          parsed.flatMap(({ market }, index) => {
+            const unifiedMarket = unifiedMarketRows[index];
+            return unifiedMarket
+              ? [
+                  {
+                    sourceMarket: market,
+                    market: unifiedMarket,
+                    event: eventById.get(unifiedMarket.event_id),
+                  },
+                ]
+              : [];
+          }),
+        ),
+      { markets: parsed.length },
+    );
+  } catch (error) {
+    log.warn("Polymarket market update publish failed", {
+      context: "refreshMarketRefs",
+      error,
+    });
+  }
 
   return {
     ...resultBase,

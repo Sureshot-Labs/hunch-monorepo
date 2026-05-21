@@ -8,6 +8,7 @@ import {
   getPriceRefreshQueueBacklog,
   createTopTickGate,
   publishMarketState,
+  publishMarketUpdate,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -985,6 +986,56 @@ async function publishDflowMarketStates(
   );
 }
 
+async function publishDflowMarketUpdates(
+  markets: UnifiedMarketRow[],
+  events: UnifiedEventRow[] = [],
+): Promise<void> {
+  if (!markets.length) return;
+
+  const eventById = new Map(events.map((event) => [event.id, event]));
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      if (!tokenIds.length) return [];
+      const event = eventById.get(market.event_id);
+      const acceptingOrders = resolveDflowAcceptingOrders(market, tsMs);
+      return [
+        q.add(() =>
+          publishMarketUpdate({
+            redis,
+            venue: "kalshi",
+            tokenIds,
+            marketId: market.id,
+            eventId: market.event_id,
+            conditionId: market.condition_id ?? null,
+            volumeTotal: market.volume_total,
+            volume24h: market.volume_24h,
+            liquidity: market.liquidity,
+            openInterest: market.open_interest,
+            lastPrice: market.last_price,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+            eventVolumeTotal: event?.volume_total,
+            eventVolume24h: event?.volume_24h,
+            eventLiquidity: event?.liquidity,
+            eventOpenInterest: event?.open_interest,
+            tsMs,
+          }),
+        ),
+      ];
+    }),
+  );
+}
+
 async function syncMarketStatusesForTokenIds(
   inputTokenIds: string[],
   context: string,
@@ -1118,6 +1169,11 @@ async function syncMarketStatusesForTokenIds(
       }
       if (options.publishMarketState) {
         await publishDflowMarketStates(unifiedMarketRows);
+      }
+      try {
+        await publishDflowMarketUpdates(unifiedMarketRows);
+      } catch (error) {
+        log.warn("DFlow market update publish failed", { context, error });
       }
 
       if (unifiedMarketRows.length) {
@@ -1389,6 +1445,14 @@ async function processEvents(
   }
   if (tokenRows.length) {
     await upsertUnifiedTokens(pool, tokenRows);
+  }
+  try {
+    await publishDflowMarketUpdates(unifiedMarketRows, unifiedEventRows);
+  } catch (error) {
+    log.warn("DFlow market update publish failed", {
+      context: options.enrichmentContext ?? "events",
+      error,
+    });
   }
   if (unifiedMarketRows.length) {
     await reconcileKalshiEventStatuses(

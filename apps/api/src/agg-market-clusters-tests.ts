@@ -129,6 +129,8 @@ function dbRow(args: {
   bestBid?: number | null;
   bestAsk?: number | null;
   lastPrice?: number | null;
+  closeTime?: string | null;
+  expirationTime?: string | null;
 }) {
   return {
     id: args.id,
@@ -151,8 +153,12 @@ function dbRow(args: {
     volume_total: 100,
     liquidity: args.liquidity ?? 20,
     open_interest: 5,
-    close_time: "2026-06-01T00:00:00.000Z",
-    expiration_time: "2026-06-01T00:00:00.000Z",
+    close_time:
+      "closeTime" in args ? args.closeTime : "2026-06-01T00:00:00.000Z",
+    expiration_time:
+      "expirationTime" in args
+        ? args.expirationTime
+        : "2026-06-01T00:00:00.000Z",
     condition_id: args.conditionId ?? null,
     event_venue_event_id: args.venueEventId ?? null,
     event_title: args.eventTitle ?? "Event title",
@@ -497,6 +503,122 @@ await test("builds market alternatives from an AGG matched group", async () => {
   );
 });
 
+await test("drops expired market alternatives from AGG matched groups", async () => {
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "26242",
+    question: "PSG",
+  });
+  poly.matchedVenueMarkets = [kalshi, limitless];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [
+        midpoint("agg-poly", 0.57),
+        midpoint("agg-kalshi", 0.55),
+        midpoint("agg-limitless", 0.56),
+      ],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+      }),
+      dbRow({
+        id: "kalshi:KXUCL-26-PSG",
+        venue: "kalshi",
+        venueMarketId: "KXUCL-26-PSG",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        closeTime: "2026-05-01T00:00:00.000Z",
+        expirationTime: "2026-05-01T00:00:00.000Z",
+      }),
+      dbRow({
+        id: "limitless:26242",
+        venue: "limitless",
+        venueMarketId: "26242",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "matched");
+  assert.deepEqual(
+    response.alternatives.map((market) => market.marketId),
+    ["limitless:26242"],
+  );
+});
+
+await test("returns not_found for expired seed market alternatives", async () => {
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+  });
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  poly.matchedVenueMarkets = [kalshi];
+
+  const response = await buildAggMarketAlternativesResponse({
+    marketId: "polymarket:101",
+    query: { limit: 5 },
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)],
+    }),
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        closeTime: "2026-05-01T00:00:00.000Z",
+        expirationTime: "2026-05-01T00:00:00.000Z",
+      }),
+      dbRow({
+        id: "kalshi:KXUCL-26-PSG",
+        venue: "kalshi",
+        venueMarketId: "KXUCL-26-PSG",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+      }),
+    ]),
+    now: new Date("2026-05-11T12:00:00.000Z"),
+  });
+
+  assert.ok(response);
+  assert.equal(response.status, "not_found");
+  assert.equal(response.alternatives.length, 0);
+});
+
 await test("returns alternatives symmetrically for each seed in a three-venue group", async () => {
   const poly = market({
     id: "agg-poly-avs",
@@ -574,11 +696,7 @@ await test("returns alternatives symmetrically for each seed in a three-venue gr
     assert.equal(response.alternatives.length, 2);
     assert.deepEqual(
       new Set(response.markets.map((row) => row.marketId)),
-      new Set([
-        "polymarket:553828",
-        "limitless:29749",
-        "kalshi:KXNHL-26-COL",
-      ]),
+      new Set(["polymarket:553828", "limitless:29749", "kalshi:KXNHL-26-COL"]),
     );
   }
 });

@@ -152,6 +152,20 @@ type NormalizedAggGroup = {
   markets: NormalizedAggMarket[];
 };
 
+function parseExpiryMs(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isClusterMarketExpired(
+  market: Pick<ClusterMarketSummary, "expiresAt">,
+  nowMs: number,
+): boolean {
+  const expiryMs = parseExpiryMs(market.expiresAt);
+  return expiryMs != null && expiryMs <= nowMs;
+}
+
 type DbMatchedMarket = {
   row: AggClusterMarketRow;
   matchMethod: "externalIdentifier" | "conditionId";
@@ -511,6 +525,8 @@ async function loadMatchedMarketRows(
         on mam.market_id = m.id
       where m.status = 'ACTIVE'
         and e.status = 'ACTIVE'
+        and (m.close_time is null or m.close_time > now())
+        and (m.expiration_time is null or m.expiration_time > now())
         and m.venue = any($1::text[])
         and (
           m.venue_market_id = any($2::text[])
@@ -594,6 +610,8 @@ async function loadSeedMarketRow(
         on mam.market_id = m.id
       where m.status = 'ACTIVE'
         and e.status = 'ACTIVE'
+        and (m.close_time is null or m.close_time > now())
+        and (m.expiration_time is null or m.expiration_time > now())
         and (m.id = $1 or m.venue_market_id = $1)
       order by case when m.id = $1 then 0 else 1 end
       limit 1
@@ -797,10 +815,13 @@ function buildMatchedAlternativesResponseFromCluster(params: {
   cluster: AggClusterSummary;
   venues: AggSupportedVenue[];
   outputLimit: number;
+  nowMs: number;
 }): AggMarketAlternativesResponse | null {
   const venueSet = new Set(params.venues);
-  const clusterMarkets = params.cluster.markets.filter((market) =>
-    venueSet.has(market.venue as AggSupportedVenue),
+  const clusterMarkets = params.cluster.markets.filter(
+    (market) =>
+      venueSet.has(market.venue as AggSupportedVenue) &&
+      !isClusterMarketExpired(market, params.nowMs),
   );
   const ordered = orderAlternativeMarkets(params.seed.marketId, clusterMarkets);
   const orderedSeed =
@@ -877,9 +898,7 @@ function findCachedClusterForMarket(params: {
     }
   }
 
-  return (
-    candidates.sort(compareAlternativeClusters)[0] ?? null
-  );
+  return candidates.sort(compareAlternativeClusters)[0] ?? null;
 }
 
 function compareAlternativeClusters(
@@ -910,6 +929,7 @@ function buildAggClusterSummaries(params: {
   groups: NormalizedAggGroup[];
   matchedRowsByAggId: Map<string, DbMatchedMarket>;
   generatedAt: string;
+  nowMs: number;
 }): AggClusterSummary[] {
   const clusters: AggClusterSummary[] = [];
   const seenIds = new Set<string>();
@@ -920,6 +940,7 @@ function buildAggClusterSummaries(params: {
       const matched = params.matchedRowsByAggId.get(aggMarket.aggMarketId);
       if (!matched) continue;
       const baseSummary = buildMarketSummary(matched.row);
+      if (isClusterMarketExpired(baseSummary, params.nowMs)) continue;
       const yesMid = orientAggMidpointToDbYes({
         midpoint: aggMarket.midpoint,
         referenceYesMid: resolveReliableDbYesReference(matched.row),
@@ -1063,6 +1084,7 @@ async function buildAggClustersFromVenueMarkets(params: {
   client: AggMarketClient;
   db: DbQuery;
   generatedAt: string;
+  nowMs: number;
 }): Promise<AggClusterSummary[]> {
   const candidateMarkets = dedupeAggMarkets(
     params.venueMarkets.flatMap((market) => [
@@ -1091,6 +1113,7 @@ async function buildAggClustersFromVenueMarkets(params: {
     groups,
     matchedRowsByAggId,
     generatedAt: params.generatedAt,
+    nowMs: params.nowMs,
   });
 }
 
@@ -1100,7 +1123,9 @@ export async function buildAggClusterListResponse(params: {
   db: DbQuery;
   now?: Date;
 }): Promise<AggClusterListResponse> {
-  const generatedAt = (params.now ?? new Date()).toISOString();
+  const now = params.now ?? new Date();
+  const generatedAt = now.toISOString();
+  const nowMs = now.getTime();
   const venues = parseAggVenues(params.query.venues);
   const sourceLimit = clampInt(params.query.sourceLimit, 100, 100);
   const outputLimit = clampInt(params.query.limit, DEFAULTS.limit, 200);
@@ -1119,6 +1144,7 @@ export async function buildAggClusterListResponse(params: {
     client: params.client,
     db: params.db,
     generatedAt,
+    nowMs,
   });
   const filtered = applyFilters(clusters, params.query, DEFAULTS);
   const sorted = sortClusters(
@@ -1141,7 +1167,9 @@ export async function buildAggMarketAlternativesResponse(params: {
   db: DbQuery;
   now?: Date;
 }): Promise<AggMarketAlternativesResponse | null> {
-  const generatedAt = (params.now ?? new Date()).toISOString();
+  const now = params.now ?? new Date();
+  const generatedAt = now.toISOString();
+  const nowMs = now.getTime();
   const venues = parseAggVenues(params.query.venues);
   const sourceLimit = clampInt(params.query.sourceLimit, 50, 100);
   const outputLimit = clampInt(params.query.limit, 10, 50);
@@ -1149,6 +1177,13 @@ export async function buildAggMarketAlternativesResponse(params: {
   if (!seedRow) return null;
 
   const seed = buildMarketSummary(seedRow);
+  if (isClusterMarketExpired(seed, nowMs)) {
+    return buildNotFoundAlternativesResponse({
+      generatedAt,
+      marketId: seed.marketId,
+      eventId: seed.eventId,
+    });
+  }
   if (!venues.includes(seed.venue as AggSupportedVenue)) {
     return buildNotFoundAlternativesResponse({
       generatedAt,
@@ -1178,6 +1213,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       client: params.client,
       db: params.db,
       generatedAt,
+      nowMs,
     });
     const cluster = findClusterForMarket(clusters, seed.marketId);
     if (!cluster) continue;
@@ -1188,6 +1224,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       cluster,
       venues,
       outputLimit,
+      nowMs,
     });
     if (response) return response;
   }
@@ -1203,6 +1240,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       cluster: cachedCluster,
       venues,
       outputLimit,
+      nowMs,
     });
     if (response) return response;
   }
@@ -1221,6 +1259,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       client: params.client,
       db: params.db,
       generatedAt,
+      nowMs,
     });
     const cluster = findClusterForMarket(clusters, seed.marketId);
     if (cluster) {
@@ -1230,6 +1269,7 @@ export async function buildAggMarketAlternativesResponse(params: {
         cluster,
         venues,
         outputLimit,
+        nowMs,
       });
       if (response) return response;
     }

@@ -36,12 +36,21 @@ export {
   buildMarketStatePayload,
   publishMarketState,
 } from "./market-state.js";
+export {
+  buildMarketUpdatePayload,
+  publishMarketUpdate,
+} from "./market-update.js";
 export type { EmbedQueueItem, TopMarketCandidate } from "./ai-embed.js";
 export type {
   MarketStatePayload,
   MarketStateRedis,
   PublishMarketStateInputs,
 } from "./market-state.js";
+export type {
+  MarketUpdatePayload,
+  MarketUpdateRedis,
+  PublishMarketUpdateInputs,
+} from "./market-update.js";
 export type {
   ClaimPriceRefreshInputs,
   EnqueuePriceRefreshInputs,

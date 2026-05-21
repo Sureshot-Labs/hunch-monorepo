@@ -718,7 +718,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const { eventId } = request.params;
-      const { statuses } = request.query;
+      const { statuses, upcomingOnly, limit } = request.query;
 
       const base = await pool.query(
         `
@@ -728,6 +728,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             venue_event_id,
             title,
             slug,
+            start_date,
+            end_date,
+            status,
+            image,
+            icon,
             series_key,
             series_title
           from unified_events
@@ -747,6 +752,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         venue_event_id: string;
         title: string;
         slug: string | null;
+        start_date: unknown;
+        end_date: unknown;
+        status: string;
+        image: string | null;
+        icon: string | null;
         series_key: string | null;
         series_title: string | null;
       };
@@ -786,26 +796,67 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const statusFilter = (
         requested.length ? requested : ["ACTIVE"]
       ) as string[];
+      const siblingLimit =
+        limit == null ? null : Math.min(Math.max(limit, 1), 100);
 
       const seriesRows = await pool.query(
         `
-          select
-            id,
-            venue_event_id,
-            title,
-            slug,
-            start_date,
-            end_date,
-            status,
-            image,
-            icon
-          from unified_events
-          where venue = $1
-            and series_key = $2
-            and status = any($3::unified_status[])
-          order by start_date nulls last, end_date nulls last, title asc
+          with current_event as (
+            select
+              id,
+              venue_event_id,
+              title,
+              slug,
+              start_date,
+              end_date,
+              status,
+              image,
+              icon,
+              0 as sort_group
+            from unified_events
+            where id = $4
+          ),
+          sibling_events as (
+            select
+              id,
+              venue_event_id,
+              title,
+              slug,
+              start_date,
+              end_date,
+              status,
+              image,
+              icon,
+              1 as sort_group
+            from unified_events
+            where venue = $1
+              and series_key = $2
+              and id <> $4
+              and status = any($3::unified_status[])
+              and (
+                $5::boolean is not true
+                or end_date is null
+                or end_date >= now()
+              )
+            order by start_date nulls last, end_date nulls last, title asc
+            limit coalesce($6::int, 2147483647)
+          )
+          select *
+          from (
+            select * from current_event
+            union all
+            select * from sibling_events
+          ) series
+          order by sort_group, start_date nulls last, end_date nulls last, title asc
         `,
-        [row.venue, row.series_key, statusFilter],
+        [
+          row.venue,
+          row.series_key,
+          statusFilter,
+          row.id,
+          upcomingOnly,
+          siblingLimit,
+        ],
       );
 
       return reply.send({

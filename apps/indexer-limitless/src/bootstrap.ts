@@ -40,6 +40,7 @@ import {
   getPriceRefreshQueueBacklog,
   isPgSetupIssue,
   publishMarketState,
+  publishMarketUpdate,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
   type PriceRefreshRedis,
@@ -176,6 +177,54 @@ async function publishLimitlessMarketStates(
           }),
         ),
       );
+    }),
+  );
+}
+
+async function publishLimitlessMarketUpdates(
+  markets: UnifiedMarketRow[],
+  event?: ReturnType<typeof mapToUnifiedEvent>,
+): Promise<void> {
+  if (!markets.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      if (!tokenIds.length) return [];
+      const acceptingOrders = resolveLimitlessAcceptingOrders(market, tsMs);
+      return [
+        q.add(() =>
+          publishMarketUpdate({
+            redis,
+            venue: "limitless",
+            tokenIds,
+            marketId: market.id,
+            eventId: market.event_id,
+            conditionId: market.condition_id ?? null,
+            volumeTotal: market.volume_total,
+            volume24h: market.volume_24h,
+            liquidity: market.liquidity,
+            openInterest: market.open_interest,
+            lastPrice: market.last_price,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+            eventVolumeTotal: event?.volume_total,
+            eventVolume24h: event?.volume_24h,
+            eventLiquidity: event?.liquidity,
+            eventOpenInterest: event?.open_interest,
+            tsMs,
+          }),
+        ),
+      ];
     }),
   );
 }
@@ -951,6 +1000,14 @@ async function processLimitlessMarket(
 
   if (options.publishMarketState) {
     await publishLimitlessMarketStates(eventMarkets);
+  }
+  try {
+    await publishLimitlessMarketUpdates(eventMarkets, unifiedEventRow);
+  } catch (error) {
+    log.warn("Limitless market update publish failed", {
+      eventId: unifiedEventRow.id,
+      error,
+    });
   }
 
   if (embedItems.length) {
