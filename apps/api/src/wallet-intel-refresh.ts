@@ -1538,29 +1538,42 @@ async function refreshTouchedWalletArtifacts(
     tagIds: Record<string, string>;
   },
 ): Promise<{ deltaInserts: number; deltaUpdates: number }> {
-  const deltaResult = await applySnapshotDeltas(client, {
-    walletIds: Array.from(inputs.touchedWalletIds),
-    occurredAt: inputs.snapshotAt,
-    marketIds: inputs.selectedMarketIds,
-  });
-
   const walletIds = Array.from(inputs.touchedWalletIds);
+  const stageCounts = {
+    wallets: walletIds.length,
+    markets: inputs.selectedMarketIds.length,
+  };
 
-  await refreshWalletMetrics(client, {
-    walletIds,
-    asOf: inputs.snapshotAt,
-    logPrefix: "[wallets:intel:refresh]",
-  });
+  const deltaResult = await runWalletIntelArtifactStage(
+    "snapshotDeltas",
+    stageCounts,
+    () =>
+      applySnapshotDeltas(client, {
+        walletIds,
+        occurredAt: inputs.snapshotAt,
+        marketIds: inputs.selectedMarketIds,
+      }),
+  );
 
-  await refreshSystemTags(client, {
-    walletIds,
-    tagIds: inputs.tagIds,
-    freshDays: walletIntelRefreshPolicy.freshDays,
-    dormantDays: walletIntelRefreshPolicy.dormantDays,
-    whaleUsd: walletIntelRefreshPolicy.whaleUsd,
-    whaleUsdSolana: walletIntelRefreshPolicy.whaleUsdSolana,
-    asOf: inputs.snapshotAt,
-  });
+  await runWalletIntelArtifactStage("walletMetrics", stageCounts, () =>
+    refreshWalletMetrics(client, {
+      walletIds,
+      asOf: inputs.snapshotAt,
+      logPrefix: "[wallets:intel:refresh]",
+    }),
+  );
+
+  await runWalletIntelArtifactStage("systemTags", stageCounts, () =>
+    refreshSystemTags(client, {
+      walletIds,
+      tagIds: inputs.tagIds,
+      freshDays: walletIntelRefreshPolicy.freshDays,
+      dormantDays: walletIntelRefreshPolicy.dormantDays,
+      whaleUsd: walletIntelRefreshPolicy.whaleUsd,
+      whaleUsdSolana: walletIntelRefreshPolicy.whaleUsdSolana,
+      asOf: inputs.snapshotAt,
+    }),
+  );
 
   const whaleRows = await client.query<{ wallet_id: string }>(
     `
@@ -1577,29 +1590,85 @@ async function refreshTouchedWalletArtifacts(
   const activitySince = new Date(
     inputs.snapshotAt.getTime() - activityLookbackDays * 24 * 60 * 60 * 1000,
   );
+  const aggregateStageCounts = {
+    wallets: aggregateWalletIds.length,
+    markets: inputs.selectedMarketIds.length,
+  };
 
-  await refreshWalletActivityBaseline(client, {
-    walletIds: aggregateWalletIds,
-    asOf: inputs.snapshotAt,
-    windowDays: 30,
-  });
-  await refreshWalletActivityHourly(client, {
-    walletIds: aggregateWalletIds,
-    since: activitySince,
-    enteredLateHours: 24,
-  });
-  await refreshWalletPositionExposure(client, {
-    walletIds: aggregateWalletIds,
-    asOf: inputs.snapshotAt,
-  });
-  await refreshWalletInferredOutcomes(client, {
-    walletIds: aggregateWalletIds,
-  });
+  await runWalletIntelArtifactStage(
+    "activityBaseline",
+    aggregateStageCounts,
+    () =>
+      refreshWalletActivityBaseline(client, {
+        walletIds: aggregateWalletIds,
+        asOf: inputs.snapshotAt,
+        windowDays: 30,
+      }),
+  );
+  await runWalletIntelArtifactStage(
+    "activityHourly",
+    aggregateStageCounts,
+    () =>
+      refreshWalletActivityHourly(client, {
+        walletIds: aggregateWalletIds,
+        since: activitySince,
+        enteredLateHours: 24,
+      }),
+  );
+  await runWalletIntelArtifactStage(
+    "positionExposure",
+    aggregateStageCounts,
+    () =>
+      refreshWalletPositionExposure(client, {
+        walletIds: aggregateWalletIds,
+        asOf: inputs.snapshotAt,
+      }),
+  );
+  await runWalletIntelArtifactStage(
+    "inferredOutcomes",
+    aggregateStageCounts,
+    () =>
+      refreshWalletInferredOutcomes(client, {
+        walletIds: aggregateWalletIds,
+      }),
+  );
 
   return {
     deltaInserts: deltaResult.inserts,
     deltaUpdates: deltaResult.updates,
   };
+}
+
+async function runWalletIntelArtifactStage<T>(
+  stage: string,
+  counts: { wallets?: number; markets?: number },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  console.log("[wallets:intel:refresh] artifact stage start", {
+    stage,
+    ...counts,
+  });
+  try {
+    const result = await fn();
+    console.log("[wallets:intel:refresh] artifact stage done", {
+      stage,
+      durationMs: Date.now() - startedAt,
+      ...counts,
+    });
+    return result;
+  } catch (error) {
+    console.error(
+      "[wallets:intel:refresh] artifact stage failed",
+      {
+        stage,
+        durationMs: Date.now() - startedAt,
+        ...counts,
+      },
+      error,
+    );
+    throw error;
+  }
 }
 
 async function snapshotFollowedWalletHoldingsSolana(
@@ -1815,6 +1884,16 @@ async function filterTrackableMarketIds(
   return rows.map((row) => row.id);
 }
 
+type SnapshotDeltaRow = {
+  wallet_id: string;
+  venue: string;
+  market_id: string;
+  outcome_side: string | null;
+  shares: string | null;
+  price: string | null;
+  metadata: unknown;
+};
+
 async function applySnapshotDeltas(
   client: Queryable,
   inputs: {
@@ -1823,7 +1902,8 @@ async function applySnapshotDeltas(
     marketIds: string[];
   },
 ): Promise<{ inserts: number; updates: number }> {
-  if (inputs.walletIds.length === 0 || inputs.marketIds.length === 0) {
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0 || inputs.marketIds.length === 0) {
     return { inserts: 0, updates: 0 };
   }
 
@@ -1835,35 +1915,22 @@ async function applySnapshotDeltas(
     return { inserts: 0, updates: 0 };
   }
 
-  const currentRows = await client.query<{
-    wallet_id: string;
-    venue: string;
-    market_id: string;
-    outcome_side: string | null;
-    shares: string | null;
-    price: string | null;
-    metadata: unknown;
-  }>(
-    `
+  let updates = 0;
+
+  for (const walletChunk of chunkArray(walletIds, 100)) {
+    const currentRows = await client.query<SnapshotDeltaRow>(
+      `
       select wallet_id, venue, market_id, outcome_side, shares, price, metadata
       from wallet_position_snapshots
       where wallet_id = any($1::uuid[])
         and snapshot_at = $2
         and market_id = any($3::text[])
     `,
-    [inputs.walletIds, inputs.occurredAt, eligibleMarketIds],
-  );
+      [walletChunk, inputs.occurredAt, eligibleMarketIds],
+    );
 
-  const prevRows = await client.query<{
-    wallet_id: string;
-    venue: string;
-    market_id: string;
-    outcome_side: string | null;
-    shares: string | null;
-    price: string | null;
-    metadata: unknown;
-  }>(
-    `
+    const prevRows = await client.query<SnapshotDeltaRow>(
+      `
       select distinct on (wallet_id, venue, market_id, outcome_side)
         wallet_id,
         venue,
@@ -1878,203 +1945,202 @@ async function applySnapshotDeltas(
         and market_id = any($3::text[])
       order by wallet_id, venue, market_id, outcome_side, snapshot_at desc
     `,
-    [inputs.walletIds, inputs.occurredAt, eligibleMarketIds],
-  );
+      [walletChunk, inputs.occurredAt, eligibleMarketIds],
+    );
 
-  const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
-  const currentMap = new Map<string, (typeof currentRows.rows)[number]>();
-  const prevMap = new Map<string, (typeof prevRows.rows)[number]>();
-  const currentRowsByMarket = new Map<
-    string,
-    Array<(typeof currentRows.rows)[number]>
-  >();
-  const prevRowsByMarket = new Map<
-    string,
-    Array<(typeof prevRows.rows)[number]>
-  >();
+    const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
+    const currentMap = new Map<string, (typeof currentRows.rows)[number]>();
+    const prevMap = new Map<string, (typeof prevRows.rows)[number]>();
+    const currentRowsByMarket = new Map<
+      string,
+      Array<(typeof currentRows.rows)[number]>
+    >();
+    const prevRowsByMarket = new Map<
+      string,
+      Array<(typeof prevRows.rows)[number]>
+    >();
 
-  const makeKey = (row: {
-    wallet_id: string;
-    venue: string;
-    market_id: string;
-    outcome_side: string | null;
-  }) =>
-    `${row.wallet_id}|${row.venue}|${row.market_id}|${normalizeOutcomeSideForStorage(row.outcome_side)}`;
-  const makeMarketKey = (row: {
-    wallet_id: string;
-    venue: string;
-    market_id: string;
-  }) => `${row.wallet_id}|${row.venue}|${row.market_id}`;
+    const makeKey = (row: {
+      wallet_id: string;
+      venue: string;
+      market_id: string;
+      outcome_side: string | null;
+    }) =>
+      `${row.wallet_id}|${row.venue}|${row.market_id}|${normalizeOutcomeSideForStorage(row.outcome_side)}`;
+    const makeMarketKey = (row: {
+      wallet_id: string;
+      venue: string;
+      market_id: string;
+    }) => `${row.wallet_id}|${row.venue}|${row.market_id}`;
 
-  for (const row of currentRows.rows) {
-    currentMap.set(makeKey(row), row);
-    const marketKey = makeMarketKey(row);
-    const list = currentRowsByMarket.get(marketKey) ?? [];
-    list.push(row);
-    currentRowsByMarket.set(marketKey, list);
-  }
-  for (const row of prevRows.rows) {
-    prevMap.set(makeKey(row), row);
-    const marketKey = makeMarketKey(row);
-    const list = prevRowsByMarket.get(marketKey) ?? [];
-    list.push(row);
-    prevRowsByMarket.set(marketKey, list);
-  }
-
-  const keys = new Set<string>([...currentMap.keys(), ...prevMap.keys()]);
-  const marketKeys = new Set<string>([
-    ...currentRowsByMarket.keys(),
-    ...prevRowsByMarket.keys(),
-  ]);
-  const suppressedLegacyTransitionMarkets = new Set<string>();
-
-  for (const marketKey of marketKeys) {
-    const currentMarketRows = currentRowsByMarket.get(marketKey) ?? [];
-    const previousMarketRows = prevRowsByMarket.get(marketKey) ?? [];
-    if (
-      !shouldSuppressLegacySideTransitionDelta({
-        currentRows: currentMarketRows,
-        previousRows: previousMarketRows,
-      })
-    ) {
-      continue;
+    for (const row of currentRows.rows) {
+      currentMap.set(makeKey(row), row);
+      const marketKey = makeMarketKey(row);
+      const list = currentRowsByMarket.get(marketKey) ?? [];
+      list.push(row);
+      currentRowsByMarket.set(marketKey, list);
     }
-    suppressedLegacyTransitionMarkets.add(marketKey);
+    for (const row of prevRows.rows) {
+      prevMap.set(makeKey(row), row);
+      const marketKey = makeMarketKey(row);
+      const list = prevRowsByMarket.get(marketKey) ?? [];
+      list.push(row);
+      prevRowsByMarket.set(marketKey, list);
+    }
 
-    const legacyPrevious = previousMarketRows.find(
-      (row) => normalizeOutcomeSideForStorage(row.outcome_side) === "",
-    );
-    if (!legacyPrevious) continue;
-    const prevShares = legacyPrevious.shares
-      ? Number(legacyPrevious.shares)
-      : 0;
-    if (!Number.isFinite(prevShares) || prevShares <= 0) continue;
+    const keys = new Set<string>([...currentMap.keys(), ...prevMap.keys()]);
+    const marketKeys = new Set<string>([
+      ...currentRowsByMarket.keys(),
+      ...prevRowsByMarket.keys(),
+    ]);
+    const suppressedLegacyTransitionMarkets = new Set<string>();
 
-    const snapshotSource = parseMetadataSource(legacyPrevious.metadata);
-    await upsertWalletVenue(
-      client,
-      legacyPrevious.wallet_id,
-      legacyPrevious.venue as Venue,
-    );
-    await upsertWalletPositionSnapshot(client, {
-      walletId: legacyPrevious.wallet_id,
-      venue: legacyPrevious.venue,
-      marketId: legacyPrevious.market_id,
-      outcomeSide: legacyPrevious.outcome_side ?? null,
-      shares: 0,
-      sizeUsd: 0,
-      price:
-        legacyPrevious.price != null &&
-        Number.isFinite(Number(legacyPrevious.price))
-          ? Number(legacyPrevious.price)
-          : null,
-      metadata: {
-        ...((legacyPrevious.metadata ?? {}) as Record<string, unknown>),
-        source: "snapshot_transition_reset",
-        snapshotSource,
-        prevShares: Number(prevShares.toFixed(9)),
-        currShares: 0,
-        deltaShares: 0,
-        suppressedLegacyTransition: true,
-      },
-      snapshotAt: inputs.occurredAt,
-    });
-  }
+    for (const marketKey of marketKeys) {
+      const currentMarketRows = currentRowsByMarket.get(marketKey) ?? [];
+      const previousMarketRows = prevRowsByMarket.get(marketKey) ?? [];
+      if (
+        !shouldSuppressLegacySideTransitionDelta({
+          currentRows: currentMarketRows,
+          previousRows: previousMarketRows,
+        })
+      ) {
+        continue;
+      }
+      suppressedLegacyTransitionMarkets.add(marketKey);
 
-  const inserts = 0;
-  let updates = 0;
+      const legacyPrevious = previousMarketRows.find(
+        (row) => normalizeOutcomeSideForStorage(row.outcome_side) === "",
+      );
+      if (!legacyPrevious) continue;
+      const prevShares = legacyPrevious.shares
+        ? Number(legacyPrevious.shares)
+        : 0;
+      if (!Number.isFinite(prevShares) || prevShares <= 0) continue;
 
-  for (const key of keys) {
-    const current = currentMap.get(key);
-    const previous = prevMap.get(key);
-    const marketKey = current
-      ? makeMarketKey(current)
-      : previous
-        ? makeMarketKey(previous)
-        : null;
-    if (marketKey && suppressedLegacyTransitionMarkets.has(marketKey)) continue;
-    const walletId = current?.wallet_id ?? previous?.wallet_id;
-    if (!walletId) continue;
-    if (!prevWallets.has(walletId)) continue;
-
-    const currShares = current?.shares ? Number(current.shares) : 0;
-    const prevShares = previous?.shares ? Number(previous.shares) : 0;
-    const delta = currShares - prevShares;
-    if (!Number.isFinite(delta) || Math.abs(delta) < 1e-9) continue;
-
-    const action = delta > 0 ? "BUY" : "SELL";
-    const absShares = Math.abs(delta);
-    const price =
-      (current?.price != null ? Number(current.price) : null) ??
-      (previous?.price != null ? Number(previous.price) : null);
-    const sizeUsd =
-      price != null && Number.isFinite(price)
-        ? Number((absShares * price).toFixed(6))
-        : null;
-
-    const metadataBase = (current?.metadata ??
-      previous?.metadata ??
-      {}) as Record<string, unknown>;
-    const snapshotSource = parseMetadataSource(metadataBase);
-    const metadata = {
-      ...metadataBase,
-      snapshotSource,
-      deltaShares: Number(absShares.toFixed(9)),
-      prevShares: Number(prevShares.toFixed(9)),
-      currShares: Number(currShares.toFixed(9)),
-    };
-
-    const marketId = current?.market_id ?? previous?.market_id;
-    if (!marketId) continue;
-
-    await upsertWalletActivityEvent(client, {
-      walletId,
-      venue: current?.venue ?? previous?.venue ?? "polymarket",
-      marketId,
-      outcomeSide: current?.outcome_side ?? previous?.outcome_side ?? null,
-      action,
-      deltaShares: Number(absShares.toFixed(9)),
-      sizeUsd,
-      price,
-      activityType: "delta",
-      source: "snapshot_delta",
-      metadata: metadata as Record<string, unknown>,
-      occurredAt: inputs.occurredAt,
-    });
-    updates += 1;
-
-    // When a selected market disappears from the current snapshot, record a
-    // zero-share snapshot to prevent repeated synthetic "SELL" events on
-    // subsequent runs.
-    const missingCurrent = !current && previous && prevShares > 0;
-    if (missingCurrent) {
-      const venue = previous.venue;
-      await upsertWalletVenue(client, walletId, venue as Venue);
+      const snapshotSource = parseMetadataSource(legacyPrevious.metadata);
+      await upsertWalletVenue(
+        client,
+        legacyPrevious.wallet_id,
+        legacyPrevious.venue as Venue,
+      );
       await upsertWalletPositionSnapshot(client, {
-        walletId,
-        venue,
-        marketId,
-        outcomeSide: previous.outcome_side ?? null,
+        walletId: legacyPrevious.wallet_id,
+        venue: legacyPrevious.venue,
+        marketId: legacyPrevious.market_id,
+        outcomeSide: legacyPrevious.outcome_side ?? null,
         shares: 0,
         sizeUsd: 0,
         price:
-          previous.price != null && Number.isFinite(Number(previous.price))
-            ? Number(previous.price)
+          legacyPrevious.price != null &&
+          Number.isFinite(Number(legacyPrevious.price))
+            ? Number(legacyPrevious.price)
             : null,
         metadata: {
-          ...(metadataBase as Record<string, unknown>),
-          source: "snapshot_zero",
+          ...((legacyPrevious.metadata ?? {}) as Record<string, unknown>),
+          source: "snapshot_transition_reset",
           snapshotSource,
           prevShares: Number(prevShares.toFixed(9)),
           currShares: 0,
-          deltaShares: Number(absShares.toFixed(9)),
+          deltaShares: 0,
+          suppressedLegacyTransition: true,
         },
         snapshotAt: inputs.occurredAt,
       });
     }
+
+    for (const key of keys) {
+      const current = currentMap.get(key);
+      const previous = prevMap.get(key);
+      const marketKey = current
+        ? makeMarketKey(current)
+        : previous
+          ? makeMarketKey(previous)
+          : null;
+      if (marketKey && suppressedLegacyTransitionMarkets.has(marketKey))
+        continue;
+      const walletId = current?.wallet_id ?? previous?.wallet_id;
+      if (!walletId) continue;
+      if (!prevWallets.has(walletId)) continue;
+
+      const currShares = current?.shares ? Number(current.shares) : 0;
+      const prevShares = previous?.shares ? Number(previous.shares) : 0;
+      const delta = currShares - prevShares;
+      if (!Number.isFinite(delta) || Math.abs(delta) < 1e-9) continue;
+
+      const action = delta > 0 ? "BUY" : "SELL";
+      const absShares = Math.abs(delta);
+      const price =
+        (current?.price != null ? Number(current.price) : null) ??
+        (previous?.price != null ? Number(previous.price) : null);
+      const sizeUsd =
+        price != null && Number.isFinite(price)
+          ? Number((absShares * price).toFixed(6))
+          : null;
+
+      const metadataBase = (current?.metadata ??
+        previous?.metadata ??
+        {}) as Record<string, unknown>;
+      const snapshotSource = parseMetadataSource(metadataBase);
+      const metadata = {
+        ...metadataBase,
+        snapshotSource,
+        deltaShares: Number(absShares.toFixed(9)),
+        prevShares: Number(prevShares.toFixed(9)),
+        currShares: Number(currShares.toFixed(9)),
+      };
+
+      const marketId = current?.market_id ?? previous?.market_id;
+      if (!marketId) continue;
+
+      await upsertWalletActivityEvent(client, {
+        walletId,
+        venue: current?.venue ?? previous?.venue ?? "polymarket",
+        marketId,
+        outcomeSide: current?.outcome_side ?? previous?.outcome_side ?? null,
+        action,
+        deltaShares: Number(absShares.toFixed(9)),
+        sizeUsd,
+        price,
+        activityType: "delta",
+        source: "snapshot_delta",
+        metadata: metadata as Record<string, unknown>,
+        occurredAt: inputs.occurredAt,
+      });
+      updates += 1;
+
+      // When a selected market disappears from the current snapshot, record a
+      // zero-share snapshot to prevent repeated synthetic "SELL" events on
+      // subsequent runs.
+      const missingCurrent = !current && previous && prevShares > 0;
+      if (missingCurrent) {
+        const venue = previous.venue;
+        await upsertWalletVenue(client, walletId, venue as Venue);
+        await upsertWalletPositionSnapshot(client, {
+          walletId,
+          venue,
+          marketId,
+          outcomeSide: previous.outcome_side ?? null,
+          shares: 0,
+          sizeUsd: 0,
+          price:
+            previous.price != null && Number.isFinite(Number(previous.price))
+              ? Number(previous.price)
+              : null,
+          metadata: {
+            ...(metadataBase as Record<string, unknown>),
+            source: "snapshot_zero",
+            snapshotSource,
+            prevShares: Number(prevShares.toFixed(9)),
+            currShares: 0,
+            deltaShares: Number(absShares.toFixed(9)),
+          },
+          snapshotAt: inputs.occurredAt,
+        });
+      }
+    }
   }
 
-  return { inserts, updates };
+  return { inserts: 0, updates };
 }
 
 async function refreshWalletActivityBaseline(
@@ -2085,7 +2151,8 @@ async function refreshWalletActivityBaseline(
     windowDays: number;
   },
 ) {
-  if (inputs.walletIds.length === 0) return;
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0) return;
   const hasSampleCountColumn =
     await hasWalletActivityBaselineSampleCountColumn(client);
   const sampleCountInsertColumnSql = hasSampleCountColumn
@@ -2101,8 +2168,9 @@ async function refreshWalletActivityBaseline(
         sample_count = excluded.sample_count`
     : "";
 
-  await client.query(
-    `
+  for (const chunk of chunkArray(walletIds, 100)) {
+    await client.query(
+      `
       insert into wallet_activity_baseline (
         wallet_id,
         window_days,
@@ -2137,8 +2205,9 @@ async function refreshWalletActivityBaseline(
         as_of = excluded.as_of,
         updated_at = now()
     `,
-    [inputs.walletIds, inputs.windowDays, inputs.asOf],
-  );
+      [chunk, inputs.windowDays, inputs.asOf],
+    );
+  }
 }
 
 async function refreshWalletActivityHourly(
@@ -2149,9 +2218,12 @@ async function refreshWalletActivityHourly(
     enteredLateHours: number;
   },
 ) {
-  if (inputs.walletIds.length === 0) return;
-  await client.query(
-    `
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0) return;
+
+  for (const chunk of chunkArray(walletIds, 100)) {
+    await client.query(
+      `
       insert into wallet_activity_hourly (
         wallet_id,
         venue,
@@ -2300,8 +2372,9 @@ async function refreshWalletActivityHourly(
         counts_reduced = excluded.counts_reduced,
         updated_at = now()
     `,
-    [inputs.walletIds, inputs.since, inputs.enteredLateHours],
-  );
+      [chunk, inputs.since, inputs.enteredLateHours],
+    );
+  }
 }
 
 async function refreshWalletPositionExposure(
