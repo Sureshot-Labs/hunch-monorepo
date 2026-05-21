@@ -9,7 +9,7 @@
     "prestart": "pnpm -C ../../packages/db build",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "test": "node dist/mappers-tests.js",
+    "test": "node dist/mappers-tests.js && node dist/gammaClient-tests.js",
     "category:backfill": "tsx src/category-backfill.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",

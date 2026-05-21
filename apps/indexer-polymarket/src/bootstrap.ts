@@ -3,6 +3,7 @@ import { ensureRedis, redis } from "./redis.js";
 import { env } from "./env.js";
 import {
   fetchEventsByIds,
+  fetchEventsByIdsDetailed,
   fetchMarketById,
   iterateEventPages,
 } from "./gammaClient.js";
@@ -114,7 +115,34 @@ type SyncCounters = {
 type ProcessResult = {
   processedEvents: number;
   processedMarkets: number;
+  timings?: Record<string, number>;
 };
+
+function createTimings(): Record<string, number> {
+  return {};
+}
+
+async function timedPhase<T>(
+  timings: Record<string, number>,
+  phase: string,
+  run: () => Promise<T>,
+  context: Record<string, unknown> = {},
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await run();
+  } finally {
+    const durationMs = Date.now() - startedAt;
+    timings[phase] = (timings[phase] ?? 0) + durationMs;
+    if (durationMs >= env.slowPhaseWarnMs) {
+      log.warn("Polymarket slow phase", {
+        phase,
+        durationMs,
+        ...context,
+      });
+    }
+  }
+}
 
 async function hasAnyPolymarketData(): Promise<boolean> {
   const { rows } = await pool.query("select 1 from polymarket_events limit 1");
@@ -142,6 +170,7 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
 
   if (!parsedEvents.length) return { processedEvents: 0, processedMarkets: 0 };
 
+  const timings = createTimings();
   const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
   const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
 
@@ -160,69 +189,101 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     }),
   );
 
-  await upsertEventsConsistently(pool, {
-    unified: unifiedEventRows,
-    polymarket: polymarketEventRows,
-  });
+  await timedPhase(
+    timings,
+    "processEvents.eventUpsert",
+    () =>
+      upsertEventsConsistently(pool, {
+        unified: unifiedEventRows,
+        polymarket: polymarketEventRows,
+      }),
+    { events: parsedEvents.length },
+  );
 
-  await upsertMarketsConsistently(pool, {
-    unified: unifiedMarketRows,
-    polymarket: polymarketMarketRows,
-  });
+  await timedPhase(
+    timings,
+    "processEvents.marketUpsert",
+    () =>
+      upsertMarketsConsistently(
+        pool,
+        {
+          unified: unifiedMarketRows,
+          polymarket: polymarketMarketRows,
+        },
+        {
+          unifiedBatchSize: env.marketUpsertBatchSize,
+        },
+      ),
+    { markets: unifiedMarketRows.length },
+  );
   if (unifiedTokenRows.length) {
-    await upsertUnifiedTokens(pool, unifiedTokenRows);
+    await timedPhase(
+      timings,
+      "processEvents.tokenUpsert",
+      () => upsertUnifiedTokens(pool, unifiedTokenRows),
+      { tokens: unifiedTokenRows.length },
+    );
   }
 
   try {
-    const eventTitleById = new Map(
-      unifiedEventRows.map((row) => [row.id, row.title]),
+    await timedPhase(
+      timings,
+      "processEvents.embedEnqueue",
+      async () => {
+        const eventTitleById = new Map(
+          unifiedEventRows.map((row) => [row.id, row.title]),
+        );
+        const marketsByEvent = new Map<string, typeof unifiedMarketRows>();
+        for (const row of unifiedMarketRows) {
+          const list = marketsByEvent.get(row.event_id) ?? [];
+          list.push(row);
+          marketsByEvent.set(row.event_id, list);
+        }
+        const topMarketsByEvent = new Map<string, string>();
+        for (const row of unifiedEventRows) {
+          const markets = marketsByEvent.get(row.id) ?? [];
+          const topMarkets = buildTopMarketsText(markets, row.title);
+          if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
+        }
+        const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
+          entity_type: "event",
+          event_id: row.id,
+          venue: row.venue,
+          status: row.status,
+          event_title: row.title,
+          top_markets: topMarketsByEvent.get(row.id),
+          description: row.description,
+          category: row.category,
+          updated_at: row.updated_at ?? row.created_at,
+          source: "polymarket",
+        }));
+        const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+          entity_type: "market",
+          market_id: row.id,
+          venue: row.venue,
+          status: row.status,
+          market_title: row.title,
+          event_title: eventTitleById.get(row.event_id),
+          description: row.description,
+          category: row.category,
+          outcomes: row.outcomes,
+          market_type: row.market_type,
+          updated_at: row.updated_at ?? row.created_at,
+          source: "polymarket",
+        }));
+        await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
+      },
+      { events: unifiedEventRows.length, markets: unifiedMarketRows.length },
     );
-    const marketsByEvent = new Map<string, typeof unifiedMarketRows>();
-    for (const row of unifiedMarketRows) {
-      const list = marketsByEvent.get(row.event_id) ?? [];
-      list.push(row);
-      marketsByEvent.set(row.event_id, list);
-    }
-    const topMarketsByEvent = new Map<string, string>();
-    for (const row of unifiedEventRows) {
-      const markets = marketsByEvent.get(row.id) ?? [];
-      const topMarkets = buildTopMarketsText(markets, row.title);
-      if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
-    }
-    const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
-      entity_type: "event",
-      event_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      event_title: row.title,
-      top_markets: topMarketsByEvent.get(row.id),
-      description: row.description,
-      category: row.category,
-      updated_at: row.updated_at ?? row.created_at,
-      source: "polymarket",
-    }));
-    const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
-      entity_type: "market",
-      market_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      market_title: row.title,
-      event_title: eventTitleById.get(row.event_id),
-      description: row.description,
-      category: row.category,
-      outcomes: row.outcomes,
-      market_type: row.market_type,
-      updated_at: row.updated_at ?? row.created_at,
-      source: "polymarket",
-    }));
-    await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
   } catch (err) {
+    if (isPgSetupIssue(err)) throw err;
     log.warn("Polymarket embed enqueue failed", err);
   }
 
   return {
     processedEvents: parsedEvents.length,
     processedMarkets: polymarketMarketRows.length,
+    timings,
   };
 }
 
@@ -383,13 +444,17 @@ export async function syncHotWindow(): Promise<SyncCounters> {
 export async function snapshotBooks(tokenIds: string[]): Promise<{
   requested: number;
   failedTokenIds: string[];
+  timings: Record<string, number>;
 }> {
-  if (tokenIds.length === 0) return { requested: 0, failedTokenIds: [] };
+  if (tokenIds.length === 0) {
+    return { requested: 0, failedTokenIds: [], timings: {} };
+  }
   await ensureRedis();
   await pool.query("select 1");
 
   const snapIds = tokenIds.slice(0, env.topBookSnapshot);
   const failedTokenIds: string[] = [];
+  const timings = createTimings();
   log.info(`Snapshotting ${snapIds.length} top books`);
 
   const batches = chunkArray(snapIds, 20);
@@ -398,22 +463,38 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
     batches.map((group) =>
       q.add(async () => {
         try {
-          const books = await postBooksOnce(group);
-          for (const b of books) {
-            const bb = bestBid(b.bids);
-            const ba = bestAsk(b.asks);
-            const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
-            await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
-            await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
-            const tickJson = JSON.stringify({
-              token_id: b.asset_id,
-              best_bid: bb,
-              best_ask: ba,
-              ts: ts.getTime(),
-            });
-            await redis.set(`top:${b.asset_id}`, tickJson, { EX: 60 });
-            await redis.publish(`prices:${b.asset_id}`, tickJson);
-          }
+          const books = await timedPhase(
+            timings,
+            "snapshotBooks.fetchBooks",
+            () => postBooksOnce(group),
+            { tokens: group.length },
+          );
+          await timedPhase(
+            timings,
+            "snapshotBooks.persistBooks",
+            async () => {
+              for (const b of books) {
+                const bb = bestBid(b.bids);
+                const ba = bestAsk(b.asks);
+                const ts = b.timestamp
+                  ? new Date(Number(b.timestamp))
+                  : new Date();
+                await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
+                await redis.set(`book:${b.asset_id}`, JSON.stringify(b), {
+                  EX: 5,
+                });
+                const tickJson = JSON.stringify({
+                  token_id: b.asset_id,
+                  best_bid: bb,
+                  best_ask: ba,
+                  ts: ts.getTime(),
+                });
+                await redis.set(`top:${b.asset_id}`, tickJson, { EX: 60 });
+                await redis.publish(`prices:${b.asset_id}`, tickJson);
+              }
+            },
+            { tokens: books.length },
+          );
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;
           failedTokenIds.push(...group);
@@ -422,7 +503,7 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
       }),
     ),
   );
-  return { requested: snapIds.length, failedTokenIds };
+  return { requested: snapIds.length, failedTokenIds, timings };
 }
 
 async function fetchEventIdsForTokenIds(
@@ -562,6 +643,7 @@ type RefreshMarketRefsResult = {
   refreshed: number;
   eventsFetched: number;
   fallbackMarketFetches: number;
+  timings: Record<string, number>;
 };
 
 function dedupeMarketRefs(refs: PolymarketMarketRef[]): PolymarketMarketRef[] {
@@ -643,19 +725,26 @@ async function refreshMarketRefs(
     eventsFetched: 0,
     fallbackMarketFetches: 0,
   };
-  if (!dedupedRefs.length) return { ...resultBase, refreshed: 0 };
+  if (!dedupedRefs.length) {
+    return { ...resultBase, refreshed: 0, timings: {} };
+  }
 
+  const timings = createTimings();
   const refsByMarketId = new Map(dedupedRefs.map((ref) => [ref.marketId, ref]));
   const eventIds = Array.from(new Set(dedupedRefs.map((ref) => ref.eventId)));
 
-  let events: TEvent[] = [];
-  try {
-    events = await fetchEventsByIds(eventIds);
-  } catch (error) {
-    log.warn("Polymarket event batch market refresh failed", {
+  const eventRefresh = await timedPhase(
+    timings,
+    "refreshMarketRefs.fetchEvents",
+    () => fetchEventsByIdsDetailed(eventIds),
+    { eventIds: eventIds.length, marketRefs: dedupedRefs.length },
+  );
+  const events = eventRefresh.events;
+  if (eventRefresh.failedIds.length) {
+    log.warn("Polymarket event batch market refresh partially failed", {
       eventIds: eventIds.length,
+      failedEventIds: eventRefresh.failedIds.length,
       marketRefs: dedupedRefs.length,
-      error,
     });
   }
 
@@ -663,7 +752,14 @@ async function refreshMarketRefs(
   const missingRefs = dedupedRefs.filter(
     (ref) => !rowsByMarketId.has(ref.marketId),
   );
-  const fallbackRows = await fetchFallbackMarketRows(missingRefs);
+  const fallbackRows = missingRefs.length
+    ? await timedPhase(
+        timings,
+        "refreshMarketRefs.fallbackMarkets",
+        () => fetchFallbackMarketRows(missingRefs),
+        { marketRefs: missingRefs.length },
+      )
+    : [];
   for (const row of fallbackRows) {
     rowsByMarketId.set(String(row.market.id), row);
   }
@@ -675,6 +771,7 @@ async function refreshMarketRefs(
       eventsFetched: events.length,
       fallbackMarketFetches: missingRefs.length,
       refreshed: 0,
+      timings,
     };
   }
 
@@ -691,42 +788,65 @@ async function refreshMarketRefs(
     return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
   });
 
-  await upsertMarketsConsistently(pool, {
-    unified: unifiedMarketRows,
-    polymarket: polymarketMarketRows,
-  });
+  await timedPhase(
+    timings,
+    "refreshMarketRefs.marketUpsert",
+    () =>
+      upsertMarketsConsistently(
+        pool,
+        {
+          unified: unifiedMarketRows,
+          polymarket: polymarketMarketRows,
+        },
+        {
+          unifiedBatchSize: env.marketUpsertBatchSize,
+        },
+      ),
+    { markets: unifiedMarketRows.length },
+  );
   if (unifiedTokenRows.length) {
-    await upsertUnifiedTokens(pool, unifiedTokenRows);
+    await timedPhase(
+      timings,
+      "refreshMarketRefs.tokenUpsert",
+      () => upsertUnifiedTokens(pool, unifiedTokenRows),
+      { tokens: unifiedTokenRows.length },
+    );
   }
 
   const tsMs = Date.now();
   const stateQueue = new PQueue({ concurrency: 20 });
-  await Promise.all(
-    parsed.flatMap(({ market }, index) => {
-      const unifiedMarket = unifiedMarketRows[index];
-      const { yes, no } = clobTokenPair(market);
-      const tokenIds = [yes, no].filter((tokenId): tokenId is string =>
-        Boolean(tokenId),
-      );
-      return tokenIds.map((tokenId) =>
-        stateQueue.add(() =>
-          publishMarketState({
-            redis,
-            venue: "polymarket",
-            tokenId,
-            market: market.conditionId ?? null,
-            conditionId: market.conditionId ?? null,
-            status: publishedMarketStatus(unifiedMarket),
-            acceptingOrders:
-              typeof market.acceptingOrders === "boolean"
-                ? market.acceptingOrders
-                : null,
-            resolvedOutcome: unifiedMarket?.resolved_outcome ?? null,
-            tsMs,
-          }),
-        ),
-      );
-    }),
+  await timedPhase(
+    timings,
+    "refreshMarketRefs.publishState",
+    () =>
+      Promise.all(
+        parsed.flatMap(({ market }, index) => {
+          const unifiedMarket = unifiedMarketRows[index];
+          const { yes, no } = clobTokenPair(market);
+          const tokenIds = [yes, no].filter((tokenId): tokenId is string =>
+            Boolean(tokenId),
+          );
+          return tokenIds.map((tokenId) =>
+            stateQueue.add(() =>
+              publishMarketState({
+                redis,
+                venue: "polymarket",
+                tokenId,
+                market: market.conditionId ?? null,
+                conditionId: market.conditionId ?? null,
+                status: publishedMarketStatus(unifiedMarket),
+                acceptingOrders:
+                  typeof market.acceptingOrders === "boolean"
+                    ? market.acceptingOrders
+                    : null,
+                resolvedOutcome: unifiedMarket?.resolved_outcome ?? null,
+                tsMs,
+              }),
+            ),
+          );
+        }),
+      ),
+    { markets: parsed.length },
   );
 
   return {
@@ -734,6 +854,7 @@ async function refreshMarketRefs(
     eventsFetched: events.length,
     fallbackMarketFetches: missingRefs.length,
     refreshed: parsed.length,
+    timings,
   };
 }
 
@@ -826,19 +947,34 @@ export async function processPriceRefreshQueue(): Promise<{
   let eventsFetched = 0;
   let fallbackMarketFetches = 0;
   let snapshotTokens = 0;
+  let refreshTimings: Record<string, number> = {};
+  let bookTimings: Record<string, number> = {};
+  const timings = createTimings();
   try {
-    const refs = await fetchMarketRefsForTokenIds(tokenIds);
+    const refs = await timedPhase(
+      timings,
+      "priceRefresh.fetchMarketRefs",
+      () => fetchMarketRefsForTokenIds(tokenIds),
+      { tokens: tokenIds.length },
+    );
     const marketResult = await refreshMarketRefs(refs);
     marketRefs = marketResult.requestedMarkets;
     marketRefreshed = marketResult.refreshed;
     eventsFetched = marketResult.eventsFetched;
     fallbackMarketFetches = marketResult.fallbackMarketFetches;
+    refreshTimings = marketResult.timings;
 
-    const snapshotTokenIds = await fetchTradableTokenIdsForSnapshot(tokenIds);
+    const snapshotTokenIds = await timedPhase(
+      timings,
+      "priceRefresh.fetchTradableSnapshotTokens",
+      () => fetchTradableTokenIdsForSnapshot(tokenIds),
+      { tokens: tokenIds.length },
+    );
     snapshotTokens = snapshotTokenIds.length;
     skippedBookTokens = Math.max(0, tokenIds.length - snapshotTokenIds.length);
     if (snapshotTokenIds.length) {
       const result = await snapshotBooks(snapshotTokenIds);
+      bookTimings = result.timings;
       bookRefreshed = result.requested - result.failedTokenIds.length;
       failed = result.failedTokenIds.length;
       if (result.failedTokenIds.length) {
@@ -876,6 +1012,11 @@ export async function processPriceRefreshQueue(): Promise<{
     skippedBookTokens,
     backlog,
     durationMs: Date.now() - startedAt,
+    timings: {
+      ...timings,
+      ...refreshTimings,
+      ...bookTimings,
+    },
   });
   return { claimed: tokenIds.length, refreshed, failed, backlog };
 }

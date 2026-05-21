@@ -495,6 +495,7 @@ export async function upsertUnifiedMarket(
 export async function upsertUnifiedMarkets(
   pool: Pool,
   marketRows: UnifiedMarketRow[],
+  options: { batchSize?: number } = {},
 ): Promise<void> {
   if (marketRows.length === 0) return;
 
@@ -659,7 +660,8 @@ export async function upsertUnifiedMarkets(
        excluded.created_at, excluded.updated_at)
   `;
 
-  const batches = chunkArray(rows, 500);
+  const batchSize = Math.max(1, Math.trunc(options.batchSize ?? 500));
+  const batches = chunkArray(rows, batchSize);
   for (const batch of batches) {
     const existingTokenSources = await loadUnifiedMarketTokenSources(
       pool,

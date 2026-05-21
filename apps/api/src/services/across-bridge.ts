@@ -132,6 +132,14 @@ function isSolanaNativeToken(chainId: string, tokenAddress: string): boolean {
   );
 }
 
+function isPolygonPusdToken(chainId: string, tokenAddress: string): boolean {
+  return (
+    chainId === "137" &&
+    normalizeAddress(tokenAddress) ===
+      normalizeAddress(env.polymarketPusdAddress)
+  );
+}
+
 function isAcrossAllowlistedRoute(inputs: {
   srcChainId: string;
   dstChainId: string;
@@ -198,6 +206,16 @@ export function resolveAcrossRoute(inputs: {
   if (
     !(sourceIsAcrossToken || sourceIsSolanaNative) ||
     !destinationIsAcrossToken
+  ) {
+    return {
+      ok: false,
+      code: "across_token_unsupported",
+      message: "Across route is not supported for the selected tokens",
+    };
+  }
+  if (
+    inputs.srcChainId === HUNCH_SOLANA_CHAIN_ID &&
+    isPolygonPusdToken(inputs.dstChainId, inputs.dstToken)
   ) {
     return {
       ok: false,

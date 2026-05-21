@@ -162,6 +162,18 @@ const tests: TestCase[] = [
           { ok: true, mode: "solana_source" },
         );
 
+        const solanaToPusdRoute = resolveAcrossRoute({
+          swapType: "cross_chain",
+          srcChainId: HUNCH_SOLANA_CHAIN_ID,
+          dstChainId: "137",
+          srcToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          dstToken: POLYGON_PUSD,
+        });
+        assert.equal(solanaToPusdRoute.ok, false);
+        if (!solanaToPusdRoute.ok) {
+          assert.equal(solanaToPusdRoute.code, "across_token_unsupported");
+        }
+
         assert.deepEqual(
           resolveAcrossRoute({
             swapType: "cross_chain",

@@ -214,6 +214,22 @@ const priceRefreshRetryDelayMs = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
   { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
 );
+const marketUpsertBatchSize = clampInt(
+  parseOptionalInt(process.env.POLYMARKET_MARKET_UPSERT_BATCH),
+  { min: 1, max: 500, fallback: 150 },
+);
+const gammaRetryAttempts = clampInt(
+  parseOptionalInt(process.env.POLYMARKET_GAMMA_RETRY_ATTEMPTS),
+  { min: 1, max: 5, fallback: 3 },
+);
+const gammaRetryBaseMs = clampInt(
+  parseOptionalInt(process.env.POLYMARKET_GAMMA_RETRY_BASE_MS),
+  { min: 0, max: 30_000, fallback: 250 },
+);
+const slowPhaseWarnMs = clampInt(
+  parseOptionalInt(process.env.POLYMARKET_SLOW_PHASE_WARN_MS),
+  { min: 100, max: 10 * 60_000, fallback: 2_000 },
+);
 
 const wsHotShareRaw = parseOptionalFloat(
   process.env.POLYMARKET_WS_HOT_SHARE ?? process.env.WS_HOT_SHARE,
@@ -266,6 +282,10 @@ export const env = {
   priceRefreshMarketConcurrency,
   priceRefreshQueueMax,
   priceRefreshRetryDelayMs,
+  marketUpsertBatchSize,
+  gammaRetryAttempts,
+  gammaRetryBaseMs,
+  slowPhaseWarnMs,
   hotStatusMaxEvents,
   topBookSnapshot: Number(process.env.INDEXER_TOP_BOOK_SNAPSHOT ?? "150"),
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),

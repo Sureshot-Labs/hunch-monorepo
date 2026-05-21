@@ -978,10 +978,16 @@ function enqueueEventRefresh(eventId: string): void {
           unified: unifiedEventRows,
           polymarket: polymarketEventRows,
         });
-        await upsertMarketsConsistently(pool, {
-          unified: unifiedMarketRows,
-          polymarket: polymarketMarketRows,
-        });
+        await upsertMarketsConsistently(
+          pool,
+          {
+            unified: unifiedMarketRows,
+            polymarket: polymarketMarketRows,
+          },
+          {
+            unifiedBatchSize: env.marketUpsertBatchSize,
+          },
+        );
         if (unifiedTokenRows.length) {
           await upsertUnifiedTokens(pool, unifiedTokenRows);
         }

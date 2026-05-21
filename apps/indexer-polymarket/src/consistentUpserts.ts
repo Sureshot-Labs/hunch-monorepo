@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import PQueue from "p-queue";
 import {
   type UnifiedEventRow,
   type UnifiedMarketRow,
@@ -11,6 +12,12 @@ import {
   upsertPolymarketEvents,
   upsertPolymarketMarkets,
 } from "./polymarket-repo.js";
+
+const marketUpsertQueue = new PQueue({ concurrency: 1 });
+
+type UpsertMarketsConsistentlyOptions = {
+  unifiedBatchSize?: number;
+};
 
 export async function upsertEventsConsistently(
   pool: Pool,
@@ -29,10 +36,15 @@ export async function upsertMarketsConsistently(
     unified: UnifiedMarketRow[];
     polymarket: PolymarketMarketRow[];
   },
+  options: UpsertMarketsConsistentlyOptions = {},
 ): Promise<void> {
-  // The UI and status repair script read unified_markets. Write it first so a
-  // partial refresh cannot advance raw Polymarket flags while unified status
-  // stays stale.
-  await upsertUnifiedMarkets(pool, rows.unified);
-  await upsertPolymarketMarkets(rows.polymarket);
+  await marketUpsertQueue.add(async () => {
+    // The UI and status repair script read unified_markets. Write it first so a
+    // partial refresh cannot advance raw Polymarket flags while unified status
+    // stays stale.
+    await upsertUnifiedMarkets(pool, rows.unified, {
+      batchSize: options.unifiedBatchSize,
+    });
+    await upsertPolymarketMarkets(rows.polymarket);
+  });
 }

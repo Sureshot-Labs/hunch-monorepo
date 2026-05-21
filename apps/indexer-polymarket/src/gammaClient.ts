@@ -44,6 +44,11 @@ export type GammaEventsQuery = {
   end_date_max?: string;
 };
 
+export type GammaEventsByIdsResult = {
+  events: GammaEventType[];
+  failedIds: string[];
+};
+
 function resolveEventsUrl(): string {
   const base = env.gammaBase.replace(/\/+$/, "");
   return `${base}/events`;
@@ -96,7 +101,19 @@ function setOptionalString(
   sp.set(k, v);
 }
 
-export async function fetchEventsPage(q: GammaEventsQuery) {
+function isRetriableGammaError(error: unknown): boolean {
+  if (error instanceof GammaHttpError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return error instanceof TypeError;
+}
+
+function gammaRetryDelayMs(attempt: number): number {
+  if (env.gammaRetryBaseMs <= 0) return 0;
+  return env.gammaRetryBaseMs * Math.max(1, attempt);
+}
+
+async function fetchEventsPageOnce(q: GammaEventsQuery) {
   const url = new URL(resolveEventsUrl());
   url.searchParams.set("limit", String(q.limit));
   url.searchParams.set("offset", String(q.offset));
@@ -132,6 +149,26 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
     events = (parsed.events ?? parsed.data ?? []) as GammaEventType[];
   }
   return { events };
+}
+
+export async function fetchEventsPage(q: GammaEventsQuery) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= env.gammaRetryAttempts; attempt += 1) {
+    try {
+      return await fetchEventsPageOnce(q);
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt >= env.gammaRetryAttempts ||
+        !isRetriableGammaError(error)
+      ) {
+        throw error;
+      }
+      const delayMs = gammaRetryDelayMs(attempt);
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+  throw lastError;
 }
 
 export type GammaEventsPage = {
@@ -218,25 +255,64 @@ export async function fetchAllEvents() {
 export async function fetchEventsByIds(
   ids: Array<number | string>,
 ): Promise<GammaEventType[]> {
+  const result = await fetchEventsByIdsDetailed(ids);
+  if (result.failedIds.length > 0 && result.events.length === 0) {
+    throw new Error(
+      `Gamma event fetch failed for ${result.failedIds.length} id(s)`,
+    );
+  }
+  return result.events;
+}
+
+async function fetchEventsByIdsChunk(
+  ids: number[],
+): Promise<GammaEventsByIdsResult> {
+  if (ids.length === 0) return { events: [], failedIds: [] };
+
+  try {
+    const { events } = await fetchEventsPage({
+      offset: 0,
+      limit: ids.length,
+      id: ids,
+    });
+    return { events: events ?? [], failedIds: [] };
+  } catch {
+    if (ids.length <= 1) {
+      return { events: [], failedIds: ids.map(String) };
+    }
+
+    const splitAt = Math.ceil(ids.length / 2);
+    const left = await fetchEventsByIdsChunk(ids.slice(0, splitAt));
+    const right = await fetchEventsByIdsChunk(ids.slice(splitAt));
+    return {
+      events: [...left.events, ...right.events],
+      failedIds: [...left.failedIds, ...right.failedIds],
+    };
+  }
+}
+
+export async function fetchEventsByIdsDetailed(
+  ids: Array<number | string>,
+): Promise<GammaEventsByIdsResult> {
   const cleaned = ids
     .map((id) => Number(String(id).trim()))
     .filter((id) => Number.isFinite(id));
-  if (cleaned.length === 0) return [];
+  if (cleaned.length === 0) return { events: [], failedIds: [] };
 
-  const out: GammaEventType[] = [];
+  const eventsById = new Map<string, GammaEventType>();
+  const failedIds: string[] = [];
   const chunkSize = Math.min(env.pageSize, 200);
 
   for (let i = 0; i < cleaned.length; i += chunkSize) {
     const chunk = cleaned.slice(i, i + chunkSize);
-    const { events } = await fetchEventsPage({
-      offset: 0,
-      limit: chunk.length,
-      id: chunk,
-    });
-    out.push(...(events ?? []));
+    const result = await fetchEventsByIdsChunk(chunk);
+    for (const event of result.events) {
+      eventsById.set(String(event.id), event);
+    }
+    failedIds.push(...result.failedIds);
   }
 
-  return out;
+  return { events: Array.from(eventsById.values()), failedIds };
 }
 
 function extractFirstMarketPayload(
