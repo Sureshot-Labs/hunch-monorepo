@@ -16,6 +16,7 @@ type DepositEventStatus =
   | "notified"
   | "ignored_bridge"
   | "ignored_venue"
+  | "ignored_internal"
   | "unresolved";
 
 type UserWalletMatch = {
@@ -37,6 +38,20 @@ type ExecutionMatch = {
   user_id: string;
   venue: string;
   status: string | null;
+};
+
+type InternalDepositMatch = {
+  userId: string;
+  walletAddress: string | null;
+  walletType: string | null;
+  reason: string;
+};
+
+type PolymarketFunderMovementMatch = {
+  user_id: string;
+  signer_address: string;
+  funder_address: string;
+  direction: string;
 };
 
 type DepositEventRow = {
@@ -201,6 +216,92 @@ async function resolveUserWallet(
     [input.walletType, normalized],
   );
   return rows[0] ?? null;
+}
+
+async function findPolymarketFunderMovement(
+  db: DbQuery,
+  input: { sender: string | null; recipient: string | null },
+): Promise<PolymarketFunderMovementMatch | null> {
+  const sender = normalizeEvmAddress(input.sender);
+  const recipient = normalizeEvmAddress(input.recipient);
+  if (!sender || !recipient) return null;
+
+  const { rows } = await db.query<PolymarketFunderMovementMatch>(
+    `
+      select
+        user_id,
+        wallet_address as signer_address,
+        funder_address,
+        case
+          when lower(funder_address) = $1 and lower(wallet_address) = $2
+            then 'funder_to_signer'
+          when lower(wallet_address) = $1 and lower(funder_address) = $2
+            then 'signer_to_funder'
+        end as direction
+      from user_venue_credentials
+      where venue = 'polymarket'
+        and is_active = true
+        and funder_address is not null
+        and (
+          (lower(funder_address) = $1 and lower(wallet_address) = $2)
+          or (lower(wallet_address) = $1 and lower(funder_address) = $2)
+        )
+      order by updated_at desc
+      limit 1
+    `,
+    [sender, recipient],
+  );
+  return rows[0] ?? null;
+}
+
+async function findInternalDepositMovement(
+  db: DbQuery,
+  input: {
+    event: PrivyFundsDepositedWebhook;
+    recipientWallet: UserWalletMatch | null;
+    recipientWalletType: string | null;
+    recipient: string | null;
+  },
+): Promise<InternalDepositMatch | null> {
+  const sender = input.event.sender?.trim() || null;
+  if (!sender || !input.recipient) return null;
+
+  const senderWalletType = resolveWalletType(input.event.caip2, sender);
+  const senderWallet =
+    senderWalletType != null
+      ? await resolveUserWallet(db, {
+          walletType: senderWalletType,
+          address: sender,
+        })
+      : null;
+
+  if (
+    senderWallet &&
+    input.recipientWallet &&
+    senderWallet.user_id === input.recipientWallet.user_id
+  ) {
+    return {
+      userId: input.recipientWallet.user_id,
+      walletAddress: input.recipientWallet.wallet_address,
+      walletType: input.recipientWallet.wallet_type,
+      reason: "same_user_wallet",
+    };
+  }
+
+  const funderMovement = await findPolymarketFunderMovement(db, {
+    sender,
+    recipient: input.recipient,
+  });
+  if (funderMovement?.user_id) {
+    return {
+      userId: funderMovement.user_id,
+      walletAddress: input.recipientWallet?.wallet_address ?? input.recipient,
+      walletType: input.recipientWallet?.wallet_type ?? input.recipientWalletType,
+      reason: `polymarket_${funderMovement.direction || "funder_movement"}`,
+    };
+  }
+
+  return null;
 }
 
 async function findBridgeOrderByTxHash(
@@ -483,20 +584,36 @@ export async function handlePrivyDepositWebhook(
     : await findExecutionByTxHash(db, event.transaction_hash);
   const venueCashDeposit =
     !bridgeOrder && (Boolean(execution) || isVenueCashDeposit(event));
+  const internalMovement =
+    !bridgeOrder && !venueCashDeposit
+      ? await findInternalDepositMovement(db, {
+          event,
+          recipientWallet: wallet,
+          recipientWalletType: walletType,
+          recipient,
+        })
+      : null;
   const status: DepositEventStatus = bridgeOrder
     ? "ignored_bridge"
     : venueCashDeposit
       ? "ignored_venue"
-      : wallet
-        ? "recorded"
-        : "unresolved";
+      : internalMovement
+        ? "ignored_internal"
+        : wallet
+          ? "recorded"
+          : "unresolved";
 
   const insertedRow = await insertDepositEvent(db, {
     status,
     userId:
-      wallet?.user_id ?? bridgeOrder?.user_id ?? execution?.user_id ?? null,
-    walletAddress: wallet?.wallet_address ?? recipient,
-    walletType: wallet?.wallet_type ?? walletType,
+      wallet?.user_id ??
+      bridgeOrder?.user_id ??
+      execution?.user_id ??
+      internalMovement?.userId ??
+      null,
+    walletAddress:
+      wallet?.wallet_address ?? internalMovement?.walletAddress ?? recipient,
+    walletType: wallet?.wallet_type ?? internalMovement?.walletType ?? walletType,
     bridgeOrderId: bridgeOrder?.id ?? null,
     payload: event,
   });
@@ -550,6 +667,30 @@ export async function handlePrivyDepositWebhook(
       "Privy deposit webhook ignored because it matched venue cash movement",
     );
     return { ok: true, duplicate, ignored: true, status: "ignored_venue" };
+  }
+
+  if (internalMovement) {
+    if (row.status !== "ignored_internal") {
+      await updateDepositEventStatus(db, {
+        eventId: row.id,
+        status: "ignored_internal",
+        userId: internalMovement.userId,
+        walletAddress: internalMovement.walletAddress,
+        walletType: internalMovement.walletType,
+      });
+    }
+    logger?.info?.(
+      {
+        depositEventId: row.id,
+        sender: event.sender ?? null,
+        recipient,
+        asset: event.asset,
+        txHash: event.transaction_hash ?? null,
+        reason: internalMovement.reason,
+      },
+      "Privy deposit webhook ignored because it matched an internal wallet movement",
+    );
+    return { ok: true, duplicate, ignored: true, status: "ignored_internal" };
   }
 
   if (!wallet) {

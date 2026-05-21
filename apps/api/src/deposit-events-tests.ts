@@ -11,11 +11,19 @@ type TestCase = {
   run: () => void | Promise<void>;
 };
 
+type MockWallet = {
+  userId: string;
+  walletAddress: string;
+  walletType: string;
+};
+
 type MockDbOptions = {
-  wallet?: {
+  wallet?: MockWallet | null;
+  wallets?: MockWallet[];
+  venueCredential?: {
     userId: string;
     walletAddress: string;
-    walletType: string;
+    funderAddress: string;
   } | null;
   bridgeOrder?: {
     id: string;
@@ -60,6 +68,10 @@ const basePayload = {
   block: { number: 123 },
 };
 
+function normalizeMockWalletAddress(walletType: string, address: string) {
+  return walletType === "solana" ? address : address.toLowerCase();
+}
+
 function createMockDb(options: MockDbOptions): MockDb {
   const calls: MockDb["calls"] = [];
   const notificationInserts: MockDb["notificationInserts"] = [];
@@ -72,13 +84,54 @@ function createMockDb(options: MockDbOptions): MockDb {
     calls.push({ sql, params });
 
     if (/from user_wallets/i.test(sql)) {
-      if (!options.wallet) return { rows: [] };
+      const walletType = typeof params?.[0] === "string" ? params[0] : "";
+      const walletAddressNorm =
+        typeof params?.[1] === "string" ? params[1] : "";
+      const wallets = [
+        ...(options.wallet ? [options.wallet] : []),
+        ...(options.wallets ?? []),
+      ];
+      const wallet = wallets.find(
+        (candidate) =>
+          candidate.walletType === walletType &&
+          normalizeMockWalletAddress(
+            candidate.walletType,
+            candidate.walletAddress,
+          ) === walletAddressNorm,
+      );
+      if (!wallet) return { rows: [] };
       return {
         rows: [
           {
-            user_id: options.wallet.userId,
-            wallet_address: options.wallet.walletAddress,
-            wallet_type: options.wallet.walletType,
+            user_id: wallet.userId,
+            wallet_address: wallet.walletAddress,
+            wallet_type: wallet.walletType,
+          } as unknown as T,
+        ],
+      };
+    }
+
+    if (/from user_venue_credentials/i.test(sql)) {
+      const credential = options.venueCredential;
+      if (!credential) return { rows: [] };
+      const sender = typeof params?.[0] === "string" ? params[0] : "";
+      const recipient = typeof params?.[1] === "string" ? params[1] : "";
+      const signer = credential.walletAddress.toLowerCase();
+      const funder = credential.funderAddress.toLowerCase();
+      const direction =
+        funder === sender && signer === recipient
+          ? "funder_to_signer"
+          : signer === sender && funder === recipient
+            ? "signer_to_funder"
+            : null;
+      if (!direction) return { rows: [] };
+      return {
+        rows: [
+          {
+            user_id: credential.userId,
+            signer_address: credential.walletAddress,
+            funder_address: credential.funderAddress,
+            direction,
           } as unknown as T,
         ],
       };
@@ -313,6 +366,112 @@ const tests: TestCase[] = [
         assert.equal(result.ok, true);
         assert.equal(result.ignored, true);
         assert.equal(result.status, "ignored_venue");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "same-user linked wallet movement records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const sender = "0x1111111111111111111111111111111111111111";
+        const recipient = "0x2222222222222222222222222222222222222222";
+        const db = createMockDb({
+          wallets: [
+            {
+              userId: "user-1",
+              walletAddress: sender,
+              walletType: "ethereum",
+            },
+            {
+              userId: "user-1",
+              walletAddress: recipient,
+              walletType: "ethereum",
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          sender,
+          recipient,
+          idempotency_key: "deposit-key-internal-wallet",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_internal");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "Polymarket funder to signer movement records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const signer = "0x2222222222222222222222222222222222222222";
+        const funder = "0x3333333333333333333333333333333333333333";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: signer,
+            walletType: "ethereum",
+          },
+          venueCredential: {
+            userId: "user-1",
+            walletAddress: signer,
+            funderAddress: funder,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "eip155:137",
+          asset: {
+            type: "erc20",
+            address: env.polymarketUsdceAddress,
+          },
+          sender: funder,
+          recipient: signer,
+          idempotency_key: "deposit-key-funder-to-signer",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_internal");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "Polymarket signer to funder movement records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const signer = "0x2222222222222222222222222222222222222222";
+        const funder = "0x3333333333333333333333333333333333333333";
+        const db = createMockDb({
+          venueCredential: {
+            userId: "user-1",
+            walletAddress: signer,
+            funderAddress: funder,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "eip155:137",
+          asset: {
+            type: "erc20",
+            address: env.polymarketPusdAddress,
+          },
+          sender: signer,
+          recipient: funder,
+          idempotency_key: "deposit-key-signer-to-funder",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_internal");
         assert.deepEqual(db.notificationInserts, []);
       });
     },

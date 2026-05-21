@@ -1,4 +1,10 @@
-export type { UnifiedEventRow, UnifiedMarketRow } from "./unified-repo.js";
+export type {
+  UnifiedEventRow,
+  UnifiedMarketRow,
+  UpsertUnifiedEventsResult,
+  UpsertUnifiedMarketsResult,
+  UpsertUnifiedTokensResult,
+} from "./unified-repo.js";
 export {
   upsertUnifiedEvent,
   upsertUnifiedEvents,
@@ -7,6 +13,7 @@ export {
   upsertUnifiedToken,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
+  writeUnifiedBookTops,
   writeUnifiedLastTrade,
 } from "./unified-repo.js";
 export { getVenueId } from "./venues-repo.js";

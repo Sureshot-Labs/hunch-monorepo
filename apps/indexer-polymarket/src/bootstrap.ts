@@ -15,7 +15,7 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
-import { upsertUnifiedTokens, writeUnifiedBookTop } from "@hunch/db";
+import { upsertUnifiedTokens, writeUnifiedBookTops } from "@hunch/db";
 import {
   upsertEventsConsistently,
   upsertMarketsConsistently,
@@ -189,7 +189,7 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     }),
   );
 
-  await timedPhase(
+  const eventUpsertResult = await timedPhase(
     timings,
     "processEvents.eventUpsert",
     () =>
@@ -199,8 +199,23 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       }),
     { events: parsedEvents.length },
   );
+  log.info("Polymarket event upsert stats", {
+    events: parsedEvents.length,
+    unifiedInputRows: eventUpsertResult.unified.inputRows,
+    unifiedDedupedRows: eventUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: eventUpsertResult.unified.changedRows,
+    unifiedSkippedRows: eventUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: eventUpsertResult.unified.upsertedRows,
+    unifiedBatches: eventUpsertResult.unified.batches,
+    polymarketInputRows: eventUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: eventUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: eventUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: eventUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: eventUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: eventUpsertResult.polymarket.batches,
+  });
 
-  await timedPhase(
+  const marketUpsertResult = await timedPhase(
     timings,
     "processEvents.marketUpsert",
     () =>
@@ -216,13 +231,41 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       ),
     { markets: unifiedMarketRows.length },
   );
+  log.info("Polymarket market upsert stats", {
+    markets: unifiedMarketRows.length,
+    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: marketUpsertResult.polymarket.batches,
+    unifiedInputRows: marketUpsertResult.unified.inputRows,
+    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: marketUpsertResult.unified.changedRows,
+    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
+    unifiedBatches: marketUpsertResult.unified.batches,
+    unifiedTokenSyncMarketCount:
+      marketUpsertResult.unified.tokenSyncMarketCount,
+  });
+
   if (unifiedTokenRows.length) {
-    await timedPhase(
+    const tokenUpsertResult = await timedPhase(
       timings,
       "processEvents.tokenUpsert",
       () => upsertUnifiedTokens(pool, unifiedTokenRows),
       { tokens: unifiedTokenRows.length },
     );
+    log.info("Polymarket token upsert stats", {
+      context: "processEvents",
+      tokens: unifiedTokenRows.length,
+      inputRows: tokenUpsertResult.inputRows,
+      dedupedRows: tokenUpsertResult.dedupedRows,
+      changedRows: tokenUpsertResult.changedRows,
+      skippedRows: tokenUpsertResult.skippedRows,
+      upsertedRows: tokenUpsertResult.upsertedRows,
+      batches: tokenUpsertResult.batches,
+    });
   }
 
   try {
@@ -473,25 +516,46 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
             timings,
             "snapshotBooks.persistBooks",
             async () => {
-              for (const b of books) {
+              const bookTops = books.map((b) => {
                 const bb = bestBid(b.bids);
                 const ba = bestAsk(b.asks);
                 const ts = b.timestamp
                   ? new Date(Number(b.timestamp))
                   : new Date();
-                await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
-                await redis.set(`book:${b.asset_id}`, JSON.stringify(b), {
-                  EX: 5,
-                });
-                const tickJson = JSON.stringify({
-                  token_id: b.asset_id,
-                  best_bid: bb,
-                  best_ask: ba,
-                  ts: ts.getTime(),
-                });
-                await redis.set(`top:${b.asset_id}`, tickJson, { EX: 60 });
-                await redis.publish(`prices:${b.asset_id}`, tickJson);
-              }
+                return { book: b, bestBid: bb, bestAsk: ba, ts };
+              });
+
+              await writeUnifiedBookTops(
+                pool,
+                bookTops.map((entry) => ({
+                  tokenId: entry.book.asset_id,
+                  bestBid: entry.bestBid,
+                  bestAsk: entry.bestAsk,
+                  ts: entry.ts,
+                })),
+              );
+
+              await Promise.all(
+                bookTops.map(async (entry) => {
+                  const tickJson = JSON.stringify({
+                    token_id: entry.book.asset_id,
+                    best_bid: entry.bestBid,
+                    best_ask: entry.bestAsk,
+                    ts: entry.ts.getTime(),
+                  });
+                  await Promise.all([
+                    redis.set(
+                      `book:${entry.book.asset_id}`,
+                      JSON.stringify(entry.book),
+                      { EX: 5 },
+                    ),
+                    redis.set(`top:${entry.book.asset_id}`, tickJson, {
+                      EX: 60,
+                    }),
+                    redis.publish(`prices:${entry.book.asset_id}`, tickJson),
+                  ]);
+                }),
+              );
             },
             { tokens: books.length },
           );
@@ -788,7 +852,7 @@ async function refreshMarketRefs(
     return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
   });
 
-  await timedPhase(
+  const marketUpsertResult = await timedPhase(
     timings,
     "refreshMarketRefs.marketUpsert",
     () =>
@@ -804,13 +868,42 @@ async function refreshMarketRefs(
       ),
     { markets: unifiedMarketRows.length },
   );
+  log.info("Polymarket market upsert stats", {
+    context: "refreshMarketRefs",
+    markets: unifiedMarketRows.length,
+    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: marketUpsertResult.polymarket.batches,
+    unifiedInputRows: marketUpsertResult.unified.inputRows,
+    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: marketUpsertResult.unified.changedRows,
+    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
+    unifiedBatches: marketUpsertResult.unified.batches,
+    unifiedTokenSyncMarketCount:
+      marketUpsertResult.unified.tokenSyncMarketCount,
+  });
+
   if (unifiedTokenRows.length) {
-    await timedPhase(
+    const tokenUpsertResult = await timedPhase(
       timings,
       "refreshMarketRefs.tokenUpsert",
       () => upsertUnifiedTokens(pool, unifiedTokenRows),
       { tokens: unifiedTokenRows.length },
     );
+    log.info("Polymarket token upsert stats", {
+      context: "refreshMarketRefs",
+      tokens: unifiedTokenRows.length,
+      inputRows: tokenUpsertResult.inputRows,
+      dedupedRows: tokenUpsertResult.dedupedRows,
+      changedRows: tokenUpsertResult.changedRows,
+      skippedRows: tokenUpsertResult.skippedRows,
+      upsertedRows: tokenUpsertResult.upsertedRows,
+      batches: tokenUpsertResult.batches,
+    });
   }
 
   const tsMs = Date.now();
@@ -1217,73 +1310,30 @@ async function fetchTopTokens(
 ): Promise<string[]> {
   if (limitTokens <= 0) return [];
   const limitMarkets = Math.max(100, limitTokens * 2);
-  const shortlistFactors = [5, 15, 40];
-  for (const factor of shortlistFactors) {
-    const shortlistMarkets = Math.max(limitMarkets * factor, 1_000);
-    const out = await fetchTopTokensFromShortlist(
-      shortlistMarkets,
-      limitTokens,
+  const out: string[] = [];
+
+  const sourceScanFactors = [1, 5, 15, 40];
+  for (const factor of sourceScanFactors) {
+    const scanMarkets = Math.max(limitMarkets * factor, 1_000);
+    const sourceRows = await fetchTopTokensFromSourceScan(
+      scanMarkets,
+      limitTokens - out.length,
       exclude,
     );
+    out.push(...sourceRows);
     if (out.length >= limitTokens) return out;
   }
-
-  const fallback = await fetchTopTokensFromSourceScan(
-    limitMarkets,
-    limitTokens,
-    exclude,
-  );
-  if (fallback.length < limitTokens) {
+  if (out.length < limitTokens) {
     log.warn(
-      "Polymarket top token shortlist underfilled; broad scan fallback still short",
+      "Polymarket top token source scan underfilled",
       {
         limitTokens,
-        returned: fallback.length,
+        returned: out.length,
         limitMarkets,
       },
     );
   }
-  return fallback;
-}
-
-async function fetchTopTokensFromShortlist(
-  shortlistMarkets: number,
-  limitTokens: number,
-  exclude: Set<string>,
-): Promise<string[]> {
-  const { rows } = await pool.query<{ clob_token_ids: unknown }>(
-    `
-      with candidate_markets as (
-        select venue_market_id
-        from unified_markets
-        where venue = 'polymarket'
-          and status = 'ACTIVE'
-          and venue_market_id is not null
-          and clob_token_ids is not null
-          and clob_token_ids <> '[]'
-        order by volume_24h desc nulls last, liquidity desc nulls last, venue_market_id
-        limit $1
-      )
-      select pm.clob_token_ids
-      from candidate_markets c
-      join polymarket_markets pm
-        on pm.id = c.venue_market_id
-      where pm.closed = false
-        and pm.archived = false
-        and pm.enable_order_book = true
-        and pm.accepting_orders = true
-        and pm.clob_token_ids is not null
-        and pm.clob_token_ids <> '[]'
-      order by
-        coalesce(pm.volume24hr_clob, 0) desc,
-        coalesce(pm.liquidity_clob, 0) desc,
-        coalesce(pm.volume24hr, 0) desc,
-        coalesce(pm.liquidity, 0) desc
-    `,
-    [shortlistMarkets],
-  );
-
-  return collectTopTokensFromRows(rows, limitTokens, exclude);
+  return out;
 }
 
 async function fetchTopTokensFromSourceScan(
@@ -1305,7 +1355,8 @@ async function fetchTopTokensFromSourceScan(
         coalesce(volume24hr_clob, 0) desc,
         coalesce(liquidity_clob, 0) desc,
         coalesce(volume24hr, 0) desc,
-        coalesce(liquidity, 0) desc
+        coalesce(liquidity, 0) desc,
+        id
       limit $1
     `,
     [limitMarkets],
