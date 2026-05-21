@@ -95,8 +95,8 @@ async function periodicPriceRefresh() {
 
 async function main() {
   await periodicBootstrap();
-  await periodicWsRefresh();
   await periodicPriceRefresh();
+  await periodicWsRefresh();
   void syncCatchUpFromCursor().catch((e) => {
     if (isPgSetupIssue(e)) {
       log.warn(`catch-up blocked: ${formatPgError(e)}`);

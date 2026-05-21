@@ -1900,6 +1900,84 @@ type SnapshotDeltaMarketKey = {
   market_id: string;
 };
 
+const SNAPSHOT_DELTA_WALLET_CHUNK_SIZE = 25;
+const SNAPSHOT_DELTA_MARKET_KEY_CHUNK_SIZE = 250;
+const SNAPSHOT_DELTA_OUTCOME_SIDES = ["", "YES", "NO"] as const;
+const WALLET_POSITION_EXPOSURE_CHUNK_SIZE = 50;
+
+async function fetchPreviousSnapshotDeltaRows(
+  client: Queryable,
+  inputs: {
+    currentMarketKeys: SnapshotDeltaMarketKey[];
+    occurredAt: Date;
+  },
+): Promise<SnapshotDeltaRow[]> {
+  const rows: SnapshotDeltaRow[] = [];
+
+  for (const marketKeyChunk of chunkArray(
+    inputs.currentMarketKeys,
+    SNAPSHOT_DELTA_MARKET_KEY_CHUNK_SIZE,
+  )) {
+    if (!marketKeyChunk.length) continue;
+    const result = await client.query<SnapshotDeltaRow>(
+      `
+        with current_markets as (
+          select distinct
+            x.wallet_id,
+            x.venue,
+            x.market_id
+          from unnest($1::uuid[], $2::text[], $3::text[]) as x(
+            wallet_id,
+            venue,
+            market_id
+          )
+        ),
+        outcome_sides as (
+          select unnest($5::text[]) as outcome_side
+        )
+        select
+          prev.wallet_id,
+          prev.venue,
+          prev.market_id,
+          prev.outcome_side,
+          prev.shares,
+          prev.price,
+          prev.metadata
+        from current_markets cm
+        cross join outcome_sides os
+        join lateral (
+          select
+            ws.wallet_id,
+            ws.venue,
+            ws.market_id,
+            ws.outcome_side,
+            ws.shares,
+            ws.price,
+            ws.metadata
+          from wallet_position_snapshots ws
+          where ws.wallet_id = cm.wallet_id
+            and ws.venue = cm.venue
+            and ws.market_id = cm.market_id
+            and ws.outcome_side = os.outcome_side
+            and ws.snapshot_at < $4
+          order by ws.snapshot_at desc
+          limit 1
+        ) prev on true
+      `,
+      [
+        marketKeyChunk.map((row) => row.wallet_id),
+        marketKeyChunk.map((row) => row.venue),
+        marketKeyChunk.map((row) => row.market_id),
+        inputs.occurredAt,
+        SNAPSHOT_DELTA_OUTCOME_SIDES,
+      ],
+    );
+    rows.push(...result.rows);
+  }
+
+  return rows;
+}
+
 async function applySnapshotDeltas(
   client: Queryable,
   inputs: {
@@ -1923,7 +2001,10 @@ async function applySnapshotDeltas(
 
   let updates = 0;
 
-  for (const walletChunk of chunkArray(walletIds, 50)) {
+  for (const walletChunk of chunkArray(
+    walletIds,
+    SNAPSHOT_DELTA_WALLET_CHUNK_SIZE,
+  )) {
     const currentRows = await client.query<SnapshotDeltaRow>(
       `
       select wallet_id, venue, market_id, outcome_side, shares, price, metadata
@@ -1965,50 +2046,23 @@ async function applySnapshotDeltas(
       [walletChunk, inputs.occurredAt],
     );
 
-    const prevRows = await client.query<SnapshotDeltaRow>(
-      `
-      with current_markets as (
-        select distinct
-          x.wallet_id::uuid as wallet_id,
-          x.venue::text as venue,
-          x.market_id::text as market_id
-        from jsonb_to_recordset($1::jsonb) as x(
-          wallet_id text,
-          venue text,
-          market_id text
-        )
-      )
-      select distinct on (ws.wallet_id, ws.venue, ws.market_id, ws.outcome_side)
-        ws.wallet_id,
-        ws.venue,
-        ws.market_id,
-        ws.outcome_side,
-        ws.shares,
-        ws.price,
-        ws.metadata
-      from wallet_position_snapshots ws
-      join current_markets cm
-        on cm.wallet_id = ws.wallet_id
-       and cm.venue = ws.venue
-       and cm.market_id = ws.market_id
-      where ws.snapshot_at < $2
-      order by ws.wallet_id, ws.venue, ws.market_id, ws.outcome_side, ws.snapshot_at desc
-    `,
-      [JSON.stringify(currentMarketKeys), inputs.occurredAt],
-    );
+    const prevRows = await fetchPreviousSnapshotDeltaRows(client, {
+      currentMarketKeys,
+      occurredAt: inputs.occurredAt,
+    });
 
     const prevWallets = new Set(
       prevWalletRows.rows.map((row) => row.wallet_id),
     );
     const currentMap = new Map<string, (typeof currentRows.rows)[number]>();
-    const prevMap = new Map<string, (typeof prevRows.rows)[number]>();
+    const prevMap = new Map<string, (typeof prevRows)[number]>();
     const currentRowsByMarket = new Map<
       string,
       Array<(typeof currentRows.rows)[number]>
     >();
     const prevRowsByMarket = new Map<
       string,
-      Array<(typeof prevRows.rows)[number]>
+      Array<(typeof prevRows)[number]>
     >();
 
     const makeKey = (row: {
@@ -2031,7 +2085,7 @@ async function applySnapshotDeltas(
       list.push(row);
       currentRowsByMarket.set(marketKey, list);
     }
-    for (const row of prevRows.rows) {
+    for (const row of prevRows) {
       prevMap.set(makeKey(row), row);
       const marketKey = makeMarketKey(row);
       const list = prevRowsByMarket.get(marketKey) ?? [];
@@ -2438,7 +2492,10 @@ async function refreshWalletPositionExposure(
   const walletIds = Array.from(new Set(inputs.walletIds));
   if (walletIds.length === 0) return;
 
-  for (const chunk of chunkArray(walletIds, 100)) {
+  for (const chunk of chunkArray(
+    walletIds,
+    WALLET_POSITION_EXPOSURE_CHUNK_SIZE,
+  )) {
     await client.query(
       `
       with wallet_set as (
@@ -2446,12 +2503,20 @@ async function refreshWalletPositionExposure(
       ),
       latest as (
         select
-          ws.wallet_id,
-          ws.venue,
-          max(ws.snapshot_at) as snapshot_at
-        from wallet_position_snapshots ws
-        join wallet_set input on input.wallet_id = ws.wallet_id
-        group by ws.wallet_id, ws.venue
+          input.wallet_id,
+          wv.venue,
+          latest_snapshot.snapshot_at
+        from wallet_set input
+        join wallet_venues wv on wv.wallet_id = input.wallet_id
+        join lateral (
+          select ws.snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = input.wallet_id
+            and ws.venue = wv.venue
+            and ws.snapshot_at <= $2::timestamptz
+          order by ws.snapshot_at desc
+          limit 1
+        ) latest_snapshot on true
       ),
       latest_rows as (
         select
@@ -2476,12 +2541,11 @@ async function refreshWalletPositionExposure(
          and l.snapshot_at = ws.snapshot_at
         join unified_markets m on m.id = ws.market_id
         left join unified_events e on e.id = m.event_id
-        where ws.wallet_id = any($1::uuid[])
-          and ${buildWalletIntelTrackableMarketSql({
-            marketAlias: "m",
-            eventAlias: "e",
-            asOfSql: "$2::timestamptz",
-          })}
+        where ${buildWalletIntelTrackableMarketSql({
+          marketAlias: "m",
+          eventAlias: "e",
+          asOfSql: "$2::timestamptz",
+        })}
       ),
       market_rollup as (
         select
@@ -2570,54 +2634,27 @@ async function refreshWalletInferredOutcomes(
       with input_wallets as (
         select unnest($1::uuid[]) as wallet_id
       ),
-      latest as (
-        select distinct on (ws.wallet_id, ws.market_id, ws.outcome_side)
-          ws.wallet_id,
-          ws.market_id,
-          ws.outcome_side,
-          ws.shares
-        from wallet_position_snapshots ws
-        join input_wallets iw on iw.wallet_id = ws.wallet_id
-        where ws.shares > 0
-        order by ws.wallet_id, ws.market_id, ws.outcome_side, ws.snapshot_at desc
-      ),
-      agg as (
-        select
-          wallet_id,
-          market_id,
-          sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
-          sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
-        from latest
-        group by wallet_id, market_id
-      ),
-      resolved as (
-        select
-          agg.wallet_id,
-          agg.market_id,
-          agg.yes_shares,
-          agg.no_shares,
-          upper(m.resolved_outcome) as resolved_outcome
-        from agg
-        join unified_markets m on m.id = agg.market_id
-        where m.resolved_outcome is not null
-          and upper(m.resolved_outcome) in ('YES', 'NO')
-      ),
-      eligible as (
-        select *
-        from resolved
-        where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
-           or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
-      ),
       summary as (
         select
-          wallet_id,
+          wa.wallet_id,
           count(*) filter (
-            where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
-               or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
+            where upper(coalesce(wa.outcome_side, '')) = upper(coalesce(m.resolved_outcome::text, ''))
           )::int as wins,
           count(*)::int as total
-        from eligible
-        group by wallet_id
+        from wallet_activity_events wa
+        join input_wallets iw on iw.wallet_id = wa.wallet_id
+        join unified_markets m on m.id = wa.market_id
+        left join unified_events e on e.id = m.event_id
+        where wa.activity_type in ('delta', 'trade')
+          and upper(coalesce(m.resolved_outcome::text, '')) in ('YES', 'NO')
+          and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
+          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+          and ${buildSnapshotDeltaTrackableActivitySql({
+            activityAlias: "wa",
+            marketAlias: "m",
+            eventAlias: "e",
+          })}
+        group by wa.wallet_id
       )
       insert into wallet_inferred_outcomes (
         wallet_id,
@@ -3469,7 +3506,7 @@ async function runSnapshot(snapshotAt: Date) {
 
   const client = await pool.connect();
   try {
-    await client.query("SET statement_timeout = '120s'");
+    await client.query("SET statement_timeout = '300s'");
     const tagIds = await ensureSystemTags(client);
 
     const markets = await client.query<{

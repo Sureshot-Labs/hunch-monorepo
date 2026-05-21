@@ -1183,6 +1183,8 @@ function filterUsableEvents(events: MarketMapEventSummary[]): {
       marketBestBid: event.marketBestBid ?? null,
       marketBestAsk: event.marketBestAsk ?? null,
       lastPrice: event.lastPrice ?? null,
+      closeTime: event.closeTime ?? event.endTime ?? null,
+      expirationTime: null,
       resolvedOutcome: event.resolvedOutcome ?? null,
       resolvedOutcomePct: event.resolvedOutcomePct ?? null,
     });
@@ -1920,7 +1922,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v2",
+        "market-map:v4",
         runId,
         policyCacheVersion,
         String(level),
@@ -2193,42 +2195,21 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       metricForEvent(b, sizeBy) - metricForEvent(a, sizeBy) ||
                       b.score - a.score ||
                       a.eventId.localeCompare(b.eventId),
-                  )
-                  .slice(0, eventsPreviewLimit),
-              );
-              const previewEventIds = Array.from(
-                new Set(
-                  eventsByNode.flatMap((events) =>
-                    events.map((event) => event.eventId),
                   ),
-                ),
-              );
-              const eventSignalSummaryByEventId =
-                previewEventIds.length > 0
-                  ? await loadEventSignalSummaryByEventId({
-                      runId,
-                      eventIds: previewEventIds,
-                    })
-                  : new Map();
-              const eventActivityMetricsByEventId =
-                await loadEventActivityMetricsByEventId(previewEventIds);
-              const eventsByNodeWithSignals = eventsByNode.map((events) =>
-                applyEventActivityMetricsToEvents(
-                  applySignalSummaryToEvents(
-                    events,
-                    eventSignalSummaryByEventId,
-                  ),
-                  eventActivityMetricsByEventId,
-                ),
               );
 
-              const previewEvents = eventsByNodeWithSignals.flat();
-              let liveBundle: MarketMapLiveMarketBundle | null = null;
+              const previewEvents = eventsByNode.flat();
+              let hydratedPreviewEvents = previewEvents;
               if (previewEvents.length > 0) {
                 try {
-                  liveBundle = await loadLiveMarketDataForEvents(
+                  const liveBundle = await loadLiveMarketDataForEvents(
                     previewEvents,
                     marketsPreviewLimit,
+                  );
+                  hydratedPreviewEvents = applyLiveMarketDataToEvents(
+                    previewEvents,
+                    liveBundle.primaryByEventVenue,
+                    liveBundle.marketsByEventVenue,
                   );
                 } catch (error) {
                   skipCacheWrite = true;
@@ -2245,38 +2226,91 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 }
               }
 
-              let droppedPreviewEvents = 0;
+              const filteredPreviewEvents =
+                filterUsableEvents(hydratedPreviewEvents);
+              const droppedPreviewEvents = filteredPreviewEvents.dropped;
               const droppedReasons = emptyDropReasonCounts();
-              const previewItems = itemsWithPreviewSignals.map(
+              for (const reason of Object.keys(
+                filteredPreviewEvents.droppedReasons,
+              ) as MarketMapDropReason[]) {
+                droppedReasons[reason] +=
+                  filteredPreviewEvents.droppedReasons[reason];
+              }
+
+              const usablePreviewEventByVenue = new Map<
+                string,
+                MarketMapEventSummary
+              >();
+              for (const event of filteredPreviewEvents.items) {
+                usablePreviewEventByVenue.set(
+                  eventVenueKey(event.eventId, event.venue),
+                  event,
+                );
+              }
+
+              const previewItemsBeforeMetadata = itemsWithPreviewSignals.map(
                 (node, index) => {
-                  const withLive =
-                    liveBundle == null
-                      ? eventsByNodeWithSignals[index]
-                      : applyLiveMarketDataToEvents(
-                          eventsByNodeWithSignals[index],
-                          liveBundle.primaryByEventVenue,
-                          liveBundle.marketsByEventVenue,
-                        );
-                  if (liveBundle == null) {
-                    return {
-                      ...node,
-                      eventsPreview: withLive,
-                    };
-                  }
-                  const filtered = filterUsableEvents(withLive);
-                  droppedPreviewEvents += filtered.dropped;
-                  for (const reason of Object.keys(
-                    filtered.droppedReasons,
-                  ) as MarketMapDropReason[]) {
-                    droppedReasons[reason] += filtered.droppedReasons[reason];
-                  }
+                  const eventsPreview = eventsByNode[index]
+                    .map((event) =>
+                      usablePreviewEventByVenue.get(
+                        eventVenueKey(event.eventId, event.venue),
+                      ),
+                    )
+                    .filter(
+                      (event): event is MarketMapEventSummary => event != null,
+                    )
+                    .slice(0, eventsPreviewLimit);
                   return {
                     ...node,
-                    eventsPreview: filtered.items,
+                    eventsPreview,
                   };
                 },
               );
-              if (liveBundle != null && droppedPreviewEvents > 0) {
+
+              const displayedPreviewEvents = previewItemsBeforeMetadata.flatMap(
+                (node) => node.eventsPreview ?? [],
+              );
+              const previewEventIds = Array.from(
+                new Set(displayedPreviewEvents.map((event) => event.eventId)),
+              );
+              const eventSignalSummaryByEventId =
+                previewEventIds.length > 0
+                  ? await loadEventSignalSummaryByEventId({
+                      runId,
+                      eventIds: previewEventIds,
+                    })
+                  : new Map();
+              const eventActivityMetricsByEventId =
+                await loadEventActivityMetricsByEventId(previewEventIds);
+              const eventsWithMetadata = applyEventActivityMetricsToEvents(
+                applySignalSummaryToEvents(
+                  displayedPreviewEvents,
+                  eventSignalSummaryByEventId,
+                ),
+                eventActivityMetricsByEventId,
+              );
+              const eventWithMetadataByVenue = new Map<
+                string,
+                MarketMapEventSummary
+              >();
+              for (const event of eventsWithMetadata) {
+                eventWithMetadataByVenue.set(
+                  eventVenueKey(event.eventId, event.venue),
+                  event,
+                );
+              }
+
+              const previewItems = previewItemsBeforeMetadata.map((node) => ({
+                ...node,
+                eventsPreview: node.eventsPreview?.map(
+                  (event) =>
+                    eventWithMetadataByVenue.get(
+                      eventVenueKey(event.eventId, event.venue),
+                    ) ?? event,
+                ),
+              }));
+
+              if (droppedPreviewEvents > 0) {
                 request.log.info(
                   {
                     level,
@@ -2441,7 +2475,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v3",
+        "market-map:sidebars:v4",
         policyCacheVersion,
         venues.slice().sort().join(","),
         String(defaultLimit),
@@ -2538,8 +2572,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 liveBundle.primaryByEventVenue,
                 liveBundle.marketsByEventVenue,
               );
-        const filtered =
-          liveBundle == null ? withLive : filterUsableEvents(withLive).items;
+        const filtered = filterUsableEvents(withLive).items;
         return filtered.slice(0, limit);
       };
 
@@ -2690,7 +2723,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         policy.effective.venuesEnabled.join(","),
       ].join(":");
       const cacheKey = [
-        "market-map:node-events:v2",
+        "market-map:node-events:v4",
         runId,
         policyCacheVersion,
         nodeId,
@@ -2738,7 +2771,41 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         sortBy,
         sortDir,
       });
-      const items = sortedEvents.slice(offset, offset + limit);
+      let sortedEventsWithLiveMarket = sortedEvents;
+      if (sortedEvents.length > 0) {
+        try {
+          const liveBundle = await loadLiveMarketDataForEvents(
+            sortedEvents,
+            marketsPreviewLimit,
+          );
+          sortedEventsWithLiveMarket = applyLiveMarketDataToEvents(
+            sortedEvents,
+            liveBundle.primaryByEventVenue,
+            liveBundle.marketsByEventVenue,
+          );
+        } catch (error) {
+          skipCacheWrite = true;
+          request.log.warn(
+            { err: error, nodeId, itemCount: sortedEvents.length },
+            "market-map node events live market enrichment failed",
+          );
+        }
+      }
+      const filteredEvents = filterUsableEvents(sortedEventsWithLiveMarket);
+      if (filteredEvents.dropped > 0) {
+        request.log.info(
+          {
+            nodeId,
+            offset,
+            limit,
+            droppedItems: filteredEvents.dropped,
+            droppedReasons: filteredEvents.droppedReasons,
+          },
+          "market-map node events quality gate dropped events",
+        );
+      }
+
+      const items = filteredEvents.items.slice(offset, offset + limit);
       const eventSignalSummaryByEventId =
         items.length > 0
           ? await loadEventSignalSummaryByEventId({
@@ -2746,7 +2813,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
               eventIds: Array.from(new Set(items.map((item) => item.eventId))),
             })
           : new Map();
-      let itemsWithLiveMarket = applySignalSummaryToEvents(
+      let itemsWithMetadata = applySignalSummaryToEvents(
         items,
         eventSignalSummaryByEventId,
       );
@@ -2754,56 +2821,19 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         await loadEventActivityMetricsByEventId(
           items.map((item) => item.eventId),
         );
-      itemsWithLiveMarket = applyEventActivityMetricsToEvents(
-        itemsWithLiveMarket,
+      itemsWithMetadata = applyEventActivityMetricsToEvents(
+        itemsWithMetadata,
         eventActivityMetricsByEventId,
       );
-      let qualityGateApplied = false;
-      if (items.length > 0) {
-        try {
-          const liveBundle = await loadLiveMarketDataForEvents(
-            itemsWithLiveMarket,
-            marketsPreviewLimit,
-          );
-          itemsWithLiveMarket = applyLiveMarketDataToEvents(
-            itemsWithLiveMarket,
-            liveBundle.primaryByEventVenue,
-            liveBundle.marketsByEventVenue,
-          );
-          qualityGateApplied = true;
-        } catch (error) {
-          skipCacheWrite = true;
-          request.log.warn(
-            { err: error, nodeId, itemCount: items.length },
-            "market-map node events live market enrichment failed",
-          );
-        }
-      }
-      if (qualityGateApplied) {
-        const filtered = filterUsableEvents(itemsWithLiveMarket);
-        itemsWithLiveMarket = filtered.items;
-        if (filtered.dropped > 0) {
-          request.log.info(
-            {
-              nodeId,
-              offset,
-              limit,
-              droppedItems: filtered.dropped,
-              droppedReasons: filtered.droppedReasons,
-            },
-            "market-map node events quality gate dropped events",
-          );
-        }
-      }
 
       const payload = {
         runId,
         node: applyVenueFilterToNode(node, selectedVenueSet),
-        total: events.length,
+        total: filteredEvents.items.length,
         offset,
         limit,
         venues: selectedVenues,
-        items: itemsWithLiveMarket,
+        items: itemsWithMetadata,
       };
       requestMarketMapPayloadRefresh(payload, "market-map:node-events");
       const body = JSON.stringify(payload);

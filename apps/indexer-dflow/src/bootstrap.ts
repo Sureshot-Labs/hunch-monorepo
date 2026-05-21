@@ -14,7 +14,7 @@ import {
 } from "@hunch/infra";
 import {
   upsertUnifiedEvents,
-  upsertUnifiedMarkets,
+  upsertUnifiedMarkets as upsertUnifiedMarketsBase,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedLastTrade,
@@ -76,6 +76,7 @@ type MarketStatusRefreshOptions = {
 const STATUS_BATCH_LIMIT = 100;
 const STATUS_POSITION_TOKEN_LIMIT = 200;
 const TRADE_MIN_SIZE = 1e-9;
+const unifiedMarketWriteQueue = new PQueue({ concurrency: 1 });
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
     void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
@@ -86,6 +87,13 @@ const topTickGate = createTopTickGate({
     });
   },
 });
+
+async function upsertDflowUnifiedMarkets(
+  rows: UnifiedMarketRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await unifiedMarketWriteQueue.add(() => upsertUnifiedMarketsBase(pool, rows));
+}
 
 type TradeSide = "BUY" | "SELL";
 
@@ -1103,7 +1111,7 @@ async function syncMarketStatusesForTokenIds(
       }
 
       if (unifiedMarketRows.length) {
-        await upsertUnifiedMarkets(pool, unifiedMarketRows);
+        await upsertDflowUnifiedMarkets(unifiedMarketRows);
       }
       if (tokenRows.length) {
         await upsertUnifiedTokens(pool, tokenRows);
@@ -1377,7 +1385,7 @@ async function processEvents(
     await upsertUnifiedEvents(pool, unifiedEventRows);
   }
   if (unifiedMarketRows.length) {
-    await upsertUnifiedMarkets(pool, unifiedMarketRows);
+    await upsertDflowUnifiedMarkets(unifiedMarketRows);
   }
   if (tokenRows.length) {
     await upsertUnifiedTokens(pool, tokenRows);

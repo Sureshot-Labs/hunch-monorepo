@@ -47,6 +47,34 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "resolved market is excluded",
+    run: () => {
+      const reason = getMarketMapDropReason({
+        tokenYes: "yes-token",
+        tokenNo: "no-token",
+        acceptingOrders: true,
+        marketStatus: "ACTIVE",
+        resolvedOutcome: "YES",
+        yesBid: 1,
+      });
+      assert.equal(reason, "untradeable");
+    },
+  },
+  {
+    name: "past close market is excluded",
+    run: () => {
+      const reason = getMarketMapDropReason({
+        tokenYes: "yes-token",
+        tokenNo: "no-token",
+        acceptingOrders: true,
+        marketStatus: "ACTIVE",
+        closeTime: new Date(Date.now() - 60_000).toISOString(),
+        yesBid: 0.52,
+      });
+      assert.equal(reason, "untradeable");
+    },
+  },
+  {
     name: "null odds market is excluded",
     run: () => {
       const reason = getMarketMapDropReason({

@@ -20,6 +20,8 @@ export type MarketMapUsabilityInput = {
   marketBestBid?: number | null;
   marketBestAsk?: number | null;
   lastPrice?: number | null;
+  closeTime?: unknown;
+  expirationTime?: unknown;
   resolvedOutcome?: string | null;
   resolvedOutcomePct?: number | null;
   yesProbability?: number | null;
@@ -44,11 +46,33 @@ function hasResolvedOutcomeSignal(value: string | null | undefined): boolean {
   return normalized === "YES" || normalized === "NO";
 }
 
+function parseTimestampMs(value: unknown): number | null {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    const time = value.getTime();
+    return Number.isFinite(time) ? time : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 export function hasMarketMapTokenPair(input: MarketMapUsabilityInput): boolean {
   return hasNonEmptyToken(input.tokenYes) && hasNonEmptyToken(input.tokenNo);
 }
 
 export function isMarketMapActionable(input: MarketMapUsabilityInput): boolean {
+  if (
+    hasResolvedOutcomeSignal(input.resolvedOutcome) ||
+    isFiniteNumber(input.resolvedOutcomePct)
+  ) {
+    return false;
+  }
+  const terminalMs =
+    parseTimestampMs(input.closeTime) ?? parseTimestampMs(input.expirationTime);
+  if (terminalMs != null && terminalMs <= Date.now()) return false;
   if (input.acceptingOrders === false) return false;
   const normalizedStatus = input.marketStatus?.trim().toUpperCase() ?? "";
   if (!normalizedStatus) return true;

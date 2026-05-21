@@ -34,6 +34,7 @@ import { pool } from "./db.js";
 import {
   PolymarketEvent,
   PolymarketMarket,
+  type TEvent,
   type TPolymarketEvent,
   type TPolymarketMarket,
 } from "./types.js";
@@ -73,9 +74,10 @@ function bestAsk(levels: Array<{ price: string }> | undefined): number | null {
   return best;
 }
 
-function clobTokenPair(
-  market: TPolymarketMarket,
-): { yes: string | null; no: string | null } {
+function clobTokenPair(market: TPolymarketMarket): {
+  yes: string | null;
+  no: string | null;
+} {
   const raw = market.clobTokenIds;
   if (Array.isArray(raw)) {
     return { yes: raw[0] ?? null, no: raw[1] ?? null };
@@ -409,11 +411,7 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
               best_ask: ba,
               ts: ts.getTime(),
             });
-            await redis.set(
-              `top:${b.asset_id}`,
-              tickJson,
-              { EX: 60 },
-            );
+            await redis.set(`top:${b.asset_id}`, tickJson, { EX: 60 });
             await redis.publish(`prices:${b.asset_id}`, tickJson);
           }
         } catch (e) {
@@ -549,12 +547,69 @@ async function fetchMarketRefsForTokenIds(tokenIds: string[]): Promise<
     .filter((row): row is { marketId: string; eventId: string } => row != null);
 }
 
-async function refreshMarketRefs(
-  refs: Array<{ marketId: string; eventId: string }>,
-): Promise<number> {
-  if (!refs.length) return 0;
+type PolymarketMarketRef = {
+  marketId: string;
+  eventId: string;
+};
 
-  const q = new PQueue({ concurrency: 4 });
+type RefreshedPolymarketMarket = {
+  eventId: string;
+  market: TPolymarketMarket;
+};
+
+type RefreshMarketRefsResult = {
+  requestedMarkets: number;
+  refreshed: number;
+  eventsFetched: number;
+  fallbackMarketFetches: number;
+};
+
+function dedupeMarketRefs(refs: PolymarketMarketRef[]): PolymarketMarketRef[] {
+  const out: PolymarketMarketRef[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    if (seen.has(ref.marketId)) continue;
+    seen.add(ref.marketId);
+    out.push(ref);
+  }
+  return out;
+}
+
+function collectMarketsFromEvents(
+  events: TEvent[],
+  refsByMarketId: Map<string, PolymarketMarketRef>,
+): Map<string, RefreshedPolymarketMarket> {
+  const rowsByMarketId = new Map<string, RefreshedPolymarketMarket>();
+
+  for (const event of events) {
+    for (const rawMarket of event.markets) {
+      const marketId = String(rawMarket.id);
+      const ref = refsByMarketId.get(marketId);
+      if (!ref || rowsByMarketId.has(marketId)) continue;
+      try {
+        rowsByMarketId.set(marketId, {
+          eventId: ref.eventId,
+          market: PolymarketMarket.parse(rawMarket) as TPolymarketMarket,
+        });
+      } catch (error) {
+        log.warn("Failed to parse Polymarket refreshed market from event", {
+          eventId: event.id,
+          marketId,
+          error,
+        });
+      }
+    }
+  }
+
+  return rowsByMarketId;
+}
+
+async function fetchFallbackMarketRows(
+  refs: PolymarketMarketRef[],
+): Promise<RefreshedPolymarketMarket[]> {
+  if (!refs.length) return [];
+
+  const q = new PQueue({ concurrency: env.priceRefreshMarketConcurrency });
   const rows = await Promise.all(
     refs.map((ref) =>
       q.add(async () => {
@@ -576,15 +631,52 @@ async function refreshMarketRefs(
     ),
   );
 
-  const parsed = rows.filter(
-    (
-      row,
-    ): row is {
-      eventId: string;
-      market: TPolymarketMarket;
-    } => row != null,
+  return rows.filter((row): row is RefreshedPolymarketMarket => row != null);
+}
+
+async function refreshMarketRefs(
+  refs: PolymarketMarketRef[],
+): Promise<RefreshMarketRefsResult> {
+  const dedupedRefs = dedupeMarketRefs(refs);
+  const resultBase = {
+    requestedMarkets: dedupedRefs.length,
+    eventsFetched: 0,
+    fallbackMarketFetches: 0,
+  };
+  if (!dedupedRefs.length) return { ...resultBase, refreshed: 0 };
+
+  const refsByMarketId = new Map(dedupedRefs.map((ref) => [ref.marketId, ref]));
+  const eventIds = Array.from(new Set(dedupedRefs.map((ref) => ref.eventId)));
+
+  let events: TEvent[] = [];
+  try {
+    events = await fetchEventsByIds(eventIds);
+  } catch (error) {
+    log.warn("Polymarket event batch market refresh failed", {
+      eventIds: eventIds.length,
+      marketRefs: dedupedRefs.length,
+      error,
+    });
+  }
+
+  const rowsByMarketId = collectMarketsFromEvents(events, refsByMarketId);
+  const missingRefs = dedupedRefs.filter(
+    (ref) => !rowsByMarketId.has(ref.marketId),
   );
-  if (!parsed.length) return 0;
+  const fallbackRows = await fetchFallbackMarketRows(missingRefs);
+  for (const row of fallbackRows) {
+    rowsByMarketId.set(String(row.market.id), row);
+  }
+
+  const parsed = Array.from(rowsByMarketId.values());
+  if (!parsed.length) {
+    return {
+      ...resultBase,
+      eventsFetched: events.length,
+      fallbackMarketFetches: missingRefs.length,
+      refreshed: 0,
+    };
+  }
 
   const polymarketMarketRows = parsed.map(({ eventId, market }) =>
     mapPolymarketMarketRow(eventId, market),
@@ -637,7 +729,12 @@ async function refreshMarketRefs(
     }),
   );
 
-  return parsed.length;
+  return {
+    ...resultBase,
+    eventsFetched: events.length,
+    fallbackMarketFetches: missingRefs.length,
+    refreshed: parsed.length,
+  };
 }
 
 async function fetchTradableTokenIdsForSnapshot(
@@ -725,11 +822,20 @@ export async function processPriceRefreshQueue(): Promise<{
   let marketRefreshed = 0;
   let bookRefreshed = 0;
   let skippedBookTokens = 0;
+  let marketRefs = 0;
+  let eventsFetched = 0;
+  let fallbackMarketFetches = 0;
+  let snapshotTokens = 0;
   try {
-    const marketRefs = await fetchMarketRefsForTokenIds(tokenIds);
-    marketRefreshed = await refreshMarketRefs(marketRefs);
+    const refs = await fetchMarketRefsForTokenIds(tokenIds);
+    const marketResult = await refreshMarketRefs(refs);
+    marketRefs = marketResult.requestedMarkets;
+    marketRefreshed = marketResult.refreshed;
+    eventsFetched = marketResult.eventsFetched;
+    fallbackMarketFetches = marketResult.fallbackMarketFetches;
 
     const snapshotTokenIds = await fetchTradableTokenIdsForSnapshot(tokenIds);
+    snapshotTokens = snapshotTokenIds.length;
     skippedBookTokens = Math.max(0, tokenIds.length - snapshotTokenIds.length);
     if (snapshotTokenIds.length) {
       const result = await snapshotBooks(snapshotTokenIds);
@@ -760,7 +866,11 @@ export async function processPriceRefreshQueue(): Promise<{
   log.info("Polymarket price refresh queue processed", {
     claimed: tokenIds.length,
     refreshed,
+    marketRefs,
     marketRefreshed,
+    eventsFetched,
+    fallbackMarketFetches,
+    snapshotTokens,
     bookRefreshed,
     failed,
     skippedBookTokens,

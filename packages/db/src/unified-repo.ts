@@ -101,6 +101,65 @@ function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   return Array.from(map.values());
 }
 
+function compareText(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): number {
+  return (a ?? "").localeCompare(b ?? "");
+}
+
+function sortUnifiedMarketRows(rows: UnifiedMarketRow[]): UnifiedMarketRow[] {
+  return [...rows].sort((a, b) => {
+    const venue = compareText(a.venue, b.venue);
+    if (venue !== 0) return venue;
+    const venueMarketId = compareText(a.venue_market_id, b.venue_market_id);
+    if (venueMarketId !== 0) return venueMarketId;
+    return compareText(a.id, b.id);
+  });
+}
+
+function getPgErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function isTransientPgWriteConflict(error: unknown): boolean {
+  const code = getPgErrorCode(error);
+  return code === "40P01" || code === "40001";
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithPgWriteConflictRetry(
+  label: string,
+  batchSize: number,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await fn();
+      return;
+    } catch (error) {
+      if (!isTransientPgWriteConflict(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = 50 * attempt + Math.floor(Math.random() * 75);
+      console.warn(`[db] ${label} retry after transient write conflict`, {
+        attempt,
+        maxAttempts,
+        batchSize,
+        delayMs,
+        code: getPgErrorCode(error),
+      });
+      await sleep(delayMs);
+    }
+  }
+}
+
 export interface UnifiedMarketRow {
   id: string; // venue:venue_market_id
   venue: string;
@@ -439,7 +498,7 @@ export async function upsertUnifiedMarkets(
 ): Promise<void> {
   if (marketRows.length === 0) return;
 
-  const rows = dedupeById(marketRows);
+  const rows = sortUnifiedMarketRows(dedupeById(marketRows));
 
   const query = `
     with input as (
@@ -499,6 +558,7 @@ export async function upsertUnifiedMarkets(
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
     from input
+    order by venue, venue_market_id, id
     on conflict (venue, venue_market_id)
     do update set
       event_id = excluded.event_id,
@@ -605,7 +665,13 @@ export async function upsertUnifiedMarkets(
       pool,
       batch.map((row: UnifiedMarketRow) => row.id),
     );
-    await pool.query(query, [JSON.stringify(batch)]);
+    await runWithPgWriteConflictRetry(
+      "upsertUnifiedMarkets",
+      batch.length,
+      async () => {
+        await pool.query(query, [JSON.stringify(batch)]);
+      },
+    );
     const changedMarketIds = batch
       .filter((row: UnifiedMarketRow) =>
         shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),

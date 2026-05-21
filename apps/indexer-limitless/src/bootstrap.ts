@@ -67,6 +67,29 @@ function prefixLimitlessToken(tokenId?: string | null): string | undefined {
   return tokenId.startsWith("limitless:") ? tokenId : `limitless:${tokenId}`;
 }
 
+function resolveTimestampMs(value: Date | undefined): number | null {
+  if (!value) return null;
+  const time = value.getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function resolveLimitlessAcceptingOrders(
+  market: UnifiedMarketRow,
+  nowMs: number,
+): boolean {
+  if (market.resolved_outcome || market.resolved_outcome_pct != null) {
+    return false;
+  }
+  if (market.status !== "ACTIVE") return false;
+
+  const closeMs = resolveTimestampMs(market.close_time);
+  const expirationMs = resolveTimestampMs(market.expiration_time);
+  return !(
+    (closeMs != null && closeMs <= nowMs) ||
+    (expirationMs != null && expirationMs <= nowMs)
+  );
+}
+
 function buildBookSide(best: number | null) {
   return best != null ? [{ price: String(best), size: "NA" }] : [];
 }
@@ -134,6 +157,7 @@ async function publishLimitlessMarketStates(
       const tokenIds = [market.token_yes, market.token_no].filter(
         (tokenId): tokenId is string => Boolean(tokenId),
       );
+      const acceptingOrders = resolveLimitlessAcceptingOrders(market, tsMs);
       return tokenIds.map((tokenId) =>
         q.add(() =>
           publishMarketState({
@@ -146,7 +170,7 @@ async function publishLimitlessMarketStates(
               market.resolved_outcome || market.resolved_outcome_pct != null
                 ? "SETTLED"
                 : (market.status ?? null),
-            acceptingOrders: null,
+            acceptingOrders,
             resolvedOutcome: market.resolved_outcome ?? null,
             tsMs,
           }),

@@ -189,12 +189,22 @@ const priceRefreshQueueEnabled = parseBoolean(
   true,
 );
 const priceRefreshQueueBatch = clampInt(
-  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_BATCH),
+  parseOptionalInt(
+    process.env.POLYMARKET_PRICE_REFRESH_QUEUE_BATCH ??
+      process.env.PRICE_REFRESH_QUEUE_BATCH,
+  ),
   { min: 1, max: 1000, fallback: 100 },
 );
 const priceRefreshQueueIntervalMs = clampInt(
-  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_INTERVAL_MS),
+  parseOptionalInt(
+    process.env.POLYMARKET_PRICE_REFRESH_QUEUE_INTERVAL_MS ??
+      process.env.PRICE_REFRESH_QUEUE_INTERVAL_MS,
+  ),
   { min: 1000, max: 10 * 60 * 1000, fallback: 5000 },
+);
+const priceRefreshMarketConcurrency = clampInt(
+  parseOptionalInt(process.env.POLYMARKET_PRICE_REFRESH_MARKET_CONCURRENCY),
+  { min: 1, max: 32, fallback: 8 },
 );
 const priceRefreshQueueMax = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_MAX),
@@ -253,6 +263,7 @@ export const env = {
   priceRefreshQueueEnabled,
   priceRefreshQueueBatch,
   priceRefreshQueueIntervalMs,
+  priceRefreshMarketConcurrency,
   priceRefreshQueueMax,
   priceRefreshRetryDelayMs,
   hotStatusMaxEvents,

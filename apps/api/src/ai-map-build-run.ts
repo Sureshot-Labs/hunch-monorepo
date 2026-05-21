@@ -2183,6 +2183,7 @@ async function filterCandidatesByRepresentativeQuality(params: {
       marketBestBid: selected.marketBestBid,
       marketBestAsk: selected.marketBestAsk,
       lastPrice: selected.lastPrice,
+      closeTime: selected.closeTime,
       resolvedOutcome: selected.resolvedOutcome,
       resolvedOutcomePct: selected.resolvedOutcomePct,
       yesProbability: selected.yesProbability,
