@@ -520,6 +520,17 @@ type RetentionConfig = {
   skipCleanup: boolean;
 };
 
+const WALLET_INTEL_CLEANUP_DELETE_BATCH_SIZE = 25_000;
+
+type WalletIntelCleanupTarget = {
+  table:
+    | "wallet_position_snapshots"
+    | "wallet_activity_events"
+    | "wallet_activity_hourly"
+    | "wallet_metrics_snapshots";
+  timestampColumn: "snapshot_at" | "occurred_at" | "hour_bucket" | "as_of";
+};
+
 function parseOptionalArgInt(prefix: string): number | undefined {
   const arg = process.argv.find((entry) => entry.startsWith(prefix));
   if (!arg) return undefined;
@@ -745,6 +756,33 @@ function retentionCutoff(now: Date, days: number): Date {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
+async function deleteOldWalletIntelRowsInBatches(
+  client: Queryable,
+  target: WalletIntelCleanupTarget,
+  cutoff: Date,
+): Promise<number> {
+  let total = 0;
+  for (;;) {
+    const result = await client.query(
+      `
+        with doomed as (
+          select ctid
+          from ${target.table}
+          where ${target.timestampColumn} < $1
+          limit $2
+        )
+        delete from ${target.table} target_rows
+        using doomed
+        where target_rows.ctid = doomed.ctid
+      `,
+      [cutoff, WALLET_INTEL_CLEANUP_DELETE_BATCH_SIZE],
+    );
+    const deleted = result.rowCount ?? 0;
+    total += deleted;
+    if (deleted < WALLET_INTEL_CLEANUP_DELETE_BATCH_SIZE) return total;
+  }
+}
+
 async function cleanupWalletIntel(
   config: RetentionConfig,
   now: Date,
@@ -757,46 +795,47 @@ async function cleanupWalletIntel(
 
     if (config.snapshotsDays) {
       const cutoff = retentionCutoff(now, config.snapshotsDays);
-      const result = await client.query(
-        `
-          delete from wallet_position_snapshots
-          where snapshot_at < $1
-        `,
-        [cutoff],
+      snapshots = await deleteOldWalletIntelRowsInBatches(
+        client,
+        {
+          table: "wallet_position_snapshots",
+          timestampColumn: "snapshot_at",
+        },
+        cutoff,
       );
-      snapshots = result.rowCount ?? 0;
     }
 
     if (config.activityDays) {
       const cutoff = retentionCutoff(now, config.activityDays);
-      const result = await client.query(
-        `
-          delete from wallet_activity_events
-          where occurred_at < $1
-        `,
-        [cutoff],
+      activity = await deleteOldWalletIntelRowsInBatches(
+        client,
+        {
+          table: "wallet_activity_events",
+          timestampColumn: "occurred_at",
+        },
+        cutoff,
       );
-      activity = result.rowCount ?? 0;
 
-      await client.query(
-        `
-          delete from wallet_activity_hourly
-          where hour_bucket < $1
-        `,
-        [cutoff],
+      await deleteOldWalletIntelRowsInBatches(
+        client,
+        {
+          table: "wallet_activity_hourly",
+          timestampColumn: "hour_bucket",
+        },
+        cutoff,
       );
     }
 
     if (config.metricsDays) {
       const cutoff = retentionCutoff(now, config.metricsDays);
-      const result = await client.query(
-        `
-          delete from wallet_metrics_snapshots
-          where as_of < $1
-        `,
-        [cutoff],
+      metrics = await deleteOldWalletIntelRowsInBatches(
+        client,
+        {
+          table: "wallet_metrics_snapshots",
+          timestampColumn: "as_of",
+        },
+        cutoff,
       );
-      metrics = result.rowCount ?? 0;
     }
 
     return { snapshots, activity, metrics };
