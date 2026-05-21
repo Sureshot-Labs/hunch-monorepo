@@ -32,6 +32,7 @@ const tokenInterface = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",
   "function transfer(address to,uint256 value) returns (bool)",
   "function wrap(address _asset,address _to,uint256 _amount)",
+  "function unwrap(address _asset,address _to,uint256 _amount)",
 ]);
 
 function buildDepositWalletBatchTypedData(
@@ -262,6 +263,49 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "embedded deposit wallet withdraw batch allows pUSD unwrap approval",
+    run: () => {
+      const offramp = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
+      const request = buildEmbeddedPolymarketTypedDataRequest({
+        context: walletContext,
+        depositWalletBatchPurpose: "withdraw",
+        typedData: buildDepositWalletBatchTypedData({
+          target: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+          value: "0",
+          data: tokenInterface.encodeFunctionData("approve", [
+            offramp,
+            1_103_536n,
+          ]),
+        }),
+      });
+
+      assert.equal(request.id, "polymarket-typed-data-signature");
+    },
+  },
+  {
+    name: "embedded deposit wallet withdraw batch allows pUSD unwrap call",
+    run: () => {
+      const offramp = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
+      const usdce = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+      const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
+      const request = buildEmbeddedPolymarketTypedDataRequest({
+        context: walletContext,
+        depositWalletBatchPurpose: "withdraw",
+        typedData: buildDepositWalletBatchTypedData({
+          target: offramp,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("unwrap", [
+            usdce,
+            depositWallet,
+            1_103_536n,
+          ]),
+        }),
+      });
+
+      assert.equal(request.id, "polymarket-typed-data-signature");
+    },
+  },
+  {
     name: "embedded deposit wallet withdraw batch rejects approvals",
     run: () => {
       assert.throws(
@@ -278,7 +322,7 @@ const tests: TestCase[] = [
               ]),
             }),
           }),
-        /withdraw batches only support transfer calls/,
+        /Unsupported deposit wallet pUSD unwrap approval/,
       );
     },
   },
@@ -303,7 +347,7 @@ const tests: TestCase[] = [
               ]),
             }),
           }),
-        /withdraw batches only support transfer calls/,
+        /withdraw batches only support transfer and pUSD unwrap calls/,
       );
     },
   },

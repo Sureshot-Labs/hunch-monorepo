@@ -145,6 +145,7 @@ const TOKEN_APPROVAL_ABI = new Interface([
   "function approve(address spender,uint256 value) returns (bool)",
   "function transfer(address to,uint256 value) returns (bool)",
   "function wrap(address _asset,address _to,uint256 _amount)",
+  "function unwrap(address _asset,address _to,uint256 _amount)",
   "function setApprovalForAll(address operator,bool approved)",
   "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
   "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
@@ -894,32 +895,79 @@ function validateDepositWalletBatchCall(
   }
   if (!decoded) {
     throw new Error(
-      "Deposit wallet batch only supports approval, pUSD transfer, or USDC.e wrap calls.",
+      "Deposit wallet batch only supports approval, pUSD transfer, or USDC.e wrap/unwrap calls.",
     );
   }
 
   if (purpose === "withdraw") {
-    if (decoded.name !== "transfer") {
-      throw new Error(
-        "Deposit wallet withdraw batches only support transfer calls.",
-      );
-    }
     const allowedTransferTokens = allowedDepositWalletTransferTokens();
-    const recipient = normalizeAddress(String(decoded.args[0] ?? ""));
-    let amount = 0n;
-    try {
-      amount = BigInt(String(decoded.args[1] ?? "0"));
-    } catch {
-      amount = 0n;
+    if (decoded.name === "transfer") {
+      const recipient = normalizeAddress(String(decoded.args[0] ?? ""));
+      let amount = 0n;
+      try {
+        amount = BigInt(String(decoded.args[1] ?? "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (
+        !allowedTransferTokens.has(target.toLowerCase()) ||
+        !recipient ||
+        amount <= 0n
+      ) {
+        throw new Error("Unsupported deposit wallet ERC20 transfer call.");
+      }
+      return;
     }
-    if (
-      !allowedTransferTokens.has(target.toLowerCase()) ||
-      !recipient ||
-      amount <= 0n
-    ) {
-      throw new Error("Unsupported deposit wallet ERC20 transfer call.");
+
+    if (decoded.name === "approve") {
+      const pusdToken = normalizeAddress(env.polymarketUsdcAddress);
+      const collateralOfframp = normalizeAddress(
+        env.polymarketCollateralOfframpAddress,
+      );
+      const spender = normalizeAddress(String(decoded.args[0] ?? ""));
+      let amount = 0n;
+      try {
+        amount = BigInt(String(decoded.args[1] ?? "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (
+        !addressesEqual(target, pusdToken) ||
+        !addressesEqual(spender, collateralOfframp) ||
+        amount <= 0n
+      ) {
+        throw new Error("Unsupported deposit wallet pUSD unwrap approval.");
+      }
+      return;
     }
-    return;
+
+    if (decoded.name === "unwrap") {
+      const collateralOfframp = normalizeAddress(
+        env.polymarketCollateralOfframpAddress,
+      );
+      const usdceToken = normalizeAddress(env.polymarketUsdceAddress);
+      const asset = normalizeAddress(String(decoded.args[0] ?? ""));
+      const recipient = normalizeAddress(String(decoded.args[1] ?? ""));
+      let amount = 0n;
+      try {
+        amount = BigInt(String(decoded.args[2] ?? "0"));
+      } catch {
+        amount = 0n;
+      }
+      if (
+        !addressesEqual(target, collateralOfframp) ||
+        !addressesEqual(asset, usdceToken) ||
+        !addressesEqual(recipient, depositWallet) ||
+        amount <= 0n
+      ) {
+        throw new Error("Unsupported deposit wallet pUSD unwrap call.");
+      }
+      return;
+    }
+
+    throw new Error(
+      "Deposit wallet withdraw batches only support transfer and pUSD unwrap calls.",
+    );
   }
 
   if (purpose === "redeem") {
