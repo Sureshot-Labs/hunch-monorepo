@@ -1894,6 +1894,12 @@ type SnapshotDeltaRow = {
   metadata: unknown;
 };
 
+type SnapshotDeltaMarketKey = {
+  wallet_id: string;
+  venue: string;
+  market_id: string;
+};
+
 async function applySnapshotDeltas(
   client: Queryable,
   inputs: {
@@ -1917,7 +1923,7 @@ async function applySnapshotDeltas(
 
   let updates = 0;
 
-  for (const walletChunk of chunkArray(walletIds, 100)) {
+  for (const walletChunk of chunkArray(walletIds, 50)) {
     const currentRows = await client.query<SnapshotDeltaRow>(
       `
       select wallet_id, venue, market_id, outcome_side, shares, price, metadata
@@ -1929,26 +1935,71 @@ async function applySnapshotDeltas(
       [walletChunk, inputs.occurredAt, eligibleMarketIds],
     );
 
-    const prevRows = await client.query<SnapshotDeltaRow>(
+    if (currentRows.rows.length === 0) continue;
+
+    const currentMarketKeysByKey = new Map<string, SnapshotDeltaMarketKey>();
+    for (const row of currentRows.rows) {
+      const key = `${row.wallet_id}|${row.venue}|${row.market_id}`;
+      if (currentMarketKeysByKey.has(key)) continue;
+      currentMarketKeysByKey.set(key, {
+        wallet_id: row.wallet_id,
+        venue: row.venue,
+        market_id: row.market_id,
+      });
+    }
+    const currentMarketKeys = Array.from(currentMarketKeysByKey.values());
+    const prevWalletRows = await client.query<{ wallet_id: string }>(
       `
-      select distinct on (wallet_id, venue, market_id, outcome_side)
-        wallet_id,
-        venue,
-        market_id,
-        outcome_side,
-        shares,
-        price,
-        metadata
-      from wallet_position_snapshots
-      where wallet_id = any($1::uuid[])
-        and snapshot_at < $2
-        and market_id = any($3::text[])
-      order by wallet_id, venue, market_id, outcome_side, snapshot_at desc
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      )
+      select wallet_set.wallet_id
+      from wallet_set
+      where exists (
+        select 1
+        from wallet_position_snapshots ws
+        where ws.wallet_id = wallet_set.wallet_id
+          and ws.snapshot_at < $2
+      )
     `,
-      [walletChunk, inputs.occurredAt, eligibleMarketIds],
+      [walletChunk, inputs.occurredAt],
     );
 
-    const prevWallets = new Set(prevRows.rows.map((row) => row.wallet_id));
+    const prevRows = await client.query<SnapshotDeltaRow>(
+      `
+      with current_markets as (
+        select distinct
+          x.wallet_id::uuid as wallet_id,
+          x.venue::text as venue,
+          x.market_id::text as market_id
+        from jsonb_to_recordset($1::jsonb) as x(
+          wallet_id text,
+          venue text,
+          market_id text
+        )
+      )
+      select distinct on (ws.wallet_id, ws.venue, ws.market_id, ws.outcome_side)
+        ws.wallet_id,
+        ws.venue,
+        ws.market_id,
+        ws.outcome_side,
+        ws.shares,
+        ws.price,
+        ws.metadata
+      from wallet_position_snapshots ws
+      join current_markets cm
+        on cm.wallet_id = ws.wallet_id
+       and cm.venue = ws.venue
+       and cm.market_id = ws.market_id
+      where ws.snapshot_at < $2
+      order by ws.wallet_id, ws.venue, ws.market_id, ws.outcome_side, ws.snapshot_at desc
+    `,
+      [JSON.stringify(currentMarketKeys), inputs.occurredAt],
+    );
+
+    const prevWallets = new Set(
+      prevWalletRows.rows.map((row) => row.wallet_id),
+    );
     const currentMap = new Map<string, (typeof currentRows.rows)[number]>();
     const prevMap = new Map<string, (typeof prevRows.rows)[number]>();
     const currentRowsByMarket = new Map<
