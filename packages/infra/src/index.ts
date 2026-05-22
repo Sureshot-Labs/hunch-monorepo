@@ -33,9 +33,11 @@ export {
   requeuePriceRefreshTokens,
 } from "./price-refresh.js";
 export {
-  buildMarketStatePayload,
-  publishMarketState,
-} from "./market-state.js";
+  INDEXER_STATS_KEYS,
+  INDEXER_STATS_TTL_SEC,
+  updateIndexerStats,
+} from "./indexer-stats.js";
+export { buildMarketStatePayload, publishMarketState } from "./market-state.js";
 export {
   buildMarketUpdatePayload,
   publishMarketUpdate,
@@ -56,9 +58,15 @@ export type {
   EnqueuePriceRefreshInputs,
   EnqueuePriceRefreshResult,
   PriceRefreshRedis,
+  PriceRefreshQueueClaimSide,
   PriceRefreshVenue,
   RequeuePriceRefreshInputs,
 } from "./price-refresh.js";
+export type {
+  IndexerStatsPatch,
+  IndexerStatsRedis,
+  IndexerStatsVenue,
+} from "./indexer-stats.js";
 export type {
   TopTickGate,
   TopTickGateInputs,

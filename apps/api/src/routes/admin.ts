@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { getEmbedStreamKey, tx, type RedisClientType } from "@hunch/infra";
+import {
+  getEmbedStreamKey,
+  INDEXER_STATS_KEYS,
+  PRICE_REFRESH_QUEUE_KEYS,
+  tx,
+  type RedisClientType,
+} from "@hunch/infra";
 import { Interface, ethers } from "ethers";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
@@ -42,6 +48,7 @@ import {
 import { mergeUsersById } from "../admin-merge-user-core.js";
 import {
   createAdminCampaignReferralCode,
+  getAdminReferralCodeReferralsByCode,
   getRewardsPolicy,
   listAdminReferralCodes,
   setReferralCodeForUser,
@@ -84,7 +91,9 @@ import {
   adminRewardsTreasuryQuerySchema,
   adminRewardsPolicySchema,
   adminReferralCodeCampaignCreateSchema,
+  adminReferralCodeByCodeParamsSchema,
   adminReferralCodeParamsSchema,
+  adminReferralCodeReferralsQuerySchema,
   adminReferralCodesQuerySchema,
   adminReferralCodeUpdateSchema,
   adminUserActiveSchema,
@@ -125,6 +134,19 @@ const EMBED_INDEX_MARKET = "idx:ai:embed:market";
 const EMBED_INDEX_EVENT = "idx:ai:embed:event";
 const EMBED_DLQ_KEY = "ai:embed:dead";
 const SOLANA_LAMPORT_DECIMALS = 9;
+const ADMIN_SYSTEM_VENUES = ["polymarket", "dflow", "limitless"] as const;
+type AdminSystemVenue = (typeof ADMIN_SYSTEM_VENUES)[number];
+const ADMIN_SYSTEM_HOT_KEYS: Record<AdminSystemVenue, string> = {
+  polymarket: "hot:tokens:polymarket",
+  dflow: "hot:tokens:dflow",
+  limitless: "hot:tokens:limitless",
+};
+const ADMIN_SYSTEM_HOT_STREAM_KEYS: Record<AdminSystemVenue, string> = {
+  polymarket: "hot:tokens:stream:polymarket",
+  dflow: "hot:tokens:stream:dflow",
+  limitless: "hot:tokens:stream:limitless",
+};
+const ADMIN_SYSTEM_QUERY_TEXT_LIMIT = 600;
 
 const DEBRIDGE_CHAIN_META: Record<
   string,
@@ -1112,6 +1134,408 @@ async function fetchIndexCount(
   }
 }
 
+function truncateAdminText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= ADMIN_SYSTEM_QUERY_TEXT_LIMIT) return normalized;
+  return `${normalized.slice(0, ADMIN_SYSTEM_QUERY_TEXT_LIMIT)}…`;
+}
+
+async function readRedisNumber(
+  redis: RedisClientType,
+  command: string[],
+): Promise<number | null> {
+  const value = await redis.sendCommand(command);
+  return toOptionalNumber(value);
+}
+
+function parseRedisZsetScore(raw: unknown): number | null {
+  if (!Array.isArray(raw) || raw.length < 2) return null;
+  return toOptionalNumber(raw[1]);
+}
+
+function ageFromScore(nowMs: number, score: number | null): number | null {
+  if (score == null) return null;
+  return Math.max(0, nowMs - score);
+}
+
+async function readRedisZsetStats(
+  redis: RedisClientType,
+  key: string,
+  freshTtlSec: number,
+  nowMs: number,
+) {
+  const [total, fresh, oldestRaw, newestRaw] = await Promise.all([
+    readRedisNumber(redis, ["ZCARD", key]),
+    readRedisNumber(redis, [
+      "ZCOUNT",
+      key,
+      String(nowMs - freshTtlSec * 1000),
+      "+inf",
+    ]),
+    redis.sendCommand(["ZRANGE", key, "0", "0", "WITHSCORES"]),
+    redis.sendCommand(["ZREVRANGE", key, "0", "0", "WITHSCORES"]),
+  ]);
+  const oldestScore = parseRedisZsetScore(oldestRaw);
+  const newestScore = parseRedisZsetScore(newestRaw);
+  return {
+    key,
+    total: total ?? 0,
+    fresh: fresh ?? 0,
+    oldestAgeMs: ageFromScore(nowMs, oldestScore),
+    newestAgeMs: ageFromScore(nowMs, newestScore),
+  };
+}
+
+async function readRedisPriceRefreshQueueStats(
+  redis: RedisClientType,
+  key: string,
+  nowMs: number,
+) {
+  const [total, due, oldestDueRaw] = await Promise.all([
+    readRedisNumber(redis, ["ZCARD", key]),
+    readRedisNumber(redis, ["ZCOUNT", key, "-inf", String(nowMs)]),
+    redis.sendCommand([
+      "ZRANGEBYSCORE",
+      key,
+      "-inf",
+      String(nowMs),
+      "WITHSCORES",
+      "LIMIT",
+      "0",
+      "1",
+    ]),
+  ]);
+  const resolvedTotal = total ?? 0;
+  const resolvedDue = due ?? 0;
+  const oldestDueScore = parseRedisZsetScore(oldestDueRaw);
+  return {
+    key,
+    total: resolvedTotal,
+    due: resolvedDue,
+    delayed: Math.max(0, resolvedTotal - resolvedDue),
+    oldestDueAgeMs: ageFromScore(nowMs, oldestDueScore),
+  };
+}
+
+async function readIndexerHeartbeat(
+  redis: RedisClientType,
+  venue: AdminSystemVenue,
+) {
+  const raw = await redis.get(INDEXER_STATS_KEYS[venue]);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return { parseError: true };
+  }
+}
+
+async function buildAdminIndexerSystemStats() {
+  const generatedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const { redis, status, error } = await getRedisStatus({ force: true });
+  const base = {
+    generatedAt,
+    redis: {
+      available: Boolean(redis),
+      status,
+      error: error ?? null,
+    },
+  };
+  if (!redis) {
+    return {
+      ...base,
+      venues: ADMIN_SYSTEM_VENUES.map((venue) => ({
+        venue,
+        hotTokens: null,
+        streamHotTokens: null,
+        priceRefreshQueue: null,
+        heartbeat: null,
+        error: error ?? "Redis unavailable",
+      })),
+    };
+  }
+
+  const venues = await Promise.all(
+    ADMIN_SYSTEM_VENUES.map(async (venue) => {
+      try {
+        const [hotTokens, streamHotTokens, priceRefreshQueue, heartbeat] =
+          await Promise.all([
+            readRedisZsetStats(
+              redis,
+              ADMIN_SYSTEM_HOT_KEYS[venue],
+              env.hotTokensTtlSec,
+              nowMs,
+            ),
+            readRedisZsetStats(
+              redis,
+              ADMIN_SYSTEM_HOT_STREAM_KEYS[venue],
+              env.hotStreamTokensTtlSec,
+              nowMs,
+            ),
+            readRedisPriceRefreshQueueStats(
+              redis,
+              PRICE_REFRESH_QUEUE_KEYS[venue],
+              nowMs,
+            ),
+            readIndexerHeartbeat(redis, venue),
+          ]);
+        return {
+          venue,
+          hotTokens,
+          streamHotTokens,
+          priceRefreshQueue,
+          heartbeat,
+          error: null,
+        };
+      } catch (venueError) {
+        return {
+          venue,
+          hotTokens: null,
+          streamHotTokens: null,
+          priceRefreshQueue: null,
+          heartbeat: null,
+          error:
+            venueError instanceof Error
+              ? venueError.message
+              : "Failed to load indexer stats",
+        };
+      }
+    }),
+  );
+
+  return {
+    ...base,
+    venues,
+  };
+}
+
+async function readAdminPostgresSlowQueries() {
+  try {
+    const available = await pool.query<{ available: string | null }>(
+      `select to_regclass('pg_stat_statements')::text as available`,
+    );
+    if (!available.rows[0]?.available) {
+      return { available: false, error: null, items: [] };
+    }
+    const { rows } = await pool.query<{
+      query: string;
+      calls: string;
+      total_ms: string;
+      mean_ms: string;
+      max_ms: string;
+      rows_returned: string;
+      shared_blks_hit: string;
+      shared_blks_read: string;
+      temp_blks_read: string;
+      temp_blks_written: string;
+    }>(
+      `
+        select
+          query,
+          calls::text,
+          total_exec_time::text as total_ms,
+          mean_exec_time::text as mean_ms,
+          max_exec_time::text as max_ms,
+          rows::text as rows_returned,
+          shared_blks_hit::text,
+          shared_blks_read::text,
+          temp_blks_read::text,
+          temp_blks_written::text
+        from pg_stat_statements
+        where dbid = (
+          select oid
+          from pg_database
+          where datname = current_database()
+        )
+        order by total_exec_time desc
+        limit 25
+      `,
+    );
+    return {
+      available: true,
+      error: null,
+      items: rows.map((row) => ({
+        query: truncateAdminText(row.query),
+        calls: Number(row.calls ?? 0),
+        totalMs: Number(row.total_ms ?? 0),
+        meanMs: Number(row.mean_ms ?? 0),
+        maxMs: Number(row.max_ms ?? 0),
+        rows: Number(row.rows_returned ?? 0),
+        sharedBlksHit: Number(row.shared_blks_hit ?? 0),
+        sharedBlksRead: Number(row.shared_blks_read ?? 0),
+        tempBlksRead: Number(row.temp_blks_read ?? 0),
+        tempBlksWritten: Number(row.temp_blks_written ?? 0),
+      })),
+    };
+  } catch (error) {
+    return {
+      available: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to load pg_stat_statements",
+      items: [],
+    };
+  }
+}
+
+async function buildAdminPostgresSystemStats() {
+  const generatedAt = new Date().toISOString();
+  const [
+    dbRows,
+    connectionRows,
+    waitingRows,
+    lockRows,
+    blockerRows,
+    tableRows,
+    slowQueries,
+  ] = await Promise.all([
+    pool.query<{
+      db_name: string;
+      size_bytes: string;
+      max_connections: string;
+    }>(
+      `
+        select
+          current_database() as db_name,
+          pg_database_size(current_database())::text as size_bytes,
+          current_setting('max_connections') as max_connections
+      `,
+    ),
+    pool.query<{ state: string; count: string }>(
+      `
+        select coalesce(state, 'unknown') as state, count(*)::text as count
+        from pg_stat_activity
+        where datname = current_database()
+        group by coalesce(state, 'unknown')
+        order by count(*) desc
+      `,
+    ),
+    pool.query<{ waiting: string }>(
+      `
+        select count(*)::text as waiting
+        from pg_stat_activity
+        where datname = current_database()
+          and wait_event is not null
+      `,
+    ),
+    pool.query<{ mode: string; granted: boolean; count: string }>(
+      `
+        select mode, granted, count(*)::text as count
+        from pg_locks
+        group by mode, granted
+        order by count(*) desc, mode asc
+        limit 30
+      `,
+    ),
+    pool.query<{
+      waiter_pid: number;
+      blocker_pid: number;
+      wait_event_type: string | null;
+      wait_event: string | null;
+      waiter_query: string | null;
+      blocker_query: string | null;
+    }>(
+      `
+        select
+          blocked.pid as waiter_pid,
+          blocking.pid as blocker_pid,
+          blocked.wait_event_type,
+          blocked.wait_event,
+          blocked.query as waiter_query,
+          blocking.query as blocker_query
+        from pg_stat_activity blocked
+        join lateral unnest(pg_blocking_pids(blocked.pid)) blocker_pid on true
+        join pg_stat_activity blocking
+          on blocking.pid = blocker_pid
+        where blocked.datname = current_database()
+        limit 20
+      `,
+    ),
+    pool.query<{
+      schemaname: string;
+      relname: string;
+      live_rows: string;
+      dead_rows: string;
+      seq_scan: string;
+      idx_scan: string;
+      last_vacuum: Date | null;
+      last_autovacuum: Date | null;
+      last_analyze: Date | null;
+      last_autoanalyze: Date | null;
+      total_bytes: string;
+    }>(
+      `
+        select
+          s.schemaname,
+          s.relname,
+          s.n_live_tup::text as live_rows,
+          s.n_dead_tup::text as dead_rows,
+          s.seq_scan::text,
+          s.idx_scan::text,
+          s.last_vacuum,
+          s.last_autovacuum,
+          s.last_analyze,
+          s.last_autoanalyze,
+          pg_total_relation_size(s.relid)::text as total_bytes
+        from pg_stat_user_tables s
+        order by pg_total_relation_size(s.relid) desc
+        limit 25
+      `,
+    ),
+    readAdminPostgresSlowQueries(),
+  ]);
+
+  const db = dbRows.rows[0];
+  return {
+    generatedAt,
+    database: {
+      name: db?.db_name ?? null,
+      sizeBytes: Number(db?.size_bytes ?? 0),
+      maxConnections: Number(db?.max_connections ?? 0),
+    },
+    connections: {
+      byState: connectionRows.rows.map((row) => ({
+        state: row.state,
+        count: Number(row.count ?? 0),
+      })),
+      waiting: Number(waitingRows.rows[0]?.waiting ?? 0),
+    },
+    locks: {
+      summary: lockRows.rows.map((row) => ({
+        mode: row.mode,
+        granted: row.granted,
+        count: Number(row.count ?? 0),
+      })),
+      blockers: blockerRows.rows.map((row) => ({
+        waiterPid: row.waiter_pid,
+        blockerPid: row.blocker_pid,
+        waitEventType: row.wait_event_type,
+        waitEvent: row.wait_event,
+        waiterQuery: truncateAdminText(row.waiter_query),
+        blockerQuery: truncateAdminText(row.blocker_query),
+      })),
+    },
+    slowQueries,
+    tableHealth: tableRows.rows.map((row) => ({
+      schema: row.schemaname,
+      table: row.relname,
+      liveRows: Number(row.live_rows ?? 0),
+      deadRows: Number(row.dead_rows ?? 0),
+      seqScan: Number(row.seq_scan ?? 0),
+      idxScan: Number(row.idx_scan ?? 0),
+      lastVacuum: row.last_vacuum,
+      lastAutovacuum: row.last_autovacuum,
+      lastAnalyze: row.last_analyze,
+      lastAutoanalyze: row.last_autoanalyze,
+      totalBytes: Number(row.total_bytes ?? 0),
+    })),
+  };
+}
+
 async function resolveUserIdByWallet(walletAddress: string) {
   const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
   const trimmed = walletAddress.trim();
@@ -2034,6 +2458,34 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/system/postgres",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+    },
+    async (_request, reply) => {
+      const stats = await buildAdminPostgresSystemStats();
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, ...stats });
+    },
+  );
+
+  z.get(
+    "/admin/system/indexers",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+    },
+    async (_request, reply) => {
+      const stats = await buildAdminIndexerSystemStats();
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, ...stats });
+    },
+  );
+
+  z.get(
     "/admin/vector",
     {
       preHandler: createAdminMiddleware({
@@ -2266,6 +2718,17 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               or u.referral_code ilike '%' || $${idx} || '%'
               or exists (
                 select 1
+                from referral_codes rcq
+                join referral_code_policies pq
+                  on pq.id = rcq.policy_id
+                where pq.owner_user_id = u.id
+                  and (
+                    rcq.code ilike '%' || $${idx} || '%'
+                    or pq.label ilike '%' || $${idx} || '%'
+                  )
+              )
+              or exists (
+                select 1
                 from user_wallets wq
                 where wq.user_id = u.id
                   and (
@@ -2282,20 +2745,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                     lower(vcq.wallet_address) = lower($${idx})
                     or lower(vcq.funder_address) = lower($${idx})
                     ${venueCredentialSubstringPredicate}
-                  )
-              )
-              or exists (
-                select 1
-                from referrals rq
-                left join referral_codes rcq
-                  on rcq.id = rq.referral_code_id
-                left join referral_code_policies pq
-                  on pq.id = rcq.policy_id
-                where rq.referred_user_id = u.id
-                  and (
-                    rq.code ilike '%' || $${idx} || '%'
-                    or rcq.code ilike '%' || $${idx} || '%'
-                    or pq.label ilike '%' || $${idx} || '%'
                   )
               )
             )
@@ -2365,6 +2814,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         inbound_referral_label: string | null;
         inbound_referral_multiplier_override: string | null;
         inbound_referral_owner_user_id: string | null;
+        inbound_referral_referrer_user_id: string | null;
+        inbound_referral_referrer_email: string | null;
+        inbound_referral_referrer_username: string | null;
+        inbound_referral_referrer_display_name: string | null;
+        inbound_referral_referrer_wallet_address: string | null;
         inbound_referral_attached_at: Date | null;
       }>(
         `
@@ -2392,6 +2846,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             inbound.label as inbound_referral_label,
             inbound.multiplier_override as inbound_referral_multiplier_override,
             inbound.owner_user_id as inbound_referral_owner_user_id,
+            inbound.referrer_user_id as inbound_referral_referrer_user_id,
+            inbound.referrer_email as inbound_referral_referrer_email,
+            inbound.referrer_username as inbound_referral_referrer_username,
+            inbound.referrer_display_name as inbound_referral_referrer_display_name,
+            inbound.referrer_wallet_address as inbound_referral_referrer_wallet_address,
             inbound.attached_at as inbound_referral_attached_at
           from users u
           left join lateral (
@@ -2429,12 +2888,26 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               p.label,
               p.multiplier_override::text as multiplier_override,
               p.owner_user_id,
+              r.referrer_user_id,
+              referrer.email as referrer_email,
+              referrer.username as referrer_username,
+              referrer.display_name as referrer_display_name,
+              referrer_wallet.wallet_address as referrer_wallet_address,
               r.created_at as attached_at
             from referrals r
             left join referral_codes rc
               on rc.id = r.referral_code_id
             left join referral_code_policies p
               on p.id = rc.policy_id
+            left join users referrer
+              on referrer.id = r.referrer_user_id
+            left join lateral (
+              select wallet_address
+              from user_wallets
+              where user_id = r.referrer_user_id
+              order by is_primary desc, created_at asc
+              limit 1
+            ) referrer_wallet on true
             where r.referred_user_id = u.id
             order by r.created_at desc
             limit 1
@@ -2480,6 +2953,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                     ? null
                     : Number(row.inbound_referral_multiplier_override),
                 ownerUserId: row.inbound_referral_owner_user_id,
+                referrerUserId: row.inbound_referral_referrer_user_id,
+                referrerEmail: row.inbound_referral_referrer_email,
+                referrerUsername: row.inbound_referral_referrer_username,
+                referrerDisplayName: row.inbound_referral_referrer_display_name,
+                referrerWalletAddress:
+                  row.inbound_referral_referrer_wallet_address,
                 attachedAt: row.inbound_referral_attached_at,
               }
             : null,
@@ -2607,6 +3086,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         label: string | null;
         multiplier_override: string | null;
         owner_user_id: string | null;
+        referrer_user_id: string | null;
+        referrer_email: string | null;
+        referrer_username: string | null;
+        referrer_display_name: string | null;
+        referrer_wallet_address: string | null;
         attached_at: Date;
       }>(
         `
@@ -2616,12 +3100,26 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             p.label,
             p.multiplier_override::text as multiplier_override,
             p.owner_user_id,
+            r.referrer_user_id,
+            referrer.email as referrer_email,
+            referrer.username as referrer_username,
+            referrer.display_name as referrer_display_name,
+            referrer_wallet.wallet_address as referrer_wallet_address,
             r.created_at as attached_at
           from referrals r
           left join referral_codes rc
             on rc.id = r.referral_code_id
           left join referral_code_policies p
             on p.id = rc.policy_id
+          left join users referrer
+            on referrer.id = r.referrer_user_id
+          left join lateral (
+            select wallet_address
+            from user_wallets
+            where user_id = r.referrer_user_id
+            order by is_primary desc, created_at asc
+            limit 1
+          ) referrer_wallet on true
           where r.referred_user_id = $1
           order by r.created_at desc
           limit 1
@@ -2654,6 +3152,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
                     ? null
                     : Number(inboundReferral.multiplier_override),
                 ownerUserId: inboundReferral.owner_user_id,
+                referrerUserId: inboundReferral.referrer_user_id,
+                referrerEmail: inboundReferral.referrer_email,
+                referrerUsername: inboundReferral.referrer_username,
+                referrerDisplayName: inboundReferral.referrer_display_name,
+                referrerWalletAddress: inboundReferral.referrer_wallet_address,
                 attachedAt: inboundReferral.attached_at,
               }
             : null,
@@ -2672,9 +3175,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         stats: {
           points: Number(pointsRows[0]?.public_points ?? 0),
           tierPoints: Number(pointsRows[0]?.tier_points ?? 0),
-          qualificationPoints: Number(
-            pointsRows[0]?.qualification_points ?? 0,
-          ),
+          qualificationPoints: Number(pointsRows[0]?.qualification_points ?? 0),
           rawPoints: Number(pointsRows[0]?.raw_points ?? 0),
           feeUsdTotal: Number(feeRows[0]?.total_fee_usd ?? 0),
           feeUsdCollected: Number(feeRows[0]?.collected_fee_usd ?? 0),
@@ -5275,6 +5776,59 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         limit,
         offset,
       });
+    },
+  );
+
+  z.get(
+    "/admin/rewards/referral-codes/by-code/:code/referrals",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermissions: ["rewards:read", "users:read"],
+      }),
+      schema: {
+        params: adminReferralCodeByCodeParamsSchema,
+        querystring: adminReferralCodeReferralsQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      try {
+        const limit = request.query.limit ?? 50;
+        const offset = request.query.offset ?? 0;
+        const result = await getAdminReferralCodeReferralsByCode(pool, {
+          code: request.params.code,
+          limit,
+          offset,
+        });
+        if (!result) {
+          reply.code(404);
+          return reply.send({ error: "Referral code not found" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          code: result.code,
+          referrals: result.referrals,
+          total: result.total,
+          limit,
+          offset,
+        });
+      } catch (error) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error &&
+          typeof (error as { statusCode?: unknown }).statusCode === "number"
+            ? (error as { statusCode: number }).statusCode
+            : 500;
+        reply.code(statusCode);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to load referral code referrals",
+        });
+      }
     },
   );
 

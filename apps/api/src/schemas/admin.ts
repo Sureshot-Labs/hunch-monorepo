@@ -201,6 +201,15 @@ export const adminReferralCodeParamsSchema = z.object({
   id: z.string().uuid(),
 });
 
+export const adminReferralCodeByCodeParamsSchema = z.object({
+  code: z.string().trim().min(1).max(120),
+});
+
+export const adminReferralCodeReferralsQuerySchema = z.object({
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
 export const adminReferralCodeUpdateSchema = z.object({
   label: z.string().trim().min(1).max(120).nullable().optional(),
   multiplierOverride: z.coerce

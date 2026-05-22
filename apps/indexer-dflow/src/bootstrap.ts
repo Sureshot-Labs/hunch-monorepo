@@ -11,6 +11,7 @@ import {
   publishMarketUpdate,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
 } from "@hunch/infra";
 import {
@@ -1256,14 +1257,21 @@ export async function syncHotMarketStatuses(): Promise<{
   );
 }
 
-export async function processPriceRefreshQueue(): Promise<{
+export async function processPriceRefreshQueue(
+  options: {
+    side?: PriceRefreshQueueClaimSide;
+    logSuccess?: boolean;
+  } = {},
+): Promise<{
   claimed: number;
   refreshed: number;
   failed: number;
   backlog: number;
+  side: PriceRefreshQueueClaimSide;
 }> {
+  const side = options.side ?? "oldest";
   if (!env.priceRefreshQueueEnabled || !env.dflowEnabled) {
-    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
   }
 
   await ensureRedis();
@@ -1271,9 +1279,10 @@ export async function processPriceRefreshQueue(): Promise<{
   const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
     venue: "dflow",
     limit: env.priceRefreshQueueBatch,
+    side,
   });
   if (!tokenIds.length) {
-    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
   }
 
   const startedAt = Date.now();
@@ -1302,16 +1311,19 @@ export async function processPriceRefreshQueue(): Promise<{
   }
 
   const backlog = await getPriceRefreshQueueBacklog(redisClient, "dflow");
-  log.info("DFlow price refresh queue processed", {
-    claimed: tokenIds.length,
-    refreshed,
-    marketRefreshed,
-    topRefreshed,
-    failed,
-    backlog,
-    durationMs: Date.now() - startedAt,
-  });
-  return { claimed: tokenIds.length, refreshed, failed, backlog };
+  if (options.logSuccess !== false) {
+    log.info("DFlow price refresh queue processed", {
+      side,
+      claimed: tokenIds.length,
+      refreshed,
+      marketRefreshed,
+      topRefreshed,
+      failed,
+      backlog,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
 }
 
 async function processEvents(

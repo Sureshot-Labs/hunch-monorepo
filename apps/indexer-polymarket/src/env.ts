@@ -195,6 +195,13 @@ const priceRefreshQueueBatch = clampInt(
   ),
   { min: 1, max: 1000, fallback: 100 },
 );
+const priceRefreshQueueConsumers = clampInt(
+  parseOptionalInt(
+    process.env.POLYMARKET_PRICE_REFRESH_QUEUE_CONSUMERS ??
+      process.env.PRICE_REFRESH_QUEUE_CONSUMERS,
+  ),
+  { min: 1, max: 32, fallback: 2 },
+);
 const priceRefreshQueueIntervalMs = clampInt(
   parseOptionalInt(
     process.env.POLYMARKET_PRICE_REFRESH_QUEUE_INTERVAL_MS ??
@@ -278,6 +285,7 @@ export const env = {
   hotStreamTokensMax,
   priceRefreshQueueEnabled,
   priceRefreshQueueBatch,
+  priceRefreshQueueConsumers,
   priceRefreshQueueIntervalMs,
   priceRefreshMarketConcurrency,
   priceRefreshQueueMax,

@@ -85,6 +85,28 @@ class FakeRedis implements PriceRefreshRedis {
     for (const [tokenId] of slice) set.delete(tokenId);
     return slice.length;
   }
+
+  async eval(
+    _script: string,
+    options: { keys: string[]; arguments: string[] },
+  ): Promise<string[]> {
+    const key = options.keys[0];
+    const maxScore = Number(options.arguments[0]);
+    const limit = Number(options.arguments[1]);
+    const side = options.arguments[2] === "newest" ? "newest" : "oldest";
+    const set = this.getSet(key);
+    const tokens = Array.from(set.entries())
+      .filter(([, score]) => score <= maxScore)
+      .sort((a, b) =>
+        side === "newest"
+          ? b[1] - a[1] || b[0].localeCompare(a[0])
+          : a[1] - b[1] || a[0].localeCompare(b[0]),
+      )
+      .slice(0, limit)
+      .map(([tokenId]) => tokenId);
+    for (const token of tokens) set.delete(token);
+    return tokens;
+  }
 }
 
 await test("inferPriceRefreshVenue recognizes active venue token shapes", () => {
@@ -129,6 +151,135 @@ await test("claimDuePriceRefreshTokens returns due tokens and removes them", asy
 
   assert.deepEqual(claimed, ["1", "2"]);
   assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 1);
+});
+
+await test("claimDuePriceRefreshTokens oldest returns earliest due tokens", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["3"],
+    venue: "polymarket",
+    nowMs: 3000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["1"],
+    venue: "polymarket",
+    nowMs: 1000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["2"],
+    venue: "polymarket",
+    nowMs: 2000,
+  });
+
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    nowMs: 3000,
+    limit: 2,
+    side: "oldest",
+  });
+
+  assert.deepEqual(claimed, ["1", "2"]);
+});
+
+await test("claimDuePriceRefreshTokens newest returns latest due tokens", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["1"],
+    venue: "polymarket",
+    nowMs: 1000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["2"],
+    venue: "polymarket",
+    nowMs: 2000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["3"],
+    venue: "polymarket",
+    nowMs: 3000,
+  });
+
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    nowMs: 3000,
+    limit: 2,
+    side: "newest",
+  });
+
+  assert.deepEqual(claimed, ["3", "2"]);
+});
+
+await test("parallel claimDuePriceRefreshTokens calls do not duplicate tokens", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["1", "2", "3"],
+    venue: "polymarket",
+    nowMs: 1000,
+  });
+
+  const [first, second] = await Promise.all([
+    claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      nowMs: 1000,
+      limit: 2,
+    }),
+    claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      nowMs: 1000,
+      limit: 2,
+    }),
+  ]);
+
+  const claimed = [...first, ...second];
+  assert.equal(claimed.length, 3);
+  assert.equal(new Set(claimed).size, 3);
+  assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 0);
+});
+
+await test("parallel oldest/newest claims drain both sides without duplicates", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["1"],
+    venue: "polymarket",
+    nowMs: 1000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["2"],
+    venue: "polymarket",
+    nowMs: 2000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["3"],
+    venue: "polymarket",
+    nowMs: 3000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["4"],
+    venue: "polymarket",
+    nowMs: 4000,
+  });
+
+  const [oldest, newest] = await Promise.all([
+    claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      nowMs: 4000,
+      limit: 2,
+      side: "oldest",
+    }),
+    claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      nowMs: 4000,
+      limit: 2,
+      side: "newest",
+    }),
+  ]);
+
+  const claimed = [...oldest, ...newest];
+  assert.equal(claimed.length, 4);
+  assert.equal(new Set(claimed).size, 4);
+  assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 0);
+  assert.ok(oldest.includes("1"));
+  assert.ok(newest.includes("4"));
 });
 
 await test("requeuePriceRefreshTokens delays failed tokens", async () => {
