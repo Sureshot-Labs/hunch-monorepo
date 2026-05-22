@@ -100,6 +100,7 @@ Query params:
 - `q`: optional text search.
 - `policyType`: optional, `user` or `campaign`.
 - `active`: optional boolean.
+- `usageLimit`: optional, `limited` or `unlimited`.
 - `limit`: optional, default `50`, max `100`.
 - `offset`: optional.
 
@@ -121,6 +122,9 @@ Response:
       "isActive": true,
       "retiredAt": null,
       "retiredReason": null,
+      "maxUses": 100,
+      "uses": 42,
+      "remainingUses": 58,
       "policy": {
         "id": "e2d7b08d-6d55-47de-9c36-3b0be1582a11",
         "type": "campaign",
@@ -147,6 +151,11 @@ Implementation notes:
 - Show `code`, `policy.type`, `policy.label`, `policy.multiplierOverride`,
   `visibleDropPoints`, `tierDropPoints`, `isActive`, `retiredAt`, and
   `referralCount`.
+- `uses` is the successful attach count for this exact code alias.
+- `maxUses: null` means unlimited. `remainingUses` is `null` for unlimited
+  codes.
+- Use `usageLimit=limited` for capped codes and `usageLimit=unlimited` for
+  uncapped codes. This composes with `q`, `policyType`, and `active`.
 - For `user` policies, show `policy.owner`.
 - For inactive/retired codes, visually mark them as not attachable.
 
@@ -162,7 +171,8 @@ Request:
   "label": "Polymarket",
   "multiplierOverride": 1.5,
   "visibleDropPoints": 100,
-  "tierDropPoints": 400
+  "tierDropPoints": 400,
+  "maxUses": 100
 }
 ```
 
@@ -174,6 +184,7 @@ Field rules:
   partner multiplier.
 - `visibleDropPoints`: optional nonnegative number, defaults to `0`.
 - `tierDropPoints`: optional nonnegative number, defaults to `0`.
+- `maxUses`: optional positive integer. Omit for unlimited.
 
 Response:
 
@@ -186,6 +197,9 @@ Response:
     "isActive": true,
     "retiredAt": null,
     "retiredReason": null,
+    "maxUses": 100,
+    "uses": 0,
+    "remainingUses": 100,
     "policy": {
       "id": "e2d7b08d-6d55-47de-9c36-3b0be1582a11",
       "type": "campaign",
@@ -223,7 +237,8 @@ Request:
   "label": "Polymarket",
   "multiplierOverride": 1.5,
   "visibleDropPoints": 100,
-  "tierDropPoints": 400
+  "tierDropPoints": 400,
+  "maxUses": 100
 }
 ```
 
@@ -232,7 +247,8 @@ Clear nullable policy fields by sending `null`:
 ```json
 {
   "label": null,
-  "multiplierOverride": null
+  "multiplierOverride": null,
+  "maxUses": null
 }
 ```
 
@@ -252,6 +268,14 @@ Notes:
   applying to existing users.
 - Drop point fields are attach-time incentives only. Changing them later does
   not retroactively grant old referrals.
+- Limited-use caps apply only to campaign codes.
+- A use is counted only when a new referral attachment row is created.
+  Already-attached retries do not consume capacity.
+- Backend rejects `maxUses` lower than current `uses`.
+- When a successful attach reaches `maxUses`, backend automatically retires the
+  code with `retiredReason: "usage_limit_reached"`.
+- To reactivate a capped retired code, raise `maxUses` above current `uses` or
+  clear it to `null`, then send `reactivate: true`.
 
 Response shape is the same `item` object used by create/list.
 

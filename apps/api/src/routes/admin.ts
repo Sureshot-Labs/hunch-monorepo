@@ -5761,12 +5761,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const limit = request.query.limit ?? 50;
       const offset = request.query.offset ?? 0;
       const result = await listAdminReferralCodes(pool, {
-        q: request.query.q,
-        policyType: request.query.policyType ?? null,
-        active: request.query.active ?? null,
-        limit,
-        offset,
-      });
+          q: request.query.q,
+          policyType: request.query.policyType ?? null,
+          active: request.query.active ?? null,
+          usageLimit: request.query.usageLimit ?? null,
+          limit,
+          offset,
+        });
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
@@ -5849,6 +5850,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             multiplierOverride: request.body.multiplierOverride,
             visibleDropPoints: request.body.visibleDropPoints,
             tierDropPoints: request.body.tierDropPoints,
+            maxUses: request.body.maxUses,
           }),
         );
 
@@ -5895,6 +5897,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             multiplierOverride: request.body.multiplierOverride,
             visibleDropPoints: request.body.visibleDropPoints,
             tierDropPoints: request.body.tierDropPoints,
+            maxUses: request.body.maxUses,
             deactivate: request.body.deactivate,
             reactivate: request.body.reactivate,
           }),

@@ -122,6 +122,7 @@ export type ReferralCodeLookupRow = {
   is_active: boolean;
   retired_at: Date | null;
   retired_reason: string | null;
+  max_uses: number | null;
   policy_id: string;
   policy_type: ReferralCodePolicyType;
   owner_user_id: string | null;
@@ -139,6 +140,8 @@ export type ReferralCodeListRow = ReferralCodeLookupRow & {
   owner_display_name: string | null;
   referral_count: string;
 };
+
+export type ReferralCodeUsageLimitFilter = "limited" | "unlimited";
 
 export type ReferralCodeReferralUserRow = {
   id: string;
@@ -542,6 +545,7 @@ export async function findReferralCodeByCode(
         rc.is_active,
         rc.retired_at,
         rc.retired_reason,
+        rc.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -565,6 +569,7 @@ export async function findReferralCodeByCode(
 export async function findActiveReferralCodeForAttach(
   pool: DbQuery,
   referralCode: string,
+  inputs?: { lockForUpdate?: boolean },
 ): Promise<ReferralCodeLookupRow | null> {
   const { rows } = await pool.query<ReferralCodeLookupRow>(
     `
@@ -574,6 +579,7 @@ export async function findActiveReferralCodeForAttach(
         rc.is_active,
         rc.retired_at,
         rc.retired_reason,
+        rc.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -590,6 +596,7 @@ export async function findActiveReferralCodeForAttach(
         and rc.is_active = true
         and rc.retired_at is null
       limit 1
+      ${inputs?.lockForUpdate ? "for update of rc" : ""}
     `,
     [referralCode],
   );
@@ -609,6 +616,23 @@ export async function countReferralsForReferralCode(
     [referralCodeId],
   );
   return Number(rows[0]?.total ?? 0);
+}
+
+export async function retireReferralCodeForUsageLimit(
+  pool: DbQuery,
+  referralCodeId: string,
+): Promise<void> {
+  await pool.query(
+    `
+      update referral_codes
+      set is_active = false,
+          retired_at = coalesce(retired_at, now()),
+          retired_reason = coalesce(retired_reason, 'usage_limit_reached')
+      where id = $1
+        and is_active = true
+    `,
+    [referralCodeId],
+  );
 }
 
 export async function retireActiveUserReferralCodes(
@@ -639,6 +663,7 @@ export async function insertReferralCodeAlias(
     policyId: string;
     isActive: boolean;
     retiredReason?: string | null;
+    maxUses?: number | null;
   },
 ): Promise<ReferralCodeLookupRow> {
   const { rows } = await pool.query<ReferralCodeLookupRow>(
@@ -649,14 +674,16 @@ export async function insertReferralCodeAlias(
           policy_id,
           is_active,
           retired_at,
-          retired_reason
+          retired_reason,
+          max_uses
         )
         values (
           upper($1),
           $2,
           $3,
           case when $3 then null else now() end,
-          case when $3 then null else $4 end
+          case when $3 then null else $4 end,
+          $5
         )
         returning *
       )
@@ -666,6 +693,7 @@ export async function insertReferralCodeAlias(
         i.is_active,
         i.retired_at,
         i.retired_reason,
+        i.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -684,6 +712,7 @@ export async function insertReferralCodeAlias(
       inputs.policyId,
       inputs.isActive,
       inputs.retiredReason ?? null,
+      inputs.maxUses ?? null,
     ],
   );
   return rows[0];
@@ -825,6 +854,7 @@ export async function listReferralCodes(
     q?: string | null;
     policyType?: ReferralCodePolicyType | null;
     active?: boolean | null;
+    usageLimit?: ReferralCodeUsageLimitFilter | null;
     limit: number;
     offset: number;
   },
@@ -850,6 +880,11 @@ export async function listReferralCodes(
     params.push(inputs.active);
     whereParts.push(`rc.is_active = $${params.length}`);
   }
+  if (inputs.usageLimit === "limited") {
+    whereParts.push(`rc.max_uses is not null`);
+  } else if (inputs.usageLimit === "unlimited") {
+    whereParts.push(`rc.max_uses is null`);
+  }
   const whereSql = whereParts.length ? `where ${whereParts.join(" and ")}` : "";
 
   const countRows = await pool.query<{ total: string }>(
@@ -874,6 +909,7 @@ export async function listReferralCodes(
         rc.is_active,
         rc.retired_at,
         rc.retired_reason,
+        rc.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -918,6 +954,7 @@ export async function createCampaignReferralCode(
     multiplierOverride?: number | null;
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
+    maxUses?: number | null;
   },
 ): Promise<ReferralCodeLookupRow> {
   const policyResult = await pool.query<{ id: string }>(
@@ -945,6 +982,7 @@ export async function createCampaignReferralCode(
     code: inputs.code,
     policyId: policyResult.rows[0].id,
     isActive: true,
+    maxUses: inputs.maxUses ?? null,
   });
 }
 
@@ -956,6 +994,7 @@ export async function updateReferralCodePolicy(
     multiplierOverride?: number | null;
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
+    maxUses?: number | null;
     deactivateCampaign?: boolean;
     reactivateCampaign?: boolean;
   },
@@ -968,6 +1007,7 @@ export async function updateReferralCodePolicy(
         rc.is_active,
         rc.retired_at,
         rc.retired_reason,
+        rc.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -1023,6 +1063,17 @@ export async function updateReferralCodePolicy(
           and rc.is_active = true
       `,
       [inputs.referralCodeId],
+    );
+  }
+
+  if (inputs.maxUses !== undefined) {
+    await pool.query(
+      `
+        update referral_codes
+        set max_uses = $2
+        where id = $1
+      `,
+      [inputs.referralCodeId, inputs.maxUses],
     );
   }
 

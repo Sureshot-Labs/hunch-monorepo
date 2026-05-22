@@ -49,6 +49,48 @@ function createReferralDb(
   seed: Array<{ id: string; referral_code: string | null }>,
 ): import("./db.js").DbQuery {
   const users = seed.map((row) => ({ ...row }));
+  const policies = users.map((user) => ({
+    id: `policy-${user.id}`,
+    policy_type: "user" as const,
+    owner_user_id: user.id,
+  }));
+  const codes = users
+    .filter((user) => user.referral_code)
+    .map((user) => ({
+      id: `code-${String(user.referral_code).toUpperCase()}`,
+      code: String(user.referral_code).toUpperCase(),
+      policy_id: `policy-${user.id}`,
+      is_active: true,
+      retired_at: null as Date | null,
+      retired_reason: null as string | null,
+      max_uses: null as number | null,
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    }));
+  const lookupCode = (code: string) => {
+    const normalized = code.toUpperCase();
+    const row = codes.find((entry) => entry.code === normalized);
+    if (!row) return null;
+    const policy = policies.find((entry) => entry.id === row.policy_id);
+    if (!policy) return null;
+    return {
+      referral_code_id: row.id,
+      code: row.code,
+      is_active: row.is_active,
+      retired_at: row.retired_at,
+      retired_reason: row.retired_reason,
+      max_uses: row.max_uses,
+      policy_id: policy.id,
+      policy_type: policy.policy_type,
+      owner_user_id: policy.owner_user_id,
+      label: null,
+      multiplier_override: null,
+      visible_drop_points: "0",
+      tier_drop_points: "0",
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  };
   return {
     query: async (sql: string, params?: unknown[]) => {
       const values = Array.isArray(params) ? params : [];
@@ -62,6 +104,94 @@ function createReferralDb(
         return {
           rows: row ? [{ id: row.id, referral_code: row.referral_code }] : [],
         };
+      }
+
+      if (
+        sql.includes("from referral_codes rc") &&
+        sql.includes("where rc.code = upper($1)")
+      ) {
+        const row = lookupCode(String(values[0] ?? ""));
+        return { rows: row ? [row] : [] };
+      }
+
+      if (
+        sql.includes("select count(*)::text as total") &&
+        sql.includes("from referrals")
+      ) {
+        return { rows: [{ total: "0" }] };
+      }
+
+      if (sql.includes("insert into referral_code_policies")) {
+        const userId = String(values[0] ?? "");
+        let policy = policies.find((entry) => entry.owner_user_id === userId);
+        if (!policy) {
+          policy = {
+            id: `policy-${userId}`,
+            policy_type: "user",
+            owner_user_id: userId,
+          };
+          policies.push(policy);
+        }
+        return { rows: [{ id: policy.id }] };
+      }
+
+      if (sql.includes("from referral_code_policies")) {
+        const userId = String(values[0] ?? "");
+        const policy = policies.find((entry) => entry.owner_user_id === userId);
+        return { rows: policy ? [{ id: policy.id }] : [] };
+      }
+
+      if (
+        sql.includes("update referral_codes rc") &&
+        sql.includes("reason = coalesce")
+      ) {
+        const userId = String(values[0] ?? "");
+        const policy = policies.find((entry) => entry.owner_user_id === userId);
+        if (policy) {
+          for (const code of codes) {
+            if (code.policy_id === policy.id && code.is_active) {
+              code.is_active = false;
+              code.retired_at = new Date("2026-01-02T00:00:00.000Z");
+              code.retired_reason = String(values[1] ?? "");
+            }
+          }
+        }
+        return { rows: [] };
+      }
+
+      if (sql.includes("insert into referral_codes")) {
+        const code = String(values[0] ?? "").toUpperCase();
+        const policyId = String(values[1] ?? "");
+        const isActive = Boolean(values[2]);
+        const row = {
+          id: `code-${code}`,
+          code,
+          policy_id: policyId,
+          is_active: isActive,
+          retired_at: isActive ? null : new Date("2026-01-02T00:00:00.000Z"),
+          retired_reason: isActive ? null : String(values[3] ?? ""),
+          max_uses: values[4] == null ? null : Number(values[4]),
+          created_at: new Date("2026-01-02T00:00:00.000Z"),
+          updated_at: new Date("2026-01-02T00:00:00.000Z"),
+        };
+        codes.push(row);
+        return { rows: [lookupCode(code)] };
+      }
+
+      if (
+        sql.includes("update referral_codes") &&
+        sql.includes("set policy_id = $2")
+      ) {
+        const codeId = String(values[0] ?? "");
+        const policyId = String(values[1] ?? "");
+        const row = codes.find((entry) => entry.id === codeId);
+        if (row) {
+          row.policy_id = policyId;
+          row.is_active = true;
+          row.retired_at = null;
+          row.retired_reason = null;
+        }
+        return { rows: [] };
       }
 
       if (sql.includes("upper(referral_code) = upper($1)")) {
@@ -124,10 +254,23 @@ function createReferralAttachDb(seed: {
     username?: string | null;
     display_name?: string | null;
   }>;
+  codes?: Array<{
+    id: string;
+    code: string;
+    policy_type: "user" | "campaign";
+    owner_user_id?: string | null;
+    is_active?: boolean;
+    retired_at?: Date | null;
+    max_uses?: number | null;
+    visible_drop_points?: number;
+    tier_drop_points?: number;
+  }>;
   referrals?: Array<{
-    referrer_user_id: string;
+    id?: string;
+    referrer_user_id: string | null;
     referred_user_id: string;
     code: string;
+    referral_code_id?: string | null;
     status: "pending" | "qualified" | "blocked";
     qualified_at?: Date | null;
     created_at?: Date;
@@ -139,10 +282,58 @@ function createReferralAttachDb(seed: {
     ...row,
   }));
   const referrals = (seed.referrals ?? []).map((row) => ({
+    id: `referral-${row.referred_user_id}`,
     qualified_at: null,
     created_at: new Date("2026-01-01T00:00:00.000Z"),
+    referral_code_id: `code-${row.code.toUpperCase()}`,
     ...row,
   }));
+  const codes = [
+    ...users
+      .filter((user) => user.referral_code)
+      .map((user) => ({
+        id: `code-${String(user.referral_code).toUpperCase()}`,
+        code: String(user.referral_code).toUpperCase(),
+        policy_type: "user" as const,
+        owner_user_id: user.id,
+        is_active: true,
+        retired_at: null as Date | null,
+        max_uses: null as number | null,
+        visible_drop_points: 0,
+        tier_drop_points: 0,
+      })),
+    ...(seed.codes ?? []).map((code) => ({
+      is_active: true,
+      retired_at: null as Date | null,
+      max_uses: null as number | null,
+      owner_user_id: null as string | null,
+      visible_drop_points: 0,
+      tier_drop_points: 0,
+      ...code,
+      code: code.code.toUpperCase(),
+    })),
+  ];
+  const lookupCode = (code: string) => {
+    const row = codes.find((entry) => entry.code === code.toUpperCase());
+    if (!row) return null;
+    return {
+      referral_code_id: row.id,
+      code: row.code,
+      is_active: row.is_active,
+      retired_at: row.retired_at,
+      retired_reason: row.retired_at ? "campaign_deactivated" : null,
+      max_uses: row.max_uses,
+      policy_id: `policy-${row.id}`,
+      policy_type: row.policy_type,
+      owner_user_id: row.owner_user_id ?? null,
+      label: null,
+      multiplier_override: null,
+      visible_drop_points: String(row.visible_drop_points ?? 0),
+      tier_drop_points: String(row.tier_drop_points ?? 0),
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    };
+  };
 
   return {
     query: async (sql: string, params?: unknown[]) => {
@@ -161,6 +352,20 @@ function createReferralAttachDb(seed: {
         return {
           rows: [
             {
+              referral_code_id: row.referral_code_id ?? null,
+              policy_type: row.referral_code_id
+                ? (codes.find((code) => code.id === row.referral_code_id)
+                    ?.policy_type ?? null)
+                : null,
+              policy_id: row.referral_code_id
+                ? `policy-${row.referral_code_id}`
+                : null,
+              policy_label: null,
+              policy_multiplier_override: null,
+              policy_owner_user_id: row.referral_code_id
+                ? (codes.find((code) => code.id === row.referral_code_id)
+                    ?.owner_user_id ?? null)
+                : null,
               referrer_user_id: row.referrer_user_id,
               code: row.code,
               status: row.status,
@@ -173,44 +378,83 @@ function createReferralAttachDb(seed: {
         };
       }
 
-      if (sql.includes("upper(referral_code) = upper($1)")) {
-        const code = String(values[0] ?? "").toUpperCase();
-        const row =
-          users.find((entry) => entry.referral_code?.toUpperCase() === code) ??
-          null;
-        return { rows: row ? [{ id: row.id }] : [] };
+      if (
+        sql.includes("from referral_codes rc") &&
+        sql.includes("where rc.code = upper($1)")
+      ) {
+        const row = lookupCode(String(values[0] ?? ""));
+        if (!row || !row.is_active || row.retired_at) return { rows: [] };
+        return { rows: [row] };
+      }
+
+      if (
+        sql.includes("select count(*)::text as total") &&
+        sql.includes("from referrals")
+      ) {
+        const referralCodeId = String(values[0] ?? "");
+        return {
+          rows: [
+            {
+              total: String(
+                referrals.filter(
+                  (entry) => entry.referral_code_id === referralCodeId,
+                ).length,
+              ),
+            },
+          ],
+        };
       }
 
       if (
         sql.includes("insert into referrals") &&
         sql.includes("on conflict (referred_user_id) do nothing")
       ) {
-        const referrerUserId = String(values[0] ?? "");
+        const referrerUserId = values[0] == null ? null : String(values[0]);
         const referredUserId = String(values[1] ?? "");
         const code = String(values[2] ?? "");
-        const status = String(values[3] ?? "pending") as
+        const referralCodeId = String(values[3] ?? "");
+        const status = String(values[4] ?? "pending") as
           | "pending"
           | "qualified"
           | "blocked";
         const qualifiedAt =
-          values[4] instanceof Date
-            ? (values[4] as Date)
-            : values[4] == null
+          values[5] instanceof Date
+            ? (values[5] as Date)
+            : values[5] == null
               ? null
-              : new Date(String(values[4]));
+              : new Date(String(values[5]));
         if (
           referrals.some((entry) => entry.referred_user_id === referredUserId)
         ) {
           return { rows: [] };
         }
         referrals.push({
+          id: `referral-${referredUserId}`,
           referrer_user_id: referrerUserId,
           referred_user_id: referredUserId,
           code,
+          referral_code_id: referralCodeId,
           status,
           qualified_at: qualifiedAt,
           created_at: new Date("2026-02-01T00:00:00.000Z"),
         });
+        return { rows: [{ id: `referral-${referredUserId}` }] };
+      }
+
+      if (
+        sql.includes("update referral_codes") &&
+        sql.includes("usage_limit_reached")
+      ) {
+        const referralCodeId = String(values[0] ?? "");
+        const code = codes.find((entry) => entry.id === referralCodeId);
+        if (code) {
+          code.is_active = false;
+          code.retired_at = new Date("2026-02-01T00:00:00.000Z");
+        }
+        return { rows: [] };
+      }
+
+      if (sql.includes("insert into volume_events")) {
         return { rows: [{ inserted: true }] };
       }
 
@@ -753,6 +997,69 @@ const tests: TestCase[] = [
       assert.equal(result.referral.code, "CREATOR");
       assert.equal(result.referral.status, "pending");
       assert.equal(result.referral.referrer?.userId, "user-b");
+    },
+  },
+  {
+    name: "attach referral retires campaign code when usage limit is reached",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [{ id: "user-a", referral_code: null }],
+        codes: [
+          {
+            id: "code-poly",
+            code: "POLY",
+            policy_type: "campaign",
+            max_uses: 1,
+            visible_drop_points: 420,
+            tier_drop_points: 100_000,
+          },
+        ],
+      });
+
+      const first = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "POLY",
+      });
+      assert.equal(first.status, "attached");
+      assert.equal(first.referral.code, "POLY");
+
+      const second = await attachReferralCodeForExistingUser(db, {
+        userId: "user-b",
+        referralCode: "POLY",
+      });
+      assert.equal(second.status, "not_found");
+    },
+  },
+  {
+    name: "attach referral rejects campaign code already at usage limit",
+    run: async () => {
+      const db = createReferralAttachDb({
+        users: [{ id: "user-a", referral_code: null }],
+        codes: [
+          {
+            id: "code-poly",
+            code: "POLY",
+            policy_type: "campaign",
+            max_uses: 1,
+          },
+        ],
+        referrals: [
+          {
+            id: "referral-existing",
+            referrer_user_id: null,
+            referred_user_id: "user-existing",
+            code: "POLY",
+            referral_code_id: "code-poly",
+            status: "pending",
+          },
+        ],
+      });
+
+      const result = await attachReferralCodeForExistingUser(db, {
+        userId: "user-a",
+        referralCode: "POLY",
+      });
+      assert.equal(result.status, "not_found");
     },
   },
   {

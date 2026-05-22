@@ -188,6 +188,7 @@ export const adminReferralCodesQuerySchema = z.object({
   q: z.string().trim().min(1).max(120).optional(),
   policyType: z.enum(["user", "campaign"]).optional(),
   active: adminQueryBooleanSchema.optional(),
+  usageLimit: z.enum(["limited", "unlimited"]).optional(),
   limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
@@ -204,6 +205,7 @@ export const adminReferralCodeCampaignCreateSchema = z.object({
   multiplierOverride: z.coerce.number().positive().finite().optional(),
   visibleDropPoints: referralCodePolicyNumberSchema,
   tierDropPoints: referralCodePolicyNumberSchema,
+  maxUses: z.coerce.number().int().positive().optional(),
 });
 
 export const adminReferralCodeParamsSchema = z.object({
@@ -229,6 +231,7 @@ export const adminReferralCodeUpdateSchema = z.object({
     .optional(),
   visibleDropPoints: referralCodePolicyNumberSchema,
   tierDropPoints: referralCodePolicyNumberSchema,
+  maxUses: z.coerce.number().int().positive().nullable().optional(),
   deactivate: z.coerce.boolean().optional(),
   reactivate: z.coerce.boolean().optional(),
 });

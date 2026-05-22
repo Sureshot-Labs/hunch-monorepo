@@ -32,6 +32,7 @@ import {
   insertRewardClaim,
   listReferralCodes,
   retireActiveUserReferralCodes,
+  retireReferralCodeForUsageLimit,
   updateReferralCodePolicy,
   type RewardsManualFilterMode,
   type RewardsLeaderboardInterval,
@@ -41,6 +42,7 @@ import {
   type RewardsReferralsSortDir,
   type ReferralCodeListRow,
   type ReferralCodePolicyType,
+  type ReferralCodeUsageLimitFilter,
   REFERRAL_CODE_TIER_DROP_SOURCE_PREFIX,
   REFERRAL_CODE_VISIBLE_DROP_SOURCE_PREFIX,
   markQualifiedReferralsForUser,
@@ -532,20 +534,38 @@ async function grantReferralCodeDrops(
   }
 }
 
-export async function attachReferralCode(
+async function insertReferralWithUsageLimit(
   pool: DbQuery,
   inputs: { userId: string; referralCode: string },
-): Promise<void> {
-  const normalized = normalizeReferralCode(inputs.referralCode);
-  if (!normalized) return;
-
-  const referralCode = await findActiveReferralCodeForAttach(pool, normalized);
-  if (!referralCode) return;
+): Promise<{
+  status: "attached" | "already_attached" | "not_found" | "self_referral";
+  referralCode: Awaited<ReturnType<typeof findActiveReferralCodeForAttach>> | null;
+  referralId: string | null;
+}> {
+  const referralCode = await findActiveReferralCodeForAttach(
+    pool,
+    inputs.referralCode,
+    { lockForUpdate: true },
+  );
+  if (!referralCode) {
+    return { status: "not_found", referralCode: null, referralId: null };
+  }
   if (
     referralCode.policy_type === "user" &&
     referralCode.owner_user_id === inputs.userId
   ) {
-    return;
+    return { status: "self_referral", referralCode, referralId: null };
+  }
+
+  const maxUses =
+    referralCode.max_uses == null ? null : Number(referralCode.max_uses);
+  const currentUses =
+    maxUses == null
+      ? 0
+      : await countReferralsForReferralCode(pool, referralCode.referral_code_id);
+  if (maxUses != null && currentUses >= maxUses) {
+    await retireReferralCodeForUsageLimit(pool, referralCode.referral_code_id);
+    return { status: "not_found", referralCode, referralId: null };
   }
 
   const inserted = await insertReferral(pool, {
@@ -556,12 +576,36 @@ export async function attachReferralCode(
     referralCodeId: referralCode.referral_code_id,
     status: "pending",
   });
-  if (inserted.inserted && inserted.id) {
+  if (!inserted.inserted || !inserted.id) {
+    return { status: "already_attached", referralCode, referralId: null };
+  }
+
+  if (maxUses != null && currentUses + 1 >= maxUses) {
+    await retireReferralCodeForUsageLimit(pool, referralCode.referral_code_id);
+  }
+
+  return { status: "attached", referralCode, referralId: inserted.id };
+}
+
+export async function attachReferralCode(
+  pool: DbQuery,
+  inputs: { userId: string; referralCode: string },
+): Promise<void> {
+  const normalized = normalizeReferralCode(inputs.referralCode);
+  if (!normalized) return;
+
+  const attached = await insertReferralWithUsageLimit(pool, {
+    userId: inputs.userId,
+    referralCode: normalized,
+  });
+  if (attached.status === "attached" && attached.referralId) {
     await grantReferralCodeDrops(pool, {
       userId: inputs.userId,
-      referralId: inserted.id,
-      visibleDropPoints: Number(referralCode.visible_drop_points ?? 0),
-      tierDropPoints: Number(referralCode.tier_drop_points ?? 0),
+      referralId: attached.referralId,
+      visibleDropPoints: Number(
+        attached.referralCode?.visible_drop_points ?? 0,
+      ),
+      tierDropPoints: Number(attached.referralCode?.tier_drop_points ?? 0),
     });
   }
 }
@@ -638,44 +682,37 @@ export async function attachReferralCodeForExistingUser(
     };
   }
 
-  const referralCode = await findActiveReferralCodeForAttach(pool, normalized);
-  if (!referralCode) {
+  const attached = await insertReferralWithUsageLimit(pool, {
+    userId: inputs.userId,
+    referralCode: normalized,
+  });
+  if (attached.status === "not_found") {
     return {
       status: "not_found",
       referral: existing,
     };
   }
-
-  if (
-    referralCode.policy_type === "user" &&
-    referralCode.owner_user_id === inputs.userId
-  ) {
+  if (attached.status === "self_referral") {
     return {
       status: "self_referral",
       referral: existing,
     };
   }
 
-  const inserted = await insertReferral(pool, {
-    referrerUserId:
-      referralCode.policy_type === "user" ? referralCode.owner_user_id : null,
-    referredUserId: inputs.userId,
-    code: referralCode.code,
-    referralCodeId: referralCode.referral_code_id,
-    status: "pending",
-  });
-  if (inserted.inserted && inserted.id) {
+  if (attached.status === "attached" && attached.referralId) {
     await grantReferralCodeDrops(pool, {
       userId: inputs.userId,
-      referralId: inserted.id,
-      visibleDropPoints: Number(referralCode.visible_drop_points ?? 0),
-      tierDropPoints: Number(referralCode.tier_drop_points ?? 0),
+      referralId: attached.referralId,
+      visibleDropPoints: Number(
+        attached.referralCode?.visible_drop_points ?? 0,
+      ),
+      tierDropPoints: Number(attached.referralCode?.tier_drop_points ?? 0),
     });
   }
 
   const current = await buildReferralAttachmentState(pool, inputs.userId);
   return {
-    status: inserted.inserted ? "attached" : "already_attached",
+    status: attached.status === "attached" ? "attached" : "already_attached",
     referral: current,
   };
 }
@@ -810,12 +847,17 @@ export async function setReferralCodeForUser(
 }
 
 function mapReferralCodeListRow(row: ReferralCodeListRow) {
+  const uses = Number(row.referral_count ?? 0);
+  const maxUses = row.max_uses == null ? null : Number(row.max_uses);
   return {
     id: row.referral_code_id,
     code: row.code,
     isActive: row.is_active,
     retiredAt: row.retired_at,
     retiredReason: row.retired_reason,
+    maxUses,
+    uses,
+    remainingUses: maxUses == null ? null : Math.max(0, maxUses - uses),
     policy: {
       id: row.policy_id,
       type: row.policy_type,
@@ -837,7 +879,7 @@ function mapReferralCodeListRow(row: ReferralCodeListRow) {
             }
           : null,
     },
-    referralCount: Number(row.referral_count ?? 0),
+    referralCount: uses,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -849,6 +891,7 @@ export async function listAdminReferralCodes(
     q?: string | null;
     policyType?: ReferralCodePolicyType | null;
     active?: boolean | null;
+    usageLimit?: ReferralCodeUsageLimitFilter | null;
     limit: number;
     offset: number;
   },
@@ -920,6 +963,7 @@ export async function createAdminCampaignReferralCode(
     multiplierOverride?: number | null;
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
+    maxUses?: number | null;
   },
 ) {
   const normalized = normalizeReferralCode(inputs.code);
@@ -936,6 +980,7 @@ export async function createAdminCampaignReferralCode(
     multiplierOverride: inputs.multiplierOverride,
     visibleDropPoints: inputs.visibleDropPoints,
     tierDropPoints: inputs.tierDropPoints,
+    maxUses: inputs.maxUses,
   });
   return mapReferralCodeListRow({
     ...row,
@@ -954,6 +999,7 @@ export async function updateAdminReferralCodePolicy(
     multiplierOverride?: number | null;
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
+    maxUses?: number | null;
     deactivate?: boolean;
     reactivate?: boolean;
   },
@@ -966,6 +1012,7 @@ export async function updateAdminReferralCodePolicy(
         rc.is_active,
         rc.retired_at,
         rc.retired_reason,
+        rc.max_uses,
         p.id as policy_id,
         p.policy_type,
         p.owner_user_id,
@@ -1015,6 +1062,32 @@ export async function updateAdminReferralCodePolicy(
       "Referral code cannot be deactivated and reactivated in one request",
     );
   }
+  if (inputs.maxUses !== undefined && currentRow.policy_type !== "campaign") {
+    throw createReferralCodeError(400, "Only campaign codes can be limited");
+  }
+  const currentUses = Number(currentRow.referral_count ?? 0);
+  const effectiveMaxUses =
+    inputs.maxUses === undefined
+      ? currentRow.max_uses == null
+        ? null
+        : Number(currentRow.max_uses)
+      : inputs.maxUses;
+  if (effectiveMaxUses != null && effectiveMaxUses < currentUses) {
+    throw createReferralCodeError(
+      400,
+      "Usage limit cannot be lower than current uses",
+    );
+  }
+  if (
+    inputs.reactivate &&
+    effectiveMaxUses != null &&
+    effectiveMaxUses <= currentUses
+  ) {
+    throw createReferralCodeError(
+      400,
+      "Usage limit must be higher than current uses to reactivate",
+    );
+  }
 
   const updated = await updateReferralCodePolicy(pool, {
     referralCodeId: inputs.referralCodeId,
@@ -1022,6 +1095,7 @@ export async function updateAdminReferralCodePolicy(
     multiplierOverride: inputs.multiplierOverride,
     visibleDropPoints: inputs.visibleDropPoints,
     tierDropPoints: inputs.tierDropPoints,
+    maxUses: inputs.maxUses,
     deactivateCampaign: inputs.deactivate,
     reactivateCampaign: inputs.reactivate,
   });
