@@ -3,6 +3,13 @@ import { z } from "zod";
 const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
 const adminCursorSchema = z.string().trim().min(1).max(2000);
 const adminPageLimitSchema = z.coerce.number().int().min(1).max(100);
+const adminQueryBooleanSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  return value;
+}, z.boolean());
 
 export const adminFeePolicySchema = z.object({
   venue: feePolicyVenueSchema,
@@ -85,6 +92,7 @@ export const adminRewardsMultiplierPolicySchema = z
   .object({
     effectiveAt: z.string().datetime().optional(),
     globalMultiplier: multiplierValueSchema,
+    globalMultiplierLabel: z.string().trim().max(120).nullable().optional(),
     referralRules: z
       .array(
         z.object({
@@ -140,6 +148,7 @@ export const adminRewardsMultiplierOverrideSchema = z
     userId: z.string().uuid().optional(),
     walletAddress: z.string().trim().min(1).optional(),
     multiplier: multiplierValueSchema,
+    label: z.string().trim().max(120).nullable().optional(),
     reason: z.string().trim().max(500).optional(),
     effectiveAt: z.string().datetime().optional(),
     expiresAt: z.string().datetime().nullable().optional(),
@@ -178,7 +187,7 @@ export const adminRewardsMultiplierOverrideParamsSchema = z.object({
 export const adminReferralCodesQuerySchema = z.object({
   q: z.string().trim().min(1).max(120).optional(),
   policyType: z.enum(["user", "campaign"]).optional(),
-  active: z.coerce.boolean().optional(),
+  active: adminQueryBooleanSchema.optional(),
   limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
@@ -221,6 +230,7 @@ export const adminReferralCodeUpdateSchema = z.object({
   visibleDropPoints: referralCodePolicyNumberSchema,
   tierDropPoints: referralCodePolicyNumberSchema,
   deactivate: z.coerce.boolean().optional(),
+  reactivate: z.coerce.boolean().optional(),
 });
 
 export const adminUsersQuerySchema = z.object({

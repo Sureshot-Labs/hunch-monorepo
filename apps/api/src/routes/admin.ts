@@ -5896,6 +5896,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             visibleDropPoints: request.body.visibleDropPoints,
             tierDropPoints: request.body.tierDropPoints,
             deactivate: request.body.deactivate,
+            reactivate: request.body.reactivate,
           }),
         );
 
@@ -5933,6 +5934,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const fallbackCreatedAt = active?.created_at ?? null;
       const fallbackUpdatedAt = active?.updated_at ?? null;
       const globalMultiplier = Number(active?.global_multiplier ?? 1);
+      const globalMultiplierLabel = active?.global_multiplier_label ?? null;
       const referralRules = normalizeMultiplierReferralRules(
         active?.referral_rules ?? [],
       );
@@ -5945,6 +5947,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         policy: {
           effectiveAt: fallbackEffectiveAt,
           globalMultiplier,
+          globalMultiplierLabel,
           referralRules,
           tierRules,
           notes,
@@ -5954,6 +5957,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               id: active.id,
               effectiveAt: fallbackEffectiveAt,
               globalMultiplier,
+              globalMultiplierLabel,
               referralRules,
               tierRules,
               notes,
@@ -5978,6 +5982,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const inserted = await insertRewardsMultiplierPolicy(pool, {
         effectiveAt: body.effectiveAt ? new Date(body.effectiveAt) : new Date(),
         globalMultiplier: Number(body.globalMultiplier),
+        globalMultiplierLabel: body.globalMultiplierLabel?.trim() || null,
         referralRules: body.referralRules,
         tierRules: body.tierRules,
         notes: body.notes?.trim() || null,
@@ -5990,6 +5995,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           id: inserted.id,
           effectiveAt: inserted.effective_at,
           globalMultiplier: Number(inserted.global_multiplier),
+          globalMultiplierLabel: inserted.global_multiplier_label ?? null,
           referralRules: normalizeMultiplierReferralRules(
             inserted.referral_rules,
           ),
@@ -6029,6 +6035,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           username: row.username,
           displayName: row.display_name,
           multiplier: Number(row.multiplier),
+          label: row.label,
           reason: row.reason,
           effectiveAt: row.effective_at,
           expiresAt: row.expires_at,
@@ -6082,6 +6089,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           upsertRewardsMultiplierOverride(client, {
             userId,
             multiplier: Number(body.multiplier),
+            label: body.label?.trim() || null,
             reason: body.reason?.trim() || null,
             effectiveAt,
             expiresAt,
@@ -6099,6 +6107,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           username: row.username,
           displayName: row.display_name,
           multiplier: Number(row.multiplier),
+          label: row.label,
           reason: row.reason,
           effectiveAt: row.effective_at,
           expiresAt: row.expires_at,

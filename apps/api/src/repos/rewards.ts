@@ -15,6 +15,7 @@ export type RewardsMultiplierPolicyRow = {
   id: string;
   effective_at: Date;
   global_multiplier: string;
+  global_multiplier_label: string | null;
   referral_rules: unknown;
   tier_rules: unknown;
   notes: string | null;
@@ -25,6 +26,7 @@ export type RewardsMultiplierPolicyRow = {
 export type RewardsMultiplierOverrideRow = {
   user_id: string;
   multiplier: string;
+  label: string | null;
   reason: string | null;
   effective_at: Date;
   expires_at: Date | null;
@@ -262,6 +264,7 @@ export async function fetchActiveRewardsMultiplierPolicy(
         id,
         effective_at,
         global_multiplier::text as global_multiplier,
+        global_multiplier_label,
         referral_rules,
         tier_rules,
         notes,
@@ -282,6 +285,7 @@ export async function insertRewardsMultiplierPolicy(
   inputs: {
     effectiveAt: Date;
     globalMultiplier: number;
+    globalMultiplierLabel?: string | null;
     referralRules: unknown;
     tierRules: unknown;
     notes?: string | null;
@@ -292,15 +296,17 @@ export async function insertRewardsMultiplierPolicy(
       insert into rewards_multiplier_policy (
         effective_at,
         global_multiplier,
+        global_multiplier_label,
         referral_rules,
         tier_rules,
         notes
       )
-      values ($1, $2, $3, $4, $5)
+      values ($1, $2, $3, $4, $5, $6)
       returning
         id,
         effective_at,
         global_multiplier::text as global_multiplier,
+        global_multiplier_label,
         referral_rules,
         tier_rules,
         notes,
@@ -310,6 +316,7 @@ export async function insertRewardsMultiplierPolicy(
     [
       inputs.effectiveAt,
       inputs.globalMultiplier,
+      inputs.globalMultiplierLabel?.trim() || null,
       JSON.stringify(inputs.referralRules),
       JSON.stringify(inputs.tierRules),
       inputs.notes ?? null,
@@ -329,6 +336,7 @@ export async function listRewardsMultiplierOverrides(
     const placeholder = `$${params.length}`;
     whereParts.push(
       `(o.user_id::text ilike ${placeholder}
+        or coalesce(o.label, '') ilike ${placeholder}
         or coalesce(u.email, '') ilike ${placeholder}
         or coalesce(u.username, '') ilike ${placeholder}
         or coalesce(u.display_name, '') ilike ${placeholder}
@@ -361,6 +369,7 @@ export async function listRewardsMultiplierOverrides(
     select
       o.user_id,
       o.multiplier::text as multiplier,
+      o.label,
       o.reason,
       o.effective_at,
       o.expires_at,
@@ -398,6 +407,7 @@ export async function upsertRewardsMultiplierOverride(
   inputs: {
     userId: string;
     multiplier: number;
+    label?: string | null;
     reason?: string | null;
     effectiveAt: Date;
     expiresAt?: Date | null;
@@ -408,14 +418,16 @@ export async function upsertRewardsMultiplierOverride(
       insert into rewards_multiplier_user_overrides (
         user_id,
         multiplier,
+        label,
         reason,
         effective_at,
         expires_at
       )
-      values ($1, $2, $3, $4, $5)
+      values ($1, $2, $3, $4, $5, $6)
       on conflict (user_id)
       do update set
         multiplier = excluded.multiplier,
+        label = excluded.label,
         reason = excluded.reason,
         effective_at = excluded.effective_at,
         expires_at = excluded.expires_at,
@@ -423,6 +435,7 @@ export async function upsertRewardsMultiplierOverride(
       returning
         user_id,
         multiplier::text as multiplier,
+        label,
         reason,
         effective_at,
         expires_at,
@@ -455,6 +468,7 @@ export async function upsertRewardsMultiplierOverride(
     [
       inputs.userId,
       inputs.multiplier,
+      inputs.label?.trim() || null,
       inputs.reason ?? null,
       inputs.effectiveAt,
       inputs.expiresAt ?? null,
@@ -943,6 +957,7 @@ export async function updateReferralCodePolicy(
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
     deactivateCampaign?: boolean;
+    reactivateCampaign?: boolean;
   },
 ): Promise<ReferralCodeLookupRow | null> {
   const current = await pool.query<ReferralCodeLookupRow>(
@@ -1006,6 +1021,20 @@ export async function updateReferralCodePolicy(
             retired_reason = coalesce(retired_reason, 'campaign_deactivated')
         where rc.id = $1
           and rc.is_active = true
+      `,
+      [inputs.referralCodeId],
+    );
+  }
+
+  if (inputs.reactivateCampaign) {
+    await pool.query(
+      `
+        update referral_codes rc
+        set is_active = true,
+            retired_at = null,
+            retired_reason = null
+        where rc.id = $1
+          and rc.is_active = false
       `,
       [inputs.referralCodeId],
     );

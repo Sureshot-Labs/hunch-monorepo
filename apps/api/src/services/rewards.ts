@@ -955,6 +955,7 @@ export async function updateAdminReferralCodePolicy(
     visibleDropPoints?: number | null;
     tierDropPoints?: number | null;
     deactivate?: boolean;
+    reactivate?: boolean;
   },
 ) {
   const current = await pool.query<ReferralCodeListRow>(
@@ -1002,6 +1003,18 @@ export async function updateAdminReferralCodePolicy(
       "Only campaign codes can be deactivated",
     );
   }
+  if (inputs.reactivate && currentRow.policy_type !== "campaign") {
+    throw createReferralCodeError(
+      400,
+      "Only campaign codes can be reactivated",
+    );
+  }
+  if (inputs.deactivate && inputs.reactivate) {
+    throw createReferralCodeError(
+      400,
+      "Referral code cannot be deactivated and reactivated in one request",
+    );
+  }
 
   const updated = await updateReferralCodePolicy(pool, {
     referralCodeId: inputs.referralCodeId,
@@ -1010,6 +1023,7 @@ export async function updateAdminReferralCodePolicy(
     visibleDropPoints: inputs.visibleDropPoints,
     tierDropPoints: inputs.tierDropPoints,
     deactivateCampaign: inputs.deactivate,
+    reactivateCampaign: inputs.reactivate,
   });
   if (!updated) {
     throw createReferralCodeError(404, "Referral code not found");
@@ -1179,6 +1193,7 @@ export async function getRewardsSummary(
   multiplier: {
     value: number;
     source: RewardsMultiplierSource;
+    label: string | null;
     asOf: Date;
     referralCode: {
       code: string;
@@ -1268,6 +1283,7 @@ export async function getRewardsSummary(
     multiplier: {
       value: multiplier.multiplierApplied,
       source: multiplier.multiplierSource,
+      label: multiplier.label?.trim() || null,
       asOf: multiplierAsOf,
       referralCode: multiplier.referralCodeContext
         ? {

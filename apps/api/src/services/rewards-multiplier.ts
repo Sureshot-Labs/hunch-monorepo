@@ -29,6 +29,7 @@ type VolumeEventInsertInput = {
 export type ResolvedRewardsMultiplier = {
   multiplierApplied: number;
   multiplierSource: RewardsMultiplierSource;
+  label?: string | null;
   referralCodeContext?: {
     code: string;
     label: string | null;
@@ -166,10 +167,15 @@ async function fetchUserOverrideMultiplier(
   client: MultiplierQueryable,
   userId: string,
   eventTime: Date,
-): Promise<number | null> {
-  const { rows } = await client.query<{ multiplier: string | null }>(
+): Promise<{ multiplier: number; label: string | null } | null> {
+  const { rows } = await client.query<{
+    multiplier: string | null;
+    label: string | null;
+  }>(
     `
-      select multiplier::text as multiplier
+      select
+        multiplier::text as multiplier,
+        label
       from rewards_multiplier_user_overrides
       where user_id = $1
         and effective_at <= $2
@@ -183,7 +189,10 @@ async function fetchUserOverrideMultiplier(
   if (!raw) return null;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return parsed;
+  return {
+    multiplier: parsed,
+    label: rows[0]?.label?.trim() || null,
+  };
 }
 
 export async function resolveRewardsMultiplierAtEvent(
@@ -197,19 +206,22 @@ export async function resolveRewardsMultiplierAtEvent(
   );
   if (overrideMultiplier != null) {
     return {
-      multiplierApplied: overrideMultiplier,
+      multiplierApplied: overrideMultiplier.multiplier,
       multiplierSource: "user",
+      label: overrideMultiplier.label,
     };
   }
 
   const policyRows = await client.query<{
     global_multiplier: string | null;
+    global_multiplier_label: string | null;
     referral_rules: unknown;
     tier_rules: unknown;
   }>(
     `
       select
         global_multiplier::text as global_multiplier,
+        global_multiplier_label,
         referral_rules,
         tier_rules
       from rewards_multiplier_policy
@@ -268,6 +280,7 @@ export async function resolveRewardsMultiplierAtEvent(
     return {
       multiplierApplied: globalMultiplier,
       multiplierSource: "global",
+      label: policy?.global_multiplier_label?.trim() || null,
     };
   }
 
@@ -288,6 +301,7 @@ export async function resolveRewardsMultiplierAtEvent(
     return {
       multiplierApplied: referralCodeMultiplier,
       multiplierSource: "referral_code",
+      label: context.label?.trim() || null,
       referralCodeContext: {
         code: context.code,
         label: context.label,
@@ -299,17 +313,20 @@ export async function resolveRewardsMultiplierAtEvent(
     return {
       multiplierApplied: referralMultiplier,
       multiplierSource: "referral",
+      label: null,
     };
   }
   if (Math.abs(tierMultiplier - maxMultiplier) < 1e-12) {
     return {
       multiplierApplied: tierMultiplier,
       multiplierSource: "tier",
+      label: null,
     };
   }
   return {
     multiplierApplied: globalMultiplier,
     multiplierSource: "global",
+    label: policy?.global_multiplier_label?.trim() || null,
   };
 }
 
