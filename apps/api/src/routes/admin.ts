@@ -24,12 +24,16 @@ import {
 import { fetchActiveFeePolicy, insertFeePolicy } from "../repos/fee-policy.js";
 import { insertRuntimePolicy } from "../repos/runtime-policies.js";
 import {
+  buildPublicPointsContributionSql,
+  buildQualificationPointsContributionSql,
+  buildTierPointsContributionSql,
   deleteAdminManualVolumeEvent,
   deleteRewardsMultiplierOverride,
   fetchActiveRewardsMultiplierPolicy,
   fetchActiveRewardsPolicy,
   fetchAdminManualVolumeEvents,
   HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX,
+  insertExactManualVolumeEvent,
   insertRewardsMultiplierPolicy,
   listRewardsMultiplierOverrides,
   upsertRewardsMultiplierOverride,
@@ -37,10 +41,12 @@ import {
 } from "../repos/rewards.js";
 import { mergeUsersById } from "../admin-merge-user-core.js";
 import {
+  createAdminCampaignReferralCode,
   getRewardsPolicy,
+  listAdminReferralCodes,
   setReferralCodeForUser,
+  updateAdminReferralCodePolicy,
 } from "../services/rewards.js";
-import { insertVolumeEventsWithMultiplier } from "../services/rewards-multiplier.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import {
   getIntelPolicySchema,
@@ -77,6 +83,10 @@ import {
   adminRewardsMultiplierPolicySchema,
   adminRewardsTreasuryQuerySchema,
   adminRewardsPolicySchema,
+  adminReferralCodeCampaignCreateSchema,
+  adminReferralCodeParamsSchema,
+  adminReferralCodesQuerySchema,
+  adminReferralCodeUpdateSchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
   adminUserAnalyticsQuerySchema,
@@ -2233,6 +2243,19 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (q) {
         filterParams.push(q);
         const idx = filterParams.length;
+        const walletSubstringPredicate =
+          q.length >= 6
+            ? `
+                  or wq.wallet_address ilike '%' || $${idx} || '%'
+                `
+            : "";
+        const venueCredentialSubstringPredicate =
+          q.length >= 6
+            ? `
+                    or vcq.wallet_address ilike '%' || $${idx} || '%'
+                    or vcq.funder_address ilike '%' || $${idx} || '%'
+                `
+            : "";
         filterConditions.push(
           `
             (
@@ -2240,11 +2263,40 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               or u.email ilike '%' || $${idx} || '%'
               or u.username ilike '%' || $${idx} || '%'
               or u.display_name ilike '%' || $${idx} || '%'
+              or u.referral_code ilike '%' || $${idx} || '%'
               or exists (
                 select 1
                 from user_wallets wq
                 where wq.user_id = u.id
-                  and (lower(wq.wallet_address) = lower($${idx}) or wq.wallet_address = $${idx})
+                  and (
+                    lower(wq.wallet_address) = lower($${idx})
+                    or wq.wallet_address = $${idx}
+                    ${walletSubstringPredicate}
+                  )
+              )
+              or exists (
+                select 1
+                from user_venue_credentials vcq
+                where vcq.user_id = u.id
+                  and (
+                    lower(vcq.wallet_address) = lower($${idx})
+                    or lower(vcq.funder_address) = lower($${idx})
+                    ${venueCredentialSubstringPredicate}
+                  )
+              )
+              or exists (
+                select 1
+                from referrals rq
+                left join referral_codes rcq
+                  on rcq.id = rq.referral_code_id
+                left join referral_code_policies pq
+                  on pq.id = rcq.policy_id
+                where rq.referred_user_id = u.id
+                  and (
+                    rq.code ilike '%' || $${idx} || '%'
+                    or rcq.code ilike '%' || $${idx} || '%'
+                    or pq.label ilike '%' || $${idx} || '%'
+                  )
               )
             )
           `,
@@ -2302,9 +2354,18 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         referral_code: string | null;
         wallet_address: string | null;
         points: string | null;
+        tier_points: string | null;
+        qualification_points: string | null;
+        raw_points: string | null;
         fee_usd_total: string | null;
         fee_usd_collected: string | null;
         referral_count: string | null;
+        inbound_referral_code: string | null;
+        inbound_referral_policy_type: "user" | "campaign" | null;
+        inbound_referral_label: string | null;
+        inbound_referral_multiplier_override: string | null;
+        inbound_referral_owner_user_id: string | null;
+        inbound_referral_attached_at: Date | null;
       }>(
         `
           select
@@ -2319,10 +2380,19 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             u.created_at,
             u.referral_code,
             primary_wallet.wallet_address,
-            points.total as points,
+            points.public_points as points,
+            points.tier_points,
+            points.qualification_points,
+            points.raw_points,
             fees.total_fee_usd as fee_usd_total,
             fees.collected_fee_usd as fee_usd_collected,
-            refs.referral_count
+            refs.referral_count,
+            inbound.code as inbound_referral_code,
+            inbound.policy_type as inbound_referral_policy_type,
+            inbound.label as inbound_referral_label,
+            inbound.multiplier_override as inbound_referral_multiplier_override,
+            inbound.owner_user_id as inbound_referral_owner_user_id,
+            inbound.attached_at as inbound_referral_attached_at
           from users u
           left join lateral (
             select wallet_address
@@ -2332,9 +2402,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             limit 1
           ) primary_wallet on true
           left join lateral (
-            select coalesce(sum(points_awarded), 0)::text as total
-            from volume_events
-            where user_id = u.id
+            select
+              coalesce(sum(${buildPublicPointsContributionSql("ve")}), 0)::text as public_points,
+              coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::text as tier_points,
+              coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as qualification_points,
+              coalesce(sum(ve.points_awarded), 0)::text as raw_points
+            from volume_events ve
+            where ve.user_id = u.id
           ) points on true
           left join lateral (
             select
@@ -2348,6 +2422,23 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             from referrals
             where referrer_user_id = u.id
           ) refs on true
+          left join lateral (
+            select
+              r.code,
+              p.policy_type,
+              p.label,
+              p.multiplier_override::text as multiplier_override,
+              p.owner_user_id,
+              r.created_at as attached_at
+            from referrals r
+            left join referral_codes rc
+              on rc.id = r.referral_code_id
+            left join referral_code_policies p
+              on p.id = rc.policy_id
+            where r.referred_user_id = u.id
+            order by r.created_at desc
+            limit 1
+          ) inbound on true
           ${whereClause}
           order by u.created_at desc, u.id desc
           limit $${limitIdx}
@@ -2373,9 +2464,25 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           referralCode: row.referral_code,
           walletAddress: row.wallet_address ?? null,
           points: Number(row.points ?? 0),
+          tierPoints: Number(row.tier_points ?? 0),
+          qualificationPoints: Number(row.qualification_points ?? 0),
+          rawPoints: Number(row.raw_points ?? 0),
           feeUsdTotal: Number(row.fee_usd_total ?? 0),
           feeUsdCollected: Number(row.fee_usd_collected ?? 0),
           referralCount: Number(row.referral_count ?? 0),
+          inboundReferral: row.inbound_referral_code
+            ? {
+                code: row.inbound_referral_code,
+                policyType: row.inbound_referral_policy_type,
+                label: row.inbound_referral_label,
+                multiplierOverride:
+                  row.inbound_referral_multiplier_override == null
+                    ? null
+                    : Number(row.inbound_referral_multiplier_override),
+                ownerUserId: row.inbound_referral_owner_user_id,
+                attachedAt: row.inbound_referral_attached_at,
+              }
+            : null,
         })),
         total: Number(countRows[0]?.total ?? 0),
         limit,
@@ -2457,8 +2564,21 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         [id],
       );
 
-      const { rows: pointsRows } = await pool.query<{ total: string | null }>(
-        `select coalesce(sum(points_awarded), 0)::text as total from volume_events where user_id = $1`,
+      const { rows: pointsRows } = await pool.query<{
+        public_points: string | null;
+        tier_points: string | null;
+        qualification_points: string | null;
+        raw_points: string | null;
+      }>(
+        `
+          select
+            coalesce(sum(${buildPublicPointsContributionSql("ve")}), 0)::text as public_points,
+            coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::text as tier_points,
+            coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as qualification_points,
+            coalesce(sum(ve.points_awarded), 0)::text as raw_points
+          from volume_events ve
+          where ve.user_id = $1
+        `,
         [id],
       );
 
@@ -2481,6 +2601,35 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         [id],
       );
 
+      const { rows: inboundReferralRows } = await pool.query<{
+        code: string;
+        policy_type: "user" | "campaign" | null;
+        label: string | null;
+        multiplier_override: string | null;
+        owner_user_id: string | null;
+        attached_at: Date;
+      }>(
+        `
+          select
+            r.code,
+            p.policy_type,
+            p.label,
+            p.multiplier_override::text as multiplier_override,
+            p.owner_user_id,
+            r.created_at as attached_at
+          from referrals r
+          left join referral_codes rc
+            on rc.id = r.referral_code_id
+          left join referral_code_policies p
+            on p.id = rc.policy_id
+          where r.referred_user_id = $1
+          order by r.created_at desc
+          limit 1
+        `,
+        [id],
+      );
+      const inboundReferral = inboundReferralRows[0] ?? null;
+
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
@@ -2495,6 +2644,19 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           lastLoginAt: user.last_login_at,
           createdAt: user.created_at,
           referralCode: user.referral_code,
+          inboundReferral: inboundReferral
+            ? {
+                code: inboundReferral.code,
+                policyType: inboundReferral.policy_type,
+                label: inboundReferral.label,
+                multiplierOverride:
+                  inboundReferral.multiplier_override == null
+                    ? null
+                    : Number(inboundReferral.multiplier_override),
+                ownerUserId: inboundReferral.owner_user_id,
+                attachedAt: inboundReferral.attached_at,
+              }
+            : null,
         },
         wallets: walletRows.map((row) => ({
           id: row.id,
@@ -2508,7 +2670,12 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           polymarketFunderUpdatedAt: row.polymarket_funder_updated_at,
         })),
         stats: {
-          points: Number(pointsRows[0]?.total ?? 0),
+          points: Number(pointsRows[0]?.public_points ?? 0),
+          tierPoints: Number(pointsRows[0]?.tier_points ?? 0),
+          qualificationPoints: Number(
+            pointsRows[0]?.qualification_points ?? 0,
+          ),
+          rawPoints: Number(pointsRows[0]?.raw_points ?? 0),
           feeUsdTotal: Number(feeRows[0]?.total_fee_usd ?? 0),
           feeUsdCollected: Number(feeRows[0]?.collected_fee_usd ?? 0),
           referralCount: Number(referralRows[0]?.count ?? 0),
@@ -5082,6 +5249,124 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/rewards/referral-codes",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:read",
+      }),
+      schema: { querystring: adminReferralCodesQuerySchema },
+    },
+    async (request, reply) => {
+      const limit = request.query.limit ?? 50;
+      const offset = request.query.offset ?? 0;
+      const result = await listAdminReferralCodes(pool, {
+        q: request.query.q,
+        policyType: request.query.policyType ?? null,
+        active: request.query.active ?? null,
+        limit,
+        offset,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit,
+        offset,
+      });
+    },
+  );
+
+  z.post(
+    "/admin/rewards/referral-codes/campaigns",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
+      schema: { body: adminReferralCodeCampaignCreateSchema },
+    },
+    async (request, reply) => {
+      try {
+        const item = await tx(pool, async (client: PoolClient) =>
+          createAdminCampaignReferralCode(client, {
+            code: request.body.code,
+            label: request.body.label,
+            multiplierOverride: request.body.multiplierOverride,
+            visibleDropPoints: request.body.visibleDropPoints,
+            tierDropPoints: request.body.tierDropPoints,
+          }),
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, item });
+      } catch (error) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error &&
+          typeof (error as { statusCode?: unknown }).statusCode === "number"
+            ? (error as { statusCode: number }).statusCode
+            : isUniqueViolationError(error)
+              ? 409
+              : 500;
+        reply.code(statusCode);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to create campaign referral code",
+        });
+      }
+    },
+  );
+
+  z.patch(
+    "/admin/rewards/referral-codes/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
+      schema: {
+        params: adminReferralCodeParamsSchema,
+        body: adminReferralCodeUpdateSchema,
+      },
+    },
+    async (request, reply) => {
+      try {
+        const item = await tx(pool, async (client: PoolClient) =>
+          updateAdminReferralCodePolicy(client, {
+            referralCodeId: request.params.id,
+            label: request.body.label,
+            multiplierOverride: request.body.multiplierOverride,
+            visibleDropPoints: request.body.visibleDropPoints,
+            tierDropPoints: request.body.tierDropPoints,
+            deactivate: request.body.deactivate,
+          }),
+        );
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, item });
+      } catch (error) {
+        const statusCode =
+          typeof error === "object" &&
+          error !== null &&
+          "statusCode" in error &&
+          typeof (error as { statusCode?: unknown }).statusCode === "number"
+            ? (error as { statusCode: number }).statusCode
+            : 500;
+        reply.code(statusCode);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to update referral code policy",
+        });
+      }
+    },
+  );
+
+  z.get(
     "/admin/rewards/multiplier-policy",
     {
       preHandler: createAdminMiddleware({
@@ -5422,18 +5707,14 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const sourceId = `${visible ? VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX : HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX}${randomUUID()}`;
       const venue = body.venue?.trim() ?? "admin";
 
-      const inserted = await insertVolumeEventsWithMultiplier(pool, {
+      const inserted = await insertExactManualVolumeEvent(pool, {
         userId,
         walletAddress,
         venue,
         sourceType,
-        events: [
-          {
-            sourceId,
-            notionalUsd: body.amount,
-            createdAt: new Date(),
-          },
-        ],
+        sourceId,
+        points: body.amount,
+        createdAt: new Date(),
       });
 
       if (!inserted.inserted) {
@@ -5448,7 +5729,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         event: {
-          id: inserted.ids[0] ?? null,
+          id: inserted.id,
           userId,
           walletAddress,
           venue,

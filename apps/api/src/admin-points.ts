@@ -4,10 +4,10 @@ import { randomUUID } from "node:crypto";
 import { pool } from "./db.js";
 import {
   HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX,
+  insertExactManualVolumeEvent,
   isHiddenManualVolumeSourceId,
   VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX,
 } from "./repos/rewards.js";
-import { insertVolumeEventsWithMultiplier } from "./services/rewards-multiplier.js";
 
 type ScriptOptions = {
   wallet?: string;
@@ -187,18 +187,14 @@ async function main() {
       return;
     }
 
-    const inserted = await insertVolumeEventsWithMultiplier(pool, {
+    const inserted = await insertExactManualVolumeEvent(pool, {
       userId: user.id,
       walletAddress: walletAddress ?? null,
       venue,
       sourceType,
-      events: [
-        {
-          sourceId,
-          notionalUsd: amount,
-          createdAt: new Date(),
-        },
-      ],
+      sourceId,
+      points: amount,
+      createdAt: new Date(),
     });
 
     if (!inserted.inserted) {

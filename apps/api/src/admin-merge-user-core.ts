@@ -47,6 +47,9 @@ export type MergeSummary = {
   referralsReferredMoved: number;
   referralsReferrerDeduped: number;
   referralsReferrerMoved: number;
+  referralCodePoliciesDeleted: number;
+  referralCodePoliciesMoved: number;
+  referralCodesPolicyMoved: number;
   referralsSelfRemoved: number;
   walletsDeleted: number;
   primaryWalletAssigned: number;
@@ -138,6 +141,9 @@ export async function mergeUsers(
     referralsReferredMoved: 0,
     referralsReferrerDeduped: 0,
     referralsReferrerMoved: 0,
+    referralCodePoliciesDeleted: 0,
+    referralCodePoliciesMoved: 0,
+    referralCodesPolicyMoved: 0,
     referralsSelfRemoved: 0,
     walletsDeleted: 0,
     primaryWalletAssigned: 0,
@@ -447,6 +453,65 @@ export async function mergeUsers(
       (
         await client.query(
           `update referrals set referred_user_id = $1 where referred_user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.referralCodesPolicyMoved =
+      (
+        await client.query(
+          `
+          with target_policy as (
+            insert into referral_code_policies (policy_type, owner_user_id)
+            values ('user', $1)
+            on conflict do nothing
+            returning id
+          ),
+          resolved_target_policy as (
+            select id from target_policy
+            union all
+            select id
+            from referral_code_policies
+            where policy_type = 'user'
+              and owner_user_id = $1
+            limit 1
+          ),
+          source_policy as (
+            select id
+            from referral_code_policies
+            where policy_type = 'user'
+              and owner_user_id = $2
+            limit 1
+          )
+          update referral_codes rc
+          set policy_id = (select id from resolved_target_policy)
+          where rc.policy_id = (select id from source_policy)
+        `,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.referralCodePoliciesDeleted =
+      (
+        await client.query(
+          `
+          delete from referral_code_policies
+          where policy_type = 'user'
+            and owner_user_id = $1
+        `,
+          [source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.referralCodePoliciesMoved =
+      (
+        await client.query(
+          `
+          update referral_code_policies
+          set owner_user_id = $1
+          where policy_type = 'user'
+            and owner_user_id = $2
+        `,
           [target.id, source.id],
         )
       ).rowCount ?? 0;

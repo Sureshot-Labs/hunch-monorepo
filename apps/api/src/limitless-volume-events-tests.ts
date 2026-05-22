@@ -46,7 +46,8 @@ function createRewardsPoolMock() {
       }
       if (
         text.includes("from volume_events") &&
-        text.includes("coalesce(sum(points_awarded)")
+        text.includes("coalesce(sum(") &&
+        text.includes("as total")
       ) {
         return { rows: [{ total: "0" }] };
       }

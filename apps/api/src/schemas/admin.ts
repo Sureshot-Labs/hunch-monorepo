@@ -175,6 +175,45 @@ export const adminRewardsMultiplierOverrideParamsSchema = z.object({
   userId: z.string().uuid(),
 });
 
+export const adminReferralCodesQuerySchema = z.object({
+  q: z.string().trim().min(1).max(120).optional(),
+  policyType: z.enum(["user", "campaign"]).optional(),
+  active: z.coerce.boolean().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+const referralCodePolicyNumberSchema = z.coerce
+  .number()
+  .finite()
+  .min(0)
+  .optional();
+
+export const adminReferralCodeCampaignCreateSchema = z.object({
+  code: z.string().trim().min(3).max(10),
+  label: z.string().trim().min(1).max(120).optional(),
+  multiplierOverride: z.coerce.number().positive().finite().optional(),
+  visibleDropPoints: referralCodePolicyNumberSchema,
+  tierDropPoints: referralCodePolicyNumberSchema,
+});
+
+export const adminReferralCodeParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const adminReferralCodeUpdateSchema = z.object({
+  label: z.string().trim().min(1).max(120).nullable().optional(),
+  multiplierOverride: z.coerce
+    .number()
+    .positive()
+    .finite()
+    .nullable()
+    .optional(),
+  visibleDropPoints: referralCodePolicyNumberSchema,
+  tierDropPoints: referralCodePolicyNumberSchema,
+  deactivate: z.coerce.boolean().optional(),
+});
+
 export const adminUsersQuerySchema = z.object({
   cursor: adminCursorSchema.optional(),
   q: z.string().trim().min(1).optional(),

@@ -23,6 +23,7 @@ import {
   fetchAdminManualVolumeEvents,
   fetchReferralsForUser,
   fetchQualifiedReferralCount,
+  fetchUserTierPoints,
   fetchUserPoints,
   fetchUserVolume,
   markQualifiedReferralsForUser,
@@ -357,6 +358,7 @@ function createFetchReferralsDb(seed: {
     created_at: Date;
     wallet_address: string | null;
     points: string | null;
+    tier_points?: string | null;
     qualification_points?: string | null;
     bonus: string | null;
   }>;
@@ -844,7 +846,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "fetchUserPoints excludes manual admin volume events",
+    name: "fetchUserPoints uses public points only",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
       const db = createUserPointsDb({ total: "750", capture });
@@ -853,12 +855,28 @@ const tests: TestCase[] = [
 
       assert.equal(points, 750);
       assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.match(capture.sql ?? "", /source_id like 'referral-code-tier:%'/);
       assert.doesNotMatch(capture.sql ?? "", /manual-visible:%/);
+      assert.doesNotMatch(capture.sql ?? "", /referral-code-visible:%/);
       assert.deepEqual(capture.params, ["user-a"]);
     },
   },
   {
-    name: "fetchUserVolume excludes hidden manual events but leaves visible manual events",
+    name: "fetchUserTierPoints excludes hidden manual but includes tier drops",
+    run: async () => {
+      const capture: { sql?: string; params?: unknown[] } = {};
+      const db = createUserPointsDb({ total: "1250", capture });
+
+      const points = await fetchUserTierPoints(db, "user-a");
+
+      assert.equal(points, 1250);
+      assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.doesNotMatch(capture.sql ?? "", /source_id like 'referral-code-tier:%'/);
+      assert.deepEqual(capture.params, ["user-a"]);
+    },
+  },
+  {
+    name: "fetchUserVolume excludes manual grants and referral-code drops",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
       const db = createUserPointsDb({ total: "250", capture });
@@ -867,7 +885,9 @@ const tests: TestCase[] = [
 
       assert.equal(volume, 250);
       assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
-      assert.doesNotMatch(capture.sql ?? "", /manual-visible:%/);
+      assert.match(capture.sql ?? "", /manual-visible:%/);
+      assert.match(capture.sql ?? "", /referral-code-visible:%/);
+      assert.match(capture.sql ?? "", /referral-code-tier:%/);
       assert.deepEqual(capture.params, ["user-a"]);
     },
   },
@@ -1126,6 +1146,7 @@ const tests: TestCase[] = [
             created_at: new Date("2026-02-01T00:00:00.000Z"),
             wallet_address: "0xabc",
             points: "499",
+            tier_points: "499",
             qualification_points: "500",
             bonus: "0",
           },

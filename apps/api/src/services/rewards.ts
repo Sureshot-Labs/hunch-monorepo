@@ -3,10 +3,15 @@ import type { Pool } from "pg";
 import type { DbQuery } from "../db.js";
 import {
   clearUserReferralCodeIfMatches,
+  countReferralsForReferralCode,
+  createCampaignReferralCode,
+  ensureUserReferralCodePolicy,
   fetchActiveRewardsPolicy,
   fetchClaimedTotalsByChain,
   fetchFeeTotalsByChain,
   fetchInboundReferralForUser,
+  findActiveReferralCodeForAttach,
+  findReferralCodeByCode,
   fetchUserTutorialDismissal,
   fetchQualifiedReferralCount,
   fetchReferralFeeTotalsByChain,
@@ -15,18 +20,28 @@ import {
   fetchReferralsForUser,
   fetchUserPoints,
   fetchUserQualificationPoints,
+  fetchUserTierPoints,
   fetchUserVolume,
   fetchUserReferralCode,
+  insertExactManualVolumeEvent,
+  insertExactReferralCodeDropEvent,
+  insertReferralCodeAlias,
   lockUserReferralCodeByUserId,
-  findUserByReferralCode,
   insertReferral,
   insertRewardClaim,
+  listReferralCodes,
+  retireActiveUserReferralCodes,
+  updateReferralCodePolicy,
   type RewardsManualFilterMode,
   type RewardsLeaderboardInterval,
   type RewardsLeaderboardMetric,
   type RewardsLeaderboardRow,
   type RewardsReferralsSortBy,
   type RewardsReferralsSortDir,
+  type ReferralCodeListRow,
+  type ReferralCodePolicyType,
+  REFERRAL_CODE_TIER_DROP_SOURCE_PREFIX,
+  REFERRAL_CODE_VISIBLE_DROP_SOURCE_PREFIX,
   markQualifiedReferralsForUser,
   setUserReferralCode,
   upsertUserTutorialDismissal,
@@ -40,7 +55,6 @@ import {
   usdcMicroToDecimalString,
 } from "../lib/usdc.js";
 import {
-  insertVolumeEventsWithMultiplier,
   resolveRewardsMultiplierAtEvent,
   type RewardsMultiplierSource,
 } from "./rewards-multiplier.js";
@@ -180,6 +194,25 @@ export type ReferralAttachmentState = {
     username: string | null;
     displayName: string | null;
   } | null;
+  referralCode: {
+    id: string;
+    policyId: string;
+    policyType: ReferralCodePolicyType;
+    label: string | null;
+    multiplierOverride: number | null;
+    ownerUserId: string | null;
+  } | null;
+};
+
+export type InboundReferralSummary = {
+  code: string;
+  referralCodeId: string | null;
+  policyType: ReferralCodePolicyType | null;
+  label: string | null;
+  multiplierOverride: number | null;
+  ownerUserId: string | null;
+  status: string;
+  attachedAt: Date;
 };
 
 export type RewardsTutorialState = {
@@ -309,6 +342,26 @@ function emptyReferralAttachmentState(): ReferralAttachmentState {
     linkedAt: null,
     qualifiedAt: null,
     referrer: null,
+    referralCode: null,
+  };
+}
+
+function buildInboundReferralSummary(
+  row: Awaited<ReturnType<typeof fetchInboundReferralForUser>>,
+): InboundReferralSummary | null {
+  if (!row) return null;
+  return {
+    code: row.code,
+    referralCodeId: row.referral_code_id,
+    policyType: row.policy_type,
+    label: row.policy_label,
+    multiplierOverride:
+      row.policy_multiplier_override == null
+        ? null
+        : Number(row.policy_multiplier_override),
+    ownerUserId: row.policy_owner_user_id,
+    status: row.status,
+    attachedAt: row.linked_at,
   };
 }
 
@@ -330,11 +383,27 @@ async function buildReferralAttachmentState(
     status,
     linkedAt: row.linked_at,
     qualifiedAt: row.qualified_at,
-    referrer: {
-      userId: row.referrer_user_id,
-      username: row.referrer_username,
-      displayName: row.referrer_display_name,
-    },
+    referrer: row.referrer_user_id
+      ? {
+          userId: row.referrer_user_id,
+          username: row.referrer_username,
+          displayName: row.referrer_display_name,
+        }
+      : null,
+    referralCode:
+      row.referral_code_id && row.policy_id && row.policy_type
+        ? {
+            id: row.referral_code_id,
+            policyId: row.policy_id,
+            policyType: row.policy_type,
+            label: row.policy_label,
+            multiplierOverride:
+              row.policy_multiplier_override == null
+                ? null
+                : Number(row.policy_multiplier_override),
+            ownerUserId: row.policy_owner_user_id,
+          }
+        : null,
   };
 }
 
@@ -396,20 +465,70 @@ export async function getOrCreateReferralCode(
   userId: string,
 ): Promise<string> {
   const existing = await fetchUserReferralCode(pool, userId);
-  if (existing) return existing;
+  if (existing) {
+    const normalizedExisting = normalizeReferralCode(existing);
+    if (normalizedExisting) {
+      const policy = await ensureUserReferralCodePolicy(pool, userId);
+      const registered = await findReferralCodeByCode(pool, normalizedExisting);
+      if (!registered) {
+        await insertReferralCodeAlias(pool, {
+          code: normalizedExisting,
+          policyId: policy.id,
+          isActive: true,
+        });
+      }
+    }
+    return existing;
+  }
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const code = generateReferralCode();
-    const found = await findUserByReferralCode(pool, code);
+    const found = await findReferralCodeByCode(pool, code);
     if (found) continue;
-    await setUserReferralCode(pool, userId, code);
+    await setReferralCodeForUser(pool, {
+      userId,
+      referralCode: code,
+      forceTransfer: false,
+    });
     return code;
   }
 
   const fallback = `${generateReferralCode()}${Math.floor(Date.now() / 1000)}`;
   const truncated = fallback.slice(0, REFERRAL_CODE_MAX_LENGTH);
-  await setUserReferralCode(pool, userId, truncated);
+  await setReferralCodeForUser(pool, {
+    userId,
+    referralCode: truncated,
+    forceTransfer: false,
+  });
   return truncated;
+}
+
+async function grantReferralCodeDrops(
+  pool: DbQuery,
+  inputs: {
+    userId: string;
+    referralId: string;
+    visibleDropPoints: number;
+    tierDropPoints: number;
+  },
+): Promise<void> {
+  if (
+    Number.isFinite(inputs.visibleDropPoints) &&
+    inputs.visibleDropPoints > 0
+  ) {
+    await insertExactReferralCodeDropEvent(pool, {
+      userId: inputs.userId,
+      sourceId: `${REFERRAL_CODE_VISIBLE_DROP_SOURCE_PREFIX}${inputs.referralId}`,
+      points: inputs.visibleDropPoints,
+    });
+  }
+  if (Number.isFinite(inputs.tierDropPoints) && inputs.tierDropPoints > 0) {
+    await insertExactReferralCodeDropEvent(pool, {
+      userId: inputs.userId,
+      sourceId: `${REFERRAL_CODE_TIER_DROP_SOURCE_PREFIX}${inputs.referralId}`,
+      points: inputs.tierDropPoints,
+    });
+  }
 }
 
 export async function attachReferralCode(
@@ -419,16 +538,31 @@ export async function attachReferralCode(
   const normalized = normalizeReferralCode(inputs.referralCode);
   if (!normalized) return;
 
-  const referrer = await findUserByReferralCode(pool, normalized);
-  if (!referrer) return;
-  if (referrer.id === inputs.userId) return;
+  const referralCode = await findActiveReferralCodeForAttach(pool, normalized);
+  if (!referralCode) return;
+  if (
+    referralCode.policy_type === "user" &&
+    referralCode.owner_user_id === inputs.userId
+  ) {
+    return;
+  }
 
-  await insertReferral(pool, {
-    referrerUserId: referrer.id,
+  const inserted = await insertReferral(pool, {
+    referrerUserId:
+      referralCode.policy_type === "user" ? referralCode.owner_user_id : null,
     referredUserId: inputs.userId,
-    code: normalized,
+    code: referralCode.code,
+    referralCodeId: referralCode.referral_code_id,
     status: "pending",
   });
+  if (inserted.inserted && inserted.id) {
+    await grantReferralCodeDrops(pool, {
+      userId: inputs.userId,
+      referralId: inserted.id,
+      visibleDropPoints: Number(referralCode.visible_drop_points ?? 0),
+      tierDropPoints: Number(referralCode.tier_drop_points ?? 0),
+    });
+  }
 }
 
 export async function getReferralAttachmentStatus(
@@ -466,23 +600,19 @@ export async function claimOnboardingShareBonus(
   alreadyGranted: boolean;
   pointsAwarded: number;
 }> {
-  const inserted = await insertVolumeEventsWithMultiplier(pool, {
+  const inserted = await insertExactManualVolumeEvent(pool, {
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
     venue: ONBOARDING_SHARE_BONUS_VENUE,
     sourceType: ONBOARDING_SHARE_BONUS_SOURCE_TYPE,
-    events: [
-      {
-        sourceId: ONBOARDING_SHARE_BONUS_SOURCE_ID,
-        notionalUsd: ONBOARDING_SHARE_BONUS_POINTS,
-        createdAt: new Date(),
-      },
-    ],
+    sourceId: ONBOARDING_SHARE_BONUS_SOURCE_ID,
+    points: ONBOARDING_SHARE_BONUS_POINTS,
+    createdAt: new Date(),
   });
 
   return {
-    granted: inserted.inserted > 0,
-    alreadyGranted: inserted.inserted === 0,
+    granted: inserted.inserted,
+    alreadyGranted: !inserted.inserted,
     pointsAwarded: ONBOARDING_SHARE_BONUS_POINTS,
   };
 }
@@ -507,15 +637,18 @@ export async function attachReferralCodeForExistingUser(
     };
   }
 
-  const referrer = await findUserByReferralCode(pool, normalized);
-  if (!referrer) {
+  const referralCode = await findActiveReferralCodeForAttach(pool, normalized);
+  if (!referralCode) {
     return {
       status: "not_found",
       referral: existing,
     };
   }
 
-  if (referrer.id === inputs.userId) {
+  if (
+    referralCode.policy_type === "user" &&
+    referralCode.owner_user_id === inputs.userId
+  ) {
     return {
       status: "self_referral",
       referral: existing,
@@ -523,15 +656,25 @@ export async function attachReferralCodeForExistingUser(
   }
 
   const inserted = await insertReferral(pool, {
-    referrerUserId: referrer.id,
+    referrerUserId:
+      referralCode.policy_type === "user" ? referralCode.owner_user_id : null,
     referredUserId: inputs.userId,
-    code: normalized,
+    code: referralCode.code,
+    referralCodeId: referralCode.referral_code_id,
     status: "pending",
   });
+  if (inserted.inserted && inserted.id) {
+    await grantReferralCodeDrops(pool, {
+      userId: inputs.userId,
+      referralId: inserted.id,
+      visibleDropPoints: Number(referralCode.visible_drop_points ?? 0),
+      tierDropPoints: Number(referralCode.tier_drop_points ?? 0),
+    });
+  }
 
   const current = await buildReferralAttachmentState(pool, inputs.userId);
   return {
-    status: inserted ? "attached" : "already_attached",
+    status: inserted.inserted ? "attached" : "already_attached",
     referral: current,
   };
 }
@@ -550,11 +693,13 @@ export async function setReferralCodeForUser(
   }
 
   const targetId = inputs.userId;
-  const preOwner = await findUserByReferralCode(pool, normalized);
+  const preCode = await findReferralCodeByCode(pool, normalized);
+  const preOwnerId =
+    preCode?.policy_type === "user" ? preCode.owner_user_id : null;
   const lockIds = Array.from(
     new Set([
       targetId,
-      ...(preOwner?.id && preOwner.id !== targetId ? [preOwner.id] : []),
+      ...(preOwnerId && preOwnerId !== targetId ? [preOwnerId] : []),
     ]),
   ).sort((a, b) => a.localeCompare(b));
 
@@ -570,11 +715,17 @@ export async function setReferralCodeForUser(
     throw createReferralCodeError(404, "User not found");
   }
 
-  const owner = await findUserByReferralCode(pool, normalized);
-  const ownerId = owner?.id ?? null;
+  const codeRow = await findReferralCodeByCode(pool, normalized);
+  const ownerId =
+    codeRow?.policy_type === "user" ? codeRow.owner_user_id : null;
 
-  if (ownerId && ownerId !== targetId && !inputs.forceTransfer) {
-    throw createReferralCodeError(409, "Referral code already taken");
+  if (codeRow) {
+    if (!codeRow.is_active || codeRow.retired_at) {
+      throw createReferralCodeError(409, "Referral code is retired");
+    }
+    if (codeRow.policy_type === "campaign") {
+      throw createReferralCodeError(409, "Referral code is reserved");
+    }
   }
 
   if (ownerId && ownerId !== targetId && !lockIds.includes(ownerId)) {
@@ -585,7 +736,30 @@ export async function setReferralCodeForUser(
   }
 
   let transferredFromUserId: string | null = null;
-  if (ownerId && ownerId !== targetId) {
+  if (codeRow && ownerId === targetId) {
+    await setUserReferralCode(pool, targetId, normalized);
+    return {
+      code: normalized,
+      transferredFromUserId: null,
+    };
+  }
+
+  if (codeRow && ownerId && ownerId !== targetId) {
+    if (!inputs.forceTransfer) {
+      throw createReferralCodeError(409, "Referral code already taken");
+    }
+    const historicalReferrals = await countReferralsForReferralCode(
+      pool,
+      codeRow.referral_code_id,
+    );
+    if (historicalReferrals > 0) {
+      throw createReferralCodeError(
+        409,
+        "Referral code has historical referrals and cannot be transferred",
+      );
+    }
+    const targetPolicy = await ensureUserReferralCodePolicy(pool, targetId);
+    await retireActiveUserReferralCodes(pool, targetId, "user_code_changed");
     const cleared = await clearUserReferralCodeIfMatches(
       pool,
       ownerId,
@@ -594,9 +768,32 @@ export async function setReferralCodeForUser(
     if (cleared) {
       transferredFromUserId = ownerId;
     }
+    await pool.query(
+      `
+        update referral_codes
+        set policy_id = $2,
+            is_active = true,
+            retired_at = null,
+            retired_reason = null
+        where id = $1
+      `,
+      [codeRow.referral_code_id, targetPolicy.id],
+    );
+    await setUserReferralCode(pool, targetId, normalized);
+    return {
+      code: normalized,
+      transferredFromUserId,
+    };
   }
 
   try {
+    const targetPolicy = await ensureUserReferralCodePolicy(pool, targetId);
+    await retireActiveUserReferralCodes(pool, targetId, "user_code_changed");
+    await insertReferralCodeAlias(pool, {
+      code: normalized,
+      policyId: targetPolicy.id,
+      isActive: true,
+    });
     await setUserReferralCode(pool, targetId, normalized);
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -609,6 +806,169 @@ export async function setReferralCodeForUser(
     code: normalized,
     transferredFromUserId,
   };
+}
+
+function mapReferralCodeListRow(row: ReferralCodeListRow) {
+  return {
+    id: row.referral_code_id,
+    code: row.code,
+    isActive: row.is_active,
+    retiredAt: row.retired_at,
+    retiredReason: row.retired_reason,
+    policy: {
+      id: row.policy_id,
+      type: row.policy_type,
+      label: row.label,
+      multiplierOverride:
+        row.multiplier_override == null
+          ? null
+          : Number(row.multiplier_override),
+      visibleDropPoints: Number(row.visible_drop_points ?? 0),
+      tierDropPoints: Number(row.tier_drop_points ?? 0),
+      ownerUserId: row.owner_user_id,
+      owner:
+        row.owner_user_id != null
+          ? {
+              id: row.owner_user_id,
+              email: row.owner_email,
+              username: row.owner_username,
+              displayName: row.owner_display_name,
+            }
+          : null,
+    },
+    referralCount: Number(row.referral_count ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listAdminReferralCodes(
+  pool: DbQuery,
+  inputs: {
+    q?: string | null;
+    policyType?: ReferralCodePolicyType | null;
+    active?: boolean | null;
+    limit: number;
+    offset: number;
+  },
+) {
+  const result = await listReferralCodes(pool, inputs);
+  return {
+    total: result.total,
+    items: result.rows.map(mapReferralCodeListRow),
+  };
+}
+
+export async function createAdminCampaignReferralCode(
+  pool: DbQuery,
+  inputs: {
+    code: string;
+    label?: string | null;
+    multiplierOverride?: number | null;
+    visibleDropPoints?: number | null;
+    tierDropPoints?: number | null;
+  },
+) {
+  const normalized = normalizeReferralCode(inputs.code);
+  if (!normalized) {
+    throw createReferralCodeError(400, "Invalid referral code");
+  }
+  const existing = await findReferralCodeByCode(pool, normalized);
+  if (existing) {
+    throw createReferralCodeError(409, "Referral code is reserved");
+  }
+  const row = await createCampaignReferralCode(pool, {
+    code: normalized,
+    label: inputs.label,
+    multiplierOverride: inputs.multiplierOverride,
+    visibleDropPoints: inputs.visibleDropPoints,
+    tierDropPoints: inputs.tierDropPoints,
+  });
+  return mapReferralCodeListRow({
+    ...row,
+    owner_email: null,
+    owner_username: null,
+    owner_display_name: null,
+    referral_count: "0",
+  });
+}
+
+export async function updateAdminReferralCodePolicy(
+  pool: DbQuery,
+  inputs: {
+    referralCodeId: string;
+    label?: string | null;
+    multiplierOverride?: number | null;
+    visibleDropPoints?: number | null;
+    tierDropPoints?: number | null;
+    deactivate?: boolean;
+  },
+) {
+  const current = await pool.query<ReferralCodeListRow>(
+    `
+      select
+        rc.id as referral_code_id,
+        rc.code,
+        rc.is_active,
+        rc.retired_at,
+        rc.retired_reason,
+        p.id as policy_id,
+        p.policy_type,
+        p.owner_user_id,
+        p.label,
+        p.multiplier_override::text as multiplier_override,
+        p.visible_drop_points::text as visible_drop_points,
+        p.tier_drop_points::text as tier_drop_points,
+        rc.created_at,
+        rc.updated_at,
+        u.email as owner_email,
+        u.username as owner_username,
+        u.display_name as owner_display_name,
+        (
+          select count(*)::text
+          from referrals r
+          where r.referral_code_id = rc.id
+        ) as referral_count
+      from referral_codes rc
+      join referral_code_policies p
+        on p.id = rc.policy_id
+      left join users u
+        on u.id = p.owner_user_id
+      where rc.id = $1
+      limit 1
+    `,
+    [inputs.referralCodeId],
+  );
+  const currentRow = current.rows[0];
+  if (!currentRow) {
+    throw createReferralCodeError(404, "Referral code not found");
+  }
+  if (inputs.deactivate && currentRow.policy_type !== "campaign") {
+    throw createReferralCodeError(
+      400,
+      "Only campaign codes can be deactivated",
+    );
+  }
+
+  const updated = await updateReferralCodePolicy(pool, {
+    referralCodeId: inputs.referralCodeId,
+    label: inputs.label,
+    multiplierOverride: inputs.multiplierOverride,
+    visibleDropPoints: inputs.visibleDropPoints,
+    tierDropPoints: inputs.tierDropPoints,
+    deactivateCampaign: inputs.deactivate,
+  });
+  if (!updated) {
+    throw createReferralCodeError(404, "Referral code not found");
+  }
+
+  return mapReferralCodeListRow({
+    ...updated,
+    owner_email: currentRow.owner_email,
+    owner_username: currentRow.owner_username,
+    owner_display_name: currentRow.owner_display_name,
+    referral_count: currentRow.referral_count,
+  });
 }
 
 export function computeCashbackBreakdown(inputs: {
@@ -737,7 +1097,12 @@ export async function getRewardsSummary(
   inputs: { userId: string },
 ): Promise<{
   policy: RewardsPolicy;
-  clout: { points: number; volumeUsd: number };
+  clout: {
+    points: number;
+    tierPoints: number;
+    qualificationPoints: number;
+    volumeUsd: number;
+  };
   tier: RewardsTier;
   nextTier: RewardsTier | null;
   progress: { pct: number; remaining: number | null };
@@ -762,24 +1127,38 @@ export async function getRewardsSummary(
     value: number;
     source: RewardsMultiplierSource;
     asOf: Date;
+    referralCode: {
+      code: string;
+      label: string | null;
+      policyType: ReferralCodePolicyType;
+    } | null;
   };
+  inboundReferral: InboundReferralSummary | null;
 }> {
   // Summary stays read-only; reconciliation/qualification mutations are handled outside this path.
   const policy = await getRewardsPolicy(pool);
 
-  const [points, volumeUsd] = await Promise.all([
-    fetchUserPoints(pool, inputs.userId),
-    fetchUserVolume(pool, inputs.userId),
-  ]);
-  const tier = resolveTier(points, policy.tiers);
-  const nextTier = resolveNextTier(points, policy.tiers);
+  const [points, tierPoints, qualificationPoints, volumeUsd] =
+    await Promise.all([
+      fetchUserPoints(pool, inputs.userId),
+      fetchUserTierPoints(pool, inputs.userId),
+      fetchUserQualificationPoints(pool, inputs.userId),
+      fetchUserVolume(pool, inputs.userId),
+    ]);
+  const tier = resolveTier(tierPoints, policy.tiers);
+  const nextTier = resolveNextTier(tierPoints, policy.tiers);
   const progressPct = nextTier
     ? Math.min(
         1,
-        Math.max(0, (points - tier.points) / (nextTier.points - tier.points)),
+        Math.max(
+          0,
+          (tierPoints - tier.points) / (nextTier.points - tier.points),
+        ),
       )
     : 1;
-  const remaining = nextTier ? Math.max(0, nextTier.points - points) : null;
+  const remaining = nextTier
+    ? Math.max(0, nextTier.points - tierPoints)
+    : null;
 
   const feeTotalsByChain = await fetchFeeTotalsByChain(pool, {
     userId: inputs.userId,
@@ -789,6 +1168,9 @@ export async function getRewardsSummary(
     userId: inputs.userId,
     eventTime: multiplierAsOf,
   });
+  const inboundReferral = buildInboundReferralSummary(
+    await fetchInboundReferralForUser(pool, inputs.userId),
+  );
   const qualifiedCount = await fetchQualifiedReferralCount(pool, {
     userId: inputs.userId,
     threshold: OBSERVER_THRESHOLD,
@@ -814,7 +1196,7 @@ export async function getRewardsSummary(
 
   return {
     policy,
-    clout: { points, volumeUsd },
+    clout: { points, tierPoints, qualificationPoints, volumeUsd },
     tier,
     nextTier,
     progress: { pct: progressPct, remaining },
@@ -836,7 +1218,15 @@ export async function getRewardsSummary(
       value: multiplier.multiplierApplied,
       source: multiplier.multiplierSource,
       asOf: multiplierAsOf,
+      referralCode: multiplier.referralCodeContext
+        ? {
+            code: multiplier.referralCodeContext.code,
+            label: multiplier.referralCodeContext.label,
+            policyType: multiplier.referralCodeContext.policyType,
+          }
+        : null,
     },
+    inboundReferral,
   };
 }
 
@@ -891,7 +1281,7 @@ export async function getRewardsReferrals(
 
   const rows = await fetchReferralsForUser(pool, inputs);
   const referrals = rows.map((row) => {
-    const tier = resolveTier(row.points, policy.tiers);
+    const tier = resolveTier(row.tierPoints, policy.tiers);
     const status = resolveEffectiveReferralStatus({
       storedStatus: row.status,
       referrerPoints: referrerQualificationPoints,
