@@ -331,6 +331,11 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
       ),
     { markets: unifiedMarketRows.length },
   );
+  const slowProcessEventUnifiedTimings =
+    marketUpsertResult.unified.timings &&
+    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
+      ? marketUpsertResult.unified.timings
+      : undefined;
   log.info("Polymarket market upsert stats", {
     markets: unifiedMarketRows.length,
     polymarketInputRows: marketUpsertResult.polymarket.inputRows,
@@ -347,6 +352,9 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     unifiedBatches: marketUpsertResult.unified.batches,
     unifiedTokenSyncMarketCount:
       marketUpsertResult.unified.tokenSyncMarketCount,
+    ...(slowProcessEventUnifiedTimings
+      ? { unifiedTimings: slowProcessEventUnifiedTimings }
+      : {}),
   });
 
   if (unifiedTokenRows.length) {
@@ -1012,6 +1020,11 @@ async function refreshMarketRefs(
       ),
     { markets: unifiedMarketRows.length },
   );
+  const slowRefreshMarketRefsUnifiedTimings =
+    marketUpsertResult.unified.timings &&
+    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
+      ? marketUpsertResult.unified.timings
+      : undefined;
   log.info("Polymarket market upsert stats", {
     context: "refreshMarketRefs",
     markets: unifiedMarketRows.length,
@@ -1029,6 +1042,9 @@ async function refreshMarketRefs(
     unifiedBatches: marketUpsertResult.unified.batches,
     unifiedTokenSyncMarketCount:
       marketUpsertResult.unified.tokenSyncMarketCount,
+    ...(slowRefreshMarketRefsUnifiedTimings
+      ? { unifiedTimings: slowRefreshMarketRefsUnifiedTimings }
+      : {}),
   });
 
   if (unifiedTokenRows.length) {
@@ -1496,14 +1512,11 @@ async function fetchTopTokens(
     if (out.length >= limitTokens) return out;
   }
   if (out.length < limitTokens) {
-    log.warn(
-      "Polymarket top token source scan underfilled",
-      {
-        limitTokens,
-        returned: out.length,
-        limitMarkets,
-      },
-    );
+    log.warn("Polymarket top token source scan underfilled", {
+      limitTokens,
+      returned: out.length,
+      limitMarkets,
+    });
   }
   return out;
 }

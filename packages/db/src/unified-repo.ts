@@ -107,6 +107,13 @@ export type UpsertUnifiedMarketsResult = {
   batches: number;
   upsertedRows: number;
   tokenSyncMarketCount: number;
+  timings?: {
+    filterChangedMs: number;
+    loadTokenSourcesMs: number;
+    upsertMs: number;
+    tokenSyncMs: number;
+    totalMs: number;
+  };
 };
 
 export type UpsertUnifiedEventsResult = {
@@ -586,6 +593,15 @@ export async function upsertUnifiedMarkets(
   marketRows: UnifiedMarketRow[],
   options: { batchSize?: number; filterUnchanged?: boolean } = {},
 ): Promise<UpsertUnifiedMarketsResult> {
+  const startedAt = Date.now();
+  const timings = {
+    filterChangedMs: 0,
+    loadTokenSourcesMs: 0,
+    upsertMs: 0,
+    tokenSyncMs: 0,
+    totalMs: 0,
+  };
+
   if (marketRows.length === 0) {
     return {
       inputRows: 0,
@@ -595,6 +611,7 @@ export async function upsertUnifiedMarkets(
       batches: 0,
       upsertedRows: 0,
       tokenSyncMarketCount: 0,
+      timings,
     };
   }
 
@@ -767,17 +784,22 @@ export async function upsertUnifiedMarkets(
   let tokenSyncMarketCount = 0;
 
   for (const batch of batches) {
+    const filterStartedAt = Date.now();
     const changedBatch = options.filterUnchanged
       ? await filterChangedUnifiedMarketRows(pool, batch)
       : batch;
+    timings.filterChangedMs += Date.now() - filterStartedAt;
     changedRows += changedBatch.length;
     skippedRows += batch.length - changedBatch.length;
     if (changedBatch.length === 0) continue;
 
+    const loadTokenSourcesStartedAt = Date.now();
     const existingTokenSources = await loadUnifiedMarketTokenSources(
       pool,
       changedBatch.map((row: UnifiedMarketRow) => row.id),
     );
+    timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
+    const upsertStartedAt = Date.now();
     await runWithPgWriteConflictRetry(
       "upsertUnifiedMarkets",
       changedBatch.length,
@@ -786,6 +808,7 @@ export async function upsertUnifiedMarkets(
         upsertedRows += result.rowCount ?? 0;
       },
     );
+    timings.upsertMs += Date.now() - upsertStartedAt;
     const changedMarketIds = changedBatch
       .filter((row: UnifiedMarketRow) =>
         shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
@@ -793,10 +816,13 @@ export async function upsertUnifiedMarkets(
       .map((row: UnifiedMarketRow) => row.id);
     if (changedMarketIds.length > 0) {
       tokenSyncMarketCount += changedMarketIds.length;
+      const tokenSyncStartedAt = Date.now();
       await syncUnifiedMarketTokens(pool, changedMarketIds);
+      timings.tokenSyncMs += Date.now() - tokenSyncStartedAt;
     }
   }
 
+  timings.totalMs = Date.now() - startedAt;
   return {
     inputRows: marketRows.length,
     dedupedRows: rows.length,
@@ -805,6 +831,7 @@ export async function upsertUnifiedMarkets(
     batches: batches.length,
     upsertedRows,
     tokenSyncMarketCount,
+    timings,
   };
 }
 
@@ -1378,12 +1405,7 @@ export async function writeUnifiedBookTops(
   const payload = inputs.flatMap((input) => {
     const tsMs = input.ts.getTime();
     if (
-      shouldSkipBookTopWrite(
-        input.tokenId,
-        input.bestBid,
-        input.bestAsk,
-        tsMs,
-      )
+      shouldSkipBookTopWrite(input.tokenId, input.bestBid, input.bestAsk, tsMs)
     ) {
       return [];
     }
