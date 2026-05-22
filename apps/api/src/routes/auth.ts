@@ -138,6 +138,7 @@ function buildAuthWalletPayloads(
     const isEmbeddedWallet = profile?.source === "embedded";
     const isSmartWallet = profile?.source === "smart";
     const isInternalWallet = profile?.isInternalWallet;
+    const walletName = wallet.name?.trim();
 
     return {
       id: wallet.id,
@@ -147,7 +148,7 @@ function buildAuthWalletPayloads(
       isEmbeddedWallet,
       isSmartWallet,
       isInternalWallet,
-      name: isInternalWallet ? "Trading Wallet" : wallet.name,
+      name: walletName || (isInternalWallet ? "Trading Wallet" : null),
       isPrimary: wallet.isPrimary,
       isVerified: wallet.isVerified,
       createdAt: wallet.createdAt.toISOString(),

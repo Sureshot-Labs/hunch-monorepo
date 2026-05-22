@@ -1,10 +1,12 @@
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 
-const COLLECTED_ANALYTICS_EVENTS = [
+export const COLLECTED_ANALYTICS_EVENTS = [
   "hf_bridge_fail",
   "hf_bridge_submit",
   "hf_bridge_success",
+  "hf_event_entry_open",
+  "hf_market_open",
   "hf_order_fail",
   "hf_order_submit",
   "hf_order_success",
@@ -14,6 +16,15 @@ const COLLECTED_ANALYTICS_EVENTS = [
   "hf_redemption_action",
   "hf_rewards_claim_action",
   "hf_rewards_referral_action",
+  "hf_trade_submit_no_terminal_2m",
+  "hf_wallet_connect_click",
+  "hf_wallet_connect_completed_funnel",
+  "hf_wallet_connect_error",
+  "hf_wallet_connect_success",
+  "hf_wallet_link_click",
+  "hf_wallet_link_completed_funnel",
+  "hf_wallet_link_error",
+  "hf_wallet_link_success",
 ] as const;
 
 type CollectedAnalyticsEventName = (typeof COLLECTED_ANALYTICS_EVENTS)[number];
@@ -27,6 +38,10 @@ type ForwardedAnalyticsTelemetry = {
   droppedDisabled: number;
   droppedInvalid: number;
   failed: number;
+};
+
+type AnalyticsForwardingTelemetryOptions = {
+  breakdownWindowDays?: number;
 };
 
 type AnalyticsEventCollectionResult =
@@ -61,12 +76,15 @@ const runtimeTelemetry: ForwardedAnalyticsTelemetry = {
   droppedInvalid: 0,
   failed: 0,
 };
+const runtimeStartedAt = new Date();
 let deliveryModeOverrideForTests: AnalyticsDeliveryMode | null = null;
+const DEFAULT_TELEMETRY_BREAKDOWN_WINDOW_DAYS = 30;
 
 const TERMINAL_ORDER_EVENTS = new Set<string>([
   "hf_order_fail",
   "hf_order_submit",
   "hf_order_success",
+  "hf_trade_submit_no_terminal_2m",
 ]);
 const TERMINAL_BRIDGE_EVENTS = new Set<string>([
   "hf_bridge_fail",
@@ -136,6 +154,14 @@ function resolveDeliveryMode(): AnalyticsDeliveryMode {
   if (deliveryModeOverrideForTests) return deliveryModeOverrideForTests;
   if (!env.analyticsServerForwardingEnabled) return "off";
   return env.analyticsServerForwardingMode;
+}
+
+function normalizeTelemetryBreakdownWindowDays(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_TELEMETRY_BREAKDOWN_WINDOW_DAYS;
+  }
+  return Math.max(1, Math.min(395, Math.trunc(parsed)));
 }
 
 export function setAnalyticsDeliveryModeForTests(
@@ -262,6 +288,10 @@ function validateCollectedAnalyticsPayload(
 
 export function shouldForwardAnalyticsEvent(event: string): boolean {
   return isCollectedAnalyticsEventName(event);
+}
+
+export function listCollectedAnalyticsEvents(): string[] {
+  return [...COLLECTED_ANALYTICS_EVENTS];
 }
 
 async function insertAnalyticsServerEvent(
@@ -407,27 +437,51 @@ export async function ingestForwardedAnalyticsEvent(
 
 export async function fetchAnalyticsForwardingTelemetry(
   pool: DbQuery,
+  options: AnalyticsForwardingTelemetryOptions = {},
 ): Promise<{
   byEvent: Array<{ event: string; count: number }>;
   byOrigin: Array<{ count: number; origin: AnalyticsEventOrigin }>;
   bySchemaVersion: Array<{ count: number; version: string }>;
   collector: {
+    recentStored: number;
+    recentWindowDays: number;
     stored: number;
+    storedEstimated: boolean;
   };
   mode: AnalyticsDeliveryMode;
   runtime: ForwardedAnalyticsTelemetry;
+  runtimeStartedAt: string;
 }> {
+  const breakdownWindowDays = normalizeTelemetryBreakdownWindowDays(
+    options.breakdownWindowDays,
+  );
   const [
     { rows: collectorRows },
     { rows: versionRows },
     { rows: eventRows },
     { rows: originRows },
   ] = await Promise.all([
-    pool.query<{ stored: string }>(
+    pool.query<{ recent_stored: string; stored: string }>(
       `
-          select count(*)::text as stored
-          from analytics_server_events
+          select
+            greatest(
+              coalesce(
+                (
+                  select reltuples::bigint
+                  from pg_class
+                  where oid = 'analytics_server_events'::regclass
+                ),
+                0
+              ),
+              0
+            )::text as stored,
+            (
+              select count(*)::text
+              from analytics_server_events
+              where created_at >= now() - make_interval(days => $1::int)
+            ) as recent_stored
         `,
+      [breakdownWindowDays],
     ),
     pool.query<{ count: string; version: string }>(
       `
@@ -435,10 +489,12 @@ export async function fetchAnalyticsForwardingTelemetry(
             analytics_schema_version as version,
             count(*)::text as count
           from analytics_server_events
+          where created_at >= now() - make_interval(days => $1::int)
           group by analytics_schema_version
           order by count(*) desc, analytics_schema_version desc
           limit 20
         `,
+      [breakdownWindowDays],
     ),
     pool.query<{ count: string; event: string }>(
       `
@@ -446,10 +502,12 @@ export async function fetchAnalyticsForwardingTelemetry(
             event_name as event,
             count(*)::text as count
           from analytics_server_events
+          where created_at >= now() - make_interval(days => $1::int)
           group by event_name
           order by count(*) desc, event_name asc
           limit 20
         `,
+      [breakdownWindowDays],
     ),
     pool.query<{ count: string; origin: AnalyticsEventOrigin }>(
       `
@@ -457,18 +515,24 @@ export async function fetchAnalyticsForwardingTelemetry(
             origin,
             count(*)::text as count
           from analytics_server_events
+          where created_at >= now() - make_interval(days => $1::int)
           group by origin
           order by count(*) desc, origin asc
         `,
+      [breakdownWindowDays],
     ),
   ]);
 
   const collectorRow = collectorRows[0];
   return {
     runtime: { ...runtimeTelemetry },
+    runtimeStartedAt: runtimeStartedAt.toISOString(),
     mode: resolveDeliveryMode(),
     collector: {
       stored: Number(collectorRow?.stored ?? 0),
+      storedEstimated: true,
+      recentStored: Number(collectorRow?.recent_stored ?? 0),
+      recentWindowDays: breakdownWindowDays,
     },
     byOrigin: originRows.map((row) => ({
       origin: row.origin,
