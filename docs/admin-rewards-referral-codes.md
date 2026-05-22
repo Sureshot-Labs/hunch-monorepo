@@ -51,6 +51,14 @@ Referral-code capabilities:
 - Use the new point fields to avoid showing private tier-only points as public
   points.
 
+Rewards multiplier capabilities:
+
+- Edit the global multiplier display label separately from multiplier policy
+  notes.
+- Edit user override display labels separately from override reasons.
+- Render a multiplier badge label only when the winning multiplier source
+  returns an explicit label.
+
 System/Ops capabilities added for the external panel:
 
 - Postgres health and slow-query stats from `/admin/system/postgres`.
@@ -73,6 +81,8 @@ Routes use existing admin permissions:
 | Referred users by code | `/admin/rewards/referral-codes/by-code/:code/referrals` | `rewards:read` and `users:read` |
 | User current-code management | `/admin/users/:id/referral-code` | `users:write` |
 | User list/detail metadata | `/admin/users`, `/admin/users/:id` | `users:read` |
+| Multiplier policy | `/admin/rewards/multiplier-policy` | `rewards:read` / `rewards:write` |
+| Multiplier overrides | `/admin/rewards/multiplier-overrides` | `rewards:read` / `rewards:write` |
 | Manual points | `/admin/rewards/points`, `/admin/points/manual-events` | `rewards:write` / `rewards:read` |
 | Postgres System/Ops stats | `/admin/system/postgres` | `analytics:read` |
 | Indexer System/Ops stats | `/admin/system/indexers` | `analytics:read` |
@@ -427,6 +437,105 @@ Implementation details:
 - Keep `publicPoints`, `tierPoints`, and `qualificationPoints` labeled
   separately. Do not show `tierPoints` as public leaderboard points.
 
+## Multiplier Policy And Override Labels
+
+Multiplier labels are public display labels for the active multiplier badge.
+They are separate from admin-only notes and reasons.
+
+### Multiplier Policy
+
+`GET /admin/rewards/multiplier-policy`
+
+Relevant response fields:
+
+```json
+{
+  "ok": true,
+  "policy": {
+    "effectiveAt": "2026-05-22T12:00:00.000Z",
+    "globalMultiplier": 1.25,
+    "globalMultiplierLabel": "Launch Boost",
+    "referralRules": [],
+    "tierRules": [],
+    "notes": "Internal admin notes"
+  },
+  "active": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "effectiveAt": "2026-05-22T12:00:00.000Z",
+    "globalMultiplier": 1.25,
+    "globalMultiplierLabel": "Launch Boost",
+    "referralRules": [],
+    "tierRules": [],
+    "notes": "Internal admin notes",
+    "createdAt": "2026-05-22T12:00:00.000Z",
+    "updatedAt": "2026-05-22T12:00:00.000Z"
+  }
+}
+```
+
+`POST /admin/rewards/multiplier-policy`
+
+Request:
+
+```json
+{
+  "globalMultiplier": 1.25,
+  "globalMultiplierLabel": "Launch Boost",
+  "referralRules": [],
+  "tierRules": [],
+  "notes": "Internal admin notes"
+}
+```
+
+Field notes:
+
+- `globalMultiplierLabel`: optional public display label, max 120 chars.
+- `notes`: internal/admin text. Do not show it in the public user app.
+- Empty or `null` `globalMultiplierLabel` means no badge label if global wins.
+
+### User Multiplier Overrides
+
+`GET /admin/rewards/multiplier-overrides`
+
+Items include:
+
+```json
+{
+  "userId": "7f2e6c1f-83f1-4dc8-b4c3-9487f0440a24",
+  "walletAddress": "0x45bd000000000000000000000000000000001733",
+  "email": "user@example.com",
+  "username": "hunchuser",
+  "displayName": "Hunch User",
+  "multiplier": 1.75,
+  "label": "VIP Boost",
+  "reason": "Internal admin reason",
+  "effectiveAt": "2026-05-22T12:00:00.000Z",
+  "expiresAt": null,
+  "createdAt": "2026-05-22T12:00:00.000Z",
+  "updatedAt": "2026-05-22T12:00:00.000Z"
+}
+```
+
+`POST /admin/rewards/multiplier-overrides`
+
+Request:
+
+```json
+{
+  "userId": "7f2e6c1f-83f1-4dc8-b4c3-9487f0440a24",
+  "multiplier": 1.75,
+  "label": "VIP Boost",
+  "reason": "Internal admin reason",
+  "expiresAt": null
+}
+```
+
+Field notes:
+
+- `label`: optional public display label, max 120 chars.
+- `reason`: internal/admin text. Do not show it in the public user app.
+- Override search `q` matches the label as well as user/wallet fields.
+
 ## System/Ops Read APIs
 
 These APIs were added for the new external panel as read-only operational
@@ -630,6 +739,7 @@ Relevant response fields:
     "multiplier": {
       "value": 1.5,
       "source": "referral_code",
+      "label": "Polymarket",
       "asOf": "2026-05-22T12:00:00.000Z",
       "referralCode": {
         "code": "POLY15",
@@ -653,10 +763,13 @@ Relevant response fields:
 
 Display guidance:
 
-- If `summary.multiplier.source === "referral_code"` and
-  `summary.multiplier.referralCode.label` exists, frontend may display
-  `Polymarket: 1.5x`.
-- If another multiplier wins, `summary.inboundReferral` still tells the UI that
+- Show a multiplier badge label only when `summary.multiplier.label` is
+  non-empty. Preserve the label casing.
+- `summary.multiplier.label` can come from a winning referral-code policy,
+  global multiplier policy, or user override.
+- Referral-count and tier multipliers return `label: null`.
+- If the user came from a partner code but another multiplier wins,
+  `summary.inboundReferral` still tells the UI that
   the user came from a partner code. In that case, show partner attribution only
   if product wants it; do not imply that partner multiplier is the active
   multiplier.
@@ -759,6 +872,21 @@ Suggested labels:
 - `rawPoints`: "Raw points"
 
 Avoid showing `rawPoints` as a leaderboard/public score.
+
+### Multiplier Policy / Overrides
+
+Add editable fields:
+
+- Global policy display label: `globalMultiplierLabel`.
+- User override display label: `label`.
+
+Keep these fields internal/admin-only:
+
+- Multiplier policy `notes`.
+- Override `reason`.
+
+Public multiplier badge behavior should read `summary.multiplier.label`; do not
+derive public labels from notes or reasons.
 
 ## Rollout Notes
 
