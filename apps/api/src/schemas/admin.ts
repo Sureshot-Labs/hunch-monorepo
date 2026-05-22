@@ -13,8 +13,18 @@ export const adminFeePolicySchema = z.object({
     .regex(/^0x[0-9a-fA-F]{64}$/)
     .optional()
     .or(z.literal("")),
-  polymarketBuilderTakerFeeBps: z.coerce.number().int().min(0).max(100).optional(),
-  polymarketBuilderMakerFeeBps: z.coerce.number().int().min(0).max(50).optional(),
+  polymarketBuilderTakerFeeBps: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(100)
+    .optional(),
+  polymarketBuilderMakerFeeBps: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(50)
+    .optional(),
   limitlessFeeShareBps: z.coerce.number().int().min(0).max(10_000).optional(),
   effectiveAt: z.string().datetime().optional(),
 });
@@ -194,6 +204,33 @@ export const adminUserAnalyticsQuerySchema = z.object({
   cursor: adminCursorSchema.optional(),
   limit: adminPageLimitSchema.optional(),
   range: adminUserAnalyticsRangeSchema.optional(),
+});
+
+const adminAnalyticsOriginSchema = z.enum(["backend", "browser"]);
+const adminAnalyticsOutcomeSchema = z.enum([
+  "action",
+  "failure",
+  "success",
+  "timeout",
+]);
+
+export const adminAnalyticsRangeQuerySchema = z.object({
+  range: adminUserAnalyticsRangeSchema.optional(),
+});
+
+export const adminAnalyticsEventsQuerySchema = z.object({
+  cursor: adminCursorSchema.optional(),
+  domain: z.string().trim().min(1).max(80).optional(),
+  eventName: z.string().trim().min(1).max(120).optional(),
+  limit: adminPageLimitSchema.optional(),
+  origin: adminAnalyticsOriginSchema.optional(),
+  outcome: adminAnalyticsOutcomeSchema.optional(),
+  q: z.string().trim().min(1).max(200).optional(),
+  range: adminUserAnalyticsRangeSchema.optional(),
+  source: z.string().trim().min(1).max(120).optional(),
+  status: z.string().trim().min(1).max(120).optional(),
+  userId: z.string().uuid().optional(),
+  venue: z.string().trim().min(1).max(120).optional(),
 });
 
 export const adminUserAdminSchema = z.object({

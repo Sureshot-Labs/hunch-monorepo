@@ -147,7 +147,7 @@ function buildAuthWalletPayloads(
       isEmbeddedWallet,
       isSmartWallet,
       isInternalWallet,
-      name: isInternalWallet ? "Trading Wallet" : wallet.name,
+      name: wallet.name,
       isPrimary: wallet.isPrimary,
       isVerified: wallet.isVerified,
       createdAt: wallet.createdAt.toISOString(),

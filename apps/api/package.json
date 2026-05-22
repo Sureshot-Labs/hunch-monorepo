@@ -17,6 +17,7 @@
     "admin:points": "tsx src/admin-points.ts",
     "admin:merge-user": "tsx src/admin-merge-user.ts",
     "admin:wallets:duplicates": "tsx src/admin-wallet-duplicates.ts",
+    "analytics:retention": "tsx src/analytics-retention.ts",
     "fees:collect": "tsx src/collect-fees.ts",
     "fees:reconcile": "tsx src/reconcile-fees.ts",
     "kalshi:reconcile-executions": "tsx src/reconcile-kalshi-executions.ts",

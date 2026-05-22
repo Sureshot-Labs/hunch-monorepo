@@ -11,7 +11,10 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { abis } from "../lib/contracts.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
-import { parseUsdcToMicroFloor, usdcMicroToDecimalString } from "../lib/usdc.js";
+import {
+  parseUsdcToMicroFloor,
+  usdcMicroToDecimalString,
+} from "../lib/usdc.js";
 import { withRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { getRedisStatus } from "../redis.js";
 import {
@@ -59,6 +62,8 @@ import {
   formatUiAmount,
 } from "../services/solana-rpc.js";
 import {
+  adminAnalyticsEventsQuerySchema,
+  adminAnalyticsRangeQuerySchema,
   adminFeePolicySchema,
   adminIntelPolicyBodySchema,
   adminIntelPolicyParamsSchema,
@@ -83,6 +88,10 @@ import {
   adminUserParamsSchema,
   adminUsersQuerySchema,
 } from "../schemas/admin.js";
+import {
+  fetchAnalyticsForwardingTelemetry,
+  listCollectedAnalyticsEvents,
+} from "../services/analytics-forwarding.js";
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
@@ -313,7 +322,10 @@ function max0Bigint(value: bigint): bigint {
   return value > 0n ? value : 0n;
 }
 
-function clampFeeBpsForMax(value: number | null | undefined, max: number): number {
+function clampFeeBpsForMax(
+  value: number | null | undefined,
+  max: number,
+): number {
   if (value == null || !Number.isFinite(value)) return 0;
   return Math.min(Math.max(Math.trunc(value), 0), max);
 }
@@ -379,6 +391,12 @@ type AdminUserAnalyticsRange =
   | "all";
 
 type AdminUserAnalyticsOutcome = "action" | "failure" | "success" | "timeout";
+type AdminAnalyticsMonitorStatus =
+  | "critical"
+  | "healthy"
+  | "no_data"
+  | "warning";
+type AdminAnalyticsMonitorRateMode = "attempt" | "event_count";
 
 type AdminKeysetCursor = {
   createdAt: Date;
@@ -409,11 +427,456 @@ const ADMIN_USER_ANALYTICS_OUTCOME_SQL = `
   end
 `;
 
+type AdminAnalyticsEventMetadata = {
+  alertSlaHours: number;
+  domain: string;
+  owner: string;
+  tier: "core" | "supporting";
+};
+
+type AdminAnalyticsMonitorStep = {
+  event: string;
+  statuses?: readonly string[];
+};
+
+type AdminAnalyticsMonitorDefinition = {
+  alertSlaHours: number;
+  domain: string;
+  failure?: AdminAnalyticsMonitorStep;
+  id: string;
+  involvedOwners: readonly string[];
+  kind: "event_volume" | "funnel_rate" | "terminal_error_rate";
+  owner: string;
+  priority: "p1" | "p2";
+  requiredDimensions: readonly string[];
+  start: AdminAnalyticsMonitorStep;
+  success?: AdminAnalyticsMonitorStep;
+  thresholds: {
+    expectedFailureRateMaxPct?: number;
+    expectedSuccessRateMinPct?: number;
+    expectedTimeoutRateMaxPct?: number;
+    expectedVolumeMinPerWindow?: number;
+  };
+  timeout?: AdminAnalyticsMonitorStep;
+  trackedEvents: readonly string[];
+  windowMinutes: number;
+};
+
+const ADMIN_ANALYTICS_SCHEMA_VERSION_FILTER = "2026-04-06.p3c4a";
+const ADMIN_ANALYTICS_COLLECTOR_WINDOW_DAYS = 30;
+const ADMIN_ANALYTICS_EVENT_METADATA: Record<
+  string,
+  AdminAnalyticsEventMetadata
+> = {
+  hf_bridge_fail: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "deposit",
+    tier: "core",
+  },
+  hf_bridge_submit: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "deposit",
+    tier: "core",
+  },
+  hf_bridge_success: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "deposit",
+    tier: "core",
+  },
+  hf_event_entry_open: {
+    alertSlaHours: 168,
+    domain: "market_navigation",
+    owner: "analytics_platform",
+    tier: "supporting",
+  },
+  hf_market_open: {
+    alertSlaHours: 24,
+    domain: "event_page",
+    owner: "events",
+    tier: "core",
+  },
+  hf_order_fail: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "trade",
+    tier: "core",
+  },
+  hf_order_submit: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "trade",
+    tier: "core",
+  },
+  hf_order_success: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "trade",
+    tier: "core",
+  },
+  hf_portfolio_order_cancel: {
+    alertSlaHours: 24,
+    domain: "portfolio",
+    owner: "portfolio",
+    tier: "core",
+  },
+  hf_portfolio_share_action: {
+    alertSlaHours: 168,
+    domain: "portfolio",
+    owner: "portfolio",
+    tier: "supporting",
+  },
+  hf_referral_link_landing: {
+    alertSlaHours: 168,
+    domain: "onboarding",
+    owner: "growth",
+    tier: "supporting",
+  },
+  hf_redemption_action: {
+    alertSlaHours: 168,
+    domain: "portfolio",
+    owner: "portfolio",
+    tier: "supporting",
+  },
+  hf_rewards_claim_action: {
+    alertSlaHours: 24,
+    domain: "rewards",
+    owner: "rewards",
+    tier: "core",
+  },
+  hf_rewards_referral_action: {
+    alertSlaHours: 168,
+    domain: "rewards",
+    owner: "rewards",
+    tier: "supporting",
+  },
+  hf_trade_submit_no_terminal_2m: {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    owner: "analytics_platform",
+    tier: "core",
+  },
+  hf_wallet_connect_click: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "growth",
+    tier: "core",
+  },
+  hf_wallet_connect_completed_funnel: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "analytics_platform",
+    tier: "core",
+  },
+  hf_wallet_connect_error: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "growth",
+    tier: "core",
+  },
+  hf_wallet_connect_success: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "growth",
+    tier: "core",
+  },
+  hf_wallet_link_click: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "deposit",
+    tier: "core",
+  },
+  hf_wallet_link_completed_funnel: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "analytics_platform",
+    tier: "core",
+  },
+  hf_wallet_link_error: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "deposit",
+    tier: "core",
+  },
+  hf_wallet_link_success: {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    owner: "deposit",
+    tier: "core",
+  },
+};
+
+const ADMIN_ANALYTICS_MONITORS: readonly AdminAnalyticsMonitorDefinition[] = [
+  {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    failure: { event: "hf_bridge_fail" },
+    id: "bridge_terminal_outcome",
+    involvedOwners: ["deposit"],
+    kind: "funnel_rate",
+    owner: "deposit",
+    priority: "p1",
+    requiredDimensions: [
+      "analytics_schema_version",
+      "attempt_id",
+      "dst_chain_id",
+      "execution_mode",
+      "src_chain_id",
+    ],
+    start: { event: "hf_bridge_submit" },
+    success: { event: "hf_bridge_success" },
+    thresholds: {
+      expectedFailureRateMaxPct: 15,
+      expectedSuccessRateMinPct: 80,
+    },
+    trackedEvents: ["hf_bridge_fail", "hf_bridge_submit", "hf_bridge_success"],
+    windowMinutes: 120,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "event_page",
+    id: "event_page_open_volume",
+    involvedOwners: ["events"],
+    kind: "event_volume",
+    owner: "events",
+    priority: "p2",
+    requiredDimensions: ["analytics_schema_version", "event_id"],
+    start: { event: "hf_market_open" },
+    thresholds: {
+      expectedVolumeMinPerWindow: 1,
+    },
+    trackedEvents: ["hf_market_open"],
+    windowMinutes: 60,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "trade_execution",
+    failure: { event: "hf_order_fail" },
+    id: "order_terminal_outcome",
+    involvedOwners: ["analytics_platform", "trade"],
+    kind: "funnel_rate",
+    owner: "trade",
+    priority: "p1",
+    requiredDimensions: [
+      "analytics_schema_version",
+      "attempt_id",
+      "order_type",
+      "side",
+      "venue",
+    ],
+    start: { event: "hf_order_submit" },
+    success: { event: "hf_order_success" },
+    thresholds: {
+      expectedFailureRateMaxPct: 20,
+      expectedSuccessRateMinPct: 75,
+      expectedTimeoutRateMaxPct: 5,
+    },
+    timeout: {
+      event: "hf_trade_submit_no_terminal_2m",
+      statuses: ["timeout_120s"],
+    },
+    trackedEvents: [
+      "hf_order_fail",
+      "hf_order_submit",
+      "hf_order_success",
+      "hf_trade_submit_no_terminal_2m",
+    ],
+    windowMinutes: 120,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "portfolio",
+    failure: {
+      event: "hf_portfolio_order_cancel",
+      statuses: ["cancel_error"],
+    },
+    id: "portfolio_cancel_terminal",
+    involvedOwners: ["portfolio"],
+    kind: "terminal_error_rate",
+    owner: "portfolio",
+    priority: "p1",
+    requiredDimensions: [
+      "analytics_schema_version",
+      "attempt_id",
+      "order_type",
+      "source",
+      "status",
+      "venue",
+    ],
+    start: {
+      event: "hf_portfolio_order_cancel",
+      statuses: ["cancel_submit"],
+    },
+    success: {
+      event: "hf_portfolio_order_cancel",
+      statuses: ["cancel_success"],
+    },
+    thresholds: {
+      expectedFailureRateMaxPct: 20,
+      expectedSuccessRateMinPct: 70,
+    },
+    trackedEvents: ["hf_portfolio_order_cancel"],
+    windowMinutes: 120,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "rewards",
+    failure: {
+      event: "hf_rewards_claim_action",
+      statuses: ["claim_error"],
+    },
+    id: "rewards_claim_terminal",
+    involvedOwners: ["rewards"],
+    kind: "terminal_error_rate",
+    owner: "rewards",
+    priority: "p1",
+    requiredDimensions: [
+      "analytics_schema_version",
+      "attempt_id",
+      "source",
+      "status",
+    ],
+    start: {
+      event: "hf_rewards_claim_action",
+      statuses: ["claim_submit"],
+    },
+    success: {
+      event: "hf_rewards_claim_action",
+      statuses: ["claim_success"],
+    },
+    thresholds: {
+      expectedFailureRateMaxPct: 20,
+      expectedSuccessRateMinPct: 70,
+    },
+    trackedEvents: ["hf_rewards_claim_action"],
+    windowMinutes: 240,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    failure: { event: "hf_wallet_connect_error" },
+    id: "wallet_connect_completion",
+    involvedOwners: ["analytics_platform", "growth"],
+    kind: "funnel_rate",
+    owner: "growth",
+    priority: "p1",
+    requiredDimensions: ["analytics_schema_version", "source"],
+    start: { event: "hf_wallet_connect_click" },
+    success: {
+      event: "hf_wallet_connect_completed_funnel",
+      statuses: ["completed"],
+    },
+    thresholds: {
+      expectedFailureRateMaxPct: 20,
+      expectedSuccessRateMinPct: 70,
+    },
+    trackedEvents: [
+      "hf_wallet_connect_click",
+      "hf_wallet_connect_completed_funnel",
+      "hf_wallet_connect_error",
+      "hf_wallet_connect_success",
+    ],
+    windowMinutes: 60,
+  },
+  {
+    alertSlaHours: 24,
+    domain: "onboarding",
+    failure: { event: "hf_wallet_link_error" },
+    id: "wallet_link_completion",
+    involvedOwners: ["analytics_platform", "deposit"],
+    kind: "funnel_rate",
+    owner: "deposit",
+    priority: "p1",
+    requiredDimensions: ["analytics_schema_version", "source", "status"],
+    start: { event: "hf_wallet_link_click" },
+    success: {
+      event: "hf_wallet_link_completed_funnel",
+      statuses: ["completed"],
+    },
+    thresholds: {
+      expectedFailureRateMaxPct: 20,
+      expectedSuccessRateMinPct: 70,
+    },
+    trackedEvents: [
+      "hf_wallet_link_click",
+      "hf_wallet_link_completed_funnel",
+      "hf_wallet_link_error",
+      "hf_wallet_link_success",
+    ],
+    windowMinutes: 60,
+  },
+];
+
+const ADMIN_ANALYTICS_EXPECTED_MONITOR_EVENTS = Array.from(
+  new Set(ADMIN_ANALYTICS_MONITORS.flatMap((monitor) => monitor.trackedEvents)),
+).sort((a, b) => a.localeCompare(b));
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+const ADMIN_ANALYTICS_DOMAIN_SQL = `
+  case
+    ${Object.entries(ADMIN_ANALYTICS_EVENT_METADATA)
+      .map(
+        ([eventName, metadata]) =>
+          `when event_name = ${sqlStringLiteral(eventName)} then ${sqlStringLiteral(metadata.domain)}`,
+      )
+      .join("\n    ")}
+    else 'unknown'
+  end
+`;
+
+function getAdminAnalyticsEventMetadata(eventName: string) {
+  return (
+    ADMIN_ANALYTICS_EVENT_METADATA[eventName] ?? {
+      alertSlaHours: null,
+      domain: "unknown",
+      owner: null,
+      tier: "unknown",
+    }
+  );
+}
+
+function getAdminAnalyticsEventsForDomain(domain: string): string[] {
+  return Object.entries(ADMIN_ANALYTICS_EVENT_METADATA)
+    .filter(([, metadata]) => metadata.domain === domain)
+    .map(([eventName]) => eventName);
+}
+
 function resolveAdminUserAnalyticsRangeStart(
   range: AdminUserAnalyticsRange,
 ): Date | null {
   if (range === "all") return null;
   return new Date(Date.now() - ADMIN_USER_ANALYTICS_RANGE_MS[range]);
+}
+
+function resolveAdminAnalyticsWindow(range: AdminUserAnalyticsRange): {
+  previousRangeEndAt: Date | null;
+  previousRangeStartAt: Date | null;
+  rangeEndAt: Date;
+  rangeStartAt: Date | null;
+} {
+  const rangeEndAt = new Date();
+  if (range === "all") {
+    return {
+      previousRangeEndAt: null,
+      previousRangeStartAt: null,
+      rangeEndAt,
+      rangeStartAt: null,
+    };
+  }
+
+  const durationMs = ADMIN_USER_ANALYTICS_RANGE_MS[range];
+  const rangeStartAt = new Date(rangeEndAt.getTime() - durationMs);
+  return {
+    previousRangeEndAt: rangeStartAt,
+    previousRangeStartAt: new Date(rangeStartAt.getTime() - durationMs),
+    rangeEndAt,
+    rangeStartAt,
+  };
 }
 
 function resolveAdminUserAnalyticsTimelineGranularity(
@@ -425,9 +888,143 @@ function resolveAdminUserAnalyticsTimelineGranularity(
   return "day";
 }
 
-function decodeAdminKeysetCursor(
-  encoded: string | undefined,
-): { cursor: AdminKeysetCursor | null; error: string | null } {
+function appendAdminAnalyticsRangeWhere(
+  parts: string[],
+  params: Array<string | Date | number | string[]>,
+  window: { rangeEndAt: Date; rangeStartAt: Date | null },
+  column = "created_at",
+): void {
+  if (window.rangeStartAt) {
+    params.push(window.rangeStartAt);
+    parts.push(`${column} >= $${params.length}`);
+  }
+  params.push(window.rangeEndAt);
+  parts.push(`${column} < $${params.length}`);
+}
+
+function buildAdminAnalyticsStepCondition(
+  params: Array<string | Date | number | string[]>,
+  step: AdminAnalyticsMonitorStep,
+): string {
+  params.push(step.event);
+  let condition = `event_name = $${params.length}`;
+  if (step.statuses?.length) {
+    params.push([...step.statuses]);
+    condition += ` and status = any($${params.length}::text[])`;
+  }
+  return `(${condition})`;
+}
+
+function buildAdminAnalyticsWhere(parts: string[]): string {
+  return parts.length ? parts.join(" and ") : "true";
+}
+
+function ratePct(count: number, denominator: number): number | null {
+  if (denominator <= 0) return null;
+  return Number(((count / denominator) * 100).toFixed(2));
+}
+
+function resolveAdminAnalyticsTerminalRate(
+  success: number,
+  failure: number,
+  timeout: number,
+): number | null {
+  return ratePct(success, success + failure + timeout);
+}
+
+function resolveAdminAnalyticsMonitorRateMode(
+  monitor: AdminAnalyticsMonitorDefinition,
+): AdminAnalyticsMonitorRateMode {
+  return monitor.requiredDimensions.includes("attempt_id")
+    ? "attempt"
+    : "event_count";
+}
+
+function classifyAdminAnalyticsMonitor(inputs: {
+  denominator: number;
+  failureRatePct: number | null;
+  missingAttemptEventCount: number;
+  missingEvents: string[];
+  observedCount: number;
+  startCount: number;
+  successRatePct: number | null;
+  thresholds: AdminAnalyticsMonitorDefinition["thresholds"];
+  timeoutRatePct: number | null;
+}): { noDataReason: string | null; status: AdminAnalyticsMonitorStatus } {
+  if (inputs.missingEvents.length > 0) {
+    return { noDataReason: "missing_collection", status: "no_data" };
+  }
+  if (inputs.observedCount <= 0) {
+    return { noDataReason: "no_observed_events", status: "no_data" };
+  }
+
+  const {
+    expectedFailureRateMaxPct,
+    expectedSuccessRateMinPct,
+    expectedTimeoutRateMaxPct,
+    expectedVolumeMinPerWindow,
+  } = inputs.thresholds;
+
+  if (
+    expectedVolumeMinPerWindow != null &&
+    inputs.startCount < expectedVolumeMinPerWindow
+  ) {
+    return { noDataReason: null, status: "critical" };
+  }
+  if (
+    expectedSuccessRateMinPct != null &&
+    inputs.successRatePct != null &&
+    inputs.successRatePct < expectedSuccessRateMinPct
+  ) {
+    return { noDataReason: null, status: "critical" };
+  }
+  if (
+    expectedFailureRateMaxPct != null &&
+    inputs.failureRatePct != null &&
+    inputs.failureRatePct > expectedFailureRateMaxPct
+  ) {
+    return { noDataReason: null, status: "critical" };
+  }
+  if (
+    expectedTimeoutRateMaxPct != null &&
+    inputs.timeoutRatePct != null &&
+    inputs.timeoutRatePct > expectedTimeoutRateMaxPct
+  ) {
+    return { noDataReason: null, status: "critical" };
+  }
+
+  if (inputs.missingAttemptEventCount > 0) {
+    return { noDataReason: null, status: "warning" };
+  }
+
+  if (
+    expectedSuccessRateMinPct != null &&
+    inputs.successRatePct != null &&
+    inputs.successRatePct < expectedSuccessRateMinPct + 5
+  ) {
+    return { noDataReason: null, status: "warning" };
+  }
+  if (
+    expectedFailureRateMaxPct != null &&
+    inputs.failureRatePct != null &&
+    inputs.failureRatePct > Math.max(0, expectedFailureRateMaxPct - 5)
+  ) {
+    return { noDataReason: null, status: "warning" };
+  }
+  if (
+    expectedTimeoutRateMaxPct != null &&
+    inputs.timeoutRatePct != null &&
+    inputs.timeoutRatePct > Math.max(0, expectedTimeoutRateMaxPct - 2)
+  ) {
+    return { noDataReason: null, status: "warning" };
+  }
+  return { noDataReason: null, status: "healthy" };
+}
+
+function decodeAdminKeysetCursor(encoded: string | undefined): {
+  cursor: AdminKeysetCursor | null;
+  error: string | null;
+} {
   if (!encoded) return { cursor: null, error: null };
 
   try {
@@ -1225,11 +1822,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       >();
       for (const row of feeAccrualRows.rows) {
         const chainId = row.chain_id ?? "unknown";
-        const current =
-          feeAccrualMicroByChain.get(chainId) ?? {
-            accrued: 0n,
-            verified: 0n,
-          };
+        const current = feeAccrualMicroByChain.get(chainId) ?? {
+          accrued: 0n,
+          verified: 0n,
+        };
         const amount = parseUsdcToMicroFloor(row.amount ?? "0") ?? 0n;
         if (row.status === "accrued") current.accrued += amount;
         if (row.status === "verified") current.verified += amount;
@@ -1332,8 +1928,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             polymarketBuilderNativeBalance !== null
               ? ethers.formatEther(polymarketBuilderNativeBalance)
               : null,
-          nativeBalanceRaw:
-            polymarketBuilderNativeBalance?.toString() ?? null,
+          nativeBalanceRaw: polymarketBuilderNativeBalance?.toString() ?? null,
           error: polymarketBuilderError,
         },
         dflowFeeAccount: {
@@ -2291,6 +2886,1231 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/analytics/collector",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+    },
+    async (_request, reply) => {
+      const telemetry = await fetchAnalyticsForwardingTelemetry(pool, {
+        breakdownWindowDays: ADMIN_ANALYTICS_COLLECTOR_WINDOW_DAYS,
+      });
+      const collectedEvents = new Set(listCollectedAnalyticsEvents());
+      const [
+        { rows: lastStoredRows },
+        { rows: oldestStoredRows },
+        { rows: expectedRows },
+      ] = await Promise.all([
+        pool.query<{ created_at: Date | null }>(
+          `
+            select created_at
+            from analytics_server_events
+            order by created_at desc
+            limit 1
+          `,
+        ),
+        pool.query<{ created_at: Date | null }>(
+          `
+            select created_at
+            from analytics_server_events
+            order by created_at asc
+            limit 1
+          `,
+        ),
+        pool.query<{
+          count: string;
+          event_name: string;
+          last_seen_at: Date | null;
+        }>(
+          `
+            select
+              event_name,
+              count(*)::text as count,
+              max(created_at) as last_seen_at
+            from analytics_server_events
+            where event_name = any($1::text[])
+              and created_at >= now() - make_interval(days => $2::int)
+            group by event_name
+          `,
+          [
+            ADMIN_ANALYTICS_EXPECTED_MONITOR_EVENTS,
+            ADMIN_ANALYTICS_COLLECTOR_WINDOW_DAYS,
+          ],
+        ),
+      ]);
+      const expectedByEvent = new Map(
+        expectedRows.map((row) => [
+          row.event_name,
+          {
+            count: Number(row.count),
+            lastSeenAt: row.last_seen_at,
+          },
+        ]),
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        enabled: env.analyticsServerForwardingEnabled,
+        ...telemetry,
+        collector: {
+          ...telemetry.collector,
+          coverageWindowDays: ADMIN_ANALYTICS_COLLECTOR_WINDOW_DAYS,
+          lastStoredAt: lastStoredRows[0]?.created_at ?? null,
+          oldestStoredAt: oldestStoredRows[0]?.created_at ?? null,
+        },
+        coverage: ADMIN_ANALYTICS_EXPECTED_MONITOR_EVENTS.map((eventName) => {
+          const metadata = getAdminAnalyticsEventMetadata(eventName);
+          const observed = expectedByEvent.get(eventName);
+          return {
+            eventName,
+            supported: collectedEvents.has(eventName),
+            storedEvents: observed?.count ?? 0,
+            lastSeenAt: observed?.lastSeenAt ?? null,
+            domain: metadata.domain,
+            owner: metadata.owner,
+            tier: metadata.tier,
+          };
+        }),
+      });
+    },
+  );
+
+  z.get(
+    "/admin/analytics/overview",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+      schema: {
+        querystring: adminAnalyticsRangeQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const range = request.query.range ?? "7d";
+      const window = resolveAdminAnalyticsWindow(range);
+      const whereParts: string[] = [];
+      const whereParams: Array<string | Date | number | string[]> = [];
+      appendAdminAnalyticsRangeWhere(whereParts, whereParams, window);
+      const whereSql = buildAdminAnalyticsWhere(whereParts);
+      const timelineGranularity =
+        resolveAdminUserAnalyticsTimelineGranularity(range);
+
+      const previousParams: Array<string | Date | number | string[]> = [];
+      const previousParts: string[] = [];
+      if (window.previousRangeStartAt && window.previousRangeEndAt) {
+        appendAdminAnalyticsRangeWhere(previousParts, previousParams, {
+          rangeEndAt: window.previousRangeEndAt,
+          rangeStartAt: window.previousRangeStartAt,
+        });
+      }
+      const previousWhereSql =
+        previousParts.length > 0
+          ? buildAdminAnalyticsWhere(previousParts)
+          : null;
+
+      const [
+        { rows: summaryRows },
+        { rows: outcomeRows },
+        { rows: timelineRows },
+        { rows: byEventRows },
+        { rows: byDomainRows },
+        { rows: byVenueRows },
+        { rows: bySourceRows },
+        { rows: byOriginRows },
+        { rows: bySchemaVersionRows },
+        previousOutcomeResult,
+        previousSummaryResult,
+      ] = await Promise.all([
+        pool.query<{
+          active_users: string;
+          distinct_event_count: string;
+          first_seen_at: Date | null;
+          last_seen_at: Date | null;
+          total_events: string;
+        }>(
+          `
+            select
+              count(*)::text as total_events,
+              count(distinct user_id) filter (where user_id is not null)::text as active_users,
+              count(distinct event_name)::text as distinct_event_count,
+              min(created_at) as first_seen_at,
+              max(created_at) as last_seen_at
+            from analytics_server_events
+            where ${whereSql}
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; outcome: AdminUserAnalyticsOutcome }>(
+          `
+            select outcome, count(*)::text as count
+            from (
+              select ${ADMIN_USER_ANALYTICS_OUTCOME_SQL} as outcome
+              from analytics_server_events
+              where ${whereSql}
+            ) scoped
+            group by outcome
+          `,
+          whereParams,
+        ),
+        pool.query<{
+          bucket_start_at: Date;
+          count: string;
+          outcome: AdminUserAnalyticsOutcome;
+        }>(
+          `
+            select
+              date_trunc('${timelineGranularity}', created_at) as bucket_start_at,
+              ${ADMIN_USER_ANALYTICS_OUTCOME_SQL} as outcome,
+              count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by 1, 2
+            order by bucket_start_at asc
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; event_name: string }>(
+          `
+            select event_name, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by event_name
+            order by count(*) desc, event_name asc
+            limit 30
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; domain: string }>(
+          `
+            select ${ADMIN_ANALYTICS_DOMAIN_SQL} as domain, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by 1
+            order by count(*) desc, domain asc
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; venue: string }>(
+          `
+            select venue, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql} and venue is not null
+            group by venue
+            order by count(*) desc, venue asc
+            limit 20
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; source: string }>(
+          `
+            select source, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql} and source is not null
+            group by source
+            order by count(*) desc, source asc
+            limit 20
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; origin: "backend" | "browser" }>(
+          `
+            select origin, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by origin
+            order by count(*) desc, origin asc
+          `,
+          whereParams,
+        ),
+        pool.query<{ count: string; version: string }>(
+          `
+            select analytics_schema_version as version, count(*)::text as count
+            from analytics_server_events
+            where ${whereSql}
+            group by analytics_schema_version
+            order by count(*) desc, analytics_schema_version desc
+            limit 20
+          `,
+          whereParams,
+        ),
+        previousWhereSql
+          ? pool.query<{ count: string; outcome: AdminUserAnalyticsOutcome }>(
+              `
+                select outcome, count(*)::text as count
+                from (
+                  select ${ADMIN_USER_ANALYTICS_OUTCOME_SQL} as outcome
+                  from analytics_server_events
+                  where ${previousWhereSql}
+                ) scoped
+                group by outcome
+              `,
+              previousParams,
+            )
+          : Promise.resolve({ rows: [] }),
+        previousWhereSql
+          ? pool.query<{
+              active_users: string;
+              distinct_event_count: string;
+              total_events: string;
+            }>(
+              `
+                select
+                  count(*)::text as total_events,
+                  count(distinct user_id) filter (where user_id is not null)::text as active_users,
+                  count(distinct event_name)::text as distinct_event_count
+                from analytics_server_events
+                where ${previousWhereSql}
+              `,
+              previousParams,
+            )
+          : Promise.resolve({ rows: [] }),
+      ]);
+
+      const outcomeTotals = {
+        action: 0,
+        failure: 0,
+        success: 0,
+        timeout: 0,
+      };
+      for (const row of outcomeRows) {
+        outcomeTotals[row.outcome] = Number(row.count);
+      }
+      const previousOutcomeTotals = {
+        action: 0,
+        failure: 0,
+        success: 0,
+        timeout: 0,
+      };
+      for (const row of previousOutcomeResult.rows) {
+        previousOutcomeTotals[row.outcome] = Number(row.count);
+      }
+
+      const timelineByBucket = new Map<
+        string,
+        {
+          action: number;
+          bucketStartAt: Date;
+          failure: number;
+          success: number;
+          timeout: number;
+          total: number;
+        }
+      >();
+      for (const row of timelineRows) {
+        const key = row.bucket_start_at.toISOString();
+        const bucket =
+          timelineByBucket.get(key) ??
+          ({
+            action: 0,
+            bucketStartAt: row.bucket_start_at,
+            failure: 0,
+            success: 0,
+            timeout: 0,
+            total: 0,
+          } satisfies {
+            action: number;
+            bucketStartAt: Date;
+            failure: number;
+            success: number;
+            timeout: number;
+            total: number;
+          });
+        const count = Number(row.count);
+        bucket[row.outcome] += count;
+        bucket.total += count;
+        timelineByBucket.set(key, bucket);
+      }
+
+      const summary = summaryRows[0];
+      const terminalSuccessRatePct = resolveAdminAnalyticsTerminalRate(
+        outcomeTotals.success,
+        outcomeTotals.failure,
+        outcomeTotals.timeout,
+      );
+      const previousTerminalSuccessRatePct = resolveAdminAnalyticsTerminalRate(
+        previousOutcomeTotals.success,
+        previousOutcomeTotals.failure,
+        previousOutcomeTotals.timeout,
+      );
+      const previousSummary = previousSummaryResult.rows[0];
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        range,
+        rangeStartAt: window.rangeStartAt,
+        rangeEndAt: window.rangeEndAt,
+        previousRange:
+          window.previousRangeStartAt && window.previousRangeEndAt
+            ? {
+                rangeStartAt: window.previousRangeStartAt,
+                rangeEndAt: window.previousRangeEndAt,
+                activeUsers: Number(previousSummary?.active_users ?? 0),
+                distinctEvents: Number(
+                  previousSummary?.distinct_event_count ?? 0,
+                ),
+                outcomeTotals: previousOutcomeTotals,
+                problemCount:
+                  previousOutcomeTotals.failure + previousOutcomeTotals.timeout,
+                terminalSuccessRatePct: previousTerminalSuccessRatePct,
+                totalEvents: Number(previousSummary?.total_events ?? 0),
+              }
+            : null,
+        summary: {
+          activeUsers: Number(summary?.active_users ?? 0),
+          distinctEvents: Number(summary?.distinct_event_count ?? 0),
+          firstSeenAt: summary?.first_seen_at ?? null,
+          lastSeenAt: summary?.last_seen_at ?? null,
+          outcomeTotals,
+          problemCount: outcomeTotals.failure + outcomeTotals.timeout,
+          terminalSuccessRatePct,
+          totalEvents: Number(summary?.total_events ?? 0),
+        },
+        breakdowns: {
+          byDomain: byDomainRows.map((row) => ({
+            domain: row.domain,
+            count: Number(row.count),
+          })),
+          byEvent: byEventRows.map((row) => {
+            const metadata = getAdminAnalyticsEventMetadata(row.event_name);
+            return {
+              eventName: row.event_name,
+              count: Number(row.count),
+              domain: metadata.domain,
+              owner: metadata.owner,
+              tier: metadata.tier,
+            };
+          }),
+          byOrigin: byOriginRows.map((row) => ({
+            origin: row.origin,
+            count: Number(row.count),
+          })),
+          bySchemaVersion: bySchemaVersionRows.map((row) => ({
+            version: row.version,
+            count: Number(row.count),
+          })),
+          bySource: bySourceRows.map((row) => ({
+            source: row.source,
+            count: Number(row.count),
+          })),
+          byVenue: byVenueRows.map((row) => ({
+            venue: row.venue,
+            count: Number(row.count),
+          })),
+          timeline: [...timelineByBucket.entries()]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, bucket]) => ({
+              bucketStartAt: bucket.bucketStartAt,
+              action: bucket.action,
+              failure: bucket.failure,
+              success: bucket.success,
+              timeout: bucket.timeout,
+              total: bucket.total,
+            })),
+        },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/analytics/events",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermissions: ["analytics:read", "users:read"],
+      }),
+      schema: {
+        querystring: adminAnalyticsEventsQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const limit = request.query.limit ?? 50;
+      const decodedCursor = decodeAdminKeysetCursor(request.query.cursor);
+      if (decodedCursor.error) {
+        reply.code(400);
+        return reply.send({ error: decodedCursor.error });
+      }
+
+      const range = request.query.range ?? "7d";
+      const window = resolveAdminAnalyticsWindow(range);
+      const whereParts: string[] = [];
+      const params: Array<string | Date | number | string[]> = [];
+      appendAdminAnalyticsRangeWhere(
+        whereParts,
+        params,
+        window,
+        "e.created_at",
+      );
+
+      if (request.query.eventName) {
+        params.push(request.query.eventName);
+        whereParts.push(`e.event_name = $${params.length}`);
+      }
+      if (request.query.domain) {
+        const eventsForDomain = getAdminAnalyticsEventsForDomain(
+          request.query.domain,
+        );
+        if (eventsForDomain.length === 0) {
+          whereParts.push("false");
+        } else {
+          params.push(eventsForDomain);
+          whereParts.push(`e.event_name = any($${params.length}::text[])`);
+        }
+      }
+      if (request.query.outcome) {
+        params.push(request.query.outcome);
+        whereParts.push(
+          `(${ADMIN_USER_ANALYTICS_OUTCOME_SQL}) = $${params.length}`,
+        );
+      }
+      if (request.query.venue) {
+        params.push(request.query.venue);
+        whereParts.push(`e.venue = $${params.length}`);
+      }
+      if (request.query.source) {
+        params.push(request.query.source);
+        whereParts.push(`e.source = $${params.length}`);
+      }
+      if (request.query.status) {
+        params.push(request.query.status);
+        whereParts.push(`e.status = $${params.length}`);
+      }
+      if (request.query.origin) {
+        params.push(request.query.origin);
+        whereParts.push(`e.origin = $${params.length}`);
+      }
+      if (request.query.userId) {
+        params.push(request.query.userId);
+        whereParts.push(`e.user_id = $${params.length}`);
+      }
+      if (request.query.q) {
+        params.push(request.query.q);
+        const qIdx = params.length;
+        whereParts.push(`(
+          e.event_name = $${qIdx}
+          or e.event_slug = $${qIdx}
+          or e.source = $${qIdx}
+          or e.status = $${qIdx}
+          or e.venue = $${qIdx}
+          or e.attempt_id = $${qIdx}
+          or e.payload->>'market_slug' = $${qIdx}
+          or e.payload->>'tx_hash' = $${qIdx}
+          or e.payload->>'error_message' = $${qIdx}
+        )`);
+      }
+
+      const cursor = decodedCursor.cursor;
+      if (cursor) {
+        params.push(cursor.createdAt);
+        const cursorCreatedAtIdx = params.length;
+        params.push(cursor.id);
+        const cursorIdIdx = params.length;
+        whereParts.push(
+          `(e.created_at, e.id) < ($${cursorCreatedAtIdx}, $${cursorIdIdx})`,
+        );
+      }
+
+      params.push(limit + 1);
+      const limitPlaceholder = `$${params.length}`;
+      const whereSql = buildAdminAnalyticsWhere(whereParts);
+      const { rows } = await pool.query<{
+        analytics_schema_version: string;
+        attempt_id: string | null;
+        created_at: Date;
+        email: string | null;
+        event_name: string;
+        event_slug: string | null;
+        id: string;
+        origin: "backend" | "browser";
+        payload: unknown;
+        primary_wallet: string | null;
+        referral_code: string | null;
+        referred_user_key: string | null;
+        source: string | null;
+        status: string | null;
+        user_id: string | null;
+        venue: string | null;
+      }>(
+        `
+          select
+            e.id::text,
+            e.user_id::text,
+            e.event_name,
+            e.event_slug,
+            e.source,
+            e.status,
+            e.venue,
+            e.referred_user_key,
+            e.attempt_id,
+            e.analytics_schema_version,
+            e.origin,
+            e.payload,
+            e.created_at,
+            u.email,
+            u.referral_code,
+            w.wallet_address as primary_wallet
+          from analytics_server_events e
+          left join users u on u.id = e.user_id
+          left join lateral (
+            select wallet_address
+            from user_wallets
+            where user_id = e.user_id
+            order by is_primary desc, created_at asc
+            limit 1
+          ) w on true
+          where ${whereSql}
+          order by e.created_at desc, e.id desc
+          limit ${limitPlaceholder}
+        `,
+        params,
+      );
+      const page = buildAdminCursorPage(rows, limit);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        range,
+        rangeStartAt: window.rangeStartAt,
+        rangeEndAt: window.rangeEndAt,
+        items: page.items.map((row) => {
+          const metadata = getAdminAnalyticsEventMetadata(row.event_name);
+          return {
+            id: row.id,
+            userId: row.user_id,
+            user: row.user_id
+              ? {
+                  id: row.user_id,
+                  email: row.email,
+                  primaryWallet: row.primary_wallet,
+                  referralCode: row.referral_code,
+                }
+              : null,
+            eventName: row.event_name,
+            eventSlug: row.event_slug,
+            domain: metadata.domain,
+            owner: metadata.owner,
+            tier: metadata.tier,
+            outcome:
+              row.event_name.toLowerCase().includes("no_terminal") ||
+              row.status?.toLowerCase().includes("timeout")
+                ? "timeout"
+                : row.event_name.toLowerCase().endsWith("_fail") ||
+                    row.event_name.toLowerCase().endsWith("_error") ||
+                    row.status?.toLowerCase().includes("fail") ||
+                    row.status?.toLowerCase().includes("error") ||
+                    row.status?.toLowerCase().includes("missing") ||
+                    row.status?.toLowerCase().includes("unavailable")
+                  ? "failure"
+                  : row.event_name.toLowerCase().endsWith("_success") ||
+                      row.event_name
+                        .toLowerCase()
+                        .includes("completed_funnel") ||
+                      row.status?.toLowerCase().includes("success") ||
+                      row.status?.toLowerCase().includes("completed") ||
+                      row.status?.toLowerCase().includes("captured")
+                    ? "success"
+                    : "action",
+            source: row.source,
+            status: row.status,
+            venue: row.venue,
+            referredUserKey: row.referred_user_key,
+            attemptId: row.attempt_id,
+            analyticsSchemaVersion: row.analytics_schema_version,
+            origin: row.origin,
+            createdAt: row.created_at,
+            page: readAnalyticsPayloadString(row.payload, "page"),
+            marketSlug: readAnalyticsPayloadString(row.payload, "market_slug"),
+            eventId: readAnalyticsPayloadString(row.payload, "event_id"),
+            amountUsd: readAnalyticsPayloadNumber(row.payload, "amount_usd"),
+            shares: readAnalyticsPayloadNumber(row.payload, "shares"),
+            price: readAnalyticsPayloadNumber(row.payload, "price"),
+            errorMessage: readAnalyticsPayloadString(
+              row.payload,
+              "error_message",
+            ),
+            txHash: readAnalyticsPayloadString(row.payload, "tx_hash"),
+            walletType: readAnalyticsPayloadString(row.payload, "wallet_type"),
+            chainId: readAnalyticsPayloadString(row.payload, "chain_id"),
+            payload: row.payload,
+          };
+        }),
+        hasMore: page.hasMore,
+        limit,
+        nextCursor: page.nextCursor,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/analytics/referrals",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+      schema: {
+        querystring: adminAnalyticsRangeQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const range = request.query.range ?? "30d";
+      const window = resolveAdminAnalyticsWindow(range);
+      const boundsParams = [window.rangeStartAt, window.rangeEndAt];
+      const previousBoundsParams =
+        window.previousRangeStartAt && window.previousRangeEndAt
+          ? [window.previousRangeStartAt, window.previousRangeEndAt]
+          : null;
+      const rangePredicate = (alias: string) =>
+        `${alias}.created_at < b.range_end_at and (b.range_start_at is null or ${alias}.created_at >= b.range_start_at)`;
+      const totalsSql = `
+        with b as (
+          select $1::timestamptz as range_start_at, $2::timestamptz as range_end_at
+        )
+        select
+          (
+            select count(*)::text
+            from analytics_server_events e, b
+            where ${rangePredicate("e")}
+              and e.event_name in ('hf_portfolio_share_action', 'hf_rewards_referral_action')
+          ) as share_count,
+          (
+            select count(*)::text
+            from analytics_server_events e, b
+            where ${rangePredicate("e")}
+              and e.event_name = 'hf_referral_link_landing'
+          ) as landing_count,
+          (
+            select count(*)::text
+            from referrals r, b
+            where ${rangePredicate("r")}
+          ) as signup_count,
+          (
+            select count(*)::text
+            from referral_first_trade_conversions c, b
+            where ${rangePredicate("c")}
+          ) as first_trade_count
+      `;
+
+      const [
+        { rows: totalRows },
+        previousTotalResult,
+        { rows: topCodeRows },
+        { rows: topVenueRows },
+        { rows: topSourceRows },
+        { rows: topStatusRows },
+      ] = await Promise.all([
+        pool.query<{
+          first_trade_count: string;
+          landing_count: string;
+          share_count: string;
+          signup_count: string;
+        }>(totalsSql, boundsParams),
+        previousBoundsParams
+          ? pool.query<{
+              first_trade_count: string;
+              landing_count: string;
+              share_count: string;
+              signup_count: string;
+            }>(totalsSql, previousBoundsParams)
+          : Promise.resolve({ rows: [] }),
+        pool.query<{
+          first_trade_count: string;
+          landing_count: string;
+          referral_code: string;
+          share_count: string;
+          signup_count: string;
+        }>(
+          `
+            with b as (
+              select $1::timestamptz as range_start_at, $2::timestamptz as range_end_at
+            ),
+            referral_codes as (
+              select distinct e.event_slug as referral_code
+              from analytics_server_events e, b
+              where ${rangePredicate("e")}
+                and e.event_slug is not null
+                and e.event_name in (
+                  'hf_portfolio_share_action',
+                  'hf_rewards_referral_action',
+                  'hf_referral_link_landing'
+                )
+
+              union
+
+              select distinct r.code as referral_code
+              from referrals r, b
+              where ${rangePredicate("r")}
+                and r.code is not null
+
+              union
+
+              select distinct c.code as referral_code
+              from referral_first_trade_conversions c, b
+              where ${rangePredicate("c")}
+                and c.code is not null
+            ),
+            share_counts as (
+              select e.event_slug as referral_code, count(*)::bigint as share_count
+              from analytics_server_events e, b
+              where ${rangePredicate("e")}
+                and e.event_slug is not null
+                and e.event_name in ('hf_portfolio_share_action', 'hf_rewards_referral_action')
+              group by e.event_slug
+            ),
+            landing_counts as (
+              select e.event_slug as referral_code, count(*)::bigint as landing_count
+              from analytics_server_events e, b
+              where ${rangePredicate("e")}
+                and e.event_slug is not null
+                and e.event_name = 'hf_referral_link_landing'
+              group by e.event_slug
+            ),
+            signup_counts as (
+              select r.code as referral_code, count(*)::bigint as signup_count
+              from referrals r, b
+              where ${rangePredicate("r")}
+                and r.code is not null
+              group by r.code
+            ),
+            first_trade_counts as (
+              select c.code as referral_code, count(*)::bigint as first_trade_count
+              from referral_first_trade_conversions c, b
+              where ${rangePredicate("c")}
+                and c.code is not null
+              group by c.code
+            )
+            select
+              rc.referral_code,
+              coalesce(sc.share_count, 0)::text as share_count,
+              coalesce(lc.landing_count, 0)::text as landing_count,
+              coalesce(suc.signup_count, 0)::text as signup_count,
+              coalesce(ftc.first_trade_count, 0)::text as first_trade_count
+            from referral_codes rc
+            left join share_counts sc on sc.referral_code = rc.referral_code
+            left join landing_counts lc on lc.referral_code = rc.referral_code
+            left join signup_counts suc on suc.referral_code = rc.referral_code
+            left join first_trade_counts ftc on ftc.referral_code = rc.referral_code
+            order by
+              coalesce(ftc.first_trade_count, 0) desc,
+              coalesce(suc.signup_count, 0) desc,
+              coalesce(lc.landing_count, 0) desc,
+              coalesce(sc.share_count, 0) desc,
+              rc.referral_code asc
+            limit 25
+          `,
+          boundsParams,
+        ),
+        pool.query<{ count: string; venue: string }>(
+          `
+            with b as (
+              select $1::timestamptz as range_start_at, $2::timestamptz as range_end_at
+            )
+            select venue, count(*)::text as count
+            from referral_first_trade_conversions c, b
+            where ${rangePredicate("c")}
+              and c.venue is not null
+            group by venue
+            order by count(*) desc, venue asc
+            limit 20
+          `,
+          boundsParams,
+        ),
+        pool.query<{ count: string; source: string }>(
+          `
+            with b as (
+              select $1::timestamptz as range_start_at, $2::timestamptz as range_end_at
+            )
+            select source, count(*)::text as count
+            from analytics_server_events e, b
+            where ${rangePredicate("e")}
+              and e.event_name in (
+                'hf_portfolio_share_action',
+                'hf_rewards_referral_action',
+                'hf_referral_link_landing'
+              )
+              and e.source is not null
+            group by source
+            order by count(*) desc, source asc
+            limit 20
+          `,
+          boundsParams,
+        ),
+        pool.query<{ count: string; status: string }>(
+          `
+            with b as (
+              select $1::timestamptz as range_start_at, $2::timestamptz as range_end_at
+            )
+            select status, count(*)::text as count
+            from (
+              select e.status
+              from analytics_server_events e, b
+              where ${rangePredicate("e")}
+                and e.event_name in (
+                  'hf_portfolio_share_action',
+                  'hf_rewards_referral_action',
+                  'hf_referral_link_landing'
+                )
+                and e.status is not null
+
+              union all
+
+              select c.status
+              from referral_first_trade_conversions c, b
+              where ${rangePredicate("c")}
+                and c.status is not null
+            ) statuses
+            group by status
+            order by count(*) desc, status asc
+            limit 20
+          `,
+          boundsParams,
+        ),
+      ]);
+
+      const totals = {
+        firstTradeCount: Number(totalRows[0]?.first_trade_count ?? 0),
+        landingCount: Number(totalRows[0]?.landing_count ?? 0),
+        shareCount: Number(totalRows[0]?.share_count ?? 0),
+        signupCount: Number(totalRows[0]?.signup_count ?? 0),
+      };
+      const previousTotals = previousTotalResult.rows[0]
+        ? {
+            firstTradeCount: Number(
+              previousTotalResult.rows[0].first_trade_count ?? 0,
+            ),
+            landingCount: Number(
+              previousTotalResult.rows[0].landing_count ?? 0,
+            ),
+            shareCount: Number(previousTotalResult.rows[0].share_count ?? 0),
+            signupCount: Number(previousTotalResult.rows[0].signup_count ?? 0),
+          }
+        : null;
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        range,
+        rangeStartAt: window.rangeStartAt,
+        rangeEndAt: window.rangeEndAt,
+        totals: {
+          ...totals,
+          landingToSignupConversionPct: ratePct(
+            totals.signupCount,
+            totals.landingCount,
+          ),
+          signupToFirstTradeConversionPct: ratePct(
+            totals.firstTradeCount,
+            totals.signupCount,
+          ),
+        },
+        previousRange:
+          previousTotals &&
+          window.previousRangeStartAt &&
+          window.previousRangeEndAt
+            ? {
+                rangeStartAt: window.previousRangeStartAt,
+                rangeEndAt: window.previousRangeEndAt,
+                totals: {
+                  ...previousTotals,
+                  landingToSignupConversionPct: ratePct(
+                    previousTotals.signupCount,
+                    previousTotals.landingCount,
+                  ),
+                  signupToFirstTradeConversionPct: ratePct(
+                    previousTotals.firstTradeCount,
+                    previousTotals.signupCount,
+                  ),
+                },
+              }
+            : null,
+        topReferralCodes: topCodeRows.map((row) => ({
+          referralCode: row.referral_code,
+          shareCount: Number(row.share_count),
+          landingCount: Number(row.landing_count),
+          signupCount: Number(row.signup_count),
+          firstTradeCount: Number(row.first_trade_count),
+          landingToSignupConversionPct: ratePct(
+            Number(row.signup_count),
+            Number(row.landing_count),
+          ),
+          signupToFirstTradeConversionPct: ratePct(
+            Number(row.first_trade_count),
+            Number(row.signup_count),
+          ),
+        })),
+        topVenues: topVenueRows.map((row) => ({
+          venue: row.venue,
+          count: Number(row.count),
+        })),
+        topSources: topSourceRows.map((row) => ({
+          source: row.source,
+          count: Number(row.count),
+        })),
+        topStatuses: topStatusRows.map((row) => ({
+          status: row.status,
+          count: Number(row.count),
+        })),
+      });
+    },
+  );
+
+  z.get(
+    "/admin/analytics/monitors",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+      schema: {
+        querystring: adminAnalyticsRangeQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const range = request.query.range ?? "7d";
+      const window = resolveAdminAnalyticsWindow(range);
+      const collectedEvents = new Set(listCollectedAnalyticsEvents());
+      const whereParts: string[] = [];
+      const params: Array<string | Date | number | string[]> = [];
+      appendAdminAnalyticsRangeWhere(whereParts, params, window);
+      params.push(ADMIN_ANALYTICS_EXPECTED_MONITOR_EVENTS);
+      whereParts.push(`event_name = any($${params.length}::text[])`);
+      const whereSql = buildAdminAnalyticsWhere(whereParts);
+
+      const { rows: countRows } = await pool.query<{
+        attempt_count: string;
+        event_name: string;
+        event_count: string;
+        missing_attempt_count: string;
+        status: string | null;
+      }>(
+        `
+          select
+            event_name,
+            status,
+            count(*)::text as event_count,
+            (
+              count(distinct attempt_id) filter (where attempt_id is not null)
+              + count(*) filter (where attempt_id is null)
+            )::text as attempt_count,
+            count(*) filter (where attempt_id is null)::text as missing_attempt_count
+          from analytics_server_events
+          where ${whereSql}
+          group by event_name, status
+        `,
+        params,
+      );
+
+      const counts = countRows.map((row) => ({
+        eventName: row.event_name,
+        status: row.status,
+        attemptCount: Number(row.attempt_count),
+        eventCount: Number(row.event_count),
+        missingAttemptCount: Number(row.missing_attempt_count),
+      }));
+      const countStep = (
+        step: AdminAnalyticsMonitorStep | undefined,
+        rateMode: AdminAnalyticsMonitorRateMode,
+      ) => {
+        if (!step) return 0;
+        const statuses = step.statuses ? new Set(step.statuses) : null;
+        return counts
+          .filter((row) => {
+            if (row.eventName !== step.event) return false;
+            if (!statuses) return true;
+            return row.status != null && statuses.has(row.status);
+          })
+          .reduce(
+            (sum, row) =>
+              sum +
+              (rateMode === "attempt" ? row.attemptCount : row.eventCount),
+            0,
+          );
+      };
+
+      const monitors = await Promise.all(
+        ADMIN_ANALYTICS_MONITORS.map(async (monitor) => {
+          const rateMode = resolveAdminAnalyticsMonitorRateMode(monitor);
+          const startCount = countStep(monitor.start, rateMode);
+          const successCount = countStep(monitor.success, rateMode);
+          const failureCount = countStep(monitor.failure, rateMode);
+          const timeoutCount = countStep(monitor.timeout, rateMode);
+          const observedCount = counts
+            .filter((row) => monitor.trackedEvents.includes(row.eventName))
+            .reduce(
+              (sum, row) =>
+                sum +
+                (rateMode === "attempt" ? row.attemptCount : row.eventCount),
+              0,
+            );
+          const missingAttemptEventCount =
+            rateMode === "attempt"
+              ? counts
+                  .filter((row) =>
+                    monitor.trackedEvents.includes(row.eventName),
+                  )
+                  .reduce((sum, row) => sum + row.missingAttemptCount, 0)
+              : 0;
+          const denominator =
+            monitor.kind === "event_volume"
+              ? startCount
+              : Math.max(
+                  startCount,
+                  successCount + failureCount + timeoutCount,
+                );
+          const successRatePct = ratePct(successCount, denominator);
+          const failureRatePct = ratePct(failureCount, denominator);
+          const timeoutRatePct = ratePct(timeoutCount, denominator);
+          const missingEvents = monitor.trackedEvents.filter(
+            (eventName) => !collectedEvents.has(eventName),
+          );
+          const classification = classifyAdminAnalyticsMonitor({
+            denominator,
+            failureRatePct,
+            missingAttemptEventCount,
+            missingEvents,
+            observedCount,
+            startCount,
+            successRatePct,
+            thresholds: monitor.thresholds,
+            timeoutRatePct,
+          });
+
+          const badSteps = [monitor.failure, monitor.timeout].filter(
+            Boolean,
+          ) as AdminAnalyticsMonitorStep[];
+          let topBadDimensions: Array<{
+            count: number;
+            errorMessage: string | null;
+            eventName: string;
+            source: string | null;
+            status: string | null;
+            venue: string | null;
+          }> = [];
+          let topAffectedUsers: Array<{
+            count: number;
+            lastEventAt: Date;
+            userId: string;
+          }> = [];
+
+          if (badSteps.length > 0) {
+            const badParams: Array<string | Date | number | string[]> = [];
+            const badWhereParts: string[] = [];
+            appendAdminAnalyticsRangeWhere(badWhereParts, badParams, window);
+            const stepSql = badSteps
+              .map((step) => buildAdminAnalyticsStepCondition(badParams, step))
+              .join(" or ");
+            badWhereParts.push(`(${stepSql})`);
+            const badWhereSql = buildAdminAnalyticsWhere(badWhereParts);
+            const [{ rows: dimensionRows }, { rows: userRows }] =
+              await Promise.all([
+                pool.query<{
+                  count: string;
+                  error_message: string | null;
+                  event_name: string;
+                  source: string | null;
+                  status: string | null;
+                  venue: string | null;
+                }>(
+                  `
+                    select
+                      event_name,
+                      venue,
+                      source,
+                      status,
+                      payload->>'error_message' as error_message,
+                      count(*)::text as count
+                    from analytics_server_events
+                    where ${badWhereSql}
+                    group by event_name, venue, source, status, payload->>'error_message'
+                    order by count(*) desc, event_name asc
+                    limit 10
+                  `,
+                  badParams,
+                ),
+                pool.query<{
+                  count: string;
+                  last_event_at: Date;
+                  user_id: string;
+                }>(
+                  `
+                    select
+                      user_id::text,
+                      count(*)::text as count,
+                      max(created_at) as last_event_at
+                    from analytics_server_events
+                    where ${badWhereSql}
+                      and user_id is not null
+                    group by user_id
+                    order by count(*) desc, max(created_at) desc
+                    limit 10
+                  `,
+                  badParams,
+                ),
+              ]);
+            topBadDimensions = dimensionRows.map((row) => ({
+              eventName: row.event_name,
+              venue: row.venue,
+              source: row.source,
+              status: row.status,
+              errorMessage: row.error_message,
+              count: Number(row.count),
+            }));
+            topAffectedUsers = userRows.map((row) => ({
+              userId: row.user_id,
+              count: Number(row.count),
+              lastEventAt: row.last_event_at,
+            }));
+          }
+
+          return {
+            id: monitor.id,
+            title: monitor.id
+              .split("_")
+              .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+              .join(" "),
+            domain: monitor.domain,
+            owner: monitor.owner,
+            involvedOwners: monitor.involvedOwners,
+            priority: monitor.priority,
+            alertSlaHours: monitor.alertSlaHours,
+            windowMinutes: monitor.windowMinutes,
+            thresholds: monitor.thresholds,
+            requiredDimensions: monitor.requiredDimensions,
+            trackedEvents: monitor.trackedEvents,
+            requiredFilters: {
+              analytics_schema_version: ADMIN_ANALYTICS_SCHEMA_VERSION_FILTER,
+            },
+            startCount,
+            successCount,
+            failureCount,
+            timeoutCount,
+            observedCount,
+            denominator,
+            rateMode,
+            missingAttemptEventCount,
+            successRatePct,
+            failureRatePct,
+            timeoutRatePct,
+            status: classification.status,
+            noDataReason: classification.noDataReason,
+            missingEvents,
+            topBadDimensions,
+            topAffectedUsers,
+          };
+        }),
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        range,
+        rangeStartAt: window.rangeStartAt,
+        rangeEndAt: window.rangeEndAt,
+        monitors,
+      });
+    },
+  );
+
+  z.get(
     "/admin/users/:id/analytics",
     {
       preHandler: createAdminMiddleware({
@@ -2943,8 +4763,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             ),
             collectionMode:
               clampFeeBps(
-                limitless?.limitless_fee_share_bps ??
-                  env.limitlessFeeShareBps,
+                limitless?.limitless_fee_share_bps ?? env.limitlessFeeShareBps,
               ) > 0
                 ? "venue_share"
                 : "none",
