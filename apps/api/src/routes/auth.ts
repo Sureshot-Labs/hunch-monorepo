@@ -91,13 +91,15 @@ function resolvePostSignupOnboardingRequired(user: User): boolean {
 }
 
 function buildAuthUserPayload(user: User) {
+  const legacyAdminAccessEnabled =
+    env.adminAuthEnabled && env.adminAuthLegacyFallback;
   return {
     id: user.id,
     email: user.email,
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
+    isAdmin: legacyAdminAccessEnabled ? user.isAdmin : false,
     isActive: user.isActive,
     isVerified: user.isVerified,
     postSignupOnboardingRequired: resolvePostSignupOnboardingRequired(user),
