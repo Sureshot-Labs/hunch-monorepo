@@ -1,6 +1,13 @@
 /* no-transaction */
-SET lock_timeout = '5s';
+SET lock_timeout = '5min';
 SET statement_timeout = 0;
+
+-- A canceled CREATE INDEX CONCURRENTLY can leave an invalid index with the
+-- target name. Drop first so a retry cannot skip an invalid index via
+-- IF NOT EXISTS.
+DROP INDEX CONCURRENTLY IF EXISTS idx_unified_markets_feed_event_renderable_active_open;
+DROP INDEX CONCURRENTLY IF EXISTS idx_unified_markets_activity_recent_active;
+DROP INDEX CONCURRENTLY IF EXISTS idx_unified_markets_active_open_candidate;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_unified_markets_feed_event_renderable_active_open
   ON unified_markets (event_id, expiration_time, close_time)
@@ -18,10 +25,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_unified_markets_feed_event_renderabl
       OR best_ask IS NOT NULL
       OR last_price IS NOT NULL
     );
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_unified_markets_active_open_candidate
-  ON unified_markets (close_time, expiration_time, id)
-  WHERE status = 'ACTIVE';
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_unified_markets_activity_recent_active
   ON unified_markets (updated_at_db DESC, id)
