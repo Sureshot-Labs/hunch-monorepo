@@ -116,6 +116,13 @@ type FeedSearchPlan = {
   prefixQueryText: string | null;
 };
 
+export type FeedCandidateEventSearchFilter = {
+  hasSearch: boolean;
+  searchCte: string;
+  searchEventJoin: string;
+  searchFilterExpr: string;
+};
+
 type FeedEventFilterInputs = Pick<
   FeedInputs,
   | "venues"
@@ -427,6 +434,29 @@ function buildFeedSearchContext(args: {
       plan.hasSearch && effectiveMode === "ranked"
         ? "case when sq.applies then coalesce(se.rank, 0) else 0 end"
         : "0::double precision",
+  };
+}
+
+export function buildFeedCandidateEventSearchFilter(args: {
+  add: (value: PgParams[number]) => string;
+  q?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+}): FeedCandidateEventSearchFilter {
+  const context = buildFeedSearchContext({
+    add: args.add,
+    q: args.q,
+    nowParam: args.nowParam,
+    nowCloseParam: args.nowCloseParam,
+    renderableMarketExpr: buildRenderableMarketSql({ alias: "m" }),
+    mode: "membership",
+  });
+
+  return {
+    hasSearch: context.hasSearch,
+    searchCte: context.searchCte,
+    searchEventJoin: context.searchEventJoin,
+    searchFilterExpr: context.searchFilterExpr,
   };
 }
 

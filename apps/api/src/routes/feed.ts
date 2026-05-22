@@ -20,6 +20,7 @@ import {
 } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
+  buildFeedCandidateEventSearchFilter,
   fetchFavoriteFeedEventPage,
   fetchFeedEventIds,
   fetchFeedMarkets,
@@ -1162,7 +1163,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         };
         const eventIdsParam = add(candidateEventIds);
         const nowParamSql = add(nowParam);
-        const searchParam = search ? add(`%${search}%`) : null;
+        const searchFilter = buildFeedCandidateEventSearchFilter({
+          add,
+          q: search,
+          nowParam: nowParamSql,
+        });
         const where: string[] = [
           "e.status = 'ACTIVE'",
           `(e.end_date is null or e.end_date > ${nowParamSql}::timestamptz)`,
@@ -1189,37 +1194,16 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (minLiquidity > 0) {
           where.push(`${eventLiquidityDisplayExpr} >= ${add(minLiquidity)}`);
         }
-        if (searchParam) {
-          where.push(`
-            (
-              e.id ilike ${searchParam}
-              or e.title ilike ${searchParam}
-              or e.description ilike ${searchParam}
-              or e.category ilike ${searchParam}
-              or e.slug ilike ${searchParam}
-              or exists (
-                select 1
-                from unified_markets m
-                where m.event_id = e.id
-                  and m.status = 'ACTIVE'
-                  and (m.expiration_time is null or m.expiration_time > ${nowParamSql}::timestamptz)
-                  and (m.close_time is null or m.close_time > ${nowParamSql}::timestamptz)
-                  and (
-                    m.venue_market_id::text ilike ${searchParam}
-                    or m.title ilike ${searchParam}
-                    or m.description ilike ${searchParam}
-                    or m.category ilike ${searchParam}
-                    or m.slug ilike ${searchParam}
-                  )
-              )
-            )
-          `);
+        if (searchFilter.hasSearch) {
+          where.push(searchFilter.searchFilterExpr);
         }
 
         const sql = `
+          ${searchFilter.searchCte ? `with ${searchFilter.searchCte}` : ""}
           select c.event_id
           from unnest(${eventIdsParam}::text[]) with ordinality as c(event_id, ord)
           join unified_events e on e.id = c.event_id
+          ${searchFilter.searchEventJoin}
           where ${where.join(" and ")}
           order by c.ord
         `;
