@@ -108,12 +108,26 @@ type FeedSearchContext = {
 };
 
 type FeedSearchMode = "ranked" | "membership";
+type FeedSearchProfile = "primary" | "full";
+type FeedSearchStrategy = "primary_with_fallback" | "full";
+type FeedSearchVenueFilterTarget = "event" | "market";
 
 type FeedSearchPlan = {
   hasSearch: boolean;
   rankMode: FeedSearchMode;
+  strategy: FeedSearchStrategy;
   searchText: string;
   prefixQueryText: string | null;
+};
+
+type FeedSearchEarlyFilterInputs = Pick<
+  FeedInputs,
+  "venues" | "category" | "categories" | "endWithin" | "ageSince"
+>;
+
+type FeedSearchEarlyFilterSql = {
+  eventWhere: string[];
+  marketWhere: string[];
 };
 
 export type FeedCandidateEventSearchFilter = {
@@ -121,6 +135,11 @@ export type FeedCandidateEventSearchFilter = {
   searchCte: string;
   searchEventJoin: string;
   searchFilterExpr: string;
+};
+
+export type FeedSearchResultWindow = {
+  matchLimit: number | null;
+  fallbackThreshold: number | null;
 };
 
 type FeedEventFilterInputs = Pick<
@@ -187,7 +206,17 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   };
 }
 
-function buildFeedSearchDocumentExpr(alias: string): string {
+function buildFeedSearchDocumentExpr(
+  alias: string,
+  profile: FeedSearchProfile,
+): string {
+  const primary = `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.category, '')), 'B')
+  `;
+
+  if (profile === "primary") return primary;
+
   return `
     setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
     setweight(to_tsvector('english', coalesce(${alias}.slug, '')), 'A') ||
@@ -228,122 +257,250 @@ function buildFeedSearchPlan(q?: string): FeedSearchPlan {
   return {
     hasSearch: searchText.length > 0,
     rankMode: rawTerms.length >= 2 ? "ranked" : "membership",
+    strategy: rawTerms.length <= 1 ? "primary_with_fallback" : "full",
     searchText,
     prefixQueryText: prefixTerm ? `${prefixTerm}:*` : null,
   };
 }
 
+function buildFeedSearchEarlyFilterSql(args: {
+  add: PgParamAdder;
+  inputs?: FeedSearchEarlyFilterInputs;
+  venueTarget?: FeedSearchVenueFilterTarget;
+}): FeedSearchEarlyFilterSql {
+  const { add, inputs, venueTarget = "event" } = args;
+  const eventWhere: string[] = [];
+  const marketWhere: string[] = [];
+  if (!inputs) return { eventWhere, marketWhere };
+
+  if (inputs.venues?.length) {
+    const venuesParam = add(inputs.venues);
+    eventWhere.push(`e.venue = ANY(${venuesParam}::text[])`);
+    marketWhere.push(
+      `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${venuesParam}::text[])`,
+    );
+  }
+  if (inputs.categories?.length) {
+    const categoriesParam = add(inputs.categories);
+    eventWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
+    marketWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
+  } else if (inputs.category) {
+    const categoryParam = add(inputs.category.toLowerCase());
+    eventWhere.push(`lower(e.category) = ${categoryParam}`);
+    marketWhere.push(`lower(e.category) = ${categoryParam}`);
+  }
+  if (inputs.endWithin) {
+    const endWithinParam = add(inputs.endWithin);
+    eventWhere.push(
+      `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
+    );
+    marketWhere.push(
+      `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
+    );
+  }
+  if (inputs.ageSince) {
+    const ageSinceParam = add(inputs.ageSince);
+    eventWhere.push(
+      `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
+    );
+    marketWhere.push(
+      `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
+    );
+  }
+
+  return { eventWhere, marketWhere };
+}
+
 function buildFeedSearchMatchesSql(args: {
   mode: FeedSearchMode;
   matchLimit?: number | null;
+  fallbackThreshold?: number | null;
   nowParam: string;
   nowCloseParam: string;
-  eventSearchDocExpr: string;
-  marketSearchDocExpr: string;
+  primaryEventSearchDocExpr: string;
+  primaryMarketSearchDocExpr: string;
+  fullEventSearchDocExpr: string;
+  fullMarketSearchDocExpr: string;
   renderableMarketExpr: string;
   nativeTradableMarketExpr: string;
+  strategy: FeedSearchStrategy;
+  earlyFilters?: FeedSearchEarlyFilterSql;
 }): string {
   const {
     mode,
     matchLimit = null,
+    fallbackThreshold = null,
     nowParam,
     nowCloseParam,
-    eventSearchDocExpr,
-    marketSearchDocExpr,
+    primaryEventSearchDocExpr,
+    primaryMarketSearchDocExpr,
+    fullEventSearchDocExpr,
+    fullMarketSearchDocExpr,
     renderableMarketExpr,
     nativeTradableMarketExpr,
+    strategy,
+    earlyFilters,
   } = args;
-  const needsScore = mode === "ranked" || matchLimit != null;
-  const selectColumns = needsScore ? "id, max(rank) as rank" : "distinct id";
   const marketRankFactor = mode === "ranked" ? " * 2" : "";
   const eventRankFactor = mode === "ranked" ? " * 2" : "";
   const eventMembershipScore =
     "coalesce(e.volume_total, e.open_interest, e.liquidity, 0)";
   const marketMembershipScore =
     "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
-  const aggregateClause = needsScore
-    ? `
-      group by id
-      order by rank desc nulls last, id
-      ${matchLimit != null ? `limit ${matchLimit}` : ""}
-    `
-    : "";
+  const finalLimitClause =
+    matchLimit != null ? `limit ${Math.max(1, Math.floor(matchLimit))}` : "";
+  const fallbackRunExpr =
+    fallbackThreshold != null
+      ? `(select matched from primary_search_state) < ${Math.max(1, Math.floor(fallbackThreshold))}`
+      : "false";
 
+  const buildProfileSql = (
+    profile: FeedSearchProfile,
+    sourcePriority: 1 | 0,
+  ) => {
+    const eventSearchDocExpr =
+      profile === "primary"
+        ? primaryEventSearchDocExpr
+        : fullEventSearchDocExpr;
+    const marketSearchDocExpr =
+      profile === "primary"
+        ? primaryMarketSearchDocExpr
+        : fullMarketSearchDocExpr;
+    const profileGate =
+      profile === "full" && strategy === "primary_with_fallback"
+        ? `and ${fallbackRunExpr}`
+        : "";
+    const eventEarlyWhere = earlyFilters?.eventWhere.length
+      ? `and ${earlyFilters.eventWhere.join(" and ")}`
+      : "";
+    const marketEarlyWhere = earlyFilters?.marketWhere.length
+      ? `and ${earlyFilters.marketWhere.join(" and ")}`
+      : "";
+
+    return `
+      select id, max(rank) as rank, ${sourcePriority}::int as search_priority
+      from (
+        select
+          e.id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${eventSearchDocExpr}), sq.query)${eventRankFactor}`
+              : eventMembershipScore
+          } as rank
+        from unified_events e
+        cross join search_query sq
+        where querytree(sq.query) <> ''
+          ${profileGate}
+          and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${eventEarlyWhere}
+          and (${eventSearchDocExpr}) @@ sq.query
+        union all
+        select
+          e.id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query)`
+              : eventMembershipScore
+          } as rank
+        from unified_events e
+        cross join search_query sq
+        where sq.prefix_query is not null
+          and querytree(sq.prefix_query) <> ''
+          ${profileGate}
+          and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${eventEarlyWhere}
+          and (${eventSearchDocExpr}) @@ sq.prefix_query
+        union all
+        select
+          m.event_id as id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${marketSearchDocExpr}), sq.query)${marketRankFactor}`
+              : marketMembershipScore
+          } as rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        cross join search_query sq
+        where querytree(sq.query) <> ''
+          ${profileGate}
+          and m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${marketEarlyWhere}
+          and ${renderableMarketExpr}
+          and ${nativeTradableMarketExpr}
+          and (${marketSearchDocExpr}) @@ sq.query
+        union all
+        select
+          m.event_id as id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query)`
+              : marketMembershipScore
+          } as rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        cross join search_query sq
+        where sq.prefix_query is not null
+          and querytree(sq.prefix_query) <> ''
+          ${profileGate}
+          and m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${marketEarlyWhere}
+          and ${renderableMarketExpr}
+          and ${nativeTradableMarketExpr}
+          and (${marketSearchDocExpr}) @@ sq.prefix_query
+      ) matches
+      group by id
+      order by search_priority desc, rank desc nulls last, id
+      ${finalLimitClause}
+    `;
+  };
+
+  if (strategy === "full") {
+    return `
+      search_events as materialized (
+        ${buildProfileSql("full", 1)}
+      )
+    `;
+  }
+
+  const primarySql = buildProfileSql("primary", 1);
+  const fallbackSql = buildProfileSql("full", 0);
   return `
-    select
-      ${selectColumns}
-    from (
-      select
-        e.id,
-        ${
-          mode === "ranked"
-            ? `ts_rank_cd((${eventSearchDocExpr}), sq.query)${eventRankFactor}`
-            : eventMembershipScore
-        } as rank
-      from unified_events e
-      cross join search_query sq
-      where querytree(sq.query) <> ''
-        and e.status = 'ACTIVE'
-        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-        and (${eventSearchDocExpr}) @@ sq.query
-      union all
-      select
-        e.id,
-        ${
-          mode === "ranked"
-            ? `ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query)`
-            : eventMembershipScore
-        } as rank
-      from unified_events e
-      cross join search_query sq
-      where sq.prefix_query is not null
-        and querytree(sq.prefix_query) <> ''
-        and e.status = 'ACTIVE'
-        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-        and (${eventSearchDocExpr}) @@ sq.prefix_query
-      union all
-      select
-        m.event_id as id,
-        ${
-          mode === "ranked"
-            ? `ts_rank_cd((${marketSearchDocExpr}), sq.query)${marketRankFactor}`
-            : marketMembershipScore
-        } as rank
-      from unified_markets m
-      join unified_events e on e.id = m.event_id
-      cross join search_query sq
-      where querytree(sq.query) <> ''
-        and m.status = 'ACTIVE'
-        and e.status = 'ACTIVE'
-        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-        and ${renderableMarketExpr}
-        and ${nativeTradableMarketExpr}
-        and (${marketSearchDocExpr}) @@ sq.query
-      union all
-      select
-        m.event_id as id,
-        ${
-          mode === "ranked"
-            ? `ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query)`
-            : marketMembershipScore
-        } as rank
-      from unified_markets m
-      join unified_events e on e.id = m.event_id
-      cross join search_query sq
-      where sq.prefix_query is not null
-        and querytree(sq.prefix_query) <> ''
-        and m.status = 'ACTIVE'
-        and e.status = 'ACTIVE'
-        and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-        and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-        and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-        and ${renderableMarketExpr}
-        and ${nativeTradableMarketExpr}
-        and (${marketSearchDocExpr}) @@ sq.prefix_query
-    ) matches
-    ${aggregateClause}
+    primary_search_events as materialized (
+      ${primarySql}
+    ),
+    primary_search_state as materialized (
+      select count(*)::int as matched from primary_search_events
+    ),
+    fallback_search_events as materialized (
+      ${fallbackSql}
+    ),
+    search_events as materialized (
+      select id, rank, search_priority
+      from (
+        select id, rank, search_priority
+        from primary_search_events
+        union all
+        select f.id, f.rank, f.search_priority
+        from fallback_search_events f
+        where not exists (
+          select 1
+          from primary_search_events p
+          where p.id = f.id
+        )
+      ) merged_search_events
+      order by search_priority desc, rank desc nulls last, id
+      ${finalLimitClause}
+    )
   `;
 }
 
@@ -356,6 +513,9 @@ function buildFeedSearchContext(args: {
   nativeTradableMarketExpr?: string;
   mode?: FeedSearchMode;
   matchLimit?: number | null;
+  fallbackThreshold?: number | null;
+  earlyFilterInputs?: FeedSearchEarlyFilterInputs;
+  venueFilterTarget?: FeedSearchVenueFilterTarget;
 }): FeedSearchContext {
   const {
     add,
@@ -366,23 +526,43 @@ function buildFeedSearchContext(args: {
     nativeTradableMarketExpr = buildNativeTradableMarketSql("m"),
     mode = "ranked",
     matchLimit = null,
+    fallbackThreshold = null,
+    earlyFilterInputs,
+    venueFilterTarget = "event",
   } = args;
   const plan = buildFeedSearchPlan(q);
   const searchParam = plan.hasSearch ? add(plan.searchText) : null;
   const prefixParam = plan.hasSearch ? add(plan.prefixQueryText) : null;
-  const eventSearchDocExpr = buildFeedSearchDocumentExpr("e");
-  const marketSearchDocExpr = buildFeedSearchDocumentExpr("m");
+  const primaryEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "primary");
+  const primaryMarketSearchDocExpr = buildFeedSearchDocumentExpr(
+    "m",
+    "primary",
+  );
+  const fullEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "full");
+  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr("m", "full");
   const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
+  const earlyFilters = plan.hasSearch
+    ? buildFeedSearchEarlyFilterSql({
+        add,
+        inputs: earlyFilterInputs,
+        venueTarget: venueFilterTarget,
+      })
+    : undefined;
   const searchMatchesSql = plan.hasSearch
     ? buildFeedSearchMatchesSql({
         mode: effectiveMode,
         matchLimit,
+        fallbackThreshold,
         nowParam,
         nowCloseParam,
-        eventSearchDocExpr,
-        marketSearchDocExpr,
+        primaryEventSearchDocExpr,
+        primaryMarketSearchDocExpr,
+        fullEventSearchDocExpr,
+        fullMarketSearchDocExpr,
         renderableMarketExpr,
         nativeTradableMarketExpr,
+        strategy: plan.strategy,
+        earlyFilters,
       })
     : "";
   const searchCte = plan.hasSearch
@@ -412,9 +592,7 @@ function buildFeedSearchContext(args: {
           ) raw
         ) prepared
       ),
-      search_events as materialized (
-        ${searchMatchesSql}
-      )
+      ${searchMatchesSql}
     `
     : "";
 
@@ -430,10 +608,9 @@ function buildFeedSearchContext(args: {
     searchFilterExpr: plan.hasSearch
       ? "(not sq.applies or se.id is not null)"
       : "true",
-    joinedRankExpr:
-      plan.hasSearch && effectiveMode === "ranked"
-        ? "case when sq.applies then coalesce(se.rank, 0) else 0 end"
-        : "0::double precision",
+    joinedRankExpr: plan.hasSearch
+      ? "case when sq.applies then (coalesce(se.search_priority, 0) * 1000000000000000000000000000000::numeric + coalesce(se.rank, 0)) else 0 end"
+      : "0::double precision",
   };
 }
 
@@ -442,6 +619,9 @@ export function buildFeedCandidateEventSearchFilter(args: {
   q?: string;
   nowParam: string;
   nowCloseParam?: string;
+  matchLimit?: number | null;
+  fallbackThreshold?: number | null;
+  earlyFilterInputs?: FeedSearchEarlyFilterInputs;
 }): FeedCandidateEventSearchFilter {
   const context = buildFeedSearchContext({
     add: args.add,
@@ -450,6 +630,9 @@ export function buildFeedCandidateEventSearchFilter(args: {
     nowCloseParam: args.nowCloseParam,
     renderableMarketExpr: buildRenderableMarketSql({ alias: "m" }),
     mode: "membership",
+    matchLimit: args.matchLimit,
+    fallbackThreshold: args.fallbackThreshold,
+    earlyFilterInputs: args.earlyFilterInputs,
   });
 
   return {
@@ -605,6 +788,8 @@ function buildFeedMarketViewContext(args: {
   requireNamedCategory?: boolean;
   searchMode?: FeedSearchMode;
   searchMatchLimit?: number | null;
+  searchFallbackThreshold?: number | null;
+  venueFilterTarget?: FeedSearchVenueFilterTarget;
 }) {
   const {
     add,
@@ -615,6 +800,8 @@ function buildFeedMarketViewContext(args: {
     requireNamedCategory = false,
     searchMode = "ranked",
     searchMatchLimit = null,
+    searchFallbackThreshold = null,
+    venueFilterTarget = "market",
   } = args;
   const {
     marketVolumeDisplayExpr,
@@ -635,6 +822,9 @@ function buildFeedMarketViewContext(args: {
     renderableMarketExpr,
     mode: searchMode,
     matchLimit: searchMatchLimit,
+    fallbackThreshold: searchFallbackThreshold,
+    earlyFilterInputs: inputs,
+    venueFilterTarget,
   });
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
@@ -753,17 +943,28 @@ function feedSearchResultMatchLimit(): number {
 }
 
 function feedSearchResultMatchLimitForInputs(
-  inputs: Pick<FeedInputs, "category" | "categories" | "venues" | "marketIds">,
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
 ): number | null {
-  if (
-    inputs.category ||
-    inputs.categories?.length ||
-    inputs.venues?.length ||
-    inputs.marketIds?.length
-  ) {
-    return null;
-  }
-  return feedSearchResultMatchLimit();
+  if (inputs.marketIds?.length) return null;
+  const pageAwareLimit = Math.max(inputs.limit + inputs.offset + 100, 200);
+  return Math.min(pageAwareLimit, feedSearchResultMatchLimit());
+}
+
+function feedSearchFallbackThresholdForInputs(
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+): number | null {
+  const matchLimit = feedSearchResultMatchLimitForInputs(inputs);
+  if (matchLimit == null) return null;
+  return Math.min(matchLimit, inputs.limit + inputs.offset + 25);
+}
+
+export function buildFeedSearchResultWindow(
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+): FeedSearchResultWindow {
+  return {
+    matchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    fallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+  };
 }
 
 async function queryRowsWithLocalSettings<T extends QueryResultRow>(
@@ -917,6 +1118,7 @@ export async function fetchFeedCategoryFacetRows(
       expressions,
       requireNamedCategory: true,
       searchMode: "membership",
+      venueFilterTarget: "market",
     });
 
     const withParts: string[] = [];
@@ -969,6 +1171,8 @@ export async function fetchFeedCategoryFacetRows(
     nowParam,
     renderableMarketExpr,
     mode: "membership",
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "event",
   });
   const eventWhere = buildFeedEventWhere({
     add,
@@ -1106,6 +1310,9 @@ export async function fetchFeedEventIds(
     nowParam,
     renderableMarketExpr,
     matchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    fallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "event",
   });
   const eventWhere = buildFeedEventWhere({
     add,
@@ -1710,6 +1917,8 @@ export async function fetchFeedMarketsDirect(
     nowCloseParam,
     expressions,
     searchMatchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    searchFallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+    venueFilterTarget: "market",
   });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
@@ -1973,6 +2182,8 @@ export async function fetchFavoriteFeedEventPage(
     nowParam,
     nowCloseParam,
     renderableMarketExpr,
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "market",
   });
   const marketCountCte = `
     market_count as (

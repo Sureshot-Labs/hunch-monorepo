@@ -21,6 +21,7 @@ import {
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
   buildFeedCandidateEventSearchFilter,
+  buildFeedSearchResultWindow,
   fetchFavoriteFeedEventPage,
   fetchFeedEventIds,
   fetchFeedMarkets,
@@ -1163,10 +1164,22 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         };
         const eventIdsParam = add(candidateEventIds);
         const nowParamSql = add(nowParam);
+        const searchWindow = buildFeedSearchResultWindow({
+          limit,
+          offset,
+        });
         const searchFilter = buildFeedCandidateEventSearchFilter({
           add,
           q: search,
           nowParam: nowParamSql,
+          matchLimit: searchWindow.matchLimit,
+          fallbackThreshold: searchWindow.fallbackThreshold,
+          earlyFilterInputs: {
+            venues,
+            categories,
+            endWithin,
+            ageSince,
+          },
         });
         const where: string[] = [
           "e.status = 'ACTIVE'",

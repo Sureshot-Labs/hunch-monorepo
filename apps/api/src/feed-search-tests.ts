@@ -161,6 +161,7 @@ async function main() {
 
   const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const needle = `ftstest${suffix}`;
+  const fallbackNeedle = `fallback${suffix}`;
   const category = `feed-search-${suffix}`;
   const now = Date.now();
   const seededEventIds: string[] = [];
@@ -248,6 +249,27 @@ async function main() {
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
       volumeTotal: 15,
     },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Primary search marker ${fallbackNeedle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 1,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Description-only fallback marker`,
+      description: `Hidden recall token ${fallbackNeedle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 3,
+    },
   ];
 
   const markets: SeededMarket[] = [
@@ -331,6 +353,27 @@ async function main() {
       expirationTime: events[7].endDate,
       volumeTotal: 15,
     },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[8].id,
+      title: `Primary search market ${fallbackNeedle}`,
+      closeTime: events[8].endDate,
+      expirationTime: events[8].endDate,
+      volumeTotal: 1,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[9].id,
+      title: `Description-only fallback market`,
+      description: `Hidden market recall token ${fallbackNeedle}`,
+      closeTime: events[9].endDate,
+      expirationTime: events[9].endDate,
+      volumeTotal: 3,
+    },
   ];
 
   try {
@@ -341,6 +384,28 @@ async function main() {
     for (const market of markets) {
       await insertMarket(market);
       seededMarketIds.push(market.id);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          view: "events",
+          venue: "polymarket",
+          sort: "time",
+          sort_dir: "asc",
+          limit: 5,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: "/meta/categories/facets?venue=polymarket",
+      });
+      assert.equal(response.statusCode, 200);
     }
 
     {
@@ -400,6 +465,46 @@ async function main() {
       assert.ok(
         !eventIds.includes(events[0].id),
         "one-character search should not fall back to the unfiltered feed",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: fallbackNeedle,
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.equal(eventIds[0], events[8].id);
+      assert.equal(new Set(eventIds).size, eventIds.length);
+      assert.ok(
+        eventIds.includes(events[9].id),
+        "single-token search should fall back to full text when primary results underfill",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "hidden recall",
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(
+        eventIds.includes(events[9].id),
+        "multi-token search should keep full description recall",
       );
     }
 
