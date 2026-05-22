@@ -2,7 +2,8 @@
 
 This document describes the backend contract for admin-panel work around
 referral-code campaigns, partner labels, multiplier context, and rewards point
-visibility.
+visibility. It also lists the System/Ops read APIs added in the same admin
+handoff batch so the new external panel has one implementation document.
 
 The public user app remains backward compatible. Existing fields stay in place;
 new fields are additive unless noted.
@@ -30,17 +31,33 @@ Important lifecycle rules:
 - Campaign codes can be deactivated. Deactivation blocks future attaches only.
 - Policy edits are live for already-attached users.
 
-## Admin UI To Add
+## External Panel Work To Add
 
-Add a Rewards / Referral Codes area with:
+This is a capability checklist, not a navigation recommendation. The external
+panel can decide placement and grouping.
+
+Referral-code capabilities:
 
 - List and filter referral codes.
 - Create ownerless campaign code.
 - Edit policy fields for any code.
 - Deactivate campaign codes.
+- Open a code drilldown listing users referred by that code.
 - Show inbound referral campaign metadata on user list/detail.
+- Use clear labels:
+  - `Share code`: the user's own code.
+  - `Used referral code`: the inbound code this user attached with.
+  - `Referred by`: the source user or campaign label.
 - Use the new point fields to avoid showing private tier-only points as public
   points.
+
+System/Ops capabilities added for the external panel:
+
+- Postgres health and slow-query stats from `/admin/system/postgres`.
+- Indexer hot-token, stream-hot-token, price-refresh queue, and heartbeat stats
+  from `/admin/system/indexers`.
+- Existing vector stats remain at `/admin/vector`; keep them conceptually
+  separate from System/Ops stats.
 
 Do not add a hard-delete control. Backend supports deactivation/retirement, not
 delete.
@@ -53,9 +70,13 @@ Routes use existing admin permissions:
 | --- | --- | --- |
 | List referral codes | `/admin/rewards/referral-codes` | `rewards:read` |
 | Create/update campaign or policy | `/admin/rewards/referral-codes/*` | `rewards:write` |
+| Referred users by code | `/admin/rewards/referral-codes/by-code/:code/referrals` | `rewards:read` and `users:read` |
 | User current-code management | `/admin/users/:id/referral-code` | `users:write` |
 | User list/detail metadata | `/admin/users`, `/admin/users/:id` | `users:read` |
 | Manual points | `/admin/rewards/points`, `/admin/points/manual-events` | `rewards:write` / `rewards:read` |
+| Postgres System/Ops stats | `/admin/system/postgres` | `analytics:read` |
+| Indexer System/Ops stats | `/admin/system/indexers` | `analytics:read` |
+| Vector stats | `/admin/vector` | `analytics:read` |
 
 Frontend should still handle backend `403`; hiding UI is not the security
 boundary.
@@ -111,7 +132,7 @@ Response:
 }
 ```
 
-Display recommendations:
+Implementation notes:
 
 - Show `code`, `policy.type`, `policy.label`, `policy.multiplierOverride`,
   `visibleDropPoints`, `tierDropPoints`, `isActive`, `retiredAt`, and
@@ -325,6 +346,249 @@ Admin user search `q` now matches:
 No UI change is required for search input; existing search box can use the new
 backend matching.
 
+## Referred Users By Code
+
+`GET /admin/rewards/referral-codes/by-code/:code/referrals`
+
+Required permissions:
+
+- `rewards:read`
+- `users:read`
+
+Query params:
+
+- `limit`: optional, default `50`, max `100`.
+- `offset`: optional.
+
+The `:code` path param is normalized with the same referral-code rules used by
+referral attach. The endpoint works for both user-owned share codes and
+ownerless campaign codes. Unknown codes return `404`.
+
+Example:
+
+```http
+GET /admin/rewards/referral-codes/by-code/POLY15/referrals?limit=50&offset=0
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "code": {
+    "id": "f8f16b6f-29c2-44df-bc42-24cb20a34f7a",
+    "code": "POLY15",
+    "isActive": true,
+    "retiredAt": null,
+    "retiredReason": null,
+    "policy": {
+      "id": "e2d7b08d-6d55-47de-9c36-3b0be1582a11",
+      "type": "campaign",
+      "label": "Polymarket",
+      "multiplierOverride": 1.5,
+      "visibleDropPoints": 100,
+      "tierDropPoints": 400,
+      "ownerUserId": null,
+      "owner": null
+    },
+    "referralCount": 42,
+    "createdAt": "2026-05-22T12:00:00.000Z",
+    "updatedAt": "2026-05-22T12:00:00.000Z"
+  },
+  "referrals": [
+    {
+      "id": "8d9b3e1c-1111-4444-9999-2bdb5a9e55aa",
+      "referredUserId": "7f2e6c1f-83f1-4dc8-b4c3-9487f0440a24",
+      "email": "user@example.com",
+      "username": "hunchuser",
+      "displayName": "Hunch User",
+      "primaryWallet": "0x45bd000000000000000000000000000000001733",
+      "status": "qualified",
+      "qualifiedAt": "2026-05-22T13:00:00.000Z",
+      "attachedAt": "2026-05-22T12:00:00.000Z",
+      "publicPoints": 173,
+      "tierPoints": 573,
+      "qualificationPoints": 1073,
+      "referralBonus": 25
+    }
+  ],
+  "total": 1,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+Implementation details:
+
+- Show code metadata above the table so admins can confirm campaign/user code,
+  label, owner, multiplier, and drop config.
+- Use `attachedAt` as the referral attach timestamp.
+- Use `status` and `qualifiedAt` for qualification state.
+- Keep `publicPoints`, `tierPoints`, and `qualificationPoints` labeled
+  separately. Do not show `tierPoints` as public leaderboard points.
+
+## System/Ops Read APIs
+
+These APIs were added for the new external panel as read-only operational
+surfaces. They do not mutate database state, reset stats, restart workers, or
+modify queues.
+
+### Postgres Stats
+
+`GET /admin/system/postgres`
+
+Required permission:
+
+- `analytics:read`
+
+Response fields:
+
+- `generatedAt`
+- `database.name`
+- `database.sizeBytes`
+- `database.maxConnections`
+- `connections.byState`
+- `connections.waiting`
+- `locks.summary`
+- `locks.blockers`
+- `slowQueries.available`
+- `slowQueries.error`
+- `slowQueries.items`
+- `tableHealth`
+
+Slow-query rows contain normalized, truncated query text and timing/IO fields:
+
+```json
+{
+  "query": "select ...",
+  "calls": 42,
+  "totalMs": 12000,
+  "meanMs": 285.7,
+  "maxMs": 1300,
+  "rows": 1000,
+  "sharedBlksHit": 5000,
+  "sharedBlksRead": 200,
+  "tempBlksRead": 0,
+  "tempBlksWritten": 0
+}
+```
+
+Implementation notes:
+
+- If `pg_stat_statements` is missing or unreadable, the endpoint still returns
+  successfully with `slowQueries.available=false`.
+- `locks.blockers` contains current blocker/waiter pairs; empty means no active
+  blocking pair was found at request time.
+- `tableHealth` is ordered by relation size and includes live/dead row estimates,
+  scan counts, vacuum/analyze timestamps, and `totalBytes`.
+- Query text is admin-only operational data even though literals are normalized
+  by `pg_stat_statements`.
+
+### Indexer And Redis Stats
+
+`GET /admin/system/indexers`
+
+Required permission:
+
+- `analytics:read`
+
+Venues returned:
+
+- `polymarket`
+- `dflow`
+- `limitless`
+
+DFlow is the Kalshi data path. Do not add legacy Kalshi indexer stats.
+
+Top-level Redis status:
+
+```json
+{
+  "redis": {
+    "available": true,
+    "status": "ready",
+    "error": null
+  }
+}
+```
+
+Each venue item contains:
+
+```json
+{
+  "venue": "polymarket",
+  "hotTokens": {
+    "key": "hot:tokens:polymarket",
+    "total": 5000,
+    "fresh": 5000,
+    "oldestAgeMs": 114000,
+    "newestAgeMs": 250
+  },
+  "streamHotTokens": {
+    "key": "hot:tokens:stream:polymarket",
+    "total": 268,
+    "fresh": 268,
+    "oldestAgeMs": 30000,
+    "newestAgeMs": 120
+  },
+  "priceRefreshQueue": {
+    "key": "price-refresh:tokens:polymarket",
+    "total": 1350,
+    "due": 1350,
+    "delayed": 0,
+    "oldestDueAgeMs": 15500
+  },
+  "heartbeat": {
+    "schemaVersion": 1,
+    "venue": "polymarket",
+    "updatedAt": "2026-05-22T20:54:14.000Z",
+    "priceRefresh": {
+      "lastRunAt": "2026-05-22T20:54:14.000Z",
+      "durationMs": 900,
+      "consumers": 2,
+      "batch": 100,
+      "claimed": 200,
+      "claimedBySide": { "oldest": 100, "newest": 100 },
+      "refreshed": 338,
+      "failed": 0,
+      "backlog": 1150
+    }
+  },
+  "error": null
+}
+```
+
+Implementation notes:
+
+- `hotTokens` and `streamHotTokens` are Redis sorted-set snapshots. `fresh`
+  counts entries newer than the configured TTL.
+- `priceRefreshQueue.total` is all queued tokens. `due` is ready to claim now.
+  `delayed` is scheduled for the future.
+- `oldestDueAgeMs` growing across multiple refresh waves means the queue is not
+  draining fast enough.
+- Missing `heartbeat` is allowed and should be shown as unavailable/unknown, not
+  as a route failure.
+- If Redis is unavailable, the route still returns venue rows with null stats
+  and an error.
+
+### Price Refresh Heartbeat Interpretation
+
+The external panel only needs to interpret the returned heartbeat fields; env
+configuration belongs in ops/runbook docs.
+
+- `heartbeat.priceRefresh.consumers`: workers used in the last refresh wave.
+- `heartbeat.priceRefresh.batch`: max tokens each worker could claim.
+- `heartbeat.priceRefresh.claimed`: tokens claimed from the queue.
+- `heartbeat.priceRefresh.claimedBySide`: split of claimed tokens from the
+  oldest and newest due ends of the queue.
+- `heartbeat.priceRefresh.refreshed`: token/market refreshes completed.
+- `heartbeat.priceRefresh.failed`: refresh failures in the wave.
+- `heartbeat.priceRefresh.backlog`: remaining queue size after the wave.
+- If `priceRefreshQueue.oldestDueAgeMs` and `heartbeat.priceRefresh.backlog`
+  keep growing across refreshes, the indexer is falling behind.
+- Indexer logs are one aggregate success log per wave. The System/Ops panel
+  should use heartbeat fields rather than scraping logs.
+
 ## Point Semantics
 
 Use these fields consistently:
@@ -449,7 +713,7 @@ Manual event listing:
 This returns both hidden and visible manual grants. Use `visible` to label rows
 in the UI.
 
-## Recommended Admin Panel Screens
+## Referral Fields To Surface
 
 ### Referral Codes
 
@@ -472,6 +736,7 @@ Actions:
 - Edit label/multiplier/drops.
 - Deactivate campaign code.
 - Open owner user detail for user codes.
+- Open referred-users drilldown for any code.
 
 ### User List / Detail
 

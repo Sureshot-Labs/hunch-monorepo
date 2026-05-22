@@ -18,6 +18,7 @@ import {
   fetchRewardsLeaderboardMe,
   fetchRewardsLeaderboardRows,
   fetchReferralsForUser,
+  fetchReferralsForReferralCode,
   fetchUserPoints,
   fetchUserQualificationPoints,
   fetchUserTierPoints,
@@ -320,7 +321,7 @@ function resolveReferralBonus(
   return current;
 }
 
-function normalizeReferralCode(value: string): string | null {
+export function normalizeReferralCode(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   const upper = trimmed.toUpperCase();
@@ -859,6 +860,58 @@ export async function listAdminReferralCodes(
   };
 }
 
+export async function getAdminReferralCodeReferralsByCode(
+  pool: DbQuery,
+  inputs: {
+    code: string;
+    limit: number;
+    offset: number;
+  },
+) {
+  const normalized = normalizeReferralCode(inputs.code);
+  if (!normalized) {
+    throw createReferralCodeError(400, "Invalid referral code");
+  }
+
+  const row = await findReferralCodeByCode(pool, normalized);
+  if (!row) return null;
+
+  const [total, referrals] = await Promise.all([
+    countReferralsForReferralCode(pool, row.referral_code_id),
+    fetchReferralsForReferralCode(pool, {
+      referralCodeId: row.referral_code_id,
+      limit: inputs.limit,
+      offset: inputs.offset,
+    }),
+  ]);
+
+  return {
+    code: mapReferralCodeListRow({
+      ...row,
+      owner_email: null,
+      owner_username: null,
+      owner_display_name: null,
+      referral_count: String(total),
+    }),
+    referrals: referrals.map((referral) => ({
+      id: referral.id,
+      referredUserId: referral.referred_user_id,
+      email: referral.email,
+      username: referral.username,
+      displayName: referral.display_name,
+      primaryWallet: referral.primary_wallet,
+      status: referral.status,
+      qualifiedAt: referral.qualified_at,
+      attachedAt: referral.attached_at,
+      publicPoints: Number(referral.public_points ?? 0),
+      tierPoints: Number(referral.tier_points ?? 0),
+      qualificationPoints: Number(referral.qualification_points ?? 0),
+      referralBonus: Number(referral.referral_bonus ?? 0),
+    })),
+    total,
+  };
+}
+
 export async function createAdminCampaignReferralCode(
   pool: DbQuery,
   inputs: {
@@ -1156,9 +1209,7 @@ export async function getRewardsSummary(
         ),
       )
     : 1;
-  const remaining = nextTier
-    ? Math.max(0, nextTier.points - tierPoints)
-    : null;
+  const remaining = nextTier ? Math.max(0, nextTier.points - tierPoints) : null;
 
   const feeTotalsByChain = await fetchFeeTotalsByChain(pool, {
     userId: inputs.userId,

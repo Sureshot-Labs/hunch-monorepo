@@ -1,4 +1,5 @@
 export type PriceRefreshVenue = "polymarket" | "dflow" | "limitless";
+export type PriceRefreshQueueClaimSide = "oldest" | "newest";
 
 export type PriceRefreshRedis = {
   zAdd: (
@@ -17,6 +18,10 @@ export type PriceRefreshRedis = {
     key: string,
     start: number,
     stop: number,
+  ) => Promise<unknown>;
+  eval: (
+    script: string,
+    options: { keys: string[]; arguments: string[] },
   ) => Promise<unknown>;
 };
 
@@ -39,6 +44,7 @@ export type ClaimPriceRefreshInputs = {
   venue: PriceRefreshVenue;
   nowMs?: number;
   limit: number;
+  side?: PriceRefreshQueueClaimSide;
 };
 
 export type RequeuePriceRefreshInputs = {
@@ -54,6 +60,20 @@ export const PRICE_REFRESH_QUEUE_KEYS: Record<PriceRefreshVenue, string> = {
   dflow: "price-refresh:tokens:dflow",
   limitless: "price-refresh:tokens:limitless",
 };
+
+const CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT = `
+local side = ARGV[3]
+local tokens
+if side == 'newest' then
+  tokens = redis.call('ZREVRANGEBYSCORE', KEYS[1], ARGV[1], '-inf', 'LIMIT', 0, tonumber(ARGV[2]))
+else
+  tokens = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+end
+if #tokens > 0 then
+  redis.call('ZREM', KEYS[1], unpack(tokens))
+end
+return tokens
+`;
 
 function normalizeTokenId(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -152,13 +172,13 @@ export async function claimDuePriceRefreshTokens(
   if (limit <= 0) return [];
 
   const key = getPriceRefreshQueueKey(inputs.venue);
-  const tokens = await redis.zRangeByScore(key, 0, inputs.nowMs ?? Date.now(), {
-    LIMIT: { offset: 0, count: limit },
+  const side = inputs.side === "newest" ? "newest" : "oldest";
+  const result = await redis.eval(CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT, {
+    keys: [key],
+    arguments: [String(inputs.nowMs ?? Date.now()), String(limit), side],
   });
-  if (!tokens.length) return [];
-
-  await redis.zRem(key, tokens);
-  return tokens;
+  if (!Array.isArray(result)) return [];
+  return result.filter((value): value is string => typeof value === "string");
 }
 
 export async function requeuePriceRefreshTokens(

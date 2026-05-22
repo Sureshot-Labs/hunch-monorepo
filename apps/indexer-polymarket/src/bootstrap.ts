@@ -35,6 +35,7 @@ import {
   publishMarketUpdate,
   requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
 } from "@hunch/infra";
 import { pool } from "./db.js";
@@ -1198,14 +1199,21 @@ async function fetchTradableTokenIdsForSnapshot(
     );
 }
 
-export async function processPriceRefreshQueue(): Promise<{
+export async function processPriceRefreshQueue(
+  options: {
+    side?: PriceRefreshQueueClaimSide;
+    logSuccess?: boolean;
+  } = {},
+): Promise<{
   claimed: number;
   refreshed: number;
   failed: number;
   backlog: number;
+  side: PriceRefreshQueueClaimSide;
 }> {
+  const side = options.side ?? "oldest";
   if (!env.priceRefreshQueueEnabled) {
-    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
   }
 
   await ensureRedis();
@@ -1213,9 +1221,10 @@ export async function processPriceRefreshQueue(): Promise<{
   const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
     venue: "polymarket",
     limit: env.priceRefreshQueueBatch,
+    side,
   });
   if (!tokenIds.length) {
-    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0 };
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
   }
 
   const startedAt = Date.now();
@@ -1280,26 +1289,29 @@ export async function processPriceRefreshQueue(): Promise<{
   }
 
   const backlog = await getPriceRefreshQueueBacklog(redisClient, "polymarket");
-  log.info("Polymarket price refresh queue processed", {
-    claimed: tokenIds.length,
-    refreshed,
-    marketRefs,
-    marketRefreshed,
-    eventsFetched,
-    fallbackMarketFetches,
-    snapshotTokens,
-    bookRefreshed,
-    failed,
-    skippedBookTokens,
-    backlog,
-    durationMs: Date.now() - startedAt,
-    timings: {
-      ...timings,
-      ...refreshTimings,
-      ...bookTimings,
-    },
-  });
-  return { claimed: tokenIds.length, refreshed, failed, backlog };
+  if (options.logSuccess !== false) {
+    log.info("Polymarket price refresh queue processed", {
+      side,
+      claimed: tokenIds.length,
+      refreshed,
+      marketRefs,
+      marketRefreshed,
+      eventsFetched,
+      fallbackMarketFetches,
+      snapshotTokens,
+      bookRefreshed,
+      failed,
+      skippedBookTokens,
+      backlog,
+      durationMs: Date.now() - startedAt,
+      timings: {
+        ...timings,
+        ...refreshTimings,
+        ...bookTimings,
+      },
+    });
+  }
+  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
 }
 
 function parseJsonStringArray(raw: unknown): string[] {

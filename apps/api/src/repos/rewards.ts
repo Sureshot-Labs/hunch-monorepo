@@ -138,6 +138,22 @@ export type ReferralCodeListRow = ReferralCodeLookupRow & {
   referral_count: string;
 };
 
+export type ReferralCodeReferralUserRow = {
+  id: string;
+  referred_user_id: string;
+  status: string;
+  qualified_at: Date | null;
+  attached_at: Date;
+  email: string | null;
+  username: string | null;
+  display_name: string | null;
+  primary_wallet: string | null;
+  public_points: string | null;
+  tier_points: string | null;
+  qualification_points: string | null;
+  referral_bonus: string | null;
+};
+
 export type ReferralCodeMultiplierContextRow = {
   code: string;
   label: string | null;
@@ -1640,6 +1656,101 @@ export async function fetchReferralsForUser(
     qualificationPoints: Number(row.qualification_points ?? 0),
     bonus: Number(row.bonus ?? 0),
   }));
+}
+
+export async function fetchReferralsForReferralCode(
+  pool: DbQuery,
+  inputs: {
+    referralCodeId: string;
+    limit: number;
+    offset: number;
+  },
+): Promise<ReferralCodeReferralUserRow[]> {
+  const { rows } = await pool.query<ReferralCodeReferralUserRow>(
+    `
+      with referral_rows as (
+        select
+          r.id,
+          r.referred_user_id,
+          r.status,
+          r.qualified_at,
+          r.created_at as attached_at
+        from referrals r
+        where r.referral_code_id = $1
+        order by r.created_at desc, r.id desc
+        limit $2 offset $3
+      ),
+      public_points as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildPublicPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      tier_points as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildTierPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      qualification_points as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0) as points
+        from volume_events ve
+        join referral_rows rr
+          on rr.referred_user_id = ve.user_id
+        group by ve.user_id
+      ),
+      referral_bonus as (
+        select
+          fe.user_id,
+          coalesce(sum(fe.referral_earned_usdc), 0) as total_bonus
+        from fee_events fe
+        join referral_rows rr
+          on rr.referred_user_id = fe.user_id
+        where fe.liability_snapshot_source = 'event_time_frozen'
+          and fe.status <> 'failed'
+        group by fe.user_id
+      )
+      select
+        rr.id,
+        rr.referred_user_id,
+        rr.status,
+        rr.qualified_at,
+        rr.attached_at,
+        u.email,
+        u.username,
+        u.display_name,
+        w.wallet_address as primary_wallet,
+        coalesce(pp.points, 0)::text as public_points,
+        coalesce(tp.points, 0)::text as tier_points,
+        coalesce(qp.points, 0)::text as qualification_points,
+        coalesce(rb.total_bonus, 0)::text as referral_bonus
+      from referral_rows rr
+      join users u
+        on u.id = rr.referred_user_id
+      left join user_wallets w
+        on w.user_id = rr.referred_user_id
+       and w.is_primary = true
+      left join public_points pp
+        on pp.user_id = rr.referred_user_id
+      left join tier_points tp
+        on tp.user_id = rr.referred_user_id
+      left join qualification_points qp
+        on qp.user_id = rr.referred_user_id
+      left join referral_bonus rb
+        on rb.user_id = rr.referred_user_id
+      order by rr.attached_at desc, rr.id desc
+    `,
+    [inputs.referralCodeId, inputs.limit, inputs.offset],
+  );
+  return rows;
 }
 
 export function resolveRewardsReferralsOrderBy(inputs: {
