@@ -110,6 +110,8 @@ export type UpsertUnifiedMarketsResult = {
   timings?: {
     filterChangedMs: number;
     loadTokenSourcesMs: number;
+    updateMs: number;
+    insertMs: number;
     upsertMs: number;
     tokenSyncMs: number;
     totalMs: number;
@@ -597,6 +599,8 @@ export async function upsertUnifiedMarkets(
   const timings = {
     filterChangedMs: 0,
     loadTokenSourcesMs: 0,
+    updateMs: 0,
+    insertMs: 0,
     upsertMs: 0,
     tokenSyncMs: 0,
     totalMs: 0,
@@ -617,7 +621,7 @@ export async function upsertUnifiedMarkets(
 
   const rows = sortUnifiedMarketRows(dedupeById(marketRows));
 
-  const query = `
+  const insertQuery = `
     with input as (
       select *
       from jsonb_to_recordset($1::jsonb) as x(
@@ -776,6 +780,197 @@ export async function upsertUnifiedMarkets(
        excluded.created_at, excluded.updated_at)
   `;
 
+  const updateQuery = `
+    with input as (
+      select *
+      from jsonb_to_recordset($1::jsonb) as x(
+        id text,
+        venue text,
+        venue_market_id text,
+        event_id text,
+        title text,
+        description text,
+        category text,
+        status unified_status,
+        market_type text,
+        open_time timestamptz,
+        close_time timestamptz,
+        expiration_time timestamptz,
+        best_bid numeric,
+        best_ask numeric,
+        last_price numeric,
+        volume_total numeric,
+        volume_24h numeric,
+        open_interest numeric,
+        liquidity numeric,
+        metadata jsonb,
+        outcomes text,
+        token_yes text,
+        token_no text,
+        clob_token_ids text,
+        condition_id text,
+        market_ledger text,
+        settlement_mint text,
+        is_initialized boolean,
+        redemption_status text,
+        resolved_outcome text,
+        resolved_outcome_pct numeric,
+        slug text,
+        image text,
+        icon text,
+        created_at timestamptz,
+        updated_at timestamptz
+      )
+    )
+    update unified_markets
+    set
+      event_id = input.event_id,
+      title = input.title,
+      description = input.description,
+      category = input.category,
+      status = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+          AND input.status = 'ACTIVE'
+        THEN unified_markets.status
+        ELSE input.status
+      END,
+      market_type = input.market_type,
+      open_time = input.open_time,
+      close_time = input.close_time,
+      expiration_time = input.expiration_time,
+      best_bid = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.best_bid IS NULL
+        THEN unified_markets.best_bid
+        ELSE input.best_bid
+      END,
+      best_ask = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.best_ask IS NULL
+        THEN unified_markets.best_ask
+        ELSE input.best_ask
+      END,
+      last_price = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.last_price IS NULL
+        THEN unified_markets.last_price
+        ELSE input.last_price
+      END,
+      volume_total = input.volume_total,
+      volume_24h = input.volume_24h,
+      open_interest = input.open_interest,
+      liquidity = input.liquidity,
+      metadata = input.metadata,
+      outcomes = input.outcomes,
+      token_yes = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_yes like 'sol:%'
+          AND input.token_yes like 'kalshi:%'
+        THEN unified_markets.token_yes
+        ELSE input.token_yes
+      END,
+      token_no = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_no like 'sol:%'
+          AND input.token_no like 'kalshi:%'
+        THEN unified_markets.token_no
+        ELSE input.token_no
+      END,
+      clob_token_ids = input.clob_token_ids,
+      condition_id = input.condition_id,
+      market_ledger = COALESCE(input.market_ledger, unified_markets.market_ledger),
+      settlement_mint = COALESCE(input.settlement_mint, unified_markets.settlement_mint),
+      is_initialized = COALESCE(input.is_initialized, unified_markets.is_initialized),
+      redemption_status = COALESCE(input.redemption_status, unified_markets.redemption_status),
+      resolved_outcome = COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
+      resolved_outcome_pct = COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
+      slug = input.slug,
+      image = input.image,
+      icon = input.icon,
+      created_at = input.created_at,
+      updated_at = input.updated_at,
+      updated_at_db = now()
+    from input
+    where unified_markets.venue = input.venue
+      and unified_markets.venue_market_id = input.venue_market_id
+      and (
+        unified_markets.event_id, unified_markets.title, unified_markets.description,
+        unified_markets.category, unified_markets.status, unified_markets.market_type,
+        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
+        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
+        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
+        unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
+        unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
+        unified_markets.market_ledger, unified_markets.settlement_mint,
+        unified_markets.is_initialized, unified_markets.redemption_status,
+        unified_markets.resolved_outcome, unified_markets.resolved_outcome_pct,
+        unified_markets.slug, unified_markets.image, unified_markets.icon,
+        unified_markets.created_at, unified_markets.updated_at
+      ) is distinct from (
+        input.event_id, input.title, input.description,
+        input.category,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+            AND input.status = 'ACTIVE'
+          THEN unified_markets.status
+          ELSE input.status
+        END,
+        input.market_type,
+        input.open_time, input.close_time, input.expiration_time,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.best_bid IS NULL
+          THEN unified_markets.best_bid
+          ELSE input.best_bid
+        END,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.best_ask IS NULL
+          THEN unified_markets.best_ask
+          ELSE input.best_ask
+        END,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.last_price IS NULL
+          THEN unified_markets.last_price
+          ELSE input.last_price
+        END,
+        input.volume_total, input.volume_24h, input.open_interest,
+        input.liquidity, input.metadata, input.outcomes,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.token_yes like 'sol:%'
+            AND input.token_yes like 'kalshi:%'
+          THEN unified_markets.token_yes
+          ELSE input.token_yes
+        END,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.token_no like 'sol:%'
+            AND input.token_no like 'kalshi:%'
+          THEN unified_markets.token_no
+          ELSE input.token_no
+        END,
+        input.clob_token_ids, input.condition_id,
+        COALESCE(input.market_ledger, unified_markets.market_ledger),
+        COALESCE(input.settlement_mint, unified_markets.settlement_mint),
+        COALESCE(input.is_initialized, unified_markets.is_initialized),
+        COALESCE(input.redemption_status, unified_markets.redemption_status),
+        COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
+        COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
+        input.slug, input.image, input.icon,
+        input.created_at, input.updated_at
+      )
+  `;
+
   const batchSize = Math.max(1, Math.trunc(options.batchSize ?? 500));
   const batches = chunkArray(rows, batchSize);
   let changedRows = 0;
@@ -785,10 +980,15 @@ export async function upsertUnifiedMarkets(
 
   for (const batch of batches) {
     const filterStartedAt = Date.now();
-    const changedBatch = options.filterUnchanged
+    const changedBatchResult = options.filterUnchanged
       ? await filterChangedUnifiedMarketRows(pool, batch)
-      : batch;
+      : {
+          changedRows: batch,
+          existingChangedRows: [],
+          newRows: batch,
+        };
     timings.filterChangedMs += Date.now() - filterStartedAt;
+    const changedBatch = changedBatchResult.changedRows;
     changedRows += changedBatch.length;
     skippedRows += batch.length - changedBatch.length;
     if (changedBatch.length === 0) continue;
@@ -800,14 +1000,34 @@ export async function upsertUnifiedMarkets(
     );
     timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
     const upsertStartedAt = Date.now();
-    await runWithPgWriteConflictRetry(
-      "upsertUnifiedMarkets",
-      changedBatch.length,
-      async () => {
-        const result = await pool.query(query, [JSON.stringify(changedBatch)]);
-        upsertedRows += result.rowCount ?? 0;
-      },
-    );
+    if (changedBatchResult.existingChangedRows.length > 0) {
+      const updateStartedAt = Date.now();
+      await runWithPgWriteConflictRetry(
+        "updateUnifiedMarkets",
+        changedBatchResult.existingChangedRows.length,
+        async () => {
+          const result = await pool.query(updateQuery, [
+            JSON.stringify(changedBatchResult.existingChangedRows),
+          ]);
+          upsertedRows += result.rowCount ?? 0;
+        },
+      );
+      timings.updateMs += Date.now() - updateStartedAt;
+    }
+    if (changedBatchResult.newRows.length > 0) {
+      const insertStartedAt = Date.now();
+      await runWithPgWriteConflictRetry(
+        "insertUnifiedMarkets",
+        changedBatchResult.newRows.length,
+        async () => {
+          const result = await pool.query(insertQuery, [
+            JSON.stringify(changedBatchResult.newRows),
+          ]);
+          upsertedRows += result.rowCount ?? 0;
+        },
+      );
+      timings.insertMs += Date.now() - insertStartedAt;
+    }
     timings.upsertMs += Date.now() - upsertStartedAt;
     const changedMarketIds = changedBatch
       .filter((row: UnifiedMarketRow) =>
@@ -835,13 +1055,28 @@ export async function upsertUnifiedMarkets(
   };
 }
 
+type ChangedUnifiedMarketRows = {
+  changedRows: UnifiedMarketRow[];
+  existingChangedRows: UnifiedMarketRow[];
+  newRows: UnifiedMarketRow[];
+};
+
 async function filterChangedUnifiedMarketRows(
   pool: Pool,
   rows: UnifiedMarketRow[],
-): Promise<UnifiedMarketRow[]> {
-  if (rows.length === 0) return [];
+): Promise<ChangedUnifiedMarketRows> {
+  if (rows.length === 0) {
+    return {
+      changedRows: [],
+      existingChangedRows: [],
+      newRows: [],
+    };
+  }
 
-  const { rows: changedRows } = await pool.query<{ id: string }>(
+  const { rows: changedRows } = await pool.query<{
+    id: string;
+    exists_in_db: boolean;
+  }>(
     `
       with input as (
         select *
@@ -884,7 +1119,9 @@ async function filterChangedUnifiedMarketRows(
           updated_at timestamptz
         )
       )
-      select input.id
+      select
+        input.id,
+        (unified_markets.id is not null) as exists_in_db
       from input
       left join unified_markets
         on unified_markets.venue = input.venue
@@ -968,7 +1205,18 @@ async function filterChangedUnifiedMarketRows(
   );
 
   const changedIds = new Set(changedRows.map((row) => row.id));
-  return rows.filter((row) => changedIds.has(row.id));
+  const existingChangedIds = new Set(
+    changedRows.filter((row) => row.exists_in_db).map((row) => row.id),
+  );
+  const newChangedIds = new Set(
+    changedRows.filter((row) => !row.exists_in_db).map((row) => row.id),
+  );
+
+  return {
+    changedRows: rows.filter((row) => changedIds.has(row.id)),
+    existingChangedRows: rows.filter((row) => existingChangedIds.has(row.id)),
+    newRows: rows.filter((row) => newChangedIds.has(row.id)),
+  };
 }
 
 type UnifiedMarketTokenRow = {
