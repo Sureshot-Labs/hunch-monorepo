@@ -562,15 +562,24 @@ async function fetchTokenSides(
 async function fetchLastTradeTimestamps(
   tokenIds: string[],
 ): Promise<Map<string, Date>> {
-  if (!tokenIds.length) return new Map();
+  const uniqueTokenIds = Array.from(new Set(tokenIds.filter(Boolean)));
+  if (!uniqueTokenIds.length) return new Map();
   const { rows } = await pool.query<{ token_id: string; ts: Date | null }>(
     `
-      select token_id, max(ts) as ts
-      from unified_last_trade
-      where token_id = any($1::text[])
-      group by token_id
+      with input as (
+        select distinct unnest($1::text[]) as token_id
+      )
+      select i.token_id, lt.ts
+      from input i
+      join lateral (
+        select ult.ts
+        from unified_last_trade ult
+        where ult.token_id = i.token_id
+        order by ult.ts desc
+        limit 1
+      ) lt on true
     `,
-    [tokenIds],
+    [uniqueTokenIds],
   );
   const map = new Map<string, Date>();
   for (const row of rows) {
