@@ -195,6 +195,21 @@ function scheduleMarketRefreshBatch(): void {
   }, MARKET_REFRESH_BATCH_DELAY_MS);
 }
 
+export async function flushPendingMarketRefreshes(): Promise<void> {
+  if (pendingMarketRefreshTimer) {
+    clearTimeout(pendingMarketRefreshTimer);
+    pendingMarketRefreshTimer = null;
+  }
+
+  const batch = pendingMarketRefreshBatch;
+  pendingMarketRefreshBatch = null;
+  if (batch) {
+    queueMarketRefreshBatchFlush(batch);
+  }
+
+  await marketRefreshFlushChain;
+}
+
 export function requestMarketRefreshForTokenRefs(inputs: {
   tokenRefs: MarketRefreshTokenRef[];
   logLabel: string;

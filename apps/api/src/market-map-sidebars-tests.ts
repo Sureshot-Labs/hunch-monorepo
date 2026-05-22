@@ -273,65 +273,6 @@ async function insertMarketActivityMetric(params: {
   );
 }
 
-async function insertMarketActivitySnapshots(params: {
-  marketId: string;
-  eventId: string;
-  venue?: string;
-  volumeTotal: number;
-  liquidity: number | null;
-}): Promise<void> {
-  const buckets = [
-    { hoursAgo: 2, volumeOffset: -20, liquidityOffset: -2 },
-    { hoursAgo: 1, volumeOffset: -10, liquidityOffset: -1 },
-    { hoursAgo: 0, volumeOffset: 0, liquidityOffset: 0 },
-  ];
-  for (const bucket of buckets) {
-    await pool.query(
-      `
-        insert into unified_market_activity_snapshots_1h (
-          market_id,
-          event_id,
-          venue,
-          bucket,
-          volume_total,
-          liquidity,
-          open_interest,
-          source_updated_at,
-          created_at
-        )
-        values (
-          $1,
-          $2,
-          $8,
-          date_trunc('hour', now() - ($3::text || ' hours')::interval),
-          greatest($4::numeric + $5::numeric, 0),
-          case when $6::numeric is null then null else greatest($6::numeric + $7::numeric, 0) end,
-          null,
-          now() - ($3::text || ' hours')::interval,
-          now() - ($3::text || ' hours')::interval
-        )
-        on conflict (market_id, bucket) do update
-          set event_id = excluded.event_id,
-              venue = excluded.venue,
-              volume_total = excluded.volume_total,
-              liquidity = excluded.liquidity,
-              open_interest = excluded.open_interest,
-              source_updated_at = excluded.source_updated_at
-      `,
-      [
-        params.marketId,
-        params.eventId,
-        bucket.hoursAgo,
-        params.volumeTotal,
-        bucket.volumeOffset,
-        params.liquidity,
-        bucket.liquidityOffset,
-        params.venue ?? "polymarket",
-      ],
-    );
-  }
-}
-
 async function insertEventActivitySnapshots(params: {
   eventId: string;
   venue?: string;
@@ -541,13 +482,6 @@ async function main() {
         liquidityNow: seed.liquidityNow,
         updatedAt,
       });
-      await insertMarketActivitySnapshots({
-        marketId,
-        eventId,
-        venue: seed.venue,
-        volumeTotal: seed.volume24h,
-        liquidity: seed.liquidityNow,
-      });
       if (seed.key !== "beta") {
         await insertEventActivitySnapshots({
           eventId,
@@ -655,11 +589,11 @@ async function main() {
     assert.equal(payload.topMovers24h[0]?.eventId, eventIds[1]);
     assert.equal(
       payload.topMovers24h[0]?.activitySparklines?.volume?.points.at(-1)?.value,
-      1_000_000_000_030,
+      null,
     );
     assert.equal(
       payload.topMovers24h[0]?.activitySparklines?.volume?.points.at(-1)?.delta,
-      10,
+      null,
     );
 
     const alpha = payload.volumeMovers24h[0];
@@ -812,10 +746,6 @@ async function main() {
     await pool.query(
       "delete from unified_event_activity_snapshots_1h where event_id = any($1::text[])",
       [eventIds],
-    );
-    await pool.query(
-      "delete from unified_market_activity_snapshots_1h where market_id = any($1::text[])",
-      [marketIds],
     );
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       marketIds,

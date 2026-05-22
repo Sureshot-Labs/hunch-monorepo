@@ -177,7 +177,6 @@ function addMetricValues(
 type ActivitySparklineValues = {
   volumeByEvent: Map<string, Map<string, number | null>>;
   liquidityByEvent: Map<string, Map<string, number | null>>;
-  keysWithRows: Set<string>;
 };
 
 async function loadEventActivitySparklineValues(
@@ -187,9 +186,8 @@ async function loadEventActivitySparklineValues(
 ): Promise<ActivitySparklineValues> {
   const volumeByEvent = new Map<string, Map<string, number | null>>();
   const liquidityByEvent = new Map<string, Map<string, number | null>>();
-  const keysWithRows = new Set<string>();
   if (events.length === 0) {
-    return { volumeByEvent, liquidityByEvent, keysWithRows };
+    return { volumeByEvent, liquidityByEvent };
   }
 
   const rows = await pool.query<ActivitySparklineRow>(
@@ -244,7 +242,6 @@ async function loadEventActivitySparklineValues(
 
   for (const row of rows.rows) {
     const key = eventVenueKey(row.event_id, row.venue);
-    keysWithRows.add(key);
     addMetricValues(volumeByEvent, key, row.bucket_start, row.volume_value);
     addMetricValues(
       liquidityByEvent,
@@ -254,88 +251,7 @@ async function loadEventActivitySparklineValues(
     );
   }
 
-  return { volumeByEvent, liquidityByEvent, keysWithRows };
-}
-
-async function loadMarketActivitySparklineValues(
-  pool: Pool,
-  events: NormalizedSparklineEvent[],
-  window: ResolvedSparklineWindow,
-): Promise<ActivitySparklineValues> {
-  const volumeByEvent = new Map<string, Map<string, number | null>>();
-  const liquidityByEvent = new Map<string, Map<string, number | null>>();
-  const keysWithRows = new Set<string>();
-  if (events.length === 0) {
-    return { volumeByEvent, liquidityByEvent, keysWithRows };
-  }
-
-  const rows = await pool.query<ActivitySparklineRow>(
-    `
-      with event_set as (
-        select *
-        from unnest($1::text[], $2::text[]) as es(event_id, venue)
-      ),
-      market_bucket_rows as (
-        select distinct on (
-          s.event_id,
-          s.venue,
-          s.market_id,
-          floor(extract(epoch from s.bucket) / ($5::int * 3600))::bigint
-        )
-          s.event_id,
-          s.venue,
-          s.market_id,
-          floor(extract(epoch from s.bucket) / ($5::int * 3600))::bigint as bucket_index,
-          s.bucket,
-          s.volume_total,
-          s.liquidity
-        from unified_market_activity_snapshots_1h s
-        join event_set es
-          on es.event_id = s.event_id
-         and es.venue = s.venue
-        where s.bucket >= $3::timestamptz
-          and s.bucket <= $4::timestamptz
-        order by
-          s.event_id,
-          s.venue,
-          s.market_id,
-          bucket_index,
-          s.bucket desc
-      )
-      select
-        event_id,
-        venue,
-        timestamptz 'epoch'
-          + (bucket_index * $5::int * 3600) * interval '1 second'
-            as bucket_start,
-        sum(volume_total)::text as volume_value,
-        sum(liquidity)::text as liquidity_value
-      from market_bucket_rows
-      group by event_id, venue, bucket_index
-      order by event_id, venue, bucket_start
-    `,
-    [
-      events.map((event) => event.eventId),
-      events.map((event) => event.venue),
-      window.start,
-      window.end,
-      window.bucketHours,
-    ],
-  );
-
-  for (const row of rows.rows) {
-    const key = eventVenueKey(row.event_id, row.venue);
-    keysWithRows.add(key);
-    addMetricValues(volumeByEvent, key, row.bucket_start, row.volume_value);
-    addMetricValues(
-      liquidityByEvent,
-      key,
-      row.bucket_start,
-      row.liquidity_value,
-    );
-  }
-
-  return { volumeByEvent, liquidityByEvent, keysWithRows };
+  return { volumeByEvent, liquidityByEvent };
 }
 
 async function loadActivitySparklineValues(
@@ -346,37 +262,7 @@ async function loadActivitySparklineValues(
   volumeByEvent: Map<string, Map<string, number | null>>;
   liquidityByEvent: Map<string, Map<string, number | null>>;
 }> {
-  const eventValues = await loadEventActivitySparklineValues(
-    pool,
-    events,
-    window,
-  );
-  const fallbackEvents = events.filter(
-    (event) =>
-      !eventValues.keysWithRows.has(eventVenueKey(event.eventId, event.venue)),
-  );
-  if (fallbackEvents.length === 0) {
-    return {
-      volumeByEvent: eventValues.volumeByEvent,
-      liquidityByEvent: eventValues.liquidityByEvent,
-    };
-  }
-
-  const fallbackValues = await loadMarketActivitySparklineValues(
-    pool,
-    fallbackEvents,
-    window,
-  );
-  return {
-    volumeByEvent: new Map([
-      ...fallbackValues.volumeByEvent,
-      ...eventValues.volumeByEvent,
-    ]),
-    liquidityByEvent: new Map([
-      ...fallbackValues.liquidityByEvent,
-      ...eventValues.liquidityByEvent,
-    ]),
-  };
+  return loadEventActivitySparklineValues(pool, events, window);
 }
 
 async function loadMovementSparklineValues(
