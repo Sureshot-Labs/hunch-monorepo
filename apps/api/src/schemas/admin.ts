@@ -223,6 +223,20 @@ export const adminReferralCodeReferralsQuerySchema = z.object({
 
 const adminFeeLedgerSourceTypeSchema = z.enum(["order", "execution"]);
 const adminFeeLedgerRewardKindSchema = z.enum(["any", "cashback", "referral"]);
+const adminUserOrderKindSchema = z.preprocess(
+  (value) => (typeof value === "string" ? value.toLowerCase() : value),
+  z.enum(["order", "swap"]),
+);
+const adminCsvStringSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .transform((value) =>
+    value
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
 
 export const adminFeeLedgerQuerySchema = z.object({
   q: z.string().trim().min(1).max(500).optional(),
@@ -255,6 +269,50 @@ export const adminFeeLedgerQuerySchema = z.object({
 
 export const adminFeeLedgerDetailParamsSchema = z.object({
   id: z.string().uuid(),
+});
+
+export const adminUserOrderParamsSchema = z.object({
+  id: z.string().uuid(),
+  orderId: z.string().trim().min(1).max(200),
+});
+
+export const adminUserOrdersQuerySchema = z.object({
+  venue: feePolicyVenueSchema.optional(),
+  wallet: z.string().trim().min(1).max(160).optional(),
+  wallets: adminCsvStringSchema.optional(),
+  eventId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  marketId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  tokenId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  status: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  type: adminUserOrderKindSchema.optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
 });
 
 export const adminReferralCodeFeeEventsQuerySchema =
@@ -495,6 +553,8 @@ export type AdminUserParams = z.infer<typeof adminUserParamsSchema>;
 export type AdminUserActivityQuery = z.infer<
   typeof adminUserActivityQuerySchema
 >;
+export type AdminUserOrdersQuery = z.infer<typeof adminUserOrdersQuerySchema>;
+export type AdminUserOrderParams = z.infer<typeof adminUserOrderParamsSchema>;
 export type AdminUserAnalyticsQuery = z.infer<
   typeof adminUserAnalyticsQuerySchema
 >;

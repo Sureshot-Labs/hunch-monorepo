@@ -103,6 +103,8 @@ import {
   adminUserAdminSchema,
   adminUserAnalyticsQuerySchema,
   adminUserKalshiProofBypassSchema,
+  adminUserOrderParamsSchema,
+  adminUserOrdersQuerySchema,
   adminUserReferralCodeSchema,
   adminUserActivityQuerySchema,
   adminUserMergeSchema,
@@ -127,6 +129,12 @@ import {
   listAdminFeeLedgerContractReceivables,
   listAdminFeeLedgerEvents,
 } from "../services/admin-fee-ledger.js";
+import {
+  fetchUnifiedMarketIdsByEventId,
+  fetchUnifiedOrderById,
+  fetchUnifiedOrders,
+  mapUnifiedOrder,
+} from "../repos/unified-orders.js";
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
@@ -1586,6 +1594,24 @@ async function fetchPrimaryWallet(userId: string) {
     [userId.trim()],
   );
   return rows[0]?.wallet_address ?? null;
+}
+
+async function adminUserExists(userId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`select 1 from users where id = $1`, [
+    userId,
+  ]);
+  return (rowCount ?? 0) > 0;
+}
+
+function resolveAdminOrderWalletFilter(query: {
+  wallet?: string;
+  wallets?: string[];
+}): string[] | undefined {
+  const wallets = [...(query.wallets ?? []), query.wallet ?? ""]
+    .map((wallet) => wallet.trim())
+    .filter(Boolean);
+  const unique = Array.from(new Set(wallets));
+  return unique.length ? unique : undefined;
 }
 
 async function fetchPolymarketBalances(inputs: {
@@ -3421,6 +3447,106 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         wallets,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/users/:id/orders",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
+      schema: {
+        params: adminUserParamsSchema,
+        querystring: adminUserOrdersQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const query = request.query;
+      const limit = query.limit ?? 50;
+      const offset = query.offset ?? 0;
+
+      if (!(await adminUserExists(id))) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      const marketIds =
+        query.marketId || !query.eventId
+          ? []
+          : await fetchUnifiedMarketIdsByEventId(pool, query.eventId);
+      if (query.eventId && !query.marketId && marketIds.length === 0) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          orders: [],
+          pagination: {
+            total: 0,
+            limit,
+            offset,
+            hasMore: false,
+          },
+        });
+      }
+
+      const result = await fetchUnifiedOrders(pool, {
+        userId: id,
+        walletAddresses: resolveAdminOrderWalletFilter(query),
+        venue: query.venue,
+        marketId: query.marketId,
+        marketIds: marketIds.length ? marketIds : undefined,
+        tokenId: query.tokenId,
+        status: query.status,
+        type: query.type,
+        from: query.from,
+        to: query.to,
+        limit,
+        offset,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        orders: result.rows.map(mapUnifiedOrder),
+        pagination: {
+          total: result.total,
+          limit,
+          offset,
+          hasMore: offset + limit < result.total,
+        },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/users/:id/orders/:orderId",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "users:read",
+      }),
+      schema: {
+        params: adminUserOrderParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id, orderId } = request.params;
+
+      const row = await fetchUnifiedOrderById(pool, {
+        userId: id,
+        id: orderId,
+      });
+
+      if (!row) {
+        reply.code(404);
+        return reply.send({ error: "Order not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        order: mapUnifiedOrder(row),
       });
     },
   );
