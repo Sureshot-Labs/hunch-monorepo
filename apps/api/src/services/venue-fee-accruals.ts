@@ -73,6 +73,17 @@ function microToDecimal(rawMicro: bigint): string {
   return usdcMicroToDecimalString(rawMicro);
 }
 
+function feeEventSourceIdForAccrual(row: VenueFeeAccrualRow): string {
+  if (
+    row.venue === "limitless" &&
+    row.fee_program === "venue_share_contract" &&
+    row.tx_hash
+  ) {
+    return `limitless:venue_share_contract:${row.tx_hash}:${row.venue_fill_id}`;
+  }
+  return `${row.venue}:${row.fee_program}:${row.order_hash}:${row.venue_fill_id}`;
+}
+
 export async function upsertVenueFeeAccruals(
   pool: Pool,
   inputs: Array<VenueFeeAccrualInput | null>,
@@ -303,7 +314,7 @@ async function insertCollectedFeeEventForAccrual(
     eventTime: row.filled_at,
     feeUsd: row.fee_amount,
   });
-  const sourceId = `${row.venue}:${row.fee_program}:${row.order_hash}:${row.venue_fill_id}`;
+  const sourceId = feeEventSourceIdForAccrual(row);
   const result = await client.query<{ id: string }>(
     `
       insert into fee_events (

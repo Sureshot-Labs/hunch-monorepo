@@ -12,7 +12,11 @@ import {
   type LimitlessFeeShareConfig,
   type LimitlessOrderStatusItem,
 } from "./services/limitless-fee-accruals.js";
-import { convertLimitlessReceivableRaw } from "./services/limitless-contract-fee-receivables.js";
+import {
+  buildLimitlessContractAccrualSourceId,
+  buildLimitlessContractFeeSourceId,
+  convertLimitlessReceivableRaw,
+} from "./services/limitless-contract-fee-receivables.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -164,6 +168,25 @@ test("converts Limitless receivable raw amount with integer payout ratio", () =>
   assert.equal(convertLimitlessReceivableRaw("1000000", "1", "1"), "1000000");
   assert.equal(convertLimitlessReceivableRaw("1000000", "1", "2"), "500000");
   assert.equal(convertLimitlessReceivableRaw("999999", "0", "1"), "0");
+});
+
+test("builds stable source ids for Limitless contract fee accrual unlocks", () => {
+  const txHash =
+    "0x9c80f1398a443f121407c81d956c35ae385616244399fe04bf3d217e76ae255d";
+  assert.equal(
+    buildLimitlessContractFeeSourceId({ txHash, logIndex: 276 }),
+    `limitless:venue_share_contract:${txHash}:276`,
+  );
+  assert.equal(
+    buildLimitlessContractAccrualSourceId({
+      venue: "limitless",
+      feeProgram: "venue_share_contract",
+      orderHash: "order-hash",
+      venueFillId: "276",
+      txHash,
+    }),
+    `limitless:venue_share_contract:${txHash}:276`,
+  );
 });
 
 test("does not create rewards accrual for contract-denominated fee", () => {

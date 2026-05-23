@@ -2,7 +2,6 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { isRecord } from "../lib/type-guards.js";
-import { resolveFeeEventSnapshotAtWrite } from "./rewards-fee-snapshot.js";
 import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import {
   extractLimitlessMessage,
@@ -11,6 +10,7 @@ import {
 
 const LIMITLESS_VENUE = "limitless";
 const LIMITLESS_FEE_PROGRAM = "venue_share";
+export const LIMITLESS_CONTRACT_FEE_PROGRAM = "venue_share_contract";
 const BASE_CHAIN_ID = "8453";
 
 export type LimitlessContractFeeReceivableStatus =
@@ -56,6 +56,9 @@ type ReceivableResolutionRow = {
   log_index: number;
   raw_token_id: string;
   token_id: string;
+  side: "BUY" | "SELL";
+  role: "maker" | "taker";
+  fee_rate_bps: number;
   outcome_side: "YES" | "NO" | null;
   market_id: string | null;
   event_id: string | null;
@@ -88,6 +91,13 @@ type ResolutionResult =
       kind: "failed";
       reason: string;
     };
+
+export function buildLimitlessContractFeeSourceId(inputs: {
+  txHash: string;
+  logIndex: number | string;
+}): string {
+  return `${LIMITLESS_VENUE}:${LIMITLESS_CONTRACT_FEE_PROGRAM}:${inputs.txHash}:${inputs.logIndex}`;
+}
 
 function clampBps(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -455,82 +465,173 @@ async function resolveReceivable(
   };
 }
 
-async function insertPendingFeeEventForReceivable(
+async function upsertVerifiedAccrualForReceivable(
   client: PoolClient,
   row: ReceivableResolutionRow,
   feeUsdRaw: string,
 ): Promise<string> {
   const feeUsd = microToDecimal(feeUsdRaw);
-  const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
-    userId: row.user_id,
-    eventTime: row.filled_at,
-    feeUsd,
-  });
-  const sourceId = `limitless:venue_share_contract:${row.tx_hash}:${row.log_index}`;
   const result = await client.query<{ id: string }>(
     `
-      insert into fee_events (
-        id,
-        user_id,
-        wallet_address,
-        venue,
-        chain_id,
-        source_type,
-        source_id,
-        fee_amount,
-        fee_asset,
-        fee_usd,
-        cashback_bps_applied,
-        referral_bps_applied,
-        cashback_earned_usdc,
-        referral_earned_usdc,
-        liability_snapshot_source,
-        tx_hash,
-        collected_at,
-        status,
-        created_at,
-        updated_at
+      with upserted as (
+        insert into venue_fee_accruals (
+          user_id,
+          wallet_address,
+          signer_address,
+          venue,
+          fee_program,
+          chain_id,
+          order_id,
+          order_hash,
+          venue_order_id,
+          venue_fill_id,
+          venue_trade_id,
+          tx_hash,
+          log_index,
+          token_id,
+          side,
+          role,
+          attribution_code,
+          fee_rate_bps,
+          fee_basis,
+          notional_amount,
+          notional_amount_raw,
+          fee_amount,
+          fee_amount_raw,
+          fee_asset,
+          filled_at,
+          chain_verified_at,
+          status,
+          created_at,
+          updated_at
+        )
+        values (
+          $1, $2, null, 'limitless', 'venue_share_contract', '8453',
+          $3, $4, $5, $6, null, $7, $8, $9, $10, $11, null, $12,
+          'venue_fee_share', $13, $14, $13, $14, 'USDC', $15, now(),
+          'verified', now(), now()
+        )
+        on conflict (venue, fee_program, order_id, venue_fill_id)
+        do update set
+          tx_hash = coalesce(excluded.tx_hash, venue_fee_accruals.tx_hash),
+          log_index = coalesce(excluded.log_index, venue_fee_accruals.log_index),
+          token_id = excluded.token_id,
+          fee_basis = excluded.fee_basis,
+          notional_amount = excluded.notional_amount,
+          notional_amount_raw = excluded.notional_amount_raw,
+          fee_amount = excluded.fee_amount,
+          fee_amount_raw = excluded.fee_amount_raw,
+          fee_asset = excluded.fee_asset,
+          filled_at = excluded.filled_at,
+          chain_verified_at = coalesce(venue_fee_accruals.chain_verified_at, excluded.chain_verified_at),
+          status = case
+            when venue_fee_accruals.status = 'accrued' then 'verified'
+            else venue_fee_accruals.status
+          end,
+          updated_at = now()
+        where venue_fee_accruals.status in ('accrued', 'verified')
+        returning id
       )
-      values (
-        gen_random_uuid(),
-        $1, $2, 'limitless', '8453', 'order', $3,
-        $4, 'USDC', $4, $5, $6, $7, $8, $9, $10, null, 'pending', now(), now()
-      )
-      on conflict (user_id, source_type, source_id)
-      do update set
-        tx_hash = excluded.tx_hash,
-        status = case
-          when fee_events.status = 'collected' then fee_events.status
-          else excluded.status
-        end,
-        updated_at = now()
-      where fee_events.fee_amount = excluded.fee_amount
-        and fee_events.fee_usd = excluded.fee_usd
-        and fee_events.cashback_bps_applied = excluded.cashback_bps_applied
-        and fee_events.referral_bps_applied = excluded.referral_bps_applied
-        and fee_events.cashback_earned_usdc = excluded.cashback_earned_usdc
-        and fee_events.referral_earned_usdc = excluded.referral_earned_usdc
-        and fee_events.liability_snapshot_source = excluded.liability_snapshot_source
-      returning id
+      select id from upserted
+      union all
+      select id
+      from venue_fee_accruals
+      where venue = 'limitless'
+        and fee_program = 'venue_share_contract'
+        and order_id = $3
+        and venue_fill_id = $6
+        and status in ('accrued', 'verified', 'collected')
+      limit 1
     `,
     [
       row.user_id,
       row.wallet_address,
-      sourceId,
-      feeUsd,
-      snapshot.cashbackBpsApplied,
-      snapshot.referralBpsApplied,
-      snapshot.cashbackEarnedUsdc,
-      snapshot.referralEarnedUsdc,
-      snapshot.liabilitySnapshotSource,
+      row.order_id,
+      row.order_hash,
+      row.venue_order_id,
+      String(row.log_index),
       row.tx_hash,
+      row.log_index,
+      row.token_id,
+      row.side,
+      row.role,
+      row.fee_rate_bps,
+      feeUsd,
+      feeUsdRaw,
+      row.filled_at,
     ],
   );
-  const feeEventId = result.rows[0]?.id;
-  if (!feeEventId) {
-    throw new Error(`fee_events immutable economic mismatch for ${sourceId}`);
+  const accrualId = result.rows[0]?.id;
+  if (!accrualId) {
+    const sourceId = buildLimitlessContractFeeSourceId({
+      txHash: row.tx_hash,
+      logIndex: row.log_index,
+    });
+    throw new Error(`venue_fee_accruals immutable mismatch for ${sourceId}`);
   }
-  return feeEventId;
+  return accrualId;
+}
+
+export async function syncLimitlessContractReceivablesFromAccruals(
+  pool: Pool,
+): Promise<{ synced: number }> {
+  const result = await pool.query(
+    `
+      update limitless_contract_fee_receivables r
+      set status = 'converted_to_fee_event',
+          fee_event_id = a.fee_event_id,
+          updated_at = now()
+      from venue_fee_accruals a
+      where r.accrual_id = a.id
+        and r.status = 'resolved_payable'
+        and a.status = 'collected'
+        and a.fee_event_id is not null
+    `,
+  );
+  return { synced: result.rowCount ?? 0 };
+}
+
+async function linkPendingFeeEventIfPresent(
+  client: PoolClient,
+  row: ReceivableResolutionRow,
+): Promise<string | null> {
+  const sourceId = buildLimitlessContractFeeSourceId({
+    txHash: row.tx_hash,
+    logIndex: row.log_index,
+  });
+  const result = await client.query<{ id: string }>(
+    `
+      select id
+      from fee_events
+      where user_id = $1
+        and source_type = 'order'
+        and source_id = $2
+        and status = 'pending'
+      limit 1
+    `,
+    [row.user_id, sourceId],
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+export function buildLimitlessContractAccrualSourceId(inputs: {
+  venue: string;
+  feeProgram: string;
+  orderHash: string;
+  venueFillId: string;
+  txHash: string | null;
+}): string {
+  if (
+    inputs.venue === LIMITLESS_VENUE &&
+    inputs.feeProgram === LIMITLESS_CONTRACT_FEE_PROGRAM &&
+    inputs.txHash
+  ) {
+    return buildLimitlessContractFeeSourceId({
+      txHash: inputs.txHash,
+      logIndex: inputs.venueFillId,
+    });
+  }
+  return `${inputs.venue}:${inputs.feeProgram}:${inputs.orderHash}:${inputs.venueFillId}`;
 }
 
 export async function reconcileLimitlessContractFeeReceivables(
@@ -557,6 +658,9 @@ export async function reconcileLimitlessContractFeeReceivables(
         r.log_index,
         r.raw_token_id,
         r.token_id,
+        r.side,
+        r.role,
+        r.fee_rate_bps,
         r.outcome_side,
         r.market_id,
         r.event_id,
@@ -690,7 +794,7 @@ export async function reconcileLimitlessContractFeeReceivables(
               select
                 id, user_id, wallet_address, order_id, order_hash,
                 venue_order_id, tx_hash, log_index, raw_token_id, token_id,
-                outcome_side, market_id, event_id, condition_id,
+                side, role, fee_rate_bps, outcome_side, market_id, event_id, condition_id,
                 receivable_token_amount_raw, filled_at, resolution_attempts,
                 null::text as token_market_id,
                 null::text as token_outcome_side,
@@ -708,15 +812,19 @@ export async function reconcileLimitlessContractFeeReceivables(
           );
           const locked = latest.rows[0];
           if (!locked) return;
-          const feeEventId = await insertPendingFeeEventForReceivable(
+          const accrualId = await upsertVerifiedAccrualForReceivable(
             client,
             { ...locked, ...row },
             resolvedRaw,
           );
+          const pendingFeeEventId = await linkPendingFeeEventIfPresent(
+            client,
+            { ...locked, ...row },
+          );
           await client.query(
             `
               update limitless_contract_fee_receivables
-              set status = 'converted_to_fee_event',
+              set status = 'resolved_payable',
                   market_id = coalesce(market_id, $2),
                   event_id = coalesce(event_id, $3),
                   condition_id = coalesce(condition_id, $4),
@@ -725,7 +833,8 @@ export async function reconcileLimitlessContractFeeReceivables(
                   resolution_source = $7,
                   resolved_usdc_amount_raw = $8,
                   resolved_usdc_amount = $9,
-                  fee_event_id = $10,
+                  accrual_id = $10,
+                  fee_event_id = coalesce(fee_event_id, $11),
                   resolved_at = coalesce(resolved_at, now()),
                   last_resolution_checked_at = now(),
                   next_resolution_check_at = null,
@@ -743,7 +852,8 @@ export async function reconcileLimitlessContractFeeReceivables(
               resolution.source,
               resolvedRaw,
               microToDecimal(resolvedRaw),
-              feeEventId,
+              accrualId,
+              pendingFeeEventId,
             ],
           );
         });

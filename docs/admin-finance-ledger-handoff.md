@@ -21,7 +21,8 @@ The finance ledger has five related surfaces:
   allocated back to individual fee events in this API.
 - **Contract receivables**: token-denominated Limitless fee receivables in
   `limitless_contract_fee_receivables`. These are not collected USDC. They wait
-  for market resolution and may later link to a pending or collected fee event.
+  for market resolution, then link to a verified accrual while waiting for
+  hot-wallet budget, and finally link to a collected fee event.
 - **Backfill attempts**: retry/failure explanation rows in
   `venue_fee_backfill_attempts`. These explain why an expected venue fee did not
   become an accrual or receivable yet. Do not count them as revenue.
@@ -257,11 +258,13 @@ Returns paginated Limitless token-fee receivables:
       "resolutionSource": null,
       "resolvedUsdcAmountRaw": null,
       "resolvedUsdcAmount": null,
+      "accrualId": null,
       "feeEventId": null,
       "status": "pending_resolution",
       "resolutionAttempts": 0,
       "resolutionError": "Limitless market is not resolved yet",
       "order": {},
+      "accrual": null,
       "feeEvent": null
     }
   ],
@@ -274,15 +277,20 @@ Returns paginated Limitless token-fee receivables:
 Statuses:
 
 - `pending_resolution`: market is not resolved yet.
-- `resolved_payable`: token outcome won and a USDC value was computed.
-- `converted_to_fee_event`: receivable has linked to a fee event.
+- `resolved_payable`: token outcome won, a USDC value was computed, and a
+  verified `venue_share_contract` accrual is waiting for hot-wallet budget.
+- `converted_to_fee_event`: the linked accrual unlocked and created/updated a
+  collected fee event.
 - `settled_zero`: token outcome lost.
 - `refunded`: Limitless refunded the token-denominated fee in the same
   transaction.
 - `failed`: resolution/conversion failed and needs ops inspection.
 
 Keep this table visually separate from collected USDC. Show tx hash, log index,
-token amount, resolution status, linked order, and linked fee event.
+token amount, resolution status, linked order, linked accrual, and linked fee
+event. `resolved_payable` is not claimable revenue yet; it is the same
+hot-wallet wait state as a verified USDC accrual, after the extra outcome
+resolution step.
 
 ### Backfill Attempts
 
@@ -468,8 +476,8 @@ Missing user, missing order, or an order that belongs to another user returns
   `orderId`, `orderHash`, `venueOrderId`, `txHash`, and referral code.
 - In detail drawers, expose raw ids and raw micro amounts. This is an admin
   debugging surface.
-- Keep contract receivables separate from collected fee totals until they link
-  to a fee event and collection is confirmed.
+- Keep contract receivables separate from collected fee totals until their
+  linked accrual unlocks into a collected fee event.
 - Use user-orders endpoints for full order inspection and to navigate from a
   ledger row to the underlying order.
 - Use `/admin/users/:id/activity` only for a compact mixed timeline of orders,

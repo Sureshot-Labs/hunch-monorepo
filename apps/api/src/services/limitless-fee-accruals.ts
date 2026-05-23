@@ -21,6 +21,7 @@ import {
 import {
   buildLimitlessContractFeeReceivableInput,
   reconcileLimitlessContractFeeReceivables,
+  syncLimitlessContractReceivablesFromAccruals,
   upsertLimitlessContractFeeReceivables,
   type LimitlessContractFeeReceivableInput,
 } from "./limitless-contract-fee-receivables.js";
@@ -1602,6 +1603,9 @@ export async function reconcileLimitlessVenueShareAccruals(
   backfill: Awaited<ReturnType<typeof backfillLimitlessVenueShareAccruals>>;
   verify: Awaited<ReturnType<typeof verifyLimitlessVenueShareAccruals>>;
   unlock: Awaited<ReturnType<typeof unlockVenueFeeAccruals>>;
+  contractReceivableSync: Awaited<
+    ReturnType<typeof syncLimitlessContractReceivablesFromAccruals>
+  >;
   contractReceivables: Awaited<
     ReturnType<typeof reconcileLimitlessContractFeeReceivables>
   >;
@@ -1614,14 +1618,6 @@ export async function reconcileLimitlessVenueShareAccruals(
     const verify = await verifyLimitlessVenueShareAccruals(pool, {
       limit: options.limit,
     });
-    const unlock = await unlockVenueFeeAccruals(pool, {
-      chainId: BASE_CHAIN_ID,
-      venue: LIMITLESS_VENUE,
-      feeProgram: LIMITLESS_FEE_PROGRAM,
-      limit: options.limit,
-      dryRun: options.dryRun,
-      assumeRewardsChainLock: true,
-    });
     const contractReceivables = await reconcileLimitlessContractFeeReceivables(
       pool,
       {
@@ -1629,6 +1625,22 @@ export async function reconcileLimitlessVenueShareAccruals(
         dryRun: options.dryRun,
       },
     );
-    return { backfill, verify, unlock, contractReceivables };
+    const unlock = await unlockVenueFeeAccruals(pool, {
+      chainId: BASE_CHAIN_ID,
+      venue: LIMITLESS_VENUE,
+      limit: options.limit,
+      dryRun: options.dryRun,
+      assumeRewardsChainLock: true,
+    });
+    const contractReceivableSync = options.dryRun
+      ? { synced: 0 }
+      : await syncLimitlessContractReceivablesFromAccruals(pool);
+    return {
+      backfill,
+      verify,
+      unlock,
+      contractReceivableSync,
+      contractReceivables,
+    };
   });
 }

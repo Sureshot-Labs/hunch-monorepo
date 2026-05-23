@@ -196,6 +196,7 @@ type ContractReceivableRow = LedgerUserRow & {
   resolution_source: string | null;
   resolved_usdc_amount_raw: string | null;
   resolved_usdc_amount: string | null;
+  accrual_id: string | null;
   fee_event_id: string | null;
   status: string;
   next_resolution_check_at: Date | null;
@@ -216,6 +217,10 @@ type ContractReceivableRow = LedgerUserRow & {
   order_filled_size: string | null;
   order_average_fill_price: string | null;
   order_fee_policy_snapshot: unknown | null;
+  linked_accrual_status: string | null;
+  linked_accrual_fee_amount: string | null;
+  linked_accrual_fee_amount_raw: string | null;
+  linked_accrual_fee_event_id: string | null;
   linked_fee_event_status: string | null;
   linked_fee_event_fee_usd: string | null;
   linked_fee_event_tx_hash: string | null;
@@ -671,14 +676,6 @@ function buildContractReceivableFilters(
     parts.clauses.push(
       `r.fee_event_id = ${push(parts, query.feeEventId)}::uuid`,
     );
-  if (query.feeProgram)
-    parts.clauses.push(`r.fee_program = ${push(parts, query.feeProgram)}`);
-  if (query.tokenId) {
-    const idx = push(parts, query.tokenId);
-    parts.clauses.push(`(r.token_id = ${idx} or r.raw_token_id = ${idx})`);
-  }
-  if (query.marketId)
-    parts.clauses.push(`r.market_id = ${push(parts, query.marketId)}`);
   if (query.sourceId) {
     const idx = push(parts, query.sourceId);
     parts.clauses.push(`(
@@ -688,8 +685,17 @@ function buildContractReceivableFilters(
       or r.venue_order_id = ${idx}
       or r.tx_hash = ${idx}
       or r.fee_event_id::text = ${idx}
+      or r.accrual_id::text = ${idx}
     )`);
   }
+  if (query.feeProgram)
+    parts.clauses.push(`r.fee_program = ${push(parts, query.feeProgram)}`);
+  if (query.tokenId) {
+    const idx = push(parts, query.tokenId);
+    parts.clauses.push(`(r.token_id = ${idx} or r.raw_token_id = ${idx})`);
+  }
+  if (query.marketId)
+    parts.clauses.push(`r.market_id = ${push(parts, query.marketId)}`);
   if (query.q) {
     const idx = push(parts, query.q);
     parts.clauses.push(`(
@@ -703,6 +709,7 @@ function buildContractReceivableFilters(
       or r.market_id = ${idx}
       or r.condition_id = ${idx}
       or r.fee_event_id::text = ${idx}
+      or r.accrual_id::text = ${idx}
       or lower(r.wallet_address) = lower(${idx})
       or lower(r.signer_address) = lower(${idx})
       or lower(u.email) = lower(${idx})
@@ -974,6 +981,7 @@ const EVENT_LATERAL_SQL = `
           'receivableTokenAmountRaw', rx.receivable_token_amount_raw,
           'resolvedUsdcAmountRaw', rx.resolved_usdc_amount_raw,
           'resolvedUsdcAmount', rx.resolved_usdc_amount::text,
+          'accrualId', rx.accrual_id,
           'filledAt', rx.filled_at,
           'resolvedAt', rx.resolved_at
         )
@@ -983,6 +991,12 @@ const EVENT_LATERAL_SQL = `
     ) as linked_contract_receivables
     from limitless_contract_fee_receivables rx
     where rx.fee_event_id = fe.id
+       or exists (
+        select 1
+        from venue_fee_accruals ax
+        where ax.id = rx.accrual_id
+          and ax.fee_event_id = fe.id
+      )
   ) contract_receivables on true
   left join lateral (
     select jsonb_build_object(
@@ -1017,7 +1031,15 @@ const EVENT_LATERAL_SQL = `
         or exists (
           select 1
           from limitless_contract_fee_receivables rx
-          where rx.fee_event_id = fe.id
+          where (
+              rx.fee_event_id = fe.id
+              or exists (
+                select 1
+                from venue_fee_accruals ax
+                where ax.id = rx.accrual_id
+                  and ax.fee_event_id = fe.id
+              )
+            )
             and rx.order_id = ox.id
         )
       )
@@ -1284,6 +1306,7 @@ const CONTRACT_RECEIVABLE_FROM_SQL = `
   from limitless_contract_fee_receivables r
   left join users u on u.id = r.user_id
   left join orders o on o.id = r.order_id
+  left join venue_fee_accruals a on a.id = r.accrual_id
   left join fee_events fe on fe.id = r.fee_event_id
 `;
 
@@ -1322,6 +1345,7 @@ const CONTRACT_RECEIVABLE_SELECT_SQL = `
     r.resolution_source,
     r.resolved_usdc_amount_raw,
     r.resolved_usdc_amount::text as resolved_usdc_amount,
+    r.accrual_id,
     r.fee_event_id,
     r.status,
     r.next_resolution_check_at,
@@ -1342,6 +1366,10 @@ const CONTRACT_RECEIVABLE_SELECT_SQL = `
     o.filled_size::text as order_filled_size,
     o.average_fill_price::text as order_average_fill_price,
     o.fee_policy_snapshot as order_fee_policy_snapshot,
+    a.status as linked_accrual_status,
+    a.fee_amount::text as linked_accrual_fee_amount,
+    a.fee_amount_raw as linked_accrual_fee_amount_raw,
+    a.fee_event_id as linked_accrual_fee_event_id,
     fe.status as linked_fee_event_status,
     fe.fee_usd::text as linked_fee_event_fee_usd,
     fe.tx_hash as linked_fee_event_tx_hash,
@@ -1382,6 +1410,7 @@ function mapContractReceivable(row: ContractReceivableRow) {
     resolutionSource: row.resolution_source,
     resolvedUsdcAmountRaw: row.resolved_usdc_amount_raw,
     resolvedUsdcAmount: row.resolved_usdc_amount,
+    accrualId: row.accrual_id,
     feeEventId: row.fee_event_id,
     status: row.status,
     nextResolutionCheckAt: toIso(row.next_resolution_check_at),
@@ -1407,6 +1436,15 @@ function mapContractReceivable(row: ContractReceivableRow) {
       averageFillPrice: row.order_average_fill_price,
       feePolicySnapshot: row.order_fee_policy_snapshot,
     },
+    accrual: row.accrual_id
+      ? {
+          id: row.accrual_id,
+          status: row.linked_accrual_status,
+          feeAmount: row.linked_accrual_fee_amount,
+          feeAmountRaw: row.linked_accrual_fee_amount_raw,
+          feeEventId: row.linked_accrual_fee_event_id,
+        }
+      : null,
     feeEvent: row.fee_event_id
       ? {
           id: row.fee_event_id,
@@ -1607,7 +1645,11 @@ export async function getAdminFeeLedgerSummary(
           r.fee_program,
           r.status,
           r.chain_id,
-          case when r.fee_event_id is null then 'unlinked' else 'linked' end as linked_state,
+          case
+            when r.fee_event_id is not null then 'fee_event_linked'
+            when r.accrual_id is not null then 'accrual_linked'
+            else 'unlinked'
+          end as linked_state,
           r.resolution_source,
           count(*)::text as count,
           coalesce(sum(r.receivable_token_amount_raw::numeric), 0)::text as receivable_token_amount_raw,
