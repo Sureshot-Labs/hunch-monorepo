@@ -660,6 +660,24 @@ const POLYMARKET_COLLATERAL_ONRAMP_ADDRESS =
 const POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS =
   "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
 
+function resolvePolymarketPusdAddress(): string {
+  const explicitPusd = process.env.POLYMARKET_PUSD_ADDRESS?.trim();
+  const legacyCollateralAlias =
+    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim();
+  const resolved = explicitPusd || legacyCollateralAlias || POLYMARKET_PUSD_ADDRESS;
+  if (resolved.toLowerCase() === POLYMARKET_USDCE_ADDRESS.toLowerCase()) {
+    const source = explicitPusd
+      ? "POLYMARKET_PUSD_ADDRESS"
+      : "POLYMARKET_COLLATERAL_ADDRESS";
+    throw new Error(
+      `[env] ${source} points to USDC.e; Polymarket CLOB V2 collateral must be pUSD`,
+    );
+  }
+  return resolved;
+}
+
+const polymarketPusdAddress = resolvePolymarketPusdAddress();
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
@@ -1158,16 +1176,11 @@ export const env = {
     "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
-  polymarketPusdAddress:
-    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
-    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
-    POLYMARKET_PUSD_ADDRESS,
+  polymarketPusdAddress,
   polymarketUsdceAddress:
     process.env.POLYMARKET_USDCE_ADDRESS?.trim() || POLYMARKET_USDCE_ADDRESS,
-  polymarketUsdcAddress:
-    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
-    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
-    POLYMARKET_PUSD_ADDRESS,
+  // Compatibility alias for older API response fields. This is pUSD for CLOB V2.
+  polymarketUsdcAddress: polymarketPusdAddress,
   polymarketExchangeAddress:
     process.env.POLYMARKET_EXCHANGE_ADDRESS?.trim() ||
     POLYMARKET_EXCHANGE_V2_ADDRESS,

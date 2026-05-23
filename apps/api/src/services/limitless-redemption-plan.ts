@@ -51,6 +51,8 @@ async function readConditionPayout(inputs: {
   conditionResolved: boolean;
   resolvedOutcome: "YES" | "NO" | null;
   resolvedOutcomePct: number | null;
+  payoutDenominator: bigint;
+  payoutNumerators: [bigint, bigint];
 }> {
   const payoutDenominator = await safeEvmReadContract<bigint>({
     rpcUrl: inputs.rpcUrl,
@@ -66,6 +68,8 @@ async function readConditionPayout(inputs: {
       conditionResolved: false,
       resolvedOutcome: null,
       resolvedOutcomePct: null,
+      payoutDenominator,
+      payoutNumerators: [0n, 0n],
     };
   }
 
@@ -97,6 +101,8 @@ async function readConditionPayout(inputs: {
     conditionResolved: true,
     resolvedOutcome,
     resolvedOutcomePct: Number.isFinite(pctBasisPoints) ? pctBasisPoints : null,
+    payoutDenominator,
+    payoutNumerators: [yesRaw, noRaw],
   };
 }
 
@@ -156,6 +162,22 @@ export async function buildLimitlessRedemptionPlan(
         chainId: BASE_CHAIN_ID,
         reason: "no_redeemable_balance",
         reasonMessage: "No redeemable balance found for this position.",
+        conditionResolved: true,
+        resolvedOutcome: condition.resolvedOutcome,
+        resolvedOutcomePct: condition.resolvedOutcomePct,
+      });
+    }
+
+    const selectedPayoutNumerator =
+      inputs.outcome === "YES"
+        ? condition.payoutNumerators[0]
+        : condition.payoutNumerators[1];
+    if (selectedPayoutNumerator <= 0n) {
+      return buildUnavailableRedemptionPlan({
+        venue: "limitless",
+        chainId: BASE_CHAIN_ID,
+        reason: "resolved_zero_payout",
+        reasonMessage: "Outcome resolved against this position.",
         conditionResolved: true,
         resolvedOutcome: condition.resolvedOutcome,
         resolvedOutcomePct: condition.resolvedOutcomePct,

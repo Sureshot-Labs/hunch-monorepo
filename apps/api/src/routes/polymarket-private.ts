@@ -39,7 +39,6 @@ import {
 import {
   fetchErc1155BalancesByOwner,
   fetchEvmCode,
-  fetchPolymarketOrderHash,
   fetchPolymarketOrderHashV2,
   fetchPolymarketOrderStatus,
   fetchPolymarketOrderStatusV2,
@@ -94,7 +93,6 @@ import {
   validatePolymarketOrderBuilderCodeForConfig,
 } from "../services/polymarket-builder-fees.js";
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const POLY_DECIMALS = 6;
 const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
 const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
@@ -1446,38 +1444,13 @@ function normalizeOrderForPayload(
     "takerAmount",
     "timestamp",
     "expiration",
-    "nonce",
-    "feeRateBps",
   ]) {
     const value = normalizeNumberishString(order[key]);
     if (value !== null) normalized[key] = value;
   }
 
-  if (!isPolymarketOrderPayloadV2(order)) {
-    const takerRaw = order.taker;
-    if (typeof takerRaw !== "string" || takerRaw.trim().length === 0) {
-      normalized.taker = ZERO_ADDRESS;
-    }
-  }
-
   return normalized;
 }
-
-type NormalizedPolymarketOrderV1 = {
-  salt: string;
-  maker: string;
-  signer: string;
-  taker: string;
-  tokenId: string;
-  makerAmount: string;
-  takerAmount: string;
-  expiration: string;
-  nonce: string;
-  feeRateBps: string;
-  side: number;
-  signatureType: number;
-  signature: string;
-};
 
 type NormalizedPolymarketOrderV2 = {
   salt: string;
@@ -1494,61 +1467,7 @@ type NormalizedPolymarketOrderV2 = {
   signature: string;
 };
 
-function normalizeOrderForHashV1(
-  order: Record<string, unknown>,
-  side: PolymarketSide,
-): NormalizedPolymarketOrderV1 | null {
-  const signatureType = normalizeSignatureType(order.signatureType);
-  if (signatureType == null) return null;
-
-  const maker = typeof order.maker === "string" ? order.maker.trim() : "";
-  const signer = typeof order.signer === "string" ? order.signer.trim() : "";
-  if (!maker || !signer) return null;
-
-  const salt = normalizeNumberishString(order.salt);
-  const tokenId = normalizeNumberishString(order.tokenId);
-  const makerAmount = normalizeNumberishString(order.makerAmount);
-  const takerAmount = normalizeNumberishString(order.takerAmount);
-  const expiration = normalizeNumberishString(order.expiration);
-  const nonce = normalizeNumberishString(order.nonce);
-  const feeRateBps = normalizeNumberishString(order.feeRateBps);
-  if (
-    !salt ||
-    !tokenId ||
-    !makerAmount ||
-    !takerAmount ||
-    !expiration ||
-    !nonce ||
-    !feeRateBps
-  ) {
-    return null;
-  }
-
-  const takerRaw = typeof order.taker === "string" ? order.taker.trim() : "";
-  const taker = takerRaw.length ? takerRaw : ZERO_ADDRESS;
-
-  const signature =
-    typeof order.signature === "string" ? order.signature.trim() : "";
-  if (!signature) return null;
-
-  return {
-    salt,
-    maker,
-    signer,
-    taker,
-    tokenId,
-    makerAmount,
-    takerAmount,
-    expiration,
-    nonce,
-    feeRateBps,
-    side: side === "BUY" ? 0 : 1,
-    signatureType,
-    signature,
-  };
-}
-
-function normalizeOrderForHashV2(
+function normalizeOrderForHash(
   order: Record<string, unknown>,
   side: PolymarketSide,
 ): NormalizedPolymarketOrderV2 | null {
@@ -1597,16 +1516,6 @@ function normalizeOrderForHashV2(
     builder,
     signature,
   };
-}
-
-function normalizeOrderForHash(
-  order: Record<string, unknown>,
-  side: PolymarketSide,
-): NormalizedPolymarketOrderV1 | NormalizedPolymarketOrderV2 | null {
-  if (isPolymarketOrderPayloadV2(order)) {
-    return normalizeOrderForHashV2(order, side);
-  }
-  return normalizeOrderForHashV1(order, side);
 }
 
 function derivePriceAndSize(
@@ -1922,19 +1831,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         env.polymarketExchangeAddress;
 
       try {
-        const orderHash = isPolymarketOrderPayloadV2(order)
-          ? await fetchPolymarketOrderHashV2({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              exchangeAddress,
-              order: normalizedForHash as NormalizedPolymarketOrderV2,
-            })
-          : await fetchPolymarketOrderHash({
-              rpcUrl: env.polygonRpcUrl,
-              timeoutMs: env.polygonRpcTimeoutMs,
-              exchangeAddress,
-              order: normalizedForHash as NormalizedPolymarketOrderV1,
-            });
+        const orderHash = await fetchPolymarketOrderHashV2({
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          exchangeAddress,
+          order: normalizedForHash,
+        });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -3759,50 +3661,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         marketInfo = await fetchPolymarketMarketInfo(pool, {
           tokenId: orderTokenId,
         });
-        const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
-        const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
-        const takerFeeBps =
-          takerFeeRaw != null && takerFeeRaw !== ""
-            ? Math.max(0, Number(takerFeeRaw))
-            : 0;
-        const makerFeeBps =
-          makerFeeRaw != null && makerFeeRaw !== ""
-            ? Math.max(0, Number(makerFeeRaw))
-            : 0;
-        const expectedFeeBps =
-          orderType === "GTC" || orderType === "GTD"
-            ? makerFeeBps
-            : takerFeeBps;
-        const orderFeeBps = isClobV2Order
-          ? expectedFeeBps
-          : (parseNumberish(order.feeRateBps) ?? 0);
-        if (expectedFeeBps > 0 && orderFeeBps !== expectedFeeBps) {
-          reply.code(400);
-          return reply.send({
-            error: `Order feeRateBps must match market ${
-              orderType === "GTC" || orderType === "GTD" ? "maker" : "taker"
-            } fee (${expectedFeeBps}).`,
-          });
-        }
       }
 
       const normalizedOrder = normalizeOrderForPayload(order, side);
       const normalizedForHash = normalizeOrderForHash(order, side);
-      if (isClobV2Order && normalizedOrder.expiration == null) {
+      if (normalizedOrder.expiration == null) {
         normalizedOrder.expiration = "0";
       }
       const orderPayload = normalizedForHash ?? normalizedOrder;
 
-      const feeAuth = body.feeAuth;
-      const feeAuthSig =
-        typeof body.feeAuthSig === "string" ? body.feeAuthSig.trim() : "";
-      if (feeAuth || feeAuthSig) {
-        reply.code(400);
-        return reply.send({
-          error:
-            "Polymarket fee-auth orders are disabled; configure builder fees or submit without a Hunch fee.",
-        });
-      }
       const exchangeAddress =
         (typeof body.exchangeAddress === "string" &&
           body.exchangeAddress.trim()) ||
@@ -3856,19 +3723,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      orderHash = isClobV2Order
-        ? await fetchPolymarketOrderHashV2({
-            rpcUrl: env.polygonRpcUrl,
-            timeoutMs: env.polygonRpcTimeoutMs,
-            exchangeAddress,
-            order: normalizedForHash as NormalizedPolymarketOrderV2,
-          })
-        : await fetchPolymarketOrderHash({
-            rpcUrl: env.polygonRpcUrl,
-            timeoutMs: env.polygonRpcTimeoutMs,
-            exchangeAddress,
-            order: normalizedForHash as NormalizedPolymarketOrderV1,
-          });
+      orderHash = await fetchPolymarketOrderHashV2({
+        rpcUrl: env.polygonRpcUrl,
+        timeoutMs: env.polygonRpcTimeoutMs,
+        exchangeAddress,
+        order: normalizedForHash,
+      });
 
       const payload = {
         order: normalizedOrder,

@@ -508,47 +508,6 @@ export async function fetchErc20Allowance(inputs: {
   return value;
 }
 
-export async function fetchPolymarketOrderHash(inputs: {
-  rpcUrl: string;
-  timeoutMs: number;
-  exchangeAddress: string;
-  order: {
-    salt: string | number | bigint;
-    maker: string;
-    signer: string;
-    taker: string;
-    tokenId: string | number | bigint;
-    makerAmount: string | number | bigint;
-    takerAmount: string | number | bigint;
-    expiration: string | number | bigint;
-    nonce: string | number | bigint;
-    feeRateBps: string | number | bigint;
-    side: number;
-    signatureType: number;
-    signature: string;
-  };
-}): Promise<string> {
-  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
-  const data = polymarketExchangeIface.encodeFunctionData("hashOrder", [
-    inputs.order,
-  ]);
-  const result = await ethRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    method: "eth_call",
-    params: [{ to: exchangeAddress, data }, "latest"],
-  });
-  const decoded = polymarketExchangeIface.decodeFunctionResult(
-    "hashOrder",
-    result,
-  ) as unknown;
-  const value = Array.isArray(decoded) ? decoded[0] : null;
-  if (typeof value !== "string") {
-    throw new Error("Polygon RPC: invalid hashOrder result");
-  }
-  return value;
-}
-
 export async function fetchPolymarketOrderHashV2(inputs: {
   rpcUrl: string;
   timeoutMs: number;

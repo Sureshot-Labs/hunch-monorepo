@@ -1176,7 +1176,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   /**
    * POST /auth/polymarket/relayer-sign
-   * Returns builder auth headers for the Polymarket relayer (used by client-side relayer requests).
+   * Returns builder-HMAC auth headers for the Polymarket gasless relayer only.
+   * CLOB V2 order builder attribution must use the order builder field instead.
    */
   z.post(
     "/auth/polymarket/relayer-sign",

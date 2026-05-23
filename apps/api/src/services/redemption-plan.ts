@@ -4,6 +4,7 @@ export type RedemptionPlanReason =
   | "ready"
   | "condition_unresolved"
   | "no_redeemable_balance"
+  | "resolved_zero_payout"
   | "missing_condition_id"
   | "missing_token_id"
   | "outcome_required"

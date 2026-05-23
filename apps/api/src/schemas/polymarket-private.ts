@@ -23,41 +23,6 @@ const zOptionalBool = z
   .transform((v) => v === true || v === "true")
   .catch(false);
 
-const polymarketOrderSchemaV1 = z
-  .object({
-    salt: zNumberish,
-    maker: zEthAddressRequired,
-    signer: zEthAddressRequired,
-    taker: zEthAddress.optional(),
-    tokenId: zNumberish,
-    makerAmount: zNumberish,
-    takerAmount: zNumberish,
-    expiration: zNumberish,
-    nonce: zNumberish,
-    feeRateBps: zNumberish,
-    side: zNumberish,
-    signatureType: zNumberish,
-    signature: zRequiredString("signature is required"),
-  })
-  .passthrough();
-
-const polymarketUnsignedOrderSchemaV1 = z
-  .object({
-    salt: zNumberish,
-    maker: zEthAddressRequired,
-    signer: zEthAddressRequired,
-    taker: zEthAddress.optional(),
-    tokenId: zNumberish,
-    makerAmount: zNumberish,
-    takerAmount: zNumberish,
-    expiration: zNumberish,
-    nonce: zNumberish,
-    feeRateBps: zNumberish,
-    side: zNumberish,
-    signatureType: zNumberish,
-  })
-  .passthrough();
-
 const polymarketOrderSchemaV2 = z
   .object({
     salt: zNumberish,
@@ -74,7 +39,7 @@ const polymarketOrderSchemaV2 = z
     signature: zRequiredString("signature is required"),
     expiration: zNumberish.optional(),
   })
-  .passthrough();
+  .strict();
 
 const polymarketUnsignedOrderSchemaV2 = z
   .object({
@@ -91,17 +56,10 @@ const polymarketUnsignedOrderSchemaV2 = z
     builder: zBytes32,
     expiration: zNumberish.optional(),
   })
-  .passthrough();
+  .strict();
 
-const polymarketOrderSchema = z.union([
-  polymarketOrderSchemaV2,
-  polymarketOrderSchemaV1,
-]);
-
-const polymarketUnsignedOrderSchema = z.union([
-  polymarketUnsignedOrderSchemaV2,
-  polymarketUnsignedOrderSchemaV1,
-]);
+const polymarketOrderSchema = polymarketOrderSchemaV2;
+const polymarketUnsignedOrderSchema = polymarketUnsignedOrderSchemaV2;
 
 const polymarketFeeAuthSchemaV1 = z.object({
   signer: zEthAddressRequired,
@@ -134,34 +92,16 @@ export const polymarketPlaceOrderBodySchema = z
     deferExec: z.boolean().optional(),
     exchangeAddress: zEthAddress.optional(),
     negRisk: z.boolean().optional(),
-    feeCollectorAddress: zEthAddress.optional(),
-    feeAuth: polymarketFeeAuthSchema.optional(),
-    feeAuthSig: z.string().optional(),
   })
-  .superRefine((value, ctx) => {
-    if (value.feeAuth || value.feeAuthSig) {
-      if (!value.feeAuth) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "feeAuth is required when feeAuthSig is provided",
-          path: ["feeAuth"],
-        });
-      }
-      if (!value.feeAuthSig) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "feeAuthSig is required when feeAuth is provided",
-          path: ["feeAuthSig"],
-        });
-      }
-    }
-  });
+  .strict();
 
-export const polymarketOrderHashBodySchema = z.object({
-  order: polymarketOrderSchema,
-  exchangeAddress: zEthAddress.optional(),
-  negRisk: z.boolean().optional(),
-});
+export const polymarketOrderHashBodySchema = z
+  .object({
+    order: polymarketOrderSchema,
+    exchangeAddress: zEthAddress.optional(),
+    negRisk: z.boolean().optional(),
+  })
+  .strict();
 
 export const polymarketCancelOrderBodySchema = z.object({
   orderID: zRequiredString("orderID is required"),
@@ -292,11 +232,15 @@ export const polymarketEmbeddedEnsureReadyExecuteBodySchema = z.object({
     .default([]),
 });
 
-export const polymarketEmbeddedSignOrderBodySchema = z.object({
-  order: polymarketUnsignedOrderSchema,
-  exchangeAddress: zEthAddressRequired,
-  authorizationSignature: zRequiredString("authorizationSignature is required"),
-});
+export const polymarketEmbeddedSignOrderBodySchema = z
+  .object({
+    order: polymarketUnsignedOrderSchema,
+    exchangeAddress: zEthAddressRequired,
+    authorizationSignature: zRequiredString(
+      "authorizationSignature is required",
+    ),
+  })
+  .strict();
 
 export const polymarketEmbeddedSignFeeAuthBodySchema = z.object({
   feeAuth: polymarketFeeAuthSchema,

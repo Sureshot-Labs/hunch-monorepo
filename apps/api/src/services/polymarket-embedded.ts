@@ -36,23 +36,6 @@ const POLYMARKET_AUTH_TYPES = {
   ],
 } as const;
 
-const POLYMARKET_ORDER_TYPES = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "taker", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "expiration", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "feeRateBps", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-  ],
-} as const;
-
 const POLYMARKET_ORDER_TYPES_V2 = {
   Order: [
     { name: "salt", type: "uint256" },
@@ -162,16 +145,13 @@ export type PolymarketOrderPayload = {
   salt: string | number;
   maker: string;
   signer: string;
-  taker?: string;
   tokenId: string | number;
   makerAmount: string | number;
   takerAmount: string | number;
   expiration?: string | number;
-  nonce?: string | number;
-  feeRateBps?: string | number;
-  timestamp?: string | number;
-  metadata?: string;
-  builder?: string;
+  timestamp: string | number;
+  metadata: string;
+  builder: string;
   side: number | string;
   signatureType: number | string;
 };
@@ -699,7 +679,7 @@ async function signTypedDataWithEmbeddedWallet(inputs: {
 function canonicalizeOrderPayload(
   payload: PolymarketOrderPayload,
 ): PolymarketOrderPayload {
-  const output = {
+  return {
     ...payload,
     maker: requireAddress(payload.maker, "Invalid Polymarket maker address."),
     signer: requireAddress(
@@ -707,13 +687,6 @@ function canonicalizeOrderPayload(
       "Invalid Polymarket signer address.",
     ),
   };
-  if (!isPolymarketOrderPayloadV2(payload)) {
-    output.taker = requireAddress(
-      payload.taker ?? ZERO_ADDRESS,
-      "Invalid Polymarket taker address.",
-    );
-  }
-  return output;
 }
 
 function isPolymarketOrderPayloadV2(payload: PolymarketOrderPayload): boolean {
@@ -1312,19 +1285,19 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
       "Embedded Polymarket orders must use a deposit wallet or deployed legacy Safe.",
     );
   }
-  const isV2Order = isPolymarketOrderPayloadV2(typedPayload);
+  if (!isPolymarketOrderPayloadV2(typedPayload)) {
+    throw new Error("Polymarket embedded orders must use CLOB V2 payloads.");
+  }
   return {
     domain: {
       name: "Polymarket CTF Exchange",
-      version: isV2Order ? "2" : "1",
+      version: "2",
       chainId: POLY_CHAIN_ID,
       verifyingContract: exchangeAddress,
     },
     types: {
       EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-      Order: isV2Order
-        ? POLYMARKET_ORDER_TYPES_V2.Order
-        : POLYMARKET_ORDER_TYPES.Order,
+      Order: POLYMARKET_ORDER_TYPES_V2.Order,
     },
     primaryType: "Order",
     message: typedPayload,
@@ -1586,21 +1559,22 @@ export async function signEmbeddedPolymarketOrder(inputs: {
       "Embedded Polymarket order signer must match the selected Trading Wallet.",
     );
   }
+  if (!isPolymarketOrderPayloadV2(typedPayload)) {
+    throw new Error("Embedded Polymarket orders must use CLOB V2 payloads.");
+  }
   return signTypedDataWithEmbeddedWallet({
     walletApiClient: inputs.context.walletApiClient,
     signer: inputs.context.signer,
     typedData: {
       domain: {
         name: "Polymarket CTF Exchange",
-        version: isPolymarketOrderPayloadV2(typedPayload) ? "2" : "1",
+        version: "2",
         chainId: POLY_CHAIN_ID,
         verifyingContract: exchangeAddress,
       },
       types: {
         EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-        Order: isPolymarketOrderPayloadV2(typedPayload)
-          ? POLYMARKET_ORDER_TYPES_V2.Order
-          : POLYMARKET_ORDER_TYPES.Order,
+        Order: POLYMARKET_ORDER_TYPES_V2.Order,
       },
       primaryType: "Order",
       message: typedPayload,

@@ -1,8 +1,4 @@
 import crypto from "crypto";
-import {
-  BuilderSigner,
-  type BuilderApiKeyCreds,
-} from "@polymarket/builder-signing-sdk";
 import { isRecord } from "../lib/type-guards.js";
 import {
   fetchWithWalletIntelRetry,
@@ -14,8 +10,6 @@ export type PolymarketL2Credentials = {
   apiSecret: string;
   apiPassphrase: string;
 };
-
-export type PolymarketBuilderCredentials = BuilderApiKeyCreds;
 
 const STRIP_QUERY_FROM_SIGNATURE = true;
 
@@ -65,27 +59,6 @@ export function createPolymarketL2Headers(inputs: {
     POLY_API_KEY: inputs.creds.apiKey,
     POLY_PASSPHRASE: inputs.creds.apiPassphrase,
   };
-}
-
-function createPolymarketBuilderHeaders(inputs: {
-  creds?: PolymarketBuilderCredentials;
-  method: string;
-  requestPath: string;
-  body?: string;
-  timestampSec?: number;
-}): Record<string, string> | null {
-  if (!inputs.creds) return null;
-  const key = inputs.creds.key?.trim();
-  const secret = inputs.creds.secret?.trim();
-  const passphrase = inputs.creds.passphrase?.trim();
-  if (!key || !secret || !passphrase) return null;
-  const signer = new BuilderSigner({ key, secret, passphrase });
-  return signer.createBuilderHeaderPayload(
-    inputs.method,
-    inputs.requestPath,
-    inputs.body ?? "",
-    inputs.timestampSec,
-  );
 }
 
 async function readJsonOrText(res: Response): Promise<unknown> {
@@ -153,7 +126,6 @@ export async function polymarketL2Request(inputs: {
   timeoutMs: number;
   address: string;
   creds: PolymarketL2Credentials;
-  builderCreds?: PolymarketBuilderCredentials;
   method: "GET" | "POST" | "DELETE";
   requestPath: string;
   body?: unknown;
@@ -191,24 +163,10 @@ export async function polymarketL2Request(inputs: {
       body: bodyString,
       ...(remoteTime != null ? { timestampSec: remoteTime } : {}),
     }),
-    ...(createPolymarketBuilderHeaders({
-      creds: inputs.builderCreds,
-      method: inputs.method,
-      requestPath: requestPathForSignature,
-      body: bodyString,
-      ...(remoteTime != null ? { timestampSec: remoteTime } : {}),
-    }) ?? {}),
   });
   if (bodyString !== undefined) {
     headers.set("content-type", "application/json; charset=utf-8");
   }
-  /*console.log("!!! Polymarket L2 Request:", {
-    method: inputs.method,
-    requestPath,
-    hasBuilderCreds: Boolean(inputs.builderCreds?.key),
-  });
-  console.log("!!! Polymarket L2 Request Headers:", Object.fromEntries(headers.entries()));
-  console.log("!!! Polymarket inputs.builderCreds :", inputs.builderCreds);*/
   const res = await fetchWithWalletIntelRetry({
     url: `${baseUrl}${requestPath}`,
     init: {
@@ -438,7 +396,6 @@ export async function fetchPolymarketOrderByHash(inputs: {
   timeoutMs: number;
   address: string;
   creds: PolymarketL2Credentials;
-  builderCreds?: PolymarketBuilderCredentials;
   orderHash: string;
 }): Promise<
   | { ok: true; payload: unknown; order: PolymarketOpenOrder | null }
@@ -450,7 +407,6 @@ export async function fetchPolymarketOrderByHash(inputs: {
     timeoutMs: inputs.timeoutMs,
     address: inputs.address,
     creds: inputs.creds,
-    builderCreds: inputs.builderCreds,
     method: "GET",
     requestPath,
   });
@@ -470,7 +426,6 @@ export async function fetchPolymarketTrades(inputs: {
   timeoutMs: number;
   address: string;
   creds: PolymarketL2Credentials;
-  builderCreds?: PolymarketBuilderCredentials;
   query?: {
     id?: string;
     taker?: string;
@@ -502,7 +457,6 @@ export async function fetchPolymarketTrades(inputs: {
     timeoutMs: inputs.timeoutMs,
     address: inputs.address,
     creds: inputs.creds,
-    builderCreds: inputs.builderCreds,
     method: "GET",
     requestPath,
   });
