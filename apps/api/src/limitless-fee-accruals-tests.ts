@@ -12,6 +12,7 @@ import {
   type LimitlessFeeShareConfig,
   type LimitlessOrderStatusItem,
 } from "./services/limitless-fee-accruals.js";
+import { convertLimitlessReceivableRaw } from "./services/limitless-contract-fee-receivables.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -49,6 +50,9 @@ const limitlessOrderFilledInterface = new ethers.Interface([
 const limitlessFeeChargedInterface = new ethers.Interface([
   "event FeeCharged(address indexed receiver, uint256 tokenId, uint256 amount)",
 ]);
+const limitlessFeeRefundedInterface = new ethers.Interface([
+  "event FeeRefunded(address token, address to, uint256 id, uint256 amount)",
+]);
 const limitlessExchange = "0x05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5";
 const feeReceiver = "0xF94ef760884b0605E433853Aed17DA574160226E";
 
@@ -57,12 +61,13 @@ function eventLog(
   eventName: string,
   args: unknown[],
   index: number,
+  address = limitlessExchange,
 ) {
   const event = iface.getEvent(eventName);
   assert.ok(event);
   const encoded = iface.encodeEventLog(event, args);
   return {
-    address: limitlessExchange,
+    address,
     topics: encoded.topics,
     data: encoded.data,
     index,
@@ -153,6 +158,12 @@ test("builds Limitless accrual from USD-denominated venue fee", () => {
   assert.equal(accrual.venueFeeAmount, "0.010000");
   assert.equal(accrual.venueFeeRateBps, 25);
   assert.equal(accrual.venueEffectiveFeeBps, 20);
+});
+
+test("converts Limitless receivable raw amount with integer payout ratio", () => {
+  assert.equal(convertLimitlessReceivableRaw("1000000", "1", "1"), "1000000");
+  assert.equal(convertLimitlessReceivableRaw("1000000", "1", "2"), "500000");
+  assert.equal(convertLimitlessReceivableRaw("999999", "0", "1"), "0");
 });
 
 test("does not create rewards accrual for contract-denominated fee", () => {
@@ -276,7 +287,7 @@ test("builds Limitless accrual from onchain SELL receipt with USDC fee", () => {
   );
 });
 
-test("skips Limitless BUY receipt when onchain fee is contract-denominated", () => {
+test("creates Limitless contract receivable when onchain fee is token-denominated", () => {
   const orderHash =
     "0x372e13c3766404a4903af7bb9e702b31cbce8b517e36ee3e474d0756745809e1";
   const tokenId =
@@ -314,10 +325,71 @@ test("skips Limitless BUY receipt when onchain fee is contract-denominated", () 
   });
 
   assert.equal(result.accrual, null);
-  assert.ok(result.attempt);
-  assert.equal(result.attempt.status, "skipped");
-  assert.match(result.attempt.reason, /contract-denominated onchain/);
-  assert.match(result.attempt.reason, /10582/);
+  assert.equal(result.attempt, null);
+  assert.ok(result.receivable);
+  assert.equal(result.receivable.status, "pending_resolution");
+  assert.equal(result.receivable.rawTokenId, tokenId);
+  assert.equal(result.receivable.tokenId, `limitless:${tokenId}`);
+  assert.equal(result.receivable.grossTokenAmountRaw, "10582");
+  assert.equal(result.receivable.receivableTokenAmountRaw, "5291");
+  assert.equal(result.receivable.feeChargedLogIndex, 1);
+  assert.equal(result.receivable.logIndex, 2);
+});
+
+test("marks Limitless contract receivable refunded when fee is refunded in same tx", () => {
+  const orderHash =
+    "0xcf43897839d6e37cc801f26aaf8c3fdb07af7b056a34ee575c4e10cce040ea6d";
+  const tokenId =
+    "92607358619733740235110107859836604331667007194484796602553714704375329485693";
+  const logs = [
+    eventLog(
+      limitlessFeeChargedInterface,
+      "FeeCharged",
+      [feeReceiver, BigInt(tokenId), 35671n],
+      1,
+    ),
+    eventLog(
+      limitlessOrderFilledInterface,
+      "OrderFilled",
+      [
+        orderHash,
+        "0xEbb8612C859e2C468aB3A0c60C59692eC7B51FB0",
+        "0x17Cac6E4b08C8D95A2890a8DF7Cb0e7d83711387",
+        0n,
+        BigInt(tokenId),
+        189_060n,
+        1_189_056n,
+        35671n,
+      ],
+      2,
+    ),
+    eventLog(
+      limitlessFeeRefundedInterface,
+      "FeeRefunded",
+      [
+        "0xC9c98965297Bc527861c898329Ee280632B76e18",
+        "0xEbb8612C859e2C468aB3A0c60C59692eC7B51FB0",
+        BigInt(tokenId),
+        35671n,
+      ],
+      3,
+      feeReceiver,
+    ),
+  ];
+
+  const result = buildLimitlessVenueShareAccrualFromReceiptLogs({
+    order: receiptOrder("BUY", `limitless:${tokenId}`),
+    txHash:
+      "0x9c80f1398a443f121407c81d956c35ae385616244399fe04bf3d217e76ae255d",
+    logs,
+    config: receiptConfig,
+  });
+
+  assert.equal(result.accrual, null);
+  assert.equal(result.attempt, null);
+  assert.ok(result.receivable);
+  assert.equal(result.receivable.status, "refunded");
+  assert.equal(result.receivable.feeRefundedLogIndex, 3);
 });
 
 await testAsync(

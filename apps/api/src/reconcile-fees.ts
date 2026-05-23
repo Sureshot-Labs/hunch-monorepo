@@ -92,6 +92,11 @@ export async function runReconcileFees(options: ReconcileFeesOptions) {
       `unlocked=${limitlessVenueShare.unlock.unlocked}`,
       `unlockSkipped=${limitlessVenueShare.unlock.skipped}`,
       `budgetMicro=${limitlessVenueShare.unlock.budgetMicro}`,
+      `contractReceivablesChecked=${limitlessVenueShare.contractReceivables.checked}`,
+      `contractReceivablesPending=${limitlessVenueShare.contractReceivables.pending}`,
+      `contractReceivablesConverted=${limitlessVenueShare.contractReceivables.converted}`,
+      `contractReceivablesSettledZero=${limitlessVenueShare.contractReceivables.settledZero}`,
+      `contractReceivablesFailed=${limitlessVenueShare.contractReceivables.failed}`,
       `dryRun=${options.dryRun ? 1 : 0}`,
     ].join(" "),
   );

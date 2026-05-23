@@ -16,6 +16,8 @@ export type AdminFeeLedgerFilters = {
   sourceId?: string;
   sourceType?: "order" | "execution";
   feeProgram?: string;
+  tokenId?: string;
+  marketId?: string;
   referralCode?: string;
   referralCodeId?: string;
   referralPolicyId?: string;
@@ -128,6 +130,7 @@ type FeeEventRow = LedgerUserRow & {
   referral_referrer_display_name: string | null;
   referral_attached_at: Date | null;
   linked_accruals: unknown | null;
+  linked_contract_receivables: unknown | null;
   linked_order: unknown | null;
   linked_execution: unknown | null;
 };
@@ -161,6 +164,62 @@ type BackfillAttemptRow = LedgerUserRow & {
   order_hash: string | null;
   order_wallet_address: string | null;
   order_payload: unknown | null;
+};
+
+type ContractReceivableRow = LedgerUserRow & {
+  id: string;
+  venue: string;
+  fee_program: string;
+  chain_id: string;
+  wallet_address: string | null;
+  signer_address: string | null;
+  order_id: string;
+  order_hash: string;
+  venue_order_id: string | null;
+  tx_hash: string;
+  log_index: number;
+  fee_charged_log_index: number | null;
+  fee_refunded_log_index: number | null;
+  fee_receiver_address: string | null;
+  market_id: string | null;
+  event_id: string | null;
+  condition_id: string | null;
+  raw_token_id: string;
+  token_id: string;
+  outcome_side: string | null;
+  side: string;
+  role: string;
+  fee_rate_bps: number;
+  gross_token_amount_raw: string;
+  receivable_token_amount_raw: string;
+  resolved_outcome: string | null;
+  resolution_source: string | null;
+  resolved_usdc_amount_raw: string | null;
+  resolved_usdc_amount: string | null;
+  fee_event_id: string | null;
+  status: string;
+  next_resolution_check_at: Date | null;
+  last_resolution_checked_at: Date | null;
+  resolution_attempts: number;
+  resolution_error: string | null;
+  filled_at: Date;
+  resolved_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  order_status: string | null;
+  order_wallet_address: string | null;
+  order_token_id: string | null;
+  order_side: string | null;
+  order_type: string | null;
+  order_price: string | null;
+  order_size: string | null;
+  order_filled_size: string | null;
+  order_average_fill_price: string | null;
+  order_fee_policy_snapshot: unknown | null;
+  linked_fee_event_status: string | null;
+  linked_fee_event_fee_usd: string | null;
+  linked_fee_event_tx_hash: string | null;
+  linked_fee_event_created_at: Date | null;
 };
 
 function push(parts: QueryParts, value: unknown): string {
@@ -341,16 +400,17 @@ function buildAccrualFilters(query: AdminFeeLedgerFilters): QueryParts {
   if (query.orderHash)
     parts.clauses.push(`a.order_hash = ${push(parts, query.orderHash)}`);
   if (query.venueOrderId)
-    parts.clauses.push(
-      `a.venue_order_id = ${push(parts, query.venueOrderId)}`,
-    );
-  if (query.txHash) parts.clauses.push(`a.tx_hash = ${push(parts, query.txHash)}`);
+    parts.clauses.push(`a.venue_order_id = ${push(parts, query.venueOrderId)}`);
+  if (query.txHash)
+    parts.clauses.push(`a.tx_hash = ${push(parts, query.txHash)}`);
   if (query.feeEventId)
     parts.clauses.push(
       `a.fee_event_id = ${push(parts, query.feeEventId)}::uuid`,
     );
   if (query.feeProgram)
     parts.clauses.push(`a.fee_program = ${push(parts, query.feeProgram)}`);
+  if (query.tokenId)
+    parts.clauses.push(`a.token_id = ${push(parts, query.tokenId)}`);
   if (query.sourceType)
     parts.clauses.push(`fe.source_type = ${push(parts, query.sourceType)}`);
   if (query.sourceId) {
@@ -409,13 +469,28 @@ function buildEventFilters(query: AdminFeeLedgerFilters): QueryParts {
   if (query.feeProgram) {
     const idx = push(parts, query.feeProgram);
     parts.clauses.push(
-      `exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.fee_program = ${idx})`,
+      `(exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.fee_program = ${idx})
+        or exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and rx.fee_program = ${idx}))`,
+    );
+  }
+  if (query.tokenId) {
+    const idx = push(parts, query.tokenId);
+    parts.clauses.push(`(
+      exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.token_id = ${idx})
+      or exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and (rx.token_id = ${idx} or rx.raw_token_id = ${idx}))
+    )`);
+  }
+  if (query.marketId) {
+    const idx = push(parts, query.marketId);
+    parts.clauses.push(
+      `exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and rx.market_id = ${idx})`,
     );
   }
   if (query.orderId) {
     const idx = push(parts, query.orderId);
     parts.clauses.push(`(
       exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.order_id = ${idx}::uuid)
+      or exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and rx.order_id = ${idx}::uuid)
       or exists (select 1 from orders ox where ox.id = ${idx}::uuid and ox.user_id = fe.user_id)
     )`);
   }
@@ -423,6 +498,7 @@ function buildEventFilters(query: AdminFeeLedgerFilters): QueryParts {
     const idx = push(parts, query.orderHash);
     parts.clauses.push(`(
       exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.order_hash = ${idx})
+      or exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and rx.order_hash = ${idx})
       or exists (select 1 from orders ox where ox.user_id = fe.user_id and ox.order_hash = ${idx})
     )`);
   }
@@ -430,6 +506,7 @@ function buildEventFilters(query: AdminFeeLedgerFilters): QueryParts {
     const idx = push(parts, query.venueOrderId);
     parts.clauses.push(`(
       exists (select 1 from venue_fee_accruals ax where ax.fee_event_id = fe.id and ax.venue_order_id = ${idx})
+      or exists (select 1 from limitless_contract_fee_receivables rx where rx.fee_event_id = fe.id and rx.venue_order_id = ${idx})
       or exists (select 1 from orders ox where ox.user_id = fe.user_id and ox.venue_order_id = ${idx})
       or exists (select 1 from executions ex where ex.user_id = fe.user_id and ex.venue_order_id = ${idx})
     )`);
@@ -439,13 +516,9 @@ function buildEventFilters(query: AdminFeeLedgerFilters): QueryParts {
     parts.clauses.push(`upper(rc.code) = upper(${idx})`);
   }
   if (query.referralCodeId)
-    parts.clauses.push(
-      `rc.id = ${push(parts, query.referralCodeId)}::uuid`,
-    );
+    parts.clauses.push(`rc.id = ${push(parts, query.referralCodeId)}::uuid`);
   if (query.referralPolicyId)
-    parts.clauses.push(
-      `p.id = ${push(parts, query.referralPolicyId)}::uuid`,
-    );
+    parts.clauses.push(`p.id = ${push(parts, query.referralPolicyId)}::uuid`);
   if (query.referrerUserId)
     parts.clauses.push(
       `r.referrer_user_id = ${push(parts, query.referrerUserId)}::uuid`,
@@ -483,6 +556,21 @@ function buildEventFilters(query: AdminFeeLedgerFilters): QueryParts {
             or ax.venue_fill_id = ${idx}
           )
       )
+      or exists (
+        select 1
+        from limitless_contract_fee_receivables rx
+        where rx.fee_event_id = fe.id
+          and (
+            rx.id::text = ${idx}
+            or rx.order_id::text = ${idx}
+            or rx.order_hash = ${idx}
+            or rx.venue_order_id = ${idx}
+            or rx.tx_hash = ${idx}
+            or rx.token_id = ${idx}
+            or rx.raw_token_id = ${idx}
+            or rx.market_id = ${idx}
+          )
+      )
     )`);
   }
   addDateRange(parts, "fe.created_at", query);
@@ -502,7 +590,8 @@ function buildClaimFilters(query: AdminFeeLedgerFilters): QueryParts {
     const idx = push(parts, query.wallet);
     parts.clauses.push(`lower(c.wallet_address) = lower(${idx})`);
   }
-  if (query.txHash) parts.clauses.push(`c.tx_hash = ${push(parts, query.txHash)}`);
+  if (query.txHash)
+    parts.clauses.push(`c.tx_hash = ${push(parts, query.txHash)}`);
   if (query.q) {
     const idx = push(parts, query.q);
     parts.clauses.push(`(
@@ -528,9 +617,7 @@ function buildBackfillFilters(query: AdminFeeLedgerFilters): QueryParts {
   if (query.orderId)
     parts.clauses.push(`b.order_id = ${push(parts, query.orderId)}::uuid`);
   if (query.venueOrderId)
-    parts.clauses.push(
-      `b.venue_order_id = ${push(parts, query.venueOrderId)}`,
-    );
+    parts.clauses.push(`b.venue_order_id = ${push(parts, query.venueOrderId)}`);
   if (query.userId)
     parts.clauses.push(`o.user_id = ${push(parts, query.userId)}::uuid`);
   if (query.wallet) {
@@ -551,6 +638,77 @@ function buildBackfillFilters(query: AdminFeeLedgerFilters): QueryParts {
     )`);
   }
   addDateRange(parts, "b.created_at", query);
+  return parts;
+}
+
+function buildContractReceivableFilters(
+  query: AdminFeeLedgerFilters,
+): QueryParts {
+  const parts: QueryParts = { clauses: [], params: [] };
+  if (query.id) parts.clauses.push(`r.id::text = ${push(parts, query.id)}`);
+  if (query.venue) parts.clauses.push(`r.venue = ${push(parts, query.venue)}`);
+  if (query.chainId)
+    parts.clauses.push(`r.chain_id = ${push(parts, query.chainId)}`);
+  if (query.status)
+    parts.clauses.push(`r.status = ${push(parts, query.status)}`);
+  if (query.userId)
+    parts.clauses.push(`r.user_id = ${push(parts, query.userId)}::uuid`);
+  if (query.wallet) {
+    const idx = push(parts, query.wallet);
+    parts.clauses.push(
+      `(lower(r.wallet_address) = lower(${idx}) or lower(r.signer_address) = lower(${idx}))`,
+    );
+  }
+  if (query.orderId)
+    parts.clauses.push(`r.order_id = ${push(parts, query.orderId)}::uuid`);
+  if (query.orderHash)
+    parts.clauses.push(`r.order_hash = ${push(parts, query.orderHash)}`);
+  if (query.venueOrderId)
+    parts.clauses.push(`r.venue_order_id = ${push(parts, query.venueOrderId)}`);
+  if (query.txHash)
+    parts.clauses.push(`r.tx_hash = ${push(parts, query.txHash)}`);
+  if (query.feeEventId)
+    parts.clauses.push(
+      `r.fee_event_id = ${push(parts, query.feeEventId)}::uuid`,
+    );
+  if (query.feeProgram)
+    parts.clauses.push(`r.fee_program = ${push(parts, query.feeProgram)}`);
+  if (query.tokenId) {
+    const idx = push(parts, query.tokenId);
+    parts.clauses.push(`(r.token_id = ${idx} or r.raw_token_id = ${idx})`);
+  }
+  if (query.marketId)
+    parts.clauses.push(`r.market_id = ${push(parts, query.marketId)}`);
+  if (query.sourceId) {
+    const idx = push(parts, query.sourceId);
+    parts.clauses.push(`(
+      r.id::text = ${idx}
+      or r.order_id::text = ${idx}
+      or r.order_hash = ${idx}
+      or r.venue_order_id = ${idx}
+      or r.tx_hash = ${idx}
+      or r.fee_event_id::text = ${idx}
+    )`);
+  }
+  if (query.q) {
+    const idx = push(parts, query.q);
+    parts.clauses.push(`(
+      r.id::text = ${idx}
+      or r.order_id::text = ${idx}
+      or r.order_hash = ${idx}
+      or r.venue_order_id = ${idx}
+      or r.tx_hash = ${idx}
+      or r.token_id = ${idx}
+      or r.raw_token_id = ${idx}
+      or r.market_id = ${idx}
+      or r.condition_id = ${idx}
+      or r.fee_event_id::text = ${idx}
+      or lower(r.wallet_address) = lower(${idx})
+      or lower(r.signer_address) = lower(${idx})
+      or lower(u.email) = lower(${idx})
+    )`);
+  }
+  addDateRange(parts, "r.filled_at", query);
   return parts;
 }
 
@@ -766,6 +924,7 @@ const EVENT_SELECT_SQL = `
     ru.display_name as referral_referrer_display_name,
     r.created_at as referral_attached_at,
     accruals.linked_accruals,
+    contract_receivables.linked_contract_receivables,
     order_link.linked_order,
     execution_link.linked_execution
 `;
@@ -797,6 +956,35 @@ const EVENT_LATERAL_SQL = `
     where ax.fee_event_id = fe.id
   ) accruals on true
   left join lateral (
+    select coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'id', rx.id,
+          'venue', rx.venue,
+          'feeProgram', rx.fee_program,
+          'status', rx.status,
+          'orderId', rx.order_id,
+          'orderHash', rx.order_hash,
+          'venueOrderId', rx.venue_order_id,
+          'txHash', rx.tx_hash,
+          'logIndex', rx.log_index,
+          'tokenId', rx.token_id,
+          'rawTokenId', rx.raw_token_id,
+          'outcomeSide', rx.outcome_side,
+          'receivableTokenAmountRaw', rx.receivable_token_amount_raw,
+          'resolvedUsdcAmountRaw', rx.resolved_usdc_amount_raw,
+          'resolvedUsdcAmount', rx.resolved_usdc_amount::text,
+          'filledAt', rx.filled_at,
+          'resolvedAt', rx.resolved_at
+        )
+        order by rx.filled_at desc, rx.created_at desc
+      ),
+      '[]'::jsonb
+    ) as linked_contract_receivables
+    from limitless_contract_fee_receivables rx
+    where rx.fee_event_id = fe.id
+  ) contract_receivables on true
+  left join lateral (
     select jsonb_build_object(
       'id', ox.id,
       'venue', ox.venue,
@@ -825,6 +1013,12 @@ const EVENT_LATERAL_SQL = `
           from venue_fee_accruals ax
           where ax.fee_event_id = fe.id
             and ax.order_id = ox.id
+        )
+        or exists (
+          select 1
+          from limitless_contract_fee_receivables rx
+          where rx.fee_event_id = fe.id
+            and rx.order_id = ox.id
         )
       )
     order by coalesce(ox.filled_at, ox.last_update, ox.posted_at) desc
@@ -894,6 +1088,7 @@ function mapFeeEvent(row: FeeEventRow) {
         }
       : null,
     linkedAccruals: row.linked_accruals ?? [],
+    linkedContractReceivables: row.linked_contract_receivables ?? [],
     linkedOrder: row.linked_order,
     linkedExecution: row.linked_execution,
   };
@@ -1085,10 +1280,177 @@ export async function listAdminFeeLedgerBackfillAttempts(
   };
 }
 
-export async function getAdminFeeLedgerAccrual(
+const CONTRACT_RECEIVABLE_FROM_SQL = `
+  from limitless_contract_fee_receivables r
+  left join users u on u.id = r.user_id
+  left join orders o on o.id = r.order_id
+  left join fee_events fe on fe.id = r.fee_event_id
+`;
+
+const CONTRACT_RECEIVABLE_SELECT_SQL = `
+  select
+    r.id,
+    r.user_id,
+    u.email as user_email,
+    u.username as user_username,
+    u.display_name as user_display_name,
+    r.venue,
+    r.fee_program,
+    r.chain_id,
+    r.wallet_address,
+    r.signer_address,
+    r.order_id,
+    r.order_hash,
+    r.venue_order_id,
+    r.tx_hash,
+    r.log_index,
+    r.fee_charged_log_index,
+    r.fee_refunded_log_index,
+    r.fee_receiver_address,
+    r.market_id,
+    r.event_id,
+    r.condition_id,
+    r.raw_token_id,
+    r.token_id,
+    r.outcome_side,
+    r.side,
+    r.role,
+    r.fee_rate_bps,
+    r.gross_token_amount_raw,
+    r.receivable_token_amount_raw,
+    r.resolved_outcome,
+    r.resolution_source,
+    r.resolved_usdc_amount_raw,
+    r.resolved_usdc_amount::text as resolved_usdc_amount,
+    r.fee_event_id,
+    r.status,
+    r.next_resolution_check_at,
+    r.last_resolution_checked_at,
+    r.resolution_attempts,
+    r.resolution_error,
+    r.filled_at,
+    r.resolved_at,
+    r.created_at,
+    r.updated_at,
+    o.status as order_status,
+    o.wallet_address as order_wallet_address,
+    o.token_id as order_token_id,
+    o.side as order_side,
+    o.order_type as order_type,
+    o.price::text as order_price,
+    o.size::text as order_size,
+    o.filled_size::text as order_filled_size,
+    o.average_fill_price::text as order_average_fill_price,
+    o.fee_policy_snapshot as order_fee_policy_snapshot,
+    fe.status as linked_fee_event_status,
+    fe.fee_usd::text as linked_fee_event_fee_usd,
+    fe.tx_hash as linked_fee_event_tx_hash,
+    fe.created_at as linked_fee_event_created_at
+`;
+
+function mapContractReceivable(row: ContractReceivableRow) {
+  return {
+    id: row.id,
+    user: mapUser(row),
+    venue: row.venue,
+    feeProgram: row.fee_program,
+    chainId: row.chain_id,
+    walletAddress: row.wallet_address,
+    signerAddress: row.signer_address,
+    orderId: row.order_id,
+    orderHash: row.order_hash,
+    venueOrderId: row.venue_order_id,
+    txHash: row.tx_hash,
+    logIndex: row.log_index,
+    feeChargedLogIndex: row.fee_charged_log_index,
+    feeRefundedLogIndex: row.fee_refunded_log_index,
+    feeReceiverAddress: row.fee_receiver_address,
+    marketId: row.market_id,
+    eventId: row.event_id,
+    conditionId: row.condition_id,
+    rawTokenId: row.raw_token_id,
+    tokenId: row.token_id,
+    outcomeSide: row.outcome_side,
+    side: row.side,
+    role: row.role,
+    feeRateBps: row.fee_rate_bps,
+    grossTokenAmountRaw: row.gross_token_amount_raw,
+    grossTokenAmount: microRawToDecimal(row.gross_token_amount_raw),
+    receivableTokenAmountRaw: row.receivable_token_amount_raw,
+    receivableTokenAmount: microRawToDecimal(row.receivable_token_amount_raw),
+    resolvedOutcome: row.resolved_outcome,
+    resolutionSource: row.resolution_source,
+    resolvedUsdcAmountRaw: row.resolved_usdc_amount_raw,
+    resolvedUsdcAmount: row.resolved_usdc_amount,
+    feeEventId: row.fee_event_id,
+    status: row.status,
+    nextResolutionCheckAt: toIso(row.next_resolution_check_at),
+    lastResolutionCheckedAt: toIso(row.last_resolution_checked_at),
+    resolutionAttempts: row.resolution_attempts,
+    resolutionError: row.resolution_error,
+    filledAt: toIso(row.filled_at),
+    resolvedAt: toIso(row.resolved_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+    order: {
+      id: row.order_id,
+      status: row.order_status,
+      orderHash: row.order_hash,
+      walletAddress: row.order_wallet_address,
+      venueOrderId: row.venue_order_id,
+      tokenId: row.order_token_id,
+      side: row.order_side,
+      orderType: row.order_type,
+      price: row.order_price,
+      size: row.order_size,
+      filledSize: row.order_filled_size,
+      averageFillPrice: row.order_average_fill_price,
+      feePolicySnapshot: row.order_fee_policy_snapshot,
+    },
+    feeEvent: row.fee_event_id
+      ? {
+          id: row.fee_event_id,
+          status: row.linked_fee_event_status,
+          feeUsd: row.linked_fee_event_fee_usd,
+          txHash: row.linked_fee_event_tx_hash,
+          createdAt: toIso(row.linked_fee_event_created_at),
+        }
+      : null,
+  };
+}
+
+export async function listAdminFeeLedgerContractReceivables(
   pool: DbQuery,
-  id: string,
+  query: AdminFeeLedgerFilters,
 ) {
+  const filters = buildContractReceivableFilters(query);
+  const { limit, offset } = limitOffset(query);
+  const where = whereSql(filters);
+  const countResult = await pool.query<{ total: string }>(
+    `select count(*)::text as total ${CONTRACT_RECEIVABLE_FROM_SQL} ${where}`,
+    filters.params,
+  );
+  const params = [...filters.params, limit, offset];
+  const rowsResult = await pool.query<ContractReceivableRow>(
+    `
+      ${CONTRACT_RECEIVABLE_SELECT_SQL}
+      ${CONTRACT_RECEIVABLE_FROM_SQL}
+      ${where}
+      order by r.filled_at desc, r.created_at desc, r.id desc
+      limit $${params.length - 1}
+      offset $${params.length}
+    `,
+    params,
+  );
+  return {
+    items: rowsResult.rows.map(mapContractReceivable),
+    total: countToNumber(countResult.rows[0]?.total),
+    limit,
+    offset,
+  };
+}
+
+export async function getAdminFeeLedgerAccrual(pool: DbQuery, id: string) {
   const result = await listAdminFeeLedgerAccruals(pool, { id, limit: 1 });
   return result.items[0] ?? null;
 }
@@ -1103,6 +1465,17 @@ export async function getAdminFeeLedgerClaim(pool: DbQuery, id: string) {
   return result.items[0] ?? null;
 }
 
+export async function getAdminFeeLedgerContractReceivable(
+  pool: DbQuery,
+  id: string,
+) {
+  const result = await listAdminFeeLedgerContractReceivables(pool, {
+    id,
+    limit: 1,
+  });
+  return result.items[0] ?? null;
+}
+
 export async function getAdminFeeLedgerSummary(
   pool: DbQuery,
   query: AdminFeeLedgerFilters,
@@ -1111,18 +1484,20 @@ export async function getAdminFeeLedgerSummary(
   const eventFilters = buildEventFilters(query);
   const claimFilters = buildClaimFilters(query);
   const backfillFilters = buildBackfillFilters(query);
+  const contractReceivableFilters = buildContractReceivableFilters(query);
 
-  const [accruals, events, claims, backfills] = await Promise.all([
-    pool.query<{
-      venue: string;
-      fee_program: string;
-      status: string;
-      chain_id: string | null;
-      linked_state: string;
-      count: string;
-      fee_amount: string;
-    }>(
-      `
+  const [accruals, events, claims, backfills, contractReceivables] =
+    await Promise.all([
+      pool.query<{
+        venue: string;
+        fee_program: string;
+        status: string;
+        chain_id: string | null;
+        linked_state: string;
+        count: string;
+        fee_amount: string;
+      }>(
+        `
         select
           a.venue,
           a.fee_program,
@@ -1136,20 +1511,20 @@ export async function getAdminFeeLedgerSummary(
         group by a.venue, a.fee_program, a.status, a.chain_id, linked_state
         order by a.venue, a.fee_program, a.status, a.chain_id, linked_state
       `,
-      accrualFilters.params,
-    ),
-    pool.query<{
-      venue: string;
-      source_type: string;
-      status: string;
-      chain_id: string | null;
-      reward_kind: string;
-      count: string;
-      fee_usd: string;
-      cashback_earned_usdc: string;
-      referral_earned_usdc: string;
-    }>(
-      `
+        accrualFilters.params,
+      ),
+      pool.query<{
+        venue: string;
+        source_type: string;
+        status: string;
+        chain_id: string | null;
+        reward_kind: string;
+        count: string;
+        fee_usd: string;
+        cashback_earned_usdc: string;
+        referral_earned_usdc: string;
+      }>(
+        `
         select
           fe.venue,
           fe.source_type,
@@ -1170,15 +1545,15 @@ export async function getAdminFeeLedgerSummary(
         group by fe.venue, fe.source_type, fe.status, fe.chain_id, reward_kind
         order by fe.venue, fe.source_type, fe.status, fe.chain_id, reward_kind
       `,
-      eventFilters.params,
-    ),
-    pool.query<{
-      chain_id: string;
-      status: string;
-      count: string;
-      amount_usdc: string;
-    }>(
-      `
+        eventFilters.params,
+      ),
+      pool.query<{
+        chain_id: string;
+        status: string;
+        count: string;
+        amount_usdc: string;
+      }>(
+        `
         select
           c.chain_id,
           c.status,
@@ -1190,16 +1565,16 @@ export async function getAdminFeeLedgerSummary(
         group by c.chain_id, c.status
         order by c.chain_id, c.status
       `,
-      claimFilters.params,
-    ),
-    pool.query<{
-      venue: string;
-      fee_program: string;
-      status: string;
-      count: string;
-      max_last_attempted_at: Date | null;
-    }>(
-      `
+        claimFilters.params,
+      ),
+      pool.query<{
+        venue: string;
+        fee_program: string;
+        status: string;
+        count: string;
+        max_last_attempted_at: Date | null;
+      }>(
+        `
         select
           b.venue,
           b.fee_program,
@@ -1213,9 +1588,38 @@ export async function getAdminFeeLedgerSummary(
         group by b.venue, b.fee_program, b.status
         order by b.venue, b.fee_program, b.status
       `,
-      backfillFilters.params,
-    ),
-  ]);
+        backfillFilters.params,
+      ),
+      pool.query<{
+        venue: string;
+        fee_program: string;
+        status: string;
+        chain_id: string;
+        linked_state: string;
+        resolution_source: string | null;
+        count: string;
+        receivable_token_amount_raw: string;
+        resolved_usdc_amount: string;
+      }>(
+        `
+        select
+          r.venue,
+          r.fee_program,
+          r.status,
+          r.chain_id,
+          case when r.fee_event_id is null then 'unlinked' else 'linked' end as linked_state,
+          r.resolution_source,
+          count(*)::text as count,
+          coalesce(sum(r.receivable_token_amount_raw::numeric), 0)::text as receivable_token_amount_raw,
+          coalesce(sum(r.resolved_usdc_amount), 0)::text as resolved_usdc_amount
+        ${CONTRACT_RECEIVABLE_FROM_SQL}
+        ${whereSql(contractReceivableFilters)}
+        group by r.venue, r.fee_program, r.status, r.chain_id, linked_state, r.resolution_source
+        order by r.venue, r.fee_program, r.status, r.chain_id, linked_state, r.resolution_source
+      `,
+        contractReceivableFilters.params,
+      ),
+    ]);
 
   return {
     accruals: accruals.rows.map((row) => ({
@@ -1250,6 +1654,18 @@ export async function getAdminFeeLedgerSummary(
       status: row.status,
       count: countToNumber(row.count),
       lastAttemptedAt: toIso(row.max_last_attempted_at),
+    })),
+    contractReceivables: contractReceivables.rows.map((row) => ({
+      venue: row.venue,
+      feeProgram: row.fee_program,
+      status: row.status,
+      chainId: row.chain_id,
+      linkedState: row.linked_state,
+      resolutionSource: row.resolution_source,
+      count: countToNumber(row.count),
+      receivableTokenAmountRaw: row.receivable_token_amount_raw,
+      receivableTokenAmount: microRawToDecimal(row.receivable_token_amount_raw),
+      resolvedUsdcAmount: row.resolved_usdc_amount,
     })),
   };
 }

@@ -18,6 +18,12 @@ import {
   type VenueFeeBackfillAttemptInput,
   type VenueFeeAccrualInput,
 } from "./venue-fee-accruals.js";
+import {
+  buildLimitlessContractFeeReceivableInput,
+  reconcileLimitlessContractFeeReceivables,
+  upsertLimitlessContractFeeReceivables,
+  type LimitlessContractFeeReceivableInput,
+} from "./limitless-contract-fee-receivables.js";
 
 const BASE_CHAIN_ID = "8453";
 const LIMITLESS_VENUE = "limitless";
@@ -34,11 +40,16 @@ const LIMITLESS_ORDER_FILLED_EVENT =
   "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)";
 const LIMITLESS_FEE_CHARGED_EVENT =
   "event FeeCharged(address indexed receiver, uint256 tokenId, uint256 amount)";
+const LIMITLESS_FEE_REFUNDED_EVENT =
+  "event FeeRefunded(address token, address to, uint256 id, uint256 amount)";
 const limitlessOrderFilledInterface = new ethers.Interface([
   LIMITLESS_ORDER_FILLED_EVENT,
 ]);
 const limitlessFeeChargedInterface = new ethers.Interface([
   LIMITLESS_FEE_CHARGED_EVENT,
+]);
+const limitlessFeeRefundedInterface = new ethers.Interface([
+  LIMITLESS_FEE_REFUNDED_EVENT,
 ]);
 
 export type LimitlessFeeShareConfig = {
@@ -88,16 +99,15 @@ type LimitlessAccrualRow = {
   order_payload?: unknown | null;
 };
 
-type LimitlessAccrualBuildResult =
-  | { accrual: VenueFeeAccrualInput; attempt: null }
-  | {
-      accrual: null;
-      attempt: {
-        status: VenueFeeBackfillAttemptInput["status"];
-        reason: string;
-        retryable: boolean;
-      };
-    };
+type LimitlessAccrualBuildResult = {
+  accrual: VenueFeeAccrualInput | null;
+  receivable: LimitlessContractFeeReceivableInput | null;
+  attempt: {
+    status: VenueFeeBackfillAttemptInput["status"];
+    reason: string;
+    retryable: boolean;
+  } | null;
+};
 
 type LimitlessLogLike = {
   address: string;
@@ -124,6 +134,15 @@ type ParsedLimitlessFeeChargedLog = {
   logIndex: number;
   receiver: string;
   tokenId: string;
+  amount: bigint;
+};
+
+type ParsedLimitlessFeeRefundedLog = {
+  address: string;
+  logIndex: number;
+  token: string;
+  to: string;
+  id: string;
   amount: bigint;
 };
 
@@ -260,6 +279,23 @@ function extractStoredLimitlessUpstreamPayload(
   return null;
 }
 
+function extractTxHashFromLimitlessStatus(
+  status: LimitlessOrderStatusItem,
+): string | null {
+  const data = extractStatusData(status.payload);
+  const execution = data ? extractExecutionRecord(data) : null;
+  return execution ? normalizeHash(textOrNull(execution.txHash)) : null;
+}
+
+function shouldTryReceiptForStatusResult(
+  result: LimitlessAccrualBuildResult,
+): boolean {
+  return Boolean(
+    result.attempt?.reason.includes("contract-denominated") ||
+    result.attempt?.reason.includes("USD fee total missing"),
+  );
+}
+
 export function buildStoredLimitlessOrderStatusItem(
   order: Pick<
     LimitlessAccrualOrderRow,
@@ -365,6 +401,33 @@ function parseLimitlessFeeChargedLog(
   }
 }
 
+function parseLimitlessFeeRefundedLog(
+  log: LimitlessLogLike,
+  fallbackIndex: number,
+): ParsedLimitlessFeeRefundedLog | null {
+  try {
+    const parsed = limitlessFeeRefundedInterface.parseLog({
+      topics: [...log.topics],
+      data: log.data,
+    });
+    if (!parsed || parsed.name !== "FeeRefunded") return null;
+    const address = normalizeAddress(log.address);
+    const token = normalizeAddress(parsed.args.token);
+    const to = normalizeAddress(parsed.args.to);
+    if (!address || !token || !to) return null;
+    return {
+      address,
+      logIndex: log.index ?? fallbackIndex,
+      token,
+      to,
+      id: (parsed.args.id as bigint).toString(),
+      amount: parsed.args.amount as bigint,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function limitlessSideAssetMatches(
   log: ParsedLimitlessOrderFilledLog,
   side: "BUY" | "SELL" | null,
@@ -422,6 +485,29 @@ function findLimitlessFeeChargedForOrder(
   return candidates[0] ?? null;
 }
 
+function findLimitlessFeeRefundedForFee(
+  feeLog: ParsedLimitlessFeeChargedLog | null,
+  tokenId: string,
+  amount: bigint,
+  refundLogs: ParsedLimitlessFeeRefundedLog[],
+): ParsedLimitlessFeeRefundedLog | null {
+  if (!feeLog) return null;
+  const conditionalTokensAddress = normalizeAddress(
+    env.limitlessConditionalTokensAddress,
+  );
+  const candidates = refundLogs
+    .filter(
+      (log) =>
+        log.address === feeLog.receiver &&
+        log.id === tokenId &&
+        log.amount === amount &&
+        log.logIndex >= feeLog.logIndex &&
+        (!conditionalTokensAddress || log.token === conditionalTokensAddress),
+    )
+    .sort((a, b) => a.logIndex - b.logIndex);
+  return candidates[0] ?? null;
+}
+
 function usdNotionalRawFromLimitlessLog(
   log: ParsedLimitlessOrderFilledLog,
 ): bigint | null {
@@ -454,6 +540,7 @@ function buildLimitlessVenueShareAccrualResult(inputs: {
     status: VenueFeeBackfillAttemptInput["status"] = "skipped",
   ): LimitlessAccrualBuildResult => ({
     accrual: null,
+    receivable: null,
     attempt: {
       status,
       reason,
@@ -543,6 +630,7 @@ function buildLimitlessVenueShareAccrualResult(inputs: {
       venueFeeAmount: microToDecimal(venueFeeRaw),
       filledAt,
     },
+    receivable: null,
     attempt: null,
   };
 }
@@ -566,6 +654,7 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
     status: VenueFeeBackfillAttemptInput["status"] = "skipped",
   ): LimitlessAccrualBuildResult => ({
     accrual: null,
+    receivable: null,
     attempt: {
       status,
       reason,
@@ -618,26 +707,8 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
     .map((log, index) => parseLimitlessFeeChargedLog(log, index))
     .filter((log): log is ParsedLimitlessFeeChargedLog => log != null);
   const feeLog = findLimitlessFeeChargedForOrder(matching, feeLogs);
-  const feeTokenId = feeLog?.tokenId ?? matching.takerAssetId;
-  if (feeTokenId !== ZERO_ASSET_ID) {
-    return terminal(
-      `Limitless fee was contract-denominated onchain (tokenId ${feeTokenId}, amount ${matching.fee.toString()}); not unlockable as USDC`,
-    );
-  }
-
-  const notionalRaw = usdNotionalRawFromLimitlessLog(matching);
-  if (notionalRaw == null || notionalRaw <= 0n) {
-    return retry("Limitless onchain USD notional missing or zero");
-  }
-
-  const feeRaw = floorBps(matching.fee, inputs.config.shareBps);
-  if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
-
-  const filledAt =
-    inputs.order.filled_at ??
-    inputs.order.last_update ??
-    inputs.order.posted_at ??
-    new Date();
+  if (!feeLog) return retry("Limitless onchain fee charged log not found");
+  const feeTokenId = feeLog.tokenId;
   const side =
     inputs.order.side ??
     (matching.makerAssetId === ZERO_ASSET_ID
@@ -646,6 +717,61 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
         ? "SELL"
         : null);
   if (!side) return retry("Limitless onchain order side missing");
+  const feeRaw = floorBps(matching.fee, inputs.config.shareBps);
+  if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
+
+  if (feeTokenId !== ZERO_ASSET_ID) {
+    const refundLogs = inputs.logs
+      .map((log, index) => parseLimitlessFeeRefundedLog(log, index))
+      .filter((log): log is ParsedLimitlessFeeRefundedLog => log != null);
+    const refundLog = findLimitlessFeeRefundedForFee(
+      feeLog,
+      feeTokenId,
+      matching.fee,
+      refundLogs,
+    );
+    const filledAt =
+      inputs.order.filled_at ??
+      inputs.order.last_update ??
+      inputs.order.posted_at ??
+      new Date();
+    return {
+      accrual: null,
+      receivable: buildLimitlessContractFeeReceivableInput({
+        userId: inputs.order.user_id,
+        walletAddress: inputs.order.wallet_address,
+        signerAddress: inputs.order.signer_address,
+        orderId: inputs.order.id,
+        orderHash: inputs.order.order_hash ?? txHash,
+        venueOrderId: inputs.order.venue_order_id,
+        txHash,
+        logIndex: matching.logIndex,
+        feeChargedLogIndex: feeLog.logIndex,
+        feeRefundedLogIndex: refundLog?.logIndex ?? null,
+        feeReceiverAddress: feeLog.receiver,
+        rawTokenId: feeTokenId,
+        side,
+        role: walletAddresses.has(matching.maker) ? "maker" : "taker",
+        feeRateBps: inputs.config.shareBps,
+        grossTokenAmountRaw: matching.fee.toString(),
+        receivableTokenAmountRaw: feeRaw.toString(),
+        filledAt,
+        refunded: Boolean(refundLog),
+      }),
+      attempt: null,
+    };
+  }
+
+  const notionalRaw = usdNotionalRawFromLimitlessLog(matching);
+  if (notionalRaw == null || notionalRaw <= 0n) {
+    return retry("Limitless onchain USD notional missing or zero");
+  }
+
+  const filledAt =
+    inputs.order.filled_at ??
+    inputs.order.last_update ??
+    inputs.order.posted_at ??
+    new Date();
   const venueFillId = `${txHash}:${matching.logIndex}`;
   const venueFeeEffectiveBps = effectiveBpsFromRaw(matching.fee, notionalRaw);
 
@@ -680,6 +806,7 @@ export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
       venueFeeAmount: microToDecimal(matching.fee),
       filledAt,
     },
+    receivable: null,
     attempt: null,
   };
 }
@@ -763,6 +890,7 @@ async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {
     status: VenueFeeBackfillAttemptInput["status"] = "skipped",
   ): LimitlessAccrualBuildResult => ({
     accrual: null,
+    receivable: null,
     attempt: {
       status,
       reason,
@@ -830,6 +958,13 @@ export async function backfillLimitlessVenueShareAccruals(
           )
           and not exists (
             select 1
+            from limitless_contract_fee_receivables r
+            where r.venue = 'limitless'
+              and r.fee_program = 'venue_share'
+              and r.order_id = o.id
+          )
+          and not exists (
+            select 1
             from venue_fee_backfill_attempts b
             where b.venue = 'limitless'
               and b.fee_program = 'venue_share'
@@ -889,9 +1024,34 @@ export async function backfillLimitlessVenueShareAccruals(
   if (!rows.length) return { checked: 0, upserted: 0, skipped: 0 };
 
   const accruals: Array<VenueFeeAccrualInput | null> = [];
+  const receivables: Array<LimitlessContractFeeReceivableInput | null> = [];
   const attempts: VenueFeeBackfillAttemptInput[] = [];
   const rowsNeedingStatus: LimitlessAccrualOrderRow[] = [];
+  let baseProvider: ethers.JsonRpcProvider | null = null;
   let skipped = 0;
+  const buildOnchainResultFromStatusTx = async (
+    row: LimitlessAccrualOrderRow,
+    status: LimitlessOrderStatusItem,
+    shareBps: number,
+  ): Promise<LimitlessAccrualBuildResult | null> => {
+    const txHash = extractTxHashFromLimitlessStatus(status);
+    if (!txHash) return null;
+    baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+      staticNetwork: true,
+    });
+    return buildLimitlessVenueShareAccrualResultFromReceipt({
+      provider: baseProvider,
+      order: {
+        ...row,
+        order_hash: txHash,
+      },
+      config: {
+        ...config,
+        active: true,
+        shareBps,
+      },
+    });
+  };
   for (const row of rows) {
     const shareBps = clampShareBps(row.fee_share_bps);
     if (shareBps <= 0) {
@@ -928,6 +1088,28 @@ export async function backfillLimitlessVenueShareAccruals(
       accruals.push(accrual);
       continue;
     }
+    if (result.receivable) {
+      receivables.push(result.receivable);
+      continue;
+    }
+    if (shouldTryReceiptForStatusResult(result)) {
+      const onchainResult = await buildOnchainResultFromStatusTx(
+        row,
+        storedStatus,
+        shareBps,
+      );
+      if (onchainResult?.accrual) {
+        accruals.push(onchainResult.accrual);
+        continue;
+      }
+      if (onchainResult?.receivable) {
+        receivables.push(onchainResult.receivable);
+        continue;
+      }
+      if (onchainResult?.attempt) {
+        result.attempt = onchainResult.attempt;
+      }
+    }
     if (result.attempt) {
       if (result.attempt.retryable) {
         rowsNeedingStatus.push(row);
@@ -954,7 +1136,6 @@ export async function backfillLimitlessVenueShareAccruals(
       clientOrderId: row.client_order_id,
     })),
   );
-  let baseProvider: ethers.JsonRpcProvider | null = null;
   for (const row of rowsNeedingStatus) {
     const status =
       statuses.get(row.venue_order_id) ??
@@ -979,6 +1160,10 @@ export async function backfillLimitlessVenueShareAccruals(
           });
         if (onchainResult.accrual) {
           accruals.push(onchainResult.accrual);
+          continue;
+        }
+        if (onchainResult.receivable) {
+          receivables.push(onchainResult.receivable);
           continue;
         }
         skipped += 1;
@@ -1020,6 +1205,28 @@ export async function backfillLimitlessVenueShareAccruals(
       },
     });
     const accrual = result.accrual;
+    if (result.receivable) {
+      receivables.push(result.receivable);
+      continue;
+    }
+    if (shouldTryReceiptForStatusResult(result)) {
+      const onchainResult = await buildOnchainResultFromStatusTx(
+        row,
+        status,
+        shareBps,
+      );
+      if (onchainResult?.accrual) {
+        accruals.push(onchainResult.accrual);
+        continue;
+      }
+      if (onchainResult?.receivable) {
+        receivables.push(onchainResult.receivable);
+        continue;
+      }
+      if (onchainResult?.attempt) {
+        result.attempt = onchainResult.attempt;
+      }
+    }
     if (!accrual) skipped += 1;
     if (result.attempt) {
       attempts.push({
@@ -1037,19 +1244,35 @@ export async function backfillLimitlessVenueShareAccruals(
     accruals.push(accrual);
   }
   const upsert = await upsertVenueFeeAccruals(pool, accruals);
-  if (upsert.upserted > 0) {
+  const receivableUpsert = await upsertLimitlessContractFeeReceivables(
+    pool,
+    receivables,
+  );
+  if (upsert.upserted > 0 || receivableUpsert.upserted > 0) {
     await clearVenueFeeBackfillAttempts(pool, {
       venue: LIMITLESS_VENUE,
       feeProgram: LIMITLESS_FEE_PROGRAM,
-      orderIds: accruals
-        .filter((accrual): accrual is VenueFeeAccrualInput => accrual != null)
-        .map((accrual) => accrual.orderId),
+      orderIds: [
+        ...accruals
+          .filter((accrual): accrual is VenueFeeAccrualInput => accrual != null)
+          .map((accrual) => accrual.orderId),
+        ...receivables
+          .filter(
+            (receivable): receivable is LimitlessContractFeeReceivableInput =>
+              receivable != null,
+          )
+          .map((receivable) => receivable.orderId),
+      ],
     });
   }
   await markVenueFeeBackfillAttempts(pool, attempts, {
     maxRetryAttempts: BACKFILL_MAX_RETRY_ATTEMPTS,
   });
-  return { checked: rows.length, upserted: upsert.upserted, skipped };
+  return {
+    checked: rows.length,
+    upserted: upsert.upserted + receivableUpsert.upserted,
+    skipped,
+  };
 }
 
 export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
@@ -1229,6 +1452,23 @@ export async function verifyLimitlessVenueShareAccruals(
         );
         continue;
       }
+      if (receiptResult.receivable) {
+        failed += 1;
+        await upsertLimitlessContractFeeReceivables(pool, [
+          receiptResult.receivable,
+        ]);
+        await pool.query(
+          `
+            update venue_fee_accruals
+            set status = 'failed',
+                verification_error = 'Limitless fee was contract-denominated onchain; moved to contract-fee receivables',
+                updated_at = now()
+            where id = $1
+          `,
+          [row.id],
+        );
+        continue;
+      }
       if (receiptResult.attempt && !receiptResult.attempt.retryable) {
         failed += 1;
         await pool.query(
@@ -1362,6 +1602,9 @@ export async function reconcileLimitlessVenueShareAccruals(
   backfill: Awaited<ReturnType<typeof backfillLimitlessVenueShareAccruals>>;
   verify: Awaited<ReturnType<typeof verifyLimitlessVenueShareAccruals>>;
   unlock: Awaited<ReturnType<typeof unlockVenueFeeAccruals>>;
+  contractReceivables: Awaited<
+    ReturnType<typeof reconcileLimitlessContractFeeReceivables>
+  >;
 }> {
   return withRewardsChainLocks(pool, [BASE_CHAIN_ID], async () => {
     const backfill = await backfillLimitlessVenueShareAccruals(pool, {
@@ -1379,6 +1622,13 @@ export async function reconcileLimitlessVenueShareAccruals(
       dryRun: options.dryRun,
       assumeRewardsChainLock: true,
     });
-    return { backfill, verify, unlock };
+    const contractReceivables = await reconcileLimitlessContractFeeReceivables(
+      pool,
+      {
+        limit: options.limit,
+        dryRun: options.dryRun,
+      },
+    );
+    return { backfill, verify, unlock, contractReceivables };
   });
 }

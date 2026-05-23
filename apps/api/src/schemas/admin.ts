@@ -222,11 +222,7 @@ export const adminReferralCodeReferralsQuerySchema = z.object({
 });
 
 const adminFeeLedgerSourceTypeSchema = z.enum(["order", "execution"]);
-const adminFeeLedgerRewardKindSchema = z.enum([
-  "any",
-  "cashback",
-  "referral",
-]);
+const adminFeeLedgerRewardKindSchema = z.enum(["any", "cashback", "referral"]);
 
 export const adminFeeLedgerQuerySchema = z.object({
   q: z.string().trim().min(1).max(500).optional(),
@@ -243,6 +239,8 @@ export const adminFeeLedgerQuerySchema = z.object({
   sourceId: z.string().trim().min(1).max(500).optional(),
   sourceType: adminFeeLedgerSourceTypeSchema.optional(),
   feeProgram: z.string().trim().min(1).max(120).optional(),
+  tokenId: z.string().trim().min(1).max(220).optional(),
+  marketId: z.string().trim().min(1).max(220).optional(),
   referralCode: z.string().trim().min(1).max(120).optional(),
   referralCodeId: z.string().uuid().optional(),
   referralPolicyId: z.string().uuid().optional(),

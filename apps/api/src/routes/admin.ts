@@ -117,12 +117,14 @@ import {
 import {
   getAdminFeeLedgerAccrual,
   getAdminFeeLedgerClaim,
+  getAdminFeeLedgerContractReceivable,
   getAdminFeeLedgerEvent,
   getAdminFeeLedgerSummary,
   getReferralCodeLedgerInfo,
   listAdminFeeLedgerAccruals,
   listAdminFeeLedgerBackfillAttempts,
   listAdminFeeLedgerClaims,
+  listAdminFeeLedgerContractReceivables,
   listAdminFeeLedgerEvents,
 } from "../services/admin-fee-ledger.js";
 
@@ -5571,6 +5573,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/fees/ledger/contract-receivables",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerContractReceivables(
+        pool,
+        request.query,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
     "/admin/fees/ledger/accruals/:id",
     {
       preHandler: createAdminMiddleware({
@@ -5623,6 +5650,29 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (!item) {
         reply.code(404);
         return reply.send({ error: "Reward claim not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/contract-receivables/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerContractReceivable(
+        pool,
+        request.params.id,
+      );
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Contract fee receivable not found" });
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -5942,13 +5992,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const limit = request.query.limit ?? 50;
       const offset = request.query.offset ?? 0;
       const result = await listAdminReferralCodes(pool, {
-          q: request.query.q,
-          policyType: request.query.policyType ?? null,
-          active: request.query.active ?? null,
-          usageLimit: request.query.usageLimit ?? null,
-          limit,
-          offset,
-        });
+        q: request.query.q,
+        policyType: request.query.policyType ?? null,
+        active: request.query.active ?? null,
+        usageLimit: request.query.usageLimit ?? null,
+        limit,
+        offset,
+      });
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
