@@ -426,6 +426,12 @@ export class PolymarketClient {
     });
   }
 
+  async getClobMarketInfo(conditionId: string): Promise<unknown> {
+    return this.rateLimiter.queueRequest(`/clob-markets:${conditionId}`, {
+      endpoint: `/clob-markets/${conditionId}`,
+    });
+  }
+
   /**
    * Get order books for multiple tokens
    * Rate limit: 80 requests/10s

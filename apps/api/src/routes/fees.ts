@@ -94,6 +94,8 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
         builderCode: polymarketSnapshot?.builderCode ?? null,
         builderTakerFeeBps: polymarketSnapshot?.builderTakerFeeBps ?? null,
         builderMakerFeeBps: polymarketSnapshot?.builderMakerFeeBps ?? null,
+        builderRateSource: polymarketSnapshot?.builderRateSource ?? null,
+        builderEnabled: polymarketSnapshot?.builderEnabled ?? null,
         venueFeeShareBps: limitlessConfig?.shareBps ?? null,
         collectorAddress:
           collectionMode === "fee_auth"

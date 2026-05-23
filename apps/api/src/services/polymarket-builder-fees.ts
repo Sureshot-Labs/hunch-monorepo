@@ -20,17 +20,26 @@ const MAX_MAKER_BUILDER_FEE_BPS = 50;
 const DECIMAL_SCALE = 1_000_000_000_000n;
 const DECIMAL_SCALE_DIGITS = 12;
 const USDC_SCALE = 1_000_000n;
+const BUILDER_RATE_CACHE_TTL_MS = 60_000;
+const BUILDER_RATE_FETCH_TIMEOUT_MS = 2_500;
 const ORDER_FILLED_EVENT =
   "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint8 side, uint256 tokenId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee, bytes32 builder, bytes32 metadata)";
 const orderFilledInterface = new ethers.Interface([ORDER_FILLED_EVENT]);
 
 export type PolymarketFeeCollectionMode = "none" | "fee_auth" | "builder";
+export type PolymarketBuilderRateSource =
+  | "polymarket"
+  | "fallback"
+  | "disabled"
+  | "none";
 
 export type PolymarketBuilderFeeConfig = {
   active: boolean;
   builderCode: string;
   takerFeeBps: number;
   makerFeeBps: number;
+  rateSource?: PolymarketBuilderRateSource;
+  builderEnabled?: boolean;
 };
 
 export type PolymarketFeePolicySnapshot = {
@@ -39,6 +48,8 @@ export type PolymarketFeePolicySnapshot = {
   builderCode: string;
   builderTakerFeeBps: number;
   builderMakerFeeBps: number;
+  builderRateSource: PolymarketBuilderRateSource;
+  builderEnabled: boolean;
   legacyFeeBps: number;
   feePolicyId: string | null;
   capturedAt: string;
@@ -116,9 +127,13 @@ function multiplyDecimalToMicroFloor(
   return (leftScaled * rightScaled * USDC_SCALE) / (DECIMAL_SCALE * DECIMAL_SCALE);
 }
 
-function ceilBps(rawMicro: bigint, bps: number): bigint {
+export function calculatePolymarketBuilderFeeRaw(
+  rawMicro: bigint,
+  bps: number,
+): bigint {
   if (rawMicro <= 0n || bps <= 0) return 0n;
-  return (rawMicro * BigInt(bps) + 9_999n) / 10_000n;
+  const raw = (rawMicro * BigInt(Math.trunc(bps))) / 10_000n;
+  return raw - (raw % 10n);
 }
 
 function microToDecimal(rawMicro: bigint): string {
@@ -145,6 +160,8 @@ function buildPolymarketBuilderFeeConfig(inputs: {
     builderCode: active ? builderCode : ZERO_BYTES32,
     takerFeeBps: active ? takerFeeBps : 0,
     makerFeeBps: active ? makerFeeBps : 0,
+    rateSource: active ? "fallback" : "none",
+    builderEnabled: active,
   };
 }
 
@@ -159,12 +176,127 @@ function resolveBuilderCodeWithEnvFallback(
 function buildPolymarketBuilderFeeConfigFromSnapshot(
   snapshot: PolymarketFeePolicySnapshot | null,
 ): PolymarketBuilderFeeConfig | null {
-  if (!snapshot || snapshot.collectionMode !== "builder") return null;
-  return buildPolymarketBuilderFeeConfig({
-    builderCode: snapshot.builderCode,
-    takerFeeBps: snapshot.builderTakerFeeBps,
-    makerFeeBps: snapshot.builderMakerFeeBps,
+  if (!snapshot) return null;
+  if (snapshot.collectionMode !== "builder") {
+    return {
+      active: false,
+      builderCode: ZERO_BYTES32,
+      takerFeeBps: 0,
+      makerFeeBps: 0,
+      rateSource: snapshot.builderRateSource,
+      builderEnabled: snapshot.builderEnabled,
+    };
+  }
+  return {
+    active: true,
+    builderCode: normalizeBytes32(snapshot.builderCode),
+    takerFeeBps: clampBps(
+      snapshot.builderTakerFeeBps,
+      MAX_TAKER_BUILDER_FEE_BPS,
+    ),
+    makerFeeBps: clampBps(
+      snapshot.builderMakerFeeBps,
+      MAX_MAKER_BUILDER_FEE_BPS,
+    ),
+    rateSource: snapshot.builderRateSource,
+    builderEnabled: snapshot.builderEnabled,
+  };
+}
+
+type CachedBuilderRates = {
+  expiresAt: number;
+  result:
+    | {
+        kind: "ok";
+        makerFeeBps: number;
+        takerFeeBps: number;
+      }
+    | { kind: "disabled" }
+    | { kind: "error"; error: string };
+};
+
+const builderRateCache = new Map<string, CachedBuilderRates>();
+
+function normalizeBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim();
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchLivePolymarketBuilderRates(
+  builderCode: string,
+): Promise<CachedBuilderRates["result"]> {
+  const normalizedBuilderCode = normalizeBytes32(builderCode);
+  if (normalizedBuilderCode === ZERO_BYTES32) {
+    return { kind: "disabled" };
+  }
+
+  const now = Date.now();
+  const cached = builderRateCache.get(normalizedBuilderCode);
+  if (cached && cached.expiresAt > now) return cached.result;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    BUILDER_RATE_FETCH_TIMEOUT_MS,
+  );
+
+  let result: CachedBuilderRates["result"];
+  try {
+    const res = await fetch(
+      `${normalizeBaseUrl(env.polymarketClobBase)}/fees/builder-fees/${normalizedBuilderCode}`,
+      {
+        headers: {
+          accept: "application/json",
+          "user-agent": "Hunch-API/1.0",
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) {
+      result = { kind: "error", error: `HTTP ${res.status}` };
+    } else {
+      const json = (await res.json()) as unknown;
+      if (!isRecord(json)) {
+        result = { kind: "error", error: "invalid response" };
+      } else if (json.enabled === false) {
+        result = { kind: "disabled" };
+      } else {
+        const maker = readFiniteNumber(json.builder_maker_fee_rate_bps);
+        const taker = readFiniteNumber(json.builder_taker_fee_rate_bps);
+        if (maker == null || taker == null) {
+          result = { kind: "error", error: "missing builder fee rates" };
+        } else {
+          result = {
+            kind: "ok",
+            makerFeeBps: clampBps(maker, MAX_MAKER_BUILDER_FEE_BPS),
+            takerFeeBps: clampBps(taker, MAX_TAKER_BUILDER_FEE_BPS),
+          };
+        }
+      }
+    }
+  } catch (error) {
+    result = {
+      kind: "error",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  builderRateCache.set(normalizedBuilderCode, {
+    expiresAt: now + BUILDER_RATE_CACHE_TTL_MS,
+    result,
   });
+  return result;
+}
+
+export function clearPolymarketBuilderRateCacheForTests(): void {
+  builderRateCache.clear();
 }
 
 export function getPolymarketBuilderFeeConfig(): PolymarketBuilderFeeConfig {
@@ -178,8 +310,24 @@ export function getPolymarketBuilderFeeConfig(): PolymarketBuilderFeeConfig {
 export async function resolvePolymarketBuilderFeeConfig(
   pool: Pool,
 ): Promise<PolymarketBuilderFeeConfig> {
+  const snapshot = await resolvePolymarketFeePolicySnapshot(pool);
+  return (
+    buildPolymarketBuilderFeeConfigFromSnapshot(snapshot) ??
+    buildPolymarketBuilderFeeConfig({
+      builderCode: null,
+      takerFeeBps: 0,
+      makerFeeBps: 0,
+    })
+  );
+}
+
+async function resolveLocalPolymarketBuilderFeeConfig(pool: Pool): Promise<{
+  config: PolymarketBuilderFeeConfig;
+  feePolicyId: string | null;
+  legacyFeeBps: number;
+}> {
   const policy = await fetchActiveFeePolicy(pool, "polymarket");
-  return buildPolymarketBuilderFeeConfig({
+  const config = buildPolymarketBuilderFeeConfig({
     builderCode: resolveBuilderCodeWithEnvFallback(
       policy?.polymarket_builder_code,
     ),
@@ -190,6 +338,11 @@ export async function resolvePolymarketBuilderFeeConfig(
       policy?.polymarket_builder_maker_fee_bps ??
       env.polymarketBuilderMakerFeeBps,
   });
+  return {
+    config,
+    feePolicyId: policy?.id ?? null,
+    legacyFeeBps: clampBps(policy?.fee_bps ?? env.feeBpsPolymarket, 10_000),
+  };
 }
 
 export function getPolymarketFeeCollectionMode(): PolymarketFeeCollectionMode {
@@ -207,22 +360,51 @@ export async function resolvePolymarketFeeCollectionMode(
 export async function resolvePolymarketFeePolicySnapshot(
   pool: Pool,
 ): Promise<PolymarketFeePolicySnapshot> {
-  const policy = await fetchActiveFeePolicy(pool, "polymarket");
-  const builderConfig = buildPolymarketBuilderFeeConfig({
-    builderCode: resolveBuilderCodeWithEnvFallback(
-      policy?.polymarket_builder_code,
-    ),
-    takerFeeBps:
-      policy?.polymarket_builder_taker_fee_bps ??
-      env.polymarketBuilderTakerFeeBps,
-    makerFeeBps:
-      policy?.polymarket_builder_maker_fee_bps ??
-      env.polymarketBuilderMakerFeeBps,
-  });
-  const legacyFeeBps = clampBps(
-    policy?.fee_bps ?? env.feeBpsPolymarket,
-    10_000,
-  );
+  const { config: localBuilderConfig, feePolicyId, legacyFeeBps } =
+    await resolveLocalPolymarketBuilderFeeConfig(pool);
+  let builderConfig: PolymarketBuilderFeeConfig = localBuilderConfig;
+  if (localBuilderConfig.active) {
+    const live = await fetchLivePolymarketBuilderRates(
+      localBuilderConfig.builderCode,
+    );
+    if (live.kind === "ok") {
+      builderConfig = {
+        active: true,
+        builderCode: localBuilderConfig.builderCode,
+        makerFeeBps: live.makerFeeBps,
+        takerFeeBps: live.takerFeeBps,
+        rateSource: "polymarket",
+        builderEnabled: true,
+      };
+    } else if (live.kind === "disabled") {
+      builderConfig = {
+        active: false,
+        builderCode: ZERO_BYTES32,
+        makerFeeBps: 0,
+        takerFeeBps: 0,
+        rateSource: "disabled",
+        builderEnabled: false,
+      };
+    } else if (
+      localBuilderConfig.makerFeeBps <= 0 &&
+      localBuilderConfig.takerFeeBps <= 0
+    ) {
+      builderConfig = {
+        active: false,
+        builderCode: ZERO_BYTES32,
+        makerFeeBps: 0,
+        takerFeeBps: 0,
+        rateSource: "fallback",
+        builderEnabled: false,
+      };
+    } else {
+      builderConfig = {
+        ...localBuilderConfig,
+        rateSource: "fallback",
+        builderEnabled: true,
+      };
+    }
+  }
   const collectionMode: PolymarketFeeCollectionMode = builderConfig.active
     ? "builder"
     : "none";
@@ -233,8 +415,10 @@ export async function resolvePolymarketFeePolicySnapshot(
     builderCode: builderConfig.builderCode,
     builderTakerFeeBps: builderConfig.takerFeeBps,
     builderMakerFeeBps: builderConfig.makerFeeBps,
+    builderRateSource: builderConfig.rateSource ?? "none",
+    builderEnabled: builderConfig.builderEnabled === true,
     legacyFeeBps,
-    feePolicyId: policy?.id ?? null,
+    feePolicyId,
     capturedAt: new Date().toISOString(),
   };
 }
@@ -266,6 +450,19 @@ export function normalizePolymarketFeePolicySnapshot(
       Number(value.builderMakerFeeBps ?? 0),
       MAX_MAKER_BUILDER_FEE_BPS,
     ),
+    builderRateSource:
+      value.builderRateSource === "polymarket" ||
+      value.builderRateSource === "fallback" ||
+      value.builderRateSource === "disabled" ||
+      value.builderRateSource === "none"
+        ? value.builderRateSource
+        : collectionMode === "builder"
+          ? "fallback"
+          : "none",
+    builderEnabled:
+      typeof value.builderEnabled === "boolean"
+        ? value.builderEnabled
+        : collectionMode === "builder",
     legacyFeeBps: clampBps(Number(value.legacyFeeBps ?? 0), 10_000),
     feePolicyId: typeof value.feePolicyId === "string" ? value.feePolicyId : null,
     capturedAt:
@@ -330,7 +527,7 @@ export function buildPolymarketBuilderFeeAccrual(
   if (feeRateBps <= 0) return null;
 
   const notionalRaw = multiplyDecimalToMicroFloor(input.size, input.price);
-  const feeRaw = ceilBps(notionalRaw, feeRateBps);
+  const feeRaw = calculatePolymarketBuilderFeeRaw(notionalRaw, feeRateBps);
   const orderHash = normalizeHash(input.orderHash);
   if (notionalRaw <= 0n || feeRaw <= 0n || !orderHash) return null;
 
@@ -397,6 +594,7 @@ function parseOrderFilledLog(log: ethers.Log): null | {
   side: "BUY" | "SELL" | null;
   makerAmountFilled: bigint;
   takerAmountFilled: bigint;
+  fee: bigint;
   logIndex: number;
 } {
   try {
@@ -410,6 +608,7 @@ function parseOrderFilledLog(log: ethers.Log): null | {
       side: sideRaw === 0 ? "BUY" : sideRaw === 1 ? "SELL" : null,
       makerAmountFilled: parsed.args.makerAmountFilled as bigint,
       takerAmountFilled: parsed.args.takerAmountFilled as bigint,
+      fee: parsed.args.fee as bigint,
       logIndex: log.index,
     };
   } catch {
@@ -518,7 +717,14 @@ export async function verifyPolymarketBuilderFeeAccruals(
       }
 
       const notionalRaw = verifiedPolymarketNotionalRaw(row.side, matching);
-      const feeRaw = ceilBps(notionalRaw, Number(row.fee_rate_bps));
+      const calculatedFeeRaw = calculatePolymarketBuilderFeeRaw(
+        notionalRaw,
+        Number(row.fee_rate_bps),
+      );
+      const feeRaw =
+        matching.fee > 0n && matching.fee < calculatedFeeRaw
+          ? matching.fee
+          : calculatedFeeRaw;
       if (notionalRaw <= 0n || feeRaw <= 0n) {
         failed += 1;
         await pool.query(

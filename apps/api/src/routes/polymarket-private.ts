@@ -89,6 +89,7 @@ import {
   polymarketL2Request,
 } from "../services/polymarket-clob-l2.js";
 import {
+  calculatePolymarketBuilderFeeRaw,
   resolvePolymarketFeePolicySnapshot,
   validatePolymarketOrderBuilderCodeForConfig,
 } from "../services/polymarket-builder-fees.js";
@@ -109,6 +110,58 @@ const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_SELL_BALANCE_CHANGED_CODE = "POLYMARKET_SELL_BALANCE_CHANGED";
 const POLYMARKET_CREDENTIALS_INVALID_CODE =
   "polymarket_credentials_invalid";
+
+function feeBaseRawForSide(
+  side: "BUY" | "SELL",
+  makerAmountRaw: bigint,
+  takerAmountRaw: bigint,
+): bigint {
+  return side === "BUY" ? makerAmountRaw : takerAmountRaw;
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function calculatePolymarketPlatformFeeRaw(inputs: {
+  sizeRaw: bigint;
+  price: number;
+  feeRate: number;
+  feeExponent: number;
+}): bigint {
+  const { sizeRaw, price, feeRate, feeExponent } = inputs;
+  if (
+    sizeRaw <= 0n ||
+    !Number.isFinite(price) ||
+    price <= 0 ||
+    price >= 1 ||
+    !Number.isFinite(feeRate) ||
+    feeRate <= 0 ||
+    !Number.isFinite(feeExponent) ||
+    feeExponent < 0
+  ) {
+    return 0n;
+  }
+  const size = Number(sizeRaw) / 1_000_000;
+  const term = Math.pow(price * (1 - price), feeExponent);
+  const feeMicro = Math.ceil(size * feeRate * term * 1_000_000);
+  return Number.isFinite(feeMicro) && feeMicro > 0
+    ? BigInt(feeMicro)
+    : 0n;
+}
+
+async function fetchPolymarketPlatformFeeCurve(
+  conditionId: string | null | undefined,
+): Promise<{ rate: number; exponent: number } | null> {
+  if (!conditionId) return null;
+  const payload = await polymarketClient.getClobMarketInfo(conditionId);
+  if (!isRecord(payload) || !isRecord(payload.fd)) return null;
+  const rate = readFiniteNumber(payload.fd.r);
+  const exponent = readFiniteNumber(payload.fd.e);
+  if (rate == null || exponent == null) return null;
+  return { rate, exponent };
+}
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -279,6 +332,11 @@ async function reconcilePolymarketTerminalOrder(inputs: {
 }
 
 const USDC_SCALE = 1_000_000n;
+
+function ceilDivRaw(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= 0n) return 0n;
+  return (numerator + denominator - 1n) / denominator;
+}
 
 function normalizeAddress(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
@@ -1783,6 +1841,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         builderCollectionMode: feePolicySnapshot.collectionMode,
         builderTakerFeeBps: feePolicySnapshot.builderTakerFeeBps,
         builderMakerFeeBps: feePolicySnapshot.builderMakerFeeBps,
+        builderRateSource: feePolicySnapshot.builderRateSource,
+        builderEnabled: feePolicySnapshot.builderEnabled,
       });
     },
   );
@@ -2082,10 +2142,12 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const [orderbookPayload, marketInfo] = await Promise.all([
-          polymarketClient.getOrderBook(tokenId),
-          fetchPolymarketMarketInfo(pool, { tokenId }),
-        ]);
+        const [orderbookPayload, marketInfo, feePolicySnapshot] =
+          await Promise.all([
+            polymarketClient.getOrderBook(tokenId),
+            fetchPolymarketMarketInfo(pool, { tokenId }),
+            resolvePolymarketFeePolicySnapshot(pool),
+          ]);
 
         const orderbook = extractOrderbookSummary(orderbookPayload);
         if (!orderbook) {
@@ -2109,6 +2171,17 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         if (marketInfo?.accepting_orders === false) {
           reply.code(400);
           return reply.send({ error: "Market is not accepting orders" });
+        }
+        let platformFeeCurve: { rate: number; exponent: number } | null = null;
+        try {
+          platformFeeCurve = await fetchPolymarketPlatformFeeCurve(
+            marketInfo?.condition_id,
+          );
+        } catch (error) {
+          request.log.warn(
+            { error, tokenId, conditionId: marketInfo?.condition_id },
+            "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
+          );
         }
 
         const topPrice = bestPrice ?? NaN;
@@ -2301,6 +2374,71 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           isLimitOrder && minOrderSize != null
             ? sizeMicro < BigInt(Math.ceil(minOrderSize * 1_000_000))
             : null;
+        const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
+        const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
+        const takerFeeBps =
+          takerFeeRaw != null && takerFeeRaw !== ""
+            ? Math.max(0, Number(takerFeeRaw))
+            : 0;
+        const makerFeeBps =
+          makerFeeRaw != null && makerFeeRaw !== ""
+            ? Math.max(0, Number(makerFeeRaw))
+            : 0;
+        const platformFeeBps = isLimitOrder ? makerFeeBps : takerFeeBps;
+        const builderFeeBps =
+          feePolicySnapshot.collectionMode === "builder"
+            ? isLimitOrder
+              ? feePolicySnapshot.builderMakerFeeBps
+              : feePolicySnapshot.builderTakerFeeBps
+            : 0;
+        const effectivePlatformFeeCurve =
+          platformFeeCurve ??
+          (platformFeeBps > 0
+            ? { rate: platformFeeBps / 10_000, exponent: 1 }
+            : null);
+        const feeBaseRaw = feeBaseRawForSide(
+          body.side,
+          makerAmountMicro,
+          takerAmountMicro,
+        );
+        let platformFeePrice = price;
+        let platformFeeSizeRaw = sizeMicro;
+        if (
+          body.side === "BUY" &&
+          bestAsk != null &&
+          Number.isFinite(bestAsk) &&
+          bestAsk > 0 &&
+          bestAsk < 1
+        ) {
+          platformFeePrice = Math.min(price, bestAsk);
+          const platformFeePriceMicro = BigInt(
+            Math.round(platformFeePrice * 1_000_000),
+          );
+          if (platformFeePriceMicro > 0n) {
+            platformFeeSizeRaw = ceilDivRaw(
+              makerAmountMicro * USDC_SCALE,
+              platformFeePriceMicro,
+            );
+          }
+        }
+        const platformFeeEstimateRaw = effectivePlatformFeeCurve
+          ? calculatePolymarketPlatformFeeRaw({
+              sizeRaw: platformFeeSizeRaw,
+              price: platformFeePrice,
+              feeRate: effectivePlatformFeeCurve.rate,
+              feeExponent: effectivePlatformFeeCurve.exponent,
+            })
+          : 0n;
+        const builderFeeEstimateRaw = calculatePolymarketBuilderFeeRaw(
+          feeBaseRaw,
+          builderFeeBps,
+        );
+        const totalFeeEstimateRaw =
+          platformFeeEstimateRaw + builderFeeEstimateRaw;
+        const totalRequiredUsdcRaw =
+          body.side === "BUY"
+            ? makerAmountMicro + totalFeeEstimateRaw
+            : null;
 
         const size = Number(sizeMicro) / 1_000_000;
         const amountUsdUsed =
@@ -2333,6 +2471,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           size,
           makerAmount: makerAmountMicro.toString(),
           takerAmount: takerAmountMicro.toString(),
+          platformFeeEstimateRaw: platformFeeEstimateRaw.toString(),
+          builderFeeEstimateRaw: builderFeeEstimateRaw.toString(),
+          totalFeeEstimateRaw: totalFeeEstimateRaw.toString(),
+          totalRequiredUsdcRaw: totalRequiredUsdcRaw?.toString() ?? null,
+          builderRateSource: feePolicySnapshot.builderRateSource,
+          builderEnabled: feePolicySnapshot.builderEnabled,
+          builderTakerFeeBps: feePolicySnapshot.builderTakerFeeBps,
+          builderMakerFeeBps: feePolicySnapshot.builderMakerFeeBps,
           orderPriceMinTickSize: tickSize,
           orderMinSize: minOrderSize,
           violatesMinOrderSize,
