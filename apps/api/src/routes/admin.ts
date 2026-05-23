@@ -77,6 +77,8 @@ import {
 import {
   adminAnalyticsEventsQuerySchema,
   adminAnalyticsRangeQuerySchema,
+  adminFeeLedgerDetailParamsSchema,
+  adminFeeLedgerQuerySchema,
   adminFeePolicySchema,
   adminIntelPolicyBodySchema,
   adminIntelPolicyParamsSchema,
@@ -92,6 +94,7 @@ import {
   adminRewardsPolicySchema,
   adminReferralCodeCampaignCreateSchema,
   adminReferralCodeByCodeParamsSchema,
+  adminReferralCodeFeeEventsQuerySchema,
   adminReferralCodeParamsSchema,
   adminReferralCodeReferralsQuerySchema,
   adminReferralCodesQuerySchema,
@@ -111,6 +114,17 @@ import {
   fetchAnalyticsForwardingTelemetry,
   listCollectedAnalyticsEvents,
 } from "../services/analytics-forwarding.js";
+import {
+  getAdminFeeLedgerAccrual,
+  getAdminFeeLedgerClaim,
+  getAdminFeeLedgerEvent,
+  getAdminFeeLedgerSummary,
+  getReferralCodeLedgerInfo,
+  listAdminFeeLedgerAccruals,
+  listAdminFeeLedgerBackfillAttempts,
+  listAdminFeeLedgerClaims,
+  listAdminFeeLedgerEvents,
+} from "../services/admin-fee-ledger.js";
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
@@ -5449,6 +5463,173 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  z.get(
+    "/admin/fees/ledger/summary",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const summary = await getAdminFeeLedgerSummary(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, summary });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/accruals",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerAccruals(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/events",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerEvents(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/claims",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerClaims(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/backfill-attempts",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerBackfillAttempts(
+        pool,
+        request.query,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/accruals/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerAccrual(pool, request.params.id);
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Fee accrual not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/events/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerEvent(pool, request.params.id);
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Fee event not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/claims/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerClaim(pool, request.params.id);
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Reward claim not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
   z.post(
     "/admin/fees/policy",
     {
@@ -5830,6 +6011,41 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               : "Failed to load referral code referrals",
         });
       }
+    },
+  );
+
+  z.get(
+    "/admin/rewards/referral-codes/by-code/:code/fee-events",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermissions: ["rewards:read", "finance:read"],
+      }),
+      schema: {
+        params: adminReferralCodeByCodeParamsSchema,
+        querystring: adminReferralCodeFeeEventsQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const code = await getReferralCodeLedgerInfo(pool, request.params.code);
+      if (!code) {
+        reply.code(404);
+        return reply.send({ error: "Referral code not found" });
+      }
+
+      const result = await listAdminFeeLedgerEvents(pool, {
+        ...request.query,
+        referralCode: request.params.code,
+      });
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        code,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
     },
   );
 

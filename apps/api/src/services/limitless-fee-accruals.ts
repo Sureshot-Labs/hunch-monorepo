@@ -1,5 +1,7 @@
 import type { Pool } from "@hunch/infra";
+import { ethers } from "ethers";
 import { env } from "../env.js";
+import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
@@ -27,6 +29,17 @@ const FAILED_STATUSES = new Set(["FAILED"]);
 const BACKFILL_RETRY_DELAY_MS = 15 * 60 * 1000;
 const BACKFILL_MAX_RETRY_ATTEMPTS = 8;
 const LIMITLESS_STATUS_BATCH_MAX_ITEMS = 50;
+const ZERO_ASSET_ID = "0";
+const LIMITLESS_ORDER_FILLED_EVENT =
+  "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)";
+const LIMITLESS_FEE_CHARGED_EVENT =
+  "event FeeCharged(address indexed receiver, uint256 tokenId, uint256 amount)";
+const limitlessOrderFilledInterface = new ethers.Interface([
+  LIMITLESS_ORDER_FILLED_EVENT,
+]);
+const limitlessFeeChargedInterface = new ethers.Interface([
+  LIMITLESS_FEE_CHARGED_EVENT,
+]);
 
 export type LimitlessFeeShareConfig = {
   active: boolean;
@@ -59,9 +72,19 @@ export type LimitlessAccrualOrderRow = {
 
 type LimitlessAccrualRow = {
   id: string;
+  user_id: string;
+  wallet_address: string | null;
+  signer_address: string | null;
   order_id: string;
+  order_hash: string;
   venue_order_id: string | null;
+  token_id: string | null;
+  side: "BUY" | "SELL" | null;
   fee_rate_bps: number;
+  filled_at: Date | null;
+  last_update: Date | null;
+  posted_at: Date | null;
+  tx_hash: string | null;
   order_payload?: unknown | null;
 };
 
@@ -75,6 +98,34 @@ type LimitlessAccrualBuildResult =
         retryable: boolean;
       };
     };
+
+type LimitlessLogLike = {
+  address: string;
+  topics: readonly string[];
+  data: string;
+  index?: number;
+};
+
+type ParsedLimitlessOrderFilledLog = {
+  address: string;
+  logIndex: number;
+  orderHash: string;
+  maker: string;
+  taker: string;
+  makerAssetId: string;
+  takerAssetId: string;
+  makerAmountFilled: bigint;
+  takerAmountFilled: bigint;
+  fee: bigint;
+};
+
+type ParsedLimitlessFeeChargedLog = {
+  address: string;
+  logIndex: number;
+  receiver: string;
+  tokenId: string;
+  amount: bigint;
+};
 
 function hasPositiveContractsFee(totals: Record<string, unknown>): boolean {
   const contractsFee = rawDigits(totals.contractsFee);
@@ -112,6 +163,21 @@ function rawDigits(value: unknown): bigint | null {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return null;
   return BigInt(trimmed);
+}
+
+function normalizeHash(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^0x[0-9a-fA-F]{64}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function normalizeAddress(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    return ethers.getAddress(value).toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 function numberOrNull(value: unknown): number | null {
@@ -185,7 +251,10 @@ function extractStoredLimitlessUpstreamPayload(
 ): Record<string, unknown> | null {
   if (!isRecord(payload)) return null;
   if (isRecord(payload._hunchUpstream)) return payload._hunchUpstream;
-  if (isRecord(payload.submitted) && isRecord(payload.submitted._hunchUpstream)) {
+  if (
+    isRecord(payload.submitted) &&
+    isRecord(payload.submitted._hunchUpstream)
+  ) {
     return payload.submitted._hunchUpstream;
   }
   return null;
@@ -226,6 +295,148 @@ function floorBps(rawMicro: bigint, bps: number): bigint {
 
 function microToDecimal(rawMicro: bigint): string {
   return usdcMicroToDecimalString(rawMicro);
+}
+
+function looksLikeEvmTxHash(value: string | null | undefined): boolean {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+function isFilledOrderWithKnownTx(row: LimitlessAccrualOrderRow): boolean {
+  return (
+    looksLikeEvmTxHash(row.order_hash) &&
+    Boolean(row.filled_at ?? row.last_update ?? row.posted_at)
+  );
+}
+
+function parseLimitlessOrderFilledLog(
+  log: LimitlessLogLike,
+  fallbackIndex: number,
+): ParsedLimitlessOrderFilledLog | null {
+  try {
+    const parsed = limitlessOrderFilledInterface.parseLog({
+      topics: [...log.topics],
+      data: log.data,
+    });
+    if (!parsed || parsed.name !== "OrderFilled") return null;
+    const address = normalizeAddress(log.address);
+    const maker = normalizeAddress(parsed.args.maker);
+    const taker = normalizeAddress(parsed.args.taker);
+    const orderHash = normalizeHash(parsed.args.orderHash);
+    if (!address || !maker || !taker || !orderHash) return null;
+    return {
+      address,
+      logIndex: log.index ?? fallbackIndex,
+      orderHash,
+      maker,
+      taker,
+      makerAssetId: (parsed.args.makerAssetId as bigint).toString(),
+      takerAssetId: (parsed.args.takerAssetId as bigint).toString(),
+      makerAmountFilled: parsed.args.makerAmountFilled as bigint,
+      takerAmountFilled: parsed.args.takerAmountFilled as bigint,
+      fee: parsed.args.fee as bigint,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseLimitlessFeeChargedLog(
+  log: LimitlessLogLike,
+  fallbackIndex: number,
+): ParsedLimitlessFeeChargedLog | null {
+  try {
+    const parsed = limitlessFeeChargedInterface.parseLog({
+      topics: [...log.topics],
+      data: log.data,
+    });
+    if (!parsed || parsed.name !== "FeeCharged") return null;
+    const address = normalizeAddress(log.address);
+    const receiver = normalizeAddress(parsed.args.receiver);
+    if (!address || !receiver) return null;
+    return {
+      address,
+      logIndex: log.index ?? fallbackIndex,
+      receiver,
+      tokenId: (parsed.args.tokenId as bigint).toString(),
+      amount: parsed.args.amount as bigint,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function limitlessSideAssetMatches(
+  log: ParsedLimitlessOrderFilledLog,
+  side: "BUY" | "SELL" | null,
+  tokenId: string | null,
+): boolean {
+  const rawTokenId = normalizeLimitlessRawTokenId(tokenId);
+  if (!side) return true;
+  if (side === "BUY") {
+    return (
+      log.makerAssetId === ZERO_ASSET_ID &&
+      (!rawTokenId || log.takerAssetId === rawTokenId)
+    );
+  }
+  return (
+    log.takerAssetId === ZERO_ASSET_ID &&
+    (!rawTokenId || log.makerAssetId === rawTokenId)
+  );
+}
+
+function scoreLimitlessOrderFilledLog(
+  log: ParsedLimitlessOrderFilledLog,
+  inputs: {
+    side: "BUY" | "SELL" | null;
+    tokenId: string | null;
+    walletAddresses: Set<string>;
+  },
+): number {
+  let score = 0;
+  if (inputs.walletAddresses.has(log.maker)) score += 100;
+  if (inputs.walletAddresses.has(log.taker)) score += 30;
+  if (limitlessSideAssetMatches(log, inputs.side, inputs.tokenId)) score += 60;
+  if (
+    normalizeLimitlessRawTokenId(inputs.tokenId) &&
+    (log.makerAssetId === normalizeLimitlessRawTokenId(inputs.tokenId) ||
+      log.takerAssetId === normalizeLimitlessRawTokenId(inputs.tokenId))
+  ) {
+    score += 20;
+  }
+  if (log.fee > 0n) score += 5;
+  return score;
+}
+
+function findLimitlessFeeChargedForOrder(
+  orderLog: ParsedLimitlessOrderFilledLog,
+  feeLogs: ParsedLimitlessFeeChargedLog[],
+): ParsedLimitlessFeeChargedLog | null {
+  const candidates = feeLogs
+    .filter(
+      (log) =>
+        log.address === orderLog.address &&
+        log.amount === orderLog.fee &&
+        log.logIndex <= orderLog.logIndex,
+    )
+    .sort((a, b) => b.logIndex - a.logIndex);
+  return candidates[0] ?? null;
+}
+
+function usdNotionalRawFromLimitlessLog(
+  log: ParsedLimitlessOrderFilledLog,
+): bigint | null {
+  if (log.makerAssetId === ZERO_ASSET_ID) return log.makerAmountFilled;
+  if (log.takerAssetId === ZERO_ASSET_ID) return log.takerAmountFilled;
+  return null;
+}
+
+function effectiveBpsFromRaw(
+  feeRaw: bigint,
+  notionalRaw: bigint,
+): number | null {
+  if (feeRaw <= 0n || notionalRaw <= 0n) return null;
+  const value = (feeRaw * 10_000n) / notionalRaw;
+  return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
 }
 
 function settlementStatus(execution: Record<string, unknown>): string | null {
@@ -344,6 +555,135 @@ export function buildLimitlessVenueShareAccrualFromStatus(inputs: {
   return buildLimitlessVenueShareAccrualResult(inputs).accrual;
 }
 
+export function buildLimitlessVenueShareAccrualFromReceiptLogs(inputs: {
+  order: LimitlessAccrualOrderRow;
+  txHash: string;
+  logs: LimitlessLogLike[];
+  config: LimitlessFeeShareConfig;
+}): LimitlessAccrualBuildResult {
+  const terminal = (
+    reason: string,
+    status: VenueFeeBackfillAttemptInput["status"] = "skipped",
+  ): LimitlessAccrualBuildResult => ({
+    accrual: null,
+    attempt: {
+      status,
+      reason,
+      retryable: status === "retry",
+    },
+  });
+  const retry = (reason: string): LimitlessAccrualBuildResult =>
+    terminal(reason, "retry");
+
+  if (!inputs.config.active) return terminal("Limitless fee share inactive");
+  const txHash = normalizeHash(inputs.txHash);
+  if (!txHash) return retry("Limitless transaction hash invalid");
+
+  const walletAddresses = new Set(
+    [inputs.order.wallet_address, inputs.order.signer_address]
+      .map(normalizeAddress)
+      .filter((value): value is string => value != null),
+  );
+  if (!walletAddresses.size) {
+    return retry("Limitless order wallet missing for onchain fee check");
+  }
+
+  const orderLogs = inputs.logs
+    .map((log, index) => parseLimitlessOrderFilledLog(log, index))
+    .filter((log): log is ParsedLimitlessOrderFilledLog => log != null)
+    .filter(
+      (log) => walletAddresses.has(log.maker) || walletAddresses.has(log.taker),
+    )
+    .sort((a, b) => {
+      const scoreDelta =
+        scoreLimitlessOrderFilledLog(b, {
+          side: inputs.order.side,
+          tokenId: inputs.order.token_id,
+          walletAddresses,
+        }) -
+        scoreLimitlessOrderFilledLog(a, {
+          side: inputs.order.side,
+          tokenId: inputs.order.token_id,
+          walletAddresses,
+        });
+      return scoreDelta || a.logIndex - b.logIndex;
+    });
+  const matching = orderLogs.find((log) =>
+    limitlessSideAssetMatches(log, inputs.order.side, inputs.order.token_id),
+  );
+  if (!matching) return retry("Limitless onchain order fill not found");
+  if (matching.fee <= 0n) return terminal("Limitless onchain fee is zero");
+
+  const feeLogs = inputs.logs
+    .map((log, index) => parseLimitlessFeeChargedLog(log, index))
+    .filter((log): log is ParsedLimitlessFeeChargedLog => log != null);
+  const feeLog = findLimitlessFeeChargedForOrder(matching, feeLogs);
+  const feeTokenId = feeLog?.tokenId ?? matching.takerAssetId;
+  if (feeTokenId !== ZERO_ASSET_ID) {
+    return terminal(
+      `Limitless fee was contract-denominated onchain (tokenId ${feeTokenId}, amount ${matching.fee.toString()}); not unlockable as USDC`,
+    );
+  }
+
+  const notionalRaw = usdNotionalRawFromLimitlessLog(matching);
+  if (notionalRaw == null || notionalRaw <= 0n) {
+    return retry("Limitless onchain USD notional missing or zero");
+  }
+
+  const feeRaw = floorBps(matching.fee, inputs.config.shareBps);
+  if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
+
+  const filledAt =
+    inputs.order.filled_at ??
+    inputs.order.last_update ??
+    inputs.order.posted_at ??
+    new Date();
+  const side =
+    inputs.order.side ??
+    (matching.makerAssetId === ZERO_ASSET_ID
+      ? "BUY"
+      : matching.takerAssetId === ZERO_ASSET_ID
+        ? "SELL"
+        : null);
+  if (!side) return retry("Limitless onchain order side missing");
+  const venueFillId = `${txHash}:${matching.logIndex}`;
+  const venueFeeEffectiveBps = effectiveBpsFromRaw(matching.fee, notionalRaw);
+
+  return {
+    accrual: {
+      userId: inputs.order.user_id,
+      walletAddress: inputs.order.wallet_address,
+      signerAddress: inputs.order.signer_address,
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_FEE_PROGRAM,
+      chainId: BASE_CHAIN_ID,
+      orderId: inputs.order.id,
+      orderHash: inputs.order.order_hash ?? txHash,
+      venueOrderId: inputs.order.venue_order_id,
+      venueFillId,
+      venueTradeId: matching.orderHash,
+      txHash,
+      tokenId: inputs.order.token_id,
+      side,
+      role: walletAddresses.has(matching.maker) ? "maker" : "taker",
+      attributionCode: null,
+      feeRateBps: inputs.config.shareBps,
+      feeBasis: "venue_fee_share",
+      notionalAmountRaw: notionalRaw.toString(),
+      notionalAmount: microToDecimal(notionalRaw),
+      feeAmountRaw: feeRaw.toString(),
+      feeAmount: microToDecimal(feeRaw),
+      feeAsset: "USDC",
+      venueFeeRateBps: venueFeeEffectiveBps,
+      venueEffectiveFeeBps: venueFeeEffectiveBps,
+      venueFeeAmountRaw: matching.fee.toString(),
+      venueFeeAmount: microToDecimal(matching.fee),
+      filledAt,
+    },
+    attempt: null,
+  };
+}
+
 export function getLimitlessFeeShareConfig(): LimitlessFeeShareConfig {
   const shareBps = clampShareBps(env.limitlessFeeShareBps);
   return { active: shareBps > 0, shareBps, effectiveAt: null, source: "env" };
@@ -411,6 +751,50 @@ async function fetchLimitlessOrderStatusBatch(
     }
   }
   return out;
+}
+
+async function buildLimitlessVenueShareAccrualResultFromReceipt(inputs: {
+  provider: ethers.JsonRpcProvider;
+  order: LimitlessAccrualOrderRow;
+  config: LimitlessFeeShareConfig;
+}): Promise<LimitlessAccrualBuildResult> {
+  const terminal = (
+    reason: string,
+    status: VenueFeeBackfillAttemptInput["status"] = "skipped",
+  ): LimitlessAccrualBuildResult => ({
+    accrual: null,
+    attempt: {
+      status,
+      reason,
+      retryable: status === "retry",
+    },
+  });
+  const retry = (reason: string): LimitlessAccrualBuildResult =>
+    terminal(reason, "retry");
+
+  const txHash = normalizeHash(inputs.order.order_hash);
+  if (!txHash) return retry("Limitless transaction hash missing");
+  try {
+    const receipt = await inputs.provider.getTransactionReceipt(txHash);
+    if (!receipt) return retry("Limitless onchain receipt not found");
+    if (receipt.status === 0) {
+      return terminal("Limitless transaction reverted", "failed");
+    }
+    return buildLimitlessVenueShareAccrualFromReceiptLogs({
+      order: inputs.order,
+      txHash,
+      logs: receipt.logs.map((log) => ({
+        address: log.address,
+        topics: log.topics,
+        data: log.data,
+        index: log.index,
+      })),
+      config: inputs.config,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return retry(`Limitless onchain receipt check failed: ${message}`);
+  }
 }
 
 export async function backfillLimitlessVenueShareAccruals(
@@ -570,6 +954,7 @@ export async function backfillLimitlessVenueShareAccruals(
       clientOrderId: row.client_order_id,
     })),
   );
+  let baseProvider: ethers.JsonRpcProvider | null = null;
   for (const row of rowsNeedingStatus) {
     const status =
       statuses.get(row.venue_order_id) ??
@@ -577,6 +962,41 @@ export async function backfillLimitlessVenueShareAccruals(
         ? statuses.get(`client:${row.client_order_id}`)
         : null);
     if (!status) {
+      const shareBps = clampShareBps(row.fee_share_bps);
+      if (isFilledOrderWithKnownTx(row) && shareBps > 0) {
+        baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+          staticNetwork: true,
+        });
+        const onchainResult =
+          await buildLimitlessVenueShareAccrualResultFromReceipt({
+            provider: baseProvider,
+            order: row,
+            config: {
+              ...config,
+              active: true,
+              shareBps,
+            },
+          });
+        if (onchainResult.accrual) {
+          accruals.push(onchainResult.accrual);
+          continue;
+        }
+        skipped += 1;
+        if (onchainResult.attempt) {
+          attempts.push({
+            venue: LIMITLESS_VENUE,
+            feeProgram: LIMITLESS_FEE_PROGRAM,
+            orderId: row.id,
+            venueOrderId: row.venue_order_id,
+            status: onchainResult.attempt.status,
+            reason: onchainResult.attempt.reason,
+            nextAttemptAt: onchainResult.attempt.retryable
+              ? new Date(Date.now() + BACKFILL_RETRY_DELAY_MS)
+              : null,
+          });
+          continue;
+        }
+      }
       skipped += 1;
       attempts.push({
         venue: LIMITLESS_VENUE,
@@ -675,7 +1095,15 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
     },
     config,
   });
-  return upsertVenueFeeAccruals(pool, [accrual]);
+  const result = await upsertVenueFeeAccruals(pool, [accrual]);
+  if (accrual) {
+    await clearVenueFeeBackfillAttempts(pool, {
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_FEE_PROGRAM,
+      orderIds: [accrual.orderId],
+    });
+  }
+  return result;
 }
 
 export async function verifyLimitlessVenueShareAccruals(
@@ -690,8 +1118,10 @@ export async function verifyLimitlessVenueShareAccruals(
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 50));
   const { rows } = await pool.query<LimitlessAccrualRow>(
     `
-      select a.id, a.order_id, a.venue_order_id, a.fee_rate_bps,
-             o.order_payload
+      select a.id, a.user_id, a.wallet_address, o.signer_address,
+             a.order_id, a.order_hash, a.venue_order_id, a.token_id, a.side,
+             a.fee_rate_bps, a.filled_at, o.last_update, o.posted_at,
+             a.tx_hash, o.order_payload
       from venue_fee_accruals a
       left join orders o on o.id = a.order_id
       where a.venue = 'limitless'
@@ -708,6 +1138,11 @@ export async function verifyLimitlessVenueShareAccruals(
 
   const statuses = await fetchLimitlessOrderStatusBatch(
     rows
+      .filter((row) => {
+        const receiptTxHash =
+          normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
+        return !receiptTxHash || !row.side;
+      })
       .filter(
         (row) =>
           !buildStoredLimitlessOrderStatusItem({
@@ -725,8 +1160,92 @@ export async function verifyLimitlessVenueShareAccruals(
   let verified = 0;
   let failed = 0;
   let skipped = 0;
+  let baseProvider: ethers.JsonRpcProvider | null = null;
   for (const row of rows) {
     checked += 1;
+    const receiptTxHash =
+      normalizeHash(row.tx_hash) ?? normalizeHash(row.order_hash);
+    if (receiptTxHash && row.side) {
+      baseProvider ??= new ethers.JsonRpcProvider(env.baseRpcUrl, undefined, {
+        staticNetwork: true,
+      });
+      const receiptResult =
+        await buildLimitlessVenueShareAccrualResultFromReceipt({
+          provider: baseProvider,
+          order: {
+            id: row.order_id,
+            user_id: row.user_id,
+            wallet_address: row.wallet_address,
+            signer_address: row.signer_address,
+            venue_order_id: row.venue_order_id ?? row.order_id,
+            order_hash: receiptTxHash,
+            token_id: row.token_id,
+            side: row.side,
+            filled_at: row.filled_at,
+            last_update: row.last_update,
+            posted_at: row.posted_at,
+          },
+          config: {
+            active: true,
+            shareBps: row.fee_rate_bps,
+            effectiveAt: null,
+            source: "db",
+          },
+        });
+      if (receiptResult.accrual) {
+        verified += 1;
+        await pool.query(
+          `
+            update venue_fee_accruals
+            set status = 'verified',
+                chain_verified_at = now(),
+                verification_error = null,
+                tx_hash = coalesce($2, tx_hash),
+                venue_trade_id = coalesce($3, venue_trade_id),
+                notional_amount_raw = $4,
+                notional_amount = $5,
+                fee_amount_raw = $6,
+                fee_amount = $7,
+                venue_fee_rate_bps = $8,
+                venue_effective_fee_bps = $9,
+                venue_fee_amount_raw = $10,
+                venue_fee_amount = $11,
+                updated_at = now()
+            where id = $1
+          `,
+          [
+            row.id,
+            receiptResult.accrual.txHash,
+            receiptResult.accrual.venueTradeId,
+            receiptResult.accrual.notionalAmountRaw,
+            receiptResult.accrual.notionalAmount,
+            receiptResult.accrual.feeAmountRaw,
+            receiptResult.accrual.feeAmount,
+            receiptResult.accrual.venueFeeRateBps ?? null,
+            receiptResult.accrual.venueEffectiveFeeBps ?? null,
+            receiptResult.accrual.venueFeeAmountRaw ?? null,
+            receiptResult.accrual.venueFeeAmount ?? null,
+          ],
+        );
+        continue;
+      }
+      if (receiptResult.attempt && !receiptResult.attempt.retryable) {
+        failed += 1;
+        await pool.query(
+          `
+            update venue_fee_accruals
+            set status = 'failed',
+                verification_error = $2,
+                updated_at = now()
+            where id = $1
+          `,
+          [row.id, receiptResult.attempt.reason],
+        );
+        continue;
+      }
+      skipped += 1;
+      continue;
+    }
     const orderId = row.venue_order_id;
     const storedStatus = orderId
       ? buildStoredLimitlessOrderStatusItem({

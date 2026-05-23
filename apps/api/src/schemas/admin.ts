@@ -221,6 +221,51 @@ export const adminReferralCodeReferralsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
+const adminFeeLedgerSourceTypeSchema = z.enum(["order", "execution"]);
+const adminFeeLedgerRewardKindSchema = z.enum([
+  "any",
+  "cashback",
+  "referral",
+]);
+
+export const adminFeeLedgerQuerySchema = z.object({
+  q: z.string().trim().min(1).max(500).optional(),
+  venue: feePolicyVenueSchema.optional(),
+  chainId: z.string().trim().min(1).max(80).optional(),
+  status: z.string().trim().min(1).max(80).optional(),
+  userId: z.string().uuid().optional(),
+  wallet: z.string().trim().min(1).max(160).optional(),
+  orderId: z.string().uuid().optional(),
+  orderHash: z.string().trim().min(1).max(200).optional(),
+  venueOrderId: z.string().trim().min(1).max(200).optional(),
+  txHash: z.string().trim().min(1).max(200).optional(),
+  feeEventId: z.string().uuid().optional(),
+  sourceId: z.string().trim().min(1).max(500).optional(),
+  sourceType: adminFeeLedgerSourceTypeSchema.optional(),
+  feeProgram: z.string().trim().min(1).max(120).optional(),
+  referralCode: z.string().trim().min(1).max(120).optional(),
+  referralCodeId: z.string().uuid().optional(),
+  referralPolicyId: z.string().uuid().optional(),
+  referrerUserId: z.string().uuid().optional(),
+  referredUserId: z.string().uuid().optional(),
+  rewardKind: adminFeeLedgerRewardKindSchema.optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminFeeLedgerDetailParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const adminReferralCodeFeeEventsQuerySchema =
+  adminFeeLedgerQuerySchema.omit({
+    referralCode: true,
+    referralCodeId: true,
+    referralPolicyId: true,
+  });
+
 export const adminReferralCodeUpdateSchema = z.object({
   label: z.string().trim().min(1).max(120).nullable().optional(),
   multiplierOverride: z.coerce

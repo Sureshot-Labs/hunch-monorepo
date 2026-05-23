@@ -1,10 +1,12 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { ethers } from "ethers";
 
 import {
   backfillLimitlessVenueShareAccruals,
   buildStoredLimitlessOrderStatusItem,
+  buildLimitlessVenueShareAccrualFromReceiptLogs,
   buildLimitlessVenueShareAccrualFromStatus,
   type LimitlessAccrualOrderRow,
   type LimitlessFeeShareConfig,
@@ -37,6 +39,35 @@ const config: LimitlessFeeShareConfig = {
   effectiveAt: null,
   source: "env",
 };
+const receiptConfig: LimitlessFeeShareConfig = {
+  ...config,
+  shareBps: 5_000,
+};
+const limitlessOrderFilledInterface = new ethers.Interface([
+  "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)",
+]);
+const limitlessFeeChargedInterface = new ethers.Interface([
+  "event FeeCharged(address indexed receiver, uint256 tokenId, uint256 amount)",
+]);
+const limitlessExchange = "0x05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5";
+const feeReceiver = "0xF94ef760884b0605E433853Aed17DA574160226E";
+
+function eventLog(
+  iface: ethers.Interface,
+  eventName: string,
+  args: unknown[],
+  index: number,
+) {
+  const event = iface.getEvent(eventName);
+  assert.ok(event);
+  const encoded = iface.encodeEventLog(event, args);
+  return {
+    address: limitlessExchange,
+    topics: encoded.topics,
+    data: encoded.data,
+    index,
+  };
+}
 
 function baseOrder(): LimitlessAccrualOrderRow {
   return {
@@ -52,6 +83,21 @@ function baseOrder(): LimitlessAccrualOrderRow {
     last_update: null,
     posted_at: null,
     order_payload: null,
+  };
+}
+
+function receiptOrder(
+  side: "BUY" | "SELL",
+  tokenId = "48772550132642880323939814998924888786090838839401112676991758227761295949349",
+): LimitlessAccrualOrderRow {
+  return {
+    ...baseOrder(),
+    wallet_address: "0x17Cac6E4b08C8D95A2890a8DF7Cb0e7d83711387",
+    signer_address: "0x17Cac6E4b08C8D95A2890a8DF7Cb0e7d83711387",
+    order_hash:
+      "0x035c18156176a837f1a728893a3921fe101c7c929cc1d2133ee93ae0326a055d",
+    token_id: tokenId,
+    side,
   };
 }
 
@@ -179,6 +225,99 @@ test("builds Limitless status item from stored upstream payload", () => {
       },
     },
   });
+});
+
+test("builds Limitless accrual from onchain SELL receipt with USDC fee", () => {
+  const orderHash =
+    "0xa1bde9b22096ae5abc1a85b3cdb94377a2c95394e36e65e2fa551751e10d01f2";
+  const tokenId =
+    "48772550132642880323939814998924888786090838839401112676991758227761295949349";
+  const logs = [
+    eventLog(
+      limitlessFeeChargedInterface,
+      "FeeCharged",
+      [feeReceiver, 0n, 8087n],
+      1,
+    ),
+    eventLog(
+      limitlessOrderFilledInterface,
+      "OrderFilled",
+      [
+        orderHash,
+        "0x17Cac6E4b08C8D95A2890a8DF7Cb0e7d83711387",
+        limitlessExchange,
+        BigInt(tokenId),
+        0n,
+        1_010_000n,
+        869_610n,
+        8087n,
+      ],
+      2,
+    ),
+  ];
+
+  const result = buildLimitlessVenueShareAccrualFromReceiptLogs({
+    order: receiptOrder("SELL", `limitless:${tokenId}`),
+    txHash:
+      "0x035c18156176a837f1a728893a3921fe101c7c929cc1d2133ee93ae0326a055d",
+    logs,
+    config: receiptConfig,
+  });
+
+  assert.ok(result.accrual);
+  assert.equal(result.accrual.feeAsset, "USDC");
+  assert.equal(result.accrual.notionalAmountRaw, "869610");
+  assert.equal(result.accrual.venueFeeAmountRaw, "8087");
+  assert.equal(result.accrual.feeAmountRaw, "4043");
+  assert.equal(result.accrual.venueTradeId, orderHash);
+  assert.equal(
+    result.accrual.venueFillId,
+    "0x035c18156176a837f1a728893a3921fe101c7c929cc1d2133ee93ae0326a055d:2",
+  );
+});
+
+test("skips Limitless BUY receipt when onchain fee is contract-denominated", () => {
+  const orderHash =
+    "0x372e13c3766404a4903af7bb9e702b31cbce8b517e36ee3e474d0756745809e1";
+  const tokenId =
+    "56174306495450546446617249361431380553366950211553449089489083225409927452816";
+  const logs = [
+    eventLog(
+      limitlessFeeChargedInterface,
+      "FeeCharged",
+      [feeReceiver, BigInt(tokenId), 10582n],
+      1,
+    ),
+    eventLog(
+      limitlessOrderFilledInterface,
+      "OrderFilled",
+      [
+        orderHash,
+        "0x17Cac6E4b08C8D95A2890a8DF7Cb0e7d83711387",
+        limitlessExchange,
+        0n,
+        BigInt(tokenId),
+        1_000_000n,
+        1_189_056n,
+        10582n,
+      ],
+      2,
+    ),
+  ];
+
+  const result = buildLimitlessVenueShareAccrualFromReceiptLogs({
+    order: receiptOrder("BUY", `limitless:${tokenId}`),
+    txHash:
+      "0x9c80f1398a443f121407c81d956c35ae385616244399fe04bf3d217e76ae255d",
+    logs,
+    config: receiptConfig,
+  });
+
+  assert.equal(result.accrual, null);
+  assert.ok(result.attempt);
+  assert.equal(result.attempt.status, "skipped");
+  assert.match(result.attempt.reason, /contract-denominated onchain/);
+  assert.match(result.attempt.reason, /10582/);
 });
 
 await testAsync(
