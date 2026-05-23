@@ -1,7 +1,6 @@
 import type { PoolClient } from "pg";
 
 import { normalizeOutcomeSideForStorage } from "./wallet-intel-helpers.js";
-import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
 import {
   computeApproxLegPnlUsd,
   NET_SHARES_EPSILON,
@@ -212,6 +211,23 @@ export function replayWalletPositionLedgerRows(
   return state;
 }
 
+function compareWalletPositionLedgerRows(
+  a: WalletPositionLedgerRow,
+  b: WalletPositionLedgerRow,
+): number {
+  const occurredDiff = a.occurredAt.getTime() - b.occurredAt.getTime();
+  if (occurredDiff !== 0) return occurredDiff;
+
+  if (a.createdAt != null || b.createdAt != null) {
+    if (a.createdAt == null) return 1;
+    if (b.createdAt == null) return -1;
+    const createdDiff = a.createdAt.getTime() - b.createdAt.getTime();
+    if (createdDiff !== 0) return createdDiff;
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
 export function computeWalletLedgerApproxMetricTotals(
   inputs: WalletLedgerApproxMetricInput[],
 ): WalletLedgerApproxMetricTotals {
@@ -367,11 +383,26 @@ export async function loadWalletPositionLedgerMap(
           outcome_side text
         )
         where x.outcome_side in ('YES', 'NO')
+      ),
+      market_ids as materialized (
+        select distinct market_id
+        from input_keys
+      ),
+      market_bounds as materialized (
+        select
+          mi.market_id,
+          m.id is not null as has_market,
+          m.close_time,
+          m.expiration_time,
+          e.end_date
+        from market_ids mi
+        left join unified_markets m on m.id = mi.market_id
+        left join unified_events e on e.id = m.event_id
       )
       select
         wa.wallet_id,
         wa.market_id,
-        upper(coalesce(wa.outcome_side, '')) as outcome_side,
+        wa.outcome_side,
         wa.action,
         wa.delta_shares::text as delta_shares,
         wa.size_usd::text as size_usd,
@@ -379,26 +410,51 @@ export async function loadWalletPositionLedgerMap(
         wa.occurred_at,
         wa.created_at,
         wa.id
-      from wallet_activity_events wa
-      left join unified_markets m on m.id = wa.market_id
-      left join unified_events e on e.id = m.event_id
-      join input_keys k
-        on k.wallet_id = wa.wallet_id
-       and k.market_id = wa.market_id
-       and k.outcome_side = upper(coalesce(wa.outcome_side, ''))
-      where wa.activity_type in ('delta', 'trade')
-        and ${buildSnapshotDeltaTrackableActivitySql({
-          activityAlias: "wa",
-          marketAlias: "m",
-          eventAlias: "e",
-        })}
-      order by
-        wa.wallet_id,
-        wa.market_id,
-        upper(coalesce(wa.outcome_side, '')),
-        wa.occurred_at asc,
-        wa.created_at asc nulls last,
-        wa.id asc
+      from input_keys k
+      join market_bounds mb
+        on mb.market_id = k.market_id
+      join lateral (
+        select
+          wa.wallet_id,
+          wa.market_id,
+          wa.outcome_side,
+          wa.action,
+          wa.delta_shares,
+          wa.size_usd,
+          wa.price,
+          wa.occurred_at,
+          wa.created_at,
+          wa.id
+        from wallet_activity_events wa
+        where wa.wallet_id = k.wallet_id
+          and wa.market_id = k.market_id
+          and wa.outcome_side = k.outcome_side
+          and wa.activity_type in ('delta', 'trade')
+          and (
+            wa.source is distinct from 'snapshot_delta'
+            or (
+              mb.has_market
+              and (
+                mb.close_time is null
+                or wa.occurred_at < mb.close_time
+              )
+              and (
+                mb.expiration_time is null
+                or wa.occurred_at < mb.expiration_time
+              )
+              and (
+                mb.close_time is not null
+                or mb.expiration_time is not null
+                or mb.end_date is null
+                or wa.occurred_at < mb.end_date
+              )
+            )
+          )
+        order by
+          wa.occurred_at asc,
+          wa.created_at asc nulls last,
+          wa.id asc
+      ) wa on true
     `,
     [
       JSON.stringify(
@@ -442,6 +498,7 @@ export async function loadWalletPositionLedgerMap(
     );
     const ledgerRows = rowsByKey.get(key);
     if (!ledgerRows || ledgerRows.length === 0) continue;
+    ledgerRows.sort(compareWalletPositionLedgerRows);
     byKey.set(key, replayWalletPositionLedgerRows(ledgerRows));
   }
 

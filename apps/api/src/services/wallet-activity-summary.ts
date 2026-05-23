@@ -1034,14 +1034,14 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
       sum(coalesce(wah.signed_delta_usd, 0)) as net_change_usd,
       sum(
         case
-          when upper(coalesce(wah.outcome_side, '')) = 'YES'
+          when wah.outcome_side = 'YES'
             then coalesce(wah.signed_delta_usd, 0)
           else 0
         end
       ) as net_change_yes_usd,
       sum(
         case
-          when upper(coalesce(wah.outcome_side, '')) = 'NO'
+          when wah.outcome_side = 'NO'
             then coalesce(wah.signed_delta_usd, 0)
           else 0
         end

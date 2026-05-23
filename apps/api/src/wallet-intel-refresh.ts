@@ -2562,7 +2562,7 @@ async function refreshWalletPositionExposure(
           ws.wallet_id,
           ws.market_id,
           case
-            when upper(ws.outcome_side) in ('YES', 'NO') then upper(ws.outcome_side)
+            when ws.outcome_side in ('YES', 'NO') then ws.outcome_side
             else '__OTHER__'
           end as outcome_side,
           greatest(
@@ -2677,7 +2677,7 @@ async function refreshWalletInferredOutcomes(
         select
           wa.wallet_id,
           count(*) filter (
-            where upper(coalesce(wa.outcome_side, '')) = upper(coalesce(m.resolved_outcome::text, ''))
+            where wa.outcome_side = upper(coalesce(m.resolved_outcome::text, ''))
           )::int as wins,
           count(*)::int as total
         from wallet_activity_events wa
@@ -2686,7 +2686,7 @@ async function refreshWalletInferredOutcomes(
         left join unified_events e on e.id = m.event_id
         where wa.activity_type in ('delta', 'trade')
           and upper(coalesce(m.resolved_outcome::text, '')) in ('YES', 'NO')
-          and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
+          and wa.outcome_side in ('YES', 'NO')
           and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
           and ${buildSnapshotDeltaTrackableActivitySql({
             activityAlias: "wa",

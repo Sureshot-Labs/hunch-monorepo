@@ -203,7 +203,7 @@ export async function loadWalletEntryBracketStats(
             else wa.price
           end as price_probability,
           wa.size_usd::double precision as stake_usd,
-          upper(coalesce(wa.outcome_side, '')) as outcome_side,
+          wa.outcome_side,
           upper(coalesce(um.resolved_outcome, '')) as resolved_outcome
         from wallet_activity_events wa
         left join unified_markets um on um.id = wa.market_id

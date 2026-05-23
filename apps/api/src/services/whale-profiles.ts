@@ -2808,7 +2808,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             ws.market_id,
             ws.venue,
             ws.snapshot_at,
-            upper(coalesce(ws.outcome_side, '')) as normalized_outcome_side,
+            ws.outcome_side as normalized_outcome_side,
             ws.shares,
             ws.size_usd,
             ws.price

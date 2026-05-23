@@ -3532,8 +3532,8 @@ async function loadWhaleTopMarkets(
               and ws.venue = recent_markets.venue
           ),
           latest_positions as (
-            select distinct on (upper(coalesce(ws.outcome_side, '')))
-              upper(coalesce(ws.outcome_side, '')) as outcome_side,
+            select distinct on (ws.outcome_side)
+              ws.outcome_side,
               ws.shares,
               ws.size_usd,
               ws.price
@@ -3545,7 +3545,7 @@ async function loadWhaleTopMarkets(
               and ws.market_id = recent_markets.market_id
               and ws.shares > 0
             order by
-              upper(coalesce(ws.outcome_side, '')),
+              ws.outcome_side,
               ws.snapshot_at desc,
               ws.size_usd desc nulls last,
               ws.shares desc
@@ -7862,8 +7862,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.venue,
                 ws.market_id,
                 case
-                  when upper(coalesce(ws.outcome_side::text, '')) in ('YES', 'NO')
-                    then upper(coalesce(ws.outcome_side::text, ''))
+                  when ws.outcome_side in ('YES', 'NO')
+                    then ws.outcome_side
                   else null
                 end as outcome_side,
                 ws.shares,
