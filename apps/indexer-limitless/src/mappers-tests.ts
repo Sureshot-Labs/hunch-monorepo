@@ -160,6 +160,22 @@ test("Limitless active payload parser keeps valid markets and reports malformed 
   );
 });
 
+test("Limitless metadata preserves full-precision Pyth open price fields", () => {
+  const parsed = LimitlessActiveResponse.parse({
+    data: [
+      makeEvent({
+        metadata: {
+          openPrice: "2132.21000000",
+          priceProvider: "pyth",
+        },
+      }),
+    ],
+  });
+
+  assert.equal(parsed.data[0]?.metadata.openPrice, "2132.21000000");
+  assert.equal(parsed.data[0]?.metadata.priceProvider, "pyth");
+});
+
 test("resolveLimitlessCategory prefers structured crypto domain over 15 min", () => {
   const category = resolveLimitlessCategory({
     categories: ["Crypto", "15 min", "Bitcoin"],

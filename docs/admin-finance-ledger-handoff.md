@@ -39,6 +39,7 @@ compact timeline widgets only.
 | Finance ledger detail rows | `/admin/fees/ledger/*/:id` | `finance:read` |
 | Referral-code fee-event drilldown | `/admin/rewards/referral-codes/by-code/:code/fee-events` | `rewards:read` and `finance:read` |
 | Referral-code referred users | `/admin/rewards/referral-codes/by-code/:code/referrals` | `rewards:read` and `users:read` |
+| Per-user finance/rewards summary | `/admin/users/:id/finance-summary` | `users:read`, `finance:read`, and `rewards:read` |
 | User full order inspection | `/admin/users/:id/orders*` | `users:read` |
 | User compact activity timeline | `/admin/users/:id/activity` | `users:read` |
 
@@ -378,6 +379,81 @@ filters by the path referral code. Use it for a referral-code drilldown showing
 which referred users generated cashback/referral rewards.
 
 ## User Orders APIs
+
+### User Finance Summary
+
+`GET /admin/users/:id/finance-summary`
+
+Returns one read-only rollup for a user's rewards, claims, referrals, fee
+events, accruals, Limitless contract receivables, and backfill attempts.
+
+Success:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "user": {
+      "id": "uuid",
+      "email": null,
+      "username": null,
+      "displayName": null,
+      "primaryWalletAddress": "0x...",
+      "inboundReferral": null
+    },
+    "rewards": {
+      "cashback": {},
+      "referralBonus": {},
+      "totals": {
+        "userRewardEarned": { "amountUsdc": "0.000000", "amountUsdcRaw": "0" },
+        "ownCashbackEarned": { "amountUsdc": "0.000000", "amountUsdcRaw": "0" },
+        "referralEarned": { "amountUsdc": "0.000000", "amountUsdcRaw": "0" },
+        "claimable": { "amountUsdc": "0.000000", "amountUsdcRaw": "0" }
+      }
+    },
+    "claims": {
+      "byStatus": {},
+      "byChain": {},
+      "totals": {}
+    },
+    "feeEvents": {
+      "groups": [],
+      "byStatus": {},
+      "totals": {}
+    },
+    "referrals": {
+      "total": 0,
+      "byStatus": {},
+      "qualifiedCount": 0,
+      "bonusBps": 0,
+      "codes": [],
+      "rewardsFromReferredUsers": {}
+    },
+    "ledger": {
+      "accruals": [],
+      "contractReceivables": [],
+      "backfillAttempts": [],
+      "totals": {}
+    }
+  }
+}
+```
+
+Accounting rules:
+
+- `rewards.totals.userRewardEarned` is the user's own cashback plus referral
+  rewards earned from users they referred.
+- `feeEvents.totals.referralGeneratedForReferrer` is not this user's earned
+  reward. It is the referral amount their own fee events generated for their
+  referrer.
+- `claims.totals.nonFailed` is the aggregate amount reserved/subtracted by
+  reward claims. Claims are not allocated to cashback vs referral in this API.
+- `ledger.contractReceivables` are operational receivables. They are not
+  claimable until they become collected fee events.
+- `ledger.backfillAttempts` explain retries/failures and must not be counted
+  as revenue.
+
+Missing users return `404`.
 
 ### List User Orders
 

@@ -49,7 +49,7 @@ const Metadata = z.object({
   isBannered: optionalBool,
   isPolyArbitrage: optionalBool,
   shouldMarketMake: optionalBool,
-});
+}).passthrough();
 
 // Settings schema
 const Settings = z.object({

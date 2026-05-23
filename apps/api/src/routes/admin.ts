@@ -129,6 +129,7 @@ import {
   listAdminFeeLedgerContractReceivables,
   listAdminFeeLedgerEvents,
 } from "../services/admin-fee-ledger.js";
+import { getAdminUserFinanceSummary } from "../services/admin-user-finance-summary.js";
 import {
   fetchUnifiedMarketIdsByEventId,
   fetchUnifiedOrderById,
@@ -3223,6 +3224,31 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           feeUsdCollected: Number(feeRows[0]?.collected_fee_usd ?? 0),
           referralCount: Number(referralRows[0]?.count ?? 0),
         },
+      });
+    },
+  );
+
+  z.get(
+    "/admin/users/:id/finance-summary",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermissions: ["users:read", "finance:read", "rewards:read"],
+      }),
+      schema: { params: adminUserParamsSchema },
+    },
+    async (request, reply) => {
+      const summary = await getAdminUserFinanceSummary(pool, {
+        userId: request.params.id,
+      });
+      if (!summary) {
+        reply.code(404);
+        return reply.send({ error: "User not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        summary,
       });
     },
   );
