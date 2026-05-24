@@ -91,7 +91,7 @@ pnpm -F api run admin:auth -- list
 On prod, run the same script inside the `hunch-api` container after migrations:
 
 ```bash
-/usr/bin/docker exec hunch-api node /app/apps/api/dist/admin-auth-cli.js invite --email admin@example.com
+/usr/bin/docker exec hunch-api node /app/packages/config/dist/run-with-secrets.js /app/apps/api/dist/admin-auth-cli.js invite --email admin@example.com
 ```
 
 `invite` and `rotate-link` print a one-time URL using `ADMIN_APP_BASE_URL`, for
