@@ -1856,6 +1856,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          coldNativeBalance: string | null;
+          coldNativeBalanceRaw: string | null;
+          coldUsdcBalance: string | null;
+          coldUsdcBalanceRaw: string | null;
+          coldUsdceBalance: string | null;
+          coldUsdceBalanceRaw: string | null;
+          coldError: string | null;
           treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
@@ -1872,6 +1879,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          coldNativeBalance: string | null;
+          coldNativeBalanceRaw: string | null;
+          coldUsdcBalance: string | null;
+          coldUsdcBalanceRaw: string | null;
+          coldError: string | null;
           treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
@@ -1888,6 +1900,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: string;
           payoutTokenAddress: string;
           coldAddress: string | null;
+          coldNativeBalance: string | null;
+          coldNativeBalanceRaw: string | null;
+          coldUsdcBalance: string | null;
+          coldUsdcBalanceRaw: string | null;
+          coldError: string | null;
           treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
@@ -1912,6 +1929,13 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             env.rewardsPayoutTokenAddressPolygon?.trim() ||
             env.polymarketPusdAddress,
           coldAddress: env.rewardsTreasuryColdAddressPolygon || null,
+          coldNativeBalance: null,
+          coldNativeBalanceRaw: null,
+          coldUsdcBalance: null,
+          coldUsdcBalanceRaw: null,
+          coldUsdceBalance: null,
+          coldUsdceBalanceRaw: null,
+          coldError: null,
           treasury: { ...emptyTreasurySummary },
           error: null,
         },
@@ -1929,6 +1953,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutTokenAddress:
             env.rewardsUsdcAddressBase || env.limitlessUsdcAddress,
           coldAddress: env.rewardsTreasuryColdAddressBase || null,
+          coldNativeBalance: null,
+          coldNativeBalanceRaw: null,
+          coldUsdcBalance: null,
+          coldUsdcBalanceRaw: null,
+          coldError: null,
           treasury: { ...emptyTreasurySummary },
           error: null,
         },
@@ -1945,6 +1974,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payoutAsset: "USDC",
           payoutTokenAddress: env.solanaUsdcMint,
           coldAddress: env.rewardsTreasuryColdAddressSolana || null,
+          coldNativeBalance: null,
+          coldNativeBalanceRaw: null,
+          coldUsdcBalance: null,
+          coldUsdcBalanceRaw: null,
+          coldError: null,
           treasury: { ...emptyTreasurySummary },
           error: null,
         },
@@ -2236,6 +2270,119 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               : "Rewards Solana wallet fetch failed";
         }
       }
+
+      await Promise.all([
+        (async () => {
+          if (!rewardsHotWallets.polygon.coldAddress) return;
+          try {
+            const provider = new ethers.JsonRpcProvider(env.polygonRpcUrl);
+            const usdcAddress =
+              env.rewardsPayoutTokenAddressPolygon?.trim() ||
+              env.polymarketPusdAddress;
+            const [nativeBalance, usdcBalance, usdceBalance] =
+              await Promise.all([
+                provider.getBalance(rewardsHotWallets.polygon.coldAddress),
+                fetchErc20Balance({
+                  tokenAddress: usdcAddress,
+                  owner: rewardsHotWallets.polygon.coldAddress,
+                  rpcUrl: env.polygonRpcUrl,
+                  multicallAddress: POLYGON_MULTICALL_ADDRESS,
+                }),
+                fetchErc20Balance({
+                  tokenAddress: env.polymarketUsdceAddress,
+                  owner: rewardsHotWallets.polygon.coldAddress,
+                  rpcUrl: env.polygonRpcUrl,
+                  multicallAddress: POLYGON_MULTICALL_ADDRESS,
+                }),
+              ]);
+            rewardsHotWallets.polygon.coldNativeBalance =
+              ethers.formatEther(nativeBalance);
+            rewardsHotWallets.polygon.coldNativeBalanceRaw =
+              nativeBalance.toString();
+            rewardsHotWallets.polygon.coldUsdcBalance = ethers.formatUnits(
+              usdcBalance,
+              6,
+            );
+            rewardsHotWallets.polygon.coldUsdcBalanceRaw =
+              usdcBalance.toString();
+            rewardsHotWallets.polygon.coldUsdceBalance = ethers.formatUnits(
+              usdceBalance,
+              6,
+            );
+            rewardsHotWallets.polygon.coldUsdceBalanceRaw =
+              usdceBalance.toString();
+          } catch (error) {
+            rewardsHotWallets.polygon.coldError =
+              error instanceof Error
+                ? error.message
+                : "Rewards Polygon cold wallet fetch failed";
+          }
+        })(),
+        (async () => {
+          if (!rewardsHotWallets.base.coldAddress) return;
+          try {
+            const provider = new ethers.JsonRpcProvider(env.baseRpcUrl);
+            const usdcAddress =
+              env.rewardsUsdcAddressBase?.trim() || env.limitlessUsdcAddress;
+            const [nativeBalance, usdcBalance] = await Promise.all([
+              provider.getBalance(rewardsHotWallets.base.coldAddress),
+              fetchErc20Balance({
+                tokenAddress: usdcAddress,
+                owner: rewardsHotWallets.base.coldAddress,
+                rpcUrl: env.baseRpcUrl,
+                multicallAddress: env.baseMulticallAddress,
+              }),
+            ]);
+            rewardsHotWallets.base.coldNativeBalance =
+              ethers.formatEther(nativeBalance);
+            rewardsHotWallets.base.coldNativeBalanceRaw =
+              nativeBalance.toString();
+            rewardsHotWallets.base.coldUsdcBalance = ethers.formatUnits(
+              usdcBalance,
+              6,
+            );
+            rewardsHotWallets.base.coldUsdcBalanceRaw = usdcBalance.toString();
+          } catch (error) {
+            rewardsHotWallets.base.coldError =
+              error instanceof Error
+                ? error.message
+                : "Rewards Base cold wallet fetch failed";
+          }
+        })(),
+        (async () => {
+          if (!rewardsHotWallets.solana.coldAddress) return;
+          try {
+            const [nativeBalance, usdcBalance] = await Promise.all([
+              fetchSolanaBalanceLamports({
+                rpcUrls: env.solanaRpcUrls,
+                timeoutMs: env.solanaRpcTimeoutMs,
+                owner: rewardsHotWallets.solana.coldAddress,
+              }),
+              fetchSolanaTokenBalanceByOwnerAndMint({
+                rpcUrls: env.solanaRpcUrls,
+                timeoutMs: env.solanaRpcTimeoutMs,
+                owner: rewardsHotWallets.solana.coldAddress,
+                mint: env.solanaUsdcMint,
+              }),
+            ]);
+            rewardsHotWallets.solana.coldNativeBalance = formatUiAmount(
+              nativeBalance,
+              SOLANA_LAMPORT_DECIMALS,
+            );
+            rewardsHotWallets.solana.coldNativeBalanceRaw =
+              nativeBalance.toString();
+            rewardsHotWallets.solana.coldUsdcBalance =
+              usdcBalance?.uiAmountString ?? "0";
+            rewardsHotWallets.solana.coldUsdcBalanceRaw =
+              usdcBalance?.amount.toString() ?? "0";
+          } catch (error) {
+            rewardsHotWallets.solana.coldError =
+              error instanceof Error
+                ? error.message
+                : "Rewards Solana cold wallet fetch failed";
+          }
+        })(),
+      ]);
 
       const pendingFeeParams: Array<string | number> = [
         MAX_FEE_COLLECT_ATTEMPTS,
