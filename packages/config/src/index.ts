@@ -9,6 +9,7 @@ import { z } from "zod";
  * then load it. Stops at filesystem root.
  */
 function loadRootEnv() {
+  if (process.env.HUNCH_RUNTIME_SECRETS_LOADED === "1") return;
   let dir = process.cwd();
   while (true) {
     const candidate = path.join(dir, ".env");

@@ -6,7 +6,9 @@ const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../.env",
 );
-config({ path: envPath, override: true });
+if (process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
+  config({ path: envPath, override: true });
+}
 
 // nuke pg envs so Pool uses connectionString you provided
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(

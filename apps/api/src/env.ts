@@ -7,7 +7,9 @@ const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../.env",
 );
-config({ path: envPath, override: true });
+if (process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
+  config({ path: envPath, override: true });
+}
 
 function req(name: string) {
   const v = process.env[name];
@@ -671,7 +673,8 @@ function resolvePolymarketPusdAddress(): string {
   const explicitPusd = process.env.POLYMARKET_PUSD_ADDRESS?.trim();
   const legacyCollateralAlias =
     process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim();
-  const resolved = explicitPusd || legacyCollateralAlias || POLYMARKET_PUSD_ADDRESS;
+  const resolved =
+    explicitPusd || legacyCollateralAlias || POLYMARKET_PUSD_ADDRESS;
   if (resolved.toLowerCase() === POLYMARKET_USDCE_ADDRESS.toLowerCase()) {
     const source = explicitPusd
       ? "POLYMARKET_PUSD_ADDRESS"

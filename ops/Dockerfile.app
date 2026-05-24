@@ -29,7 +29,8 @@ COPY apps apps
 COPY packages packages
 COPY ops ops
 
-RUN pnpm --filter api... build \
+RUN pnpm --filter @hunch/config build \
+  && pnpm --filter api... build \
   && pnpm --filter ai-worker... build \
   && pnpm --filter finance-worker... build \
   && pnpm --filter indexer-dflow... build \
