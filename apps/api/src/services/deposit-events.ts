@@ -80,8 +80,29 @@ type NotificationIdRow = {
 };
 
 const HUNCH_SOLANA_CHAIN_ID = "7565164";
+const POLYGON_CHAIN_ID = "137";
+const BASE_CHAIN_ID = "8453";
 const ACROSS_SOLANA_DEPOSIT_SENDER =
   "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC";
+const ACROSS_BASE_WITHDRAW_SENDER =
+  "0xcad97616f91872c02ba3553db315db4015cbe850";
+const ACROSS_BASE_SPOKE_POOL_SENDER =
+  "0xfd03abcadaf3f930fa4e37eb2f6ea3a44a41b7f0";
+const ACROSS_POLYGON_DEPOSIT_SENDER =
+  "0xb5b25e9b8c5c2d4e03ca0a79e42aa226cdec3ff2";
+const ACROSS_POLYGON_ENTRYPOINT_SENDER =
+  "0x0000000071727de22e5e9d8baf0edac6f37da032";
+const KNOWN_ACROSS_DEPOSIT_SENDERS_BY_CHAIN: Record<string, Set<string>> = {
+  [HUNCH_SOLANA_CHAIN_ID]: new Set([ACROSS_SOLANA_DEPOSIT_SENDER]),
+  [BASE_CHAIN_ID]: new Set([
+    ACROSS_BASE_WITHDRAW_SENDER,
+    ACROSS_BASE_SPOKE_POOL_SENDER,
+  ]),
+  [POLYGON_CHAIN_ID]: new Set([
+    ACROSS_POLYGON_DEPOSIT_SENDER,
+    ACROSS_POLYGON_ENTRYPOINT_SENDER,
+  ]),
+};
 
 const privyAssetSchema = zod
   .object({
@@ -115,6 +136,21 @@ const privyFundsDepositedSchema = zod
 export type PrivyFundsDepositedWebhook = zod.infer<
   typeof privyFundsDepositedSchema
 >;
+
+function normalizeKnownAcrossSender(chainId: string, sender: string): string {
+  return chainId === HUNCH_SOLANA_CHAIN_ID ? sender.trim() : sender.toLowerCase();
+}
+
+function isKnownAcrossBridgeDeposit(event: PrivyFundsDepositedWebhook): boolean {
+  const chainId = resolveBridgeChainIdFromCaip2(event.caip2);
+  const sender = event.sender?.trim();
+  if (!chainId || !sender) return false;
+  return (
+    KNOWN_ACROSS_DEPOSIT_SENDERS_BY_CHAIN[chainId]?.has(
+      normalizeKnownAcrossSender(chainId, sender),
+    ) ?? false
+  );
+}
 
 function readWebhookType(payload: unknown): string | null {
   if (
@@ -828,6 +864,7 @@ export async function handlePrivyDepositWebhook(
   }
 
   const event = privyFundsDepositedSchema.parse(normalizedPayload);
+  const knownAcrossBridgeDeposit = isKnownAcrossBridgeDeposit(event);
   const recipient = event.recipient?.trim() || null;
   const walletType = resolveWalletType(event.caip2, recipient);
   const wallet =
@@ -840,13 +877,15 @@ export async function handlePrivyDepositWebhook(
     recipient,
     logger,
   });
-  const execution = bridgeOrder
+  const execution = bridgeOrder || knownAcrossBridgeDeposit
     ? null
     : await findExecutionByTxHash(db, event.transaction_hash);
   const venueCashDeposit =
-    !bridgeOrder && (Boolean(execution) || isVenueCashDeposit(event));
+    !bridgeOrder &&
+    !knownAcrossBridgeDeposit &&
+    (Boolean(execution) || isVenueCashDeposit(event));
   const internalMovement =
-    !bridgeOrder && !venueCashDeposit
+    !bridgeOrder && !knownAcrossBridgeDeposit && !venueCashDeposit
       ? await findInternalDepositMovement(db, {
           event,
           recipientWallet: wallet,
@@ -854,7 +893,7 @@ export async function handlePrivyDepositWebhook(
           recipient,
         })
       : null;
-  const status: DepositEventStatus = bridgeOrder
+  const status: DepositEventStatus = bridgeOrder || knownAcrossBridgeDeposit
     ? "ignored_bridge"
     : venueCashDeposit
       ? "ignored_venue"
@@ -928,6 +967,27 @@ export async function handlePrivyDepositWebhook(
         bridgeOrderId: bridgeOrder?.id ?? null,
       },
       "Privy deposit webhook ignored because it matched a bridge order",
+    );
+    return { ok: true, duplicate, ignored: true, status: "ignored_bridge" };
+  }
+
+  if (knownAcrossBridgeDeposit) {
+    if (row.status !== "ignored_bridge") {
+      await updateDepositEventStatus(db, {
+        eventId: row.id,
+        status: "ignored_bridge",
+        userId: wallet?.user_id ?? row.user_id,
+        walletAddress: wallet?.wallet_address ?? recipient,
+        walletType: wallet?.wallet_type ?? walletType,
+      });
+    }
+    logger?.info?.(
+      {
+        depositEventId: row.id,
+        sender: event.sender ?? null,
+        txHash: event.transaction_hash ?? null,
+      },
+      "Privy deposit webhook ignored because sender is Across bridge",
     );
     return { ok: true, duplicate, ignored: true, status: "ignored_bridge" };
   }

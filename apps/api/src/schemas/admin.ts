@@ -109,7 +109,7 @@ export const adminRewardsMultiplierPolicySchema = z
         }),
       )
       .default([]),
-    notes: z.string().trim().max(2000).optional(),
+    notes: z.string().trim().max(2000).nullable().optional(),
   })
   .superRefine((value, ctx) => {
     const referralThresholds = new Set<number>();

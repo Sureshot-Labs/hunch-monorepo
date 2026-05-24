@@ -637,7 +637,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "ambiguous Across intent candidates create normal deposit notification",
+    name: "ambiguous Across intent candidates from bridge sender are ignored",
     run: async () => {
       await withRedisDisabled(async () => {
         const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
@@ -697,11 +697,65 @@ const tests: TestCase[] = [
         );
 
         assert.equal(result.ok, true);
-        assert.equal(result.notified, true);
-        assert.equal(result.status, "notified");
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
         assert.deepEqual(db.bridgeUpdates, []);
-        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+        assert.deepEqual(db.notificationInserts, []);
         assert.equal(warnings.length, 1);
+      });
+    },
+  },
+  {
+    name: "known Across Base sender records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "eip155:8453",
+          sender: "0xCad97616f91872C02BA3553dB315Db4015cBE850",
+          transaction_hash: "base-across-fill-tx",
+          idempotency_key: "deposit-key-base-across-fill",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "known Across Polygon sender records ignored event without notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "eip155:137",
+          sender: "0xB5b25e9b8C5c2d4E03CA0A79e42AA226cDEC3FF2",
+          transaction_hash: "polygon-across-fill-tx",
+          idempotency_key: "deposit-key-polygon-across-fill",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.notificationInserts, []);
       });
     },
   },
