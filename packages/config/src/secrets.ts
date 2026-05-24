@@ -314,13 +314,14 @@ async function getAwsSecretJson(
   const payload = (await res.json()) as {
     SecretString?: string;
     message?: string;
+    Message?: string;
     __type?: string;
   };
   if (!res.ok) {
+    const errorMessage = payload.message ?? payload.Message ?? res.statusText;
+    const errorType = payload.__type ? `${payload.__type}: ` : "";
     throw new Error(
-      `[secrets] GetSecretValue failed for ${secretId}: ${
-        payload.message ?? res.statusText
-      }`,
+      `[secrets] GetSecretValue failed for ${secretId}: ${errorType}${errorMessage}`,
     );
   }
   if (!payload.SecretString) {

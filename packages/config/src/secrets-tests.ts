@@ -88,6 +88,50 @@ test("optional mode falls back to dotenv if fetch fails", async () => {
   }
 });
 
+test("optional mode reports AWS uppercase Message errors clearly", async () => {
+  const envBefore = snapshotEnv();
+  try {
+    const dir = tempDir();
+    const envPath = path.join(dir, ".env");
+    fs.writeFileSync(
+      envPath,
+      [
+        "HUNCH_SECRETS_MODE=optional",
+        "HUNCH_SECRET_BUNDLES=aws-sm:/missing",
+        "AWS_REGION=eu-north-1",
+        "AWS_ACCESS_KEY_ID=test",
+        "AWS_SECRET_ACCESS_KEY=secret",
+        "JWT_SECRET=local",
+        "",
+      ].join("\n"),
+    );
+    let logged = "";
+    await loadRuntimeSecrets({
+      envPath,
+      logger: {
+        info() {},
+        warn() {},
+        error(message) {
+          logged = String(message);
+        },
+      },
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            __type: "ResourceNotFoundException",
+            Message: "Secrets Manager can't find the specified secret.",
+          }),
+          { status: 400, statusText: "Bad Request" },
+        ),
+      now: new Date("2026-05-24T00:00:00.000Z"),
+    });
+    assert.match(logged, /ResourceNotFoundException/u);
+    assert.match(logged, /can't find the specified secret/u);
+  } finally {
+    restoreEnv(envBefore);
+  }
+});
+
 test("optional mode does not keep partial remote values after a later bundle fails", async () => {
   const envBefore = snapshotEnv();
   try {
