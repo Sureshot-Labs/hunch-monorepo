@@ -17,7 +17,7 @@ Tools:
   admin:points     -> /app/apps/api/dist/admin-points.js
   fees:collect     -> /app/apps/api/dist/collect-fees.js
   rewards:payout   -> /app/apps/api/dist/rewards-payout.js
-  migrate          -> /app/packages/db/dist/migrate.js
+  migrate          -> /app/packages/db/dist/migrate.js via run-with-secrets
   run -- <cmd>     -> run an arbitrary command inside hunch-api
   psql "<sql>"     -> run SQL against hunch-postgres using container env
 
@@ -71,7 +71,7 @@ case "${tool}" in
     cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/rewards-payout.js$(quote_args "$@")"
     ;;
   migrate)
-    cmd="docker exec -i ${SERVICE} node /app/packages/db/dist/migrate.js$(quote_args "$@")"
+    cmd="docker exec -i ${SERVICE} node /app/packages/config/dist/run-with-secrets.js /app/packages/db/dist/migrate.js$(quote_args "$@")"
     ;;
   run)
     if [[ $# -lt 1 ]]; then
