@@ -56,6 +56,13 @@ function optionalNonNegativeNumber(name: string, fallback: number): number {
   return n >= 0 ? n : fallback;
 }
 
+function optionalNonNegativeBigInt(name: string, fallback: bigint): bigint {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) return fallback;
+  return BigInt(raw);
+}
+
 function optionalRatio01(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -1217,6 +1224,27 @@ export const env = {
   polymarketBuilderCode: process.env.POLYMARKET_BUILDER_CODE?.trim() || "",
   polymarketBuilderAddress:
     process.env.POLYMARKET_BUILDER_ADDRESS?.trim() || "",
+  polymarketBuilderOwnerAddress:
+    process.env.POLYMARKET_BUILDER_OWNER_ADDRESS?.trim() || "",
+  polymarketRelayerPrivateKey:
+    process.env.POLYMARKET_RELAYER_PRIVATE_KEY?.trim() || "",
+  polymarketRelayerApiKey: process.env.POLYMARKET_RELAYER_API_KEY?.trim() || "",
+  polymarketRelayerApiKeyAddress:
+    process.env.POLYMARKET_RELAYER_API_KEY_ADDRESS?.trim() || "",
+  polymarketBuilderSweepEnabled:
+    parseOptionalBool(process.env.POLYMARKET_BUILDER_SWEEP_ENABLED) ?? false,
+  polymarketBuilderSweepMinRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_MIN_RAW",
+    0n,
+  ),
+  polymarketBuilderSweepMaxRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_MAX_RAW",
+    0n,
+  ),
+  polymarketBuilderSweepReserveRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_RESERVE_RAW",
+    0n,
+  ),
   polymarketBuilderTakerFeeBps:
     process.env.POLYMARKET_BUILDER_TAKER_FEE_BPS?.trim()
       ? optionalNonNegativeInt("POLYMARKET_BUILDER_TAKER_FEE_BPS", 0)

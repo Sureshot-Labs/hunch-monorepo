@@ -34,6 +34,11 @@ import {
   computeTreasuryChainMath,
   reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
+import {
+  buildDepositWalletBatchTypedData,
+  computePolymarketBuilderSweepAmount,
+  deriveAddressFromPrivateKey,
+} from "./services/polymarket-builder-sweeps.js";
 import { resolveBlockedRewardsMigrations } from "./rewards-migration-preflight.js";
 
 type TestCase = {
@@ -750,6 +755,66 @@ const tests: TestCase[] = [
       assert.equal(reserveTreasurySweepAmountMicro(1_000n, 250n), 750n);
       assert.equal(reserveTreasurySweepAmountMicro(1_000n, 1_250n), 0n);
       assert.equal(reserveTreasurySweepAmountMicro(0n, 250n), 0n);
+    },
+  },
+  {
+    name: "polymarket builder sweep amount respects reserve min and max",
+    run: () => {
+      assert.deepEqual(
+        computePolymarketBuilderSweepAmount({
+          balanceRaw: 1_000_000n,
+          reserveRaw: 100_000n,
+          maxRaw: 250_000n,
+          minRaw: 10_000n,
+        }),
+        { amountRaw: 250_000n, reason: null },
+      );
+      assert.deepEqual(
+        computePolymarketBuilderSweepAmount({
+          balanceRaw: 105_000n,
+          reserveRaw: 100_000n,
+          minRaw: 10_000n,
+        }),
+        { amountRaw: 0n, reason: "below_min_sweep" },
+      );
+      assert.deepEqual(
+        computePolymarketBuilderSweepAmount({
+          balanceRaw: 99_999n,
+          reserveRaw: 100_000n,
+        }),
+        { amountRaw: 0n, reason: "reserved_builder_balance" },
+      );
+    },
+  },
+  {
+    name: "polymarket builder sweep derives owner key and builds wallet typed data",
+    run: () => {
+      const privateKey =
+        "0x0000000000000000000000000000000000000000000000000000000000000001";
+      assert.equal(
+        deriveAddressFromPrivateKey(privateKey),
+        "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+      );
+      const typedData = buildDepositWalletBatchTypedData({
+        depositWalletAddress: "0x82E748661FA3DDD6aE486FcB7ADa88D52AB87AA9",
+        nonce: "42",
+        deadline: "1800000000",
+        calls: [
+          {
+            target: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+            value: "0",
+            data: "0x1234",
+          },
+        ],
+      });
+      assert.equal(typedData.domain.name, "DepositWallet");
+      assert.equal(typedData.domain.version, "1");
+      assert.equal(typedData.domain.chainId, 137);
+      assert.equal(typedData.message.nonce, 42n);
+      assert.equal(
+        typedData.message.calls[0]?.target,
+        "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+      );
     },
   },
   {
