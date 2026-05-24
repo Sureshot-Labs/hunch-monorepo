@@ -17,6 +17,23 @@ type MockWallet = {
   walletType: string;
 };
 
+type MockBridgeOrder = {
+  id: string;
+  userId: string;
+  provider?: string;
+  status?: string;
+  swapType?: string;
+  srcChainId?: string;
+  dstChainId?: string;
+  dstToken?: string;
+  orderId?: string | null;
+  txHashSrc?: string | null;
+  txHashDst?: string | null;
+  expectedOutputAmount?: string | null;
+  matchByTxHash?: boolean;
+  matchByIntent?: boolean;
+};
+
 type MockDbOptions = {
   wallet?: MockWallet | null;
   wallets?: MockWallet[];
@@ -25,10 +42,8 @@ type MockDbOptions = {
     walletAddress: string;
     funderAddress: string;
   } | null;
-  bridgeOrder?: {
-    id: string;
-    userId: string;
-  } | null;
+  bridgeOrder?: MockBridgeOrder | null;
+  bridgeOrders?: MockBridgeOrder[];
   execution?: {
     id: string;
     userId: string;
@@ -50,6 +65,11 @@ type MockDb = DbQuery & {
     dedupeKey: string | null;
   }>;
   depositUpdates: Array<{ status: string; eventId: string }>;
+  bridgeUpdates: Array<{
+    id: string | null;
+    txHashDst: string | null;
+    status: string | null;
+  }>;
 };
 
 const basePayload = {
@@ -72,10 +92,39 @@ function normalizeMockWalletAddress(walletType: string, address: string) {
   return walletType === "solana" ? address : address.toLowerCase();
 }
 
+function normalizeMockTxHash(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
+}
+
+function mockTxHashMatches(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean {
+  if (!left?.trim() || !right?.trim()) return false;
+  return normalizeMockTxHash(left) === normalizeMockTxHash(right);
+}
+
+function mockBridgeRow(bridgeOrder: MockBridgeOrder) {
+  return {
+    id: bridgeOrder.id,
+    user_id: bridgeOrder.userId,
+    provider: bridgeOrder.provider ?? "debridge",
+    status: bridgeOrder.status ?? "fulfilled",
+    swap_type: bridgeOrder.swapType ?? "same_chain",
+    src_chain_id: bridgeOrder.srcChainId ?? "137",
+    dst_chain_id: bridgeOrder.dstChainId ?? "8453",
+    order_id: bridgeOrder.orderId ?? "bridge-order-1",
+    tx_hash_src: bridgeOrder.txHashSrc ?? "0xsource",
+    tx_hash_dst: bridgeOrder.txHashDst ?? null,
+  };
+}
+
 function createMockDb(options: MockDbOptions): MockDb {
   const calls: MockDb["calls"] = [];
   const notificationInserts: MockDb["notificationInserts"] = [];
   const depositUpdates: MockDb["depositUpdates"] = [];
+  const bridgeUpdates: MockDb["bridgeUpdates"] = [];
 
   const query = async <T extends Record<string, unknown>>(
     sql: string,
@@ -138,17 +187,56 @@ function createMockDb(options: MockDbOptions): MockDb {
     }
 
     if (/from bridge_orders/i.test(sql)) {
-      if (!options.bridgeOrder) return { rows: [] };
+      const bridgeOrders = [
+        ...(options.bridgeOrder ? [options.bridgeOrder] : []),
+        ...(options.bridgeOrders ?? []),
+      ];
+      if (bridgeOrders.length === 0) return { rows: [] };
+
+      const isIntentLookup = /created_at > now\(\) - interval '24 hours'/i.test(
+        sql,
+      );
+      if (isIntentLookup) {
+        const userId = typeof params?.[0] === "string" ? params[0] : "";
+        const dstChainId = typeof params?.[1] === "string" ? params[1] : "";
+        const dstToken = typeof params?.[2] === "string" ? params[2] : "";
+        const amount = typeof params?.[3] === "string" ? params[3] : "";
+        return {
+          rows: bridgeOrders
+            .filter((bridgeOrder) => {
+              if (bridgeOrder.matchByIntent === false) return false;
+              if (bridgeOrder.userId !== userId) return false;
+              if ((bridgeOrder.dstChainId ?? "8453") !== dstChainId) {
+                return false;
+              }
+              if (
+                (bridgeOrder.dstToken ?? basePayload.asset.address).toLowerCase() !==
+                dstToken.toLowerCase()
+              ) {
+                return false;
+              }
+              return (
+                (bridgeOrder.expectedOutputAmount ?? basePayload.amount) ===
+                amount
+              );
+            })
+            .slice(0, 2)
+            .map((bridgeOrder) => mockBridgeRow(bridgeOrder) as unknown as T),
+        };
+      }
+
       return {
-        rows: [
-          {
-            id: options.bridgeOrder.id,
-            user_id: options.bridgeOrder.userId,
-            provider: "debridge",
-            status: "fulfilled",
-            swap_type: "same_chain",
-          } as unknown as T,
-        ],
+        rows: bridgeOrders
+          .filter((bridgeOrder) => {
+            if (bridgeOrder.matchByTxHash === false) return false;
+            const txHash = typeof params?.[0] === "string" ? params[0] : "";
+            return (
+              mockTxHashMatches(bridgeOrder.txHashSrc ?? "0xsource", txHash) ||
+              mockTxHashMatches(bridgeOrder.txHashDst, txHash)
+            );
+          })
+          .slice(0, 1)
+          .map((bridgeOrder) => mockBridgeRow(bridgeOrder) as unknown as T),
       };
     }
 
@@ -210,8 +298,8 @@ function createMockDb(options: MockDbOptions): MockDb {
       const body = typeof params?.[3] === "string" ? params[3] : null;
       const data = params?.[5];
       const dedupeKey = typeof params?.[6] === "string" ? params[6] : null;
-      notificationInserts.push({ type, body, data, dedupeKey });
       if (options.existingNotificationId) return { rows: [] };
+      notificationInserts.push({ type, body, data, dedupeKey });
       return {
         rows: [
           {
@@ -248,6 +336,15 @@ function createMockDb(options: MockDbOptions): MockDb {
       return { rows: [] };
     }
 
+    if (/update bridge_orders/i.test(sql)) {
+      bridgeUpdates.push({
+        id: typeof params?.[0] === "string" ? params[0] : null,
+        txHashDst: typeof params?.[1] === "string" ? params[1] : null,
+        status: typeof params?.[2] === "string" ? params[2] : null,
+      });
+      return { rows: [] };
+    }
+
     throw new Error(`Unexpected query in deposit-events test: ${sql}`);
   };
 
@@ -256,6 +353,7 @@ function createMockDb(options: MockDbOptions): MockDb {
     calls,
     notificationInserts,
     depositUpdates,
+    bridgeUpdates,
   };
 }
 
@@ -318,7 +416,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "bridge-matched Privy deposit records ignored event without notification",
+    name: "bridge-matched Privy deposit records bridge completion instead of deposit",
     run: async () => {
       await withRedisDisabled(async () => {
         const db = createMockDb({
@@ -327,13 +425,377 @@ const tests: TestCase[] = [
             walletAddress: basePayload.recipient,
             walletType: "ethereum",
           },
-          bridgeOrder: { id: "bridge-1", userId: "user-1" },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            status: "submitted",
+            txHashDst: basePayload.transaction_hash,
+          },
         });
 
         const result = await handlePrivyDepositWebhook(db, basePayload);
 
         assert.equal(result.ok, true);
         assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.notificationInserts, [
+          {
+            type: "bridge_completed",
+            body: "deBridge Polygon → Base",
+            data: {
+              provider: "debridge",
+              status: "completed",
+              srcChainId: "137",
+              dstChainId: "8453",
+              bridgeOrderId: "bridge-order-1",
+              txHash: "0xsource",
+            },
+            dedupeKey: "bridge:bridge-order-1:completed",
+          },
+        ]);
+      });
+    },
+  },
+  {
+    name: "source-side bridge tx match does not create completed notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            status: "submitted",
+            txHashSrc: basePayload.transaction_hash,
+            txHashDst: null,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "eip155:137",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.bridgeUpdates, [
+          { id: "bridge-1", txHashDst: "0xabc", status: "submitted" },
+        ]);
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "failed bridge destination tx match does not create completed notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: basePayload.recipient,
+            walletType: "ethereum",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            status: "failed",
+            txHashDst: basePayload.transaction_hash,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, basePayload);
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.bridgeUpdates, [
+          { id: "bridge-1", txHashDst: "0xabc", status: "failed" },
+        ]);
+        assert.deepEqual(db.notificationInserts, []);
+      });
+    },
+  },
+  {
+    name: "Across destination deposit before status sync records bridge completion",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const fillTx =
+          "2dV7ZJXJTyrg8PptcWyZL86yvndz9Cp3uCRsCDaTMamVboQkQzA85Xs7oHtohfpBPPPA8FeQJgdNRcxAQxRjuoVw";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            provider: "across",
+            status: "submitted",
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: "7565164",
+            dstToken: env.solanaUsdcMint,
+            orderId: null,
+            txHashSrc: "0xpolygonsource",
+            expectedOutputAmount: "998266",
+            matchByTxHash: false,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          amount: "998266",
+          sender: "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC",
+          recipient: solanaWallet,
+          transaction_hash: fillTx,
+          idempotency_key: "deposit-key-across-fill",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.status, "ignored_bridge");
+        assert.deepEqual(db.bridgeUpdates, [
+          { id: "bridge-1", txHashDst: fillTx, status: "fulfilled" },
+        ]);
+        assert.deepEqual(db.notificationInserts, [
+          {
+            type: "bridge_completed",
+            body: "Across Polygon → Solana",
+            data: {
+              provider: "across",
+              status: "completed",
+              srcChainId: "137",
+              dstChainId: "7565164",
+              bridgeOrderId: "bridge-1",
+              txHash: "0xpolygonsource",
+            },
+            dedupeKey: "bridge:bridge-1:completed",
+          },
+        ]);
+      });
+    },
+  },
+  {
+    name: "Across intent candidate from different sender creates normal deposit notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            provider: "across",
+            status: "submitted",
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: "7565164",
+            dstToken: env.solanaUsdcMint,
+            orderId: null,
+            txHashSrc: "0xpolygonsource",
+            expectedOutputAmount: "998266",
+            matchByTxHash: false,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          amount: "998266",
+          sender: "unrelated-sender",
+          recipient: solanaWallet,
+          transaction_hash: "solana-unrelated-same-amount",
+          idempotency_key: "deposit-key-solana-same-amount",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.notified, true);
+        assert.equal(result.status, "notified");
+        assert.deepEqual(db.bridgeUpdates, []);
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+      });
+    },
+  },
+  {
+    name: "ambiguous Across intent candidates create normal deposit notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const warnings: unknown[][] = [];
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          bridgeOrders: [
+            {
+              id: "bridge-newer",
+              userId: "user-1",
+              provider: "across",
+              status: "submitted",
+              swapType: "cross_chain",
+              srcChainId: "137",
+              dstChainId: "7565164",
+              dstToken: env.solanaUsdcMint,
+              txHashSrc: "0xsource-newer",
+              expectedOutputAmount: "998266",
+              matchByTxHash: false,
+            },
+            {
+              id: "bridge-older",
+              userId: "user-1",
+              provider: "across",
+              status: "submitted",
+              swapType: "cross_chain",
+              srcChainId: "137",
+              dstChainId: "7565164",
+              dstToken: env.solanaUsdcMint,
+              txHashSrc: "0xsource-older",
+              expectedOutputAmount: "998266",
+              matchByTxHash: false,
+            },
+          ],
+        });
+
+        const result = await handlePrivyDepositWebhook(
+          db,
+          {
+            ...basePayload,
+            caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            asset: {
+              type: "spl",
+              mint: env.solanaUsdcMint,
+            },
+            amount: "998266",
+            sender: "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC",
+            recipient: solanaWallet,
+            transaction_hash: "ambiguous-solana-fill",
+            idempotency_key: "deposit-key-solana-ambiguous",
+          },
+          { warn: (...args: unknown[]) => warnings.push(args) },
+        );
+
+        assert.equal(result.ok, true);
+        assert.equal(result.notified, true);
+        assert.equal(result.status, "notified");
+        assert.deepEqual(db.bridgeUpdates, []);
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+        assert.equal(warnings.length, 1);
+      });
+    },
+  },
+  {
+    name: "Across intent amount mismatch still creates normal deposit notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            provider: "across",
+            dstChainId: "7565164",
+            dstToken: env.solanaUsdcMint,
+            expectedOutputAmount: "998266",
+            matchByTxHash: false,
+          },
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          amount: "123456",
+          sender: "not-across",
+          recipient: solanaWallet,
+          transaction_hash: "solana-unrelated-deposit",
+          idempotency_key: "deposit-key-solana-unrelated",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.notified, true);
+        assert.equal(result.status, "notified");
+        assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+      });
+    },
+  },
+  {
+    name: "duplicate Across fill webhook does not create duplicate bridge notification",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          bridgeOrder: {
+            id: "bridge-1",
+            userId: "user-1",
+            provider: "across",
+            status: "fulfilled",
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: "7565164",
+            dstToken: env.solanaUsdcMint,
+            orderId: null,
+            txHashSrc: "0xpolygonsource",
+            expectedOutputAmount: "998266",
+            matchByTxHash: false,
+          },
+          depositInsertConflict: true,
+          existingDepositStatus: "ignored_bridge",
+          existingDepositUserId: "user-1",
+          existingNotificationId: "notification-existing",
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          asset: {
+            type: "spl",
+            mint: env.solanaUsdcMint,
+          },
+          amount: "998266",
+          sender: "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC",
+          recipient: solanaWallet,
+          transaction_hash: "solana-fill-duplicate",
+          idempotency_key: "deposit-key-across-fill-duplicate",
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ignored, true);
+        assert.equal(result.duplicate, true);
         assert.equal(result.status, "ignored_bridge");
         assert.deepEqual(db.notificationInserts, []);
       });

@@ -118,16 +118,20 @@ import {
 } from "../services/analytics-forwarding.js";
 import {
   getAdminFeeLedgerAccrual,
+  getAdminFeeLedgerBuilderSweep,
   getAdminFeeLedgerClaim,
   getAdminFeeLedgerContractReceivable,
   getAdminFeeLedgerEvent,
   getAdminFeeLedgerSummary,
+  getAdminFeeLedgerTreasuryRun,
   getReferralCodeLedgerInfo,
   listAdminFeeLedgerAccruals,
   listAdminFeeLedgerBackfillAttempts,
+  listAdminFeeLedgerBuilderSweeps,
   listAdminFeeLedgerClaims,
   listAdminFeeLedgerContractReceivables,
   listAdminFeeLedgerEvents,
+  listAdminFeeLedgerTreasuryRuns,
 } from "../services/admin-fee-ledger.js";
 import { getAdminUserFinanceSummary } from "../services/admin-user-finance-summary.js";
 import {
@@ -5897,6 +5901,50 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/fees/ledger/treasury-runs",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerTreasuryRuns(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/builder-sweeps",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminFeeLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminFeeLedgerBuilderSweeps(pool, request.query);
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
+    },
+  );
+
+  z.get(
     "/admin/fees/ledger/accruals/:id",
     {
       preHandler: createAdminMiddleware({
@@ -5972,6 +6020,49 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       if (!item) {
         reply.code(404);
         return reply.send({ error: "Contract fee receivable not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/treasury-runs/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerTreasuryRun(pool, request.params.id);
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Treasury run not found" });
+      }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
+    "/admin/fees/ledger/builder-sweeps/:id",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { params: adminFeeLedgerDetailParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminFeeLedgerBuilderSweep(
+        pool,
+        request.params.id,
+      );
+      if (!item) {
+        reply.code(404);
+        return reply.send({ error: "Builder sweep not found" });
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");

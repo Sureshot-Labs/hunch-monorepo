@@ -2,9 +2,11 @@ import { z as zod } from "zod";
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
+  buildBridgeNotification,
   buildDepositNotification,
   createNotificationSafe,
 } from "./notifications.js";
+import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
 
 type Logger = {
   info?: (...args: unknown[]) => void;
@@ -31,6 +33,16 @@ type BridgeOrderMatch = {
   provider: string;
   status: string;
   swap_type: string;
+  src_chain_id: string | null;
+  dst_chain_id: string | null;
+  order_id: string | null;
+  tx_hash_src: string | null;
+  tx_hash_dst: string | null;
+};
+
+type BridgeOrderDepositMatch = BridgeOrderMatch & {
+  matchKind: "tx" | "intent";
+  matchedTxSide: "src" | "dst" | null;
 };
 
 type ExecutionMatch = {
@@ -66,6 +78,10 @@ type DepositEventRow = {
 type NotificationIdRow = {
   id: string;
 };
+
+const HUNCH_SOLANA_CHAIN_ID = "7565164";
+const ACROSS_SOLANA_DEPOSIT_SENDER =
+  "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC";
 
 const privyAssetSchema = zod
   .object({
@@ -154,6 +170,26 @@ function normalizeEvmAddress(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return null;
   return trimmed.toLowerCase();
+}
+
+function resolveBridgeChainIdFromCaip2(caip2: string): string | null {
+  const normalized = caip2.trim().toLowerCase();
+  if (normalized.startsWith("eip155:")) {
+    const chainId = normalized.slice("eip155:".length).trim();
+    return chainId || null;
+  }
+  if (normalized.startsWith("solana:")) {
+    return HUNCH_SOLANA_CHAIN_ID;
+  }
+  return null;
+}
+
+function resolveDepositAssetAddress(
+  event: PrivyFundsDepositedWebhook,
+): string | null {
+  const raw =
+    event.asset.address?.trim() || event.asset.mint?.trim() || null;
+  return raw || null;
 }
 
 function buildAddressSet(
@@ -307,7 +343,7 @@ async function findInternalDepositMovement(
 async function findBridgeOrderByTxHash(
   db: DbQuery,
   txHash?: string | null,
-): Promise<BridgeOrderMatch | null> {
+): Promise<BridgeOrderDepositMatch | null> {
   const trimmed = txHash?.trim();
   if (!trimmed) return null;
 
@@ -317,7 +353,17 @@ async function findBridgeOrderByTxHash(
     : "";
   const { rows } = await db.query<BridgeOrderMatch>(
     `
-      select id, user_id, provider, status, swap_type
+      select
+        id,
+        user_id,
+        provider,
+        status,
+        swap_type,
+        src_chain_id,
+        dst_chain_id,
+        order_id,
+        tx_hash_src,
+        tx_hash_dst
       from bridge_orders
       where tx_hash_src = $1
         or tx_hash_dst = $1
@@ -327,7 +373,217 @@ async function findBridgeOrderByTxHash(
     `,
     params,
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    matchKind: "tx",
+    matchedTxSide: resolveMatchedBridgeTxSide(row, trimmed),
+  };
+}
+
+function normalizeBridgeTxHashForCompare(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("0x") ? trimmed.toLowerCase() : trimmed;
+}
+
+function bridgeTxHashMatches(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean {
+  if (!left?.trim() || !right?.trim()) return false;
+  return (
+    normalizeBridgeTxHashForCompare(left) ===
+    normalizeBridgeTxHashForCompare(right)
+  );
+}
+
+function resolveMatchedBridgeTxSide(
+  bridgeOrder: BridgeOrderMatch,
+  txHash: string,
+): "src" | "dst" | null {
+  if (bridgeTxHashMatches(bridgeOrder.tx_hash_dst, txHash)) return "dst";
+  if (bridgeTxHashMatches(bridgeOrder.tx_hash_src, txHash)) return "src";
+  return null;
+}
+
+async function findBridgeOrderByDepositIntent(
+  db: DbQuery,
+  input: {
+    event: PrivyFundsDepositedWebhook;
+    userId: string | null | undefined;
+    recipient: string | null;
+    logger?: Logger;
+  },
+): Promise<BridgeOrderDepositMatch | null> {
+  if (!input.userId) return null;
+  const dstChainId = resolveBridgeChainIdFromCaip2(input.event.caip2);
+  if (
+    dstChainId !== HUNCH_SOLANA_CHAIN_ID ||
+    input.event.sender?.trim() !== ACROSS_SOLANA_DEPOSIT_SENDER
+  ) {
+    return null;
+  }
+  const dstToken = resolveDepositAssetAddress(input.event);
+  const amountRaw = input.event.amount.trim();
+  if (!dstChainId || !dstToken || !amountRaw) return null;
+
+  const recipient = input.recipient?.trim() || "";
+  const { rows } = await db.query<BridgeOrderMatch>(
+    `
+      select
+        id,
+        user_id,
+        provider,
+        status,
+        swap_type,
+        src_chain_id,
+        dst_chain_id,
+        order_id,
+        tx_hash_src,
+        tx_hash_dst
+      from bridge_orders
+      where user_id = $1
+        and provider = 'across'
+        and dst_chain_id = $2
+        and lower(dst_token) = lower($3)
+        and status not in ('failed', 'expired', 'refunded')
+        and created_at > now() - interval '24 hours'
+        and (
+          metadata #>> '{across,expectedOutputAmount}' = $4
+          or metadata #>> '{across,minOutputAmount}' = $4
+          or metadata #>> '{across,providerPayload,outputAmount}' = $4
+          or metadata #>> '{across,statusPayload,outputAmount}' = $4
+        )
+        and (
+          coalesce(
+            metadata #>> '{recipientAddress}',
+            metadata #>> '{across,recipientAddress}'
+          ) is null
+          or $5 = ''
+          or lower(coalesce(
+            metadata #>> '{recipientAddress}',
+            metadata #>> '{across,recipientAddress}'
+          )) = lower($5)
+        )
+      order by created_at desc
+      limit 2
+    `,
+    [input.userId, dstChainId, dstToken, amountRaw, recipient],
+  );
+  if (rows.length > 1) {
+    input.logger?.warn?.(
+      {
+        userId: input.userId,
+        dstChainId,
+        dstToken,
+        amountRaw,
+        recipient,
+        candidateIds: rows.map((row) => row.id),
+      },
+      "Across Solana deposit intent match was ambiguous",
+    );
+    return null;
+  }
+  const row = rows[0];
+  if (!row) return null;
+  return { ...row, matchKind: "intent", matchedTxSide: "dst" };
+}
+
+async function findConfirmedBridgeOrderForDeposit(
+  db: DbQuery,
+  input: {
+    event: PrivyFundsDepositedWebhook;
+    userId: string | null | undefined;
+    recipient: string | null;
+    logger?: Logger;
+  },
+): Promise<BridgeOrderDepositMatch | null> {
+  const exactBridgeOrder = await findBridgeOrderByTxHash(
+    db,
+    input.event.transaction_hash,
+  );
+  if (exactBridgeOrder) return exactBridgeOrder;
+
+  const intentBridgeOrder = await findBridgeOrderByDepositIntent(db, {
+    event: input.event,
+    userId: input.userId,
+    recipient: input.recipient,
+    logger: input.logger,
+  });
+  return intentBridgeOrder;
+}
+
+function resolveBridgeNotificationDedupeId(
+  bridgeOrder: BridgeOrderMatch,
+): string {
+  return bridgeOrder.provider === "across"
+    ? bridgeOrder.id
+    : (bridgeOrder.order_id ?? bridgeOrder.id);
+}
+
+async function markBridgeOrderDestinationFill(
+  db: DbQuery,
+  input: {
+    bridgeOrder: BridgeOrderDepositMatch;
+    txHash: string | null;
+    depositEventId: string;
+    eventChainId: string | null;
+  },
+): Promise<void> {
+  const bridgeOrder = input.bridgeOrder;
+  const nextStatus =
+    shouldCompleteBridgeFromDeposit(bridgeOrder, input.eventChainId)
+      ? "fulfilled"
+      : bridgeOrder.status;
+
+  await db.query(
+    `
+      update bridge_orders
+      set
+        tx_hash_dst = case
+          when $5::text is not null and $5::text = dst_chain_id
+            then coalesce(tx_hash_dst, $2::text)
+          else tx_hash_dst
+        end,
+        status = $3::text,
+        metadata = jsonb_set(
+          coalesce(metadata, '{}'::jsonb),
+          '{depositFill}',
+          coalesce(metadata->'depositFill', '{}'::jsonb)
+            || jsonb_strip_nulls(jsonb_build_object(
+              'privyDepositEventId', $4::text,
+              'txHash', $2::text,
+              'matchedAt', to_jsonb(now())
+            )),
+          true
+        ),
+        updated_at = now()
+      where id = $1
+    `,
+    [
+      bridgeOrder.id,
+      input.txHash,
+      nextStatus,
+      input.depositEventId,
+      input.eventChainId,
+    ],
+  );
+}
+
+function shouldCompleteBridgeFromDeposit(
+  bridgeOrder: BridgeOrderDepositMatch,
+  eventChainId: string | null,
+): boolean {
+  const status = canonicalizeBridgeOrderStatus(bridgeOrder.status, "submitted");
+  if (status === "failed" || status === "expired" || status === "refunded") {
+    return false;
+  }
+  if (!eventChainId || eventChainId !== bridgeOrder.dst_chain_id) return false;
+  if (bridgeOrder.matchKind === "tx") {
+    return bridgeOrder.matchedTxSide === "dst";
+  }
+  return bridgeOrder.matchKind === "intent";
 }
 
 async function findExecutionByTxHash(
@@ -578,7 +834,12 @@ export async function handlePrivyDepositWebhook(
     recipient && walletType
       ? await resolveUserWallet(db, { walletType, address: recipient })
       : null;
-  const bridgeOrder = await findBridgeOrderByTxHash(db, event.transaction_hash);
+  const bridgeOrder = await findConfirmedBridgeOrderForDeposit(db, {
+    event,
+    userId: wallet?.user_id,
+    recipient,
+    logger,
+  });
   const execution = bridgeOrder
     ? null
     : await findExecutionByTxHash(db, event.transaction_hash);
@@ -626,13 +887,39 @@ export async function handlePrivyDepositWebhook(
   const duplicate = !insertedRow;
 
   if (bridgeOrder) {
-    if (row.status !== "ignored_bridge") {
-      await updateDepositEventStatus(db, {
-        eventId: row.id,
-        status: "ignored_bridge",
-        userId: bridgeOrder.user_id,
-        bridgeOrderId: bridgeOrder.id,
-      });
+    const eventChainId = resolveBridgeChainIdFromCaip2(event.caip2);
+    const shouldNotifyCompleted = shouldCompleteBridgeFromDeposit(
+      bridgeOrder,
+      eventChainId,
+    );
+    await markBridgeOrderDestinationFill(db, {
+      bridgeOrder,
+      txHash: event.transaction_hash ?? null,
+      depositEventId: row.id,
+      eventChainId,
+    });
+    await updateDepositEventStatus(db, {
+      eventId: row.id,
+      status: "ignored_bridge",
+      userId: bridgeOrder.user_id,
+      bridgeOrderId: bridgeOrder.id,
+    });
+    if (shouldNotifyCompleted) {
+      void createNotificationSafe(
+        db,
+        buildBridgeNotification({
+          userId: bridgeOrder.user_id,
+          provider: bridgeOrder.provider,
+          status: "completed",
+          srcChainId: bridgeOrder.src_chain_id,
+          dstChainId: bridgeOrder.dst_chain_id,
+          bridgeOrderId: resolveBridgeNotificationDedupeId(bridgeOrder),
+          txHash: bridgeOrder.tx_hash_src ?? event.transaction_hash ?? null,
+        }),
+        logger?.warn
+          ? { warn: (obj, msg) => logger.warn?.(obj, msg) }
+          : undefined,
+      );
     }
     logger?.info?.(
       {

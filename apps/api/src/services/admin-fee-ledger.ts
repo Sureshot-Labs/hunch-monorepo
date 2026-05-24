@@ -12,6 +12,9 @@ export type AdminFeeLedgerFilters = {
   orderHash?: string;
   venueOrderId?: string;
   txHash?: string;
+  builderAddress?: string;
+  destinationAddress?: string;
+  relayerTransactionId?: string;
   feeEventId?: string;
   sourceId?: string;
   sourceType?: "order" | "execution";
@@ -227,6 +230,46 @@ type ContractReceivableRow = LedgerUserRow & {
   linked_fee_event_created_at: Date | null;
 };
 
+type TreasuryRunRow = {
+  id: string;
+  mode: string;
+  chain_id: string | null;
+  status: string;
+  liability_mode: string;
+  report: unknown;
+  error: string | null;
+  started_at: Date;
+  finished_at: Date | null;
+  created_at: Date | null;
+  updated_at: Date | null;
+};
+
+type BuilderSweepRow = {
+  id: string;
+  builder_address: string;
+  owner_address: string;
+  destination_address: string;
+  token_address: string;
+  token_symbol: string;
+  amount_raw: string;
+  amount: string;
+  pre_builder_balance_raw: string | null;
+  post_builder_balance_raw: string | null;
+  pre_hot_balance_raw: string | null;
+  post_hot_balance_raw: string | null;
+  relayer_transaction_id: string | null;
+  tx_hash: string | null;
+  state: string;
+  relayer_state: string | null;
+  error: string | null;
+  submitted_at: Date | null;
+  broadcast_at: Date | null;
+  confirmed_at: Date | null;
+  failed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
 function push(parts: QueryParts, value: unknown): string {
   parts.params.push(value);
   return `$${parts.params.length}`;
@@ -279,6 +322,12 @@ function recordValue(
   if (!isRecord(value)) return null;
   const nested = value[key];
   return isRecord(nested) ? nested : null;
+}
+
+function arrayValue(value: unknown, key: string): unknown[] {
+  if (!isRecord(value)) return [];
+  const nested = value[key];
+  return Array.isArray(nested) ? nested : [];
 }
 
 function textValue(value: unknown, key: string): string | null {
@@ -716,6 +765,118 @@ function buildContractReceivableFilters(
     )`);
   }
   addDateRange(parts, "r.filled_at", query);
+  return parts;
+}
+
+function buildTreasuryRunFilters(query: AdminFeeLedgerFilters): QueryParts {
+  const parts: QueryParts = { clauses: [], params: [] };
+  if (query.id) parts.clauses.push(`t.id::text = ${push(parts, query.id)}`);
+  if (query.status)
+    parts.clauses.push(`t.status = ${push(parts, query.status)}`);
+  if (query.chainId) {
+    const idx = push(parts, query.chainId);
+    parts.clauses.push(`(
+      t.chain_id = ${idx}
+      or exists (
+        select 1
+        from jsonb_array_elements(
+          case
+            when jsonb_typeof(t.report->'actions') = 'array'
+              then t.report->'actions'
+            else '[]'::jsonb
+          end
+        ) action
+        where action->>'chainId' = ${idx}
+      )
+    )`);
+  }
+  if (query.txHash) {
+    const idx = push(parts, query.txHash);
+    parts.clauses.push(`(
+      t.report->'polymarketBuilderSweep'->>'txHash' = ${idx}
+      or exists (
+        select 1
+        from jsonb_array_elements(
+          case
+            when jsonb_typeof(t.report->'actions') = 'array'
+              then t.report->'actions'
+            else '[]'::jsonb
+          end
+        ) action
+        where action->>'txHash' = ${idx}
+      )
+    )`);
+  }
+  if (query.q) {
+    const idx = push(parts, query.q);
+    parts.clauses.push(`(
+      t.id::text = ${idx}
+      or t.mode = ${idx}
+      or t.status = ${idx}
+      or t.liability_mode = ${idx}
+      or t.chain_id = ${idx}
+      or t.report->'polymarketBuilderSweep'->>'sweepId' = ${idx}
+      or t.report->'polymarketBuilderSweep'->>'txHash' = ${idx}
+      or t.report->'polymarketBuilderSweep'->>'relayerTransactionId' = ${idx}
+      or exists (
+        select 1
+        from jsonb_array_elements(
+          case
+            when jsonb_typeof(t.report->'actions') = 'array'
+              then t.report->'actions'
+            else '[]'::jsonb
+          end
+        ) action
+        where action->>'chainId' = ${idx}
+           or action->>'txHash' = ${idx}
+           or lower(action->>'hotAddress') = lower(${idx}::text)
+           or lower(action->>'coldAddress') = lower(${idx}::text)
+      )
+    )`);
+  }
+  addDateRange(parts, "t.started_at", query);
+  return parts;
+}
+
+function buildBuilderSweepFilters(query: AdminFeeLedgerFilters): QueryParts {
+  const parts: QueryParts = { clauses: [], params: [] };
+  if (query.id) parts.clauses.push(`s.id::text = ${push(parts, query.id)}`);
+  if (query.status)
+    parts.clauses.push(`s.state = ${push(parts, query.status)}`);
+  if (query.chainId) {
+    const idx = push(parts, query.chainId);
+    parts.clauses.push(`lower(${idx}::text) in ('137', 'polygon')`);
+  }
+  if (query.txHash)
+    parts.clauses.push(`s.tx_hash = ${push(parts, query.txHash)}`);
+  if (query.builderAddress) {
+    const idx = push(parts, query.builderAddress);
+    parts.clauses.push(`lower(s.builder_address) = lower(${idx})`);
+  }
+  if (query.destinationAddress) {
+    const idx = push(parts, query.destinationAddress);
+    parts.clauses.push(`lower(s.destination_address) = lower(${idx})`);
+  }
+  if (query.relayerTransactionId) {
+    parts.clauses.push(
+      `s.relayer_transaction_id = ${push(parts, query.relayerTransactionId)}`,
+    );
+  }
+  if (query.q) {
+    const idx = push(parts, query.q);
+    parts.clauses.push(`(
+      s.id::text = ${idx}
+      or s.state = ${idx}
+      or s.relayer_state = ${idx}
+      or s.relayer_transaction_id = ${idx}
+      or s.tx_hash = ${idx}
+      or lower(s.builder_address) = lower(${idx})
+      or lower(s.owner_address) = lower(${idx})
+      or lower(s.destination_address) = lower(${idx})
+      or lower(s.token_address) = lower(${idx})
+    )`);
+  }
+  addDateRange(parts, "s.created_at", query);
   return parts;
 }
 
@@ -1488,6 +1649,175 @@ export async function listAdminFeeLedgerContractReceivables(
   };
 }
 
+function mapTreasuryRun(row: TreasuryRunRow) {
+  const report = recordValue(row.report, "report") ?? row.report;
+  const actions = arrayValue(row.report, "actions");
+  return {
+    id: row.id,
+    mode: row.mode,
+    chainId: row.chain_id,
+    status: row.status,
+    liabilityMode: row.liability_mode,
+    report,
+    actions,
+    polymarketBuilderSweep:
+      recordValue(row.report, "polymarketBuilderSweep") ?? null,
+    error: row.error,
+    startedAt: toIso(row.started_at),
+    finishedAt: toIso(row.finished_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
+}
+
+export async function listAdminFeeLedgerTreasuryRuns(
+  pool: DbQuery,
+  query: AdminFeeLedgerFilters,
+) {
+  const filters = buildTreasuryRunFilters(query);
+  const { limit, offset } = limitOffset(query);
+  const where = whereSql(filters);
+  const countResult = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from reward_treasury_runs t
+      ${where}
+    `,
+    filters.params,
+  );
+  const params = [...filters.params, limit, offset];
+  const rowsResult = await pool.query<TreasuryRunRow>(
+    `
+      select
+        t.id,
+        t.mode,
+        t.chain_id,
+        t.status,
+        t.liability_mode,
+        t.report,
+        t.error,
+        t.started_at,
+        t.finished_at,
+        t.created_at,
+        t.updated_at
+      from reward_treasury_runs t
+      ${where}
+      order by t.started_at desc, t.id desc
+      limit $${params.length - 1}
+      offset $${params.length}
+    `,
+    params,
+  );
+  return {
+    items: rowsResult.rows.map(mapTreasuryRun),
+    total: countToNumber(countResult.rows[0]?.total),
+    limit,
+    offset,
+  };
+}
+
+function mapBuilderSweep(row: BuilderSweepRow) {
+  const preBuilderBalanceRaw = rawDigitString(row.pre_builder_balance_raw);
+  const postBuilderBalanceRaw = rawDigitString(row.post_builder_balance_raw);
+  const preHotBalanceRaw = rawDigitString(row.pre_hot_balance_raw);
+  const postHotBalanceRaw = rawDigitString(row.post_hot_balance_raw);
+  return {
+    id: row.id,
+    state: row.state,
+    amount: row.amount,
+    amountRaw: row.amount_raw,
+    tokenSymbol: row.token_symbol,
+    builderAddress: row.builder_address,
+    ownerAddress: row.owner_address,
+    destinationAddress: row.destination_address,
+    tokenAddress: row.token_address,
+    preBuilderBalance:
+      preBuilderBalanceRaw != null
+        ? microRawToDecimal(preBuilderBalanceRaw)
+        : null,
+    preBuilderBalanceRaw,
+    postBuilderBalance:
+      postBuilderBalanceRaw != null
+        ? microRawToDecimal(postBuilderBalanceRaw)
+        : null,
+    postBuilderBalanceRaw,
+    preHotBalance:
+      preHotBalanceRaw != null ? microRawToDecimal(preHotBalanceRaw) : null,
+    preHotBalanceRaw,
+    postHotBalance:
+      postHotBalanceRaw != null ? microRawToDecimal(postHotBalanceRaw) : null,
+    postHotBalanceRaw,
+    relayerTransactionId: row.relayer_transaction_id,
+    relayerState: row.relayer_state,
+    txHash: row.tx_hash,
+    error: row.error,
+    submittedAt: toIso(row.submitted_at),
+    broadcastAt: toIso(row.broadcast_at),
+    confirmedAt: toIso(row.confirmed_at),
+    failedAt: toIso(row.failed_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
+}
+
+export async function listAdminFeeLedgerBuilderSweeps(
+  pool: DbQuery,
+  query: AdminFeeLedgerFilters,
+) {
+  const filters = buildBuilderSweepFilters(query);
+  const { limit, offset } = limitOffset(query);
+  const where = whereSql(filters);
+  const countResult = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from polymarket_builder_sweeps s
+      ${where}
+    `,
+    filters.params,
+  );
+  const params = [...filters.params, limit, offset];
+  const rowsResult = await pool.query<BuilderSweepRow>(
+    `
+      select
+        s.id,
+        s.builder_address,
+        s.owner_address,
+        s.destination_address,
+        s.token_address,
+        s.token_symbol,
+        s.amount_raw,
+        s.amount::text as amount,
+        s.pre_builder_balance_raw,
+        s.post_builder_balance_raw,
+        s.pre_hot_balance_raw,
+        s.post_hot_balance_raw,
+        s.relayer_transaction_id,
+        s.tx_hash,
+        s.state,
+        s.relayer_state,
+        s.error,
+        s.submitted_at,
+        s.broadcast_at,
+        s.confirmed_at,
+        s.failed_at,
+        s.created_at,
+        s.updated_at
+      from polymarket_builder_sweeps s
+      ${where}
+      order by s.created_at desc, s.id desc
+      limit $${params.length - 1}
+      offset $${params.length}
+    `,
+    params,
+  );
+  return {
+    items: rowsResult.rows.map(mapBuilderSweep),
+    total: countToNumber(countResult.rows[0]?.total),
+    limit,
+    offset,
+  };
+}
+
 export async function getAdminFeeLedgerAccrual(pool: DbQuery, id: string) {
   const result = await listAdminFeeLedgerAccruals(pool, { id, limit: 1 });
   return result.items[0] ?? null;
@@ -1511,6 +1841,19 @@ export async function getAdminFeeLedgerContractReceivable(
     id,
     limit: 1,
   });
+  return result.items[0] ?? null;
+}
+
+export async function getAdminFeeLedgerTreasuryRun(pool: DbQuery, id: string) {
+  const result = await listAdminFeeLedgerTreasuryRuns(pool, { id, limit: 1 });
+  return result.items[0] ?? null;
+}
+
+export async function getAdminFeeLedgerBuilderSweep(
+  pool: DbQuery,
+  id: string,
+) {
+  const result = await listAdminFeeLedgerBuilderSweeps(pool, { id, limit: 1 });
   return result.items[0] ?? null;
 }
 

@@ -1111,13 +1111,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     if (!status) return;
 
     const { rows } = await pool.query<{
+      id: string;
       user_id: string;
       src_chain_id: string;
       dst_chain_id: string;
       order_id: string | null;
     }>(
       `
-        select user_id, src_chain_id, dst_chain_id, order_id
+        select id, user_id, src_chain_id, dst_chain_id, order_id
         from bridge_orders
         where provider = $1
           and tx_hash_src = $2
@@ -1137,7 +1138,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
-        bridgeOrderId: row.order_id ?? null,
+        bridgeOrderId:
+          provider === "across" ? row.id : (row.order_id ?? null),
         txHash,
       }),
       app.log,
@@ -1153,13 +1155,14 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
     if (!status) return;
 
     const { rows } = await pool.query<{
+      id: string;
       user_id: string;
       src_chain_id: string;
       dst_chain_id: string;
       tx_hash_src: string | null;
     }>(
       `
-        select user_id, src_chain_id, dst_chain_id, tx_hash_src
+        select id, user_id, src_chain_id, dst_chain_id, tx_hash_src
         from bridge_orders
         where provider = $1
           and order_id = $2
@@ -1179,7 +1182,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
-        bridgeOrderId: orderId,
+        bridgeOrderId: provider === "across" ? row.id : orderId,
         txHash: row.tx_hash_src ?? null,
       }),
       app.log,
@@ -1747,6 +1750,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               normalizedPayload.fees ?? null,
               {
                 tx: txMeta,
+                senderAddress: addresses.senderAddress,
+                recipientAddress: addresses.recipientAddress,
                 estimation: normalizedPayload.estimation ?? null,
                 tokenIn: null,
                 tokenOut: null,
@@ -1758,6 +1763,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   expectedOutputAmount:
                     normalizedPayload.expectedOutputAmount ?? null,
                   minOutputAmount: normalizedPayload.minOutputAmount ?? null,
+                  senderAddress: addresses.senderAddress,
+                  recipientAddress: addresses.recipientAddress,
                   providerPayload,
                 },
               },
