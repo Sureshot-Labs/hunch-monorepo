@@ -54,9 +54,12 @@ function usage(): string {
 
 try {
   const options = parseArgs(process.argv.slice(2));
+  const { envPath, outDir } = options;
+  if (!envPath) throw new Error("Missing --env <path>");
+  if (!outDir) throw new Error("Missing --out <dir>");
   const result = buildSecretBundles({
-    envPath: options.envPath!,
-    outDir: options.outDir!,
+    envPath,
+    outDir,
     profile: options.profile,
     dryRun: options.dryRun,
     force: options.force,
