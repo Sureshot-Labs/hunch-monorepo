@@ -102,6 +102,9 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   "indexer-dflow": ["DFLOW_API_KEY"],
   "indexer-limitless": ["LIMITLESS_WS_SESSION"],
   ops: [
+    "AGG_API_KEY",
+    "AGG_HMAC_SIGNING_KEY",
+    "OPINIONLABS_API_KEY",
     "POLYMARKET_L2_API_KEY",
     "POLYMARKET_L2_API_SECRET",
     "POLYMARKET_L2_API_PASSPHRASE",
@@ -611,14 +614,17 @@ export function buildSecretBundles(
   const bundleRefs = activeBundles
     .map(([name]) => `aws-sm:${prefix}/${name}`)
     .join(",");
-  const sanitized = sanitizeEnv(
-    raw,
-    new Set(activeBundles.flatMap(([, values]) => Object.keys(values))),
-    {
-      profile,
-      bundleRefs,
-    },
+  const bundledSecretKeys = new Set(
+    activeBundles.flatMap(([, values]) => Object.keys(values)),
   );
+  const knownSecretKeys = new Set([
+    ...bundledSecretKeys,
+    ...Object.values(SECRET_BUNDLE_KEYS).flat(),
+  ]);
+  const sanitized = sanitizeEnv(raw, knownSecretKeys, {
+    profile,
+    bundleRefs,
+  });
   const commands = activeBundles.map(
     ([name]) =>
       `aws secretsmanager put-secret-value --secret-id ${prefix}/${name} --secret-string file://${path.join(
@@ -725,7 +731,11 @@ function sanitizeEnv(
   let sawBundles = false;
   for (const line of raw.split(/\r?\n/u)) {
     const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u);
+    const commentedMatch = line.match(
+      /^\s*#+\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u,
+    );
     if (match && secretKeys.has(match[1])) continue;
+    if (commentedMatch && secretKeys.has(commentedMatch[1])) continue;
     if (match?.[1] === "HUNCH_SECRETS_MODE") {
       sawMode = true;
       output.push("HUNCH_SECRETS_MODE=optional");

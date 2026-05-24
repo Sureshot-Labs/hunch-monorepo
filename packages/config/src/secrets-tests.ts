@@ -269,7 +269,9 @@ test("bundle builder writes only allowlisted secret keys", () => {
       "DATABASE_URL=postgres://secret",
       "DFLOW_API_KEY=dflow-secret",
       "JWT_SECRET=secret",
+      "#JWT_SECRET=commented-secret",
       "LIMITLESS_WS_SESSION=limitless-ws-secret",
+      "# POLYMARKET_BUILDER_API_SECRET=commented-builder-secret",
       "POLYMARKET_BUILDER_CODE=public-code",
       "POLYMARKET_RELAYER_PRIVATE_KEY=0xsecret",
       "NEXT_PUBLIC_POLYMARKET_RELAYER_SIGN_TOKEN=public-token",
@@ -299,8 +301,10 @@ test("bundle builder writes only allowlisted secret keys", () => {
   ]);
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
   assert.equal(sanitized.includes("JWT_SECRET="), false);
+  assert.equal(sanitized.includes("#JWT_SECRET="), false);
   assert.equal(sanitized.includes("DFLOW_API_KEY="), false);
   assert.equal(sanitized.includes("LIMITLESS_WS_SESSION="), false);
+  assert.equal(sanitized.includes("POLYMARKET_BUILDER_API_SECRET="), false);
   assert.equal(sanitized.includes("POLYMARKET_RELAYER_PRIVATE_KEY="), false);
   assert.equal(sanitized.includes("POLYMARKET_BUILDER_CODE=public-code"), true);
   assert.equal(
