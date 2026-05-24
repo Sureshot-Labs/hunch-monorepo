@@ -627,11 +627,11 @@ const walletIntelSignalWeightNovelty = optionalNonNegativeNumber(
 );
 const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "POSITIONS_SYNC_FLATTEN_GRACE_SEC",
-  45,
+  3,
 );
 const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
-  15,
+  positionsSyncFlattenGraceSec,
 );
 const rewardsTreasuryMinSweepUsdRaw =
   process.env.HUNCH_REWARDS_TREASURY_MIN_SWEEP_USD?.trim() || "0";

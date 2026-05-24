@@ -46,8 +46,6 @@ import {
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 type PositionRefreshVenue = "polymarket" | "dflow" | "limitless";
 const POSITION_REFRESH_STALE_MARKET_MINUTES = 15;
-const POLYMARKET_RECENT_FLAT_PROTECT_SEC = 15;
-const POLYMARKET_FLATTEN_GRACE_SEC = 15;
 const POLYMARKET_BALANCE_BATCH_MAX_PAIRS = 1000;
 const POLYMARKET_DATA_API_POSITIONS_LIMIT = 500;
 const POLYMARKET_DATA_API_POSITIONS_SIZE_THRESHOLD = "0.01";
@@ -1755,10 +1753,10 @@ async function syncPolymarketStoredPositionsFromPolygon(
       tokenBalances: held,
       // Short grace avoids flattening fresh matched BUYs before Polygon state
       // catches up, while still converging quickly.
-      flattenGraceSec: POLYMARKET_FLATTEN_GRACE_SEC,
+      flattenGraceSec: env.positionsSyncFlattenGraceSec,
       // Prevent immediate stale RPC snapshots from reopening freshly flattened
       // rows right after matched sells.
-      protectRecentFlatsSec: POLYMARKET_RECENT_FLAT_PROTECT_SEC,
+      protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
     });
     persistMs += Date.now() - persistStartedAt;
     heldTokens += result.heldTokens;
@@ -2288,7 +2286,6 @@ export type PositionsSyncResult = {
 };
 
 type PositionScope = "own" | "followed";
-const KALSHI_POSITIONS_SYNC_GRACE_SEC = 0;
 
 async function syncKalshiPositionsFromSolana(
   pool: Pool,
@@ -2351,8 +2348,8 @@ async function syncKalshiPositionsFromSolana(
     positionScope: inputs.positionScope,
     tokenBalances,
     tokenIdLike: "sol:%",
-    flattenGraceSec: KALSHI_POSITIONS_SYNC_GRACE_SEC,
-    protectRecentFlatsSec: KALSHI_POSITIONS_SYNC_GRACE_SEC,
+    flattenGraceSec: env.positionsSyncFlattenGraceSec,
+    protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
   });
   const persistMs = Date.now() - persistStartedAt;
 

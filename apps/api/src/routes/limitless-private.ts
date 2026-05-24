@@ -47,7 +47,10 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import { tryRecordReferralFirstTradeConversion } from "../services/analytics-referrals.js";
-import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
+import {
+  applyOptimisticPositionTrade,
+  reconcileExactPositionBalance,
+} from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import { syncLimitlessHistoryForWallet } from "../services/limitless-history.js";
 import {
@@ -3262,6 +3265,45 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             "Limitless AMM optimistic position update failed",
           );
         }
+      }
+
+      try {
+        const rawTokenId = normalizeLimitlessRawTokenId(tokenId);
+        if (rawTokenId) {
+          const balanceMap = await fetchErc1155BalancesByOwner({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            contractAddress: env.limitlessConditionalTokensAddress,
+            owner: signer,
+            tokenIds: [rawTokenId],
+          });
+          const exactRawBalance = balanceMap.get(rawTokenId) ?? 0n;
+          const exactSize = Number(ethers.formatUnits(exactRawBalance, 6));
+          const buyStaleTolerance = Math.max(0.01, size * 0.02);
+          const likelyStaleBuyBalance =
+            side === "BUY" && exactSize + buyStaleTolerance < size;
+          if (!likelyStaleBuyBalance) {
+            await reconcileExactPositionBalance(pool, {
+              userId: user.id,
+              walletAddress: signer,
+              venue: "limitless",
+              tokenId,
+              size: exactSize,
+              averagePrice: price,
+            });
+          }
+        }
+      } catch (error) {
+        app.log.warn(
+          {
+            error,
+            userId: user.id,
+            walletAddress: signer,
+            tokenId,
+            side,
+          },
+          "Limitless AMM exact position reconciliation failed",
+        );
       }
 
       void createNotificationSafe(

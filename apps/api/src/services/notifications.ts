@@ -67,6 +67,12 @@ function formatUsd(value: number | null, digits = 2): string | null {
   return `$${formatNumber(value, digits)}`;
 }
 
+function formatRewardClaimUsd(value: number): string {
+  if (!Number.isFinite(value)) return "$0.000";
+  if (value > 0 && value < 0.001) return "<$0.001";
+  return formatUsd(value, 3) ?? "$0.000";
+}
+
 function formatVenue(venue: string): string {
   if (!venue) return "Venue";
   return venue.charAt(0).toUpperCase() + venue.slice(1);
@@ -509,7 +515,7 @@ export function buildRewardNotification(input: {
     failed: "error",
   };
 
-  const amount = formatUsd(input.amountUsd, 2) ?? "$0.00";
+  const amount = formatRewardClaimUsd(input.amountUsd);
   const chain = formatChainLabel(input.chainId) ?? input.chainId;
   const body = `${amount} on ${chain}`;
   const dedupeKey = `reward:${input.claimId}:${input.status}`;

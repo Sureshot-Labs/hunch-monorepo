@@ -407,7 +407,13 @@ export async function fetchPositionsForUserWallet(
         updated_at
       from positions
       ${whereClause}
-      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by
+        last_updated_at desc nulls last,
+        created_at desc nulls last,
+        venue asc,
+        token_id asc,
+        wallet_address asc,
+        id asc
     `,
     params,
   );
@@ -486,7 +492,13 @@ export async function fetchPositionsForUserWalletByTokenIds(
         updated_at
       from positions
       ${whereClause}
-      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by
+        last_updated_at desc nulls last,
+        created_at desc nulls last,
+        venue asc,
+        token_id asc,
+        wallet_address asc,
+        id asc
     `,
     params,
   );
@@ -611,7 +623,12 @@ async function upsertLongPositionsInTx(
             then 'own'
           else 'followed'
         end,
-        last_updated_at = now(),
+        last_updated_at = case
+          when positions.side is distinct from 'LONG'
+            or positions.size is distinct from excluded.size
+            then now()
+          else positions.last_updated_at
+        end,
         updated_at = now()
       where not (
         $8::int > 0
@@ -812,7 +829,6 @@ export async function updatePositionMetrics(
         end,
         realized_pnl = v.realized_pnl,
         unrealized_pnl = v.unrealized_pnl,
-        last_updated_at = now(),
         updated_at = now()
       from (
         select

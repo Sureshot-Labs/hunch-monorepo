@@ -3630,6 +3630,24 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           error: "Order side must be BUY/SELL (or 0/1)",
         });
       }
+      const positionWalletAddress =
+        typeof body.positionWalletAddress === "string" &&
+        body.positionWalletAddress.trim()
+          ? body.positionWalletAddress.trim()
+          : null;
+      if (positionWalletAddress && side === "SELL") {
+        const normalizedPositionWallet = positionWalletAddress.toLowerCase();
+        if (
+          normalizedPositionWallet !== signer.toLowerCase() &&
+          normalizedPositionWallet !== funder.toLowerCase()
+        ) {
+          reply.code(400);
+          return reply.send({
+            error:
+              "positionWalletAddress must match the signer or Polymarket funder",
+          });
+        }
+      }
 
       const orderType = normalizeOrderTypeForClob(body.orderType);
       const orderTokenId = extractTokenId(order);
@@ -3940,10 +3958,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         tokenId &&
         immediateFill
       ) {
+        const optimisticPositionWalletAddress =
+          side === "SELL" && positionWalletAddress
+            ? positionWalletAddress
+            : funder;
         try {
           await applyOptimisticPositionTrade(pool, {
             userId: user.id,
-            walletAddress: funder,
+            walletAddress: optimisticPositionWalletAddress,
             venue: "polymarket",
             tokenId,
             side,
@@ -3955,7 +3977,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             {
               error,
               userId: user.id,
-              walletAddress: funder,
+              walletAddress: optimisticPositionWalletAddress,
+              funder,
               tokenId,
               side,
             },

@@ -92,6 +92,7 @@ export const polymarketPlaceOrderBodySchema = z
     deferExec: z.boolean().optional(),
     exchangeAddress: zEthAddress.optional(),
     negRisk: z.boolean().optional(),
+    positionWalletAddress: zEthAddress.optional(),
   })
   .strict();
 
