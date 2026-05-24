@@ -114,6 +114,7 @@ const LimitlessMarketItem = z
     updatedAt: z.string(),
     categories: z.array(z.string()),
     marketType: z.string(),
+    groupId: z.union([z.string(), z.number()]).nullable().optional(),
     proxyTitle: z.string().nullable().optional(),
     conditionId: z.string(),
     description: z.string(),
@@ -159,6 +160,7 @@ export const LimitlessMarket = z
     updatedAt: z.string(),
     categories: z.array(z.string()),
     marketType: z.string(), // 'single' or 'group'
+    groupId: z.union([z.string(), z.number()]).nullable().optional(),
     proxyTitle: z.string().nullable().optional(),
     conditionId: z.string().optional(),
     description: z.string().optional(),

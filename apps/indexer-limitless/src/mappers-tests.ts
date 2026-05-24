@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  orderLimitlessMarketsForGrouping,
+  resolveLimitlessEventContext,
+} from "./grouping.js";
+import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   resolveLimitlessCategory,
@@ -106,6 +110,7 @@ test("Limitless active response accepts null rewardable and creator fields", () 
             updatedAt: "2026-03-12T00:00:00Z",
             categories: [],
             marketType: "single",
+            groupId: 1,
             conditionId: "0xcondition",
             description: "",
             isRewardable: null,
@@ -133,6 +138,46 @@ test("Limitless active response accepts null rewardable and creator fields", () 
   assert.equal(parsed.data[0]?.markets?.[0]?.isRewardable, false);
   assert.equal(parsed.data[0]?.markets?.[0]?.creator?.imageURI, null);
   assert.equal(parsed.data[0]?.markets?.[0]?.creator?.link, null);
+  assert.equal(parsed.data[0]?.markets?.[0]?.groupId, 1);
+});
+
+test("Limitless grouping helpers process group parents before duplicate children", () => {
+  const parent = makeEvent({
+    id: 100,
+    marketType: "group",
+    title: "Grouped event",
+  });
+  const child = makeEvent({
+    id: 101,
+    marketType: "single",
+    title: "Grouped child",
+    groupId: 100,
+  });
+
+  const ordered = orderLimitlessMarketsForGrouping([child, parent]);
+  assert.equal(ordered[0]?.id, 100);
+  assert.equal(ordered[1]?.id, 101);
+
+  const context = resolveLimitlessEventContext(child, parent);
+  assert.equal(context.eventId, "100");
+  assert.equal(context.eventSource.id, 100);
+  assert.equal(context.groupedSingle, true);
+  assert.equal(context.missingGroupParent, false);
+});
+
+test("Limitless grouped child falls back to itself when parent is unavailable", () => {
+  const child = makeEvent({
+    id: 101,
+    marketType: "single",
+    title: "Grouped child",
+    groupId: 100,
+  });
+
+  const context = resolveLimitlessEventContext(child);
+  assert.equal(context.eventId, "101");
+  assert.equal(context.eventSource.id, 101);
+  assert.equal(context.groupedSingle, false);
+  assert.equal(context.missingGroupParent, true);
 });
 
 test("Limitless active payload parser keeps valid markets and reports malformed rows", () => {
@@ -300,6 +345,23 @@ test("mapToUnifiedMarket falls back to event signals when market categories are 
   });
   const unified = mapToUnifiedMarket(market, String(event.id), event);
   assert.equal(unified.category, "politics");
+});
+
+test("mapToUnifiedMarket maps grouped children to parent event and keeps group metadata", () => {
+  const event = makeEvent({
+    id: 100,
+    marketType: "group",
+    title: "World Cup Winner",
+  });
+  const market = makeMarket({
+    id: 101,
+    groupId: 100,
+    title: "Austria",
+  });
+
+  const unified = mapToUnifiedMarket(market, String(event.id), event);
+  assert.equal(unified.event_id, "limitless:100");
+  assert.equal((unified.metadata as { groupId?: unknown }).groupId, "100");
 });
 
 test("mapToUnifiedEvent suppresses AMM liquidity in unified rows", () => {

@@ -4,6 +4,7 @@ import type {
   LimitlessEventRow,
   LimitlessMarketRow,
 } from "./limitless-repo.js";
+import { resolveLimitlessGroupId } from "./grouping.js";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
 
@@ -595,6 +596,9 @@ export function mapLimitlessMarketRow(
     market.collateralToken?.decimals,
   );
   const outcomeTokens = resolveOutcomeTokens(market);
+  const groupId =
+    resolveLimitlessGroupId(market) ??
+    (eventId !== String(market.id) ? eventId : undefined);
 
   return {
     id: String(market.id),
@@ -640,7 +644,7 @@ export function mapLimitlessMarketRow(
     trade_type: market.tradeType ?? "clob",
     created_at: parseDate(market.createdAt),
     updated_at: parseDate(market.updatedAt),
-    raw: market,
+    raw: groupId ? { ...market, groupId } : market,
   };
 }
 
@@ -756,6 +760,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const image = pickImage(lm);
   const icon = pickIcon(lm);
   const venueInfo = extractVenueInfo(lm);
+  const groupId = resolveLimitlessGroupId(lm);
   const category = resolveLimitlessCategory({
     categories: lm.categories,
     tags: lm.tags,
@@ -780,6 +785,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     metadata: {
       tradeType,
       marketType: lm.marketType,
+      groupId,
       address: lm.address ?? undefined,
       negRiskRequestId: lm.negRiskRequestId ?? undefined,
       negRiskMarketId: lm.negRiskMarketId ?? undefined,
@@ -837,6 +843,9 @@ export function mapToUnifiedMarket(
   const image = pickImage(market);
   const icon = pickIcon(market);
   const venueInfo = extractVenueInfo(market);
+  const groupId =
+    resolveLimitlessGroupId(market) ??
+    (event && event.marketType === "group" ? String(event.id) : undefined);
   const category = resolveLimitlessCategory({
     categories: market.categories,
     tags: market.tags,
@@ -871,6 +880,7 @@ export function mapToUnifiedMarket(
     metadata: {
       tradeType,
       marketType: market.marketType,
+      groupId,
       address: market.address ?? undefined,
       negRiskRequestId: market.negRiskRequestId ?? undefined,
       negRiskMarketId:

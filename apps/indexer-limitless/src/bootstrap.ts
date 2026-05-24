@@ -20,6 +20,11 @@ import {
   upsertLimitlessMarket,
 } from "./limitless-repo.js";
 import {
+  orderLimitlessMarketsForGrouping,
+  resolveLimitlessEventContext,
+  resolveLimitlessGroupId,
+} from "./grouping.js";
+import {
   mapLimitlessEventRow,
   mapLimitlessMarketRow,
   mapToUnifiedEvent,
@@ -48,7 +53,11 @@ import {
 } from "@hunch/infra";
 import { pool } from "./db.js";
 import { ensureRedis, redis } from "./redis.js";
-import type { TLimitlessMarket, TLimitlessMarketItem } from "./types.js";
+import {
+  LimitlessMarket,
+  type TLimitlessMarket,
+  type TLimitlessMarketItem,
+} from "./types.js";
 import type { WsTargets } from "./wsMarket.js";
 
 const detailCache = new Map<string, TLimitlessMarket>();
@@ -243,6 +252,7 @@ function mergeMarket(
       (base as TLimitlessMarket).negRiskRequestId ?? detail?.negRiskRequestId,
     negRiskMarketId:
       (base as TLimitlessMarket).negRiskMarketId ?? detail?.negRiskMarketId,
+    groupId: (base as TLimitlessMarket).groupId ?? detail?.groupId,
     prices: (base as TLimitlessMarket).prices ?? detail?.prices,
     tokens: detail?.tokens ?? (base as TLimitlessMarket).tokens,
     markets: detail?.markets ?? (base as TLimitlessMarket).markets,
@@ -253,6 +263,33 @@ function mergeMarket(
     marketType: (base as TLimitlessMarket).marketType ?? detail?.marketType,
   };
   return merged;
+}
+
+async function loadLimitlessGroupParent(
+  groupId: string,
+): Promise<TLimitlessMarket | null> {
+  const result = await pool.query<{ raw: unknown }>(
+    `
+      select raw
+      from limitless_events
+      where id = $1
+        and market_type = 'group'
+      limit 1
+    `,
+    [groupId],
+  );
+  const raw = result.rows[0]?.raw;
+  if (!raw) return null;
+
+  const parsed = LimitlessMarket.safeParse(raw);
+  if (!parsed.success) {
+    log.warn("Limitless grouped child parent raw failed to parse", {
+      groupId,
+      error: parsed.error.message,
+    });
+    return null;
+  }
+  return parsed.data;
 }
 
 async function getMarketDetail(slug?: string | null) {
@@ -839,12 +876,33 @@ function resolveHotMarketRefs(
 
 async function processLimitlessMarket(
   mergedTop: TLimitlessMarket,
-  options: { publishMarketState?: boolean; refreshOrderbookTop?: boolean } = {},
+  options: {
+    publishMarketState?: boolean;
+    refreshOrderbookTop?: boolean;
+    groupParent?: TLimitlessMarket | null;
+  } = {},
 ): Promise<{ eventId: string; marketCount: number }> {
-  const eventRow = mapLimitlessEventRow(mergedTop);
+  let eventContext = resolveLimitlessEventContext(
+    mergedTop,
+    options.groupParent,
+  );
+  if (eventContext.missingGroupParent && eventContext.groupId) {
+    const loadedParent = await loadLimitlessGroupParent(eventContext.groupId);
+    eventContext = resolveLimitlessEventContext(mergedTop, loadedParent);
+    if (eventContext.missingGroupParent) {
+      log.warn("Limitless grouped child processed without known parent", {
+        marketId: mergedTop.id,
+        groupId: eventContext.groupId,
+        title: mergedTop.title,
+      });
+    }
+  }
+
+  const eventSource = eventContext.eventSource;
+  const eventRow = mapLimitlessEventRow(eventSource);
   const eventId = await upsertLimitlessEvent(eventRow);
 
-  const unifiedEventRow = mapToUnifiedEvent(mergedTop);
+  const unifiedEventRow = mapToUnifiedEvent(eventSource);
   await upsertUnifiedEvent(pool, unifiedEventRow);
 
   let marketCount = 0;
@@ -870,8 +928,8 @@ async function processLimitlessMarket(
 
     const unifiedMarketRow = mapToUnifiedMarket(
       mergedTop,
-      String(mergedTop.id),
-      mergedTop,
+      eventContext.eventId,
+      eventSource,
     );
     if (
       (options.refreshOrderbookTop ?? true) &&
@@ -1046,7 +1104,14 @@ async function processFetchedMarkets(
   let failedEvents = 0;
   const progressEvery = Math.max(0, opts.progressEvery ?? 0);
 
+  const groupParents = new Map<string, TLimitlessMarket>();
   for (const lm of markets) {
+    if (lm.marketType === "group") {
+      groupParents.set(String(lm.id), lm);
+    }
+  }
+
+  for (const lm of orderLimitlessMarketsForGrouping(markets)) {
     try {
       const needsDetail =
         lm.marketType === "group"
@@ -1062,9 +1127,15 @@ async function processFetchedMarkets(
           ? await getMarketDetail(lm.slug)
           : null;
       const mergedTop = mergeMarket(lm, detail);
+      if (mergedTop.marketType === "group") {
+        groupParents.set(String(mergedTop.id), mergedTop);
+      }
+      const groupId = resolveLimitlessGroupId(mergedTop);
 
       const { eventId, marketCount: processedMarkets } =
-        await processLimitlessMarket(mergedTop);
+        await processLimitlessMarket(mergedTop, {
+          groupParent: groupId ? groupParents.get(groupId) : undefined,
+        });
       eventCount += 1;
       marketCount += processedMarkets;
 
