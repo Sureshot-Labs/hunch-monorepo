@@ -720,7 +720,7 @@ const tests: TestCase[] = [
         const result = await handlePrivyDepositWebhook(db, {
           ...basePayload,
           caip2: "eip155:8453",
-          sender: "0xCad97616f91872C02BA3553dB315Db4015cBE850",
+          sender: "0x0f7ae28de1c8532170ad4ee566b5801485c13a0e",
           transaction_hash: "base-across-fill-tx",
           idempotency_key: "deposit-key-base-across-fill",
         });
@@ -747,7 +747,7 @@ const tests: TestCase[] = [
         const result = await handlePrivyDepositWebhook(db, {
           ...basePayload,
           caip2: "eip155:137",
-          sender: "0xB5b25e9b8C5c2d4E03CA0A79e42AA226cDEC3FF2",
+          sender: "0x0000000000000000000000000000000000000000",
           transaction_hash: "polygon-across-fill-tx",
           idempotency_key: "deposit-key-polygon-across-fill",
         });
