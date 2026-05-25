@@ -990,6 +990,8 @@ function normalizeSignalTargetMarket(params: {
   expirationTime: unknown;
   bestBid: unknown;
   bestAsk: unknown;
+  tokenYes: string | null;
+  tokenNo: string | null;
   bestBidYes: unknown;
   bestAskYes: unknown;
   bestBidNo: unknown;
@@ -1013,6 +1015,8 @@ function normalizeSignalTargetMarket(params: {
     marketBestBid: toNumber(params.bestBid),
     marketBestAsk: toNumber(params.bestAsk),
     lastPrice: toNumber(params.lastPrice),
+    tokenYes: params.tokenYes,
+    tokenNo: params.tokenNo,
     yesBid,
     yesAsk,
     noBid,
@@ -1067,6 +1071,8 @@ async function enrichSignalSummaryTargetMarkets(
         expirationTime: row.expiration_time,
         bestBid: row.best_bid,
         bestAsk: row.best_ask,
+        tokenYes: row.token_yes ?? null,
+        tokenNo: row.token_no ?? null,
         bestBidYes: row.best_bid_yes,
         bestAskYes: row.best_ask_yes,
         bestBidNo: row.best_bid_no,
@@ -1726,6 +1732,7 @@ function applySignalSummaryToEvents(
       ...event,
       signalCount: summary?.signalCount ?? 0,
       topSignal: summary?.topSignal ?? null,
+      signalsPreview: summary?.signalsPreview,
     };
   });
 }

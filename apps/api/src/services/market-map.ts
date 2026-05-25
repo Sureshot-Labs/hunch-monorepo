@@ -47,6 +47,8 @@ export type MarketMapSignalTargetMarket = {
   marketBestBid: number | null;
   marketBestAsk: number | null;
   lastPrice: number | null;
+  tokenYes?: string | null;
+  tokenNo?: string | null;
   yesBid: number | null;
   yesAsk: number | null;
   noBid: number | null;
@@ -217,6 +219,7 @@ export type MarketMapEventSummary = MarketMapActivityMetricFields & {
   marketsPreview?: MarketMapEventMarketPreview[];
   signalCount?: number;
   topSignal?: MarketMapSignalSummary | null;
+  signalsPreview?: MarketMapSignalSummary[];
   activitySparklines?: MarketMapActivitySparklines;
   volume24h: number;
   liquidity: number;

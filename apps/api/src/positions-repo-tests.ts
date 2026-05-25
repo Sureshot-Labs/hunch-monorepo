@@ -6,9 +6,14 @@ import crypto from "node:crypto";
 import { pool } from "./db.js";
 import {
   fetchPositionsForUserWallet,
+  setPositionHidden,
   syncWalletPositionsFromTokenBalances,
   updatePositionMetrics,
 } from "./repos/positions-repo.js";
+import {
+  createResolvedPositionNotificationIfVisible,
+  notifyResolvedPositions,
+} from "./services/positions-notifications.js";
 import { reconcileExactPositionBalance } from "./services/positions-optimistic.js";
 
 async function test(name: string, fn: () => Promise<void>) {
@@ -43,13 +48,145 @@ async function createTestUser(): Promise<string> {
   return userId;
 }
 
-async function cleanupPositionTest(userId: string, tokenIds: string[]) {
+async function cleanupPositionTest(
+  userId: string,
+  tokenIds: string[],
+  marketIds: string[] = [],
+) {
+  await pool.query("delete from notifications where user_id = $1", [userId]);
   await pool.query("delete from positions where user_id = $1", [userId]);
   await pool.query(
     "delete from unified_tokens where token_id = any($1::text[])",
     [tokenIds],
   );
+  if (marketIds.length > 0) {
+    await pool.query("delete from unified_markets where id = any($1::text[])", [
+      marketIds,
+    ]);
+    await pool.query(
+      "delete from unified_events where id = any($1::text[])",
+      [marketIds.map((marketId) => `event-${marketId}`)],
+    );
+  }
   await pool.query("delete from users where id = $1", [userId]);
+}
+
+async function insertResolvedLimitlessMarket(params: {
+  marketId: string;
+  tokenId: string;
+  outcomeSide: "YES" | "NO";
+  resolvedOutcome: "YES" | "NO";
+}): Promise<void> {
+  const eventId = `event-${params.marketId}`;
+  await pool.query(
+    `
+      insert into unified_events (
+        id,
+        venue,
+        venue_event_id,
+        title,
+        status,
+        start_date,
+        end_date,
+        volume_total,
+        volume_24h,
+        liquidity,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'limitless',
+        $1,
+        'Resolved test event',
+        'SETTLED',
+        now() - interval '2 days',
+        now() - interval '1 day',
+        0,
+        0,
+        0,
+        $2,
+        now(),
+        now()
+      )
+    `,
+    [eventId, `slug-${eventId}`],
+  );
+
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        token_yes,
+        token_no,
+        slug,
+        resolved_outcome,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'limitless',
+        $1,
+        $2,
+        'Resolved test market',
+        'SETTLED',
+        'binary',
+        now() - interval '2 days',
+        now() - interval '1 day',
+        now() - interval '1 day',
+        0,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        '["Yes","No"]',
+        case when $3 = 'YES' then $4 else $5 end,
+        case when $3 = 'NO' then $4 else $5 end,
+        $6,
+        $7,
+        now(),
+        now()
+      )
+    `,
+    [
+      params.marketId,
+      eventId,
+      params.outcomeSide,
+      params.tokenId,
+      `other-${params.tokenId}`,
+      `slug-${params.marketId}`,
+      params.resolvedOutcome,
+    ],
+  );
+
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values ($1, 'limitless', $2, $3)
+    `,
+    [params.tokenId, params.marketId, params.outcomeSide],
+  );
 }
 
 await test("position sync protection does not extend stale-balance grace forever", async () => {
@@ -695,6 +832,442 @@ await test("exact position reconciliation flattens empty AMM balance", async () 
     assert.equal(flatRow.rows[0]?.side, "FLAT");
     assert.equal(Number(flatRow.rows[0]?.size), 0);
     assert.equal(flatRow.rows[0]?.average_price, null);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("exact position reconciliation preserves hidden resolved losses", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await pool.query(
+      `
+        insert into unified_tokens(token_id, venue, market_id, side)
+        values ($1, 'limitless', $2, 'YES')
+      `,
+      [tokenId, marketId],
+    );
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          is_hidden,
+          hidden_reason,
+          hidden_at,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'LONG',
+          1.5,
+          0.52,
+          0,
+          0,
+          true,
+          'user',
+          now(),
+          now(),
+          now(),
+          now()
+        )
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    const result = await reconcileExactPositionBalance(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenId,
+      size: 1.5,
+      averagePrice: 0.52,
+    });
+
+    assert.equal(result.applied, true);
+
+    const hiddenRow = await pool.query<{
+      is_hidden: boolean | null;
+      hidden_reason: string | null;
+      hidden_at: Date | null;
+    }>(
+      `
+        select is_hidden, hidden_reason, hidden_at
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    assert.equal(hiddenRow.rows[0]?.is_hidden, true);
+    assert.equal(hiddenRow.rows[0]?.hidden_reason, "user");
+    assert.ok(hiddenRow.rows[0]?.hidden_at);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("resolved visible loss creates one notification", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "NO",
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'LONG',
+          1,
+          0.5,
+          0,
+          0,
+          now(),
+          now(),
+          now()
+        )
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    const created = await notifyResolvedPositions(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+    });
+    assert.equal(created, 1);
+
+    const notificationRow = await pool.query<{
+      title: string;
+      body: string;
+      read_at: Date | null;
+    }>(
+      `
+        select title, body, read_at
+        from notifications
+        where user_id = $1 and type = 'position_resolved'
+      `,
+      [userId],
+    );
+    assert.equal(notificationRow.rowCount, 1);
+    assert.equal(notificationRow.rows[0]?.title, "Position resolved (loss)");
+    assert.equal(notificationRow.rows[0]?.body, "Resolved with no payout");
+    assert.equal(notificationRow.rows[0]?.read_at, null);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId], [marketId]);
+  }
+});
+
+await test("resolved hidden loss creates no notification", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "NO",
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          is_hidden,
+          hidden_reason,
+          hidden_at,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'LONG',
+          1,
+          0.5,
+          0,
+          0,
+          true,
+          'user',
+          now(),
+          now(),
+          now(),
+          now()
+        )
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    const created = await notifyResolvedPositions(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+    });
+    assert.equal(created, 0);
+
+    const notificationRow = await pool.query(
+      `
+        select id
+        from notifications
+        where user_id = $1 and type = 'position_resolved'
+      `,
+      [userId],
+    );
+    assert.equal(notificationRow.rowCount, 0);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId], [marketId]);
+  }
+});
+
+await test("resolved notification insert skips position hidden after selection", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "NO",
+    });
+
+    const positionInsert = await pool.query<{
+      id: string;
+      token_id: string;
+      wallet_address: string;
+      venue: string;
+      market_id: string | null;
+    }>(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'LONG',
+          1,
+          0.5,
+          0,
+          0,
+          now(),
+          now(),
+          now()
+        )
+        returning id, token_id, wallet_address, venue, $4::text as market_id
+      `,
+      [userId, walletAddress, tokenId, marketId],
+    );
+    const selectedPosition = positionInsert.rows[0];
+    assert.ok(selectedPosition);
+
+    await setPositionHidden(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenId,
+      hidden: true,
+      reason: "user",
+    });
+
+    const notification =
+      await createResolvedPositionNotificationIfVisible(pool, {
+        userId,
+        position: selectedPosition,
+        resolvedOutcome: "NO",
+        outcomeSide: "YES",
+      });
+
+    assert.equal(notification, null);
+
+    const notificationRow = await pool.query(
+      `
+        select id
+        from notifications
+        where user_id = $1 and type = 'position_resolved'
+      `,
+      [userId],
+    );
+    assert.equal(notificationRow.rowCount, 0);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId], [marketId]);
+  }
+});
+
+await test("hiding a resolved position marks its notification read", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await pool.query(
+      `
+        insert into unified_tokens(token_id, venue, market_id, side)
+        values ($1, 'limitless', $2, 'YES')
+      `,
+      [tokenId, marketId],
+    );
+
+    const positionInsert = await pool.query<{ id: string }>(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'LONG',
+          1,
+          0.5,
+          0,
+          0,
+          now(),
+          now(),
+          now()
+        )
+        returning id
+      `,
+      [userId, walletAddress, tokenId],
+    );
+    const positionId = positionInsert.rows[0]?.id;
+    assert.ok(positionId);
+
+    await pool.query(
+      `
+        insert into notifications (
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          dedupe_key
+        )
+        values (
+          $1,
+          'position_resolved',
+          'Position resolved (loss)',
+          'Resolved with no payout',
+          'warning',
+          $2
+        )
+      `,
+      [userId, `position_resolved:${positionId}`],
+    );
+
+    await setPositionHidden(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenId,
+      hidden: true,
+      reason: "user",
+    });
+
+    const notificationRow = await pool.query<{ read_at: Date | null }>(
+      `
+        select read_at
+        from notifications
+        where user_id = $1 and dedupe_key = $2
+      `,
+      [userId, `position_resolved:${positionId}`],
+    );
+
+    assert.ok(notificationRow.rows[0]?.read_at);
   } finally {
     await cleanupPositionTest(userId, [tokenId]);
   }

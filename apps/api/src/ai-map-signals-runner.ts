@@ -7,6 +7,11 @@ import { z } from "zod";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { runMapSignals } from "./ai-map-signals-run.js";
+import { closeRedis } from "./redis.js";
+import {
+  flushPendingMarketRefreshes,
+  requestMarketRefreshForMarketRefs,
+} from "./lib/market-refresh.js";
 import { marketMapActiveKey } from "./services/market-map.js";
 import { resolveMapSignalsPolicy } from "./services/runtime-policies.js";
 
@@ -676,6 +681,52 @@ async function persistSignalNotes(params: {
   return stats;
 }
 
+function collectPublishTargetMarketIds(
+  report: SignalsReportLike,
+  maxPublishPerRun: number,
+): string[] {
+  return Array.from(
+    new Set(
+      ensureArray<SignalsReportSignal>(report.signals)
+        .filter((signal) => signal.decision === "publish_candidate")
+        .slice(0, maxPublishPerRun)
+        .map((signal) => signal.targetMarketId?.trim() || "")
+        .filter(Boolean),
+    ),
+  );
+}
+
+async function enqueueSignalTargetMarketRefreshes(params: {
+  report: SignalsReportLike;
+  maxPublishPerRun: number;
+}): Promise<void> {
+  const marketIds = collectPublishTargetMarketIds(
+    params.report,
+    params.maxPublishPerRun,
+  );
+  if (marketIds.length === 0) return;
+
+  try {
+    requestMarketRefreshForMarketRefs({
+      db: pool,
+      marketIds,
+      logLabel: "map-signals-runner",
+    });
+    await flushPendingMarketRefreshes();
+    console.log("[map-signals-runner] queued target market price refresh", {
+      marketsQueued: marketIds.length,
+    });
+  } catch (error) {
+    console.warn(
+      "[map-signals-runner] target market price refresh enqueue skipped",
+      {
+        marketsQueued: marketIds.length,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
+}
+
 function printHelp(): void {
   console.log(`Usage: pnpm -C hunch-monorepo -F api run ai:map-signals:runner -- [options]
 
@@ -824,6 +875,7 @@ async function main() {
     try {
       await releaseLockAndRedis();
     } finally {
+      await closeRedis();
       await pool.end();
       process.exit(130);
     }
@@ -1301,6 +1353,13 @@ async function main() {
             errors: 0,
           };
 
+      if (shouldPersistNotes) {
+        await enqueueSignalTargetMarketRefreshes({
+          report,
+          maxPublishPerRun: config.maxPublishPerRun,
+        });
+      }
+
       const finishedAt = Date.now();
       const runEntry: RunEntry = {
         runnerRunId,
@@ -1531,6 +1590,7 @@ async function main() {
       }
     }
     await releaseLockAndRedis();
+    await closeRedis();
     await pool.end();
   }
 }

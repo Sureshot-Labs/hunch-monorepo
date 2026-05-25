@@ -1,5 +1,10 @@
 import type { Pool } from "@hunch/infra";
-import { createNotificationSafe } from "./notifications.js";
+import type { NotificationRow } from "../repos/notifications-repo.js";
+import {
+  buildNotificationPayload,
+  publishNotification,
+  type NotificationPayload,
+} from "./notifications.js";
 
 type ResolvedPositionRow = {
   id: string;
@@ -11,10 +16,107 @@ type ResolvedPositionRow = {
   resolved_outcome: string | null;
 };
 
-function normalizeOutcome(value: string | null): string | null {
+function normalizeOutcome(value: string | null): "YES" | "NO" | null {
   if (!value) return null;
   const trimmed = value.trim().toUpperCase();
   return trimmed === "YES" || trimmed === "NO" ? trimmed : null;
+}
+
+export async function createResolvedPositionNotificationIfVisible(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    position: Pick<
+      ResolvedPositionRow,
+      "id" | "token_id" | "wallet_address" | "venue" | "market_id"
+    >;
+    resolvedOutcome: "YES" | "NO";
+    outcomeSide: "YES" | "NO";
+  },
+): Promise<NotificationPayload | null> {
+  const won = inputs.resolvedOutcome === inputs.outcomeSide;
+  const title = won ? "Position resolved (win)" : "Position resolved (loss)";
+  const body = won ? "Claim available" : "Resolved with no payout";
+  const severity = won ? "success" : "warning";
+  const data = {
+    venue: inputs.position.venue,
+    marketId: inputs.position.market_id ?? null,
+    tokenId: inputs.position.token_id,
+    walletAddress: inputs.position.wallet_address,
+    resolvedOutcome: inputs.resolvedOutcome,
+    outcomeSide: inputs.outcomeSide,
+    result: won ? "won" : "lost",
+  };
+  const dedupeKey = `position_resolved:${inputs.position.id}`;
+
+  try {
+    const { rows } = await pool.query<NotificationRow>(
+      `
+        insert into notifications (
+          id,
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          data,
+          dedupe_key,
+          created_at,
+          updated_at
+        )
+        select
+          gen_random_uuid(),
+          $1,
+          'position_resolved',
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          now(),
+          now()
+        where exists (
+          select 1
+          from positions p
+          where p.id = $7
+            and p.user_id = $1
+            and p.position_scope = 'own'
+            and p.size > 0
+            and (p.is_hidden is null or p.is_hidden = false)
+        )
+        on conflict (user_id, dedupe_key) do nothing
+        returning
+          id,
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          data,
+          read_at,
+          created_at,
+          updated_at
+      `,
+      [
+        inputs.userId,
+        title,
+        body,
+        severity,
+        data,
+        dedupeKey,
+        inputs.position.id,
+      ],
+    );
+
+    const row = rows[0];
+    if (!row) return null;
+    const payload = buildNotificationPayload(row);
+    await publishNotification(row.user_id, payload);
+    return payload;
+  } catch (error) {
+    console.warn("[position-notifications] failed", String(error));
+    return null;
+  }
 }
 
 export async function notifyResolvedPositions(
@@ -53,27 +155,12 @@ export async function notifyResolvedPositions(
     const resolved = normalizeOutcome(row.resolved_outcome);
     const side = normalizeOutcome(row.outcome_side);
     if (!resolved || !side) continue;
-    const won = resolved === side;
 
-    const title = won ? "Position resolved (win)" : "Position resolved (loss)";
-    const body = won ? "Claim available" : "Resolved with no payout";
-
-    const result = await createNotificationSafe(pool, {
+    const result = await createResolvedPositionNotificationIfVisible(pool, {
       userId: inputs.userId,
-      type: "position_resolved",
-      title,
-      body,
-      severity: won ? "success" : "warning",
-      data: {
-        venue: row.venue,
-        marketId: row.market_id ?? null,
-        tokenId: row.token_id,
-        walletAddress: row.wallet_address,
-        resolvedOutcome: resolved,
-        outcomeSide: side,
-        result: won ? "won" : "lost",
-      },
-      dedupeKey: `position_resolved:${row.id}`,
+      position: row,
+      resolvedOutcome: resolved,
+      outcomeSide: side,
     });
 
     if (result) created += 1;

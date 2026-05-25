@@ -342,9 +342,18 @@ export async function reconcileExactPositionBalance(
             side = 'LONG',
             size = excluded.size,
             average_price = coalesce(positions.average_price, excluded.average_price),
-            is_hidden = false,
-            hidden_reason = null,
-            hidden_at = null,
+            is_hidden = case
+              when positions.side = 'FLAT' or positions.size <= 0 then false
+              else positions.is_hidden
+            end,
+            hidden_reason = case
+              when positions.side = 'FLAT' or positions.size <= 0 then null
+              else positions.hidden_reason
+            end,
+            hidden_at = case
+              when positions.side = 'FLAT' or positions.size <= 0 then null
+              else positions.hidden_at
+            end,
             last_updated_at = case
               when positions.side is distinct from 'LONG'
                 or positions.size is distinct from excluded.size
@@ -372,9 +381,18 @@ export async function reconcileExactPositionBalance(
           side = 'LONG',
           size = $2,
           average_price = coalesce(positions.average_price, $3),
-          is_hidden = false,
-          hidden_reason = null,
-          hidden_at = null,
+          is_hidden = case
+            when positions.side = 'FLAT' or positions.size <= 0 then false
+            else positions.is_hidden
+          end,
+          hidden_reason = case
+            when positions.side = 'FLAT' or positions.size <= 0 then null
+            else positions.hidden_reason
+          end,
+          hidden_at = case
+            when positions.side = 'FLAT' or positions.size <= 0 then null
+            else positions.hidden_at
+          end,
           last_updated_at = case
             when positions.side is distinct from 'LONG'
               or positions.size is distinct from $2

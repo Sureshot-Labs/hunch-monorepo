@@ -40,6 +40,8 @@ type NodeEventsPayload = {
         marketId: string;
         marketBestBid: number | null;
         marketBestAsk: number | null;
+        tokenYes?: string | null;
+        tokenNo?: string | null;
         yesBid: number | null;
         yesAsk: number | null;
         noBid: number | null;
@@ -67,6 +69,8 @@ type MarketMapPayload = {
           marketId: string;
           marketBestBid: number | null;
           marketBestAsk: number | null;
+          tokenYes?: string | null;
+          tokenNo?: string | null;
           yesBid: number | null;
           yesAsk: number | null;
           noBid: number | null;
@@ -252,7 +256,9 @@ async function insertUnifiedMarketForSignal(params: {
   venueMarketId: string;
   eventId: string;
   title: string;
-}): Promise<void> {
+}): Promise<{ tokenYes: string; tokenNo: string }> {
+  const tokenYes = makeToken(`yes-${params.marketId}`);
+  const tokenNo = makeToken(`no-${params.marketId}`);
   await pool.query(
     `
       insert into unified_markets (
@@ -295,11 +301,12 @@ async function insertUnifiedMarketForSignal(params: {
       params.venueMarketId,
       params.eventId,
       params.title,
-      makeToken(`yes-${params.marketId}`),
-      makeToken(`no-${params.marketId}`),
+      tokenYes,
+      tokenNo,
       makeToken(`slug-${params.marketId}`),
     ],
   );
+  return { tokenYes, tokenNo };
 }
 
 async function insertUnifiedEventForSignal(params: {
@@ -644,7 +651,7 @@ async function main() {
       venueEventId: `venue-event-a-${suiteId}`,
       title: "Alpha event",
     });
-    await insertUnifiedMarketForSignal({
+    const signalMarketTokens = await insertUnifiedMarketForSignal({
       marketId: signalMarketId,
       venue: "polymarket",
       venueMarketId: `venue-market-signal-${suiteId}`,
@@ -846,6 +853,14 @@ async function main() {
     );
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(
+      signaledEvent?.topSignal?.targetMarket?.tokenYes,
+      signalMarketTokens.tokenYes,
+    );
+    assert.equal(
+      signaledEvent?.topSignal?.targetMarket?.tokenNo,
+      signalMarketTokens.tokenNo,
+    );
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesAsk, 0.55);
     assert.ok(
@@ -879,6 +894,14 @@ async function main() {
     assert.equal(previewSignal?.targetMarket?.marketId, signalMarketId);
     assert.equal(previewSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(previewSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(
+      previewSignal?.targetMarket?.tokenYes,
+      signalMarketTokens.tokenYes,
+    );
+    assert.equal(
+      previewSignal?.targetMarket?.tokenNo,
+      signalMarketTokens.tokenNo,
+    );
     assert.equal(previewSignals?.length, 2);
     assert.equal(previewSignals?.[0]?.title, "Alpha follow-up signal");
     assert.equal(previewSignals?.[1]?.title, "Alpha signal");

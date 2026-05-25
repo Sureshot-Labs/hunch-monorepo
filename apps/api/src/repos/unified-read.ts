@@ -2652,6 +2652,8 @@ export type MarketSignalPricingRow = {
   expiration_time: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  token_yes: string | null;
+  token_no: string | null;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
   best_bid_no: unknown;
@@ -2790,6 +2792,8 @@ export async function fetchMarketSignalPricingByIds(
       m.expiration_time,
       m.best_bid,
       m.best_ask,
+      mt.token_yes,
+      mt.token_no,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
       no_top.best_bid as best_bid_no,

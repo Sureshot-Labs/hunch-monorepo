@@ -537,7 +537,7 @@ export function buildRewardNotification(input: {
   };
 }
 
-function buildPayload(row: {
+export function buildNotificationPayload(row: {
   id: string;
   type: string;
   title: string;
@@ -559,7 +559,7 @@ function buildPayload(row: {
   };
 }
 
-async function publishNotification(
+export async function publishNotification(
   userId: string,
   payload: NotificationPayload,
 ): Promise<void> {
@@ -577,7 +577,7 @@ export async function createNotificationSafe(
   try {
     const row = await insertNotification(db, input);
     if (!row) return null;
-    const payload = buildPayload(row);
+    const payload = buildNotificationPayload(row);
     if (options.publish !== false) {
       await publishNotification(row.user_id, payload);
     }

@@ -545,6 +545,33 @@ export async function setPositionHidden(
     ],
   );
 
+  if (inputs.hidden && (result.rowCount ?? 0) > 0) {
+    const notificationWalletClause = isEthAddress(inputs.walletAddress)
+      ? "lower(p.wallet_address) = lower($4)"
+      : "p.wallet_address = $4";
+
+    await pool.query(
+      `
+        update notifications n
+        set
+          read_at = coalesce(n.read_at, now()),
+          updated_at = now()
+        where n.user_id = $1
+          and n.type = 'position_resolved'
+          and n.dedupe_key in (
+            select 'position_resolved:' || p.id::text
+            from positions p
+            where p.user_id = $1
+              and p.venue = $2
+              and p.token_id = $3
+              and p.position_scope = 'own'
+              and ${notificationWalletClause}
+          )
+      `,
+      [inputs.userId, inputs.venue, inputs.tokenId, inputs.walletAddress],
+    );
+  }
+
   return result.rowCount ?? 0;
 }
 
