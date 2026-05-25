@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { DbQuery } from "../db.js";
 import {
   clearUserReferralCodeIfMatches,
+  countReferralCodeReferrerMismatches,
   countReferralsForReferralCode,
   createCampaignReferralCode,
   ensureUserReferralCodePolicy,
@@ -31,6 +32,7 @@ import {
   insertReferral,
   insertRewardClaim,
   listReferralCodes,
+  moveReferralCodeAttribution,
   retireActiveUserReferralCodes,
   retireReferralCodeForUsageLimit,
   updateReferralCodePolicy,
@@ -742,8 +744,15 @@ export async function setReferralCodeForUser(
   ).sort((a, b) => a.localeCompare(b));
 
   let targetExists = false;
+  const lockedUsers = new Map<
+    string,
+    { id: string; referral_code: string | null }
+  >();
   for (const userId of lockIds) {
     const row = await lockUserReferralCodeByUserId(pool, userId);
+    if (row) {
+      lockedUsers.set(userId, row);
+    }
     if (userId === targetId && row) {
       targetExists = true;
     }
@@ -758,9 +767,6 @@ export async function setReferralCodeForUser(
     codeRow?.policy_type === "user" ? codeRow.owner_user_id : null;
 
   if (codeRow) {
-    if (!codeRow.is_active || codeRow.retired_at) {
-      throw createReferralCodeError(409, "Referral code is retired");
-    }
     if (codeRow.policy_type === "campaign") {
       throw createReferralCodeError(409, "Referral code is reserved");
     }
@@ -774,7 +780,29 @@ export async function setReferralCodeForUser(
   }
 
   let transferredFromUserId: string | null = null;
+  const historicalReferrals = codeRow
+    ? await countReferralsForReferralCode(pool, codeRow.referral_code_id)
+    : 0;
+
   if (codeRow && ownerId === targetId) {
+    if (!codeRow.is_active || codeRow.retired_at) {
+      await retireActiveUserReferralCodes(
+        pool,
+        targetId,
+        "user_code_changed",
+      );
+      await pool.query(
+        `
+          update referral_codes
+          set policy_id = $2,
+              is_active = true,
+              retired_at = null,
+              retired_reason = null
+          where id = $1
+        `,
+        [codeRow.referral_code_id, codeRow.policy_id],
+      );
+    }
     await setUserReferralCode(pool, targetId, normalized);
     return {
       code: normalized,
@@ -784,17 +812,71 @@ export async function setReferralCodeForUser(
 
   if (codeRow && ownerId && ownerId !== targetId) {
     if (!inputs.forceTransfer) {
-      throw createReferralCodeError(409, "Referral code already taken");
-    }
-    const historicalReferrals = await countReferralsForReferralCode(
-      pool,
-      codeRow.referral_code_id,
-    );
-    if (historicalReferrals > 0) {
       throw createReferralCodeError(
         409,
-        "Referral code has historical referrals and cannot be transferred",
+        !codeRow.is_active || codeRow.retired_at
+          ? "Referral code is retired"
+          : "Referral code already taken",
       );
+    }
+    if (historicalReferrals > 0) {
+      const ownerCurrentRaw = lockedUsers.get(ownerId)?.referral_code;
+      const ownerCurrentCode = ownerCurrentRaw
+        ? normalizeReferralCode(ownerCurrentRaw)
+        : null;
+      if (!ownerCurrentCode || ownerCurrentCode === normalized) {
+        throw createReferralCodeError(
+          409,
+          "Original owner needs a different active referral code before this used code can be force transferred",
+        );
+      }
+
+      const replacementCode = await findReferralCodeByCode(
+        pool,
+        ownerCurrentCode,
+      );
+      if (
+        !replacementCode ||
+        replacementCode.referral_code_id === codeRow.referral_code_id ||
+        replacementCode.policy_type !== "user" ||
+        replacementCode.owner_user_id !== ownerId
+      ) {
+        throw createReferralCodeError(
+          409,
+          "Original owner replacement referral code is invalid",
+        );
+      }
+      if (!replacementCode.is_active || replacementCode.retired_at) {
+        throw createReferralCodeError(
+          409,
+          "Original owner replacement referral code is not active",
+        );
+      }
+
+      const mismatchCount = await countReferralCodeReferrerMismatches(pool, {
+        referralCodeId: codeRow.referral_code_id,
+        referrerUserId: ownerId,
+      });
+      if (mismatchCount > 0) {
+        throw createReferralCodeError(
+          409,
+          "Referral code has inconsistent historical referrals and cannot be moved automatically",
+        );
+      }
+
+      const moved = await moveReferralCodeAttribution(pool, {
+        sourceReferralCodeId: codeRow.referral_code_id,
+        sourceCode: normalized,
+        replacementReferralCodeId: replacementCode.referral_code_id,
+        replacementCode: replacementCode.code,
+        referrerUserId: ownerId,
+      });
+      if (moved.referralsMoved !== historicalReferrals) {
+        throw createReferralCodeError(
+          409,
+          "Referral code history changed during update, retry",
+        );
+      }
     }
     const targetPolicy = await ensureUserReferralCodePolicy(pool, targetId);
     await retireActiveUserReferralCodes(pool, targetId, "user_code_changed");
@@ -803,7 +885,7 @@ export async function setReferralCodeForUser(
       ownerId,
       normalized,
     );
-    if (cleared) {
+    if (cleared || historicalReferrals > 0) {
       transferredFromUserId = ownerId;
     }
     await pool.query(
@@ -822,6 +904,10 @@ export async function setReferralCodeForUser(
       code: normalized,
       transferredFromUserId,
     };
+  }
+
+  if (codeRow) {
+    throw createReferralCodeError(409, "Referral code is reserved");
   }
 
   try {

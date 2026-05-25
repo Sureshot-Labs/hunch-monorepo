@@ -618,6 +618,76 @@ export async function countReferralsForReferralCode(
   return Number(rows[0]?.total ?? 0);
 }
 
+export async function countReferralCodeReferrerMismatches(
+  pool: DbQuery,
+  inputs: { referralCodeId: string; referrerUserId: string },
+): Promise<number> {
+  const { rows } = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from referrals
+      where referral_code_id = $1
+        and referrer_user_id is distinct from $2::uuid
+    `,
+    [inputs.referralCodeId, inputs.referrerUserId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
+export async function moveReferralCodeAttribution(
+  pool: DbQuery,
+  inputs: {
+    sourceReferralCodeId: string;
+    sourceCode: string;
+    replacementReferralCodeId: string;
+    replacementCode: string;
+    referrerUserId: string;
+  },
+): Promise<{ referralsMoved: number; firstTradeConversionsMoved: number }> {
+  const { rows } = await pool.query<{
+    referrals_moved: string;
+    first_trade_conversions_moved: string;
+  }>(
+    `
+      with moved_referrals as (
+        update referrals r
+        set code = $4,
+            referral_code_id = $3,
+            updated_at = now()
+        where r.referral_code_id = $1
+          and r.referrer_user_id = $5
+        returning r.referred_user_id
+      ),
+      moved_first_trades as (
+        update referral_first_trade_conversions c
+        set code = $4,
+            updated_at = now()
+        from moved_referrals mr
+        where c.referred_user_id = mr.referred_user_id
+          and c.referrer_user_id = $5
+          and upper(c.code) = upper($2)
+        returning c.id
+      )
+      select
+        (select count(*)::text from moved_referrals) as referrals_moved,
+        (select count(*)::text from moved_first_trades) as first_trade_conversions_moved
+    `,
+    [
+      inputs.sourceReferralCodeId,
+      inputs.sourceCode,
+      inputs.replacementReferralCodeId,
+      inputs.replacementCode,
+      inputs.referrerUserId,
+    ],
+  );
+  return {
+    referralsMoved: Number(rows[0]?.referrals_moved ?? 0),
+    firstTradeConversionsMoved: Number(
+      rows[0]?.first_trade_conversions_moved ?? 0,
+    ),
+  };
+}
+
 export async function retireReferralCodeForUsageLimit(
   pool: DbQuery,
   referralCodeId: string,
@@ -861,6 +931,7 @@ export async function listReferralCodes(
 ): Promise<{ total: number; rows: ReferralCodeListRow[] }> {
   const params: PgParams = [];
   const whereParts: string[] = [];
+  const search = inputs.q?.trim() || null;
   if (inputs.q?.trim()) {
     params.push(`%${inputs.q.trim()}%`);
     const qIdx = params.length;
@@ -900,7 +971,23 @@ export async function listReferralCodes(
     params,
   );
 
-  const dataParams = [...params, inputs.limit, inputs.offset];
+  const dataParams = [...params];
+  let orderBySql = "rc.is_active desc, rc.updated_at desc, rc.code asc";
+  if (search) {
+    dataParams.push(search.toUpperCase());
+    const exactIdx = dataParams.length;
+    dataParams.push(`${search.toUpperCase()}%`);
+    const prefixIdx = dataParams.length;
+    orderBySql = `
+        case
+          when rc.code = $${exactIdx} then 0
+          when rc.code like $${prefixIdx} then 1
+          else 2
+        end asc,
+        ${orderBySql}
+      `;
+  }
+  dataParams.push(inputs.limit, inputs.offset);
   const { rows } = await pool.query<ReferralCodeListRow>(
     `
       select
@@ -933,7 +1020,7 @@ export async function listReferralCodes(
       left join users u
         on u.id = p.owner_user_id
       ${whereSql}
-      order by rc.is_active desc, rc.updated_at desc, rc.code asc
+      order by ${orderBySql}
       limit $${dataParams.length - 1}
       offset $${dataParams.length}
     `,

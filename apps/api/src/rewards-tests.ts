@@ -26,6 +26,7 @@ import {
   fetchUserTierPoints,
   fetchUserPoints,
   fetchUserVolume,
+  listReferralCodes as listReferralCodeRows,
   markQualifiedReferralsForUser,
   resolveRewardsReferralsOrderBy,
 } from "./repos/rewards.js";
@@ -51,27 +52,114 @@ function toNumber(value: bigint): number {
 }
 
 function createReferralDb(
-  seed: Array<{ id: string; referral_code: string | null }>,
-): import("./db.js").DbQuery {
+  seed: Array<{
+    id: string;
+    referral_code: string | null;
+    codeIsActive?: boolean;
+    codeRetiredAt?: Date | null;
+    codeRetiredReason?: string | null;
+    referralCount?: number;
+  }>,
+  options: {
+    extraCodes?: Array<{
+      code: string;
+      ownerUserId: string;
+      isActive?: boolean;
+      retiredAt?: Date | null;
+      retiredReason?: string | null;
+      referralCount?: number;
+    }>;
+    referrals?: Array<{
+      referredUserId: string;
+      referrerUserId: string | null;
+      code: string;
+      referralCodeId?: string;
+    }>;
+    firstTradeConversions?: Array<{
+      referredUserId: string;
+      referrerUserId: string | null;
+      code: string;
+    }>;
+  } = {},
+): import("./db.js").DbQuery & {
+  snapshot: () => {
+    users: Array<{ id: string; referral_code: string | null }>;
+    codes: Array<{
+      code: string;
+      policy_id: string;
+      is_active: boolean;
+      retired_at: Date | null;
+      retired_reason: string | null;
+      referral_count: number;
+    }>;
+    referrals: Array<{
+      referred_user_id: string;
+      referrer_user_id: string | null;
+      code: string;
+      referral_code_id: string;
+    }>;
+    firstTradeConversions: Array<{
+      referred_user_id: string;
+      referrer_user_id: string | null;
+      code: string;
+    }>;
+  };
+} {
   const users = seed.map((row) => ({ ...row }));
   const policies = users.map((user) => ({
     id: `policy-${user.id}`,
     policy_type: "user" as const,
     owner_user_id: user.id,
   }));
-  const codes = users
-    .filter((user) => user.referral_code)
-    .map((user) => ({
-      id: `code-${String(user.referral_code).toUpperCase()}`,
-      code: String(user.referral_code).toUpperCase(),
-      policy_id: `policy-${user.id}`,
-      is_active: true,
-      retired_at: null as Date | null,
-      retired_reason: null as string | null,
+  const codes = [
+    ...users
+      .filter((user) => user.referral_code)
+      .map((user) => ({
+        id: `code-${String(user.referral_code).toUpperCase()}`,
+        code: String(user.referral_code).toUpperCase(),
+        policy_id: `policy-${user.id}`,
+        is_active: user.codeIsActive ?? true,
+        retired_at:
+          user.codeRetiredAt === undefined ? null : user.codeRetiredAt,
+        retired_reason:
+          user.codeRetiredReason === undefined
+            ? null
+            : user.codeRetiredReason,
+        max_uses: null as number | null,
+        referral_count: user.referralCount ?? 0,
+        created_at: new Date("2026-01-01T00:00:00.000Z"),
+        updated_at: new Date("2026-01-01T00:00:00.000Z"),
+      })),
+    ...(options.extraCodes ?? []).map((code) => ({
+      id: `code-${code.code.toUpperCase()}`,
+      code: code.code.toUpperCase(),
+      policy_id: `policy-${code.ownerUserId}`,
+      is_active: code.isActive ?? true,
+      retired_at: code.retiredAt === undefined ? null : code.retiredAt,
+      retired_reason:
+        code.retiredReason === undefined ? null : code.retiredReason,
       max_uses: null as number | null,
+      referral_count: code.referralCount ?? 0,
       created_at: new Date("2026-01-01T00:00:00.000Z"),
       updated_at: new Date("2026-01-01T00:00:00.000Z"),
-    }));
+    })),
+  ];
+  const referrals = (options.referrals ?? []).map((referral) => ({
+    referred_user_id: referral.referredUserId,
+    referrer_user_id: referral.referrerUserId,
+    code: referral.code.toUpperCase(),
+    referral_code_id:
+      referral.referralCodeId ?? `code-${referral.code.toUpperCase()}`,
+  }));
+  const firstTradeConversions = (options.firstTradeConversions ?? []).map(
+    (conversion, index) => ({
+      id: `conversion-${index}`,
+      referred_user_id: conversion.referredUserId,
+      referrer_user_id: conversion.referrerUserId,
+      code: conversion.code.toUpperCase(),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    }),
+  );
   const lookupCode = (code: string) => {
     const normalized = code.toUpperCase();
     const row = codes.find((entry) => entry.code === normalized);
@@ -121,9 +209,82 @@ function createReferralDb(
 
       if (
         sql.includes("select count(*)::text as total") &&
+        sql.includes("referrer_user_id is distinct from $2::uuid")
+      ) {
+        const codeId = String(values[0] ?? "");
+        const referrerUserId = String(values[1] ?? "");
+        const total = referrals.filter(
+          (referral) =>
+            referral.referral_code_id === codeId &&
+            referral.referrer_user_id !== referrerUserId,
+        ).length;
+        return { rows: [{ total: String(total) }] };
+      }
+
+      if (
+        sql.includes("with moved_referrals as") &&
+        sql.includes("update referrals r") &&
+        sql.includes("moved_first_trades")
+      ) {
+        const sourceCodeId = String(values[0] ?? "");
+        const sourceCode = String(values[1] ?? "").toUpperCase();
+        const replacementCodeId = String(values[2] ?? "");
+        const replacementCode = String(values[3] ?? "").toUpperCase();
+        const referrerUserId = String(values[4] ?? "");
+        const movedReferredUserIds = new Set<string>();
+        for (const referral of referrals) {
+          if (
+            referral.referral_code_id === sourceCodeId &&
+            referral.referrer_user_id === referrerUserId
+          ) {
+            referral.referral_code_id = replacementCodeId;
+            referral.code = replacementCode;
+            movedReferredUserIds.add(referral.referred_user_id);
+          }
+        }
+        const firstTradeConversionsMoved = firstTradeConversions.filter(
+          (conversion) =>
+            movedReferredUserIds.has(conversion.referred_user_id) &&
+            conversion.referrer_user_id === referrerUserId &&
+            conversion.code.toUpperCase() === sourceCode,
+        ).length;
+        for (const conversion of firstTradeConversions) {
+          if (
+            movedReferredUserIds.has(conversion.referred_user_id) &&
+            conversion.referrer_user_id === referrerUserId &&
+            conversion.code.toUpperCase() === sourceCode
+          ) {
+            conversion.code = replacementCode;
+            conversion.updated_at = new Date("2026-01-02T00:00:00.000Z");
+          }
+        }
+        const source = codes.find((entry) => entry.id === sourceCodeId);
+        if (source) source.referral_count -= movedReferredUserIds.size;
+        const replacement = codes.find(
+          (entry) => entry.id === replacementCodeId,
+        );
+        if (replacement) {
+          replacement.referral_count += movedReferredUserIds.size;
+        }
+        return {
+          rows: [
+            {
+              referrals_moved: String(movedReferredUserIds.size),
+              first_trade_conversions_moved: String(
+                firstTradeConversionsMoved,
+              ),
+            },
+          ],
+        };
+      }
+
+      if (
+        sql.includes("select count(*)::text as total") &&
         sql.includes("from referrals")
       ) {
-        return { rows: [{ total: "0" }] };
+        const codeId = String(values[0] ?? "");
+        const row = codes.find((entry) => entry.id === codeId);
+        return { rows: [{ total: String(row?.referral_count ?? 0) }] };
       }
 
       if (sql.includes("insert into referral_code_policies")) {
@@ -140,7 +301,10 @@ function createReferralDb(
         return { rows: [{ id: policy.id }] };
       }
 
-      if (sql.includes("from referral_code_policies")) {
+      if (
+        sql.includes("select id") &&
+        sql.includes("from referral_code_policies")
+      ) {
         const userId = String(values[0] ?? "");
         const policy = policies.find((entry) => entry.owner_user_id === userId);
         return { rows: policy ? [{ id: policy.id }] : [] };
@@ -148,7 +312,8 @@ function createReferralDb(
 
       if (
         sql.includes("update referral_codes rc") &&
-        sql.includes("reason = coalesce")
+        sql.includes("set is_active = false") &&
+        sql.includes("p.owner_user_id = $1")
       ) {
         const userId = String(values[0] ?? "");
         const policy = policies.find((entry) => entry.owner_user_id === userId);
@@ -176,6 +341,7 @@ function createReferralDb(
           retired_at: isActive ? null : new Date("2026-01-02T00:00:00.000Z"),
           retired_reason: isActive ? null : String(values[3] ?? ""),
           max_uses: values[4] == null ? null : Number(values[4]),
+          referral_count: 0,
           created_at: new Date("2026-01-02T00:00:00.000Z"),
           updated_at: new Date("2026-01-02T00:00:00.000Z"),
         };
@@ -249,7 +415,50 @@ function createReferralDb(
 
       throw new Error(`Unhandled SQL in referral test db: ${sql}`);
     },
-  } as import("./db.js").DbQuery;
+    snapshot: () => ({
+      users: users.map((user) => ({
+        id: user.id,
+        referral_code: user.referral_code,
+      })),
+      codes: codes.map((code) => ({
+        code: code.code,
+        policy_id: code.policy_id,
+        is_active: code.is_active,
+        retired_at: code.retired_at,
+        retired_reason: code.retired_reason,
+        referral_count: code.referral_count,
+      })),
+      referrals: referrals.map((referral) => ({ ...referral })),
+      firstTradeConversions: firstTradeConversions.map((conversion) => ({
+        referred_user_id: conversion.referred_user_id,
+        referrer_user_id: conversion.referrer_user_id,
+        code: conversion.code,
+      })),
+    }),
+  } as import("./db.js").DbQuery & {
+    snapshot: () => {
+      users: Array<{ id: string; referral_code: string | null }>;
+      codes: Array<{
+        code: string;
+        policy_id: string;
+        is_active: boolean;
+        retired_at: Date | null;
+        retired_reason: string | null;
+        referral_count: number;
+      }>;
+      referrals: Array<{
+        referred_user_id: string;
+        referrer_user_id: string | null;
+        code: string;
+        referral_code_id: string;
+      }>;
+      firstTradeConversions: Array<{
+        referred_user_id: string;
+        referrer_user_id: string | null;
+        code: string;
+      }>;
+    };
+  };
 }
 
 function createReferralAttachDb(seed: {
@@ -944,6 +1153,38 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "referral code list search ranks exact code matches first",
+    run: async () => {
+      let dataSql = "";
+      let dataParams: unknown[] = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (sql.includes("select count(*)::text as total")) {
+            return { rows: [{ total: "0" }] };
+          }
+          dataSql = sql;
+          dataParams = Array.isArray(params) ? params : [];
+          return { rows: [] };
+        },
+      } as import("./db.js").DbQuery;
+
+      await listReferralCodeRows(db, {
+        q: "LEW",
+        policyType: null,
+        active: null,
+        usageLimit: null,
+        limit: 50,
+        offset: 0,
+      });
+
+      assert.match(
+        dataSql,
+        /case\s+when rc\.code = \$2 then 0\s+when rc\.code like \$3 then 1\s+else 2\s+end asc,/,
+      );
+      assert.deepEqual(dataParams, ["%LEW%", "LEW", "LEW%", 50, 0]);
+    },
+  },
+  {
     name: "set referral code succeeds when code is available",
     run: async () => {
       const db = createReferralDb([
@@ -1022,6 +1263,335 @@ const tests: TestCase[] = [
       });
       assert.equal(result.code, "VIP");
       assert.equal(result.transferredFromUserId, "user-b");
+    },
+  },
+  {
+    name: "set referral code reactivates retired used code for same owner",
+    run: async () => {
+      const db = createReferralDb(
+        [
+          { id: "user-a", referral_code: "NEW" },
+          { id: "user-b", referral_code: null },
+        ],
+        {
+          extraCodes: [
+            {
+              code: "OLD",
+              ownerUserId: "user-a",
+              isActive: false,
+              retiredAt: new Date("2026-01-02T00:00:00.000Z"),
+              retiredReason: "user_code_changed",
+              referralCount: 3,
+            },
+          ],
+        },
+      );
+
+      const result = await setReferralCodeForUser(db, {
+        userId: "user-a",
+        referralCode: "old",
+      });
+
+      assert.equal(result.code, "OLD");
+      assert.equal(result.transferredFromUserId, null);
+      const snapshot = db.snapshot();
+      assert.equal(
+        snapshot.users.find((user) => user.id === "user-a")?.referral_code,
+        "OLD",
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "OLD")?.is_active,
+        true,
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "NEW")?.is_active,
+        false,
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "OLD")?.referral_count,
+        3,
+      );
+    },
+  },
+  {
+    name: "set referral code rejects retired used code transfer to different owner",
+    run: async () => {
+      const db = createReferralDb([
+        {
+          id: "user-a",
+          referral_code: "VIP",
+          codeIsActive: false,
+          codeRetiredAt: new Date("2026-01-02T00:00:00.000Z"),
+          codeRetiredReason: "user_code_changed",
+          referralCount: 2,
+        },
+        { id: "user-b", referral_code: null },
+      ]);
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-b",
+            referralCode: "vip",
+            forceTransfer: true,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message ===
+            "Original owner needs a different active referral code before this used code can be force transferred",
+      );
+    },
+  },
+  {
+    name: "set referral code force transfer moves used code attribution to owner replacement",
+    run: async () => {
+      const db = createReferralDb(
+        [
+          { id: "user-a", referral_code: "MADHAV" },
+          { id: "user-b", referral_code: "BETA" },
+        ],
+        {
+          extraCodes: [
+            {
+              code: "HUNCH",
+              ownerUserId: "user-a",
+              isActive: false,
+              retiredAt: new Date("2026-01-02T00:00:00.000Z"),
+              retiredReason: "user_code_changed",
+              referralCount: 2,
+            },
+          ],
+          referrals: [
+            {
+              referredUserId: "referred-1",
+              referrerUserId: "user-a",
+              code: "HUNCH",
+            },
+            {
+              referredUserId: "referred-2",
+              referrerUserId: "user-a",
+              code: "HUNCH",
+            },
+          ],
+          firstTradeConversions: [
+            {
+              referredUserId: "referred-1",
+              referrerUserId: "user-a",
+              code: "HUNCH",
+            },
+          ],
+        },
+      );
+
+      const result = await setReferralCodeForUser(db, {
+        userId: "user-b",
+        referralCode: "hunch",
+        forceTransfer: true,
+      });
+
+      assert.equal(result.code, "HUNCH");
+      assert.equal(result.transferredFromUserId, "user-a");
+      const snapshot = db.snapshot();
+      assert.equal(
+        snapshot.users.find((user) => user.id === "user-a")?.referral_code,
+        "MADHAV",
+      );
+      assert.equal(
+        snapshot.users.find((user) => user.id === "user-b")?.referral_code,
+        "HUNCH",
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "HUNCH")?.policy_id,
+        "policy-user-b",
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "HUNCH")?.referral_count,
+        0,
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "MADHAV")?.referral_count,
+        2,
+      );
+      assert.deepEqual(
+        snapshot.referrals.map((referral) => ({
+          referred_user_id: referral.referred_user_id,
+          referrer_user_id: referral.referrer_user_id,
+          code: referral.code,
+          referral_code_id: referral.referral_code_id,
+        })),
+        [
+          {
+            referred_user_id: "referred-1",
+            referrer_user_id: "user-a",
+            code: "MADHAV",
+            referral_code_id: "code-MADHAV",
+          },
+          {
+            referred_user_id: "referred-2",
+            referrer_user_id: "user-a",
+            code: "MADHAV",
+            referral_code_id: "code-MADHAV",
+          },
+        ],
+      );
+      assert.deepEqual(snapshot.firstTradeConversions, [
+        {
+          referred_user_id: "referred-1",
+          referrer_user_id: "user-a",
+          code: "MADHAV",
+        },
+      ]);
+    },
+  },
+  {
+    name: "set referral code rejects used transfer when replacement is retired",
+    run: async () => {
+      const db = createReferralDb(
+        [
+          {
+            id: "user-a",
+            referral_code: "MADHAV",
+            codeIsActive: false,
+            codeRetiredAt: new Date("2026-01-02T00:00:00.000Z"),
+            codeRetiredReason: "user_code_changed",
+          },
+          { id: "user-b", referral_code: null },
+        ],
+        {
+          extraCodes: [
+            {
+              code: "HUNCH",
+              ownerUserId: "user-a",
+              isActive: false,
+              retiredAt: new Date("2026-01-02T00:00:00.000Z"),
+              retiredReason: "user_code_changed",
+              referralCount: 1,
+            },
+          ],
+          referrals: [
+            {
+              referredUserId: "referred-1",
+              referrerUserId: "user-a",
+              code: "HUNCH",
+            },
+          ],
+        },
+      );
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-b",
+            referralCode: "hunch",
+            forceTransfer: true,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message ===
+            "Original owner replacement referral code is not active",
+      );
+    },
+  },
+  {
+    name: "set referral code rejects used transfer with inconsistent referral owner",
+    run: async () => {
+      const db = createReferralDb(
+        [
+          { id: "user-a", referral_code: "MADHAV" },
+          { id: "user-b", referral_code: null },
+        ],
+        {
+          extraCodes: [
+            {
+              code: "HUNCH",
+              ownerUserId: "user-a",
+              isActive: false,
+              retiredAt: new Date("2026-01-02T00:00:00.000Z"),
+              retiredReason: "user_code_changed",
+              referralCount: 1,
+            },
+          ],
+          referrals: [
+            {
+              referredUserId: "referred-1",
+              referrerUserId: "user-c",
+              code: "HUNCH",
+            },
+          ],
+        },
+      );
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-b",
+            referralCode: "hunch",
+            forceTransfer: true,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message ===
+            "Referral code has inconsistent historical referrals and cannot be moved automatically",
+      );
+    },
+  },
+  {
+    name: "set referral code can force transfer retired unused code",
+    run: async () => {
+      const db = createReferralDb([
+        {
+          id: "user-a",
+          referral_code: "VIP",
+          codeIsActive: false,
+          codeRetiredAt: new Date("2026-01-02T00:00:00.000Z"),
+          codeRetiredReason: "user_code_changed",
+        },
+        { id: "user-b", referral_code: "BETA" },
+      ]);
+
+      const result = await setReferralCodeForUser(db, {
+        userId: "user-b",
+        referralCode: "vip",
+        forceTransfer: true,
+      });
+
+      assert.equal(result.code, "VIP");
+      assert.equal(result.transferredFromUserId, "user-a");
+      const snapshot = db.snapshot();
+      assert.equal(
+        snapshot.users.find((user) => user.id === "user-a")?.referral_code,
+        null,
+      );
+      assert.equal(
+        snapshot.users.find((user) => user.id === "user-b")?.referral_code,
+        "VIP",
+      );
+      assert.equal(
+        snapshot.codes.find((code) => code.code === "BETA")?.is_active,
+        false,
+      );
+    },
+  },
+  {
+    name: "set referral code rejects active used code transfer",
+    run: async () => {
+      const db = createReferralDb([
+        { id: "user-a", referral_code: "VIP", referralCount: 1 },
+        { id: "user-b", referral_code: null },
+      ]);
+
+      await assert.rejects(
+        () =>
+          setReferralCodeForUser(db, {
+            userId: "user-b",
+            referralCode: "vip",
+            forceTransfer: true,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message ===
+            "Original owner needs a different active referral code before this used code can be force transferred",
+      );
     },
   },
   {
