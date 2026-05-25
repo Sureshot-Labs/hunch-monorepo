@@ -13,6 +13,8 @@ const LIMITLESS_FEE_PROGRAM = "venue_share";
 export const LIMITLESS_CONTRACT_FEE_PROGRAM = "venue_share_contract";
 const BASE_CHAIN_ID = "8453";
 
+export type LimitlessContractFeeSourceKind = "receipt" | "status";
+
 export type LimitlessContractFeeReceivableStatus =
   | "pending_resolution"
   | "resolved_payable"
@@ -28,8 +30,8 @@ export type LimitlessContractFeeReceivableInput = {
   orderId: string;
   orderHash: string;
   venueOrderId: string | null;
-  txHash: string;
-  logIndex: number;
+  txHash: string | null;
+  logIndex: number | null;
   feeChargedLogIndex: number | null;
   feeRefundedLogIndex: number | null;
   feeReceiverAddress: string | null;
@@ -41,6 +43,8 @@ export type LimitlessContractFeeReceivableInput = {
   grossTokenAmountRaw: string;
   receivableTokenAmountRaw: string;
   filledAt: Date;
+  sourceKind?: LimitlessContractFeeSourceKind;
+  sourceKey?: string | null;
   status?: LimitlessContractFeeReceivableStatus;
   resolutionError?: string | null;
 };
@@ -52,8 +56,10 @@ type ReceivableResolutionRow = {
   order_id: string;
   order_hash: string;
   venue_order_id: string | null;
-  tx_hash: string;
-  log_index: number;
+  tx_hash: string | null;
+  log_index: number | null;
+  source_kind: LimitlessContractFeeSourceKind;
+  source_key: string;
   raw_token_id: string;
   token_id: string;
   side: "BUY" | "SELL";
@@ -97,6 +103,20 @@ export function buildLimitlessContractFeeSourceId(inputs: {
   logIndex: number | string;
 }): string {
   return `${LIMITLESS_VENUE}:${LIMITLESS_CONTRACT_FEE_PROGRAM}:${inputs.txHash}:${inputs.logIndex}`;
+}
+
+export function buildLimitlessContractReceiptFeeSourceKey(inputs: {
+  txHash: string;
+  logIndex: number | string;
+}): string {
+  return `receipt:${inputs.txHash}:${inputs.logIndex}`;
+}
+
+export function buildLimitlessContractStatusFeeSourceKey(inputs: {
+  venueOrderId: string;
+  tokenId: string;
+}): string {
+  return `status:${inputs.venueOrderId}:${normalizeTokenId(inputs.tokenId)}`;
 }
 
 function clampBps(value: number): number {
@@ -178,7 +198,38 @@ export async function upsertLimitlessContractFeeReceivables(
   );
   if (!rows.length) return { upserted: 0 };
 
-  const result = await pool.query(
+  const normalizedRows = rows.map((row) => {
+    const tokenId = normalizeTokenId(row.tokenId);
+    const sourceKind =
+      row.sourceKind ??
+      (row.txHash && row.logIndex != null ? "receipt" : "status");
+    const sourceKey =
+      row.sourceKey ??
+      (sourceKind === "receipt"
+        ? row.txHash && row.logIndex != null
+          ? buildLimitlessContractReceiptFeeSourceKey({
+              txHash: row.txHash,
+              logIndex: row.logIndex,
+            })
+          : null
+        : row.venueOrderId
+          ? buildLimitlessContractStatusFeeSourceKey({
+              venueOrderId: row.venueOrderId,
+              tokenId,
+            })
+          : null);
+    if (!sourceKey) {
+      throw new Error("Limitless contract fee receivable source key missing");
+    }
+    if (sourceKind === "receipt" && (!row.txHash || row.logIndex == null)) {
+      throw new Error(
+        "Limitless receipt receivable requires tx hash and log index",
+      );
+    }
+    return { ...row, tokenId, sourceKind, sourceKey };
+  });
+
+  const result = await pool.query<{ upserted: string }>(
     `
       with input as (
         select *
@@ -206,16 +257,77 @@ export async function upsertLimitlessContractFeeReceivables(
           $21::text[],
           $22::timestamptz[],
           $23::text[],
-          $24::text[]
+          $24::text[],
+          $25::text[],
+          $26::text[]
         ) as t(
           user_id, wallet_address, signer_address, chain_id, order_id,
           order_hash, venue_order_id, tx_hash, log_index,
           fee_charged_log_index, fee_refunded_log_index, fee_receiver_address,
           raw_token_id, token_id, side, role, fee_rate_bps,
           gross_token_amount_raw, receivable_token_amount_raw, status,
-          resolution_error, filled_at, venue, fee_program
+          resolution_error, filled_at, venue, fee_program, source_kind,
+          source_key
         )
-      )
+      ),
+      enriched_existing as (
+        update limitless_contract_fee_receivables r
+        set source_kind = case
+              when i.source_kind = 'receipt' then i.source_kind
+              else r.source_kind
+            end,
+            source_key = case
+              when i.source_kind = 'receipt' then i.source_key
+              else r.source_key
+            end,
+            wallet_address = coalesce(i.wallet_address, r.wallet_address),
+            signer_address = coalesce(i.signer_address, r.signer_address),
+            order_hash = i.order_hash,
+            venue_order_id = coalesce(i.venue_order_id, r.venue_order_id),
+            tx_hash = coalesce(i.tx_hash, r.tx_hash),
+            log_index = coalesce(i.log_index, r.log_index),
+            fee_charged_log_index = coalesce(i.fee_charged_log_index, r.fee_charged_log_index),
+            fee_refunded_log_index = coalesce(i.fee_refunded_log_index, r.fee_refunded_log_index),
+            fee_receiver_address = coalesce(i.fee_receiver_address, r.fee_receiver_address),
+            role = i.role,
+            fee_rate_bps = i.fee_rate_bps,
+            gross_token_amount_raw = case
+              when i.source_kind = 'receipt' then i.gross_token_amount_raw
+              else r.gross_token_amount_raw
+            end,
+            receivable_token_amount_raw = case
+              when i.source_kind = 'receipt' then i.receivable_token_amount_raw
+              else r.receivable_token_amount_raw
+            end,
+            status = case
+              when r.status = 'converted_to_fee_event' then r.status
+              when i.status = 'refunded' then 'refunded'
+              else r.status
+            end,
+            resolution_error = case
+              when i.status = 'refunded' then i.resolution_error
+              else r.resolution_error
+            end,
+            updated_at = now()
+        from input i
+        where r.venue = i.venue
+          and r.fee_program = i.fee_program
+          and r.order_id = i.order_id
+          and r.token_id = i.token_id
+          and r.source_kind <> i.source_kind
+          and r.status <> 'converted_to_fee_event'
+        returning r.id, i.source_key
+      ),
+      insert_input as (
+        select i.*
+        from input i
+        where not exists (
+          select 1
+          from enriched_existing e
+          where e.source_key = i.source_key
+        )
+      ),
+      upserted as (
       insert into limitless_contract_fee_receivables (
         user_id, wallet_address, signer_address, chain_id, order_id,
         order_hash, venue_order_id, tx_hash, log_index,
@@ -223,7 +335,7 @@ export async function upsertLimitlessContractFeeReceivables(
         raw_token_id, token_id, side, role, fee_rate_bps,
         gross_token_amount_raw, receivable_token_amount_raw, status,
         resolution_error, next_resolution_check_at, filled_at, venue,
-        fee_program, created_at, updated_at
+        fee_program, source_kind, source_key, created_at, updated_at
       )
       select
         user_id, wallet_address, signer_address, chain_id, order_id,
@@ -233,14 +345,16 @@ export async function upsertLimitlessContractFeeReceivables(
         gross_token_amount_raw, receivable_token_amount_raw, status,
         resolution_error,
         case when status = 'pending_resolution' then now() else null end,
-        filled_at, venue, fee_program, now(), now()
-      from input
-      on conflict (venue, fee_program, tx_hash, log_index, token_id)
+        filled_at, venue, fee_program, source_kind, source_key, now(), now()
+      from insert_input
+      on conflict (venue, fee_program, source_key, token_id)
       do update set
         wallet_address = coalesce(excluded.wallet_address, limitless_contract_fee_receivables.wallet_address),
         signer_address = coalesce(excluded.signer_address, limitless_contract_fee_receivables.signer_address),
         order_hash = excluded.order_hash,
         venue_order_id = coalesce(excluded.venue_order_id, limitless_contract_fee_receivables.venue_order_id),
+        tx_hash = coalesce(excluded.tx_hash, limitless_contract_fee_receivables.tx_hash),
+        log_index = coalesce(excluded.log_index, limitless_contract_fee_receivables.log_index),
         fee_charged_log_index = coalesce(excluded.fee_charged_log_index, limitless_contract_fee_receivables.fee_charged_log_index),
         fee_refunded_log_index = coalesce(excluded.fee_refunded_log_index, limitless_contract_fee_receivables.fee_refunded_log_index),
         fee_receiver_address = coalesce(excluded.fee_receiver_address, limitless_contract_fee_receivables.fee_receiver_address),
@@ -259,38 +373,48 @@ export async function upsertLimitlessContractFeeReceivables(
         end,
         updated_at = now()
       returning id
+      ),
+      changed as (
+        select id from upserted
+        union all
+        select id from enriched_existing
+      )
+      select count(*)::text as upserted
+      from changed
     `,
     [
-      rows.map((row) => row.userId),
-      rows.map((row) => row.walletAddress),
-      rows.map((row) => row.signerAddress),
+      normalizedRows.map((row) => row.userId),
+      normalizedRows.map((row) => row.walletAddress),
+      normalizedRows.map((row) => row.signerAddress),
       rows.map(() => BASE_CHAIN_ID),
-      rows.map((row) => row.orderId),
-      rows.map((row) => row.orderHash),
-      rows.map((row) => row.venueOrderId),
-      rows.map((row) => row.txHash),
-      rows.map((row) => row.logIndex),
-      rows.map((row) => row.feeChargedLogIndex),
-      rows.map((row) => row.feeRefundedLogIndex),
-      rows.map((row) => row.feeReceiverAddress),
-      rows.map(
+      normalizedRows.map((row) => row.orderId),
+      normalizedRows.map((row) => row.orderHash),
+      normalizedRows.map((row) => row.venueOrderId),
+      normalizedRows.map((row) => row.txHash),
+      normalizedRows.map((row) => row.logIndex),
+      normalizedRows.map((row) => row.feeChargedLogIndex),
+      normalizedRows.map((row) => row.feeRefundedLogIndex),
+      normalizedRows.map((row) => row.feeReceiverAddress),
+      normalizedRows.map(
         (row) => normalizeLimitlessRawTokenId(row.rawTokenId) ?? row.rawTokenId,
       ),
-      rows.map((row) => normalizeTokenId(row.tokenId)),
-      rows.map((row) => row.side),
-      rows.map((row) => row.role),
-      rows.map((row) => clampBps(row.feeRateBps)),
-      rows.map((row) => row.grossTokenAmountRaw),
-      rows.map((row) => row.receivableTokenAmountRaw),
-      rows.map((row) => row.status ?? "pending_resolution"),
-      rows.map((row) => row.resolutionError ?? null),
-      rows.map((row) => row.filledAt),
+      normalizedRows.map((row) => row.tokenId),
+      normalizedRows.map((row) => row.side),
+      normalizedRows.map((row) => row.role),
+      normalizedRows.map((row) => clampBps(row.feeRateBps)),
+      normalizedRows.map((row) => row.grossTokenAmountRaw),
+      normalizedRows.map((row) => row.receivableTokenAmountRaw),
+      normalizedRows.map((row) => row.status ?? "pending_resolution"),
+      normalizedRows.map((row) => row.resolutionError ?? null),
+      normalizedRows.map((row) => row.filledAt),
       rows.map(() => LIMITLESS_VENUE),
       rows.map(() => LIMITLESS_FEE_PROGRAM),
+      normalizedRows.map((row) => row.sourceKind),
+      normalizedRows.map((row) => row.sourceKey),
     ],
   );
 
-  return { upserted: result.rowCount ?? 0 };
+  return { upserted: Number(result.rows[0]?.upserted ?? 0) };
 }
 
 function apiRecord(payload: unknown): Record<string, unknown> | null {
@@ -471,6 +595,10 @@ async function upsertVerifiedAccrualForReceivable(
   feeUsdRaw: string,
 ): Promise<string> {
   const feeUsd = microToDecimal(feeUsdRaw);
+  const venueFillId =
+    row.tx_hash && row.log_index != null
+      ? String(row.log_index)
+      : row.source_key;
   const result = await client.query<{ id: string }>(
     `
       with upserted as (
@@ -549,7 +677,7 @@ async function upsertVerifiedAccrualForReceivable(
       row.order_id,
       row.order_hash,
       row.venue_order_id,
-      String(row.log_index),
+      venueFillId,
       row.tx_hash,
       row.log_index,
       row.token_id,
@@ -563,9 +691,12 @@ async function upsertVerifiedAccrualForReceivable(
   );
   const accrualId = result.rows[0]?.id;
   if (!accrualId) {
-    const sourceId = buildLimitlessContractFeeSourceId({
+    const sourceId = buildLimitlessContractAccrualSourceId({
+      venue: LIMITLESS_VENUE,
+      feeProgram: LIMITLESS_CONTRACT_FEE_PROGRAM,
+      orderHash: row.order_hash,
+      venueFillId,
       txHash: row.tx_hash,
-      logIndex: row.log_index,
     });
     throw new Error(`venue_fee_accruals immutable mismatch for ${sourceId}`);
   }
@@ -595,9 +726,15 @@ async function linkPendingFeeEventIfPresent(
   client: PoolClient,
   row: ReceivableResolutionRow,
 ): Promise<string | null> {
-  const sourceId = buildLimitlessContractFeeSourceId({
+  const sourceId = buildLimitlessContractAccrualSourceId({
+    venue: LIMITLESS_VENUE,
+    feeProgram: LIMITLESS_CONTRACT_FEE_PROGRAM,
+    orderHash: row.order_hash,
+    venueFillId:
+      row.tx_hash && row.log_index != null
+        ? String(row.log_index)
+        : row.source_key,
     txHash: row.tx_hash,
-    logIndex: row.log_index,
   });
   const result = await client.query<{ id: string }>(
     `
@@ -624,7 +761,8 @@ export function buildLimitlessContractAccrualSourceId(inputs: {
   if (
     inputs.venue === LIMITLESS_VENUE &&
     inputs.feeProgram === LIMITLESS_CONTRACT_FEE_PROGRAM &&
-    inputs.txHash
+    inputs.txHash &&
+    !inputs.venueFillId.startsWith("status:")
   ) {
     return buildLimitlessContractFeeSourceId({
       txHash: inputs.txHash,
@@ -656,6 +794,8 @@ export async function reconcileLimitlessContractFeeReceivables(
         r.venue_order_id,
         r.tx_hash,
         r.log_index,
+        r.source_kind,
+        r.source_key,
         r.raw_token_id,
         r.token_id,
         r.side,
@@ -793,7 +933,8 @@ export async function reconcileLimitlessContractFeeReceivables(
             `
               select
                 id, user_id, wallet_address, order_id, order_hash,
-                venue_order_id, tx_hash, log_index, raw_token_id, token_id,
+                venue_order_id, tx_hash, log_index, source_kind, source_key,
+                raw_token_id, token_id,
                 side, role, fee_rate_bps, outcome_side, market_id, event_id, condition_id,
                 receivable_token_amount_raw, filled_at, resolution_attempts,
                 null::text as token_market_id,
@@ -901,8 +1042,8 @@ export function buildLimitlessContractFeeReceivableInput(inputs: {
   orderId: string;
   orderHash: string;
   venueOrderId: string | null;
-  txHash: string;
-  logIndex: number;
+  txHash: string | null;
+  logIndex: number | null;
   feeChargedLogIndex: number | null;
   feeRefundedLogIndex: number | null;
   feeReceiverAddress: string | null;
@@ -913,6 +1054,8 @@ export function buildLimitlessContractFeeReceivableInput(inputs: {
   grossTokenAmountRaw: string;
   receivableTokenAmountRaw: string;
   filledAt: Date;
+  sourceKind?: LimitlessContractFeeSourceKind;
+  sourceKey?: string | null;
   refunded?: boolean;
 }): LimitlessContractFeeReceivableInput {
   return {

@@ -531,7 +531,7 @@ function settlementStatus(execution: Record<string, unknown>): string | null {
   return status ? status.toUpperCase() : null;
 }
 
-function buildLimitlessVenueShareAccrualResult(inputs: {
+export function buildLimitlessVenueShareAccrualResult(inputs: {
   order: LimitlessAccrualOrderRow;
   status: LimitlessOrderStatusItem;
   config: LimitlessFeeShareConfig;
@@ -568,8 +568,60 @@ function buildLimitlessVenueShareAccrualResult(inputs: {
   const totals = extractTotalsRaw(execution);
   if (!totals) return terminal("Limitless fee totals missing");
 
+  const orderRecord = extractOrderRecord(data);
+  const side = normalizeSide(orderRecord?.side) ?? inputs.order.side;
+  if (!side) return terminal("Limitless order side missing");
+  const venueOrderId =
+    textOrNull(inputs.status.payload.orderId) ?? inputs.order.venue_order_id;
+  if (!venueOrderId) return retry("Limitless order id missing");
+  const tokenId = textOrNull(orderRecord?.tokenId) ?? inputs.order.token_id;
+  const filledAt =
+    inputs.order.filled_at ??
+    inputs.order.last_update ??
+    inputs.order.posted_at ??
+    new Date();
+
   const venueFeeRaw = rawDigits(totals.usdFee);
+  const contractsFeeRaw = rawDigits(totals.contractsFee);
   const notionalRaw = deriveUsdGrossRaw(totals);
+  if (contractsFeeRaw != null && contractsFeeRaw > 0n) {
+    if (venueFeeRaw != null && venueFeeRaw > 0n) {
+      return terminal("Limitless fee totals include both USD and contracts fees");
+    }
+    if (side !== "BUY") {
+      return terminal("Limitless contracts fee is only expected on buys");
+    }
+    if (!tokenId) return retry("Limitless contracts fee token missing");
+    const feeRaw = floorBps(contractsFeeRaw, inputs.config.shareBps);
+    if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
+
+    return {
+      accrual: null,
+      receivable: buildLimitlessContractFeeReceivableInput({
+        userId: inputs.order.user_id,
+        walletAddress: inputs.order.wallet_address,
+        signerAddress: inputs.order.signer_address,
+        orderId: inputs.order.id,
+        orderHash: inputs.order.order_hash ?? venueOrderId,
+        venueOrderId,
+        txHash: textOrNull(execution.txHash),
+        logIndex: null,
+        feeChargedLogIndex: null,
+        feeRefundedLogIndex: null,
+        feeReceiverAddress: null,
+        rawTokenId: tokenId,
+        side,
+        role: "taker",
+        feeRateBps: inputs.config.shareBps,
+        grossTokenAmountRaw: contractsFeeRaw.toString(),
+        receivableTokenAmountRaw: feeRaw.toString(),
+        filledAt,
+        sourceKind: "status",
+      }),
+      attempt: null,
+    };
+  }
+
   if (venueFeeRaw == null || notionalRaw == null) {
     return terminal(
       limitlessUsdFeeFailureReason(totals, venueFeeRaw, notionalRaw),
@@ -583,20 +635,9 @@ function buildLimitlessVenueShareAccrualResult(inputs: {
   }
   if (feeRaw <= 0n) return terminal("Limitless fee share is zero");
 
-  const orderRecord = extractOrderRecord(data);
-  const side = normalizeSide(orderRecord?.side) ?? inputs.order.side;
-  if (!side) return terminal("Limitless order side missing");
-  const venueOrderId =
-    textOrNull(inputs.status.payload.orderId) ?? inputs.order.venue_order_id;
   const venueTradeId = textOrNull(execution.tradeEventId);
   const txHash = textOrNull(execution.txHash);
   const venueFillId = venueTradeId ?? txHash ?? venueOrderId;
-  const tokenId = textOrNull(orderRecord?.tokenId) ?? inputs.order.token_id;
-  const filledAt =
-    inputs.order.filled_at ??
-    inputs.order.last_update ??
-    inputs.order.posted_at ??
-    new Date();
   const venueFeeRateBps = numberOrNull(execution.feeRateBps);
   const venueEffectiveFeeBps = numberOrNull(execution.effectiveFeeBps);
 
@@ -1295,7 +1336,7 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
 ): Promise<{ upserted: number }> {
   const config = await resolveLimitlessFeeShareConfig(pool);
   if (!config.active) return { upserted: 0 };
-  const accrual = buildLimitlessVenueShareAccrualFromStatus({
+  const result = buildLimitlessVenueShareAccrualResult({
     order: {
       id: inputs.orderId,
       user_id: inputs.userId,
@@ -1319,15 +1360,18 @@ export async function upsertLimitlessVenueShareAccrualFromOrderPayload(
     },
     config,
   });
-  const result = await upsertVenueFeeAccruals(pool, [accrual]);
-  if (accrual) {
+  const accrualUpsert = await upsertVenueFeeAccruals(pool, [result.accrual]);
+  const receivableUpsert = await upsertLimitlessContractFeeReceivables(pool, [
+    result.receivable,
+  ]);
+  if (result.accrual || result.receivable) {
     await clearVenueFeeBackfillAttempts(pool, {
       venue: LIMITLESS_VENUE,
       feeProgram: LIMITLESS_FEE_PROGRAM,
-      orderIds: [accrual.orderId],
+      orderIds: [inputs.orderId],
     });
   }
-  return result;
+  return { upserted: accrualUpsert.upserted + receivableUpsert.upserted };
 }
 
 export async function verifyLimitlessVenueShareAccruals(

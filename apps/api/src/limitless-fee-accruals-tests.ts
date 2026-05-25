@@ -8,6 +8,7 @@ import {
   buildStoredLimitlessOrderStatusItem,
   buildLimitlessVenueShareAccrualFromReceiptLogs,
   buildLimitlessVenueShareAccrualFromStatus,
+  buildLimitlessVenueShareAccrualResult,
   type LimitlessAccrualOrderRow,
   type LimitlessFeeShareConfig,
   type LimitlessOrderStatusItem,
@@ -15,6 +16,7 @@ import {
 import {
   buildLimitlessContractAccrualSourceId,
   buildLimitlessContractFeeSourceId,
+  buildLimitlessContractStatusFeeSourceKey,
   convertLimitlessReceivableRaw,
 } from "./services/limitless-contract-fee-receivables.js";
 
@@ -112,6 +114,7 @@ function receiptOrder(
 
 function statusWithTotals(
   totalsRaw: Record<string, string>,
+  options: { side?: 0 | 1; tokenId?: string } = {},
 ): LimitlessOrderStatusItem {
   return {
     orderId: "limitless-order-1",
@@ -121,8 +124,8 @@ function statusWithTotals(
       data: {
         order: {
           order: {
-            side: 0,
-            tokenId: "456",
+            side: options.side ?? 0,
+            tokenId: options.tokenId ?? "456",
           },
         },
         execution: {
@@ -148,7 +151,7 @@ test("builds Limitless accrual from USD-denominated venue fee", () => {
       usdFee: "10000",
       contractsGross: "2000000",
       contractsFee: "0",
-    }),
+    }, { side: 1 }),
     config,
   });
 
@@ -178,6 +181,13 @@ test("builds stable source ids for Limitless contract fee accrual unlocks", () =
     `limitless:venue_share_contract:${txHash}:276`,
   );
   assert.equal(
+    buildLimitlessContractStatusFeeSourceKey({
+      venueOrderId: "limitless-order-1",
+      tokenId: "limitless:456",
+    }),
+    "status:limitless-order-1:limitless:456",
+  );
+  assert.equal(
     buildLimitlessContractAccrualSourceId({
       venue: "limitless",
       feeProgram: "venue_share_contract",
@@ -187,10 +197,20 @@ test("builds stable source ids for Limitless contract fee accrual unlocks", () =
     }),
     `limitless:venue_share_contract:${txHash}:276`,
   );
+  assert.equal(
+    buildLimitlessContractAccrualSourceId({
+      venue: "limitless",
+      feeProgram: "venue_share_contract",
+      orderHash: "order-hash",
+      venueFillId: "status:limitless-order-1:limitless:456",
+      txHash,
+    }),
+    "limitless:venue_share_contract:order-hash:status:limitless-order-1:limitless:456",
+  );
 });
 
-test("does not create rewards accrual for contract-denominated fee", () => {
-  const accrual = buildLimitlessVenueShareAccrualFromStatus({
+test("builds Limitless contract receivable from buy-side contracts fee status", () => {
+  const result = buildLimitlessVenueShareAccrualResult({
     order: baseOrder(),
     status: statusWithTotals({
       usdGross: "1000000",
@@ -201,7 +221,60 @@ test("does not create rewards accrual for contract-denominated fee", () => {
     config,
   });
 
-  assert.equal(accrual, null);
+  assert.equal(result.accrual, null);
+  assert.equal(result.attempt, null);
+  assert.ok(result.receivable);
+  assert.equal(result.receivable.sourceKind, "status");
+  assert.equal(result.receivable.sourceKey, undefined);
+  assert.equal(result.receivable.txHash, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(result.receivable.logIndex, null);
+  assert.equal(result.receivable.rawTokenId, "456");
+  assert.equal(result.receivable.tokenId, "limitless:456");
+  assert.equal(result.receivable.grossTokenAmountRaw, "10000");
+  assert.equal(result.receivable.receivableTokenAmountRaw, "1000");
+});
+
+test("does not create Limitless receivable for sell-side contracts fee status", () => {
+  const result = buildLimitlessVenueShareAccrualResult({
+    order: { ...baseOrder(), side: "SELL" },
+    status: statusWithTotals(
+      {
+        usdGross: "1000000",
+        usdFee: "0",
+        contractsGross: "2000000",
+        contractsFee: "10000",
+      },
+      { side: 1 },
+    ),
+    config,
+  });
+
+  assert.equal(result.accrual, null);
+  assert.equal(result.receivable, null);
+  assert.equal(
+    result.attempt?.reason,
+    "Limitless contracts fee is only expected on buys",
+  );
+});
+
+test("does not create Limitless accrual when status has both fee denominations", () => {
+  const result = buildLimitlessVenueShareAccrualResult({
+    order: baseOrder(),
+    status: statusWithTotals({
+      usdGross: "1000000",
+      usdFee: "10000",
+      contractsGross: "2000000",
+      contractsFee: "10000",
+    }),
+    config,
+  });
+
+  assert.equal(result.accrual, null);
+  assert.equal(result.receivable, null);
+  assert.equal(
+    result.attempt?.reason,
+    "Limitless fee totals include both USD and contracts fees",
+  );
 });
 
 test("does not create rewards accrual when fee share rounds to zero", () => {

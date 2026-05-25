@@ -77,7 +77,8 @@ function feeEventSourceIdForAccrual(row: VenueFeeAccrualRow): string {
   if (
     row.venue === "limitless" &&
     row.fee_program === "venue_share_contract" &&
-    row.tx_hash
+    row.tx_hash &&
+    !row.venue_fill_id.startsWith("status:")
   ) {
     return `limitless:venue_share_contract:${row.tx_hash}:${row.venue_fill_id}`;
   }
