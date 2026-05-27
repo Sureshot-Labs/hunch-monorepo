@@ -10,11 +10,13 @@ import {
   type AggVenueMarket,
 } from "./services/agg-market-client.js";
 import {
+  type AggClusterListCacheClient,
   buildAggMarketAlternativesResponse,
   buildAggClusterListResponse,
   clearAggClustersCacheForTests,
   getAggMarketAlternativesResponseCached,
   getAggClusterListResponseCached,
+  getAggClusterListResponseCachedWithMetadata,
 } from "./services/agg-market-clusters.js";
 
 async function test(name: string, fn: () => void | Promise<void>) {
@@ -208,6 +210,33 @@ function fakeDb(rows: Array<ReturnType<typeof dbRow>>): DbQuery {
       return { rows };
     },
   } as unknown as DbQuery;
+}
+
+class FakeAggClusterCache implements AggClusterListCacheClient {
+  readonly store = new Map<string, string>();
+  getCalls = 0;
+  setCalls = 0;
+  lastSet: { key: string; value: string; ttl: number } | null = null;
+  failGet = false;
+  failSet = false;
+
+  async get(key: string): Promise<string | null> {
+    this.getCalls += 1;
+    if (this.failGet) throw new Error("redis get failed");
+    return this.store.get(key) ?? null;
+  }
+
+  async set(
+    key: string,
+    value: string,
+    options: { EX: number },
+  ): Promise<unknown> {
+    this.setCalls += 1;
+    if (this.failSet) throw new Error("redis set failed");
+    this.lastSet = { key, value, ttl: options.EX };
+    this.store.set(key, value);
+    return "OK";
+  }
 }
 
 await test("chunks midpoint ids at the AGG limit", () => {
@@ -1530,5 +1559,198 @@ await test("uses the in-memory cache for matching query params", async () => {
 
   assert.equal(calls.venueMarkets, 1);
   assert.equal(calls.midpoints, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("uses Redis cache when local AGG cluster cache is cold", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  const client = fakeClient({ markets: [], midpoints: [], calls });
+  const db = fakeDb([]);
+
+  const first = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+  assert.deepEqual(first.cache, { status: "miss", layer: "none" });
+  assert.equal(cacheClient.getCalls, 1);
+  assert.equal(cacheClient.setCalls, 1);
+  assert.equal(cacheClient.lastSet?.ttl, 30);
+  assert.equal(calls.venueMarkets, 1);
+
+  clearAggClustersCacheForTests();
+  const second = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+
+  assert.deepEqual(second.cache, { status: "hit", layer: "redis" });
+  assert.deepEqual(second.response, first.response);
+  assert.equal(cacheClient.getCalls, 2);
+  assert.equal(cacheClient.setCalls, 1);
+  assert.equal(calls.venueMarkets, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("uses local AGG cluster cache before Redis", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  const client = fakeClient({ markets: [], midpoints: [], calls });
+  const db = fakeDb([]);
+
+  await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+  const second = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+
+  assert.deepEqual(second.cache, { status: "hit", layer: "local" });
+  assert.equal(cacheClient.getCalls, 1);
+  assert.equal(cacheClient.setCalls, 1);
+  assert.equal(calls.venueMarkets, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("caches empty successful AGG cluster responses", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  const client = fakeClient({ markets: [], midpoints: [], calls });
+  const db = fakeDb([]);
+
+  const first = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+  assert.equal(first.response.items.length, 0);
+  assert.equal(cacheClient.setCalls, 1);
+
+  clearAggClustersCacheForTests();
+  const second = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+    cacheClient,
+  });
+  assert.deepEqual(second.cache, { status: "hit", layer: "redis" });
+  assert.equal(second.response.items.length, 0);
+  assert.equal(calls.venueMarkets, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("does not cache failed AGG cluster builds", async () => {
+  clearAggClustersCacheForTests();
+  const cacheClient = new FakeAggClusterCache();
+  let calls = 0;
+  const client: AggMarketClient = {
+    async getVenueMarkets() {
+      calls += 1;
+      throw new Error("AGG failed");
+    },
+    async getMidpoints() {
+      return [];
+    },
+  };
+  const db = fakeDb([]);
+
+  await assert.rejects(
+    () =>
+      getAggClusterListResponseCachedWithMetadata({
+        query: { limit: 5 },
+        client,
+        db,
+        ttlSec: 30,
+        cacheClient,
+      }),
+    /AGG failed/,
+  );
+  await assert.rejects(
+    () =>
+      getAggClusterListResponseCachedWithMetadata({
+        query: { limit: 5 },
+        client,
+        db,
+        ttlSec: 30,
+        cacheClient,
+      }),
+    /AGG failed/,
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(cacheClient.setCalls, 0);
+  clearAggClustersCacheForTests();
+});
+
+await test("falls back when AGG cluster Redis cache fails", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  cacheClient.failGet = true;
+  const errors: string[] = [];
+
+  const result = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client: fakeClient({ markets: [], midpoints: [], calls }),
+    db: fakeDb([]),
+    ttlSec: 30,
+    cacheClient,
+    onCacheError: (operation) => errors.push(operation),
+  });
+
+  assert.deepEqual(result.cache, { status: "skip", layer: "none" });
+  assert.deepEqual(errors, ["read"]);
+  assert.equal(result.response.items.length, 0);
+  assert.equal(calls.venueMarkets, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("disables AGG cluster caches when ttl is zero", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  const client = fakeClient({ markets: [], midpoints: [], calls });
+  const db = fakeDb([]);
+
+  const first = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 0,
+    cacheClient,
+  });
+  const second = await getAggClusterListResponseCachedWithMetadata({
+    query: { limit: 5 },
+    client,
+    db,
+    ttlSec: 0,
+    cacheClient,
+  });
+
+  assert.deepEqual(first.cache, { status: "skip", layer: "none" });
+  assert.deepEqual(second.cache, { status: "skip", layer: "none" });
+  assert.equal(cacheClient.getCalls, 0);
+  assert.equal(cacheClient.setCalls, 0);
+  assert.equal(calls.venueMarkets, 2);
   clearAggClustersCacheForTests();
 });

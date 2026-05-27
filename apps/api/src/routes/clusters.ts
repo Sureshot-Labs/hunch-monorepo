@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
-import { getRedisStatus } from "../redis.js";
+import { getRedis, getRedisStatus } from "../redis.js";
 import {
   buildMarketSummary,
   type ClusterMarketSummary,
@@ -10,7 +10,7 @@ import {
   AggMarketHttpError,
   createAggMarketClient,
 } from "../services/agg-market-client.js";
-import { getAggClusterListResponseCached } from "../services/agg-market-clusters.js";
+import { getAggClusterListResponseCachedWithMetadata } from "../services/agg-market-clusters.js";
 import {
   resolveAiClustersPolicy,
   resolveArbitrageDefaultsPolicy,
@@ -352,12 +352,24 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           baseUrl: env.aggMarketBaseUrl,
           timeoutMs: env.aggMarketTimeoutMs,
         });
-        const response = await getAggClusterListResponseCached({
-          query: request.query,
-          client,
-          db: pool,
-          ttlSec: env.aggClustersCacheTtlSec,
-        });
+        const cacheClient =
+          env.aggClustersCacheTtlSec > 0 ? await getRedis() : null;
+        const { response, cache } =
+          await getAggClusterListResponseCachedWithMetadata({
+            query: request.query,
+            client,
+            db: pool,
+            ttlSec: env.aggClustersCacheTtlSec,
+            cacheClient,
+            onCacheError: (operation, cacheError) => {
+              request.log.warn(
+                { error: cacheError, operation },
+                "AGG Market clusters Redis cache failed",
+              );
+            },
+          });
+        reply.header("x-agg-clusters-cache", cache.status);
+        reply.header("x-agg-clusters-cache-layer", cache.layer);
         requestClusterMarketRefresh(response.items, "clusters:agg");
         return response;
       } catch (error) {

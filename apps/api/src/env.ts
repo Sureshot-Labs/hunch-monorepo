@@ -758,6 +758,10 @@ export const env = {
     "AGG_CLUSTERS_CACHE_TTL_SEC",
     30,
   ),
+  aggMarketAlternativesNotFoundCacheTtlSec: optionalNonNegativeInt(
+    "AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC",
+    60,
+  ),
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
     15,

@@ -49,7 +49,11 @@ import {
   AggMarketHttpError,
   createAggMarketClient,
 } from "../services/agg-market-client.js";
-import { getAggMarketAlternativesResponseCached } from "../services/agg-market-clusters.js";
+import {
+  buildAggMarketAlternativesCacheKey,
+  type AggMarketAlternativesResponse,
+  getAggMarketAlternativesResponseCached,
+} from "../services/agg-market-clusters.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -165,13 +169,59 @@ type MarketRoutesOptions = {
   aggMarketBaseUrl?: string;
   aggMarketTimeoutMs?: number;
   aggMarketAlternativesCacheTtlSec?: number;
+  aggMarketAlternativesNotFoundCacheTtlSec?: number;
   aggMarketAlternativesDb?: DbQuery;
+  getAggMarketAlternativesRedis?: () => Promise<
+    AggAlternativesCacheClient | null
+  >;
   createAggMarketClient?: (config: {
     appId: string;
     baseUrl?: string;
     timeoutMs?: number;
   }) => AggMarketClient;
 };
+
+type AggAlternativesCacheClient = {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, options: { EX: number }): Promise<unknown>;
+};
+
+const AGG_ALTERNATIVES_REDIS_CACHE_PREFIX = "agg:market-alternatives:v1";
+
+function buildAggAlternativesRedisCacheKey(
+  marketId: string,
+  query: { venues?: string; limit?: number; sourceLimit?: number },
+): string {
+  const normalized = buildAggMarketAlternativesCacheKey(marketId, query);
+  const hash = createHash("sha256").update(normalized).digest("hex");
+  return `${AGG_ALTERNATIVES_REDIS_CACHE_PREFIX}:${hash}`;
+}
+
+function readAggAlternativesCacheKind(
+  body: string,
+): AggMarketAlternativesResponse["status"] | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed)) return null;
+    return parsed.status === "matched" || parsed.status === "not_found"
+      ? parsed.status
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function aggAlternativesCacheTtlForResponse(
+  response: AggMarketAlternativesResponse,
+  options: {
+    matchedTtlSec: number;
+    notFoundTtlSec: number;
+  },
+): number {
+  if (response.status === "matched") return options.matchedTtlSec;
+  if (response.status === "not_found") return options.notFoundTtlSec;
+  return 0;
+}
 
 function extractTokenIdsFromTokenPair(value: unknown): string[] {
   if (!isRecord(value)) return [];
@@ -562,6 +612,43 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       }
 
       try {
+        const matchedCacheTtlSec =
+          options.aggMarketAlternativesCacheTtlSec ??
+          env.aggClustersCacheTtlSec;
+        const notFoundCacheTtlSec =
+          options.aggMarketAlternativesNotFoundCacheTtlSec ??
+          env.aggMarketAlternativesNotFoundCacheTtlSec;
+        const redisCacheKey = buildAggAlternativesRedisCacheKey(
+          request.params.marketId,
+          request.query,
+        );
+        let cacheClient: AggAlternativesCacheClient | null = null;
+        let cacheHeader: "miss" | "skip" = "skip";
+        try {
+          cacheClient = options.getAggMarketAlternativesRedis
+            ? await options.getAggMarketAlternativesRedis()
+            : await getRedis();
+          if (cacheClient) {
+            const cached = await cacheClient.get(redisCacheKey);
+            const cachedKind =
+              cached == null ? null : readAggAlternativesCacheKind(cached);
+            if (cached && cachedKind) {
+              reply.header("x-alternatives-cache", "hit");
+              reply.header("x-alternatives-cache-kind", cachedKind);
+              reply.header("Content-Type", "application/json; charset=utf-8");
+              return reply.send(cached);
+            }
+            cacheHeader = "miss";
+          }
+        } catch (cacheError) {
+          request.log.warn(
+            { error: cacheError },
+            "AGG Market alternatives Redis cache read failed",
+          );
+          cacheClient = null;
+          cacheHeader = "skip";
+        }
+
         const client = createAggClient({
           appId: aggMarketAppId,
           baseUrl: options.aggMarketBaseUrl ?? env.aggMarketBaseUrl,
@@ -572,12 +659,36 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           query: request.query,
           client,
           db: aggAlternativesDb,
-          ttlSec:
-            options.aggMarketAlternativesCacheTtlSec ??
-            env.aggClustersCacheTtlSec,
+          ttlSec: matchedCacheTtlSec,
         });
         if (!response) {
+          reply.header("x-alternatives-cache", cacheHeader);
           return reply.code(404).send({ error: "Market not found" });
+        }
+        const responseBody = JSON.stringify(response);
+        const responseCacheTtlSec = aggAlternativesCacheTtlForResponse(
+          response,
+          {
+            matchedTtlSec: matchedCacheTtlSec,
+            notFoundTtlSec: notFoundCacheTtlSec,
+          },
+        );
+        reply.header(
+          "x-alternatives-cache",
+          cacheClient && responseCacheTtlSec > 0 ? cacheHeader : "skip",
+        );
+        reply.header("x-alternatives-cache-kind", response.status);
+        if (cacheClient && responseCacheTtlSec > 0) {
+          try {
+            await cacheClient.set(redisCacheKey, responseBody, {
+              EX: responseCacheTtlSec,
+            });
+          } catch (cacheError) {
+            request.log.warn(
+              { error: cacheError },
+              "AGG Market alternatives Redis cache write failed",
+            );
+          }
         }
         return response;
       } catch (error) {

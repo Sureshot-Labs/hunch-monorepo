@@ -176,6 +176,19 @@ type CacheEntry<T> = {
   value: T;
 };
 
+export type AggClusterListCacheClient = {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, options: { EX: number }): Promise<unknown>;
+};
+
+export type AggClusterListCacheStatus = "hit" | "miss" | "skip";
+export type AggClusterListCacheLayer = "local" | "redis" | "none";
+
+export type AggClusterListCacheMetadata = {
+  status: AggClusterListCacheStatus;
+  layer: AggClusterListCacheLayer;
+};
+
 type ResolvedAggMidpoint = {
   value: number;
   side: "yes" | "no" | "unknown";
@@ -236,6 +249,7 @@ const alternativesCache = new Map<
   string,
   CacheEntry<AggMarketAlternativesResponse>
 >();
+const AGG_CLUSTER_REDIS_CACHE_PREFIX = "agg:clusters:v1";
 const MAX_ALTERNATIVES_CACHE_ENTRIES = 500;
 const supportedVenueSet = new Set<string>(AGG_SUPPORTED_VENUES);
 
@@ -1060,16 +1074,54 @@ function sortClusters(
   });
 }
 
-function cacheKey(query: AggClustersQueryInput): string {
+export function buildAggClusterListCacheKey(
+  query: AggClustersQueryInput,
+): string {
   return JSON.stringify({
-    venues: query.venues ?? null,
-    limit: query.limit ?? null,
-    sourceLimit: query.sourceLimit ?? null,
+    venues: parseAggVenues(query.venues).join(","),
+    limit: clampInt(query.limit, DEFAULTS.limit, 200),
+    sourceLimit: clampInt(query.sourceLimit, 100, 100),
     minLiquidity: query.minLiquidity ?? null,
-    minVenueCount: query.minVenueCount ?? null,
-    minSpread: query.minSpread ?? null,
-    sort_by: query.sort_by ?? null,
-    sort_dir: query.sort_dir ?? null,
+    minVenueCount: query.minVenueCount ?? DEFAULTS.minVenueCount,
+    minSpread: query.minSpread ?? DEFAULTS.minSpread,
+    sort_by: query.sort_by ?? "volume24h",
+    sort_dir: query.sort_dir ?? "desc",
+  });
+}
+
+function buildAggClusterListRedisCacheKey(query: AggClustersQueryInput): string {
+  const hash = crypto
+    .createHash("sha256")
+    .update(buildAggClusterListCacheKey(query))
+    .digest("hex");
+  return `${AGG_CLUSTER_REDIS_CACHE_PREFIX}:${hash}`;
+}
+
+function readAggClusterListCachedBody(
+  body: string,
+): AggClusterListResponse | null {
+  try {
+    const parsed = JSON.parse(body) as AggClusterListResponse;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.generatedAt !== "string") return null;
+    if (!parsed.defaults || typeof parsed.defaults !== "object") return null;
+    if (!Array.isArray(parsed.items)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeAggClusterLocalCache(params: {
+  key: string;
+  value: AggClusterListResponse;
+  ttlSec: number;
+  now: number;
+}): void {
+  if (params.ttlSec <= 0) return;
+  cache.set(params.key, {
+    expiresAt: params.now + params.ttlSec * 1000,
+    value: params.value,
   });
 }
 
@@ -1282,34 +1334,111 @@ export async function buildAggMarketAlternativesResponse(params: {
   });
 }
 
-export async function getAggClusterListResponseCached(params: {
+export async function getAggClusterListResponseCachedWithMetadata(params: {
   query: AggClustersQueryInput;
   client: AggMarketClient;
   db: DbQuery;
   ttlSec: number;
-}): Promise<AggClusterListResponse> {
-  const key = cacheKey(params.query);
+  cacheClient?: AggClusterListCacheClient | null;
+  onCacheError?: (operation: "read" | "write", error: unknown) => void;
+}): Promise<{
+  response: AggClusterListResponse;
+  cache: AggClusterListCacheMetadata;
+}> {
+  const key = buildAggClusterListCacheKey(params.query);
   const now = Date.now();
-  const cached = cache.get(key);
-  if (cached && cached.expiresAt > now) return cached.value;
 
-  const value = await buildAggClusterListResponse({
+  if (params.ttlSec <= 0) {
+    const response = await buildAggClusterListResponse({
+      query: params.query,
+      client: params.client,
+      db: params.db,
+    });
+    return { response, cache: { status: "skip", layer: "none" } };
+  }
+
+  const cached = cache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return {
+      response: cached.value,
+      cache: { status: "hit", layer: "local" },
+    };
+  }
+
+  const cacheClient = params.cacheClient ?? null;
+  const redisKey = buildAggClusterListRedisCacheKey(params.query);
+  let cacheStatus: AggClusterListCacheStatus = cacheClient ? "miss" : "skip";
+
+  if (cacheClient) {
+    try {
+      const cachedBody = await cacheClient.get(redisKey);
+      const cachedResponse = cachedBody
+        ? readAggClusterListCachedBody(cachedBody)
+        : null;
+      if (cachedResponse) {
+        writeAggClusterLocalCache({
+          key,
+          value: cachedResponse,
+          ttlSec: params.ttlSec,
+          now,
+        });
+        return {
+          response: cachedResponse,
+          cache: { status: "hit", layer: "redis" },
+        };
+      }
+    } catch (error) {
+      params.onCacheError?.("read", error);
+      cacheStatus = "skip";
+    }
+  }
+
+  const response = await buildAggClusterListResponse({
     query: params.query,
     client: params.client,
     db: params.db,
   });
 
-  if (params.ttlSec > 0) {
-    cache.set(key, {
-      expiresAt: now + params.ttlSec * 1000,
-      value,
-    });
+  writeAggClusterLocalCache({
+    key,
+    value: response,
+    ttlSec: params.ttlSec,
+    now,
+  });
+
+  if (cacheClient && cacheStatus !== "skip") {
+    try {
+      await cacheClient.set(redisKey, JSON.stringify(response), {
+        EX: params.ttlSec,
+      });
+    } catch (error) {
+      params.onCacheError?.("write", error);
+    }
   }
 
-  return value;
+  return { response, cache: { status: cacheStatus, layer: "none" } };
 }
 
-function alternativesCacheKey(
+export async function getAggClusterListResponseCached(params: {
+  query: AggClustersQueryInput;
+  client: AggMarketClient;
+  db: DbQuery;
+  ttlSec: number;
+  cacheClient?: AggClusterListCacheClient | null;
+  onCacheError?: (operation: "read" | "write", error: unknown) => void;
+}): Promise<AggClusterListResponse> {
+  const { response } = await getAggClusterListResponseCachedWithMetadata({
+    query: params.query,
+    client: params.client,
+    db: params.db,
+    ttlSec: params.ttlSec,
+    cacheClient: params.cacheClient,
+    onCacheError: params.onCacheError,
+  });
+  return response;
+}
+
+export function buildAggMarketAlternativesCacheKey(
   marketId: string,
   query: AggMarketAlternativesQueryInput,
 ): string {
@@ -1342,7 +1471,10 @@ export async function getAggMarketAlternativesResponseCached(params: {
   db: DbQuery;
   ttlSec: number;
 }): Promise<AggMarketAlternativesResponse | null> {
-  const key = alternativesCacheKey(params.marketId, params.query);
+  const key = buildAggMarketAlternativesCacheKey(
+    params.marketId,
+    params.query,
+  );
   const now = Date.now();
   const cached = alternativesCache.get(key);
   if (cached && cached.expiresAt > now) return cached.value;

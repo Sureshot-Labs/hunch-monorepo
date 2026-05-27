@@ -9,10 +9,11 @@ import {
 } from "fastify-type-provider-zod";
 import type { DbQuery } from "./db.js";
 import { marketRoutes } from "./routes/markets.js";
-import type {
-  AggMarketClient,
-  AggMidpoint,
-  AggVenueMarket,
+import {
+  AggMarketHttpError,
+  type AggMarketClient,
+  type AggMidpoint,
+  type AggVenueMarket,
 } from "./services/agg-market-client.js";
 import { clearAggClustersCacheForTests } from "./services/agg-market-clusters.js";
 
@@ -159,18 +160,50 @@ function fakeClient(args: {
   };
 }
 
+class FakeAlternativesCache {
+  readonly store = new Map<string, string>();
+  getCalls = 0;
+  setCalls = 0;
+  lastSet: { key: string; value: string; ex: number } | null = null;
+  failGet = false;
+  failSet = false;
+
+  async get(key: string): Promise<string | null> {
+    this.getCalls += 1;
+    if (this.failGet) throw new Error("redis get failed");
+    return this.store.get(key) ?? null;
+  }
+
+  async set(
+    key: string,
+    value: string,
+    options: { EX: number },
+  ): Promise<"OK"> {
+    this.setCalls += 1;
+    if (this.failSet) throw new Error("redis set failed");
+    this.lastSet = { key, value, ex: options.EX };
+    this.store.set(key, value);
+    return "OK";
+  }
+}
+
 async function buildTestApp(args: {
   db: DbQuery;
   client: AggMarketClient;
   appId?: string;
+  redis?: FakeAlternativesCache | null;
+  matchedTtlSec?: number;
+  notFoundTtlSec?: number;
 }) {
   const app = Fastify().withTypeProvider<ZodTypeProvider>();
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   await app.register(marketRoutes, {
     aggMarketAppId: args.appId ?? "test-agg-app",
-    aggMarketAlternativesCacheTtlSec: 0,
+    aggMarketAlternativesCacheTtlSec: args.matchedTtlSec ?? 0,
+    aggMarketAlternativesNotFoundCacheTtlSec: args.notFoundTtlSec ?? 60,
     aggMarketAlternativesDb: args.db,
+    getAggMarketAlternativesRedis: async () => args.redis ?? null,
     createAggMarketClient: () => args.client,
   });
   return app;
@@ -297,6 +330,252 @@ await test("GET /markets/:marketId/alternatives hides opposite participant alter
   assert.equal(body.status, "not_found");
   assert.equal(body.markets.length, 0);
   assert.equal(body.alternatives.length, 0);
+});
+
+await test("GET /markets/:marketId/alternatives caches not_found responses in Redis", async () => {
+  clearAggClustersCacheForTests();
+  const redis = new FakeAlternativesCache();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const app = await buildTestApp({
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+    ]),
+    client: fakeClient({
+      markets: [],
+      midpoints: [],
+      calls,
+    }),
+    redis,
+    notFoundTtlSec: 60,
+  });
+
+  const first = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  const firstCalls = calls.venueMarkets;
+  const second = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  await app.close();
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.headers["x-alternatives-cache"], "miss");
+  assert.equal(first.headers["x-alternatives-cache-kind"], "not_found");
+  assert.equal(first.json().status, "not_found");
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.headers["x-alternatives-cache"], "hit");
+  assert.equal(second.headers["x-alternatives-cache-kind"], "not_found");
+  assert.equal(second.json().status, "not_found");
+  assert.equal(calls.venueMarkets, firstCalls);
+  assert.equal(redis.setCalls, 1);
+  assert.equal(redis.lastSet?.ex, 60);
+});
+
+await test("GET /markets/:marketId/alternatives can disable not_found Redis caching", async () => {
+  clearAggClustersCacheForTests();
+  const redis = new FakeAlternativesCache();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const app = await buildTestApp({
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+    ]),
+    client: fakeClient({
+      markets: [],
+      midpoints: [],
+      calls,
+    }),
+    redis,
+    notFoundTtlSec: 0,
+  });
+
+  const first = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  const firstCalls = calls.venueMarkets;
+  const second = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  await app.close();
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.headers["x-alternatives-cache"], "skip");
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.headers["x-alternatives-cache"], "skip");
+  assert.ok(calls.venueMarkets > firstCalls);
+  assert.equal(redis.setCalls, 0);
+});
+
+await test("GET /markets/:marketId/alternatives caches matched responses in Redis", async () => {
+  clearAggClustersCacheForTests();
+  const kalshi = market({
+    id: "agg-kalshi",
+    venue: "kalshi",
+    externalIdentifier: "KXUCL-26-PSG",
+    question: "PSG",
+  });
+  const poly = market({
+    id: "agg-poly",
+    venue: "polymarket",
+    externalIdentifier: "101",
+    question: "PSG",
+    matchedVenueMarkets: [kalshi],
+  });
+  const redis = new FakeAlternativesCache();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const app = await buildTestApp({
+    db: fakeDb([
+      dbRow({
+        id: "polymarket:101",
+        venue: "polymarket",
+        venueMarketId: "101",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        bestBid: 0.56,
+        bestAsk: 0.58,
+      }),
+      dbRow({
+        id: "kalshi:KXUCL-26-PSG",
+        venue: "kalshi",
+        venueMarketId: "KXUCL-26-PSG",
+        title: "PSG",
+        eventTitle: "Champions League Winner",
+        bestBid: 0.54,
+        bestAsk: 0.56,
+      }),
+    ]),
+    client: fakeClient({
+      markets: [poly],
+      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)],
+      calls,
+    }),
+    redis,
+    matchedTtlSec: 30,
+  });
+
+  const first = await app.inject({
+    method: "GET",
+    url: "/markets/polymarket%3A101/alternatives?limit=5",
+  });
+  const firstCalls = calls.venueMarkets;
+  const second = await app.inject({
+    method: "GET",
+    url: "/markets/polymarket%3A101/alternatives?limit=5",
+  });
+  await app.close();
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.headers["x-alternatives-cache"], "miss");
+  assert.equal(first.headers["x-alternatives-cache-kind"], "matched");
+  assert.equal(first.json().status, "matched");
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.headers["x-alternatives-cache"], "hit");
+  assert.equal(second.headers["x-alternatives-cache-kind"], "matched");
+  assert.equal(second.json().status, "matched");
+  assert.equal(calls.venueMarkets, firstCalls);
+  assert.equal(redis.setCalls, 1);
+  assert.equal(redis.lastSet?.ex, 30);
+});
+
+await test("GET /markets/:marketId/alternatives falls back when Redis get fails", async () => {
+  clearAggClustersCacheForTests();
+  const redis = new FakeAlternativesCache();
+  redis.failGet = true;
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const app = await buildTestApp({
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+    ]),
+    client: fakeClient({
+      markets: [],
+      midpoints: [],
+      calls,
+    }),
+    redis,
+  });
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  await app.close();
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["x-alternatives-cache"], "skip");
+  assert.equal(response.json().status, "not_found");
+  assert.ok(calls.venueMarkets > 0);
+});
+
+await test("GET /markets/:marketId/alternatives does not cache AGG failures", async () => {
+  clearAggClustersCacheForTests();
+  const redis = new FakeAlternativesCache();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const app = await buildTestApp({
+    db: fakeDb([
+      dbRow({
+        id: "limitless:84875",
+        venue: "limitless",
+        venueMarketId: "84875",
+        title: "Senegal",
+        eventTitle: "World Cup, France vs Senegal, Jun 16, 2026",
+        bestBid: 0.13,
+        bestAsk: 0.14,
+      }),
+    ]),
+    client: {
+      async getVenueMarkets() {
+        calls.venueMarkets += 1;
+        throw new AggMarketHttpError("AGG unavailable", 503, null);
+      },
+      async getMidpoints() {
+        calls.midpoints += 1;
+        return [];
+      },
+    },
+    redis,
+  });
+
+  const first = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  const second = await app.inject({
+    method: "GET",
+    url: "/markets/limitless%3A84875/alternatives?limit=5",
+  });
+  await app.close();
+
+  assert.equal(first.statusCode, 502);
+  assert.equal(second.statusCode, 502);
+  assert.equal(calls.venueMarkets, 2);
+  assert.equal(redis.setCalls, 0);
 });
 
 await test("GET /markets/:marketId/alternatives rejects unsupported venues", async () => {
