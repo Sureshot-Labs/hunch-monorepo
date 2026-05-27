@@ -218,7 +218,7 @@ export function buildPublicPointsContributionSql(alias: string): string {
 }
 
 export function buildTierPointsContributionSql(alias: string): string {
-  return `case when not (${buildHiddenManualAdminVolumeEventPredicate(alias)}) then ${alias}.points_awarded else 0 end`;
+  return `${alias}.points_awarded`;
 }
 
 export function buildQualificationPointsContributionSql(alias: string): string {

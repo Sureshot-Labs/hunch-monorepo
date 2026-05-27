@@ -1804,7 +1804,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "fetchUserTierPoints excludes hidden manual but includes tier drops",
+    name: "fetchUserTierPoints includes manual and tier drops",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
       const db = createUserPointsDb({ total: "1250", capture });
@@ -1812,7 +1812,7 @@ const tests: TestCase[] = [
       const points = await fetchUserTierPoints(db, "user-a");
 
       assert.equal(points, 1250);
-      assert.match(capture.sql ?? "", /source_id like 'manual:%'/);
+      assert.doesNotMatch(capture.sql ?? "", /source_id like 'manual:%'/);
       assert.doesNotMatch(capture.sql ?? "", /source_id like 'referral-code-tier:%'/);
       assert.deepEqual(capture.params, ["user-a"]);
     },
@@ -2075,7 +2075,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "getRewardsReferrals keeps manual qualification hidden from displayed points",
+    name: "getRewardsReferrals keeps manual tier grants hidden from displayed public points",
     run: async () => {
       const db = createFetchReferralsDb({
         referrerPoints: "500",
@@ -2088,7 +2088,7 @@ const tests: TestCase[] = [
             created_at: new Date("2026-02-01T00:00:00.000Z"),
             wallet_address: "0xabc",
             points: "499",
-            tier_points: "499",
+            tier_points: "500",
             qualification_points: "500",
             bonus: "0",
           },
@@ -2110,7 +2110,7 @@ const tests: TestCase[] = [
         "2026-02-02T00:00:00.000Z",
       );
       assert.equal(result.referrals[0]?.points, 499);
-      assert.equal(result.referrals[0]?.tier.tier, 0);
+      assert.equal(result.referrals[0]?.tier.tier, 1);
     },
   },
 ];
