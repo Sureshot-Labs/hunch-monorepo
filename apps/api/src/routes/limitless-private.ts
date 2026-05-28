@@ -121,6 +121,16 @@ function mapLimitlessUpstreamStatus(status: number): number {
   return 502;
 }
 
+function isLimitlessAlreadyCancelledOrderMessage(
+  message: string | null | undefined,
+): boolean {
+  const normalized = message?.trim().toLowerCase() ?? "";
+  return (
+    normalized.includes("order not found or already canceled") ||
+    normalized.includes("order not found or already cancelled")
+  );
+}
+
 const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
 const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
@@ -3923,6 +3933,52 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       if (!upstream.ok) {
         const upstreamMessage = extractLimitlessMessage(upstream.payload);
+        if (isLimitlessAlreadyCancelledOrderMessage(upstreamMessage)) {
+          const updateResult = await pool.query(
+            `
+              update orders
+              set status = 'cancelled',
+                  cancelled_at = coalesce(cancelled_at, now()),
+                  last_update = now()
+              where user_id = $1
+                and (wallet_address = $2 or signer_address = $2)
+                and venue = 'limitless'
+                and venue_order_id = $3
+                and lower(coalesce(status, '')) in (
+                  'pending',
+                  'submitted',
+                  'live',
+                  'open',
+                  'delayed',
+                  'unconfirmed'
+                )
+            `,
+            [user.id, cancelWallet, request.params.orderId],
+          );
+
+          if ((updateResult.rowCount ?? 0) > 0) {
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: user.id,
+                venue: "limitless",
+                status: "cancelled",
+                orderId: request.params.orderId,
+                walletAddress: cancelWallet,
+              }),
+              app.log,
+            );
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            changed: (updateResult.rowCount ?? 0) > 0,
+            idempotent: true,
+            payload: upstream.payload,
+          });
+        }
+
         reply.code(mapLimitlessUpstreamStatus(upstream.status));
         return reply.send({
           error: "Limitless cancel failed",

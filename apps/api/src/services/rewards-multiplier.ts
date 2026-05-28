@@ -380,6 +380,15 @@ export async function insertVolumeEventsWithMultiplier(
   pool: Pool,
   input: BatchInsertInput,
 ): Promise<{ inserted: number; ids: string[] }> {
+  return tx(pool, async (client) =>
+    insertVolumeEventsWithMultiplierInTx(client, input),
+  );
+}
+
+export async function insertVolumeEventsWithMultiplierInTx(
+  client: PoolClient,
+  input: BatchInsertInput,
+): Promise<{ inserted: number; ids: string[] }> {
   if (!input.events.length) return { inserted: 0, ids: [] };
 
   const sortedEvents = [...input.events].sort((a, b) => {
@@ -388,29 +397,27 @@ export async function insertVolumeEventsWithMultiplier(
     return a.sourceId.localeCompare(b.sourceId);
   });
 
-  return tx(pool, async (client) => {
-    await acquireRewardsUserAdvisoryXactLock(client, input.userId);
+  await acquireRewardsUserAdvisoryXactLock(client, input.userId);
 
-    let inserted = 0;
-    const ids: string[] = [];
-    for (const event of sortedEvents) {
-      if (!Number.isFinite(event.notionalUsd) || event.notionalUsd <= 0) {
-        continue;
-      }
-      const insertedId = await insertOneVolumeEvent(client, {
-        userId: input.userId,
-        walletAddress: input.walletAddress,
-        venue: input.venue,
-        sourceType: input.sourceType,
-        sourceId: event.sourceId,
-        notionalUsd: event.notionalUsd,
-        createdAt: event.createdAt,
-      });
-      if (insertedId) {
-        inserted += 1;
-        ids.push(insertedId);
-      }
+  let inserted = 0;
+  const ids: string[] = [];
+  for (const event of sortedEvents) {
+    if (!Number.isFinite(event.notionalUsd) || event.notionalUsd <= 0) {
+      continue;
     }
-    return { inserted, ids };
-  });
+    const insertedId = await insertOneVolumeEvent(client, {
+      userId: input.userId,
+      walletAddress: input.walletAddress,
+      venue: input.venue,
+      sourceType: input.sourceType,
+      sourceId: event.sourceId,
+      notionalUsd: event.notionalUsd,
+      createdAt: event.createdAt,
+    });
+    if (insertedId) {
+      inserted += 1;
+      ids.push(insertedId);
+    }
+  }
+  return { inserted, ids };
 }

@@ -27,7 +27,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
-import { insertVolumeEventsWithMultiplier } from "./rewards-multiplier.js";
+import { insertVolumeEventsWithMultiplierInTx } from "./rewards-multiplier.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -2094,10 +2094,6 @@ export async function syncPolymarketTradesForSigner(
     }
   }
 
-  if (builderFeeAccruals.length) {
-    await upsertPolymarketBuilderFeeAccruals(pool, builderFeeAccruals);
-  }
-
   if (!fillOrderIds.length) {
     return {
       insertedFillCount: 0,
@@ -2195,24 +2191,37 @@ export async function syncPolymarketTradesForSigner(
         `,
         [Array.from(new Set(rows.map((row) => row.order_id)))],
       );
+
+      const insertedFillKeys = new Set(
+        rows.map((row) => `${row.order_id}:${row.venue_fill_id}`),
+      );
+      const insertedBuilderFeeAccruals = builderFeeAccruals.filter(
+        (accrual) =>
+          accrual != null &&
+          insertedFillKeys.has(`${accrual.orderId}:${accrual.venueFillId}`),
+      );
+      if (insertedBuilderFeeAccruals.length) {
+        await upsertPolymarketBuilderFeeAccruals(
+          client,
+          insertedBuilderFeeAccruals,
+        );
+      }
+
+      await insertVolumeEventsWithMultiplierInTx(client, {
+        userId: inputs.userId,
+        walletAddress: inputs.signerAddress,
+        venue: "polymarket",
+        sourceType: "order",
+        events: rows.map((fill) => ({
+          sourceId: fill.venue_fill_id,
+          notionalUsd: Number(fill.fill_size) * Number(fill.fill_price),
+          createdAt: fill.filled_at,
+        })),
+      });
     }
 
     return rows;
   });
-
-  if (insertedFills.length) {
-    await insertVolumeEventsWithMultiplier(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.signerAddress,
-      venue: "polymarket",
-      sourceType: "order",
-      events: insertedFills.map((fill) => ({
-        sourceId: fill.venue_fill_id,
-        notionalUsd: Number(fill.fill_size) * Number(fill.fill_price),
-        createdAt: fill.filled_at,
-      })),
-    });
-  }
 
   let positionsRecomputed = false;
   if (insertedFills.length && options.syncPositionsOnFill !== false) {

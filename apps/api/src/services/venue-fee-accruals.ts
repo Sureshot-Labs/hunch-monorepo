@@ -69,6 +69,8 @@ export type VenueFeeBackfillAttemptInput = {
   nextAttemptAt?: Date | null;
 };
 
+type VenueFeeAccrualQueryable = Pick<PoolClient, "query">;
+
 function microToDecimal(rawMicro: bigint): string {
   return usdcMicroToDecimalString(rawMicro);
 }
@@ -86,7 +88,7 @@ function feeEventSourceIdForAccrual(row: VenueFeeAccrualRow): string {
 }
 
 export async function upsertVenueFeeAccruals(
-  pool: Pool,
+  pool: VenueFeeAccrualQueryable,
   inputs: Array<VenueFeeAccrualInput | null>,
 ): Promise<{ upserted: number }> {
   const rows = inputs.filter(

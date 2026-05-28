@@ -697,6 +697,16 @@ function isPolymarketClobOpenStatus(status: string | null | undefined) {
   );
 }
 
+function isPolymarketClobCancelledStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toLowerCase() ?? "";
+  return (
+    normalized === "cancelled" ||
+    normalized === "canceled" ||
+    normalized === "cancelled_by_user" ||
+    normalized === "canceled_by_user"
+  );
+}
+
 function isPolymarketClobNoFillTerminalStatus(
   status: string | null | undefined,
 ) {
@@ -2209,10 +2219,17 @@ async function reconcileUnconfirmedOrders(inputs: {
   );
 
   if (!rows.length) {
-    return { checked: 0, confirmedCount: 0, unmatchedCount: 0, expiredCount: 0 };
+    return {
+      checked: 0,
+      confirmedCount: 0,
+      cancelledCount: 0,
+      unmatchedCount: 0,
+      expiredCount: 0,
+    };
   }
 
   let confirmedCount = 0;
+  let cancelledCount = 0;
   let unmatchedCount = 0;
   let expiredCount = 0;
   const exchangeAddressByTokenId = new Map<string, string>();
@@ -2358,6 +2375,43 @@ async function reconcileUnconfirmedOrders(inputs: {
           }
           continue;
         }
+        if (
+          evidence.statusHint === "cancelled" ||
+          isPolymarketClobCancelledStatus(evidence.orderStatus)
+        ) {
+          const reconciled = await reconcilePolymarketTerminalOrder({
+            userId: inputs.userId,
+            venueOrderId,
+            statusHint: "cancelled",
+            externalFilledSize: null,
+            externalFillPrice: null,
+            externalHasExecution: false,
+            skipOnchainExecutionCheck: true,
+            allowAmbiguousNoFillReconcile: true,
+            allowExternalExecutionEvidence: false,
+            terminalNoFillStatus: null,
+          });
+          if (reconciled?.status === "cancelled") {
+            cancelledCount += 1;
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: inputs.userId,
+                venue: "polymarket",
+                status: "cancelled",
+                side: reconciled.side,
+                size: reconciled.size,
+                price: reconciled.price,
+                orderId: venueOrderId,
+                tokenId: reconciled.tokenId,
+                walletAddress:
+                  reconciled.walletAddress ?? inputs.signerAddress,
+              }),
+              inputs.log,
+            );
+          }
+          continue;
+        }
         if (isPolymarketClobOpenStatus(evidence.orderStatus)) {
           await markPolymarketOrderLiveFromClob({
             userId: inputs.userId,
@@ -2420,7 +2474,13 @@ async function reconcileUnconfirmedOrders(inputs: {
     }
   }
 
-  return { checked: rows.length, confirmedCount, unmatchedCount, expiredCount };
+  return {
+    checked: rows.length,
+    confirmedCount,
+    cancelledCount,
+    unmatchedCount,
+    expiredCount,
+  };
 }
 
 type PolymarketOrdersSyncStats = {
@@ -2447,6 +2507,7 @@ type PolymarketOrdersSyncStats = {
   settlementSync: {
     checked: number;
     confirmedCount: number;
+    cancelledCount: number;
     unmatchedCount: number;
     expiredCount: number;
   };
@@ -2491,6 +2552,7 @@ function emptyPolymarketOrdersSyncStats(): PolymarketOrdersSyncStats {
     settlementSync: {
       checked: 0,
       confirmedCount: 0,
+      cancelledCount: 0,
       unmatchedCount: 0,
       expiredCount: 0,
     },
@@ -2542,6 +2604,9 @@ function mergePolymarketOrdersSyncStats(
       confirmedCount:
         base.settlementSync.confirmedCount +
         next.settlementSync.confirmedCount,
+      cancelledCount:
+        base.settlementSync.cancelledCount +
+        next.settlementSync.cancelledCount,
       unmatchedCount:
         base.settlementSync.unmatchedCount +
         next.settlementSync.unmatchedCount,
@@ -2762,6 +2827,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
   let settlementSync = {
     checked: 0,
     confirmedCount: 0,
+    cancelledCount: 0,
     unmatchedCount: 0,
     expiredCount: 0,
   };
@@ -2799,6 +2865,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
       delayedSync.unconfirmedCount > 0 ||
       delayedSync.liveCount > 0 ||
       settlementSync.confirmedCount > 0 ||
+      settlementSync.cancelledCount > 0 ||
       settlementSync.unmatchedCount > 0 ||
       settlementSync.expiredCount > 0,
     fetched: ordersRaw.length,

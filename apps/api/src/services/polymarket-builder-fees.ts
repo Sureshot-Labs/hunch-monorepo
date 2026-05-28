@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 import { env } from "../env.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
@@ -560,7 +560,7 @@ export function buildPolymarketBuilderFeeAccrual(
 }
 
 export async function upsertPolymarketBuilderFeeAccruals(
-  pool: Pool,
+  pool: Pick<PoolClient, "query">,
   inputs: Array<ReturnType<typeof buildPolymarketBuilderFeeAccrual>>,
 ): Promise<{ upserted: number }> {
   return upsertVenueFeeAccruals(pool, inputs);
