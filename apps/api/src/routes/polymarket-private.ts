@@ -257,14 +257,43 @@ function isPolymarketAlreadyClosedReason(
     normalized.includes("already canceled") ||
     normalized.includes("already cancelled") ||
     normalized.includes("already matched") ||
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
     normalized.includes("can't be found") ||
     normalized.includes("cannot be found")
   );
 }
 
+function resolvePolymarketClosedReasonHint(
+  reason: string | null | undefined,
+): "matched" | "cancelled" | null {
+  if (!reason) return null;
+  const normalized = reason.trim().toLowerCase();
+  if (!normalized) return null;
+  if (
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
+    normalized.includes("already matched")
+  ) {
+    return "matched";
+  }
+  if (
+    normalized.includes("already canceled") ||
+    normalized.includes("already cancelled")
+  ) {
+    return "cancelled";
+  }
+  return null;
+}
+
 async function reconcilePolymarketTerminalOrder(inputs: {
   userId: string;
   venueOrderId: string;
+  statusHint?: "matched" | "cancelled" | null;
 }): Promise<{
   status: "matched" | "cancelled";
   tokenId: string | null;
@@ -310,7 +339,8 @@ async function reconcilePolymarketTerminalOrder(inputs: {
   const row = rows[0];
   if (!row) return null;
 
-  let nextStatus: "matched" | "cancelled" = "cancelled";
+  let nextStatus: "matched" | "cancelled" =
+    inputs.statusHint ?? "cancelled";
   const orderHash = row.order_hash?.trim() ?? null;
   const makerAmount = readMakerAmountFromOrderPayload(row.order_payload);
 
@@ -4183,6 +4213,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             const reconciled = await reconcilePolymarketTerminalOrder({
               userId: user.id,
               venueOrderId: request.body.orderID,
+              statusHint: resolvePolymarketClosedReasonHint(
+                lastCancelRejection.reason,
+              ),
             });
             const reconciledStatus = reconciled?.status ?? "cancelled";
             void createNotificationSafe(
