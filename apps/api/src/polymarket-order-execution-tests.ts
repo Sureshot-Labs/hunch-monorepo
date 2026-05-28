@@ -170,15 +170,22 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "stored fill sync preserves hard terminal statuses",
+    name: "stored fill sync promotes previous terminal no-fill status when fill exists",
     run: () => {
-      const status = resolvePolymarketStoredFillSyncStatus({
-        currentStatus: "cancelled",
-        orderType: "FOK",
-        filledSize: "1.23",
-        orderSize: "1.23",
-      });
-      assert.equal(status, "cancelled");
+      for (const currentStatus of [
+        "cancelled",
+        "expired",
+        "unmatched",
+        POLYMARKET_UNCONFIRMED_STATUS,
+      ]) {
+        const status = resolvePolymarketStoredFillSyncStatus({
+          currentStatus,
+          orderType: "FOK",
+          filledSize: "1.23",
+          orderSize: "1.23",
+        });
+        assert.equal(status, "matched");
+      }
     },
   },
   {
@@ -217,6 +224,25 @@ const tests: TestCase[] = [
         }),
         false,
       );
+    },
+  },
+  {
+    name: "no-fill terminal reconcile is blocked by terminal no-fill statuses",
+    run: () => {
+      for (const currentStatus of [
+        "cancelled",
+        "expired",
+        "unmatched",
+        "rejected",
+      ]) {
+        assert.equal(
+          canApplyPolymarketNoFillTerminalStatus({
+            currentStatus,
+            hasPositiveFillRows: false,
+          }),
+          false,
+        );
+      }
     },
   },
   {

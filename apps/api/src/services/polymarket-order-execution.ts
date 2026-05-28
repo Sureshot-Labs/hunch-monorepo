@@ -148,13 +148,6 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
   orderSize?: number | string | null;
 }): PolymarketStoredFillSyncStatus {
   const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
-  if (
-    currentStatus === "cancelled" ||
-    currentStatus === "rejected" ||
-    currentStatus === "expired"
-  ) {
-    return currentStatus;
-  }
 
   const filledSize = readPositiveNumber(inputs.filledSize);
   if (filledSize != null) {
@@ -174,13 +167,26 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
   return currentStatus || null;
 }
 
+export function isPolymarketMutableNoFillStatus(
+  status: string | null | undefined,
+): boolean {
+  const currentStatus = status?.trim().toLowerCase() ?? "";
+  return [
+    "pending",
+    "submitted",
+    "live",
+    "open",
+    "delayed",
+    POLYMARKET_UNCONFIRMED_STATUS,
+  ].includes(currentStatus);
+}
+
 export function canApplyPolymarketNoFillTerminalStatus(inputs: {
   currentStatus?: string | null;
   hasPositiveFillRows?: boolean | null;
 }): boolean {
   if (inputs.hasPositiveFillRows) return false;
-  const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
-  return !["matched", "filled", "partially_filled"].includes(currentStatus);
+  return isPolymarketMutableNoFillStatus(inputs.currentStatus);
 }
 
 export function isPolymarketUnconfirmedStatus(

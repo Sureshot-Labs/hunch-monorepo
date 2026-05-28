@@ -97,7 +97,7 @@ await test("replaceExisting notification upserts without downgrading terminal or
     /notifications\.type not in \('order_filled', 'order_cancelled', 'order_failed'\)/,
   );
   assert.match(capturedSql, /excluded\.type = 'order_filled'/);
-  assert.match(
+  assert.doesNotMatch(
     capturedSql,
     /notifications\.type in \('order_cancelled', 'order_failed'\)[\s\S]+excluded\.type in \('order_cancelled', 'order_failed'\)/,
   );
@@ -126,7 +126,7 @@ await test("replaceExisting notification keeps order_filled as highest precedenc
   });
 
   assert.match(capturedSql, /excluded\.type = 'order_filled'/);
-  assert.match(
+  assert.doesNotMatch(
     capturedSql,
     /notifications\.type in \('order_cancelled', 'order_failed'\)[\s\S]+excluded\.type in \('order_cancelled', 'order_failed'\)/,
   );

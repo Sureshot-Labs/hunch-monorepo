@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import { tx, type Pool } from "@hunch/infra";
 import type { Position } from "../order-types.js";
 import {
   expandPolymarketWallets,
@@ -1965,9 +1965,6 @@ export async function syncPolymarketTradesForSigner(
   const fillTimes: Date[] = [];
   const fillTradeIds: string[] = [];
   const fillFees: number[] = [];
-  const volumeSourceIds: string[] = [];
-  const volumeNotionals: number[] = [];
-  const volumeTimes: Date[] = [];
   const builderFeeConfig = await resolvePolymarketBuilderFeeConfig(pool);
   const builderFeeAccruals: Array<
     ReturnType<typeof buildPolymarketBuilderFeeAccrual>
@@ -2045,9 +2042,6 @@ export async function syncPolymarketTradesForSigner(
           fillTimes.push(filledAt);
           fillTradeIds.push(tradeId);
           fillFees.push(0);
-          volumeSourceIds.push(venueFillId);
-          volumeNotionals.push(size * price);
-          volumeTimes.push(filledAt);
         }
         maybeQueueBuilderAccrual({
           order: localOrder,
@@ -2084,9 +2078,6 @@ export async function syncPolymarketTradesForSigner(
           fillTimes.push(filledAt);
           fillTradeIds.push(tradeId);
           fillFees.push(0);
-          volumeSourceIds.push(venueFillId);
-          volumeNotionals.push(size * price);
-          volumeTimes.push(filledAt);
         }
         maybeQueueBuilderAccrual({
           order: localOrder,
@@ -2114,99 +2105,114 @@ export async function syncPolymarketTradesForSigner(
     };
   }
 
-  const { rows: insertedFills } = await pool.query<{
-    order_id: string;
-    fill_size: number;
-    fill_price: number;
-    fill_side: string;
-  }>(
-    `
-      with input as (
-        select *
-        from unnest(
-          $1::uuid[],
-          $2::text[],
-          $3::numeric[],
-          $4::numeric[],
-          $5::text[],
-          $6::timestamptz[],
-          $7::text[],
-          $8::numeric[]
-        ) as t(order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees)
-      )
-      insert into order_fills (
-        order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees
-      )
-      select
-        t.order_id, t.venue_fill_id, t.fill_size, t.fill_price, t.fill_side, t.filled_at, t.venue_trade_id, t.fees
-      from input t
-      where not exists (
-        select 1
-        from order_fills of
-        where of.order_id = t.order_id
-          and of.venue_fill_id = t.venue_fill_id
-      )
-      returning order_id, fill_size, fill_price, fill_side
-    `,
-    [
-      fillOrderIds,
-      fillVenueIds,
-      fillSizes,
-      fillPrices,
-      fillSides,
-      fillTimes,
-      fillTradeIds,
-      fillFees,
-    ],
-  );
+  const insertedFills = await tx(pool, async (client) => {
+    await client.query(
+      "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [
+        `polymarket-trades:${inputs.userId}:${inputs.signerAddress.toLowerCase()}`,
+      ],
+    );
 
-  if (volumeSourceIds.length) {
+    const { rows } = await client.query<{
+      order_id: string;
+      venue_fill_id: string;
+      fill_size: number;
+      fill_price: number;
+      fill_side: string;
+      filled_at: Date;
+    }>(
+      `
+        with input as (
+          select *
+          from unnest(
+            $1::uuid[],
+            $2::text[],
+            $3::numeric[],
+            $4::numeric[],
+            $5::text[],
+            $6::timestamptz[],
+            $7::text[],
+            $8::numeric[]
+          ) as t(order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees)
+        )
+        insert into order_fills (
+          order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at, venue_trade_id, fees
+        )
+        select
+          t.order_id, t.venue_fill_id, t.fill_size, t.fill_price, t.fill_side, t.filled_at, t.venue_trade_id, t.fees
+        from input t
+        where not exists (
+          select 1
+          from order_fills of
+          where of.order_id = t.order_id
+            and of.venue_fill_id = t.venue_fill_id
+        )
+        returning order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at
+      `,
+      [
+        fillOrderIds,
+        fillVenueIds,
+        fillSizes,
+        fillPrices,
+        fillSides,
+        fillTimes,
+        fillTradeIds,
+        fillFees,
+      ],
+    );
+
+    if (rows.length) {
+      await client.query(
+        `
+          with agg as (
+            select order_id,
+                   sum(fill_size) as filled_size,
+                   case when sum(fill_size) > 0
+                        then sum(fill_size * fill_price) / sum(fill_size)
+                        else null end as average_fill_price,
+                   max(filled_at) as filled_at
+            from order_fills
+            where order_id = any($1::uuid[])
+            group by order_id
+          )
+          update orders o
+          set filled_size = agg.filled_size,
+              average_fill_price = agg.average_fill_price,
+              filled_at = agg.filled_at,
+              status = case
+                when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
+                  then 'matched'
+                when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
+                  then 'filled'
+                when agg.filled_size > 0 then 'partially_filled'
+                when o.status in ('cancelled', 'rejected', 'expired', 'unmatched') then o.status
+                when o.status = 'unconfirmed' then o.status
+                else o.status
+              end,
+              last_update = now()
+          from agg
+          where o.id = agg.order_id
+        `,
+        [Array.from(new Set(rows.map((row) => row.order_id)))],
+      );
+    }
+
+    return rows;
+  });
+
+  if (insertedFills.length) {
     await insertVolumeEventsWithMultiplier(pool, {
       userId: inputs.userId,
       walletAddress: inputs.signerAddress,
       venue: "polymarket",
       sourceType: "order",
-      events: volumeSourceIds.map((sourceId, index) => ({
-        sourceId,
-        notionalUsd: volumeNotionals[index] ?? 0,
-        createdAt: volumeTimes[index] ?? new Date(),
+      events: insertedFills.map((fill) => ({
+        sourceId: fill.venue_fill_id,
+        notionalUsd: Number(fill.fill_size) * Number(fill.fill_price),
+        createdAt: fill.filled_at,
       })),
     });
   }
-
-  await pool.query(
-    `
-      with agg as (
-        select order_id,
-               sum(fill_size) as filled_size,
-               case when sum(fill_size) > 0
-                    then sum(fill_size * fill_price) / sum(fill_size)
-                    else null end as average_fill_price,
-               max(filled_at) as filled_at
-        from order_fills
-        where order_id = any($1::uuid[])
-        group by order_id
-      )
-      update orders o
-      set filled_size = agg.filled_size,
-          average_fill_price = agg.average_fill_price,
-          filled_at = agg.filled_at,
-          status = case
-            when o.status in ('cancelled', 'rejected', 'expired') then o.status
-            when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
-              then 'matched'
-            when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
-              then 'filled'
-            when agg.filled_size > 0 then 'partially_filled'
-            when o.status = 'unconfirmed' then o.status
-            else o.status
-          end,
-          last_update = now()
-      from agg
-      where o.id = agg.order_id
-    `,
-    [Array.from(new Set(fillOrderIds))],
-  );
 
   let positionsRecomputed = false;
   if (insertedFills.length && options.syncPositionsOnFill !== false) {

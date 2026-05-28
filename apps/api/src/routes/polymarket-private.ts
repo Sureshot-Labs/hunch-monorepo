@@ -481,7 +481,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
         and (
           $2 = 'matched'
           or (
-            lower(coalesce(o.status, '')) not in ('matched', 'filled', 'partially_filled')
+            lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
             and not exists (
               select 1
               from order_fills f
@@ -739,7 +739,7 @@ async function markPolymarketOrderLiveFromClob(inputs: {
         and venue_order_id = $2
         and lower(coalesce(status, '')) in ('delayed', 'unconfirmed')
         and cancelled_at is null
-        and lower(coalesce(status, '')) not in ('matched', 'filled', 'partially_filled')
+        and lower(coalesce(status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
     `,
     [inputs.userId, inputs.venueOrderId],
   );
@@ -839,6 +839,9 @@ async function resolvePolymarketOrdersSyncSignerCandidates(inputs: {
   targetWalletAddress: string | null;
 }): Promise<string[]> {
   const candidates = new Map<string, string>();
+  const isTargeted =
+    inputs.orderIds.length > 0 ||
+    Boolean(inputs.targetWalletAddress?.trim());
   const addCandidate = (value: string | null | undefined) => {
     const trimmed = value?.trim() ?? "";
     if (!EVM_ADDRESS_RE.test(trimmed)) return;
@@ -871,7 +874,9 @@ async function resolvePolymarketOrdersSyncSignerCandidates(inputs: {
     }
   }
 
-  addCandidate(inputs.authWalletAddress);
+  if (!isTargeted) {
+    addCandidate(inputs.authWalletAddress);
+  }
   return Array.from(candidates.values());
 }
 
@@ -963,6 +968,30 @@ function resolvePolymarketUnconfirmedTradeSyncAfterSecOverride(
     Math.floor(
       (earliestPostedAtMs - POLYMARKET_UNCONFIRMED_TRADE_SYNC_LOOKBACK_MS) /
         1000,
+    ),
+  );
+}
+
+function resolvePolymarketOpenOrderTimestampMs(inputs: {
+  createdAt?: string | null;
+  postedAt?: Date | null;
+}): number | null {
+  const createdAt = parseNumberish(inputs.createdAt);
+  if (createdAt != null && createdAt > 0) {
+    return createdAt > 1_000_000_000_000 ? createdAt : createdAt * 1000;
+  }
+  const postedAtMs = inputs.postedAt?.getTime();
+  return postedAtMs != null && Number.isFinite(postedAtMs) ? postedAtMs : null;
+}
+
+function resolvePolymarketTradeSyncAfterSecFromMs(
+  timestampMs: number | null,
+): number | null {
+  if (timestampMs == null || !Number.isFinite(timestampMs)) return null;
+  return Math.max(
+    0,
+    Math.floor(
+      (timestampMs - POLYMARKET_UNCONFIRMED_TRADE_SYNC_LOOKBACK_MS) / 1000,
     ),
   );
 }
@@ -2266,7 +2295,7 @@ async function reconcileUnconfirmedOrders(inputs: {
                   last_update = now()
               where o.id = $1
                 and o.status = $3
-                and lower(coalesce(o.status, '')) not in ('matched', 'filled', 'partially_filled')
+                and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
                 and not exists (
                   select 1
                   from order_fills f
@@ -2592,6 +2621,8 @@ async function syncPolymarketOrdersForSigner(inputs: {
   let alreadyKnown = 0;
   let skippedNoId = 0;
   let existingOpenMarkedLive = 0;
+  let openOrderExecutionEvidenceCount = 0;
+  let openOrderExecutionAfterSecOverride: number | null = null;
   const orderIds: string[] = [];
 
   for (const o of ordersRaw) {
@@ -2603,6 +2634,11 @@ async function syncPolymarketOrdersForSigner(inputs: {
     orderIds.push(venueOrderId);
 
     const normalizedOpenOrder = normalizeOpenOrder(o);
+    const openOrderExecution = summarizePolymarketClobOrderExecution({
+      associateTrades: normalizedOpenOrder?.associateTrades ?? null,
+      sizeMatched: normalizedOpenOrder?.sizeMatched ?? null,
+      status: normalizedOpenOrder?.status ?? null,
+    });
     const tokenId = normalizedOpenOrder?.assetId ?? extractTokenId(o);
     const record = isRecord(o) ? o : null;
     const orderType =
@@ -2640,9 +2676,27 @@ async function syncPolymarketOrdersForSigner(inputs: {
     });
 
     if (result.kind === "stored") storedNew += 1;
+    if (openOrderExecution.hasExecution) {
+      openOrderExecutionEvidenceCount += 1;
+      const candidateAfterSec = resolvePolymarketTradeSyncAfterSecFromMs(
+        resolvePolymarketOpenOrderTimestampMs({
+          createdAt: normalizedOpenOrder?.createdAt ?? null,
+          postedAt: result.order.posted_at,
+        }),
+      );
+      if (candidateAfterSec != null) {
+        openOrderExecutionAfterSecOverride =
+          openOrderExecutionAfterSecOverride == null
+            ? candidateAfterSec
+            : Math.min(openOrderExecutionAfterSecOverride, candidateAfterSec);
+      }
+    }
     if (result.kind === "exists") {
       alreadyKnown += 1;
-      if (isPolymarketPendingLocalOrderStatus(result.order.status)) {
+      if (
+        !openOrderExecution.hasExecution &&
+        isPolymarketPendingLocalOrderStatus(result.order.status)
+      ) {
         const markedLive = await markPolymarketOrderLiveFromClob({
           userId: inputs.userId,
           venueOrderId,
@@ -2657,10 +2711,16 @@ async function syncPolymarketOrdersForSigner(inputs: {
     positionsRecomputed: false,
   };
   try {
-    tradeSync = await syncPolymarketTradesForSigner(pool, {
-      userId: inputs.userId,
-      signerAddress: inputs.signer,
-    });
+    tradeSync = await syncPolymarketTradesForSigner(
+      pool,
+      {
+        userId: inputs.userId,
+        signerAddress: inputs.signer,
+      },
+      {
+        afterSecOverride: openOrderExecutionAfterSecOverride,
+      },
+    );
   } catch (error) {
     inputs.log.error(
       { error, userId: inputs.userId, signer: inputs.signer },
@@ -2730,6 +2790,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
       storedNew > 0 ||
       signerBackfillCount > 0 ||
       existingOpenMarkedLive > 0 ||
+      openOrderExecutionEvidenceCount > 0 ||
       tradeSync.insertedFillCount > 0 ||
       delayedSync.matchedCount > 0 ||
       delayedSync.cancelledCount > 0 ||
@@ -5583,30 +5644,39 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      await pool.query(
-        `
-          update orders
+        const cancelUpdate = await pool.query(
+          `
+          update orders o
           set status = 'cancelled',
               cancelled_at = now(),
               last_update = now()
-          where user_id = $1
-            and venue = 'polymarket'
-            and venue_order_id = $2
+          where o.user_id = $1
+            and o.venue = 'polymarket'
+            and o.venue_order_id = $2
+            and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
+            and not exists (
+              select 1
+              from order_fills f
+              where f.order_id = o.id
+                and coalesce(f.fill_size, 0) > 0
+            )
         `,
-        [user.id, request.body.orderID],
-      );
+          [user.id, request.body.orderID],
+        );
 
-      void createNotificationSafe(
-        pool,
-        buildOrderNotification({
-          userId: user.id,
-          venue: "polymarket",
-          status: "cancelled",
-          orderId: request.body.orderID,
-          walletAddress: resolvedSigner,
-        }),
-        app.log,
-      );
+        if ((cancelUpdate.rowCount ?? 0) > 0) {
+          void createNotificationSafe(
+            pool,
+            buildOrderNotification({
+              userId: user.id,
+              venue: "polymarket",
+              status: "cancelled",
+              orderId: request.body.orderID,
+              walletAddress: resolvedSigner,
+            }),
+            app.log,
+          );
+        }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
