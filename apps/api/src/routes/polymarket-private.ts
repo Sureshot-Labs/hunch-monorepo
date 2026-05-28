@@ -195,6 +195,10 @@ type PolymarketUnconfirmedRow = {
   id: string;
   venue_order_id: string | null;
   token_id: string | null;
+  side: string | null;
+  wallet_address: string | null;
+  price: number | string | null;
+  size: number | string | null;
   order_type: string | null;
   order_hash: string | null;
   order_payload: unknown | null;
@@ -1754,6 +1758,10 @@ async function reconcileUnconfirmedOrders(inputs: {
         id,
         venue_order_id,
         token_id,
+        side,
+        wallet_address,
+        price,
+        size,
         order_type,
         order_hash,
         order_payload,
@@ -1831,7 +1839,24 @@ async function reconcileUnconfirmedOrders(inputs: {
             [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
           );
           if (nextStatus === "matched") confirmedCount += 1;
-          if (nextStatus === "unmatched") unmatchedCount += 1;
+          if (nextStatus === "unmatched") {
+            unmatchedCount += 1;
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: inputs.userId,
+                venue: "polymarket",
+                status: nextStatus,
+                side: row.side,
+                size: row.size,
+                price: row.price,
+                orderId: row.venue_order_id,
+                tokenId: row.token_id,
+                walletAddress: row.wallet_address ?? inputs.signerAddress,
+              }),
+              inputs.log,
+            );
+          }
           continue;
         }
       }
@@ -1866,7 +1891,25 @@ async function reconcileUnconfirmedOrders(inputs: {
             allowAmbiguousNoFillReconcile: true,
             allowExternalExecutionEvidence: false,
           });
-          if (reconciled?.status === "unmatched") unmatchedCount += 1;
+          if (reconciled?.status === "unmatched") {
+            unmatchedCount += 1;
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: inputs.userId,
+                venue: "polymarket",
+                status: reconciled.status,
+                side: reconciled.side,
+                size: reconciled.size,
+                price: reconciled.price,
+                orderId: venueOrderId,
+                tokenId: reconciled.tokenId,
+                walletAddress:
+                  reconciled.walletAddress ?? inputs.signerAddress,
+              }),
+              inputs.log,
+            );
+          }
         }
       }
     } catch (error) {
