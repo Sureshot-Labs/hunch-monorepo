@@ -1607,12 +1607,21 @@ type PolymarketTradeSyncOptions = {
   syncPositionsOnFill?: boolean;
   positionScope?: PositionScope;
   prefetchedBalances?: PrefetchedPolymarketOwnerBalances | null;
+  afterSecOverride?: number | null;
 };
 
 type PolymarketTradeSyncResult = {
   insertedFillCount: number;
   positionsRecomputed: boolean;
 };
+
+function normalizePolymarketTradeAfterSecOverride(
+  value: number | null | undefined,
+): number | null {
+  if (value == null) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
 
 async function syncPolymarketStoredPositionsFromPolygon(
   pool: Pool,
@@ -1849,10 +1858,14 @@ export async function syncPolymarketTradesForSigner(
     [inputs.userId, inputs.signerAddress],
   );
   const lastFilledAt = rows[0]?.last_filled_at ?? null;
+  const afterSecOverride = normalizePolymarketTradeAfterSecOverride(
+    options.afterSecOverride,
+  );
   const afterSec =
-    lastFilledAt != null
+    afterSecOverride ??
+    (lastFilledAt != null
       ? Math.max(0, Math.floor(lastFilledAt.getTime() / 1000) - 1)
-      : null;
+      : null);
 
   const tradesResponse = await fetchPolymarketTrades({
     baseUrl: env.polymarketClobBase,

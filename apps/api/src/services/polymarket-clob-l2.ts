@@ -347,7 +347,7 @@ export function normalizeOpenOrder(order: unknown): PolymarketOpenOrder | null {
       order.asset_id ?? order.assetId ?? order.token_id ?? order.tokenId,
     ),
     expiration: readString(order.expiration),
-    type: readString(order.type),
+    type: readString(order.type ?? order.order_type ?? order.orderType),
     createdAt: readString(order.created_at ?? order.createdAt),
   };
 }

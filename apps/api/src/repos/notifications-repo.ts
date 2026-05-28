@@ -147,7 +147,11 @@ export async function insertNotification(
         created_at = now(),
         updated_at = now()
       where notifications.type not in ('order_filled', 'order_cancelled', 'order_failed')
-        or excluded.type in ('order_filled', 'order_cancelled', 'order_failed')
+        or excluded.type = 'order_filled'
+        or (
+          notifications.type in ('order_cancelled', 'order_failed')
+          and excluded.type in ('order_cancelled', 'order_failed')
+        )
     `
     : "on conflict (user_id, dedupe_key) do nothing";
 

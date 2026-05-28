@@ -96,6 +96,40 @@ await test("replaceExisting notification upserts without downgrading terminal or
     capturedSql,
     /notifications\.type not in \('order_filled', 'order_cancelled', 'order_failed'\)/,
   );
+  assert.match(capturedSql, /excluded\.type = 'order_filled'/);
+  assert.match(
+    capturedSql,
+    /notifications\.type in \('order_cancelled', 'order_failed'\)[\s\S]+excluded\.type in \('order_cancelled', 'order_failed'\)/,
+  );
+  assert.doesNotMatch(
+    capturedSql,
+    /or excluded\.type in \('order_filled', 'order_cancelled', 'order_failed'\)/,
+  );
+});
+
+await test("replaceExisting notification keeps order_filled as highest precedence", async () => {
+  let capturedSql = "";
+  const db = {
+    query: async (sql: string) => {
+      capturedSql = sql;
+      return { rows: [] };
+    },
+  } as unknown as DbQuery;
+
+  await insertNotification(db, {
+    userId: "user-1",
+    type: "order_failed",
+    title: "Order not filled",
+    body: "Polymarket order",
+    dedupeKey: "order:0xabc",
+    replaceExisting: true,
+  });
+
+  assert.match(capturedSql, /excluded\.type = 'order_filled'/);
+  assert.match(
+    capturedSql,
+    /notifications\.type in \('order_cancelled', 'order_failed'\)[\s\S]+excluded\.type in \('order_cancelled', 'order_failed'\)/,
+  );
 });
 
 await test("fetchNotifications hides stale order_created rows with terminal sibling", async () => {
