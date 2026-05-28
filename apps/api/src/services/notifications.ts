@@ -68,6 +68,23 @@ function formatUsd(value: number | null, digits = 2): string | null {
   return `$${formatNumber(value, digits)}`;
 }
 
+function readPositiveNumber(
+  value: number | string | null | undefined,
+): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed || trimmed === "null" || trimmed === "undefined") {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
 function formatRewardClaimUsd(value: number): string {
   if (!Number.isFinite(value)) return "$0.000";
   if (value > 0 && value < 0.001) return "<$0.001";
@@ -77,6 +94,70 @@ function formatRewardClaimUsd(value: number): string {
 function formatVenue(venue: string): string {
   if (!venue) return "Venue";
   return venue.charAt(0).toUpperCase() + venue.slice(1);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readDataString(
+  data: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = data[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function maybeRepairOrderNotificationBody(input: {
+  body: string;
+  data: unknown;
+  type: string;
+}): string {
+  if (!input.type.startsWith("order_") && input.type !== "trade_executed") {
+    return input.body;
+  }
+  if (!/\s@\s*(?:null|undefined|nan)\b/i.test(input.body)) {
+    return input.body;
+  }
+  if (!isRecord(input.data)) {
+    return input.body
+      .replace(/\s@\s*(?:null|undefined|nan)\b/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  const venue = readDataString(input.data, "venue") ?? "order";
+  const side = readDataString(input.data, "side");
+  const size = readPositiveNumber(
+    input.data.size as number | string | null | undefined,
+  );
+  const price = readPositiveNumber(
+    input.data.price as number | string | null | undefined,
+  );
+  const parts = [formatVenue(venue)];
+  if (side) parts.push(side);
+  if (size != null) parts.push(formatNumber(size, 4));
+  if (price != null) {
+    const formattedPrice = formatUsd(price, 4);
+    if (formattedPrice) parts.push(`@ ${formattedPrice}`);
+  }
+  return parts.join(" ").trim() || input.body;
+}
+
+function readNotificationDataNumber(data: unknown, key: string): number | null {
+  if (!isRecord(data)) return null;
+  return readPositiveNumber(
+    data[key] as number | string | null | undefined,
+  );
+}
+
+function isIncompleteOrderFilledNotification(input: NotificationInput) {
+  if (input.type !== "order_filled") return false;
+  const size = readNotificationDataNumber(input.data, "size");
+  const price = readNotificationDataNumber(input.data, "price");
+  return size == null || price == null;
 }
 
 function formatBridgeProvider(provider: string): string {
@@ -169,8 +250,8 @@ export function buildOrderNotification(input: {
   venue: string;
   status?: string | null;
   side?: string | null;
-  size?: number | null;
-  price?: number | null;
+  size?: number | string | null;
+  price?: number | string | null;
   orderId?: string | null;
   marketId?: string | null;
   tokenId?: string | null;
@@ -190,6 +271,10 @@ export function buildOrderNotification(input: {
     type = "order_cancelled";
     title = "Order cancelled";
     severity = "warning";
+  } else if (status === "unmatched") {
+    type = "order_failed";
+    title = "Order not filled";
+    severity = "warning";
   } else if (status === "failed") {
     type = "order_failed";
     title = "Order failed";
@@ -200,13 +285,16 @@ export function buildOrderNotification(input: {
     severity = "success";
   }
 
+  const size = readPositiveNumber(input.size);
+  const price = readPositiveNumber(input.price);
   const parts: string[] = [formatVenue(input.venue)];
   if (input.side) parts.push(input.side);
-  if (input.size != null && input.size > 0) {
-    parts.push(formatNumber(input.size, 4));
+  if (size != null) {
+    parts.push(formatNumber(size, 4));
   }
-  if (input.price != null && input.price > 0) {
-    parts.push(`@ ${formatUsd(input.price, 4)}`);
+  if (price != null) {
+    const formattedPrice = formatUsd(price, 4);
+    if (formattedPrice) parts.push(`@ ${formattedPrice}`);
   }
 
   const body = parts.join(" ").trim() || `${formatVenue(input.venue)} order`;
@@ -222,8 +310,8 @@ export function buildOrderNotification(input: {
       venue: input.venue,
       status: displayStatus,
       side: input.side ?? null,
-      size: input.size ?? null,
-      price: input.price ?? null,
+      size,
+      price,
       orderId: input.orderId ?? null,
       marketId: input.marketId ?? null,
       tokenId: input.tokenId ?? null,
@@ -558,7 +646,11 @@ export function buildNotificationPayload(row: {
     id: row.id,
     type: row.type,
     title: row.title,
-    body: row.body,
+    body: maybeRepairOrderNotificationBody({
+      body: row.body,
+      data: row.data,
+      type: row.type,
+    }),
     severity: row.severity,
     data: row.data ?? null,
     readAt: row.read_at ? row.read_at.toISOString() : null,
@@ -582,7 +674,25 @@ export async function createNotificationSafe(
   options: { publish?: boolean } = {},
 ): Promise<NotificationPayload | null> {
   try {
-    const row = await insertNotification(db, input);
+    const normalizedInput: NotificationInput = {
+      ...input,
+      body: maybeRepairOrderNotificationBody({
+        body: input.body,
+        data: input.data,
+        type: input.type,
+      }),
+    };
+    if (isIncompleteOrderFilledNotification(normalizedInput)) {
+      const orderId = isRecord(normalizedInput.data)
+        ? normalizedInput.data.orderId
+        : null;
+      logger?.warn?.(
+        { orderId },
+        "Skipping incomplete order filled notification",
+      );
+      return null;
+    }
+    const row = await insertNotification(db, normalizedInput);
     if (!row) return null;
     const payload = buildNotificationPayload(row);
     if (options.publish !== false) {

@@ -628,9 +628,29 @@ async function fetchPolymarketFills(
         last_update
       from orders
       where user_id = $1
-        and (wallet_address is null or wallet_address = $2)
         and venue = 'polymarket'
         and token_id = any($3::text[])
+        and (
+          wallet_address is null
+          or lower(wallet_address) = lower($2)
+          or lower(coalesce(signer_address, '')) = lower($2)
+          or lower(coalesce(wallet_address, '')) in (
+            select lower(wallet_address)
+            from user_venue_credentials
+            where user_id = $1
+              and venue = 'polymarket'
+              and is_active = true
+              and lower(coalesce(funder_address, '')) = lower($2)
+          )
+          or lower(coalesce(signer_address, '')) in (
+            select lower(wallet_address)
+            from user_venue_credentials
+            where user_id = $1
+              and venue = 'polymarket'
+              and is_active = true
+              and lower(coalesce(funder_address, '')) = lower($2)
+          )
+        )
     `,
     params,
   );

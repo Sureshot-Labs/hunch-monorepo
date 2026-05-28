@@ -105,6 +105,7 @@ async function fetchTerminalOrderKeysForNotifications(
           'failed',
           'filled',
           'matched',
+          'unmatched',
           'rejected',
           'expired'
         )

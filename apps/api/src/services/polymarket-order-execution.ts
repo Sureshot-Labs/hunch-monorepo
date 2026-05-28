@@ -13,6 +13,24 @@ export type PolymarketOnchainOrderExecutionSummary = {
   hasExecution: boolean;
 };
 
+export type PolymarketClosedReasonHint = "matched" | "cancelled" | null;
+
+export type PolymarketTerminalReconcileStatus =
+  | "matched"
+  | "cancelled"
+  | "unmatched";
+
+function readPositiveNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
 export function summarizePolymarketOnchainOrderExecution(inputs: {
   makerAmount: bigint;
   remaining: bigint;
@@ -30,6 +48,62 @@ export function summarizePolymarketOnchainOrderExecution(inputs: {
     isFilledOrCancelled: inputs.isFilledOrCancelled,
     hasExecution: makerFilled > 0n,
   };
+}
+
+export function summarizePolymarketV2OnchainOrderExecution(inputs: {
+  makerAmount: bigint;
+  filled: boolean;
+  remaining: bigint;
+}): PolymarketOnchainOrderExecutionSummary {
+  const isDefaultEmptyStatus = !inputs.filled && inputs.remaining === 0n;
+  return summarizePolymarketOnchainOrderExecution({
+    makerAmount: inputs.makerAmount,
+    remaining: isDefaultEmptyStatus ? inputs.makerAmount : inputs.remaining,
+    isFilledOrCancelled: inputs.filled,
+  });
+}
+
+export function summarizePolymarketClobOrderExecution(inputs: {
+  associateTrades?: unknown[] | null;
+  sizeMatched?: number | string | null;
+  status?: string | null;
+}): {
+  hasExecution: boolean;
+  statusHint: PolymarketClosedReasonHint;
+} {
+  const hasExecution =
+    readPositiveNumber(inputs.sizeMatched) != null ||
+    Boolean(inputs.associateTrades?.length);
+  if (hasExecution) {
+    return { hasExecution: true, statusHint: "matched" };
+  }
+
+  const status = inputs.status?.trim().toLowerCase() ?? "";
+  if (
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "cancelled_by_user" ||
+    status === "canceled_by_user"
+  ) {
+    return { hasExecution: false, statusHint: "cancelled" };
+  }
+
+  return { hasExecution: false, statusHint: null };
+}
+
+export function resolvePolymarketTerminalReconcileStatus(inputs: {
+  statusHint?: PolymarketClosedReasonHint;
+  hasStoredFill?: boolean;
+  executionSummary?: Pick<
+    PolymarketOnchainOrderExecutionSummary,
+    "hasExecution"
+  > | null;
+}): PolymarketTerminalReconcileStatus {
+  if (inputs.hasStoredFill || inputs.executionSummary?.hasExecution) {
+    return "matched";
+  }
+  if (inputs.statusHint === "cancelled") return "cancelled";
+  return "unmatched";
 }
 
 export function resolvePolymarketUnconfirmedStatus(

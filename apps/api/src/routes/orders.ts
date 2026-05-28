@@ -22,7 +22,6 @@ const OPEN_ORDER_STATUSES: string[] = [
   "live",
   "partially_filled",
   "delayed",
-  "unmatched",
   "open",
 ];
 

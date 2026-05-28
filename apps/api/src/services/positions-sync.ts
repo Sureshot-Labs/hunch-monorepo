@@ -1741,6 +1741,7 @@ async function syncPolymarketStoredPositionsFromPolygon(
   let upsertedPositions = 0;
   let flattenedPositions = 0;
   let persistMs = 0;
+  let postSyncMs = 0;
 
   for (const owner of owners) {
     const held = heldByOwner.get(owner) ?? [];
@@ -1765,7 +1766,8 @@ async function syncPolymarketStoredPositionsFromPolygon(
     flattenedPositions += result.flattenedPositions;
 
     if (inputs.positionScope === "own") {
-      void Promise.allSettled([
+      const postSyncStartedAt = Date.now();
+      const [pmMetrics, pmNotifications] = await Promise.allSettled([
         recomputePositionMetricsForWallet(pool, {
           userId: inputs.userId,
           walletAddress: owner,
@@ -1776,20 +1778,20 @@ async function syncPolymarketStoredPositionsFromPolygon(
           walletAddress: owner,
           venue: "polymarket",
         }),
-      ]).then(([pmMetrics, pmNotifications]) => {
-        if (pmMetrics.status === "rejected") {
-          console.error(
-            "Polymarket position metrics update failed",
-            pmMetrics.reason,
-          );
-        }
-        if (pmNotifications.status === "rejected") {
-          console.error(
-            "Polymarket resolved position notification failed",
-            pmNotifications.reason,
-          );
-        }
-      });
+      ]);
+      if (pmMetrics.status === "rejected") {
+        console.error(
+          "Polymarket position metrics update failed",
+          pmMetrics.reason,
+        );
+      }
+      if (pmNotifications.status === "rejected") {
+        console.error(
+          "Polymarket resolved position notification failed",
+          pmNotifications.reason,
+        );
+      }
+      postSyncMs += Date.now() - postSyncStartedAt;
     }
   }
 
@@ -1812,6 +1814,7 @@ async function syncPolymarketStoredPositionsFromPolygon(
       balanceMs,
       backfillMs,
       persistMs,
+      postSyncMs,
       totalMs: Date.now() - totalStartedAt,
     },
   };

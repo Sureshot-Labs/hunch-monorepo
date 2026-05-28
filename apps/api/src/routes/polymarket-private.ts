@@ -74,18 +74,25 @@ import {
 import { tryRecordReferralFirstTradeConversion } from "../services/analytics-referrals.js";
 import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
 import {
+  type PolymarketClosedReasonHint,
+  type PolymarketTerminalReconcileStatus,
   POLYMARKET_UNCONFIRMED_STATUS,
   isPolymarketUnconfirmedStatus,
+  summarizePolymarketClobOrderExecution,
+  resolvePolymarketTerminalReconcileStatus,
   resolvePolymarketUnconfirmedStatus,
   summarizePolymarketOnchainOrderExecution,
+  summarizePolymarketV2OnchainOrderExecution,
 } from "../services/polymarket-order-execution.js";
 import { syncPolymarketTradesForSigner } from "../services/positions-sync.js";
 import {
   extractOrderArray,
   extractOrderId,
   extractTokenId,
+  fetchPolymarketOrderByHash,
   normalizeOpenOrder,
   polymarketL2Request,
+  type PolymarketL2Credentials,
 } from "../services/polymarket-clob-l2.js";
 import {
   calculatePolymarketBuilderFeeRaw,
@@ -103,6 +110,7 @@ const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
+const POLYMARKET_CLOB_NOT_FOUND_NO_FILL_GRACE_MS = 60_000;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_SELL_BALANCE_CHANGED_CODE = "POLYMARKET_SELL_BALANCE_CHANGED";
@@ -185,10 +193,13 @@ type OrderbookSummary = {
 
 type PolymarketUnconfirmedRow = {
   id: string;
+  venue_order_id: string | null;
   token_id: string | null;
+  order_type: string | null;
   order_hash: string | null;
   order_payload: unknown | null;
   order_payload_version: string | null;
+  posted_at: Date | null;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -268,10 +279,27 @@ function isPolymarketAlreadyClosedReason(
 
 function resolvePolymarketClosedReasonHint(
   reason: string | null | undefined,
-): "matched" | "cancelled" | null {
+): PolymarketClosedReasonHint {
   if (!reason) return null;
   const normalized = reason.trim().toLowerCase();
   if (!normalized) return null;
+  const mentionsMatched =
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
+    normalized.includes("already matched") ||
+    normalized.includes(" or matched");
+  const mentionsCancelled =
+    normalized.includes("already canceled") ||
+    normalized.includes("already cancelled");
+  const mentionsNotFound =
+    normalized.includes("can't be found") ||
+    normalized.includes("cannot be found") ||
+    normalized.includes("not found");
+  if ((mentionsMatched && mentionsCancelled) || mentionsNotFound) {
+    return null;
+  }
   if (
     normalized.includes("matched orders can't be canceled") ||
     normalized.includes("matched orders can't be cancelled") ||
@@ -281,10 +309,7 @@ function resolvePolymarketClosedReasonHint(
   ) {
     return "matched";
   }
-  if (
-    normalized.includes("already canceled") ||
-    normalized.includes("already cancelled")
-  ) {
+  if (mentionsCancelled) {
     return "cancelled";
   }
   return null;
@@ -293,36 +318,54 @@ function resolvePolymarketClosedReasonHint(
 async function reconcilePolymarketTerminalOrder(inputs: {
   userId: string;
   venueOrderId: string;
-  statusHint?: "matched" | "cancelled" | null;
+  statusHint?: PolymarketClosedReasonHint;
+  externalFilledSize?: number | null;
+  externalFillPrice?: number | null;
+  externalHasExecution?: boolean;
+  skipOnchainExecutionCheck?: boolean;
+  allowAmbiguousNoFillReconcile?: boolean;
+  allowExternalExecutionEvidence?: boolean;
 }): Promise<{
-  status: "matched" | "cancelled";
+  status: PolymarketTerminalReconcileStatus;
   tokenId: string | null;
   side: string | null;
   size: number | null;
   price: number | null;
+  walletAddress: string | null;
 } | null> {
   const { rows } = await pool.query<{
     id: string;
     token_id: string | null;
     side: string | null;
-    price: number | null;
-    size: number | null;
+    wallet_address: string | null;
+    price: number | string | null;
+    size: number | string | null;
     order_hash: string | null;
     order_payload: unknown | null;
-    filled_size: number | null;
-    average_fill_price: number | null;
+    order_payload_version: string | null;
+    filled_size: number | string | null;
+    average_fill_price: number | string | null;
+    has_positive_fill_rows: boolean;
   }>(
     `
       select
         id,
         token_id,
         side,
+        wallet_address,
         price,
         size,
         order_hash,
         order_payload,
+        order_payload_version,
         filled_size,
-        average_fill_price
+        average_fill_price,
+        exists (
+          select 1
+          from order_fills f
+          where f.order_id = orders.id
+            and coalesce(f.fill_size, 0) > 0
+        ) as has_positive_fill_rows
       from orders
       where user_id = $1
         and venue = 'polymarket'
@@ -339,47 +382,369 @@ async function reconcilePolymarketTerminalOrder(inputs: {
   const row = rows[0];
   if (!row) return null;
 
-  let nextStatus: "matched" | "cancelled" =
-    inputs.statusHint ?? "cancelled";
   const orderHash = row.order_hash?.trim() ?? null;
   const makerAmount = readMakerAmountFromOrderPayload(row.order_payload);
+  const filledSize = parsePositiveNumber(row.filled_size);
+  const orderSize = parsePositiveNumber(row.size);
+  const averageFillPrice = parsePositiveNumber(row.average_fill_price);
+  const orderPrice = parsePositiveNumber(row.price);
+  const externalFilledSize = parsePositiveNumber(inputs.externalFilledSize);
+  const externalFillPrice = parsePositiveNumber(inputs.externalFillPrice);
+  const hasExternalExecution =
+    inputs.externalHasExecution === true || externalFilledSize != null;
+  const hasStoredFill =
+    filledSize != null ||
+    row.has_positive_fill_rows;
+  let executionSummary: { hasExecution: boolean } | null = null;
 
-  if (orderHash && makerAmount != null && makerAmount > 0n) {
+  if (
+    !inputs.skipOnchainExecutionCheck &&
+    !hasStoredFill &&
+    orderHash &&
+    makerAmount != null &&
+    makerAmount > 0n
+  ) {
     const exchangeAddress = await resolvePolymarketOrderExchangeAddress({
       tokenId: row.token_id?.trim() || null,
     });
-    const summary = await fetchPolymarketExecutionSummary({
+    executionSummary = await fetchPolymarketExecutionSummary({
       exchangeAddress,
       orderHash,
       makerAmount,
+      orderPayloadVersion:
+        row.order_payload_version ??
+        resolvePolymarketOrderPayloadVersion(row.order_payload),
     });
-    if (summary.hasExecution) {
-      nextStatus = "matched";
-    }
-  } else if ((row.filled_size ?? 0) > 0 || row.average_fill_price != null) {
-    nextStatus = "matched";
   }
+
+  const hasExecutionEvidence =
+    hasStoredFill ||
+    executionSummary?.hasExecution === true ||
+    (inputs.allowExternalExecutionEvidence !== false && hasExternalExecution);
+  const hasDefinitiveNoFillEvidence = inputs.statusHint === "cancelled";
+  if (
+    !hasExecutionEvidence &&
+    !hasDefinitiveNoFillEvidence &&
+    inputs.allowAmbiguousNoFillReconcile !== true
+  ) {
+    return null;
+  }
+
+  const nextStatus = resolvePolymarketTerminalReconcileStatus({
+    statusHint: inputs.statusHint,
+    hasStoredFill: hasExecutionEvidence,
+    executionSummary,
+  });
 
   await pool.query(
     `
       update orders
       set status = $2,
           cancelled_at = case when $2 = 'cancelled' then coalesce(cancelled_at, now()) else cancelled_at end,
-          filled_at = case when $2 = 'matched' then coalesce(filled_at, now()) else filled_at end,
+          filled_at = case when $2 = 'matched' then coalesce(filled_at, now()) else null end,
+          filled_size = case
+            when $2 = 'matched' and $4::numeric is not null and coalesce(filled_size, 0) = 0
+              then $4::numeric
+            else filled_size
+          end,
+          average_fill_price = case
+            when $2 = 'matched' and $5::numeric is not null and average_fill_price is null
+              then $5::numeric
+            else average_fill_price
+          end,
           last_update = now()
       where user_id = $1
         and venue = 'polymarket'
         and venue_order_id = $3
     `,
-    [inputs.userId, nextStatus, inputs.venueOrderId],
+    [
+      inputs.userId,
+      nextStatus,
+      inputs.venueOrderId,
+      externalFilledSize,
+      externalFillPrice,
+    ],
   );
 
   return {
     status: nextStatus,
     tokenId: row.token_id ?? null,
     side: row.side ?? null,
-    size: row.filled_size ?? row.size ?? null,
-    price: row.average_fill_price ?? row.price ?? null,
+    size:
+      nextStatus === "matched"
+        ? (externalFilledSize ?? filledSize ?? orderSize)
+        : orderSize,
+    price:
+      nextStatus === "matched"
+        ? (externalFillPrice ?? averageFillPrice ?? orderPrice)
+        : orderPrice,
+    walletAddress: row.wallet_address ?? null,
+  };
+}
+
+async function markPolymarketDelayedOrderUnconfirmed(inputs: {
+  userId: string;
+  venueOrderId: string;
+}): Promise<boolean> {
+  const result = await pool.query(
+    `
+      update orders
+      set status = $3,
+          last_update = now()
+      where user_id = $1
+        and venue = 'polymarket'
+        and venue_order_id = $2
+        and lower(coalesce(status, '')) = 'delayed'
+    `,
+    [inputs.userId, inputs.venueOrderId, POLYMARKET_UNCONFIRMED_STATUS],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function isPolymarketOrderNoFillGraceElapsed(inputs: {
+  userId: string;
+  venueOrderId: string;
+}): Promise<boolean> {
+  const { rows } = await pool.query<{ posted_at: Date | null }>(
+    `
+      select posted_at
+      from orders
+      where user_id = $1
+        and venue = 'polymarket'
+        and venue_order_id = $2
+      order by posted_at desc nulls last
+      limit 1
+    `,
+    [inputs.userId, inputs.venueOrderId],
+  );
+  return isPolymarketNoFillGraceElapsed(rows[0]?.posted_at ?? null);
+}
+
+async function fetchPolymarketClobOrderExecutionEvidence(inputs: {
+  creds: PolymarketL2Credentials;
+  log: { warn: (payload: unknown, message?: string) => void };
+  orderId: string;
+  signer: string;
+}): Promise<{
+  checked: boolean;
+  externalFillPrice: number | null;
+  externalFilledSize: number | null;
+  hasExecution: boolean;
+  orderStatus: string | null;
+  payload: unknown;
+  statusHint: PolymarketClosedReasonHint;
+}> {
+  try {
+    const upstream = await fetchPolymarketOrderByHash({
+      baseUrl: env.polymarketClobBase,
+      timeoutMs: 10_000,
+      address: inputs.signer,
+      creds: inputs.creds,
+      orderHash: inputs.orderId,
+    });
+
+    if (!upstream.ok) {
+      inputs.log.warn(
+        {
+          orderId: inputs.orderId,
+          signer: inputs.signer,
+          status: upstream.status,
+          payload: upstream.payload,
+        },
+        "Polymarket cancel reconcile order status lookup failed",
+      );
+      return {
+        checked: false,
+        externalFillPrice: null,
+        externalFilledSize: null,
+        hasExecution: false,
+        orderStatus: null,
+        payload: upstream.payload,
+        statusHint: null,
+      };
+    }
+
+    if (!upstream.order) {
+      inputs.log.warn(
+        {
+          orderId: inputs.orderId,
+          signer: inputs.signer,
+          payload: upstream.payload,
+        },
+        "Polymarket order status lookup returned no order",
+      );
+      return {
+        checked: true,
+        externalFillPrice: null,
+        externalFilledSize: null,
+        hasExecution: false,
+        orderStatus: "not_found",
+        payload: upstream.payload,
+        statusHint: null,
+      };
+    }
+
+    const summary = summarizePolymarketClobOrderExecution({
+      associateTrades: upstream.order?.associateTrades ?? null,
+      sizeMatched: upstream.order?.sizeMatched ?? null,
+      status: upstream.order?.status ?? null,
+    });
+
+    return {
+      checked: true,
+      externalFillPrice: summary.hasExecution
+        ? parsePositiveNumber(upstream.order?.price)
+        : null,
+      externalFilledSize: summary.hasExecution
+        ? parsePositiveNumber(upstream.order?.sizeMatched)
+        : null,
+      hasExecution: summary.hasExecution,
+      orderStatus: upstream.order?.status ?? null,
+      payload: upstream.payload,
+      statusHint: summary.statusHint,
+    };
+  } catch (error) {
+    inputs.log.warn(
+      { error, orderId: inputs.orderId, signer: inputs.signer },
+      "Polymarket cancel reconcile order status lookup errored",
+    );
+    return {
+      checked: false,
+      externalFillPrice: null,
+      externalFilledSize: null,
+      hasExecution: false,
+      orderStatus: null,
+      payload: null,
+      statusHint: null,
+    };
+  }
+}
+
+function isPolymarketClobOpenStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toLowerCase() ?? "";
+  return (
+    normalized === "open" ||
+    normalized === "live" ||
+    normalized === "pending" ||
+    normalized === "partially_filled"
+  );
+}
+
+function isPolymarketClobNotFoundStatus(status: string | null | undefined) {
+  return status?.trim().toLowerCase() === "not_found";
+}
+
+function isPolymarketNoFillGraceElapsed(postedAt: Date | null | undefined) {
+  if (!postedAt) return false;
+  return (
+    Date.now() - postedAt.getTime() >=
+    POLYMARKET_CLOB_NOT_FOUND_NO_FILL_GRACE_MS
+  );
+}
+
+async function reconcileDelayedPolymarketOrdersAfterOpenSync(inputs: {
+  creds: PolymarketL2Credentials;
+  openVenueOrderIds: string[];
+  signerAddress: string;
+  userId: string;
+  log: { warn: (payload: unknown, message?: string) => void };
+}) {
+  const { rows } = await pool.query<{
+    venue_order_id: string;
+    posted_at: Date | null;
+  }>(
+    `
+      select venue_order_id, posted_at
+      from orders
+      where user_id = $1
+        and venue = 'polymarket'
+        and lower(coalesce(status, '')) = 'delayed'
+        and upper(coalesce(order_type, '')) in ('FOK', 'FAK')
+        and venue_order_id is not null
+        and (
+          lower(coalesce(signer_address, '')) = lower($2)
+          or lower(coalesce(wallet_address, '')) = lower($2)
+        )
+        and not (venue_order_id = any($3::text[]))
+      order by posted_at desc nulls last, last_update desc nulls last
+      limit 25
+    `,
+    [inputs.userId, inputs.signerAddress, inputs.openVenueOrderIds],
+  );
+
+  let checked = 0;
+  let matchedCount = 0;
+  let cancelledCount = 0;
+  let unmatchedCount = 0;
+  let unconfirmedCount = 0;
+  let skippedOpenCount = 0;
+
+  for (const row of rows) {
+    const orderId = row.venue_order_id?.trim();
+    if (!orderId) continue;
+    const evidence = await fetchPolymarketClobOrderExecutionEvidence({
+      creds: inputs.creds,
+      log: inputs.log,
+      orderId,
+      signer: inputs.signerAddress,
+    });
+    if (!evidence.checked) continue;
+    checked += 1;
+    if (isPolymarketClobOpenStatus(evidence.orderStatus)) {
+      skippedOpenCount += 1;
+      continue;
+    }
+
+    const reconciled = await reconcilePolymarketTerminalOrder({
+      userId: inputs.userId,
+      venueOrderId: orderId,
+      statusHint: evidence.statusHint,
+      externalFilledSize: evidence.externalFilledSize,
+      externalFillPrice: evidence.externalFillPrice,
+      externalHasExecution: evidence.hasExecution,
+      skipOnchainExecutionCheck: true,
+      allowAmbiguousNoFillReconcile:
+        isPolymarketClobNotFoundStatus(evidence.orderStatus) &&
+        isPolymarketNoFillGraceElapsed(row.posted_at),
+      allowExternalExecutionEvidence: false,
+    });
+
+    if (reconciled?.status === "matched") matchedCount += 1;
+    if (reconciled?.status === "cancelled") cancelledCount += 1;
+    if (reconciled?.status === "unmatched") unmatchedCount += 1;
+    if (!reconciled) {
+      const marked = await markPolymarketDelayedOrderUnconfirmed({
+        userId: inputs.userId,
+        venueOrderId: orderId,
+      });
+      if (marked) unconfirmedCount += 1;
+    }
+    if (reconciled && reconciled.status !== "matched") {
+      void createNotificationSafe(
+        pool,
+        buildOrderNotification({
+          userId: inputs.userId,
+          venue: "polymarket",
+          status: reconciled.status,
+          side: reconciled.side,
+          size: reconciled.size,
+          price: reconciled.price,
+          orderId,
+          tokenId: reconciled.tokenId,
+          walletAddress: reconciled.walletAddress ?? inputs.signerAddress,
+        }),
+        inputs.log,
+      );
+    }
+  }
+
+  return {
+    checked,
+    matchedCount,
+    cancelledCount,
+    unmatchedCount,
+    unconfirmedCount,
+    skippedOpenCount,
   };
 }
 
@@ -1337,12 +1702,10 @@ async function fetchPolymarketExecutionSummary(inputs: {
       exchangeAddress: inputs.exchangeAddress,
       orderHash: inputs.orderHash,
     });
-    const isLiveDefault =
-      !onchainStatus.filled && onchainStatus.remaining === 0n;
-    return summarizePolymarketOnchainOrderExecution({
+    return summarizePolymarketV2OnchainOrderExecution({
       makerAmount: inputs.makerAmount,
-      remaining: isLiveDefault ? inputs.makerAmount : onchainStatus.remaining,
-      isFilledOrCancelled: onchainStatus.filled,
+      filled: onchainStatus.filled,
+      remaining: onchainStatus.remaining,
     });
   }
 
@@ -1380,18 +1743,30 @@ async function waitForPolymarketExecutionConfirmation(inputs: {
 }
 
 async function reconcileUnconfirmedOrders(inputs: {
+  creds: PolymarketL2Credentials;
   userId: string;
   signerAddress: string;
-  log: { warn: (payload: unknown, message: string) => void };
+  log: { warn: (payload: unknown, message?: string) => void };
 }) {
   const { rows } = await pool.query<PolymarketUnconfirmedRow>(
     `
-      select id, token_id, order_hash, order_payload, order_payload_version
+      select
+        id,
+        venue_order_id,
+        token_id,
+        order_type,
+        order_hash,
+        order_payload,
+        order_payload_version,
+        posted_at
       from orders
       where user_id = $1
         and venue = 'polymarket'
         and status = $3
-        and order_hash is not null
+        and (
+          order_hash is not null
+          or venue_order_id is not null
+        )
         and (
           lower(coalesce(signer_address, '')) = lower($2)
           or lower(coalesce(wallet_address, '')) = lower($2)
@@ -1418,43 +1793,81 @@ async function reconcileUnconfirmedOrders(inputs: {
   for (const row of rows) {
     const orderHash = row.order_hash?.trim();
     const makerAmount = readMakerAmountFromOrderPayload(row.order_payload);
-    if (!orderHash || makerAmount == null || makerAmount <= 0n) continue;
-
-    const tokenId = row.token_id?.trim() || null;
-    let exchangeAddress =
-      tokenId != null ? (exchangeAddressByTokenId.get(tokenId) ?? null) : null;
-    if (!exchangeAddress) {
-      exchangeAddress = await resolvePolymarketOrderExchangeAddress({
-        tokenId,
-      });
-      if (tokenId) {
-        exchangeAddressByTokenId.set(tokenId, exchangeAddress);
-      }
-    }
 
     try {
-      const summary = await fetchPolymarketExecutionSummary({
-        exchangeAddress,
-        orderHash,
-        makerAmount,
-        orderPayloadVersion:
-          row.order_payload_version ??
-          resolvePolymarketOrderPayloadVersion(row.order_payload),
-      });
-      const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
-      if (!isPolymarketUnconfirmedStatus(nextStatus)) {
-        await pool.query(
-          `
-            update orders
-            set status = $2,
-                last_update = now()
-            where id = $1
-              and status = $3
-          `,
-          [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
-        );
-        if (nextStatus === "matched") confirmedCount += 1;
-        if (nextStatus === "unmatched") unmatchedCount += 1;
+      if (orderHash && makerAmount != null && makerAmount > 0n) {
+        const tokenId = row.token_id?.trim() || null;
+        let exchangeAddress =
+          tokenId != null
+            ? (exchangeAddressByTokenId.get(tokenId) ?? null)
+            : null;
+        if (!exchangeAddress) {
+          exchangeAddress = await resolvePolymarketOrderExchangeAddress({
+            tokenId,
+          });
+          if (tokenId) {
+            exchangeAddressByTokenId.set(tokenId, exchangeAddress);
+          }
+        }
+
+        const summary = await fetchPolymarketExecutionSummary({
+          exchangeAddress,
+          orderHash,
+          makerAmount,
+          orderPayloadVersion:
+            row.order_payload_version ??
+            resolvePolymarketOrderPayloadVersion(row.order_payload),
+        });
+        const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
+        if (!isPolymarketUnconfirmedStatus(nextStatus)) {
+          await pool.query(
+            `
+              update orders
+              set status = $2,
+                  last_update = now()
+              where id = $1
+                and status = $3
+            `,
+            [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
+          );
+          if (nextStatus === "matched") confirmedCount += 1;
+          if (nextStatus === "unmatched") unmatchedCount += 1;
+          continue;
+        }
+      }
+
+      const venueOrderId = row.venue_order_id?.trim();
+      const orderType = row.order_type?.trim().toUpperCase() ?? "";
+      if (
+        venueOrderId &&
+        (orderType === "FOK" || orderType === "FAK") &&
+        isPolymarketNoFillGraceElapsed(row.posted_at)
+      ) {
+        const evidence = await fetchPolymarketClobOrderExecutionEvidence({
+          creds: inputs.creds,
+          log: inputs.log,
+          orderId: venueOrderId,
+          signer: inputs.signerAddress,
+        });
+        if (
+          evidence.checked &&
+          !isPolymarketClobOpenStatus(evidence.orderStatus) &&
+          isPolymarketClobNotFoundStatus(evidence.orderStatus) &&
+          !evidence.hasExecution
+        ) {
+          const reconciled = await reconcilePolymarketTerminalOrder({
+            userId: inputs.userId,
+            venueOrderId,
+            statusHint: null,
+            externalFilledSize: null,
+            externalFillPrice: null,
+            externalHasExecution: false,
+            skipOnchainExecutionCheck: true,
+            allowAmbiguousNoFillReconcile: true,
+            allowExternalExecutionEvidence: false,
+          });
+          if (reconciled?.status === "unmatched") unmatchedCount += 1;
+        }
       }
     } catch (error) {
       inputs.log.warn(
@@ -3392,6 +3805,33 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         );
       }
 
+      let delayedSync = {
+        checked: 0,
+        matchedCount: 0,
+        cancelledCount: 0,
+        unmatchedCount: 0,
+        unconfirmedCount: 0,
+        skippedOpenCount: 0,
+      };
+      try {
+        delayedSync = await reconcileDelayedPolymarketOrdersAfterOpenSync({
+          creds: {
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+            apiPassphrase: creds.apiPassphrase,
+          },
+          openVenueOrderIds: orderIds,
+          signerAddress: signer,
+          userId: user.id,
+          log: app.log,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, userId: user.id, signer },
+          "Polymarket delayed order reconcile during orders sync failed",
+        );
+      }
+
       let settlementSync = {
         checked: 0,
         confirmedCount: 0,
@@ -3399,6 +3839,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       };
       try {
         settlementSync = await reconcileUnconfirmedOrders({
+          creds: {
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+            apiPassphrase: creds.apiPassphrase,
+          },
           userId: user.id,
           signerAddress: signer,
           log: app.log,
@@ -3418,6 +3863,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         changed:
           storedNew > 0 ||
           tradeSync.insertedFillCount > 0 ||
+          delayedSync.matchedCount > 0 ||
+          delayedSync.cancelledCount > 0 ||
+          delayedSync.unmatchedCount > 0 ||
+          delayedSync.unconfirmedCount > 0 ||
           settlementSync.confirmedCount > 0 ||
           settlementSync.unmatchedCount > 0,
         fetched: ordersRaw.length,
@@ -3426,6 +3875,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         skippedNoId,
         sampleVenueOrderIds: orderIds.slice(0, 10),
         tradeSync,
+        delayedSync,
         settlementSync,
       });
     },
@@ -4120,6 +4570,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         payload: unknown;
       } | null = null;
       let lastCancelRejection: {
+        creds: PolymarketL2Credentials;
         signer: string;
         reason: string;
         payload: unknown;
@@ -4193,6 +4644,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         if (cancelSummary.notCanceledReason) {
           lastCancelRejection = {
+            creds: {
+              apiKey: creds.apiKey,
+              apiSecret: creds.apiSecret,
+              apiPassphrase: creds.apiPassphrase,
+            },
             signer,
             reason: cancelSummary.notCanceledReason,
             payload: upstream.payload,
@@ -4210,29 +4666,115 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         if (lastCancelRejection) {
           if (isPolymarketAlreadyClosedReason(lastCancelRejection.reason)) {
-            const reconciled = await reconcilePolymarketTerminalOrder({
+            const fallbackStatusHint = resolvePolymarketClosedReasonHint(
+              lastCancelRejection.reason,
+            );
+            const clobOrderEvidence =
+              await fetchPolymarketClobOrderExecutionEvidence({
+                creds: lastCancelRejection.creds,
+                log: request.log,
+                orderId: request.body.orderID,
+                signer: lastCancelRejection.signer,
+              });
+            const statusHint =
+              clobOrderEvidence.statusHint ?? fallbackStatusHint;
+            const allowMissingOrderNoFill =
+              isPolymarketClobNotFoundStatus(clobOrderEvidence.orderStatus) &&
+              (await isPolymarketOrderNoFillGraceElapsed({
+                userId: user.id,
+                venueOrderId: request.body.orderID,
+              }));
+            let reconciled = await reconcilePolymarketTerminalOrder({
               userId: user.id,
               venueOrderId: request.body.orderID,
-              statusHint: resolvePolymarketClosedReasonHint(
-                lastCancelRejection.reason,
-              ),
+              statusHint,
+              externalFilledSize: clobOrderEvidence.externalFilledSize,
+              externalFillPrice: clobOrderEvidence.externalFillPrice,
+              externalHasExecution: clobOrderEvidence.hasExecution,
+              skipOnchainExecutionCheck: true,
+              allowAmbiguousNoFillReconcile: allowMissingOrderNoFill,
+              allowExternalExecutionEvidence: false,
             });
-            const reconciledStatus = reconciled?.status ?? "cancelled";
-            void createNotificationSafe(
-              pool,
-              buildOrderNotification({
-                userId: user.id,
+            let tradeSync:
+              | Awaited<ReturnType<typeof syncPolymarketTradesForSigner>>
+              | null = null;
+            if (!reconciled || reconciled.status === "matched") {
+              try {
+                tradeSync = await syncPolymarketTradesForSigner(pool, {
+                  userId: user.id,
+                  signerAddress: lastCancelRejection.signer,
+                });
+                if (!reconciled && tradeSync.insertedFillCount > 0) {
+                  reconciled = await reconcilePolymarketTerminalOrder({
+                    userId: user.id,
+                    venueOrderId: request.body.orderID,
+                    statusHint,
+                    externalFilledSize: clobOrderEvidence.externalFilledSize,
+                    externalFillPrice: clobOrderEvidence.externalFillPrice,
+                    externalHasExecution: clobOrderEvidence.hasExecution,
+                    skipOnchainExecutionCheck: true,
+                    allowAmbiguousNoFillReconcile: allowMissingOrderNoFill,
+                    allowExternalExecutionEvidence: false,
+                  });
+                }
+              } catch (error) {
+                app.log.error(
+                  {
+                    error,
+                    userId: user.id,
+                    signer: lastCancelRejection.signer,
+                    orderId: request.body.orderID,
+                  },
+                  "Polymarket trade sync after cancel reconcile failed",
+                );
+              }
+            }
+
+            if (!reconciled) {
+              const markedUnconfirmed =
+                await markPolymarketDelayedOrderUnconfirmed({
+                  userId: user.id,
+                  venueOrderId: request.body.orderID,
+                });
+              reply.header("Content-Type", "application/json; charset=utf-8");
+              return reply.send({
+                ok: true,
                 venue: "polymarket",
-                status: reconciledStatus,
-                side: reconciled?.side ?? null,
-                size: reconciled?.size ?? null,
-                price: reconciled?.price ?? null,
                 orderId: request.body.orderID,
-                tokenId: reconciled?.tokenId ?? null,
-                walletAddress: lastCancelRejection.signer,
-              }),
-              app.log,
-            );
+                signer: lastCancelRejection.signer,
+                status: POLYMARKET_UNCONFIRMED_STATUS,
+                reconciled: false,
+                pendingReconcile: true,
+                changed: markedUnconfirmed,
+                reason: lastCancelRejection.reason,
+                payload: lastCancelRejection.payload,
+                orderStatusPayload: clobOrderEvidence.payload ?? undefined,
+                tradeSync: tradeSync ?? undefined,
+              });
+            }
+
+            const reconciledStatus = reconciled.status;
+            const shouldEmitCancelPathNotification =
+              reconciledStatus !== "matched";
+
+            if (shouldEmitCancelPathNotification) {
+              void createNotificationSafe(
+                pool,
+                buildOrderNotification({
+                  userId: user.id,
+                  venue: "polymarket",
+                  status: reconciledStatus,
+                  side: reconciled?.side ?? null,
+                  size: reconciled?.size ?? null,
+                  price: reconciled?.price ?? null,
+                  orderId: request.body.orderID,
+                  tokenId: reconciled?.tokenId ?? null,
+                  walletAddress:
+                    reconciled?.walletAddress ?? lastCancelRejection.signer,
+                }),
+                app.log,
+              );
+            }
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,
@@ -4242,6 +4784,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               status: reconciledStatus ?? "cancelled",
               reconciled: true,
               payload: lastCancelRejection.payload,
+              orderStatusPayload: clobOrderEvidence.payload ?? undefined,
+              tradeSync: tradeSync ?? undefined,
             });
           }
 
