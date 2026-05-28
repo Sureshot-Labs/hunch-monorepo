@@ -275,6 +275,10 @@ export function buildOrderNotification(input: {
     type = "order_failed";
     title = "Order not filled";
     severity = "warning";
+  } else if (status === "expired") {
+    type = "order_failed";
+    title = "Order expired";
+    severity = "warning";
   } else if (status === "failed") {
     type = "order_failed";
     title = "Order failed";

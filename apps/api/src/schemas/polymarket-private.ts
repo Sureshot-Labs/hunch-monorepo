@@ -164,13 +164,13 @@ export const polymarketOrderParamsQuerySchema = z.object({
   tokenId: zRequiredString("tokenId is required"),
 });
 
-export const polymarketOrdersSyncBodySchema = z
-  .object({
+export const polymarketOrdersSyncBodySchema = z.preprocess(
+  (value) => (value == null ? {} : value),
+  z.object({
     orderIds: z.array(z.string().trim().min(1)).max(50).optional(),
     targetWalletAddress: zEthAddress.nullable().optional(),
-  })
-  .nullable()
-  .optional();
+  }),
+);
 
 export const polymarketFunderDeriveQuerySchema = z.object({
   includeMagicProxy: z.string().optional(),

@@ -350,7 +350,7 @@ export async function fetchUnifiedOrders(
     createdAt: "coalesce(o.posted_at, o.last_update)",
   });
   const orderWhere = inputs.openOnly
-    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and (lower(coalesce(o.status, '')) in ('delayed', 'unconfirmed') or coalesce(o.order_type, '') not in ('FOK', 'FAK'))`
+    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'partially_filled', 'delayed', 'unconfirmed', 'open')`
     : baseOrderWhere;
   const execWhere = buildWhereClause("e", filterParams, false, {
     market: "e.unified_market_id",

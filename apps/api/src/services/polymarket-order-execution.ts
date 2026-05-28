@@ -18,11 +18,12 @@ export type PolymarketOnchainOrderExecutionSummary = {
 };
 
 export type PolymarketClosedReasonHint = "matched" | "cancelled" | null;
+export type PolymarketNoFillTerminalStatus = "unmatched" | "expired";
 
 export type PolymarketTerminalReconcileStatus =
   | "matched"
   | "cancelled"
-  | "unmatched";
+  | PolymarketNoFillTerminalStatus;
 
 export type PolymarketStoredFillSyncStatus =
   | "matched"
@@ -110,12 +111,13 @@ export function resolvePolymarketTerminalReconcileStatus(inputs: {
     PolymarketOnchainOrderExecutionSummary,
     "hasExecution"
   > | null;
+  noFillStatus?: PolymarketNoFillTerminalStatus | null;
 }): PolymarketTerminalReconcileStatus {
   if (inputs.hasStoredFill || inputs.executionSummary?.hasExecution) {
     return "matched";
   }
   if (inputs.statusHint === "cancelled") return "cancelled";
-  return "unmatched";
+  return inputs.noFillStatus ?? "unmatched";
 }
 
 export function resolvePolymarketUnconfirmedStatus(

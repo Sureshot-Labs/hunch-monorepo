@@ -65,10 +65,11 @@ await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders
   const selectSql = capturedSql[0] ?? "";
   assert.match(
     selectSql,
-    /lower\(coalesce\(o\.status, ''\)\) in \('delayed', 'unconfirmed'\)/,
+    /lower\(coalesce\(o\.status, ''\)\) in \('pending', 'submitted', 'live', 'partially_filled', 'delayed', 'unconfirmed', 'open'\)/,
   );
-  assert.match(
-    selectSql,
-    /or coalesce\(o\.order_type, ''\) not in \('FOK', 'FAK'\)/,
-  );
+  assert.doesNotMatch(selectSql, /coalesce\(o\.order_type, ''\) not in/);
+  assert.doesNotMatch(selectSql, /'unmatched'/);
+  assert.doesNotMatch(selectSql, /'expired'/);
+  assert.doesNotMatch(selectSql, /'rejected'/);
+  assert.doesNotMatch(selectSql, /'cancelled'/);
 });

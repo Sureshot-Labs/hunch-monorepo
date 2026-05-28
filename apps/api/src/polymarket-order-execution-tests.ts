@@ -134,6 +134,18 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "terminal reconcile maps explicit expired no-fill status",
+    run: () => {
+      const status = resolvePolymarketTerminalReconcileStatus({
+        statusHint: null,
+        hasStoredFill: false,
+        executionSummary: { hasExecution: false },
+        noFillStatus: "expired",
+      });
+      assert.equal(status, "expired");
+    },
+  },
+  {
     name: "stored fill sync promotes unconfirmed FOK fill to matched",
     run: () => {
       const status = resolvePolymarketStoredFillSyncStatus({
@@ -233,6 +245,23 @@ const tests: TestCase[] = [
       });
       assert.equal(notification.type, "order_failed");
       assert.equal(notification.title, "Order not filled");
+      assert.equal(notification.severity, "warning");
+    },
+  },
+  {
+    name: "expired order notification is terminal and readable",
+    run: () => {
+      const notification = buildOrderNotification({
+        userId: "user-1",
+        venue: "polymarket",
+        status: "expired",
+        side: "BUY",
+        size: 10,
+        price: 0.5,
+        orderId: "order-1",
+      });
+      assert.equal(notification.type, "order_failed");
+      assert.equal(notification.title, "Order expired");
       assert.equal(notification.severity, "warning");
     },
   },
