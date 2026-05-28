@@ -1,7 +1,11 @@
 export const POLYMARKET_UNCONFIRMED_STATUS = "unconfirmed" as const;
 
 export type PolymarketUnconfirmedResolution =
-  | "matched"
+  | "unmatched"
+  | typeof POLYMARKET_UNCONFIRMED_STATUS;
+
+export type PolymarketUnconfirmedReconcileDecision =
+  | "sync_for_fill"
   | "unmatched"
   | typeof POLYMARKET_UNCONFIRMED_STATUS;
 
@@ -120,9 +124,19 @@ export function resolvePolymarketUnconfirmedStatus(
     "hasExecution" | "isFilledOrCancelled"
   >,
 ): PolymarketUnconfirmedResolution {
-  if (summary.hasExecution) return "matched";
+  if (summary.hasExecution) return POLYMARKET_UNCONFIRMED_STATUS;
   if (summary.isFilledOrCancelled) return "unmatched";
   return POLYMARKET_UNCONFIRMED_STATUS;
+}
+
+export function resolvePolymarketUnconfirmedReconcileDecision(
+  summary: Pick<
+    PolymarketOnchainOrderExecutionSummary,
+    "hasExecution" | "isFilledOrCancelled"
+  >,
+): PolymarketUnconfirmedReconcileDecision {
+  if (summary.hasExecution) return "sync_for_fill";
+  return resolvePolymarketUnconfirmedStatus(summary);
 }
 
 export function resolvePolymarketStoredFillSyncStatus(inputs: {

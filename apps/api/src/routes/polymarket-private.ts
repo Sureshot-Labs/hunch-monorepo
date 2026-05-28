@@ -81,7 +81,7 @@ import {
   isPolymarketUnconfirmedStatus,
   summarizePolymarketClobOrderExecution,
   resolvePolymarketTerminalReconcileStatus,
-  resolvePolymarketUnconfirmedStatus,
+  resolvePolymarketUnconfirmedReconcileDecision,
   summarizePolymarketOnchainOrderExecution,
   summarizePolymarketV2OnchainOrderExecution,
 } from "../services/polymarket-order-execution.js";
@@ -531,6 +531,31 @@ async function markPolymarketDelayedOrderUnconfirmed(inputs: {
     [inputs.userId, inputs.venueOrderId, POLYMARKET_UNCONFIRMED_STATUS],
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+async function hasPolymarketOrderExecutionEvidence(
+  orderId: string,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ has_execution: boolean }>(
+    `
+      select
+        (
+          lower(coalesce(o.status, '')) in ('matched', 'filled', 'partially_filled')
+          or coalesce(o.filled_size, 0) > 0
+          or exists (
+            select 1
+            from order_fills f
+            where f.order_id = o.id
+              and coalesce(f.fill_size, 0) > 0
+          )
+        ) as has_execution
+      from orders o
+      where o.id = $1
+      limit 1
+    `,
+    [orderId],
+  );
+  return rows[0]?.has_execution === true;
 }
 
 async function isPolymarketOrderNoFillGraceElapsed(inputs: {
@@ -1854,37 +1879,59 @@ async function reconcileUnconfirmedOrders(inputs: {
             row.order_payload_version ??
             resolvePolymarketOrderPayloadVersion(row.order_payload),
         });
-        const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
-        if (!isPolymarketUnconfirmedStatus(nextStatus)) {
+        const decision =
+          resolvePolymarketUnconfirmedReconcileDecision(summary);
+        if (decision === "sync_for_fill") {
+          try {
+            await syncPolymarketTradesForSigner(pool, {
+              userId: inputs.userId,
+              signerAddress: inputs.signerAddress,
+            });
+          } catch (error) {
+            inputs.log.warn(
+              {
+                error,
+                userId: inputs.userId,
+                signerAddress: inputs.signerAddress,
+                orderId: row.id,
+                venueOrderId: row.venue_order_id,
+              },
+              "Polymarket unconfirmed order fill sync failed",
+            );
+          }
+          if (await hasPolymarketOrderExecutionEvidence(row.id)) {
+            confirmedCount += 1;
+          }
+          continue;
+        }
+        if (!isPolymarketUnconfirmedStatus(decision)) {
           const updateResult = await pool.query(
             `
               update orders o
               set status = $2,
+                  filled_at = null,
                   last_update = now()
               where o.id = $1
                 and o.status = $3
-                and (
-                  $2 = 'matched'
-                  or not exists (
-                    select 1
-                    from order_fills f
-                    where f.order_id = o.id
-                      and coalesce(f.fill_size, 0) > 0
-                  )
+                and lower(coalesce(o.status, '')) not in ('matched', 'filled', 'partially_filled')
+                and not exists (
+                  select 1
+                  from order_fills f
+                  where f.order_id = o.id
+                    and coalesce(f.fill_size, 0) > 0
                 )
             `,
-            [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
+            [row.id, decision, POLYMARKET_UNCONFIRMED_STATUS],
           );
           if ((updateResult.rowCount ?? 0) === 0) continue;
-          if (nextStatus === "matched") confirmedCount += 1;
-          if (nextStatus === "unmatched") {
+          if (decision === "unmatched") {
             unmatchedCount += 1;
             void createNotificationSafe(
               pool,
               buildOrderNotification({
                 userId: inputs.userId,
                 venue: "polymarket",
-                status: nextStatus,
+                status: decision,
                 side: row.side,
                 size: row.size,
                 price: row.price,

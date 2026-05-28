@@ -6,6 +6,7 @@ import {
   canApplyPolymarketNoFillTerminalStatus,
   resolvePolymarketStoredFillSyncStatus,
   resolvePolymarketTerminalReconcileStatus,
+  resolvePolymarketUnconfirmedReconcileDecision,
   resolvePolymarketUnconfirmedStatus,
   summarizePolymarketClobOrderExecution,
   summarizePolymarketOnchainOrderExecution,
@@ -362,13 +363,23 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "unconfirmed resolves to matched when on-chain execution exists",
+    name: "unconfirmed execution requests fill sync instead of direct matched",
+    run: () => {
+      const decision = resolvePolymarketUnconfirmedReconcileDecision({
+        hasExecution: true,
+        isFilledOrCancelled: true,
+      });
+      assert.equal(decision, "sync_for_fill");
+    },
+  },
+  {
+    name: "legacy unconfirmed status keeps execution pending for fill sync",
     run: () => {
       const resolution = resolvePolymarketUnconfirmedStatus({
         hasExecution: true,
         isFilledOrCancelled: true,
       });
-      assert.equal(resolution, "matched");
+      assert.equal(resolution, POLYMARKET_UNCONFIRMED_STATUS);
     },
   },
 ];
