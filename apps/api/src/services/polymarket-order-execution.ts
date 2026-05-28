@@ -20,6 +20,14 @@ export type PolymarketTerminalReconcileStatus =
   | "cancelled"
   | "unmatched";
 
+export type PolymarketStoredFillSyncStatus =
+  | "matched"
+  | "filled"
+  | "partially_filled"
+  | typeof POLYMARKET_UNCONFIRMED_STATUS
+  | string
+  | null;
+
 function readPositiveNumber(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isFinite(value) && value > 0 ? value : null;
@@ -115,6 +123,39 @@ export function resolvePolymarketUnconfirmedStatus(
   if (summary.hasExecution) return "matched";
   if (summary.isFilledOrCancelled) return "unmatched";
   return POLYMARKET_UNCONFIRMED_STATUS;
+}
+
+export function resolvePolymarketStoredFillSyncStatus(inputs: {
+  currentStatus?: string | null;
+  orderType?: string | null;
+  filledSize?: number | string | null;
+  orderSize?: number | string | null;
+}): PolymarketStoredFillSyncStatus {
+  const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
+  if (
+    currentStatus === "cancelled" ||
+    currentStatus === "rejected" ||
+    currentStatus === "expired"
+  ) {
+    return currentStatus;
+  }
+
+  const filledSize = readPositiveNumber(inputs.filledSize);
+  if (filledSize != null) {
+    const orderType = inputs.orderType?.trim().toUpperCase() ?? "";
+    if (orderType === "FOK") return "matched";
+
+    const orderSize = readPositiveNumber(inputs.orderSize);
+    if (orderSize != null && filledSize >= orderSize) return "filled";
+
+    return "partially_filled";
+  }
+
+  if (currentStatus === POLYMARKET_UNCONFIRMED_STATUS) {
+    return POLYMARKET_UNCONFIRMED_STATUS;
+  }
+
+  return currentStatus || null;
 }
 
 export function isPolymarketUnconfirmedStatus(

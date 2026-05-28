@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {
   POLYMARKET_UNCONFIRMED_STATUS,
+  resolvePolymarketStoredFillSyncStatus,
   resolvePolymarketTerminalReconcileStatus,
   resolvePolymarketUnconfirmedStatus,
   summarizePolymarketClobOrderExecution,
@@ -126,6 +127,42 @@ const tests: TestCase[] = [
         statusHint: "cancelled",
         hasStoredFill: false,
         executionSummary: { hasExecution: false },
+      });
+      assert.equal(status, "cancelled");
+    },
+  },
+  {
+    name: "stored fill sync promotes unconfirmed FOK fill to matched",
+    run: () => {
+      const status = resolvePolymarketStoredFillSyncStatus({
+        currentStatus: POLYMARKET_UNCONFIRMED_STATUS,
+        orderType: "FOK",
+        filledSize: "1.23",
+        orderSize: "1.23",
+      });
+      assert.equal(status, "matched");
+    },
+  },
+  {
+    name: "stored fill sync keeps unconfirmed when no fill exists",
+    run: () => {
+      const status = resolvePolymarketStoredFillSyncStatus({
+        currentStatus: POLYMARKET_UNCONFIRMED_STATUS,
+        orderType: "FOK",
+        filledSize: "0",
+        orderSize: "1.23",
+      });
+      assert.equal(status, POLYMARKET_UNCONFIRMED_STATUS);
+    },
+  },
+  {
+    name: "stored fill sync preserves hard terminal statuses",
+    run: () => {
+      const status = resolvePolymarketStoredFillSyncStatus({
+        currentStatus: "cancelled",
+        orderType: "FOK",
+        filledSize: "1.23",
+        orderSize: "1.23",
       });
       assert.equal(status, "cancelled");
     },
