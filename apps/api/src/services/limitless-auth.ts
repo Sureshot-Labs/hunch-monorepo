@@ -68,11 +68,13 @@ export function extractLimitlessProfile(
       ? profileRaw.account
       : typeof profileRaw.address === "string"
         ? profileRaw.address
-        : typeof profileRaw.walletAddress === "string"
-          ? profileRaw.walletAddress
-          : typeof profileRaw.wallet_address === "string"
-            ? profileRaw.wallet_address
-            : null;
+        : typeof profileRaw.wallet === "string"
+          ? profileRaw.wallet
+          : typeof profileRaw.walletAddress === "string"
+            ? profileRaw.walletAddress
+            : typeof profileRaw.wallet_address === "string"
+              ? profileRaw.wallet_address
+              : null;
   const normalizedAccount =
     typeof account === "string" && account.trim().length > 0
       ? account.trim()
@@ -116,6 +118,95 @@ export function extractLimitlessProfile(
     ...(client ? { client } : {}),
     ...(rank ? { rank } : {}),
   };
+}
+
+function hasUsefulLimitlessProfile(
+  profile: LimitlessProfile | null,
+): profile is LimitlessProfile {
+  return Boolean(
+    profile &&
+      (profile.id != null ||
+        profile.account != null ||
+        profile.client != null ||
+        profile.rank != null),
+  );
+}
+
+const LIMITLESS_PROFILE_COLLECTION_KEYS = [
+  "profile",
+  "items",
+  "accounts",
+  "partnerAccounts",
+  "partner_accounts",
+  "data",
+  "results",
+] as const;
+
+function collectLimitlessProfiles(
+  value: unknown,
+  depth: number,
+  out: LimitlessProfile[],
+): void {
+  if (depth > 4 || value == null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectLimitlessProfiles(item, depth + 1, out);
+    }
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  const direct = extractLimitlessProfile(value);
+  if (hasUsefulLimitlessProfile(direct)) {
+    out.push(direct);
+  }
+
+  for (const key of LIMITLESS_PROFILE_COLLECTION_KEYS) {
+    if (key in value) {
+      collectLimitlessProfiles(value[key], depth + 1, out);
+    }
+  }
+}
+
+function profileIdentityKey(profile: LimitlessProfile): string {
+  const id = profile.id == null ? "" : String(profile.id);
+  const account = profile.account == null ? "" : normalizeAddress(profile.account);
+  return `${id}:${account}`;
+}
+
+export function extractLimitlessPartnerAccountProfiles(
+  value: unknown,
+): LimitlessProfile[] {
+  const collected: LimitlessProfile[] = [];
+  collectLimitlessProfiles(value, 0, collected);
+
+  const seen = new Set<string>();
+  const unique: LimitlessProfile[] = [];
+  for (const profile of collected) {
+    const key = profileIdentityKey(profile);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(profile);
+  }
+  return unique;
+}
+
+function isValidLimitlessProfileId(id: number | undefined): id is number {
+  return typeof id === "number" && Number.isFinite(id) && id > 0;
+}
+
+export function extractLimitlessPartnerAccountProfile(
+  value: unknown,
+  account: string,
+): LimitlessProfile | null {
+  const requestedAccount = normalizeAddress(account);
+  for (const profile of extractLimitlessPartnerAccountProfiles(value)) {
+    if (!isValidLimitlessProfileId(profile.id)) continue;
+    if (!profile.account) continue;
+    if (normalizeAddress(profile.account) !== requestedAccount) continue;
+    return profile;
+  }
+  return null;
 }
 
 export function mergeLimitlessProfiles(

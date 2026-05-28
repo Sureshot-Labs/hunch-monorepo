@@ -36,6 +36,8 @@ import {
 } from "../services/limitless-client.js";
 import {
   buildLimitlessRequestAuthInputs,
+  extractLimitlessPartnerAccountProfile,
+  extractLimitlessPartnerAccountProfiles,
   extractLimitlessProfile,
   loadLimitlessProfileForWallet,
   type LimitlessProfile,
@@ -1162,6 +1164,58 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     };
   };
 
+  const lookupLimitlessPartnerAccountProfile = async (inputs: {
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<{
+    status: number;
+    message: string | null;
+    profile: LimitlessProfile | null;
+    returnedNonMatchingAccount: boolean;
+  }> => {
+    const lookup = await limitlessRequest({
+      method: "GET",
+      requestPath: `/profiles/partner-accounts?account=${encodeURIComponent(
+        inputs.account,
+      )}`,
+      auth: "partner_hmac",
+    });
+
+    if (!lookup.ok) {
+      return {
+        status: lookup.status,
+        message: extractLimitlessMessage(lookup.payload),
+        profile: null,
+        returnedNonMatchingAccount: false,
+      };
+    }
+
+    const matchingProfile = normalizeLimitlessProfileForAccount({
+      profile: extractLimitlessPartnerAccountProfile(
+        lookup.payload,
+        inputs.account,
+      ),
+      account: inputs.account,
+      clientType: inputs.clientType,
+    });
+    const requestedAccount = normalizeAddress(inputs.account);
+    const returnedNonMatchingAccount = extractLimitlessPartnerAccountProfiles(
+      lookup.payload,
+    ).some(
+      (profile) =>
+        profile.account != null &&
+        normalizeAddress(profile.account) !== requestedAccount,
+    );
+
+    return {
+      status: 200,
+      message: null,
+      profile: matchingProfile,
+      returnedNonMatchingAccount:
+        matchingProfile == null && returnedNonMatchingAccount,
+    };
+  };
+
   const loadStoredLimitlessProfileForAccount = async (inputs: {
     userId: string;
     account: string;
@@ -1287,6 +1341,18 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         if (!upstream.ok) {
           if (upstream.status === 409) {
+            const partnerAccountLookup =
+              await lookupLimitlessPartnerAccountProfile({
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              });
+            if (partnerAccountLookup.profile) {
+              return persistAndReturnProfile(
+                partnerAccountLookup.profile,
+                "Failed to store recovered Limitless credentials from partner account lookup",
+              );
+            }
+
             const upstreamExistingProfile = normalizeLimitlessProfileForAccount(
               {
                 profile: extractLimitlessProfile(upstream.payload),
@@ -1315,28 +1381,6 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               };
             }
 
-            const profileLookup = await limitlessRequest({
-              method: "GET",
-              requestPath: `/profiles/${checksumAccount}`,
-              auth: "partner_hmac",
-            });
-            const profileLookupMessage = profileLookup.ok
-              ? null
-              : extractLimitlessMessage(profileLookup.payload);
-            if (profileLookup.ok) {
-              const existingProfile = normalizeLimitlessProfileForAccount({
-                profile: extractLimitlessProfile(profileLookup.payload),
-                account: checksumAccount,
-                clientType: inputs.clientType,
-              });
-              if (existingProfile) {
-                return persistAndReturnProfile(
-                  existingProfile,
-                  "Failed to store recovered Limitless credentials from profile lookup",
-                );
-              }
-            }
-
             const upstreamMessage = extractLimitlessMessage(upstream.payload);
             app.log.warn(
               {
@@ -1345,10 +1389,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                 account: checksumAccount,
                 upstreamStatus: upstream.status,
                 upstreamMessage,
-                profileLookupStatus: profileLookup.ok
-                  ? 200
-                  : profileLookup.status,
-                profileLookupMessage,
+                profileLookupStatus: partnerAccountLookup.status,
+                profileLookupMessage: partnerAccountLookup.message,
+                profileLookupReturnedNonMatchingAccount:
+                  partnerAccountLookup.returnedNonMatchingAccount,
               },
               "Limitless profile exists but profile id could not be recovered",
             );
@@ -1365,12 +1409,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                   status: upstream.status,
                   message: upstreamMessage,
                 },
-                profileLookup: profileLookup.ok
-                  ? { status: 200, message: null }
-                  : {
-                      status: profileLookup.status,
-                      message: profileLookupMessage,
-                    },
+                profileLookup: {
+                  status: partnerAccountLookup.status,
+                  message: partnerAccountLookup.message,
+                },
               },
             };
           }
