@@ -22,6 +22,7 @@ const OPEN_ORDER_STATUSES: string[] = [
   "live",
   "partially_filled",
   "delayed",
+  "unconfirmed",
   "open",
 ];
 

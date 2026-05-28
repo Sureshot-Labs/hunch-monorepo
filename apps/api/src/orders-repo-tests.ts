@@ -34,7 +34,7 @@ await test("markOrderPositionDeltaApplied does not mutate order freshness", asyn
   assert.doesNotMatch(capturedSql, /\blast_update\s*=/i);
 });
 
-await test("fetchUnifiedOrders openOnly keeps delayed FOK/FAK orders visible", async () => {
+await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders visible", async () => {
   const capturedSql: string[] = [];
   const pool = {
     query: async (sql: string) => {
@@ -52,6 +52,7 @@ await test("fetchUnifiedOrders openOnly keeps delayed FOK/FAK orders visible", a
       "live",
       "partially_filled",
       "delayed",
+      "unconfirmed",
       "unmatched",
       "open",
     ],
@@ -62,7 +63,10 @@ await test("fetchUnifiedOrders openOnly keeps delayed FOK/FAK orders visible", a
   });
 
   const selectSql = capturedSql[0] ?? "";
-  assert.match(selectSql, /lower\(coalesce\(o\.status, ''\)\) = 'delayed'/);
+  assert.match(
+    selectSql,
+    /lower\(coalesce\(o\.status, ''\)\) in \('delayed', 'unconfirmed'\)/,
+  );
   assert.match(
     selectSql,
     /or coalesce\(o\.order_type, ''\) not in \('FOK', 'FAK'\)/,

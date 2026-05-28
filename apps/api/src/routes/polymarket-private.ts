@@ -77,6 +77,7 @@ import {
   type PolymarketClosedReasonHint,
   type PolymarketTerminalReconcileStatus,
   POLYMARKET_UNCONFIRMED_STATUS,
+  canApplyPolymarketNoFillTerminalStatus,
   isPolymarketUnconfirmedStatus,
   summarizePolymarketClobOrderExecution,
   resolvePolymarketTerminalReconcileStatus,
@@ -110,7 +111,7 @@ const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
-const POLYMARKET_CLOB_NOT_FOUND_NO_FILL_GRACE_MS = 60_000;
+const POLYMARKET_CLOB_NOT_FOUND_NO_FILL_GRACE_MS = 10_000;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_SELL_BALANCE_CHANGED_CODE = "POLYMARKET_SELL_BALANCE_CHANGED";
@@ -339,6 +340,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
 } | null> {
   const { rows } = await pool.query<{
     id: string;
+    status: string | null;
     token_id: string | null;
     side: string | null;
     wallet_address: string | null;
@@ -354,6 +356,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
     `
       select
         id,
+        status,
         token_id,
         side,
         wallet_address,
@@ -439,10 +442,19 @@ async function reconcilePolymarketTerminalOrder(inputs: {
     hasStoredFill: hasExecutionEvidence,
     executionSummary,
   });
+  if (
+    nextStatus !== "matched" &&
+    !canApplyPolymarketNoFillTerminalStatus({
+      currentStatus: row.status,
+      hasPositiveFillRows: row.has_positive_fill_rows,
+    })
+  ) {
+    return null;
+  }
 
-  await pool.query(
+  const updateResult = await pool.query(
     `
-      update orders
+      update orders o
       set status = $2,
           cancelled_at = case when $2 = 'cancelled' then coalesce(cancelled_at, now()) else cancelled_at end,
           filled_at = case when $2 = 'matched' then coalesce(filled_at, now()) else null end,
@@ -457,9 +469,22 @@ async function reconcilePolymarketTerminalOrder(inputs: {
             else average_fill_price
           end,
           last_update = now()
-      where user_id = $1
-        and venue = 'polymarket'
-        and venue_order_id = $3
+      where o.user_id = $1
+        and o.id = $6
+        and o.venue = 'polymarket'
+        and o.venue_order_id = $3
+        and (
+          $2 = 'matched'
+          or (
+            lower(coalesce(o.status, '')) not in ('matched', 'filled', 'partially_filled')
+            and not exists (
+              select 1
+              from order_fills f
+              where f.order_id = o.id
+                and coalesce(f.fill_size, 0) > 0
+            )
+          )
+        )
     `,
     [
       inputs.userId,
@@ -467,8 +492,11 @@ async function reconcilePolymarketTerminalOrder(inputs: {
       inputs.venueOrderId,
       externalFilledSize,
       externalFillPrice,
+      row.id,
     ],
   );
+
+  if ((updateResult.rowCount ?? 0) === 0) return null;
 
   return {
     status: nextStatus,
@@ -1828,16 +1856,26 @@ async function reconcileUnconfirmedOrders(inputs: {
         });
         const nextStatus = resolvePolymarketUnconfirmedStatus(summary);
         if (!isPolymarketUnconfirmedStatus(nextStatus)) {
-          await pool.query(
+          const updateResult = await pool.query(
             `
-              update orders
+              update orders o
               set status = $2,
                   last_update = now()
-              where id = $1
-                and status = $3
+              where o.id = $1
+                and o.status = $3
+                and (
+                  $2 = 'matched'
+                  or not exists (
+                    select 1
+                    from order_fills f
+                    where f.order_id = o.id
+                      and coalesce(f.fill_size, 0) > 0
+                  )
+                )
             `,
             [row.id, nextStatus, POLYMARKET_UNCONFIRMED_STATUS],
           );
+          if ((updateResult.rowCount ?? 0) === 0) continue;
           if (nextStatus === "matched") confirmedCount += 1;
           if (nextStatus === "unmatched") {
             unmatchedCount += 1;

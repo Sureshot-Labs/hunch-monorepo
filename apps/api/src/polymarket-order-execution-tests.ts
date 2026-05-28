@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {
   POLYMARKET_UNCONFIRMED_STATUS,
+  canApplyPolymarketNoFillTerminalStatus,
   resolvePolymarketStoredFillSyncStatus,
   resolvePolymarketTerminalReconcileStatus,
   resolvePolymarketUnconfirmedStatus,
@@ -165,6 +166,56 @@ const tests: TestCase[] = [
         orderSize: "1.23",
       });
       assert.equal(status, "cancelled");
+    },
+  },
+  {
+    name: "no-fill terminal reconcile is blocked by matched status",
+    run: () => {
+      assert.equal(
+        canApplyPolymarketNoFillTerminalStatus({
+          currentStatus: "matched",
+          hasPositiveFillRows: false,
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "no-fill terminal reconcile is blocked by terminal fill statuses",
+    run: () => {
+      for (const currentStatus of ["filled", "partially_filled"]) {
+        assert.equal(
+          canApplyPolymarketNoFillTerminalStatus({
+            currentStatus,
+            hasPositiveFillRows: false,
+          }),
+          false,
+        );
+      }
+    },
+  },
+  {
+    name: "no-fill terminal reconcile is blocked by positive fill rows",
+    run: () => {
+      assert.equal(
+        canApplyPolymarketNoFillTerminalStatus({
+          currentStatus: POLYMARKET_UNCONFIRMED_STATUS,
+          hasPositiveFillRows: true,
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "no-fill terminal reconcile can update unconfirmed no-fill orders",
+    run: () => {
+      assert.equal(
+        canApplyPolymarketNoFillTerminalStatus({
+          currentStatus: POLYMARKET_UNCONFIRMED_STATUS,
+          hasPositiveFillRows: false,
+        }),
+        true,
+      );
     },
   },
   {

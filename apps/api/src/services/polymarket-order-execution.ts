@@ -158,6 +158,15 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
   return currentStatus || null;
 }
 
+export function canApplyPolymarketNoFillTerminalStatus(inputs: {
+  currentStatus?: string | null;
+  hasPositiveFillRows?: boolean | null;
+}): boolean {
+  if (inputs.hasPositiveFillRows) return false;
+  const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
+  return !["matched", "filled", "partially_filled"].includes(currentStatus);
+}
+
 export function isPolymarketUnconfirmedStatus(
   status: string | null | undefined,
 ): boolean {
