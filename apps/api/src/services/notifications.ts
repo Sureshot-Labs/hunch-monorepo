@@ -13,6 +13,7 @@ export type NotificationInput = {
   severity?: NotificationSeverity;
   data?: unknown;
   dedupeKey?: string | null;
+  replaceExisting?: boolean;
 };
 
 export type NotificationPayload = {
@@ -204,7 +205,7 @@ export function buildOrderNotification(input: {
   }
 
   const body = parts.join(" ").trim() || `${formatVenue(input.venue)} order`;
-  const dedupeKey = input.orderId ? `${type}:${input.orderId}` : null;
+  const dedupeKey = input.orderId ? `order:${input.orderId}` : null;
 
   return {
     userId: input.userId,
@@ -224,6 +225,7 @@ export function buildOrderNotification(input: {
       walletAddress: input.walletAddress ?? null,
     },
     dedupeKey,
+    replaceExisting: Boolean(dedupeKey),
   };
 }
 

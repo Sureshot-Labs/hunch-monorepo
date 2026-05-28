@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import type { Pool } from "@hunch/infra";
 import { markOrderPositionDeltaApplied } from "./repos/orders-repo.js";
+import { fetchUnifiedOrders } from "./repos/unified-orders.js";
 
 async function test(name: string, fn: () => Promise<void>) {
   try {
@@ -31,4 +32,39 @@ await test("markOrderPositionDeltaApplied does not mutate order freshness", asyn
 
   assert.match(capturedSql, /_hunchPositionDeltaAppliedAt/);
   assert.doesNotMatch(capturedSql, /\blast_update\s*=/i);
+});
+
+await test("fetchUnifiedOrders openOnly keeps delayed FOK/FAK orders visible", async () => {
+  const capturedSql: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql.push(sql);
+      if (/count\(\*\)/i.test(sql)) return { rows: [{ total: "0" }] };
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await fetchUnifiedOrders(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    status: [
+      "pending",
+      "submitted",
+      "live",
+      "partially_filled",
+      "delayed",
+      "unmatched",
+      "open",
+    ],
+    openOnly: true,
+    type: "order",
+    limit: 50,
+    offset: 0,
+  });
+
+  const selectSql = capturedSql[0] ?? "";
+  assert.match(selectSql, /lower\(coalesce\(o\.status, ''\)\) = 'delayed'/);
+  assert.match(
+    selectSql,
+    /or coalesce\(o\.order_type, ''\) not in \('FOK', 'FAK'\)/,
+  );
 });

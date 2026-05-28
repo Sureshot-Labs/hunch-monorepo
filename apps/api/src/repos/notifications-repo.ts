@@ -53,10 +53,27 @@ export async function insertNotification(
     severity?: NotificationSeverity;
     data?: unknown;
     dedupeKey?: string | null;
+    replaceExisting?: boolean;
   },
 ): Promise<NotificationRow | null> {
   const severity = inputs.severity ?? "info";
   const dedupeKey = inputs.dedupeKey ?? null;
+  const conflictClause = inputs.replaceExisting
+    ? `
+      on conflict (user_id, dedupe_key) do update
+      set
+        type = excluded.type,
+        title = excluded.title,
+        body = excluded.body,
+        severity = excluded.severity,
+        data = excluded.data,
+        read_at = null,
+        created_at = now(),
+        updated_at = now()
+      where notifications.type not in ('order_filled', 'order_cancelled', 'order_failed')
+        or excluded.type in ('order_filled', 'order_cancelled', 'order_failed')
+    `
+    : "on conflict (user_id, dedupe_key) do nothing";
 
   const { rows } = await db.query<NotificationRow>(
     `
@@ -84,7 +101,7 @@ export async function insertNotification(
         now(),
         now()
       )
-      on conflict (user_id, dedupe_key) do nothing
+      ${conflictClause}
       returning
         id,
         user_id,
@@ -121,17 +138,31 @@ export async function fetchNotifications(
   },
 ): Promise<{ rows: NotificationRow[]; nextCursor: string | null }> {
   const cursor = decodeCursor(inputs.cursor);
-  let whereClause = "where user_id = $1";
+  let whereClause = `
+    where n.user_id = $1
+      and not (
+        n.type = 'order_created'
+        and n.data ? 'orderId'
+        and exists (
+          select 1
+          from notifications terminal
+          where terminal.user_id = n.user_id
+            and terminal.type in ('order_filled', 'order_cancelled', 'order_failed')
+            and terminal.data ? 'orderId'
+            and terminal.data->>'orderId' = n.data->>'orderId'
+        )
+      )
+  `;
   const params: PgParams = [inputs.userId];
   let paramCount = 1;
 
   if (inputs.unreadOnly) {
-    whereClause += " and read_at is null";
+    whereClause += " and n.read_at is null";
   }
 
   if (cursor) {
     paramCount += 1;
-    whereClause += ` and (created_at, id) < ($${paramCount}, $${paramCount + 1})`;
+    whereClause += ` and (n.created_at, n.id) < ($${paramCount}, $${paramCount + 1})`;
     params.push(cursor.createdAt);
     paramCount += 1;
     params.push(cursor.id);
@@ -140,19 +171,19 @@ export async function fetchNotifications(
   const { rows } = await db.query<NotificationRow>(
     `
       select
-        id,
-        user_id,
-        type,
-        title,
-        body,
-        severity,
-        data,
-        read_at,
-        created_at,
-        updated_at
-      from notifications
+        n.id,
+        n.user_id,
+        n.type,
+        n.title,
+        n.body,
+        n.severity,
+        n.data,
+        n.read_at,
+        n.created_at,
+        n.updated_at
+      from notifications n
       ${whereClause}
-      order by created_at desc, id desc
+      order by n.created_at desc, n.id desc
       limit $${paramCount + 1}
     `,
     [...params, inputs.limit + 1],
