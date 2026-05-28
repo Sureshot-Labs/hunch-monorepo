@@ -26,6 +26,9 @@ await test("order notifications replace by logical order id", async () => {
 
   assert.equal(notification.dedupeKey, "order:0xabc");
   assert.equal(notification.replaceExisting, true);
+  assert.equal(notification.title, "Order delayed");
+  assert.equal(notification.severity, "warning");
+  assert.equal((notification.data as { status?: unknown }).status, "pending");
 });
 
 await test("replaceExisting notification upserts without downgrading terminal orders", async () => {
@@ -48,6 +51,7 @@ await test("replaceExisting notification upserts without downgrading terminal or
 
   assert.match(capturedSql, /on conflict \(user_id, dedupe_key\) do update/i);
   assert.match(capturedSql, /read_at = null/i);
+  assert.match(capturedSql, /jsonb_strip_nulls\(coalesce\(excluded\.data/);
   assert.match(
     capturedSql,
     /notifications\.type not in \('order_filled', 'order_cancelled', 'order_failed'\)/,
@@ -69,6 +73,8 @@ await test("fetchNotifications hides stale order_created rows with terminal sibl
   });
 
   assert.match(capturedSql, /n\.type = 'order_created'/);
+  assert.match(capturedSql, /then 'Order delayed'/);
+  assert.match(capturedSql, /jsonb_set\(coalesce\(n\.data/);
   assert.match(
     capturedSql,
     /terminal\.type in \('order_filled', 'order_cancelled', 'order_failed'\)/,
@@ -76,5 +82,9 @@ await test("fetchNotifications hides stale order_created rows with terminal sibl
   assert.match(
     capturedSql,
     /terminal\.data->>'orderId' = n\.data->>'orderId'/,
+  );
+  assert.match(
+    capturedSql,
+    /n\.type = 'order_filled'[\s\S]+n\.data->>'venue'[\s\S]+like 'history:%'/,
   );
 });

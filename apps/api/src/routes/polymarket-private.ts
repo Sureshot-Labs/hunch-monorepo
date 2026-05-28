@@ -265,17 +265,35 @@ function isPolymarketAlreadyClosedReason(
 async function reconcilePolymarketTerminalOrder(inputs: {
   userId: string;
   venueOrderId: string;
-}): Promise<"matched" | "cancelled" | null> {
+}): Promise<{
+  status: "matched" | "cancelled";
+  tokenId: string | null;
+  side: string | null;
+  size: number | null;
+  price: number | null;
+} | null> {
   const { rows } = await pool.query<{
     id: string;
     token_id: string | null;
+    side: string | null;
+    price: number | null;
+    size: number | null;
     order_hash: string | null;
     order_payload: unknown | null;
     filled_size: number | null;
     average_fill_price: number | null;
   }>(
     `
-      select id, token_id, order_hash, order_payload, filled_size, average_fill_price
+      select
+        id,
+        token_id,
+        side,
+        price,
+        size,
+        order_hash,
+        order_payload,
+        filled_size,
+        average_fill_price
       from orders
       where user_id = $1
         and venue = 'polymarket'
@@ -326,7 +344,13 @@ async function reconcilePolymarketTerminalOrder(inputs: {
     [inputs.userId, nextStatus, inputs.venueOrderId],
   );
 
-  return nextStatus;
+  return {
+    status: nextStatus,
+    tokenId: row.token_id ?? null,
+    side: row.side ?? null,
+    size: row.filled_size ?? row.size ?? null,
+    price: row.average_fill_price ?? row.price ?? null,
+  };
 }
 
 const USDC_SCALE = 1_000_000n;
@@ -4156,10 +4180,26 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         if (lastCancelRejection) {
           if (isPolymarketAlreadyClosedReason(lastCancelRejection.reason)) {
-            const reconciledStatus = await reconcilePolymarketTerminalOrder({
+            const reconciled = await reconcilePolymarketTerminalOrder({
               userId: user.id,
               venueOrderId: request.body.orderID,
             });
+            const reconciledStatus = reconciled?.status ?? "cancelled";
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: user.id,
+                venue: "polymarket",
+                status: reconciledStatus,
+                side: reconciled?.side ?? null,
+                size: reconciled?.size ?? null,
+                price: reconciled?.price ?? null,
+                orderId: request.body.orderID,
+                tokenId: reconciled?.tokenId ?? null,
+                walletAddress: lastCancelRejection.signer,
+              }),
+              app.log,
+            );
             reply.header("Content-Type", "application/json; charset=utf-8");
             return reply.send({
               ok: true,

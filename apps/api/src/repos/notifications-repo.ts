@@ -43,6 +43,80 @@ function decodeCursor(cursor?: string | null): NotificationCursor | null {
   }
 }
 
+function readNotificationStringData(row: NotificationRow, key: string): string | null {
+  if (!row.data || typeof row.data !== "object" || Array.isArray(row.data)) {
+    return null;
+  }
+  const value = (row.data as Record<string, unknown>)[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function buildOrderKey(venue: string, orderId: string): string {
+  return `${venue}\u001f${orderId}`;
+}
+
+async function fetchTerminalOrderKeysForNotifications(
+  db: DbQuery,
+  inputs: { userId: string; rows: NotificationRow[] },
+): Promise<Set<string>> {
+  const pairs: Array<{ venue: string; orderId: string }> = [];
+  const seen = new Set<string>();
+
+  for (const row of inputs.rows) {
+    if (row.type !== "order_created") continue;
+    const venue = readNotificationStringData(row, "venue");
+    const orderId = readNotificationStringData(row, "orderId");
+    if (!venue || !orderId) continue;
+    const key = buildOrderKey(venue, orderId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ venue, orderId });
+  }
+
+  if (pairs.length === 0) return new Set();
+
+  const valuesSql = pairs
+    .map((_, index) => {
+      const venueParam = index * 2 + 2;
+      return `($${venueParam}::text, $${venueParam + 1}::text)`;
+    })
+    .join(", ");
+  const params: PgParams = [inputs.userId];
+  for (const pair of pairs) {
+    params.push(pair.venue, pair.orderId);
+  }
+
+  const { rows } = await db.query<{
+    venue: string;
+    venue_order_id: string;
+  }>(
+    `
+      select distinct o.venue, o.venue_order_id
+      from orders o
+      join (values ${valuesSql}) as target(venue, venue_order_id)
+        on target.venue = o.venue
+       and target.venue_order_id = o.venue_order_id
+      where o.user_id = $1
+        and o.status in (
+          'cancelled',
+          'canceled',
+          'failed',
+          'filled',
+          'matched',
+          'rejected',
+          'expired'
+        )
+    `,
+    params,
+  );
+
+  return new Set(
+    rows.map((row) => buildOrderKey(row.venue, row.venue_order_id)),
+  );
+}
+
 export async function insertNotification(
   db: DbQuery,
   inputs: {
@@ -66,7 +140,8 @@ export async function insertNotification(
         title = excluded.title,
         body = excluded.body,
         severity = excluded.severity,
-        data = excluded.data,
+        data = coalesce(notifications.data, '{}'::jsonb)
+          || jsonb_strip_nulls(coalesce(excluded.data, '{}'::jsonb)),
         read_at = null,
         created_at = now(),
         updated_at = now()
@@ -143,14 +218,21 @@ export async function fetchNotifications(
       and not (
         n.type = 'order_created'
         and n.data ? 'orderId'
-        and exists (
-          select 1
-          from notifications terminal
-          where terminal.user_id = n.user_id
-            and terminal.type in ('order_filled', 'order_cancelled', 'order_failed')
-            and terminal.data ? 'orderId'
-            and terminal.data->>'orderId' = n.data->>'orderId'
+        and (
+          exists (
+            select 1
+            from notifications terminal
+            where terminal.user_id = n.user_id
+              and terminal.type in ('order_filled', 'order_cancelled', 'order_failed')
+              and terminal.data ? 'orderId'
+              and terminal.data->>'orderId' = n.data->>'orderId'
+          )
         )
+      )
+      and not (
+        n.type = 'order_filled'
+        and lower(coalesce(n.data->>'venue', '')) = 'limitless'
+        and coalesce(n.data->>'orderId', '') like 'history:%'
       )
   `;
   const params: PgParams = [inputs.userId];
@@ -174,10 +256,25 @@ export async function fetchNotifications(
         n.id,
         n.user_id,
         n.type,
-        n.title,
+        case
+          when n.type = 'order_created'
+            and lower(coalesce(n.data->>'status', '')) = 'delayed'
+            then 'Order delayed'
+          else n.title
+        end as title,
         n.body,
-        n.severity,
-        n.data,
+        case
+          when n.type = 'order_created'
+            and lower(coalesce(n.data->>'status', '')) = 'delayed'
+            then 'warning'
+          else n.severity
+        end as severity,
+        case
+          when n.type = 'order_created'
+            and lower(coalesce(n.data->>'status', '')) = 'delayed'
+            then jsonb_set(coalesce(n.data, '{}'::jsonb), '{status}', '"pending"'::jsonb, true)
+          else n.data
+        end as data,
         n.read_at,
         n.created_at,
         n.updated_at
@@ -186,11 +283,32 @@ export async function fetchNotifications(
       order by n.created_at desc, n.id desc
       limit $${paramCount + 1}
     `,
-    [...params, inputs.limit + 1],
+    [...params, inputs.limit + 21],
   );
-  const hasMore = rows.length > inputs.limit;
-  const limitedRows = hasMore ? rows.slice(0, inputs.limit) : rows;
-  const last = limitedRows[limitedRows.length - 1];
+
+  let terminalOrderKeys = new Set<string>();
+  try {
+    terminalOrderKeys = await fetchTerminalOrderKeysForNotifications(db, {
+      userId: inputs.userId,
+      rows,
+    });
+  } catch {
+    terminalOrderKeys = new Set<string>();
+  }
+
+  const visibleRows = rows.filter((row) => {
+    if (row.type !== "order_created") return true;
+    const venue = readNotificationStringData(row, "venue");
+    const orderId = readNotificationStringData(row, "orderId");
+    if (!venue || !orderId) return true;
+    return !terminalOrderKeys.has(buildOrderKey(venue, orderId));
+  });
+
+  const hasMore = visibleRows.length > inputs.limit || rows.length > inputs.limit + 20;
+  const limitedRows = visibleRows.slice(0, inputs.limit);
+  const last =
+    limitedRows[limitedRows.length - 1] ??
+    (hasMore ? rows[rows.length - 1] : undefined);
   const nextCursor =
     hasMore && last
       ? encodeCursor({ createdAt: last.created_at, id: last.id })

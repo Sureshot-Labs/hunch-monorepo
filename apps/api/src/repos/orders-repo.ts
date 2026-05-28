@@ -348,6 +348,8 @@ export async function findLimitlessHistoryMatch(
   },
 ): Promise<{
   id: string;
+  venueOrderId: string | null;
+  status: string | null;
   postedAt: Date | null;
   positionDeltaApplied: boolean;
 } | null> {
@@ -357,12 +359,16 @@ export async function findLimitlessHistoryMatch(
 
   const { rows } = await pool.query<{
     id: string;
+    venue_order_id: string | null;
+    status: string | null;
     posted_at: Date | null;
     position_delta_applied: boolean;
   }>(
     `
       select
         id,
+        venue_order_id,
+        status,
         posted_at,
         coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
           as position_delta_applied
@@ -393,6 +399,8 @@ export async function findLimitlessHistoryMatch(
   if (rows.length !== 1) return null;
   return {
     id: rows[0].id,
+    venueOrderId: rows[0].venue_order_id ?? null,
+    status: rows[0].status ?? null,
     postedAt: rows[0].posted_at ?? null,
     positionDeltaApplied: rows[0].position_delta_applied,
   };

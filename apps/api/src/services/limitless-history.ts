@@ -243,6 +243,16 @@ function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
 
 type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
 
+function shouldNotifyHistoryFill(previousStatus: string | null): boolean {
+  const normalized = previousStatus?.trim().toLowerCase();
+  return normalized !== "filled" && normalized !== "matched";
+}
+
+function normalizeLimitlessMarketContextId(marketId: string | null): string | null {
+  if (!marketId) return null;
+  return marketId.startsWith("limitless:") ? marketId : `limitless:${marketId}`;
+}
+
 function normalizeRawLimitlessTokenIdFromUnknown(
   value: unknown,
 ): string | null {
@@ -588,6 +598,7 @@ export async function syncLimitlessHistoryForWallet(
         postedAt: timestamp,
       });
       if (match) {
+        const shouldNotifyFill = shouldNotifyHistoryFill(match.status);
         const shouldApplyPositionFill = !match.positionDeltaApplied;
         await updateOrderFromHistory(pool, {
           id: match.id,
@@ -599,20 +610,23 @@ export async function syncLimitlessHistoryForWallet(
           orderHash,
           orderPayload: entry,
         });
-        void createNotificationSafe(
-          pool,
-          buildOrderNotification({
-            userId: inputs.userId,
-            venue: "limitless",
-            status: "filled",
-            side,
-            size,
-            price,
-            orderId: venueOrderId ?? orderHash ?? null,
-            tokenId,
-            walletAddress: inputs.walletAddress,
-          }),
-        );
+        if (shouldNotifyFill) {
+          void createNotificationSafe(
+            pool,
+            buildOrderNotification({
+              userId: inputs.userId,
+              venue: "limitless",
+              status: "filled",
+              side,
+              size,
+              price,
+              orderId: match.venueOrderId ?? match.id,
+              marketId: normalizeLimitlessMarketContextId(marketId),
+              tokenId,
+              walletAddress: inputs.walletAddress,
+            }),
+          );
+        }
         await deleteHistoryOrder(pool, {
           userId: inputs.userId,
           venue: "limitless",
@@ -687,21 +701,6 @@ export async function syncLimitlessHistoryForWallet(
       }
     }
     await recordHistoryVolumeEvent();
-
-    void createNotificationSafe(
-      pool,
-      buildOrderNotification({
-        userId: inputs.userId,
-        venue: "limitless",
-        status: "filled",
-        side,
-        size,
-        price,
-        orderId: venueOrderId ?? orderHash ?? null,
-        tokenId,
-        walletAddress: inputs.walletAddress,
-      }),
-    );
   }
 
   return {

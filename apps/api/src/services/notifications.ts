@@ -180,8 +180,13 @@ export function buildOrderNotification(input: {
   let type = "order_created";
   let title = "Order submitted";
   let severity: NotificationSeverity = "info";
+  let displayStatus = input.status ?? null;
 
-  if (status === "cancelled" || status === "canceled") {
+  if (status === "delayed") {
+    title = "Order delayed";
+    severity = "warning";
+    displayStatus = "pending";
+  } else if (status === "cancelled" || status === "canceled") {
     type = "order_cancelled";
     title = "Order cancelled";
     severity = "warning";
@@ -215,7 +220,7 @@ export function buildOrderNotification(input: {
     severity,
     data: {
       venue: input.venue,
-      status: input.status ?? null,
+      status: displayStatus,
       side: input.side ?? null,
       size: input.size ?? null,
       price: input.price ?? null,
