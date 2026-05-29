@@ -94,6 +94,18 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "clob order status preserves explicit cancelled with matched size",
+    run: () => {
+      const summary = summarizePolymarketClobOrderExecution({
+        associateTrades: [],
+        sizeMatched: "2.22",
+        status: "cancelled",
+      });
+      assert.equal(summary.hasExecution, true);
+      assert.equal(summary.statusHint, "cancelled");
+    },
+  },
+  {
     name: "terminal reconcile ignores matched hint without execution",
     run: () => {
       const summary = summarizePolymarketV2OnchainOrderExecution({
@@ -520,6 +532,26 @@ const tests: TestCase[] = [
     run: () => {
       const source = readApiSourceFile("routes", "polymarket-private.ts");
       assert.match(source, /normalized\.includes\("not found"\)/);
+    },
+  },
+  {
+    name: "clob execution evidence is deferred until stored fills exist",
+    run: () => {
+      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      assert.match(source, /hasPolymarketOrderExecutionEvidence\(row\.id\)/);
+      assert.match(source, /markPolymarketDelayedOrderUnconfirmed/);
+      assert.match(source, /Polymarket trade sync before cancel reconcile failed/);
+    },
+  },
+  {
+    name: "targeted order sync has auth wallet legacy fallback",
+    run: () => {
+      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      assert.match(source, /targetedAuthFallback/);
+      assert.match(
+        source,
+        /inputs\.orderIds\.length > 0 && candidates\.size === 0/,
+      );
     },
   },
   {

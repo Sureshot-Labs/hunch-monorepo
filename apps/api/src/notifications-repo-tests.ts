@@ -59,6 +59,37 @@ await test("order notification dedupe keys are venue scoped", async () => {
   assert.notEqual(polymarketNotification.dedupeKey, limitlessNotification.dedupeKey);
 });
 
+await test("venue-scoped order notifications migrate legacy dedupe keys", async () => {
+  const queries: string[] = [];
+  const params: unknown[][] = [];
+  const db = {
+    query: async (sql: string, values?: unknown[]) => {
+      queries.push(sql);
+      params.push(values ?? []);
+      return { rows: [] };
+    },
+  } as unknown as DbQuery;
+
+  await insertNotification(db, {
+    userId: "user-1",
+    type: "order_filled",
+    title: "Order filled",
+    body: "Polymarket order",
+    dedupeKey: "order:polymarket:0xabc",
+    replaceExisting: true,
+  });
+
+  assert.equal(queries.length, 2);
+  assert.match(queries[0] ?? "", /deleted_legacy_duplicate/);
+  assert.match(queries[0] ?? "", /set dedupe_key = \$3/);
+  assert.deepEqual(params[0], [
+    "user-1",
+    "order:0xabc",
+    "order:polymarket:0xabc",
+  ]);
+  assert.match(queries[1] ?? "", /on conflict \(user_id, dedupe_key\) do update/i);
+});
+
 await test("incomplete order filled notifications are not inserted", async () => {
   let queryCount = 0;
   const db = {

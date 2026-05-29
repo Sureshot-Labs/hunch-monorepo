@@ -57,6 +57,14 @@ function buildOrderKey(venue: string, orderId: string): string {
   return `${venue}\u001f${orderId}`;
 }
 
+function resolveLegacyOrderDedupeKey(dedupeKey: string | null): string | null {
+  if (!dedupeKey?.startsWith("order:")) return null;
+  const firstSeparator = dedupeKey.indexOf(":", "order:".length);
+  if (firstSeparator < 0) return null;
+  const orderId = dedupeKey.slice(firstSeparator + 1);
+  return orderId ? `order:${orderId}` : null;
+}
+
 async function fetchTerminalOrderKeysForNotifications(
   db: DbQuery,
   inputs: { userId: string; rows: NotificationRow[] },
@@ -133,6 +141,34 @@ export async function insertNotification(
 ): Promise<NotificationRow | null> {
   const severity = inputs.severity ?? "info";
   const dedupeKey = inputs.dedupeKey ?? null;
+  const legacyDedupeKey =
+    inputs.replaceExisting === true ? resolveLegacyOrderDedupeKey(dedupeKey) : null;
+  if (legacyDedupeKey && legacyDedupeKey !== dedupeKey) {
+    await db.query(
+      `
+        with existing_new as (
+          select 1
+          from notifications
+          where user_id = $1
+            and dedupe_key = $3
+          limit 1
+        ),
+        deleted_legacy_duplicate as (
+          delete from notifications
+          where user_id = $1
+            and dedupe_key = $2
+            and exists (select 1 from existing_new)
+        )
+        update notifications
+        set dedupe_key = $3,
+            updated_at = now()
+        where user_id = $1
+          and dedupe_key = $2
+          and not exists (select 1 from existing_new)
+      `,
+      [inputs.userId, legacyDedupeKey, dedupeKey],
+    );
+  }
   const conflictClause = inputs.replaceExisting
     ? `
       on conflict (user_id, dedupe_key) do update

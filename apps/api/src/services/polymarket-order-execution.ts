@@ -84,24 +84,22 @@ export function summarizePolymarketClobOrderExecution(inputs: {
   hasExecution: boolean;
   statusHint: PolymarketClosedReasonHint;
 } {
-  const hasExecution =
-    readPositiveNumber(inputs.sizeMatched) != null ||
-    Boolean(inputs.associateTrades?.length);
-  if (hasExecution) {
-    return { hasExecution: true, statusHint: "matched" };
-  }
-
   const status = inputs.status?.trim().toLowerCase() ?? "";
-  if (
+  const statusHint: PolymarketClosedReasonHint =
     status === "cancelled" ||
     status === "canceled" ||
     status === "cancelled_by_user" ||
     status === "canceled_by_user"
-  ) {
-    return { hasExecution: false, statusHint: "cancelled" };
+      ? "cancelled"
+      : null;
+  const hasExecution =
+    readPositiveNumber(inputs.sizeMatched) != null ||
+    Boolean(inputs.associateTrades?.length);
+  if (hasExecution) {
+    return { hasExecution: true, statusHint: statusHint ?? "matched" };
   }
 
-  return { hasExecution: false, statusHint: null };
+  return { hasExecution: false, statusHint };
 }
 
 export function resolvePolymarketTerminalReconcileStatus(inputs: {
