@@ -204,8 +204,10 @@ function buildVolumeEventsCreatedAtClause(
 
 export function buildVolumeContributionSql(
   alias: string,
-  _manualMode?: RewardsManualFilterMode,
+  manualMode: RewardsManualFilterMode = "exclude_volume_only",
 ): string {
+  if (manualMode === "include_all") return `${alias}.notional_usd`;
+
   const excludedPredicates = [
     buildAdminManualVolumeEventPredicate(alias),
     buildReferralCodeDropVolumeEventPredicate(alias),

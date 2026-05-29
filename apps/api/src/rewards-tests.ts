@@ -20,6 +20,8 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  buildPublicPointsContributionSql,
+  buildVolumeContributionSql,
   fetchAdminManualVolumeEvents,
   fetchReferralsForUser,
   fetchQualifiedReferralCount,
@@ -1804,6 +1806,17 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "public points include visible admin/referral grants but exclude tier-only grants",
+    run: async () => {
+      const expression = buildPublicPointsContributionSql("ve");
+
+      assert.match(expression, /source_id like 'manual:%'/);
+      assert.match(expression, /source_id like 'referral-code-tier:%'/);
+      assert.doesNotMatch(expression, /manual-visible:%/);
+      assert.doesNotMatch(expression, /referral-code-visible:%/);
+    },
+  },
+  {
     name: "fetchUserTierPoints includes manual and tier drops",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
@@ -1831,6 +1844,25 @@ const tests: TestCase[] = [
       assert.match(capture.sql ?? "", /referral-code-visible:%/);
       assert.match(capture.sql ?? "", /referral-code-tier:%/);
       assert.deepEqual(capture.params, ["user-a"]);
+    },
+  },
+  {
+    name: "volume contribution honors leaderboard manual mode",
+    run: async () => {
+      const includeAll = buildVolumeContributionSql("ve", "include_all");
+      assert.equal(includeAll, "ve.notional_usd");
+
+      const excludeAll = buildVolumeContributionSql("ve", "exclude_all");
+      assert.match(excludeAll, /source_id like 'manual:%'/);
+      assert.match(excludeAll, /manual-visible:%/);
+      assert.match(excludeAll, /referral-code-visible:%/);
+      assert.match(excludeAll, /referral-code-tier:%/);
+
+      const excludeVolumeOnly = buildVolumeContributionSql(
+        "ve",
+        "exclude_volume_only",
+      );
+      assert.equal(excludeVolumeOnly, excludeAll);
     },
   },
   {

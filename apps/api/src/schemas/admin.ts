@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  ADMIN_USERS_SORT_BY_VALUES,
+  ADMIN_USERS_SORT_DIR_VALUES,
+} from "../services/admin-users-sort.js";
 
 const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
 const adminCursorSchema = z.string().trim().min(1).max(2000);
@@ -345,6 +349,59 @@ export const adminUsersQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
   limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
+  sortBy: z.enum(ADMIN_USERS_SORT_BY_VALUES).default("createdAt"),
+  sortDir: z.enum(ADMIN_USERS_SORT_DIR_VALUES).default("desc"),
+});
+
+const adminInboundReferralResponseSchema = z.object({
+  code: z.string(),
+  policyType: z.enum(["user", "campaign"]).nullable(),
+  label: z.string().nullable(),
+  multiplierOverride: z.number().nullable(),
+  ownerUserId: z.string().nullable(),
+  referrerUserId: z.string().nullable(),
+  referrerEmail: z.string().nullable(),
+  referrerUsername: z.string().nullable(),
+  referrerDisplayName: z.string().nullable(),
+  referrerWalletAddress: z.string().nullable(),
+  attachedAt: z.string().datetime().nullable(),
+});
+
+const adminUserRowResponseSchema = z.object({
+  id: z.string(),
+  email: z.string().nullable(),
+  username: z.string().nullable(),
+  displayName: z.string().nullable(),
+  isAdmin: z.boolean(),
+  kalshiProofBypass: z.boolean(),
+  isActive: z.boolean(),
+  lastLoginAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  referralCode: z.string().nullable(),
+  walletAddress: z.string().nullable(),
+  points: z.number(),
+  tierPoints: z.number(),
+  qualificationPoints: z.number(),
+  rawPoints: z.number(),
+  feeUsdTotal: z.number(),
+  feeUsdCollected: z.number(),
+  volumeUsd: z.number(),
+  referralCount: z.number(),
+  inboundReferral: adminInboundReferralResponseSchema.nullable(),
+});
+
+export const adminUsersResponseSchema = z.object({
+  ok: z.literal(true),
+  users: z.array(adminUserRowResponseSchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
+});
+
+export const adminUsersErrorResponseSchema = z.object({
+  error: z.string(),
 });
 
 export const adminUserParamsSchema = z.object({
