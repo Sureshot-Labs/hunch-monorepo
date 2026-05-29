@@ -302,7 +302,10 @@ export function buildOrderNotification(input: {
   }
 
   const body = parts.join(" ").trim() || `${formatVenue(input.venue)} order`;
-  const dedupeKey = input.orderId ? `order:${input.orderId}` : null;
+  const normalizedVenue = input.venue.trim().toLowerCase();
+  const dedupeKey = input.orderId
+    ? `order:${normalizedVenue}:${input.orderId}`
+    : null;
 
   return {
     userId: input.userId,

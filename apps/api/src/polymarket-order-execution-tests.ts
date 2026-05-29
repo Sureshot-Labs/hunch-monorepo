@@ -132,6 +132,43 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "terminal reconcile closes partial fill as cancelled with close evidence",
+    run: () => {
+      const status = resolvePolymarketTerminalReconcileStatus({
+        statusHint: "cancelled",
+        hasStoredFill: true,
+        storedFillKind: "partial",
+        executionSummary: null,
+      });
+      assert.equal(status, "cancelled");
+    },
+  },
+  {
+    name: "terminal reconcile closes partial fill as expired with expired evidence",
+    run: () => {
+      const status = resolvePolymarketTerminalReconcileStatus({
+        statusHint: null,
+        hasStoredFill: true,
+        storedFillKind: "partial",
+        executionSummary: null,
+        noFillStatus: "expired",
+      });
+      assert.equal(status, "expired");
+    },
+  },
+  {
+    name: "terminal reconcile does not close partial fill without terminal evidence",
+    run: () => {
+      const status = resolvePolymarketTerminalReconcileStatus({
+        statusHint: null,
+        hasStoredFill: true,
+        storedFillKind: "partial",
+        executionSummary: null,
+      });
+      assert.equal(status, null);
+    },
+  },
+  {
     name: "terminal reconcile respects explicit cancelled no-fill hint",
     run: () => {
       const status = resolvePolymarketTerminalReconcileStatus({
@@ -463,10 +500,7 @@ const tests: TestCase[] = [
     name: "fill sync insert has database duplicate safety net",
     run: () => {
       const source = readApiSourceFile("services", "positions-sync.ts");
-      assert.match(
-        source,
-        /on conflict \(order_id, venue_fill_id\) where venue_fill_id is not null do nothing/,
-      );
+      assert.match(source, /on conflict do nothing/);
       assert.match(source, /returning order_id, venue_fill_id/);
       assert.match(source, /insertedFillKeys/);
     },

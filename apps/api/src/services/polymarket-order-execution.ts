@@ -107,14 +107,24 @@ export function summarizePolymarketClobOrderExecution(inputs: {
 export function resolvePolymarketTerminalReconcileStatus(inputs: {
   statusHint?: PolymarketClosedReasonHint;
   hasStoredFill?: boolean;
+  storedFillKind?: "full" | "partial" | null;
   executionSummary?: Pick<
     PolymarketOnchainOrderExecutionSummary,
     "hasExecution"
   > | null;
   noFillStatus?: PolymarketNoFillTerminalStatus | null;
-}): PolymarketTerminalReconcileStatus {
-  if (inputs.hasStoredFill || inputs.executionSummary?.hasExecution) {
+}): PolymarketTerminalReconcileStatus | null {
+  const storedFillKind =
+    inputs.storedFillKind ?? (inputs.hasStoredFill ? "full" : null);
+  if (storedFillKind === "full" || inputs.executionSummary?.hasExecution) {
     return "matched";
+  }
+  if (storedFillKind === "partial") {
+    if (inputs.noFillStatus === "expired") return "expired";
+    if (inputs.statusHint === "cancelled" || inputs.noFillStatus) {
+      return "cancelled";
+    }
+    return null;
   }
   if (inputs.statusHint === "cancelled") return "cancelled";
   return inputs.noFillStatus ?? "unmatched";

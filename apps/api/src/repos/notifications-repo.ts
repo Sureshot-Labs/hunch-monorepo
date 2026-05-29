@@ -227,6 +227,11 @@ export async function fetchNotifications(
               and terminal.type in ('order_filled', 'order_cancelled', 'order_failed')
               and terminal.data ? 'orderId'
               and terminal.data->>'orderId' = n.data->>'orderId'
+              and (
+                nullif(lower(coalesce(terminal.data->>'venue', '')), '') is null
+                or nullif(lower(coalesce(n.data->>'venue', '')), '') is null
+                or lower(terminal.data->>'venue') = lower(n.data->>'venue')
+              )
           )
         )
       )

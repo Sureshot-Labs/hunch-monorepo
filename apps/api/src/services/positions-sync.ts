@@ -2143,7 +2143,7 @@ export async function syncPolymarketTradesForSigner(
           where of.order_id = t.order_id
             and of.venue_fill_id = t.venue_fill_id
         )
-        on conflict (order_id, venue_fill_id) where venue_fill_id is not null do nothing
+        on conflict do nothing
         returning order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at
       `,
       [

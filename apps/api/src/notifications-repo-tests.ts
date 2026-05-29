@@ -27,11 +27,36 @@ await test("order notifications replace by logical order id", async () => {
     orderId: "0xabc",
   });
 
-  assert.equal(notification.dedupeKey, "order:0xabc");
+  assert.equal(notification.dedupeKey, "order:polymarket:0xabc");
   assert.equal(notification.replaceExisting, true);
   assert.equal(notification.title, "Order delayed");
   assert.equal(notification.severity, "warning");
   assert.equal((notification.data as { status?: unknown }).status, "pending");
+});
+
+await test("order notification dedupe keys are venue scoped", async () => {
+  const polymarketNotification = buildOrderNotification({
+    userId: "user-1",
+    venue: "polymarket",
+    status: "delayed",
+    orderId: "shared-order-id",
+  });
+  const limitlessNotification = buildOrderNotification({
+    userId: "user-1",
+    venue: "limitless",
+    status: "delayed",
+    orderId: "shared-order-id",
+  });
+
+  assert.equal(
+    polymarketNotification.dedupeKey,
+    "order:polymarket:shared-order-id",
+  );
+  assert.equal(
+    limitlessNotification.dedupeKey,
+    "order:limitless:shared-order-id",
+  );
+  assert.notEqual(polymarketNotification.dedupeKey, limitlessNotification.dedupeKey);
 });
 
 await test("incomplete order filled notifications are not inserted", async () => {

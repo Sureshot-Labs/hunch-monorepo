@@ -326,14 +326,28 @@ function resolvePolymarketClosedReasonHint(
 function isPolymarketOrderLookupNotFoundResponse(
   status: number | null | undefined,
   payload: unknown,
+  orderId: string,
 ): boolean {
   if (status === 404) return true;
+  if (status !== 400 && status !== 410) return false;
   const message = extractPolymarketUpstreamMessage(payload)?.toLowerCase();
   if (!message) return false;
-  return (
+  const hasNotFoundText =
     message.includes("not found") ||
     message.includes("can't be found") ||
-    message.includes("cannot be found")
+    message.includes("cannot be found");
+  if (!hasNotFoundText) return false;
+  const normalizedOrderId = orderId.trim().toLowerCase();
+  if (normalizedOrderId.length > 0 && message.includes(normalizedOrderId)) {
+    return true;
+  }
+  return Boolean(
+    message.match(
+      /\b(order|hash)\b.{0,80}(not found|can't be found|cannot be found)/,
+    ) ??
+      message.match(
+        /(not found|can't be found|cannot be found).{0,80}\b(order|hash)\b/,
+      ),
   );
 }
 
@@ -367,6 +381,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
     order_hash: string | null;
     order_payload: unknown | null;
     order_payload_version: string | null;
+    order_type: string | null;
     filled_size: number | string | null;
     average_fill_price: number | string | null;
     has_positive_fill_rows: boolean;
@@ -383,6 +398,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
         order_hash,
         order_payload,
         order_payload_version,
+        order_type,
         filled_size,
         average_fill_price,
         exists (
@@ -413,6 +429,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
   const orderSize = parsePositiveNumber(row.size);
   const averageFillPrice = parsePositiveNumber(row.average_fill_price);
   const orderPrice = parsePositiveNumber(row.price);
+  const orderType = row.order_type?.trim().toUpperCase() ?? "";
   const externalFilledSize = parsePositiveNumber(inputs.externalFilledSize);
   const externalFillPrice = parsePositiveNumber(inputs.externalFillPrice);
   const hasExternalExecution =
@@ -420,6 +437,14 @@ async function reconcilePolymarketTerminalOrder(inputs: {
   const hasStoredFill =
     filledSize != null ||
     row.has_positive_fill_rows;
+  const storedFillKind =
+    hasStoredFill &&
+    (orderType === "FOK" ||
+      (filledSize != null && orderSize != null && filledSize >= orderSize))
+      ? "full"
+      : hasStoredFill
+        ? "partial"
+        : null;
   let executionSummary: { hasExecution: boolean } | null = null;
 
   if (
@@ -457,12 +482,18 @@ async function reconcilePolymarketTerminalOrder(inputs: {
 
   const nextStatus = resolvePolymarketTerminalReconcileStatus({
     statusHint: inputs.statusHint,
-    hasStoredFill: hasExecutionEvidence,
+    hasStoredFill: storedFillKind === "full" || (!hasStoredFill && hasExecutionEvidence),
+    storedFillKind,
     executionSummary,
     noFillStatus: inputs.terminalNoFillStatus ?? null,
   });
+  if (!nextStatus) return null;
+  const allowPartialTerminalClose =
+    storedFillKind === "partial" &&
+    (nextStatus === "cancelled" || nextStatus === "expired");
   if (
     nextStatus !== "matched" &&
+    !allowPartialTerminalClose &&
     !canApplyPolymarketNoFillTerminalStatus({
       currentStatus: row.status,
       hasPositiveFillRows: row.has_positive_fill_rows,
@@ -476,7 +507,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
       update orders o
       set status = $2,
           cancelled_at = case when $2 = 'cancelled' then coalesce(cancelled_at, now()) else cancelled_at end,
-          filled_at = case when $2 = 'matched' then coalesce(filled_at, now()) else null end,
+          filled_at = case when $2 = 'matched' then coalesce(filled_at, now()) else filled_at end,
           filled_size = case
             when $2 = 'matched' and $4::numeric is not null and coalesce(filled_size, 0) = 0
               then $4::numeric
@@ -495,6 +526,16 @@ async function reconcilePolymarketTerminalOrder(inputs: {
         and (
           $2 = 'matched'
           or (
+            $7::boolean = true
+            and lower(coalesce(o.status, '')) = 'partially_filled'
+            and exists (
+              select 1
+              from order_fills f
+              where f.order_id = o.id
+                and coalesce(f.fill_size, 0) > 0
+            )
+          )
+          or (
             lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
             and not exists (
               select 1
@@ -512,6 +553,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
       externalFilledSize,
       externalFillPrice,
       row.id,
+      allowPartialTerminalClose,
     ],
   );
 
@@ -625,6 +667,7 @@ async function fetchPolymarketClobOrderExecutionEvidence(inputs: {
         isPolymarketOrderLookupNotFoundResponse(
           upstream.status,
           upstream.payload,
+          inputs.orderId,
         )
       ) {
         return {
