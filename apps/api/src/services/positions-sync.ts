@@ -2158,7 +2158,36 @@ export async function syncPolymarketTradesForSigner(
       ],
     );
 
-    if (rows.length) {
+    const { rows: persistedCandidateFills } = await client.query<{
+      order_id: string;
+      venue_fill_id: string;
+      fill_size: number;
+      fill_price: number;
+      fill_side: string;
+      filled_at: Date;
+    }>(
+      `
+        with input as (
+          select distinct t.order_id, t.venue_fill_id
+          from unnest($1::uuid[], $2::text[]) as t(order_id, venue_fill_id)
+          where t.venue_fill_id is not null
+        )
+        select
+          f.order_id,
+          f.venue_fill_id,
+          f.fill_size,
+          f.fill_price,
+          f.fill_side,
+          f.filled_at
+        from input t
+        join order_fills f
+          on f.order_id = t.order_id
+         and f.venue_fill_id = t.venue_fill_id
+      `,
+      [fillOrderIds, fillVenueIds],
+    );
+
+    if (persistedCandidateFills.length) {
       await client.query(
         `
           with agg as (
@@ -2192,21 +2221,27 @@ export async function syncPolymarketTradesForSigner(
           from agg
           where o.id = agg.order_id
         `,
-        [Array.from(new Set(rows.map((row) => row.order_id)))],
+        [
+          Array.from(
+            new Set(persistedCandidateFills.map((row) => row.order_id)),
+          ),
+        ],
       );
 
-      const insertedFillKeys = new Set(
-        rows.map((row) => `${row.order_id}:${row.venue_fill_id}`),
+      const persistedFillKeys = new Set(
+        persistedCandidateFills.map(
+          (row) => `${row.order_id}:${row.venue_fill_id}`,
+        ),
       );
-      const insertedBuilderFeeAccruals = builderFeeAccruals.filter(
+      const persistedBuilderFeeAccruals = builderFeeAccruals.filter(
         (accrual) =>
           accrual != null &&
-          insertedFillKeys.has(`${accrual.orderId}:${accrual.venueFillId}`),
+          persistedFillKeys.has(`${accrual.orderId}:${accrual.venueFillId}`),
       );
-      if (insertedBuilderFeeAccruals.length) {
+      if (persistedBuilderFeeAccruals.length) {
         await upsertPolymarketBuilderFeeAccruals(
           client,
-          insertedBuilderFeeAccruals,
+          persistedBuilderFeeAccruals,
         );
       }
 
@@ -2215,7 +2250,7 @@ export async function syncPolymarketTradesForSigner(
         walletAddress: inputs.signerAddress,
         venue: "polymarket",
         sourceType: "order",
-        events: rows.map((fill) => ({
+        events: persistedCandidateFills.map((fill) => ({
           sourceId: fill.venue_fill_id,
           notionalUsd: Number(fill.fill_size) * Number(fill.fill_price),
           createdAt: fill.filled_at,

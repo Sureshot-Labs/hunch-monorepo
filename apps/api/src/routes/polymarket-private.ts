@@ -281,7 +281,8 @@ function isPolymarketAlreadyClosedReason(
     normalized.includes("matched orders cannot be canceled") ||
     normalized.includes("matched orders cannot be cancelled") ||
     normalized.includes("can't be found") ||
-    normalized.includes("cannot be found")
+    normalized.includes("cannot be found") ||
+    normalized.includes("not found")
   );
 }
 

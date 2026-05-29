@@ -502,7 +502,24 @@ const tests: TestCase[] = [
       const source = readApiSourceFile("services", "positions-sync.ts");
       assert.match(source, /on conflict do nothing/);
       assert.match(source, /returning order_id, venue_fill_id/);
-      assert.match(source, /insertedFillKeys/);
+      assert.match(source, /persistedFillKeys/);
+    },
+  },
+  {
+    name: "fill sync repairs replayed persisted fills",
+    run: () => {
+      const source = readApiSourceFile("services", "positions-sync.ts");
+      assert.match(source, /persistedCandidateFills/);
+      assert.match(source, /join order_fills f/);
+      assert.match(source, /persistedBuilderFeeAccruals/);
+      assert.match(source, /insertVolumeEventsWithMultiplierInTx/);
+    },
+  },
+  {
+    name: "plain not found cancel reasons enter closed-order reconcile",
+    run: () => {
+      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      assert.match(source, /normalized\.includes\("not found"\)/);
     },
   },
   {
