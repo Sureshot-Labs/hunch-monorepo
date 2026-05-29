@@ -30,7 +30,7 @@ const EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_ERROR =
 const EMBEDDED_SOLANA_BALANCE_VERIFICATION_ERROR =
   "Unable to verify Solana balance. Retry in a few seconds.";
 const EMBEDDED_SOLANA_SOL_REQUIRED_ERROR =
-  "Add SOL to this Solana wallet for network fees and account setup, then try again.";
+  "Add SOL to this Solana wallet for network fees and account setup (about 0.02 SOL), then try again.";
 
 type CompiledSolanaInstruction =
   VersionedTransaction["message"]["compiledInstructions"][number];

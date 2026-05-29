@@ -522,6 +522,7 @@ const tests: TestCase[] = [
     run: () => {
       const source = readApiSourceFile("services", "positions-sync.ts");
       assert.match(source, /persistedCandidateFills/);
+      assert.match(source, /persistedFillCount/);
       assert.match(source, /join order_fills f/);
       assert.match(source, /persistedBuilderFeeAccruals/);
       assert.match(source, /insertVolumeEventsWithMultiplierInTx/);
@@ -548,10 +549,8 @@ const tests: TestCase[] = [
     run: () => {
       const source = readApiSourceFile("routes", "polymarket-private.ts");
       assert.match(source, /targetedAuthFallback/);
-      assert.match(
-        source,
-        /inputs\.orderIds\.length > 0 && candidates\.size === 0/,
-      );
+      assert.match(source, /authFallbackSigner/);
+      assert.match(source, /!usedCredentials &&/);
     },
   },
   {

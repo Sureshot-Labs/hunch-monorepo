@@ -1612,6 +1612,7 @@ type PolymarketTradeSyncOptions = {
 
 type PolymarketTradeSyncResult = {
   insertedFillCount: number;
+  persistedFillCount: number;
   positionsRecomputed: boolean;
 };
 
@@ -1842,6 +1843,7 @@ export async function syncPolymarketTradesForSigner(
   if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
@@ -1883,6 +1885,7 @@ export async function syncPolymarketTradesForSigner(
     console.error("Polymarket trades sync failed", tradesResponse.payload);
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
@@ -1891,6 +1894,7 @@ export async function syncPolymarketTradesForSigner(
   if (!trades.length) {
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
@@ -1906,6 +1910,7 @@ export async function syncPolymarketTradesForSigner(
   if (!orderIds.size) {
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
@@ -1945,6 +1950,7 @@ export async function syncPolymarketTradesForSigner(
   if (!orderRows.length) {
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
@@ -2097,11 +2103,12 @@ export async function syncPolymarketTradesForSigner(
   if (!fillOrderIds.length) {
     return {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     };
   }
 
-  const insertedFills = await tx(pool, async (client) => {
+  const fillSync = await tx(pool, async (client) => {
     await client.query(
       "select pg_advisory_xact_lock(hashtextextended($1, 0))",
       [
@@ -2258,8 +2265,12 @@ export async function syncPolymarketTradesForSigner(
       });
     }
 
-    return rows;
+    return {
+      insertedFills: rows,
+      persistedFillCount: persistedCandidateFills.length,
+    };
   });
+  const insertedFills = fillSync.insertedFills;
 
   let positionsRecomputed = false;
   if (insertedFills.length && options.syncPositionsOnFill !== false) {
@@ -2340,6 +2351,7 @@ export async function syncPolymarketTradesForSigner(
 
   return {
     insertedFillCount: insertedFills.length,
+    persistedFillCount: fillSync.persistedFillCount,
     positionsRecomputed,
   };
 }

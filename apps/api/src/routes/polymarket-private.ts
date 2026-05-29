@@ -951,9 +951,9 @@ async function resolvePolymarketOrdersSyncSignerCandidates(inputs: {
   authWalletAddress: string | null | undefined;
   orderIds: string[];
   targetWalletAddress: string | null;
-}): Promise<{ signers: string[]; targetedAuthFallback: boolean }> {
+}): Promise<{ authFallbackSigner: string | null; signers: string[] }> {
   const candidates = new Map<string, string>();
-  let targetedAuthFallback = false;
+  let authFallbackSigner: string | null = null;
   const isTargeted =
     inputs.orderIds.length > 0 ||
     Boolean(inputs.targetWalletAddress?.trim());
@@ -992,13 +992,20 @@ async function resolvePolymarketOrdersSyncSignerCandidates(inputs: {
   if (!isTargeted) {
     addCandidate(inputs.authWalletAddress);
   } else if (inputs.orderIds.length > 0 && candidates.size === 0) {
-    const beforeFallback = candidates.size;
-    addCandidate(inputs.authWalletAddress);
-    targetedAuthFallback = candidates.size > beforeFallback;
+    const trimmed = inputs.authWalletAddress?.trim() ?? "";
+    if (EVM_ADDRESS_RE.test(trimmed)) {
+      authFallbackSigner = trimmed;
+    }
+  }
+  if (inputs.orderIds.length > 0 && authFallbackSigner == null && isTargeted) {
+    const trimmed = inputs.authWalletAddress?.trim() ?? "";
+    if (EVM_ADDRESS_RE.test(trimmed)) {
+      authFallbackSigner = trimmed;
+    }
   }
   return {
+    authFallbackSigner,
     signers: Array.from(candidates.values()),
-    targetedAuthFallback,
   };
 }
 
@@ -2651,6 +2658,7 @@ type PolymarketOrdersSyncStats = {
   sampleVenueOrderIds: string[];
   tradeSync: {
     insertedFillCount: number;
+    persistedFillCount: number;
     positionsRecomputed: boolean;
   };
   delayedSync: {
@@ -2696,6 +2704,7 @@ function emptyPolymarketOrdersSyncStats(): PolymarketOrdersSyncStats {
     sampleVenueOrderIds: [],
     tradeSync: {
       insertedFillCount: 0,
+      persistedFillCount: 0,
       positionsRecomputed: false,
     },
     delayedSync: {
@@ -2736,6 +2745,9 @@ function mergePolymarketOrdersSyncStats(
       insertedFillCount:
         base.tradeSync.insertedFillCount +
         next.tradeSync.insertedFillCount,
+      persistedFillCount:
+        base.tradeSync.persistedFillCount +
+        next.tradeSync.persistedFillCount,
       positionsRecomputed:
         base.tradeSync.positionsRecomputed ||
         next.tradeSync.positionsRecomputed,
@@ -2932,6 +2944,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
 
   let tradeSync = {
     insertedFillCount: 0,
+    persistedFillCount: 0,
     positionsRecomputed: false,
   };
   try {
@@ -3017,6 +3030,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
       existingOpenMarkedLive > 0 ||
       openOrderExecutionEvidenceCount > 0 ||
       tradeSync.insertedFillCount > 0 ||
+      tradeSync.persistedFillCount > 0 ||
       delayedSync.matchedCount > 0 ||
       delayedSync.cancelledCount > 0 ||
       delayedSync.unmatchedCount > 0 ||
@@ -4836,7 +4850,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
       const signerCandidates = signerResolution.signers;
 
-      if (signerCandidates.length === 0) {
+      if (
+        signerCandidates.length === 0 &&
+        signerResolution.authFallbackSigner == null
+      ) {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
@@ -4844,12 +4861,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: authWalletAddress ?? targetWalletAddress,
           skipped: true,
           reason: "missing_credentials",
-          targetedAuthFallback: signerResolution.targetedAuthFallback,
+          targetedAuthFallback: false,
           ...emptyPolymarketOrdersSyncStats(),
         });
       }
 
       let usedCredentials = false;
+      let targetedAuthFallback = false;
       let aggregate = emptyPolymarketOrdersSyncStats();
       const syncedSigners: string[] = [];
 
@@ -4903,6 +4921,56 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         aggregate = mergePolymarketOrdersSyncStats(aggregate, result.stats);
       }
 
+      const fallbackSigner = signerResolution.authFallbackSigner;
+      if (
+        !usedCredentials &&
+        fallbackSigner &&
+        !signerCandidates.some(
+          (signer) => signer.toLowerCase() === fallbackSigner.toLowerCase(),
+        )
+      ) {
+        const creds = await AuthService.getVenueCredentials(
+          user.id,
+          "polymarket",
+          fallbackSigner,
+        );
+        if (creds?.apiKey && creds.apiSecret && creds.apiPassphrase) {
+          usedCredentials = true;
+          targetedAuthFallback = true;
+          const result = await syncPolymarketOrdersForSigner({
+            userId: user.id,
+            signer: fallbackSigner,
+            creds: {
+              apiKey: creds.apiKey,
+              apiSecret: creds.apiSecret,
+              apiPassphrase: creds.apiPassphrase,
+              funderAddress: creds.funderAddress ?? null,
+            },
+            authWalletAddress,
+            requestedOrderIds,
+            targetWalletAddress,
+            log: app.log,
+          });
+          if (!result.ok) {
+            if (result.kind === "credentials_invalid") {
+              return sendPolymarketCredentialsInvalidResponse(reply, {
+                status: result.status,
+                payload: result.payload,
+              });
+            }
+            reply.code(502);
+            return reply.send({
+              error: "Polymarket orders sync failed",
+              status: result.status,
+              tried: result.tried,
+              payload: result.payload,
+            });
+          }
+          syncedSigners.push(result.signer);
+          aggregate = mergePolymarketOrdersSyncStats(aggregate, result.stats);
+        }
+      }
+
       if (!usedCredentials) {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -4911,7 +4979,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: authWalletAddress ?? targetWalletAddress,
           skipped: true,
           reason: "missing_credentials",
-          targetedAuthFallback: signerResolution.targetedAuthFallback,
+          targetedAuthFallback,
           ...emptyPolymarketOrdersSyncStats(),
         });
       }
@@ -4922,7 +4990,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         venue: "polymarket",
         walletAddress: syncedSigners[0] ?? authWalletAddress,
         syncedSigners,
-        targetedAuthFallback: signerResolution.targetedAuthFallback,
+        targetedAuthFallback,
         ...aggregate,
       });
     },

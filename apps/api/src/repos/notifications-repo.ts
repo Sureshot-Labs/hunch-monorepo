@@ -57,12 +57,17 @@ function buildOrderKey(venue: string, orderId: string): string {
   return `${venue}\u001f${orderId}`;
 }
 
-function resolveLegacyOrderDedupeKey(dedupeKey: string | null): string | null {
+function resolveLegacyOrderDedupe(input: {
+  dedupeKey: string | null;
+}): { dedupeKey: string; venue: string } | null {
+  const { dedupeKey } = input;
   if (!dedupeKey?.startsWith("order:")) return null;
   const firstSeparator = dedupeKey.indexOf(":", "order:".length);
   if (firstSeparator < 0) return null;
+  const venue = dedupeKey.slice("order:".length, firstSeparator).trim();
   const orderId = dedupeKey.slice(firstSeparator + 1);
-  return orderId ? `order:${orderId}` : null;
+  if (!venue || !orderId) return null;
+  return { dedupeKey: `order:${orderId}`, venue };
 }
 
 async function fetchTerminalOrderKeysForNotifications(
@@ -141,9 +146,11 @@ export async function insertNotification(
 ): Promise<NotificationRow | null> {
   const severity = inputs.severity ?? "info";
   const dedupeKey = inputs.dedupeKey ?? null;
-  const legacyDedupeKey =
-    inputs.replaceExisting === true ? resolveLegacyOrderDedupeKey(dedupeKey) : null;
-  if (legacyDedupeKey && legacyDedupeKey !== dedupeKey) {
+  const legacyDedupe =
+    inputs.replaceExisting === true
+      ? resolveLegacyOrderDedupe({ dedupeKey })
+      : null;
+  if (legacyDedupe && legacyDedupe.dedupeKey !== dedupeKey) {
     await db.query(
       `
         with existing_new as (
@@ -157,6 +164,7 @@ export async function insertNotification(
           delete from notifications
           where user_id = $1
             and dedupe_key = $2
+            and lower(coalesce(data->>'venue', '')) = lower($4)
             and exists (select 1 from existing_new)
         )
         update notifications
@@ -164,9 +172,10 @@ export async function insertNotification(
             updated_at = now()
         where user_id = $1
           and dedupe_key = $2
+          and lower(coalesce(data->>'venue', '')) = lower($4)
           and not exists (select 1 from existing_new)
       `,
-      [inputs.userId, legacyDedupeKey, dedupeKey],
+      [inputs.userId, legacyDedupe.dedupeKey, dedupeKey, legacyDedupe.venue],
     );
   }
   const conflictClause = inputs.replaceExisting

@@ -82,10 +82,15 @@ await test("venue-scoped order notifications migrate legacy dedupe keys", async 
   assert.equal(queries.length, 2);
   assert.match(queries[0] ?? "", /deleted_legacy_duplicate/);
   assert.match(queries[0] ?? "", /set dedupe_key = \$3/);
+  assert.match(
+    queries[0] ?? "",
+    /lower\(coalesce\(data->>'venue', ''\)\) = lower\(\$4\)/,
+  );
   assert.deepEqual(params[0], [
     "user-1",
     "order:0xabc",
     "order:polymarket:0xabc",
+    "polymarket",
   ]);
   assert.match(queries[1] ?? "", /on conflict \(user_id, dedupe_key\) do update/i);
 });
