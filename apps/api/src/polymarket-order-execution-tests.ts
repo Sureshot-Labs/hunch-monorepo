@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   POLYMARKET_UNCONFIRMED_STATUS,
   canApplyPolymarketNoFillTerminalStatus,
@@ -21,6 +24,12 @@ type TestCase = {
   name: string;
   run: () => void;
 };
+
+const apiSrcDir = dirname(fileURLToPath(import.meta.url));
+
+function readApiSourceFile(...pathParts: string[]): string {
+  return readFileSync(resolve(apiSrcDir, ...pathParts), "utf8");
+}
 
 const tests: TestCase[] = [
   {
@@ -186,6 +195,19 @@ const tests: TestCase[] = [
         });
         assert.equal(status, "matched");
       }
+    },
+  },
+  {
+    name: "stored fill sync preserves cancelled partial fills",
+    run: () => {
+      const status = resolvePolymarketStoredFillSyncStatus({
+        currentStatus: "cancelled",
+        cancelledAt: "2026-05-28T12:00:00.000Z",
+        orderType: "GTC",
+        filledSize: "1.23",
+        orderSize: "5",
+      });
+      assert.equal(status, "cancelled");
     },
   },
   {
@@ -435,6 +457,36 @@ const tests: TestCase[] = [
         isFilledOrCancelled: true,
       });
       assert.equal(resolution, POLYMARKET_UNCONFIRMED_STATUS);
+    },
+  },
+  {
+    name: "fill sync insert has database duplicate safety net",
+    run: () => {
+      const source = readApiSourceFile("services", "positions-sync.ts");
+      assert.match(
+        source,
+        /on conflict \(order_id, venue_fill_id\) where venue_fill_id is not null do nothing/,
+      );
+      assert.match(source, /returning order_id, venue_fill_id/);
+      assert.match(source, /insertedFillKeys/);
+    },
+  },
+  {
+    name: "fill dedupe migration creates a concurrent partial unique index",
+    run: () => {
+      const source = readApiSourceFile(
+        "..",
+        "..",
+        "..",
+        "packages",
+        "db",
+        "migrations",
+        "0155_order_fills_dedupe_index.sql",
+      ).toLowerCase();
+      assert.match(source, /\/\* no-transaction \*\//);
+      assert.match(source, /create unique index concurrently/);
+      assert.match(source, /on order_fills\(order_id, venue_fill_id\)/);
+      assert.match(source, /where venue_fill_id is not null/);
     },
   },
 ];

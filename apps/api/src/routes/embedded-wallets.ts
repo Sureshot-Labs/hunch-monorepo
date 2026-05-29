@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { createAuthMiddleware } from "../auth.js";
+import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
 import {
   embeddedEvmExecuteBodySchema,
@@ -25,6 +26,7 @@ import {
   resolveEmbeddedSolanaWalletContext,
   type EmbeddedPrivyAuthorizationRequest,
 } from "../services/embedded-solana.js";
+import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 
 const EMBEDDED_SOLANA_PREPARED_TTL_SEC = 300;
 
@@ -294,11 +296,14 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
+        const authAccessPolicy = await resolveAuthAccessPolicy(pool);
         const executionKey = request.body.executionKey ?? null;
         const requests = await prepareEmbeddedSolanaTransactionRequests({
           context,
           executionKey,
           transactions: request.body.transactions,
+          embeddedSolanaSponsorshipEnabled:
+            authAccessPolicy.effective.embeddedSolanaSponsorship === true,
           onSponsorBalanceFetchError: (error) => {
             app.log.warn(
               { error, userId: user.id, signer: context.signer },

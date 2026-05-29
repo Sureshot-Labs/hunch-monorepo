@@ -962,6 +962,7 @@ const tests: TestCase[] = [
               effective_at: new Date("2026-01-01T00:00:00.000Z"),
               payload: {
                 state: "required",
+                embeddedSolanaSponsorship: false,
               },
               created_by: null,
               created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -974,6 +975,47 @@ const tests: TestCase[] = [
       assert.equal(resolved.invalidOverride, false);
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.state, "required");
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
+    },
+  },
+  {
+    name: "auth access policy accepts embedded solana sponsorship override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000032",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+                embeddedSolanaSponsorship: true,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, true);
+    },
+  },
+  {
+    name: "auth access policy defaults embedded solana sponsorship off",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({ rows: [] }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
     },
   },
   {

@@ -2143,6 +2143,7 @@ export async function syncPolymarketTradesForSigner(
           where of.order_id = t.order_id
             and of.venue_fill_id = t.venue_fill_id
         )
+        on conflict (order_id, venue_fill_id) where venue_fill_id is not null do nothing
         returning order_id, venue_fill_id, fill_size, fill_price, fill_side, filled_at
       `,
       [
@@ -2180,6 +2181,8 @@ export async function syncPolymarketTradesForSigner(
                   then 'matched'
                 when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
                   then 'filled'
+                when agg.filled_size > 0 and o.cancelled_at is not null
+                  then 'cancelled'
                 when agg.filled_size > 0 then 'partially_filled'
                 when o.status in ('cancelled', 'rejected', 'expired', 'unmatched') then o.status
                 when o.status = 'unconfirmed' then o.status

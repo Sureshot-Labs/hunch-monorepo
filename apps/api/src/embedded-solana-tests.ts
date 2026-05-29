@@ -65,6 +65,34 @@ function getSponsor(
   return (request.input.body as { sponsor?: boolean }).sponsor;
 }
 
+type BuildEmbeddedSolanaRequestInput = Omit<
+  Parameters<typeof buildEmbeddedSolanaSignAndSendRequest>[0],
+  "embeddedSolanaSponsorshipEnabled"
+>;
+
+function buildSponsoredEmbeddedSolanaSignAndSendRequest(
+  inputs: BuildEmbeddedSolanaRequestInput,
+) {
+  return buildEmbeddedSolanaSignAndSendRequest({
+    ...inputs,
+    embeddedSolanaSponsorshipEnabled: true,
+  });
+}
+
+type PrepareEmbeddedSolanaRequestsInput = Omit<
+  Parameters<typeof prepareEmbeddedSolanaTransactionRequests>[0],
+  "embeddedSolanaSponsorshipEnabled"
+>;
+
+function prepareSponsoredEmbeddedSolanaTransactionRequests(
+  inputs: PrepareEmbeddedSolanaRequestsInput,
+) {
+  return prepareEmbeddedSolanaTransactionRequests({
+    ...inputs,
+    embeddedSolanaSponsorshipEnabled: true,
+  });
+}
+
 const tests: TestCase[] = [
   {
     name: "embedded solana disables sponsorship for native SOL transfer from signer",
@@ -85,7 +113,7 @@ const tests: TestCase[] = [
         true,
       );
 
-      const request = buildEmbeddedSolanaSignAndSendRequest({
+      const request = buildSponsoredEmbeddedSolanaSignAndSendRequest({
         context: walletContext,
         transaction: {
           id: "sol-swap",
@@ -123,7 +151,7 @@ const tests: TestCase[] = [
         true,
       );
 
-      const request = buildEmbeddedSolanaSignAndSendRequest({
+      const request = buildSponsoredEmbeddedSolanaSignAndSendRequest({
         context: walletContext,
         transaction: {
           id: "wrapped-sol-swap",
@@ -156,7 +184,7 @@ const tests: TestCase[] = [
         false,
       );
 
-      const request = buildEmbeddedSolanaSignAndSendRequest({
+      const request = buildSponsoredEmbeddedSolanaSignAndSendRequest({
         context: walletContext,
         transaction: {
           id: "account-setup",
@@ -166,6 +194,32 @@ const tests: TestCase[] = [
       });
 
       assert.equal(getSponsor(request), true);
+    },
+  },
+  {
+    name: "embedded solana disables sponsorship by default",
+    run: () => {
+      const transaction = serializeTransaction([
+        SystemProgram.createAccount({
+          fromPubkey: signerKeypair.publicKey,
+          newAccountPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+          space: 0,
+          programId: SystemProgram.programId,
+        }),
+      ]);
+
+      const request = buildEmbeddedSolanaSignAndSendRequest({
+        context: walletContext,
+        transaction: {
+          id: "account-setup",
+          label: "Account setup",
+          transaction,
+          sponsor: true,
+        },
+      });
+
+      assert.equal(getSponsor(request), false);
     },
   },
   {
@@ -181,7 +235,7 @@ const tests: TestCase[] = [
         }),
       ]);
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -191,6 +245,66 @@ const tests: TestCase[] = [
             sponsor: false,
           },
         ],
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), false);
+    },
+  },
+  {
+    name: "prepare embedded solana requests rejects low SOL when sponsorship is disabled",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "normal-trade",
+                label: "Normal trade",
+                transaction,
+                sponsor: true,
+              },
+            ],
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /Add SOL to this Solana wallet for network fees and account setup/,
+      );
+    },
+  },
+  {
+    name: "prepare embedded solana requests ignores client sponsor true when sponsorship is disabled",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "normal-trade",
+            label: "Normal trade",
+            transaction,
+            sponsor: true,
+          },
+        ],
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS,
       });
 
       const request = requests[0];
@@ -211,7 +325,7 @@ const tests: TestCase[] = [
 
       await assert.rejects(
         async () =>
-          prepareEmbeddedSolanaTransactionRequests({
+          prepareSponsoredEmbeddedSolanaTransactionRequests({
             context: walletContext,
             transactions: [
               {
@@ -238,7 +352,7 @@ const tests: TestCase[] = [
         }),
       ]);
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -276,7 +390,7 @@ const tests: TestCase[] = [
 
       await assert.rejects(
         async () =>
-          prepareEmbeddedSolanaTransactionRequests({
+          prepareSponsoredEmbeddedSolanaTransactionRequests({
             context: walletContext,
             transactions: [
               {
@@ -305,7 +419,7 @@ const tests: TestCase[] = [
         }),
       ]);
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -341,7 +455,7 @@ const tests: TestCase[] = [
         SPONSOR_BASE_REQUIREMENT_LAMPORTS,
       );
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -370,7 +484,7 @@ const tests: TestCase[] = [
         }),
       ]);
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -412,8 +526,8 @@ const tests: TestCase[] = [
         requiredLamports,
       );
 
-      const lowBalanceRequests = await prepareEmbeddedSolanaTransactionRequests(
-        {
+      const lowBalanceRequests =
+        await prepareSponsoredEmbeddedSolanaTransactionRequests({
           context: walletContext,
           transactions: [
             {
@@ -423,14 +537,13 @@ const tests: TestCase[] = [
             },
           ],
           fetchSponsorBalanceLamports: async () => requiredLamports - 1n,
-        },
-      );
+        });
       const lowBalanceRequest = lowBalanceRequests[0];
       assert.ok(lowBalanceRequest);
       assert.equal(getSponsor(lowBalanceRequest), true);
 
       const highBalanceRequests =
-        await prepareEmbeddedSolanaTransactionRequests({
+        await prepareSponsoredEmbeddedSolanaTransactionRequests({
           context: walletContext,
           transactions: [
             {
@@ -458,7 +571,7 @@ const tests: TestCase[] = [
       ]);
       let sawError = false;
 
-      const requests = await prepareEmbeddedSolanaTransactionRequests({
+      const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
         transactions: [
           {
@@ -495,7 +608,7 @@ const tests: TestCase[] = [
 
       await assert.rejects(
         async () =>
-          prepareEmbeddedSolanaTransactionRequests({
+          prepareSponsoredEmbeddedSolanaTransactionRequests({
             context: walletContext,
             transactions: [
               {

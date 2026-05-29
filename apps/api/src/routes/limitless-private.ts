@@ -3952,6 +3952,13 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
                   'delayed',
                   'unconfirmed'
                 )
+                and coalesce(filled_size, 0) = 0
+                and not exists (
+                  select 1
+                  from order_fills f
+                  where f.order_id = orders.id
+                    and coalesce(f.fill_size, 0) > 0
+                )
             `,
             [user.id, cancelWallet, request.params.orderId],
           );

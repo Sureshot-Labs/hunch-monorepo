@@ -323,6 +323,20 @@ function resolvePolymarketClosedReasonHint(
   return null;
 }
 
+function isPolymarketOrderLookupNotFoundResponse(
+  status: number | null | undefined,
+  payload: unknown,
+): boolean {
+  if (status === 404) return true;
+  const message = extractPolymarketUpstreamMessage(payload)?.toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes("not found") ||
+    message.includes("can't be found") ||
+    message.includes("cannot be found")
+  );
+}
+
 async function reconcilePolymarketTerminalOrder(inputs: {
   userId: string;
   venueOrderId: string;
@@ -607,6 +621,24 @@ async function fetchPolymarketClobOrderExecutionEvidence(inputs: {
     });
 
     if (!upstream.ok) {
+      if (
+        isPolymarketOrderLookupNotFoundResponse(
+          upstream.status,
+          upstream.payload,
+        )
+      ) {
+        return {
+          checked: true,
+          externalFillPrice: null,
+          externalFilledSize: null,
+          hasExecution: false,
+          orderType: null,
+          orderStatus: "not_found",
+          payload: upstream.payload,
+          statusHint: null,
+        };
+      }
+
       inputs.log.warn(
         {
           orderId: inputs.orderId,
@@ -5674,6 +5706,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               signer: lastCancelRejection.signer,
               status: reconciledStatus ?? "cancelled",
               reconciled: true,
+              changed: true,
               payload: lastCancelRejection.payload,
               orderStatusPayload: clobOrderEvidence.payload ?? undefined,
               tradeSync: tradeSync ?? undefined,
@@ -5711,39 +5744,41 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-        const cancelUpdate = await pool.query(
-          `
+      const cancelUpdate = await pool.query(
+        `
           update orders o
           set status = 'cancelled',
-              cancelled_at = now(),
+              cancelled_at = coalesce(cancelled_at, now()),
               last_update = now()
           where o.user_id = $1
             and o.venue = 'polymarket'
             and o.venue_order_id = $2
-            and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'open', 'delayed', 'unconfirmed')
-            and not exists (
-              select 1
-              from order_fills f
-              where f.order_id = o.id
-                and coalesce(f.fill_size, 0) > 0
+            and lower(coalesce(o.status, '')) in (
+              'pending',
+              'submitted',
+              'live',
+              'open',
+              'delayed',
+              'unconfirmed',
+              'partially_filled'
             )
         `,
-          [user.id, request.body.orderID],
-        );
+        [user.id, request.body.orderID],
+      );
 
-        if ((cancelUpdate.rowCount ?? 0) > 0) {
-          void createNotificationSafe(
-            pool,
-            buildOrderNotification({
-              userId: user.id,
-              venue: "polymarket",
-              status: "cancelled",
-              orderId: request.body.orderID,
-              walletAddress: resolvedSigner,
-            }),
-            app.log,
-          );
-        }
+      if ((cancelUpdate.rowCount ?? 0) > 0) {
+        void createNotificationSafe(
+          pool,
+          buildOrderNotification({
+            userId: user.id,
+            venue: "polymarket",
+            status: "cancelled",
+            orderId: request.body.orderID,
+            walletAddress: resolvedSigner,
+          }),
+          app.log,
+        );
+      }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
@@ -5751,6 +5786,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         venue: "polymarket",
         orderId: request.body.orderID,
         signer: resolvedSigner,
+        status: "cancelled",
+        changed: (cancelUpdate.rowCount ?? 0) > 0,
         payload: resolvedPayload,
       });
     },

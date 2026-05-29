@@ -31,6 +31,7 @@ export type AuthAccessState = "off" | "prompt" | "required";
 
 export type AuthAccessPolicy = {
   state: AuthAccessState;
+  embeddedSolanaSponsorship: boolean;
 };
 
 export type WalletIntelSignalsPolicy = {
@@ -911,6 +912,7 @@ const authAccessStateSchema = z.enum(["off", "prompt", "required"]);
 const authAccessSchema = z
   .object({
     state: authAccessStateSchema,
+    embeddedSolanaSponsorship: strictBoolean,
   })
   .strict()
   .partial();
@@ -1072,6 +1074,7 @@ function getDefaults(): IntelPolicyMap {
   return {
     auth_access: {
       state: env.authAccessState,
+      embeddedSolanaSponsorship: env.embeddedSolanaSponsorshipEnabled,
     },
     wallet_intel_signals: {
       maxOdds: env.walletIntelSignalMaxOdds,
@@ -2104,6 +2107,7 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
     state: authAccessStateSchema.safeParse(policy.state).success
       ? policy.state
       : "off",
+    embeddedSolanaSponsorship: Boolean(policy.embeddedSolanaSponsorship),
   };
 }
 

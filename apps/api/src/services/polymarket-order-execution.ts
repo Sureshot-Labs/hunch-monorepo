@@ -146,6 +146,7 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
   orderType?: string | null;
   filledSize?: number | string | null;
   orderSize?: number | string | null;
+  cancelledAt?: Date | string | null;
 }): PolymarketStoredFillSyncStatus {
   const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
 
@@ -156,6 +157,10 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
 
     const orderSize = readPositiveNumber(inputs.orderSize);
     if (orderSize != null && filledSize >= orderSize) return "filled";
+
+    if (currentStatus === "cancelled" && inputs.cancelledAt != null) {
+      return "cancelled";
+    }
 
     return "partially_filled";
   }

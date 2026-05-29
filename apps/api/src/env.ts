@@ -373,6 +373,8 @@ const authAccessState = parseEnum(
   ["off", "prompt", "required"] as const,
   "off",
 );
+const embeddedSolanaSponsorshipEnabled =
+  parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
 const adminAuthEnabled =
   parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
 const adminAuthLegacyFallback =
@@ -733,6 +735,7 @@ export const env = {
     50_000,
   ),
   authAccessState,
+  embeddedSolanaSponsorshipEnabled,
   adminAuthEnabled,
   adminAuthLegacyFallback,
   adminAppBaseUrl,
