@@ -3931,13 +3931,51 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         body: { orderId: request.params.orderId },
       });
 
+      const markLocalOrderCancelled = async () =>
+        pool.query(
+          `
+            update orders
+            set status = 'cancelled',
+                cancelled_at = coalesce(cancelled_at, now()),
+                last_update = now()
+            where user_id = $1
+              and (wallet_address = $2 or signer_address = $2)
+              and venue = 'limitless'
+              and venue_order_id = $3
+              and lower(coalesce(status, '')) in (
+                'pending',
+                'submitted',
+                'live',
+                'open',
+                'partially_filled'
+              )
+          `,
+          [user.id, cancelWallet, request.params.orderId],
+        );
+
       if (!upstream.ok) {
         const upstreamMessage = extractLimitlessMessage(upstream.payload);
         if (isLimitlessAmbiguousAlreadyCancelledOrderMessage(upstreamMessage)) {
+          const cancelResult = await markLocalOrderCancelled();
+          const changed = (cancelResult.rowCount ?? 0) > 0;
+          if (changed) {
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: user.id,
+                venue: "limitless",
+                status: "cancelled",
+                orderId: request.params.orderId,
+                walletAddress: cancelWallet,
+              }),
+              app.log,
+            );
+          }
+
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send({
             ok: true,
-            changed: false,
+            changed,
             idempotent: true,
             payload: upstream.payload,
           });
@@ -3952,34 +3990,25 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      await pool.query(
-        `
-          update orders
-          set status = 'cancelled',
-              cancelled_at = now(),
-              last_update = now()
-          where user_id = $1
-            and (wallet_address = $2 or signer_address = $2)
-            and venue = 'limitless'
-            and venue_order_id = $3
-        `,
-        [user.id, cancelWallet, request.params.orderId],
-      );
+      const cancelResult = await markLocalOrderCancelled();
+      const changed = (cancelResult.rowCount ?? 0) > 0;
 
-      void createNotificationSafe(
-        pool,
-        buildOrderNotification({
-          userId: user.id,
-          venue: "limitless",
-          status: "cancelled",
-          orderId: request.params.orderId,
-          walletAddress: cancelWallet,
-        }),
-        app.log,
-      );
+      if (changed) {
+        void createNotificationSafe(
+          pool,
+          buildOrderNotification({
+            userId: user.id,
+            venue: "limitless",
+            status: "cancelled",
+            orderId: request.params.orderId,
+            walletAddress: cancelWallet,
+          }),
+          app.log,
+        );
+      }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ ok: true, payload: upstream.payload });
+      return reply.send({ ok: true, changed, payload: upstream.payload });
     },
   );
 

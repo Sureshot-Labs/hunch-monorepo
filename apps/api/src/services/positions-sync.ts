@@ -2194,8 +2194,11 @@ export async function syncPolymarketTradesForSigner(
       [fillOrderIds, fillVenueIds],
     );
 
+    let persistedAggregateUpdateCount = 0;
     if (persistedCandidateFills.length) {
-      await client.query(
+      const { rows: persistedAggregateUpdates } = await client.query<{
+        id: string;
+      }>(
         `
           with agg as (
             select order_id,
@@ -2207,26 +2210,44 @@ export async function syncPolymarketTradesForSigner(
             from order_fills
             where order_id = any($1::uuid[])
             group by order_id
+          ),
+          next_values as (
+            select o.id,
+                   agg.filled_size,
+                   agg.average_fill_price,
+                   agg.filled_at,
+                   case
+                     when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
+                       then 'matched'
+                     when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
+                       then 'filled'
+                     when agg.filled_size > 0 and o.cancelled_at is not null
+                       then 'cancelled'
+                     when agg.filled_size > 0 and lower(coalesce(o.status, '')) in ('cancelled', 'rejected', 'expired', 'unmatched')
+                       then lower(o.status)
+                     when agg.filled_size > 0 then 'partially_filled'
+                     when o.status in ('cancelled', 'rejected', 'expired', 'unmatched') then o.status
+                     when o.status = 'unconfirmed' then o.status
+                     else o.status
+                   end as next_status
+            from orders o
+            join agg on o.id = agg.order_id
           )
           update orders o
-          set filled_size = agg.filled_size,
-              average_fill_price = agg.average_fill_price,
-              filled_at = agg.filled_at,
-              status = case
-                when agg.filled_size > 0 and upper(coalesce(o.order_type, '')) = 'FOK'
-                  then 'matched'
-                when agg.filled_size > 0 and o.size is not null and agg.filled_size >= o.size
-                  then 'filled'
-                when agg.filled_size > 0 and o.cancelled_at is not null
-                  then 'cancelled'
-                when agg.filled_size > 0 then 'partially_filled'
-                when o.status in ('cancelled', 'rejected', 'expired', 'unmatched') then o.status
-                when o.status = 'unconfirmed' then o.status
-                else o.status
-              end,
+          set filled_size = next_values.filled_size,
+              average_fill_price = next_values.average_fill_price,
+              filled_at = next_values.filled_at,
+              status = next_values.next_status,
               last_update = now()
-          from agg
-          where o.id = agg.order_id
+          from next_values
+          where o.id = next_values.id
+            and (
+              o.filled_size is distinct from next_values.filled_size
+              or o.average_fill_price is distinct from next_values.average_fill_price
+              or o.filled_at is distinct from next_values.filled_at
+              or lower(coalesce(o.status, '')) is distinct from lower(coalesce(next_values.next_status, ''))
+            )
+          returning o.id
         `,
         [
           Array.from(
@@ -2234,6 +2255,7 @@ export async function syncPolymarketTradesForSigner(
           ),
         ],
       );
+      persistedAggregateUpdateCount = persistedAggregateUpdates.length;
 
       const persistedFillKeys = new Set(
         persistedCandidateFills.map(
@@ -2267,7 +2289,7 @@ export async function syncPolymarketTradesForSigner(
 
     return {
       insertedFills: rows,
-      persistedFillCount: persistedCandidateFills.length,
+      persistedFillCount: persistedAggregateUpdateCount,
     };
   });
   const insertedFills = fillSync.insertedFills;

@@ -67,6 +67,10 @@ await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders
     selectSql,
     /lower\(coalesce\(o\.status, ''\)\) in \('pending', 'submitted', 'live', 'partially_filled', 'delayed', 'unconfirmed', 'open'\)/,
   );
+  assert.match(
+    selectSql,
+    /not \(lower\(coalesce\(o\.venue, ''\)\) = 'limitless' and upper\(coalesce\(o\.order_type, ''\)\) = 'FOK'\)/,
+  );
   assert.doesNotMatch(selectSql, /coalesce\(o\.order_type, ''\) not in/);
   assert.doesNotMatch(selectSql, /'unmatched'/);
   assert.doesNotMatch(selectSql, /'expired'/);

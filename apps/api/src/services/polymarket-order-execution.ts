@@ -166,8 +166,17 @@ export function resolvePolymarketStoredFillSyncStatus(inputs: {
     const orderSize = readPositiveNumber(inputs.orderSize);
     if (orderSize != null && filledSize >= orderSize) return "filled";
 
-    if (currentStatus === "cancelled" && inputs.cancelledAt != null) {
+    if (inputs.cancelledAt != null) {
       return "cancelled";
+    }
+
+    if (
+      currentStatus === "cancelled" ||
+      currentStatus === "expired" ||
+      currentStatus === "unmatched" ||
+      currentStatus === "rejected"
+    ) {
+      return currentStatus;
     }
 
     return "partially_filled";

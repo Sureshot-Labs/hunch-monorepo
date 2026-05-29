@@ -260,6 +260,20 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "stored fill sync preserves terminal partial fills",
+    run: () => {
+      for (const currentStatus of ["cancelled", "expired", "unmatched", "rejected"]) {
+        const status = resolvePolymarketStoredFillSyncStatus({
+          currentStatus,
+          orderType: "GTC",
+          filledSize: "1.23",
+          orderSize: "5",
+        });
+        assert.equal(status, currentStatus);
+      }
+    },
+  },
+  {
     name: "no-fill terminal reconcile is blocked by matched status",
     run: () => {
       assert.equal(
