@@ -302,12 +302,23 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           context,
           executionKey,
           transactions: request.body.transactions,
+          userId: user.id,
           embeddedSolanaSponsorshipEnabled:
             authAccessPolicy.effective.embeddedSolanaSponsorship === true,
+          embeddedSolanaSponsorshipMode:
+            authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+          embeddedSolanaSponsorshipFlows:
+            authAccessPolicy.effective.embeddedSolanaSponsorshipFlows,
           onSponsorBalanceFetchError: (error) => {
             app.log.warn(
               { error, userId: user.id, signer: context.signer },
               "Embedded Solana balance fetch failed",
+            );
+          },
+          onAuditLogError: (error) => {
+            app.log.warn(
+              { error, userId: user.id, signer: context.signer },
+              "Embedded Solana sponsorship audit write failed",
             );
           },
         });

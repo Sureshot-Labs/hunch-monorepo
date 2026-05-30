@@ -13,6 +13,12 @@ import bs58 from "bs58";
 import type { User } from "../auth.js";
 import { env } from "../env.js";
 import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
+import {
+  resolveEmbeddedSolanaSponsorshipEvaluation,
+  writeEmbeddedSolanaSponsorshipAudit,
+  type EmbeddedSolanaSponsorshipFlows,
+  type EmbeddedSolanaSponsorshipMode,
+} from "./embedded-solana-sponsorship.js";
 import { fetchSolanaBalanceLamports } from "./solana-rpc.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
@@ -354,6 +360,7 @@ export type EmbeddedSolanaTransactionSpec = {
   transaction: string;
   encoding?: "base64";
   sponsor?: boolean;
+  sponsorshipIntentId?: string | null;
   caip2?: string | null;
 };
 
@@ -542,6 +549,7 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
   executionKey?: string | null;
   embeddedSolanaSponsorshipEnabled?: boolean;
   sponsorBalanceLamports?: bigint | null;
+  sponsorOverride?: boolean;
 }): EmbeddedPrivyAuthorizationRequest {
   const transaction = inputs.transaction.transaction.trim();
   if (!transaction) {
@@ -563,13 +571,15 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     body: {
       chain_type: "solana",
       method: "signAndSendTransaction",
-      sponsor: resolveEmbeddedSolanaSponsor({
-        context: inputs.context,
-        transaction: inputs.transaction,
-        embeddedSolanaSponsorshipEnabled:
-          inputs.embeddedSolanaSponsorshipEnabled === true,
-        sponsorBalanceLamports: inputs.sponsorBalanceLamports,
-      }),
+      sponsor:
+        inputs.sponsorOverride ??
+        resolveEmbeddedSolanaSponsor({
+          context: inputs.context,
+          transaction: inputs.transaction,
+          embeddedSolanaSponsorshipEnabled:
+            inputs.embeddedSolanaSponsorshipEnabled === true,
+          sponsorBalanceLamports: inputs.sponsorBalanceLamports,
+        }),
       params: {
         transaction,
         encoding: inputs.transaction.encoding ?? "base64",
@@ -640,12 +650,25 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   context: EmbeddedSolanaWalletContext;
   transactions: EmbeddedSolanaTransactionSpec[];
   executionKey?: string | null;
+  userId?: string | null;
   embeddedSolanaSponsorshipEnabled?: boolean;
+  embeddedSolanaSponsorshipMode?: EmbeddedSolanaSponsorshipMode;
+  embeddedSolanaSponsorshipFlows?: EmbeddedSolanaSponsorshipFlows;
   fetchSponsorBalanceLamports?: EmbeddedSolanaSponsorBalanceFetcher;
   onSponsorBalanceFetchError?: (error: unknown) => void;
+  onAuditLogError?: (error: unknown) => void;
 }): Promise<EmbeddedPrivyAuthorizationRequest[]> {
   const embeddedSolanaSponsorshipEnabled =
     inputs.embeddedSolanaSponsorshipEnabled === true;
+  const embeddedSolanaSponsorshipMode =
+    inputs.embeddedSolanaSponsorshipMode ?? "enforce";
+  const embeddedSolanaSponsorshipFlows =
+    inputs.embeddedSolanaSponsorshipFlows ?? {
+      dflow: false,
+      across: false,
+      directTransfer: false,
+      debridge: false,
+    };
   const hasNativeSolSourceTransaction =
     hasEmbeddedSolanaNativeSourceTransaction({
       context: inputs.context,
@@ -658,6 +681,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   let sponsorBalanceLamports: bigint | null = null;
   if (
     !embeddedSolanaSponsorshipEnabled ||
+    embeddedSolanaSponsorshipMode === "enforce" ||
     hasNativeSolSourceTransaction ||
     shouldFetchSponsorBalance
   ) {
@@ -668,7 +692,11 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
       )(inputs.context);
     } catch (error) {
       inputs.onSponsorBalanceFetchError?.(error);
-      if (!embeddedSolanaSponsorshipEnabled || hasNativeSolSourceTransaction) {
+      if (
+        !embeddedSolanaSponsorshipEnabled ||
+        embeddedSolanaSponsorshipMode === "enforce" ||
+        hasNativeSolSourceTransaction
+      ) {
         throw new Error(EMBEDDED_SOLANA_BALANCE_VERIFICATION_ERROR);
       }
       sponsorBalanceLamports = null;
@@ -685,6 +713,32 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
       sponsorBalanceLamports == null ||
       sponsorBalanceLamports < requiredLamports
     ) {
+      for (const transaction of inputs.transactions) {
+        try {
+          const evaluation =
+            await resolveEmbeddedSolanaSponsorshipEvaluation({
+              userId: inputs.userId?.trim() || "unknown",
+              signer: inputs.context.signer,
+              transaction: transaction.transaction,
+              sponsorshipIntentId: transaction.sponsorshipIntentId,
+              requestedSponsor: transaction.sponsor !== false,
+              legacyWouldSponsor: false,
+              enabled: false,
+              mode: embeddedSolanaSponsorshipMode,
+              flows: embeddedSolanaSponsorshipFlows,
+            });
+          await writeEmbeddedSolanaSponsorshipAudit({
+            event: {
+              ...evaluation,
+              userId: inputs.userId?.trim() || "unknown",
+              signer: inputs.context.signer,
+              transactionId: transaction.id,
+            },
+          });
+        } catch (error) {
+          inputs.onAuditLogError?.(error);
+        }
+      }
       throw new Error(EMBEDDED_SOLANA_SOL_REQUIRED_ERROR);
     }
   }
@@ -698,15 +752,82 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
     throw new Error(EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_ERROR);
   }
 
-  return inputs.transactions.map((transaction) =>
-    buildEmbeddedSolanaSignAndSendRequest({
+  const requests: EmbeddedPrivyAuthorizationRequest[] = [];
+  for (const transaction of inputs.transactions) {
+    const legacySponsor = resolveEmbeddedSolanaSponsor({
       context: inputs.context,
       transaction,
-      executionKey: inputs.executionKey,
       embeddedSolanaSponsorshipEnabled,
       sponsorBalanceLamports,
-    }),
-  );
+    });
+    const evaluation = await resolveEmbeddedSolanaSponsorshipEvaluation({
+      userId: inputs.userId?.trim() || "unknown",
+      signer: inputs.context.signer,
+      transaction: transaction.transaction,
+      sponsorshipIntentId: transaction.sponsorshipIntentId,
+      requestedSponsor: transaction.sponsor !== false,
+      legacyWouldSponsor: legacySponsor,
+      enabled: embeddedSolanaSponsorshipEnabled,
+      mode: embeddedSolanaSponsorshipMode,
+      flows: embeddedSolanaSponsorshipFlows,
+    });
+
+    if (
+      embeddedSolanaSponsorshipEnabled &&
+      embeddedSolanaSponsorshipMode === "enforce" &&
+      legacySponsor &&
+      !evaluation.enforceWouldSponsor
+    ) {
+      const requiredLamports = getEmbeddedSolanaSponsorshipRequirementLamports({
+        signer: inputs.context.signer,
+        transaction: transaction.transaction,
+      });
+      if (
+        sponsorBalanceLamports == null ||
+        sponsorBalanceLamports < requiredLamports
+      ) {
+        try {
+          await writeEmbeddedSolanaSponsorshipAudit({
+            event: {
+              ...evaluation,
+              userId: inputs.userId?.trim() || "unknown",
+              signer: inputs.context.signer,
+              transactionId: transaction.id,
+            },
+          });
+        } catch (error) {
+          inputs.onAuditLogError?.(error);
+        }
+        throw new Error(EMBEDDED_SOLANA_SOL_REQUIRED_ERROR);
+      }
+    }
+
+    try {
+      await writeEmbeddedSolanaSponsorshipAudit({
+        event: {
+          ...evaluation,
+          userId: inputs.userId?.trim() || "unknown",
+          signer: inputs.context.signer,
+          transactionId: transaction.id,
+        },
+      });
+    } catch (error) {
+      inputs.onAuditLogError?.(error);
+    }
+
+    requests.push(
+      buildEmbeddedSolanaSignAndSendRequest({
+        context: inputs.context,
+        transaction,
+        executionKey: inputs.executionKey,
+        embeddedSolanaSponsorshipEnabled,
+        sponsorBalanceLamports,
+        sponsorOverride: evaluation.actualSponsor,
+      }),
+    );
+  }
+
+  return requests;
 }
 
 export async function executeEmbeddedSolanaTransactionRequests(inputs: {

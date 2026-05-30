@@ -18,6 +18,7 @@ import {
   shouldDisableEmbeddedSolanaSponsorshipForTransaction,
   type EmbeddedSolanaWalletContext,
 } from "./services/embedded-solana.js";
+import { analyzeEmbeddedSolanaTransaction } from "./services/embedded-solana-sponsorship.js";
 
 type TestCase = {
   name: string;
@@ -90,6 +91,7 @@ function prepareSponsoredEmbeddedSolanaTransactionRequests(
   return prepareEmbeddedSolanaTransactionRequests({
     ...inputs,
     embeddedSolanaSponsorshipEnabled: true,
+    embeddedSolanaSponsorshipMode: "observe",
   });
 }
 
@@ -627,6 +629,102 @@ const tests: TestCase[] = [
         /Unable to verify Solana balance/,
       );
       assert.equal(sawError, true);
+    },
+  },
+  {
+    name: "solana sponsorship analyzer detects native SOL transfer",
+    run: () => {
+      const transaction = serializeTransaction([
+        SystemProgram.transfer({
+          fromPubkey: signerKeypair.publicKey,
+          toPubkey: Keypair.generate().publicKey,
+          lamports: 1_000_000,
+        }),
+      ]);
+
+      const analysis = analyzeEmbeddedSolanaTransaction({
+        signer: walletContext.signer,
+        transaction,
+      });
+
+      assert.equal(analysis.ok, true);
+      assert.equal(analysis.hasNativeSolTransfer, true);
+      assert.equal(analysis.usesAddressLookupTables, false);
+      assert.equal(analysis.signerAddresses[0], walletContext.signer);
+    },
+  },
+  {
+    name: "enforce mode rejects sponsorship without an intent when signer cannot pay",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "normal-trade",
+                label: "Normal trade",
+                transaction,
+              },
+            ],
+            embeddedSolanaSponsorshipEnabled: true,
+            embeddedSolanaSponsorshipMode: "enforce",
+            embeddedSolanaSponsorshipFlows: {
+              dflow: true,
+              across: true,
+              directTransfer: false,
+              debridge: false,
+            },
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /Add SOL to this Solana wallet for network fees and account setup/,
+      );
+    },
+  },
+  {
+    name: "enforce mode downgrades to user-funded without an intent when signer can pay",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "normal-trade",
+            label: "Normal trade",
+            transaction,
+          },
+        ],
+        embeddedSolanaSponsorshipEnabled: true,
+        embeddedSolanaSponsorshipMode: "enforce",
+        embeddedSolanaSponsorshipFlows: {
+          dflow: true,
+          across: true,
+          directTransfer: false,
+          debridge: false,
+        },
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), false);
     },
   },
 ];

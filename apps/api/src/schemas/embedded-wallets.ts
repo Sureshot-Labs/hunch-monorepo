@@ -42,6 +42,7 @@ export const embeddedSolanaTransactionSchema = z.object({
   transaction: z.string().trim().min(1),
   encoding: z.enum(["base64"]).default("base64"),
   sponsor: z.boolean().optional(),
+  sponsorshipIntentId: z.string().trim().min(1).max(120).optional(),
   caip2: z
     .string()
     .trim()

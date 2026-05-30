@@ -33,6 +33,7 @@ import {
   formatUiAmount,
   sendSolanaRawTransaction,
 } from "../services/solana-rpc.js";
+import { createEmbeddedSolanaSponsorshipIntent } from "../services/embedded-solana-sponsorship.js";
 import {
   dflowExecutionBodySchema,
   dflowOrderQuerySchema,
@@ -303,6 +304,32 @@ function findMintPair(value: unknown, depth = 0): MintPair | null {
   return null;
 }
 
+function extractStringFromRecord(
+  record: Record<string, unknown>,
+  keys: string[],
+): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function extractNonNegativeLamportsFromRecord(
+  record: Record<string, unknown>,
+  keys: string[],
+): string | null {
+  const raw = extractStringFromRecord(record, keys);
+  if (raw && /^\d+$/.test(raw)) return raw;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return Math.trunc(value).toString();
+    }
+  }
+  return null;
+}
+
 async function enforceKalshiProof(args: {
   user: { id: string; kalshiProofBypass: boolean };
   walletAddress: string;
@@ -563,8 +590,55 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const payloadRecord =
+        upstream.payload &&
+        typeof upstream.payload === "object" &&
+        !Array.isArray(upstream.payload)
+          ? ({ ...(upstream.payload as Record<string, unknown>) } as Record<
+              string,
+              unknown
+            >)
+          : null;
+      if (payloadRecord) {
+        const transaction = extractStringFromRecord(payloadRecord, [
+          "transaction",
+          "swapTransaction",
+          "swap_transaction",
+        ]);
+        if (transaction) {
+          try {
+            const maxSystemCreateLamports =
+              extractNonNegativeLamportsFromRecord(payloadRecord, [
+                "initPredictionMarketCost",
+                "init_prediction_market_cost",
+                "initPredictionMarketCostLamports",
+              ]) ?? "0";
+            const intent = await createEmbeddedSolanaSponsorshipIntent({
+              flow: "dflow",
+              userId: user.id,
+              signer: userPublicKey,
+              transaction,
+              metadata: {
+                inputMint: query.inputMint,
+                outputMint: query.outputMint,
+                amount: query.amount,
+                maxSystemCreateLamports,
+              },
+            });
+            if (intent) {
+              payloadRecord.hunchSponsorshipIntentId = intent.id;
+            }
+          } catch (error) {
+            app.log.warn(
+              { error, userId: user.id, walletAddress },
+              "Failed to create DFlow Solana sponsorship intent",
+            );
+          }
+        }
+      }
+
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      return reply.send(payloadRecord ?? upstream.payload);
     },
   );
 

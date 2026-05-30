@@ -55,6 +55,7 @@ import {
   debridgeRequest,
   extractDebridgeErrorMessage,
 } from "../services/debridge-client.js";
+import { createEmbeddedSolanaSponsorshipIntent } from "../services/embedded-solana-sponsorship.js";
 
 type DebridgeChain = {
   chainId: string;
@@ -1771,10 +1772,44 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             ],
           );
           const bridgeOrderId = insertResult.rows[0]?.id ?? null;
+          let hunchSponsorshipIntentId: string | null = null;
+          if (
+            body.srcChainId === HUNCH_SOLANA_CHAIN_ID &&
+            bridgeOrderId &&
+            isRecord(normalizedPayload.tx) &&
+            normalizedPayload.tx.kind === "solana" &&
+            typeof normalizedPayload.tx.data === "string" &&
+            normalizedPayload.tx.data.trim()
+          ) {
+            try {
+              const intent = await createEmbeddedSolanaSponsorshipIntent({
+                flow: "across",
+                userId: user.id,
+                signer: addresses.senderAddress,
+                transaction: normalizedPayload.tx.data,
+                metadata: {
+                  bridgeOrderId,
+                  srcChainId: body.srcChainId,
+                  dstChainId: body.dstChainId,
+                  srcToken: body.srcToken,
+                  dstToken: body.dstToken,
+                  amountIn: body.amountIn,
+                  maxSystemCreateLamports: "0",
+                },
+              });
+              hunchSponsorshipIntentId = intent?.id ?? null;
+            } catch (error) {
+              app.log.warn(
+                { error, userId: user.id, bridgeOrderId },
+                "Failed to create Across Solana sponsorship intent",
+              );
+            }
+          }
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send({
             ...normalizedPayload,
             bridgeOrderId,
+            ...(hunchSponsorshipIntentId ? { hunchSponsorshipIntentId } : {}),
           });
         }
 

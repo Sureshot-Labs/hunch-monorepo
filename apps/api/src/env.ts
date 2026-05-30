@@ -375,6 +375,11 @@ const authAccessState = parseEnum(
 );
 const embeddedSolanaSponsorshipEnabled =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
+const embeddedSolanaSponsorshipAuditLogPath =
+  process.env.EMBEDDED_SOLANA_SPONSORSHIP_AUDIT_LOG_PATH?.trim() || "";
+const embeddedSolanaSponsorshipAuditIncludeRaw =
+  parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_AUDIT_INCLUDE_RAW) ??
+  false;
 const adminAuthEnabled =
   parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
 const adminAuthLegacyFallback =
@@ -736,6 +741,8 @@ export const env = {
   ),
   authAccessState,
   embeddedSolanaSponsorshipEnabled,
+  embeddedSolanaSponsorshipAuditLogPath,
+  embeddedSolanaSponsorshipAuditIncludeRaw,
   adminAuthEnabled,
   adminAuthLegacyFallback,
   adminAppBaseUrl,

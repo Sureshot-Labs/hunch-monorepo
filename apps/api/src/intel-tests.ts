@@ -991,6 +991,11 @@ const tests: TestCase[] = [
               payload: {
                 state: "required",
                 embeddedSolanaSponsorship: true,
+                embeddedSolanaSponsorshipMode: "observe",
+                embeddedSolanaSponsorshipFlows: {
+                  dflow: true,
+                  across: true,
+                },
               },
               created_by: null,
               created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -1004,6 +1009,16 @@ const tests: TestCase[] = [
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.state, "required");
       assert.equal(resolved.effective.embeddedSolanaSponsorship, true);
+      assert.equal(resolved.effective.embeddedSolanaSponsorshipMode, "observe");
+      assert.equal(resolved.effective.embeddedSolanaSponsorshipFlows.dflow, true);
+      assert.equal(
+        resolved.effective.embeddedSolanaSponsorshipFlows.across,
+        true,
+      );
+      assert.equal(
+        resolved.effective.embeddedSolanaSponsorshipFlows.directTransfer,
+        false,
+      );
     },
   },
   {
@@ -1016,6 +1031,13 @@ const tests: TestCase[] = [
       const resolved = await resolveIntelPolicy(db, "auth_access");
       assert.equal(resolved.invalidOverride, false);
       assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
+      assert.equal(resolved.effective.embeddedSolanaSponsorshipMode, "enforce");
+      assert.deepEqual(resolved.effective.embeddedSolanaSponsorshipFlows, {
+        dflow: false,
+        across: false,
+        directTransfer: false,
+        debridge: false,
+      });
     },
   },
   {

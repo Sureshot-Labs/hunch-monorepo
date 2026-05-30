@@ -28,10 +28,19 @@ export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 type PolicySource = "env" | "db";
 
 export type AuthAccessState = "off" | "prompt" | "required";
+export type EmbeddedSolanaSponsorshipMode = "observe" | "enforce";
+export type EmbeddedSolanaSponsorshipFlowsPolicy = {
+  dflow: boolean;
+  across: boolean;
+  directTransfer: boolean;
+  debridge: boolean;
+};
 
 export type AuthAccessPolicy = {
   state: AuthAccessState;
   embeddedSolanaSponsorship: boolean;
+  embeddedSolanaSponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  embeddedSolanaSponsorshipFlows: EmbeddedSolanaSponsorshipFlowsPolicy;
 };
 
 export type WalletIntelSignalsPolicy = {
@@ -909,10 +918,22 @@ const walletIntelAttributionSchema = z
   .partial();
 
 const authAccessStateSchema = z.enum(["off", "prompt", "required"]);
+const embeddedSolanaSponsorshipModeSchema = z.enum(["observe", "enforce"]);
+const embeddedSolanaSponsorshipFlowsSchema = z
+  .object({
+    dflow: strictBoolean,
+    across: strictBoolean,
+    directTransfer: strictBoolean,
+    debridge: strictBoolean,
+  })
+  .strict()
+  .partial();
 const authAccessSchema = z
   .object({
     state: authAccessStateSchema,
     embeddedSolanaSponsorship: strictBoolean,
+    embeddedSolanaSponsorshipMode: embeddedSolanaSponsorshipModeSchema,
+    embeddedSolanaSponsorshipFlows: embeddedSolanaSponsorshipFlowsSchema,
   })
   .strict()
   .partial();
@@ -1075,6 +1096,13 @@ function getDefaults(): IntelPolicyMap {
     auth_access: {
       state: env.authAccessState,
       embeddedSolanaSponsorship: env.embeddedSolanaSponsorshipEnabled,
+      embeddedSolanaSponsorshipMode: "enforce",
+      embeddedSolanaSponsorshipFlows: {
+        dflow: false,
+        across: false,
+        directTransfer: false,
+        debridge: false,
+      },
     },
     wallet_intel_signals: {
       maxOdds: env.walletIntelSignalMaxOdds,
@@ -2108,6 +2136,20 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
       ? policy.state
       : "off",
     embeddedSolanaSponsorship: Boolean(policy.embeddedSolanaSponsorship),
+    embeddedSolanaSponsorshipMode:
+      embeddedSolanaSponsorshipModeSchema.safeParse(
+        policy.embeddedSolanaSponsorshipMode,
+      ).success
+        ? policy.embeddedSolanaSponsorshipMode
+        : "enforce",
+    embeddedSolanaSponsorshipFlows: {
+      dflow: Boolean(policy.embeddedSolanaSponsorshipFlows?.dflow),
+      across: Boolean(policy.embeddedSolanaSponsorshipFlows?.across),
+      directTransfer: Boolean(
+        policy.embeddedSolanaSponsorshipFlows?.directTransfer,
+      ),
+      debridge: Boolean(policy.embeddedSolanaSponsorshipFlows?.debridge),
+    },
   };
 }
 
