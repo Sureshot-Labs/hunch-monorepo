@@ -104,9 +104,12 @@ async function loadSamples(limit: number): Promise<SampleRow[]> {
         id::text,
         user_id::text,
         metadata as raw,
-        null::text as wallet_address
+        coalesce(
+          metadata->>'senderAddress',
+          metadata->'across'->>'senderAddress'
+        ) as wallet_address
       from bridge_orders
-      where provider = 'across'
+      where provider in ('across', 'debridge')
         and src_chain_id = '7565164'
         and metadata is not null
       order by created_at desc
@@ -174,4 +177,3 @@ main()
   .finally(() => {
     void pool.end();
   });
-

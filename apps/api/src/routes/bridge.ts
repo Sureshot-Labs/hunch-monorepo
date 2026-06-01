@@ -55,7 +55,10 @@ import {
   debridgeRequest,
   extractDebridgeErrorMessage,
 } from "../services/debridge-client.js";
-import { createEmbeddedSolanaSponsorshipIntent } from "../services/embedded-solana-sponsorship.js";
+import {
+  analyzeEmbeddedSolanaTransaction,
+  createEmbeddedSolanaSponsorshipIntent,
+} from "../services/embedded-solana-sponsorship.js";
 
 type DebridgeChain = {
   chainId: string;
@@ -70,6 +73,10 @@ type DebridgeToken = {
   decimals: number | null;
   logoURI: string | null;
   tags: unknown | null;
+};
+
+type BridgeRouteLogger = {
+  warn: (bindings: Record<string, unknown>, message: string) => void;
 };
 
 type DebridgeOrderInputs = {
@@ -94,6 +101,10 @@ type DebridgeOrderInputs = {
 };
 
 const SOLANA_CHAIN_ID = HUNCH_SOLANA_CHAIN_ID;
+const SOLANA_NATIVE_TOKEN_ADDRESSES = new Set([
+  "11111111111111111111111111111111",
+  "so11111111111111111111111111111111111111112",
+]);
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
 const BSC_CHAIN_ID = "56";
@@ -527,6 +538,108 @@ function buildDebridgeSameChainQuery(inputs: DebridgeSameChainInputs) {
 function readStringField(payload: Record<string, unknown>, field: string) {
   const value = payload[field];
   return typeof value === "string" ? value : null;
+}
+
+function hasPositiveIntegerString(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return false;
+  try {
+    return BigInt(normalized) > BigInt(0);
+  } catch {
+    return false;
+  }
+}
+
+function isSolanaNativeTokenAddress(value: string): boolean {
+  return SOLANA_NATIVE_TOKEN_ADDRESSES.has(value.trim().toLowerCase());
+}
+
+function readSolanaTransactionData(payload: unknown): string | null {
+  if (!isRecord(payload) || !isRecord(payload.tx)) return null;
+  const kind =
+    typeof payload.tx.kind === "string" ? payload.tx.kind.trim() : "";
+  if (kind && kind !== "solana") return null;
+  const data = readStringField(payload.tx, "data");
+  return data?.trim() || null;
+}
+
+async function createDebridgeSolanaSponsorshipIntent(inputs: {
+  userId: string;
+  bridgeOrderId: string | null;
+  payload: unknown;
+  srcChainId: string;
+  dstChainId: string;
+  srcToken: string;
+  dstToken: string;
+  amountIn: string;
+  senderAddress: string;
+  recipientAddress: string;
+  logger: BridgeRouteLogger;
+}): Promise<string | null> {
+  if (inputs.srcChainId !== SOLANA_CHAIN_ID || !inputs.bridgeOrderId) {
+    return null;
+  }
+  if (isSolanaNativeTokenAddress(inputs.srcToken)) {
+    return null;
+  }
+  if (
+    isRecord(inputs.payload) &&
+    hasPositiveIntegerString(inputs.payload.fixFee)
+  ) {
+    return null;
+  }
+
+  const transaction = readSolanaTransactionData(inputs.payload);
+  if (!transaction) return null;
+
+  const analysis = analyzeEmbeddedSolanaTransaction({
+    signer: inputs.senderAddress,
+    transaction,
+  });
+  if (
+    !analysis.ok ||
+    analysis.usesAddressLookupTables ||
+    analysis.hasNativeSolTransfer ||
+    analysis.hasSyncNative ||
+    analysis.systemCreateLamports !== "0" ||
+    analysis.ataCreateCount !== 0 ||
+    analysis.feePayer !== inputs.senderAddress ||
+    analysis.signerAddresses.length !== 1 ||
+    analysis.signerAddresses[0] !== inputs.senderAddress
+  ) {
+    return null;
+  }
+
+  try {
+    const intent = await createEmbeddedSolanaSponsorshipIntent({
+      flow: "debridge",
+      userId: inputs.userId,
+      signer: inputs.senderAddress,
+      transaction,
+      metadata: {
+        bridgeOrderId: inputs.bridgeOrderId,
+        provider: "debridge",
+        srcChainId: inputs.srcChainId,
+        dstChainId: inputs.dstChainId,
+        srcToken: inputs.srcToken,
+        dstToken: inputs.dstToken,
+        amountIn: inputs.amountIn,
+        senderAddress: inputs.senderAddress,
+        recipientAddress: inputs.recipientAddress,
+        debridgeSponsorshipEligible: true,
+        allowedProgramIds: analysis.programIds,
+        maxSystemCreateLamports: "0",
+      },
+    });
+    return intent?.id ?? null;
+  } catch (error) {
+    inputs.logger.warn(
+      { error, userId: inputs.userId, bridgeOrderId: inputs.bridgeOrderId },
+      "Failed to create deBridge Solana sponsorship intent",
+    );
+    return null;
+  }
 }
 
 function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
@@ -2015,12 +2128,44 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           orderId,
           "created",
           fees,
-          { tx: txMeta, estimation, tokenIn, tokenOut },
+          {
+            tx: txMeta,
+            estimation,
+            tokenIn,
+            tokenOut,
+            senderAddress: addresses.senderAddress,
+            recipientAddress: addresses.recipientAddress,
+            debridge: {
+              fixFee: isRecord(upstream.payload)
+                ? (upstream.payload.fixFee ?? null)
+                : null,
+              protocolFee: isRecord(upstream.payload)
+                ? (upstream.payload.protocolFee ?? null)
+                : null,
+              estimatedTransactionFee: isRecord(upstream.payload)
+                ? (upstream.payload.estimatedTransactionFee ?? null)
+                : null,
+            },
+          },
         ],
       );
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       const bridgeOrderId = insertResult.rows[0]?.id ?? null;
+      const hunchSponsorshipIntentId =
+        await createDebridgeSolanaSponsorshipIntent({
+          userId: user.id,
+          bridgeOrderId,
+          payload: upstream.payload,
+          srcChainId: body.srcChainId,
+          dstChainId: body.dstChainId,
+          srcToken: body.srcToken,
+          dstToken: body.dstToken,
+          amountIn: body.amountIn,
+          senderAddress: addresses.senderAddress,
+          recipientAddress: addresses.recipientAddress,
+          logger: app.log,
+        });
       return reply.send({
         ...((isRecord(upstream.payload) ? upstream.payload : {}) as Record<
           string,
@@ -2029,6 +2174,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         provider: "debridge",
         bridgeOrderId,
         swapType,
+        ...(hunchSponsorshipIntentId ? { hunchSponsorshipIntentId } : {}),
       });
     },
   );

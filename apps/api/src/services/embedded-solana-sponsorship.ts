@@ -534,6 +534,18 @@ function getBooleanMetadata(
   return null;
 }
 
+function getStringArrayMetadata(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string[] {
+  const value = metadata?.[key];
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function isDflowTransaction(
   analysis: EmbeddedSolanaTransactionAnalysis,
 ): boolean {
@@ -650,8 +662,23 @@ function evaluateEnforceAllowed(inputs: {
   ) {
     reasons.push("dflow_market_not_initialized");
   }
+  if (
+    flow === "debridge" &&
+    getBooleanMetadata(inputs.intent?.metadata, "debridgeSponsorshipEligible") !==
+      true
+  ) {
+    reasons.push("debridge_not_eligible");
+  }
 
-  const allowedPrograms = FLOW_ALLOWED_PROGRAMS[flow];
+  const allowedPrograms = new Set(FLOW_ALLOWED_PROGRAMS[flow]);
+  if (flow === "debridge") {
+    for (const programId of getStringArrayMetadata(
+      inputs.intent?.metadata,
+      "allowedProgramIds",
+    )) {
+      allowedPrograms.add(programId);
+    }
+  }
   const unknownProgramIds = inputs.analysis.programIds.filter(
     (programId) => !allowedPrograms.has(programId),
   );

@@ -865,6 +865,109 @@ const tests: TestCase[] = [
       assert.equal(getSponsor(request), true);
     },
   },
+  {
+    name: "enforce mode sponsors deBridge transaction with intent-bound provider program allowlist",
+    run: async () => {
+      const debridgeProgramId = Keypair.generate().publicKey;
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: debridgeProgramId,
+          keys: [],
+          data: Buffer.from([1]),
+        }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "debridge",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          debridgeSponsorshipEligible: true,
+          allowedProgramIds: [debridgeProgramId.toBase58()],
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "debridge-bridge",
+            label: "deBridge bridge",
+            transaction,
+            sponsorshipIntentId: intent.id,
+          },
+        ],
+        userId: "user-id",
+        embeddedSolanaSponsorshipEnabled: true,
+        embeddedSolanaSponsorshipMode: "enforce",
+        embeddedSolanaSponsorshipFlows: {
+          dflow: false,
+          across: false,
+          directTransfer: false,
+          debridge: true,
+        },
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), true);
+    },
+  },
+  {
+    name: "enforce mode rejects deBridge sponsorship without provider program allowlist",
+    run: async () => {
+      const debridgeProgramId = Keypair.generate().publicKey;
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: debridgeProgramId,
+          keys: [],
+          data: Buffer.from([1]),
+        }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "debridge",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          debridgeSponsorshipEligible: true,
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "debridge-bridge",
+                label: "deBridge bridge",
+                transaction,
+                sponsorshipIntentId: intent.id,
+              },
+            ],
+            userId: "user-id",
+            embeddedSolanaSponsorshipEnabled: true,
+            embeddedSolanaSponsorshipMode: "enforce",
+            embeddedSolanaSponsorshipFlows: {
+              dflow: false,
+              across: false,
+              directTransfer: false,
+              debridge: true,
+            },
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /Add SOL to this Solana wallet for network fees and account setup/,
+      );
+    },
+  },
 ];
 
 let passed = 0;
