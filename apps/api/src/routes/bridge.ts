@@ -56,9 +56,12 @@ import {
   extractDebridgeErrorMessage,
 } from "../services/debridge-client.js";
 import {
-  analyzeEmbeddedSolanaTransaction,
   createEmbeddedSolanaSponsorshipIntent,
+  reserveEmbeddedSolanaSponsorshipBudget,
+  validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "../services/embedded-solana-sponsorship.js";
+import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import { upsertSolanaSponsorshipLedger } from "../services/solana-sponsorship-ledger.js";
 
 type DebridgeChain = {
   chainId: string;
@@ -101,10 +104,6 @@ type DebridgeOrderInputs = {
 };
 
 const SOLANA_CHAIN_ID = HUNCH_SOLANA_CHAIN_ID;
-const SOLANA_NATIVE_TOKEN_ADDRESSES = new Set([
-  "11111111111111111111111111111111",
-  "so11111111111111111111111111111111111111112",
-]);
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
 const BSC_CHAIN_ID = "56";
@@ -540,28 +539,12 @@ function readStringField(payload: Record<string, unknown>, field: string) {
   return typeof value === "string" ? value : null;
 }
 
-function hasPositiveIntegerString(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const normalized = value.trim();
-  if (!/^\d+$/.test(normalized)) return false;
-  try {
-    return BigInt(normalized) > BigInt(0);
-  } catch {
-    return false;
-  }
-}
-
-function isSolanaNativeTokenAddress(value: string): boolean {
-  return SOLANA_NATIVE_TOKEN_ADDRESSES.has(value.trim().toLowerCase());
-}
-
-function readSolanaTransactionData(payload: unknown): string | null {
-  if (!isRecord(payload) || !isRecord(payload.tx)) return null;
-  const kind =
-    typeof payload.tx.kind === "string" ? payload.tx.kind.trim() : "";
-  if (kind && kind !== "solana") return null;
-  const data = readStringField(payload.tx, "data");
-  return data?.trim() || null;
+function isPositiveIntegerString(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    /^\d+$/.test(value.trim()) &&
+    BigInt(value.trim()) > BigInt(0)
+  );
 }
 
 async function createDebridgeSolanaSponsorshipIntent(inputs: {
@@ -577,69 +560,106 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   recipientAddress: string;
   logger: BridgeRouteLogger;
 }): Promise<string | null> {
-  if (inputs.srcChainId !== SOLANA_CHAIN_ID || !inputs.bridgeOrderId) {
-    return null;
-  }
-  if (isSolanaNativeTokenAddress(inputs.srcToken)) {
+  if (
+    inputs.srcChainId !== HUNCH_SOLANA_CHAIN_ID ||
+    !isRecord(inputs.payload) ||
+    !isRecord(inputs.payload.tx) ||
+    inputs.payload.tx.kind !== "solana" ||
+    typeof inputs.payload.tx.data !== "string" ||
+    !inputs.payload.tx.data.trim()
+  ) {
     return null;
   }
   if (
-    isRecord(inputs.payload) &&
-    hasPositiveIntegerString(inputs.payload.fixFee)
+    isPositiveIntegerString(inputs.payload.fixFee) ||
+    isPositiveIntegerString(inputs.payload.protocolFee)
   ) {
     return null;
   }
 
-  const transaction = readSolanaTransactionData(inputs.payload);
-  if (!transaction) return null;
+  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+  if (
+    authAccessPolicy.effective.embeddedSolanaSponsorship !== true ||
+    authAccessPolicy.effective.embeddedSolanaSponsorshipFlows.debridge !== true
+  ) {
+    return null;
+  }
+  const allowedProgramIds = env.debridgeSolanaAllowedProgramIds;
+  if (!allowedProgramIds.length) return null;
 
-  const analysis = analyzeEmbeddedSolanaTransaction({
+  const metadata = {
+    debridgeSponsorshipEligible: true,
+    allowedProgramIds,
+    bridgeOrderId: inputs.bridgeOrderId,
+    srcChainId: inputs.srcChainId,
+    dstChainId: inputs.dstChainId,
+    srcToken: inputs.srcToken,
+    dstToken: inputs.dstToken,
+    amountIn: inputs.amountIn,
+    recipientAddress: inputs.recipientAddress,
+    maxSystemCreateLamports: "0",
+  };
+  const validation = validateEmbeddedSolanaSponsorshipIntentCandidate({
+    flow: "debridge",
+    userId: inputs.userId,
     signer: inputs.senderAddress,
-    transaction,
+    transaction: inputs.payload.tx.data,
+    metadata,
   });
-  if (
-    !analysis.ok ||
-    analysis.usesAddressLookupTables ||
-    analysis.hasNativeSolTransfer ||
-    analysis.hasSyncNative ||
-    analysis.systemCreateLamports !== "0" ||
-    analysis.ataCreateCount !== 0 ||
-    analysis.feePayer !== inputs.senderAddress ||
-    analysis.signerAddresses.length !== 1 ||
-    analysis.signerAddresses[0] !== inputs.senderAddress
-  ) {
-    return null;
-  }
-
-  try {
-    const intent = await createEmbeddedSolanaSponsorshipIntent({
-      flow: "debridge",
-      userId: inputs.userId,
-      signer: inputs.senderAddress,
-      transaction,
-      metadata: {
-        bridgeOrderId: inputs.bridgeOrderId,
-        provider: "debridge",
-        srcChainId: inputs.srcChainId,
-        dstChainId: inputs.dstChainId,
-        srcToken: inputs.srcToken,
-        dstToken: inputs.dstToken,
-        amountIn: inputs.amountIn,
-        senderAddress: inputs.senderAddress,
-        recipientAddress: inputs.recipientAddress,
-        debridgeSponsorshipEligible: true,
-        allowedProgramIds: analysis.programIds,
-        maxSystemCreateLamports: "0",
-      },
-    });
-    return intent?.id ?? null;
-  } catch (error) {
+  if (!validation.ok) {
     inputs.logger.warn(
-      { error, userId: inputs.userId, bridgeOrderId: inputs.bridgeOrderId },
-      "Failed to create deBridge Solana sponsorship intent",
+      {
+        userId: inputs.userId,
+        bridgeOrderId: inputs.bridgeOrderId,
+        reasons: validation.reasons,
+        unknownProgramIds: validation.analysis.unknownProgramIds,
+      },
+      "Skipping deBridge Solana sponsorship intent",
     );
     return null;
   }
+
+  const budget = await reserveEmbeddedSolanaSponsorshipBudget({
+    flow: "debridge",
+    walletAddress: inputs.senderAddress,
+    estimatedLamports: validation.analysis.estimatedSponsorLamports,
+    limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
+  });
+  if (!budget.ok) {
+    inputs.logger.warn(
+      { userId: inputs.userId, bridgeOrderId: inputs.bridgeOrderId, reasons: budget.reasons },
+      "Skipping deBridge Solana sponsorship intent due to budget",
+    );
+    return null;
+  }
+
+  const intent = await createEmbeddedSolanaSponsorshipIntent({
+    flow: "debridge",
+    userId: inputs.userId,
+    signer: inputs.senderAddress,
+    transaction: inputs.payload.tx.data,
+    metadata,
+  });
+  if (!intent) return null;
+  await upsertSolanaSponsorshipLedger({
+    userId: inputs.userId,
+    venue: "bridge",
+    flow: "debridge",
+    status: "intent_created",
+    intentId: intent.id,
+    walletAddress: inputs.senderAddress,
+    inputMint: inputs.srcToken,
+    outputMint: inputs.dstToken,
+    amountRaw: inputs.amountIn,
+    transactionDigest: validation.analysis.digest,
+    estimatedSponsorLamports: validation.analysis.estimatedSponsorLamports,
+    metadata: {
+      bridgeOrderId: inputs.bridgeOrderId,
+      provider: "debridge",
+      programIds: validation.analysis.programIds,
+    },
+  });
+  return intent.id;
 }
 
 function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
@@ -1895,12 +1915,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             normalizedPayload.tx.data.trim()
           ) {
             try {
-              const intent = await createEmbeddedSolanaSponsorshipIntent({
-                flow: "across",
-                userId: user.id,
-                signer: addresses.senderAddress,
-                transaction: normalizedPayload.tx.data,
-                metadata: {
+              const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+              const metadata = {
                   bridgeOrderId,
                   srcChainId: body.srcChainId,
                   dstChainId: body.dstChainId,
@@ -1908,9 +1924,75 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   dstToken: body.dstToken,
                   amountIn: body.amountIn,
                   maxSystemCreateLamports: "0",
-                },
-              });
-              hunchSponsorshipIntentId = intent?.id ?? null;
+              };
+              if (
+                authAccessPolicy.effective.embeddedSolanaSponsorship === true &&
+                authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
+                  .across === true
+              ) {
+                const validation =
+                  validateEmbeddedSolanaSponsorshipIntentCandidate({
+                    flow: "across",
+                    userId: user.id,
+                    signer: addresses.senderAddress,
+                    transaction: normalizedPayload.tx.data,
+                    metadata,
+                  });
+                const budget = validation.ok
+                  ? await reserveEmbeddedSolanaSponsorshipBudget({
+                      flow: "across",
+                      walletAddress: addresses.senderAddress,
+                      estimatedLamports:
+                        validation.analysis.estimatedSponsorLamports,
+                      limits:
+                        authAccessPolicy.effective
+                          .embeddedSolanaSponsorshipLimits,
+                    })
+                  : { ok: false, reasons: validation.reasons };
+                if (validation.ok && budget.ok) {
+                  const intent = await createEmbeddedSolanaSponsorshipIntent({
+                    flow: "across",
+                    userId: user.id,
+                    signer: addresses.senderAddress,
+                    transaction: normalizedPayload.tx.data,
+                    metadata,
+                  });
+                  hunchSponsorshipIntentId = intent?.id ?? null;
+                  if (intent) {
+                    await upsertSolanaSponsorshipLedger({
+                      userId: user.id,
+                      venue: "bridge",
+                      flow: "across",
+                      status: "intent_created",
+                      intentId: intent.id,
+                      walletAddress: addresses.senderAddress,
+                      inputMint: body.srcToken,
+                      outputMint: body.dstToken,
+                      amountRaw: body.amountIn,
+                      transactionDigest: validation.analysis.digest,
+                      estimatedSponsorLamports:
+                        validation.analysis.estimatedSponsorLamports,
+                      metadata: {
+                        bridgeOrderId,
+                        provider: "across",
+                        programIds: validation.analysis.programIds,
+                      },
+                    });
+                  }
+                } else {
+                  app.log.warn(
+                    {
+                      userId: user.id,
+                      bridgeOrderId,
+                      reasons: validation.ok
+                        ? budget.reasons
+                        : validation.reasons,
+                      unknownProgramIds: validation.analysis.unknownProgramIds,
+                    },
+                    "Skipping Across Solana sponsorship intent",
+                  );
+                }
+              }
             } catch (error) {
               app.log.warn(
                 { error, userId: user.id, bridgeOrderId },

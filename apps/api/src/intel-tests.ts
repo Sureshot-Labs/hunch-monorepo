@@ -1019,6 +1019,11 @@ const tests: TestCase[] = [
         resolved.effective.embeddedSolanaSponsorshipFlows.directTransfer,
         false,
       );
+      assert.equal(
+        resolved.effective.embeddedSolanaSponsorshipLimits.directTransfer
+          .minAmountRaw,
+        "500000",
+      );
     },
   },
   {
@@ -1038,6 +1043,11 @@ const tests: TestCase[] = [
         directTransfer: false,
         debridge: false,
       });
+      assert.equal(
+        resolved.effective.embeddedSolanaSponsorshipLimits.across
+          .maxLamportsPerWalletPerDay,
+        200_000,
+      );
     },
   },
   {

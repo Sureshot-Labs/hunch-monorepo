@@ -20,7 +20,12 @@ import {
 } from "./services/embedded-solana.js";
 import {
   analyzeEmbeddedSolanaTransaction,
+  computeEmbeddedSolanaMessageDigest,
+  computeEmbeddedSolanaTransactionDigest,
   createEmbeddedSolanaSponsorshipIntent,
+  getEmbeddedSolanaDirectTransferAmountRaw,
+  reserveEmbeddedSolanaSponsorshipBudget,
+  validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "./services/embedded-solana-sponsorship.js";
 
 type TestCase = {
@@ -44,6 +49,12 @@ const walletContext: EmbeddedSolanaWalletContext = {
 const RECENT_BLOCKHASH = "11111111111111111111111111111111";
 const SPL_TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+);
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+);
+const SOLANA_USDC_MINT = new PublicKey(
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 );
 const DFLOW_PROGRAM_ID = new PublicKey(
   "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH",
@@ -70,6 +81,65 @@ function getSponsor(
   request: ReturnType<typeof buildEmbeddedSolanaSignAndSendRequest>,
 ) {
   return (request.input.body as { sponsor?: boolean }).sponsor;
+}
+
+function buildTransferCheckedData(amount: bigint, decimals = 6): Buffer {
+  const data = new Uint8Array(10);
+  data[0] = 12;
+  const view = new DataView(data.buffer);
+  view.setBigUint64(1, amount, true);
+  data[9] = decimals;
+  return Buffer.from(data);
+}
+
+function createUsdcTransferCheckedInstruction(inputs?: {
+  source?: PublicKey;
+  destination?: PublicKey;
+  mint?: PublicKey;
+  authority?: PublicKey;
+  amount?: bigint;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: SPL_TOKEN_PROGRAM_ID,
+    keys: [
+      {
+        pubkey: inputs?.source ?? Keypair.generate().publicKey,
+        isSigner: false,
+        isWritable: true,
+      },
+      {
+        pubkey: inputs?.mint ?? SOLANA_USDC_MINT,
+        isSigner: false,
+        isWritable: false,
+      },
+      {
+        pubkey: inputs?.destination ?? Keypair.generate().publicKey,
+        isSigner: false,
+        isWritable: true,
+      },
+      {
+        pubkey: inputs?.authority ?? signerKeypair.publicKey,
+        isSigner: true,
+        isWritable: false,
+      },
+    ],
+    data: buildTransferCheckedData(inputs?.amount ?? 1_000_000n),
+  });
+}
+
+function createAssociatedTokenAccountInstruction(): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: signerKeypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true },
+      { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+      { pubkey: SOLANA_USDC_MINT, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]),
+  });
 }
 
 type BuildEmbeddedSolanaRequestInput = Omit<
@@ -102,6 +172,41 @@ function prepareSponsoredEmbeddedSolanaTransactionRequests(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "embedded solana message digest stays stable after user signature",
+    run: () => {
+      const message = new TransactionMessage({
+        payerKey: signerKeypair.publicKey,
+        recentBlockhash: RECENT_BLOCKHASH,
+        instructions: [
+          new TransactionInstruction({
+            programId: DFLOW_PROGRAM_ID,
+            keys: [],
+            data: Buffer.alloc(0),
+          }),
+        ],
+      }).compileToV0Message();
+      const tx = new VersionedTransaction(message);
+      const unsigned = Buffer.from(tx.serialize()).toString("base64");
+      const unsignedMessageDigest =
+        computeEmbeddedSolanaMessageDigest(unsigned);
+      const unsignedTransactionDigest =
+        computeEmbeddedSolanaTransactionDigest(unsigned);
+
+      tx.sign([signerKeypair]);
+      const signed = Buffer.from(tx.serialize()).toString("base64");
+
+      assert.ok(unsignedMessageDigest);
+      assert.equal(
+        computeEmbeddedSolanaMessageDigest(signed),
+        unsignedMessageDigest,
+      );
+      assert.notEqual(
+        computeEmbeddedSolanaTransactionDigest(signed),
+        unsignedTransactionDigest,
+      );
+    },
+  },
   {
     name: "embedded solana disables sponsorship for native SOL transfer from signer",
     run: () => {
@@ -866,7 +971,220 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "enforce mode sponsors deBridge transaction with intent-bound provider program allowlist",
+    name: "enforce mode requires intent for direct USDC transfer sponsorship",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction(),
+      ]);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "direct-usdc-transfer",
+                label: "USDC withdraw",
+                transaction,
+              },
+            ],
+            userId: "user-id",
+            embeddedSolanaSponsorshipEnabled: true,
+            embeddedSolanaSponsorshipMode: "enforce",
+            embeddedSolanaSponsorshipFlows: {
+              dflow: false,
+              across: false,
+              directTransfer: true,
+              debridge: false,
+            },
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /Add SOL to this Solana wallet for network fees and account setup/,
+      );
+    },
+  },
+  {
+    name: "enforce mode sponsors direct USDC transfer with matched intent",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 1_000_000n }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "1000000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "direct-usdc-transfer",
+            label: "USDC withdraw",
+            transaction,
+            sponsorshipIntentId: intent.id,
+          },
+        ],
+        userId: "user-id",
+        embeddedSolanaSponsorshipEnabled: true,
+        embeddedSolanaSponsorshipMode: "enforce",
+        embeddedSolanaSponsorshipFlows: {
+          dflow: false,
+          across: false,
+          directTransfer: true,
+          debridge: false,
+        },
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+      });
+
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), true);
+    },
+  },
+  {
+    name: "direct USDC transfer candidate exposes raw amount and validates shape",
+    run: () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 750_000n }),
+      ]);
+      const validation = validateEmbeddedSolanaSponsorshipIntentCandidate({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "750000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+
+      assert.equal(validation.ok, true);
+      assert.equal(
+        getEmbeddedSolanaDirectTransferAmountRaw({
+          analysis: validation.analysis,
+          signer: walletContext.signer,
+        }),
+        "750000",
+      );
+    },
+  },
+  {
+    name: "direct transfer sponsorship budget blocks excessive attempts",
+    run: async () => {
+      const walletAddress = Keypair.generate().publicKey.toBase58();
+      const first = await reserveEmbeddedSolanaSponsorshipBudget({
+        flow: "directTransfer",
+        walletAddress,
+        estimatedLamports: "5000",
+        limits: {
+          across: {
+            maxPerHour: 5,
+            maxPerDay: 5,
+            maxLamportsPerWalletPerDay: 50_000,
+          },
+          directTransfer: {
+            maxPerHour: 1,
+            maxPerDay: 1,
+            maxLamportsPerWalletPerDay: 5_000,
+            minAmountRaw: "500000",
+          },
+          debridge: {
+            maxPerHour: 5,
+            maxPerDay: 5,
+            maxLamportsPerWalletPerDay: 50_000,
+          },
+        },
+      });
+      assert.equal(first.ok, true);
+
+      const second = await reserveEmbeddedSolanaSponsorshipBudget({
+        flow: "directTransfer",
+        walletAddress,
+        estimatedLamports: "5000",
+        limits: {
+          across: {
+            maxPerHour: 5,
+            maxPerDay: 5,
+            maxLamportsPerWalletPerDay: 50_000,
+          },
+          directTransfer: {
+            maxPerHour: 1,
+            maxPerDay: 1,
+            maxLamportsPerWalletPerDay: 5_000,
+            minAmountRaw: "500000",
+          },
+          debridge: {
+            maxPerHour: 5,
+            maxPerDay: 5,
+            maxLamportsPerWalletPerDay: 50_000,
+          },
+        },
+      });
+      assert.equal(second.ok, false);
+      assert.ok(second.reasons.includes("sponsorship_hour_budget_exceeded"));
+    },
+  },
+  {
+    name: "enforce mode rejects direct USDC transfer with account setup rent",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createAssociatedTokenAccountInstruction(),
+        createUsdcTransferCheckedInstruction(),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "1000000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "direct-usdc-transfer-with-ata",
+                label: "USDC withdraw",
+                transaction,
+                sponsorshipIntentId: intent.id,
+              },
+            ],
+            userId: "user-id",
+            embeddedSolanaSponsorshipEnabled: true,
+            embeddedSolanaSponsorshipMode: "enforce",
+            embeddedSolanaSponsorshipFlows: {
+              dflow: false,
+              across: false,
+              directTransfer: true,
+              debridge: false,
+            },
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /Add SOL to this Solana wallet for network fees and account setup/,
+      );
+    },
+  },
+  {
+    name: "enforce mode sponsors deBridge gas-only transaction with provider program allowlist",
     run: async () => {
       const debridgeProgramId = Keypair.generate().publicKey;
       const transaction = serializeTransaction([

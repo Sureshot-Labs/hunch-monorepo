@@ -1912,6 +1912,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           coldUsdcBalance: string | null;
           coldUsdcBalanceRaw: string | null;
           coldError: string | null;
+          sponsorAddress: string | null;
+          sponsorConfigured: boolean;
+          sponsorNativeBalance: string | null;
+          sponsorNativeBalanceRaw: string | null;
+          sponsorError: string | null;
           treasury: RewardsTreasuryAdminSummary;
           error: string | null;
         };
@@ -1986,6 +1991,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           coldUsdcBalance: null,
           coldUsdcBalanceRaw: null,
           coldError: null,
+          sponsorAddress: env.hunchSolanaSponsorAddress || null,
+          sponsorConfigured: Boolean(env.hunchSolanaSponsorSecretKey),
+          sponsorNativeBalance: null,
+          sponsorNativeBalanceRaw: null,
+          sponsorError: null,
           treasury: { ...emptyTreasurySummary },
           error: null,
         },
@@ -2275,6 +2285,49 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Rewards Solana wallet fetch failed";
+        }
+      }
+
+      const solanaSponsorSecret = env.hunchSolanaSponsorSecretKey.trim();
+      const solanaSponsorConfiguredAddress =
+        env.hunchSolanaSponsorAddress.trim();
+      if (solanaSponsorSecret || solanaSponsorConfiguredAddress) {
+        rewardsHotWallets.solana.sponsorConfigured =
+          solanaSponsorSecret.length > 0;
+        try {
+          let sponsorAddress = solanaSponsorConfiguredAddress;
+          if (solanaSponsorSecret) {
+            const keypair = loadSolanaKeypair(solanaSponsorSecret);
+            const derivedAddress = keypair.publicKey.toBase58();
+            if (
+              solanaSponsorConfiguredAddress &&
+              solanaSponsorConfiguredAddress !== derivedAddress
+            ) {
+              throw new Error(
+                "HUNCH_SOLANA_SPONSOR_ADDRESS does not match HUNCH_SOLANA_SPONSOR_SECRET_KEY",
+              );
+            }
+            sponsorAddress = derivedAddress;
+          }
+          rewardsHotWallets.solana.sponsorAddress = sponsorAddress || null;
+          if (sponsorAddress) {
+            const nativeBalance = await fetchSolanaBalanceLamports({
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+              owner: sponsorAddress,
+            });
+            rewardsHotWallets.solana.sponsorNativeBalance = formatUiAmount(
+              nativeBalance,
+              SOLANA_LAMPORT_DECIMALS,
+            );
+            rewardsHotWallets.solana.sponsorNativeBalanceRaw =
+              nativeBalance.toString();
+          }
+        } catch (error) {
+          rewardsHotWallets.solana.sponsorError =
+            error instanceof Error
+              ? error.message
+              : "Solana sponsor wallet fetch failed";
         }
       }
 

@@ -8,9 +8,11 @@ import { getRedis } from "../redis.js";
 import {
   embeddedEvmExecuteBodySchema,
   embeddedEvmPrepareBodySchema,
+  embeddedSolanaDirectTransferSponsorshipIntentBodySchema,
   embeddedSolanaExecuteBodySchema,
   embeddedSolanaPrepareBodySchema,
 } from "../schemas/embedded-wallets.js";
+import { env } from "../env.js";
 import {
   executeEmbeddedEthereumTransactionRequests,
   prepareEmbeddedEthereumTransactionRequests,
@@ -26,7 +28,14 @@ import {
   resolveEmbeddedSolanaWalletContext,
   type EmbeddedPrivyAuthorizationRequest,
 } from "../services/embedded-solana.js";
+import {
+  createEmbeddedSolanaSponsorshipIntent,
+  getEmbeddedSolanaDirectTransferAmountRaw,
+  reserveEmbeddedSolanaSponsorshipBudget,
+  validateEmbeddedSolanaSponsorshipIntentCandidate,
+} from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import { upsertSolanaSponsorshipLedger } from "../services/solana-sponsorship-ledger.js";
 
 const EMBEDDED_SOLANA_PREPARED_TTL_SEC = 300;
 
@@ -272,6 +281,152 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Failed to execute embedded EVM transactions",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/wallets/embedded/solana/direct-transfer/sponsorship-intent",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: embeddedSolanaDirectTransferSponsorshipIntentBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedSolanaWalletContext({
+          user,
+          signer,
+        });
+        const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+        const disabledReasons: string[] = [];
+        if (authAccessPolicy.effective.embeddedSolanaSponsorship !== true) {
+          disabledReasons.push("sponsorship_disabled");
+        }
+        if (
+          authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
+            .directTransfer !== true
+        ) {
+          disabledReasons.push("flow_directTransfer_disabled");
+        }
+        if (request.body.mint !== env.solanaUsdcMint) {
+          disabledReasons.push("unsupported_mint");
+        }
+        const minAmountRaw =
+          authAccessPolicy.effective.embeddedSolanaSponsorshipLimits
+            .directTransfer.minAmountRaw ?? "0";
+        if (BigInt(request.body.amountRaw) < BigInt(minAmountRaw)) {
+          disabledReasons.push("amount_below_minimum");
+        }
+
+        const metadata = {
+          directTransferSponsorshipEligible: true,
+          amountRaw: request.body.amountRaw,
+          mint: request.body.mint,
+          recipientAddress: request.body.recipientAddress,
+          maxSystemCreateLamports: "0",
+        };
+        const validation = validateEmbeddedSolanaSponsorshipIntentCandidate({
+          flow: "directTransfer",
+          userId: user.id,
+          signer: context.signer,
+          transaction: request.body.transaction,
+          metadata,
+        });
+        const actualAmountRaw = getEmbeddedSolanaDirectTransferAmountRaw({
+          analysis: validation.analysis,
+          signer: context.signer,
+        });
+        if (actualAmountRaw !== request.body.amountRaw) {
+          disabledReasons.push("amount_mismatch");
+        }
+        if (!validation.ok) disabledReasons.push(...validation.reasons);
+
+        if (disabledReasons.length) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            sponsorshipIntentId: null,
+            reasons: Array.from(new Set(disabledReasons)),
+          });
+        }
+
+        const budget = await reserveEmbeddedSolanaSponsorshipBudget({
+          flow: "directTransfer",
+          walletAddress: context.signer,
+          estimatedLamports: validation.analysis.estimatedSponsorLamports,
+          limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
+        });
+        if (!budget.ok) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            sponsorshipIntentId: null,
+            reasons: budget.reasons,
+          });
+        }
+
+        const intent = await createEmbeddedSolanaSponsorshipIntent({
+          flow: "directTransfer",
+          userId: user.id,
+          signer: context.signer,
+          transaction: request.body.transaction,
+          metadata,
+        });
+        if (!intent) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            sponsorshipIntentId: null,
+            reasons: ["intent_create_failed"],
+          });
+        }
+        await upsertSolanaSponsorshipLedger({
+          userId: user.id,
+          venue: "wallet",
+          flow: "directTransfer",
+          status: "intent_created",
+          intentId: intent.id,
+          walletAddress: context.signer,
+          inputMint: request.body.mint,
+          outputMint: request.body.mint,
+          amountRaw: request.body.amountRaw,
+          transactionDigest: validation.analysis.digest,
+          estimatedSponsorLamports: validation.analysis.estimatedSponsorLamports,
+          metadata: {
+            recipientAddress: request.body.recipientAddress,
+            analysis: {
+              programIds: validation.analysis.programIds,
+              estimatedSponsorLamports:
+                validation.analysis.estimatedSponsorLamports,
+            },
+          },
+        });
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          sponsorshipIntentId: intent.id,
+          reasons: [],
+        });
+      } catch (error) {
+        app.log.warn(
+          { error, userId: user.id, signer },
+          "Failed to create embedded Solana direct transfer sponsorship intent",
+        );
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to create Solana sponsorship intent",
         });
       }
     },

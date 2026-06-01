@@ -36,11 +36,25 @@ export type EmbeddedSolanaSponsorshipFlowsPolicy = {
   debridge: boolean;
 };
 
+export type EmbeddedSolanaSponsorshipFlowLimitPolicy = {
+  maxPerHour: number;
+  maxPerDay: number;
+  maxLamportsPerWalletPerDay: number;
+  minAmountRaw?: string;
+};
+
+export type EmbeddedSolanaSponsorshipLimitsPolicy = {
+  across: EmbeddedSolanaSponsorshipFlowLimitPolicy;
+  directTransfer: EmbeddedSolanaSponsorshipFlowLimitPolicy;
+  debridge: EmbeddedSolanaSponsorshipFlowLimitPolicy;
+};
+
 export type AuthAccessPolicy = {
   state: AuthAccessState;
   embeddedSolanaSponsorship: boolean;
   embeddedSolanaSponsorshipMode: EmbeddedSolanaSponsorshipMode;
   embeddedSolanaSponsorshipFlows: EmbeddedSolanaSponsorshipFlowsPolicy;
+  embeddedSolanaSponsorshipLimits: EmbeddedSolanaSponsorshipLimitsPolicy;
 };
 
 export type WalletIntelSignalsPolicy = {
@@ -928,12 +942,30 @@ const embeddedSolanaSponsorshipFlowsSchema = z
   })
   .strict()
   .partial();
+const embeddedSolanaSponsorshipFlowLimitSchema = z
+  .object({
+    maxPerHour: z.number().int().min(0).max(1000),
+    maxPerDay: z.number().int().min(0).max(10_000),
+    maxLamportsPerWalletPerDay: z.number().int().min(0).max(1_000_000_000),
+    minAmountRaw: z.string().trim().regex(/^\d+$/).optional(),
+  })
+  .strict()
+  .partial();
+const embeddedSolanaSponsorshipLimitsSchema = z
+  .object({
+    across: embeddedSolanaSponsorshipFlowLimitSchema,
+    directTransfer: embeddedSolanaSponsorshipFlowLimitSchema,
+    debridge: embeddedSolanaSponsorshipFlowLimitSchema,
+  })
+  .strict()
+  .partial();
 const authAccessSchema = z
   .object({
     state: authAccessStateSchema,
     embeddedSolanaSponsorship: strictBoolean,
     embeddedSolanaSponsorshipMode: embeddedSolanaSponsorshipModeSchema,
     embeddedSolanaSponsorshipFlows: embeddedSolanaSponsorshipFlowsSchema,
+    embeddedSolanaSponsorshipLimits: embeddedSolanaSponsorshipLimitsSchema,
   })
   .strict()
   .partial();
@@ -1102,6 +1134,24 @@ function getDefaults(): IntelPolicyMap {
         across: false,
         directTransfer: false,
         debridge: false,
+      },
+      embeddedSolanaSponsorshipLimits: {
+        across: {
+          maxPerHour: 5,
+          maxPerDay: 20,
+          maxLamportsPerWalletPerDay: 200_000,
+        },
+        directTransfer: {
+          maxPerHour: 5,
+          maxPerDay: 20,
+          maxLamportsPerWalletPerDay: 150_000,
+          minAmountRaw: "500000",
+        },
+        debridge: {
+          maxPerHour: 3,
+          maxPerDay: 10,
+          maxLamportsPerWalletPerDay: 100_000,
+        },
       },
     },
     wallet_intel_signals: {
@@ -2131,6 +2181,36 @@ function normalizeArbitrageDefaultsPolicy(
 }
 
 function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
+  const defaults = getDefaults().auth_access;
+  const normalizeLimit = (
+    flow: keyof EmbeddedSolanaSponsorshipLimitsPolicy,
+  ): EmbeddedSolanaSponsorshipFlowLimitPolicy => {
+    const base = defaults.embeddedSolanaSponsorshipLimits[flow];
+    const limit = policy.embeddedSolanaSponsorshipLimits?.[flow] ?? base;
+    const maxPerHour = Number.isFinite(limit.maxPerHour)
+      ? Math.max(0, Math.trunc(limit.maxPerHour))
+      : base.maxPerHour;
+    const maxPerDay = Number.isFinite(limit.maxPerDay)
+      ? Math.max(0, Math.trunc(limit.maxPerDay))
+      : base.maxPerDay;
+    const maxLamportsPerWalletPerDay = Number.isFinite(
+      limit.maxLamportsPerWalletPerDay,
+    )
+      ? Math.max(0, Math.trunc(limit.maxLamportsPerWalletPerDay))
+      : base.maxLamportsPerWalletPerDay;
+    const minAmountRaw =
+      typeof limit.minAmountRaw === "string" &&
+      /^\d+$/.test(limit.minAmountRaw.trim())
+        ? limit.minAmountRaw.trim()
+        : base.minAmountRaw;
+    return {
+      maxPerHour,
+      maxPerDay,
+      maxLamportsPerWalletPerDay,
+      ...(minAmountRaw ? { minAmountRaw } : {}),
+    };
+  };
+
   return {
     state: authAccessStateSchema.safeParse(policy.state).success
       ? policy.state
@@ -2149,6 +2229,11 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
         policy.embeddedSolanaSponsorshipFlows?.directTransfer,
       ),
       debridge: Boolean(policy.embeddedSolanaSponsorshipFlows?.debridge),
+    },
+    embeddedSolanaSponsorshipLimits: {
+      across: normalizeLimit("across"),
+      directTransfer: normalizeLimit("directTransfer"),
+      debridge: normalizeLimit("debridge"),
     },
   };
 }

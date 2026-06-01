@@ -380,6 +380,10 @@ const embeddedSolanaSponsorshipAuditLogPath =
 const embeddedSolanaSponsorshipAuditIncludeRaw =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_AUDIT_INCLUDE_RAW) ??
   false;
+const hunchSolanaSponsorMaxTxLamports = optionalNonNegativeInt(
+  "HUNCH_SOLANA_SPONSOR_MAX_TX_LAMPORTS",
+  3_000_000,
+);
 const adminAuthEnabled =
   parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
 const adminAuthLegacyFallback =
@@ -1343,6 +1347,11 @@ export const env = {
     process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
   rewardsSolanaSecretKey:
     process.env.HUNCH_REWARDS_SOLANA_SECRET_KEY?.trim() || "",
+  hunchSolanaSponsorAddress:
+    process.env.HUNCH_SOLANA_SPONSOR_ADDRESS?.trim() || "",
+  hunchSolanaSponsorSecretKey:
+    process.env.HUNCH_SOLANA_SPONSOR_SECRET_KEY?.trim() || "",
+  hunchSolanaSponsorMaxTxLamports,
 
   debridgeDlnBase:
     process.env.DEBRIDGE_DLN_BASE?.trim() ||
@@ -1357,6 +1366,9 @@ export const env = {
   debridgeAffiliateFeeRecipients:
     process.env.DEBRIDGE_AFFILIATE_FEE_RECIPIENTS?.trim() || "",
   debridgeReferralCode: optionalNonNegativeInt("DEBRIDGE_REFERRAL_CODE", 0),
+  debridgeSolanaAllowedProgramIds: parseList(
+    process.env.DEBRIDGE_SOLANA_ALLOWED_PROGRAM_IDS,
+  ),
   acrossApiBase:
     process.env.ACROSS_API_BASE?.trim() || "https://app.across.to/api",
   acrossApiKey: process.env.ACROSS_API_KEY?.trim() || "",

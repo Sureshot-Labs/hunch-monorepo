@@ -50,6 +50,17 @@ export const dflowSubmitBodySchema = z.object({
   maxRetries: z.coerce.number().int().min(0).optional(),
 });
 
+export const dflowSponsoredSubmitBodySchema = z.object({
+  sponsorshipIntentId: zRequiredString("sponsorshipIntentId is required"),
+  signedTransaction: zRequiredString("signedTransaction is required"),
+  maxRetries: z.coerce.number().int().min(0).optional(),
+});
+
+export const dflowPredictionMarketInitBodySchema = z.object({
+  outcomeMint: zRequiredString("outcomeMint is required"),
+  maxRetries: z.coerce.number().int().min(0).optional(),
+});
+
 const zNumberish = z.union([z.string(), z.number()]);
 
 export const dflowExecutionBodySchema = z.object({

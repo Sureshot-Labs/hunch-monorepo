@@ -31,6 +31,18 @@ export type EmbeddedSolanaSponsorshipFlows = Record<
   boolean
 >;
 
+export type EmbeddedSolanaSponsorshipFlowLimit = {
+  maxPerHour: number;
+  maxPerDay: number;
+  maxLamportsPerWalletPerDay: number;
+  minAmountRaw?: string;
+};
+
+export type EmbeddedSolanaSponsorshipLimits = Record<
+  "across" | "directTransfer" | "debridge",
+  EmbeddedSolanaSponsorshipFlowLimit
+>;
+
 export type EmbeddedSolanaSponsorshipIntent = {
   id: string;
   flow: EmbeddedSolanaSponsorshipFlow;
@@ -133,13 +145,23 @@ const FLOW_ALLOWED_PROGRAMS: Record<EmbeddedSolanaSponsorshipFlow, Set<string>> 
       ...BASE_ALLOWED_PROGRAMS,
       ACROSS_SOLANA_SPOKE_POOL_PROGRAM_ID,
     ]),
-    directTransfer: new Set([...BASE_ALLOWED_PROGRAMS]),
+    directTransfer: new Set([
+      COMPUTE_BUDGET_PROGRAM_ID,
+      TOKEN_PROGRAM_ID_BASE58,
+      TOKEN_2022_PROGRAM_ID_BASE58,
+      MEMO_PROGRAM_ID,
+      LEGACY_MEMO_PROGRAM_ID,
+    ]),
     debridge: new Set([...BASE_ALLOWED_PROGRAMS]),
   };
 
 const sponsorshipIntentMemory = new Map<
   string,
   EmbeddedSolanaSponsorshipIntent
+>();
+const sponsorshipBudgetMemory = new Map<
+  string,
+  { count: number; lamports: bigint; expiresAt: number }
 >();
 
 function normalizeSolanaAddress(value: string): string {
@@ -167,6 +189,16 @@ export function computeEmbeddedSolanaTransactionDigest(
   const raw = decodeSerializedSolanaTransaction(transaction);
   if (!raw) return null;
   return createHash("sha256").update(raw).digest("hex");
+}
+
+export function computeEmbeddedSolanaMessageDigest(
+  transaction: string,
+): string | null {
+  const decoded = deserializeEmbeddedSolanaTransaction(transaction);
+  if (!decoded) return null;
+  return createHash("sha256")
+    .update(Buffer.from(decoded.tx.message.serialize()))
+    .digest("hex");
 }
 
 function deserializeEmbeddedSolanaTransaction(
@@ -505,6 +537,166 @@ export async function readEmbeddedSolanaSponsorshipIntent(
   return sponsorshipIntentMemory.get(trimmed) ?? null;
 }
 
+function pruneExpiredBudgets(now = Date.now()): void {
+  for (const [key, value] of sponsorshipBudgetMemory) {
+    if (value.expiresAt <= now) sponsorshipBudgetMemory.delete(key);
+  }
+}
+
+function budgetWindowStart(now: Date, window: "hour" | "day"): string {
+  const copy = new Date(now);
+  copy.setUTCMinutes(0, 0, 0);
+  if (window === "day") copy.setUTCHours(0, 0, 0, 0);
+  return copy.toISOString();
+}
+
+function budgetWindowTtlMs(window: "hour" | "day"): number {
+  return window === "hour" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+}
+
+function sponsorshipBudgetKey(inputs: {
+  flow: EmbeddedSolanaSponsorshipFlow;
+  walletAddress: string;
+  window: "hour" | "day";
+  now: Date;
+}): string {
+  return [
+    "embedded-solana",
+    "sponsorship-budget",
+    inputs.flow,
+    normalizeSolanaAddress(inputs.walletAddress),
+    inputs.window,
+    budgetWindowStart(inputs.now, inputs.window),
+  ].join(":");
+}
+
+function parseBudgetSnapshot(raw: string | null): {
+  count: number;
+  lamports: bigint;
+} {
+  if (!raw) return { count: 0, lamports: BigInt(0) };
+  try {
+    const parsed = JSON.parse(raw) as { count?: unknown; lamports?: unknown };
+    const count =
+      typeof parsed.count === "number" && Number.isFinite(parsed.count)
+        ? Math.max(0, Math.trunc(parsed.count))
+        : 0;
+    const lamports =
+      typeof parsed.lamports === "string" && /^\d+$/.test(parsed.lamports)
+        ? BigInt(parsed.lamports)
+        : BigInt(0);
+    return { count, lamports };
+  } catch {
+    return { count: 0, lamports: BigInt(0) };
+  }
+}
+
+async function readBudgetSnapshot(key: string): Promise<{
+  count: number;
+  lamports: bigint;
+}> {
+  try {
+    const redis = await getRedis();
+    if (redis) return parseBudgetSnapshot(await redis.get(key));
+  } catch {
+    // Memory fallback below keeps local/tests usable if Redis is unavailable.
+  }
+  pruneExpiredBudgets();
+  const snapshot = sponsorshipBudgetMemory.get(key);
+  return snapshot
+    ? { count: snapshot.count, lamports: snapshot.lamports }
+    : { count: 0, lamports: BigInt(0) };
+}
+
+async function writeBudgetSnapshot(inputs: {
+  key: string;
+  count: number;
+  lamports: bigint;
+  ttlMs: number;
+}): Promise<void> {
+  const payload = JSON.stringify({
+    count: inputs.count,
+    lamports: inputs.lamports.toString(),
+  });
+  try {
+    const redis = await getRedis();
+    if (redis) {
+      await redis.set(inputs.key, payload, {
+        EX: Math.ceil(inputs.ttlMs / 1000),
+      });
+      return;
+    }
+  } catch {
+    // Memory fallback below keeps local/tests usable if Redis is unavailable.
+  }
+  sponsorshipBudgetMemory.set(inputs.key, {
+    count: inputs.count,
+    lamports: inputs.lamports,
+    expiresAt: Date.now() + inputs.ttlMs,
+  });
+}
+
+export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
+  flow: "across" | "directTransfer" | "debridge";
+  walletAddress: string;
+  estimatedLamports: string | number | bigint;
+  limits: EmbeddedSolanaSponsorshipLimits;
+}): Promise<{ ok: boolean; reasons: string[] }> {
+  const limit = inputs.limits[inputs.flow];
+  const estimatedLamports =
+    typeof inputs.estimatedLamports === "bigint"
+      ? inputs.estimatedLamports
+      : BigInt(String(inputs.estimatedLamports));
+  const reasons: string[] = [];
+  const now = new Date();
+  const hourKey = sponsorshipBudgetKey({
+    flow: inputs.flow,
+    walletAddress: inputs.walletAddress,
+    window: "hour",
+    now,
+  });
+  const dayKey = sponsorshipBudgetKey({
+    flow: inputs.flow,
+    walletAddress: inputs.walletAddress,
+    window: "day",
+    now,
+  });
+  const [hour, day] = await Promise.all([
+    readBudgetSnapshot(hourKey),
+    readBudgetSnapshot(dayKey),
+  ]);
+  if (limit.maxPerHour <= 0 || hour.count + 1 > limit.maxPerHour) {
+    reasons.push("sponsorship_hour_budget_exceeded");
+  }
+  if (limit.maxPerDay <= 0 || day.count + 1 > limit.maxPerDay) {
+    reasons.push("sponsorship_day_budget_exceeded");
+  }
+  if (
+    limit.maxLamportsPerWalletPerDay <= 0 ||
+    day.lamports + estimatedLamports >
+      BigInt(limit.maxLamportsPerWalletPerDay)
+  ) {
+    reasons.push("sponsorship_lamport_budget_exceeded");
+  }
+  if (reasons.length) return { ok: false, reasons };
+
+  await Promise.all([
+    writeBudgetSnapshot({
+      key: hourKey,
+      count: hour.count + 1,
+      lamports: hour.lamports + estimatedLamports,
+      ttlMs: budgetWindowTtlMs("hour"),
+    }),
+    writeBudgetSnapshot({
+      key: dayKey,
+      count: day.count + 1,
+      lamports: day.lamports + estimatedLamports,
+      ttlMs: budgetWindowTtlMs("day"),
+    }),
+  ]);
+  return { ok: true, reasons: [] };
+}
+
 function getBigIntMetadata(
   metadata: Record<string, unknown> | undefined,
   key: string,
@@ -553,6 +745,101 @@ function isDflowTransaction(
     analysis.programIds.includes(DFLOW_PROGRAM_ID) ||
     analysis.programIds.includes(DFLOW_PREDICTION_PROGRAM_ID)
   );
+}
+
+function isComputeBudgetOrMemoInstruction(
+  instruction: EmbeddedSolanaInstructionSummary,
+): boolean {
+  return (
+    instruction.programId === COMPUTE_BUDGET_PROGRAM_ID ||
+    instruction.programId === MEMO_PROGRAM_ID ||
+    instruction.programId === LEGACY_MEMO_PROGRAM_ID
+  );
+}
+
+function isDirectUsdcTransferCheckedInstruction(inputs: {
+  instruction: EmbeddedSolanaInstructionSummary;
+  signer: string;
+}): boolean {
+  const instruction = inputs.instruction;
+  if (
+    instruction.programId !== TOKEN_PROGRAM_ID_BASE58 &&
+    instruction.programId !== TOKEN_2022_PROGRAM_ID_BASE58
+  ) {
+    return false;
+  }
+  if (
+    instruction.dataLength !== 10 ||
+    !instruction.dataPrefixHex.toLowerCase().startsWith("0c")
+  ) {
+    return false;
+  }
+  return (
+    instruction.accountAddresses.length >= 4 &&
+    instruction.accountAddresses[1] === env.solanaUsdcMint &&
+    instruction.accountAddresses[3] === normalizeSolanaAddress(inputs.signer)
+  );
+}
+
+function getDirectUsdcTransferCheckedAmountRaw(
+  instruction: EmbeddedSolanaInstructionSummary,
+): bigint | null {
+  if (
+    instruction.dataLength !== 10 ||
+    !instruction.dataPrefixHex.toLowerCase().startsWith("0c")
+  ) {
+    return null;
+  }
+  const data = Buffer.from(instruction.dataPrefixHex, "hex");
+  if (data.length < 10) return null;
+  try {
+    return data.readBigUInt64LE(1);
+  } catch {
+    return null;
+  }
+}
+
+function getDirectUsdcTransferInstruction(inputs: {
+  analysis: EmbeddedSolanaTransactionAnalysis;
+  signer: string;
+}): EmbeddedSolanaInstructionSummary | null {
+  if (!inputs.analysis.ok) return null;
+  const businessInstructions = inputs.analysis.instructions.filter(
+    (instruction) => !isComputeBudgetOrMemoInstruction(instruction),
+  );
+  if (businessInstructions.length !== 1) return null;
+  const [instruction] = businessInstructions;
+  if (!instruction) return null;
+  return isDirectUsdcTransferCheckedInstruction({
+    instruction,
+    signer: inputs.signer,
+  })
+    ? instruction
+    : null;
+}
+
+export function getEmbeddedSolanaDirectTransferAmountRaw(inputs: {
+  analysis: EmbeddedSolanaTransactionAnalysis;
+  signer: string;
+}): string | null {
+  const instruction = getDirectUsdcTransferInstruction(inputs);
+  if (!instruction) return null;
+  return getDirectUsdcTransferCheckedAmountRaw(instruction)?.toString() ?? null;
+}
+
+function isDirectUsdcTransferWithoutSetup(inputs: {
+  analysis: EmbeddedSolanaTransactionAnalysis;
+  signer: string;
+}): boolean {
+  if (!inputs.analysis.ok) return false;
+  if (inputs.analysis.usesAddressLookupTables) return false;
+  if (inputs.analysis.hasNativeSolTransfer || inputs.analysis.hasSyncNative) {
+    return false;
+  }
+  if (inputs.analysis.systemCreateLamports !== "0") return false;
+  if (inputs.analysis.ataCreateCount !== 0) return false;
+
+  return getDirectUsdcTransferInstruction(inputs) != null;
 }
 
 export function isEmbeddedSolanaSponsorshipHardDenyReason(
@@ -641,8 +928,10 @@ function evaluateEnforceAllowed(inputs: {
     analysis: inputs.analysis,
     intent: inputs.intent,
   });
+  const flow: EmbeddedSolanaSponsorshipFlow | null = intentCheck.flow;
+  const intentStatus: EmbeddedSolanaSponsorshipEvaluation["intentStatus"] =
+    intentCheck.status;
   reasons.push(...intentCheck.reasons);
-  const flow = intentCheck.flow;
   if (isDflowTransaction(inputs.analysis) && intentCheck.status !== "matched") {
     reasons.push("dflow_sponsorship_intent_required");
   }
@@ -650,12 +939,39 @@ function evaluateEnforceAllowed(inputs: {
     return {
       allowed: false,
       flow: null,
-      intentStatus: intentCheck.status,
+      intentStatus,
       reasons,
       unknownProgramIds: inputs.analysis.programIds,
     };
   }
   if (!inputs.flows[flow]) reasons.push(`flow_${flow}_disabled`);
+  if (flow === "directTransfer") {
+    if (
+      getBooleanMetadata(inputs.intent?.metadata, "directTransferSponsorshipEligible") !==
+      true
+    ) {
+      reasons.push("direct_transfer_not_eligible");
+    }
+    if (
+      !isDirectUsdcTransferWithoutSetup({
+        analysis: inputs.analysis,
+        signer: inputs.signer,
+      })
+    ) {
+      reasons.push("direct_transfer_shape_invalid");
+    }
+    const expectedAmountRaw =
+      typeof inputs.intent?.metadata?.amountRaw === "string"
+        ? inputs.intent.metadata.amountRaw.trim()
+        : "";
+    const actualAmountRaw = getEmbeddedSolanaDirectTransferAmountRaw({
+      analysis: inputs.analysis,
+      signer: inputs.signer,
+    });
+    if (expectedAmountRaw && actualAmountRaw !== expectedAmountRaw) {
+      reasons.push("direct_transfer_amount_mismatch");
+    }
+  }
   if (
     flow === "dflow" &&
     getBooleanMetadata(inputs.intent?.metadata, "marketInitialized") !== true
@@ -668,6 +984,13 @@ function evaluateEnforceAllowed(inputs: {
       true
   ) {
     reasons.push("debridge_not_eligible");
+  }
+  if (
+    flow === "debridge" &&
+    getStringArrayMetadata(inputs.intent?.metadata, "allowedProgramIds").length ===
+      0
+  ) {
+    reasons.push("debridge_program_allowlist_missing");
   }
 
   const allowedPrograms = new Set(FLOW_ALLOWED_PROGRAMS[flow]);
@@ -705,9 +1028,57 @@ function evaluateEnforceAllowed(inputs: {
   return {
     allowed: reasons.length === 0,
     flow,
-    intentStatus: intentCheck.status,
+    intentStatus,
     reasons,
     unknownProgramIds,
+  };
+}
+
+export function validateEmbeddedSolanaSponsorshipIntentCandidate(inputs: {
+  flow: EmbeddedSolanaSponsorshipFlow;
+  userId: string;
+  signer: string;
+  transaction: string;
+  metadata?: Record<string, unknown>;
+}): {
+  ok: boolean;
+  reasons: string[];
+  analysis: EmbeddedSolanaTransactionAnalysis;
+} {
+  const analysis = analyzeEmbeddedSolanaTransaction({
+    signer: inputs.signer,
+    transaction: inputs.transaction,
+    includeRaw: false,
+  });
+  const intent: EmbeddedSolanaSponsorshipIntent | null = analysis.digest
+    ? {
+        id: "candidate",
+        flow: inputs.flow,
+        userId: inputs.userId,
+        signer: normalizeSolanaAddress(inputs.signer),
+        transactionDigest: analysis.digest,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + INTENT_TTL_SEC * 1000).toISOString(),
+        ...(inputs.metadata ? { metadata: inputs.metadata } : {}),
+      }
+    : null;
+  const result = evaluateEnforceAllowed({
+    userId: inputs.userId,
+    signer: inputs.signer,
+    analysis,
+    intent,
+    flows: {
+      dflow: true,
+      across: true,
+      directTransfer: true,
+      debridge: true,
+    },
+  });
+  analysis.unknownProgramIds = result.unknownProgramIds;
+  return {
+    ok: result.allowed,
+    reasons: result.reasons,
+    analysis,
   };
 }
 
