@@ -38,6 +38,8 @@ const EMBEDDED_SOLANA_BALANCE_VERIFICATION_ERROR =
   "Unable to verify Solana balance. Retry in a few seconds.";
 const EMBEDDED_SOLANA_SOL_REQUIRED_ERROR =
   "Add SOL to this Solana wallet for network fees and account setup (about 0.02 SOL), then try again.";
+const EMBEDDED_SOLANA_DFLOW_SETUP_SOL_REQUIRED_ERROR =
+  "This Kalshi market needs one-time Solana account setup before trading. Add SOL to this wallet for network fees and setup (about 0.02 SOL), then try again.";
 
 type CompiledSolanaInstruction =
   VersionedTransaction["message"]["compiledInstructions"][number];
@@ -798,7 +800,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
         } catch (error) {
           inputs.onAuditLogError?.(error);
         }
-        throw new Error(EMBEDDED_SOLANA_SOL_REQUIRED_ERROR);
+        throw new Error(EMBEDDED_SOLANA_DFLOW_SETUP_SOL_REQUIRED_ERROR);
       }
     }
 

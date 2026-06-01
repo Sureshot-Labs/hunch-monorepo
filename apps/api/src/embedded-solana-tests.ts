@@ -767,7 +767,7 @@ const tests: TestCase[] = [
             fetchSponsorBalanceLamports: async () =>
               SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
           }),
-        /Add SOL to this Solana wallet for network fees and account setup/,
+        /This Kalshi market needs one-time Solana account setup/,
       );
     },
   },
@@ -814,7 +814,7 @@ const tests: TestCase[] = [
             fetchSponsorBalanceLamports: async () =>
               SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
           }),
-        /Add SOL to this Solana wallet for network fees and account setup/,
+        /This Kalshi market needs one-time Solana account setup/,
       );
     },
   },
