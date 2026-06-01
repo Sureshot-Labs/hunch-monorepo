@@ -61,6 +61,11 @@ type MintPair = {
   outputMint: string;
 };
 
+type DflowSponsorshipMarketState = {
+  marketIds: string[];
+  marketInitialized: boolean;
+};
+
 function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
 }
@@ -78,6 +83,49 @@ function ensureDflowReady(reply: {
 
 function isBuyIntent(inputMint: string | null | undefined): boolean {
   return Boolean(inputMint && inputMint === env.solanaUsdcMint);
+}
+
+function toDflowOutcomeTokenId(mint: string): string | null {
+  const trimmed = mint.trim();
+  if (!trimmed) return null;
+  if (trimmed === env.solanaUsdcMint) return null;
+  return trimmed.startsWith("sol:") ? trimmed : `sol:${trimmed}`;
+}
+
+async function resolveDflowSponsorshipMarketState(
+  inputMint: string,
+  outputMint: string,
+): Promise<DflowSponsorshipMarketState | null> {
+  const tokenIds = Array.from(
+    new Set(
+      [inputMint, outputMint]
+        .map(toDflowOutcomeTokenId)
+        .filter((tokenId): tokenId is string => Boolean(tokenId)),
+    ),
+  );
+  if (!tokenIds.length) return null;
+
+  const { rows } = await pool.query<{
+    market_id: string;
+    is_initialized: boolean | null;
+  }>(
+    `
+      select distinct
+        m.id as market_id,
+        m.is_initialized
+      from unified_market_tokens t
+      join unified_markets m on m.id = t.market_id
+      where t.token_id = any($1::text[])
+        and m.venue = 'kalshi'
+    `,
+    [tokenIds],
+  );
+  if (!rows.length) return null;
+
+  return {
+    marketIds: rows.map((row) => row.market_id),
+    marketInitialized: rows.every((row) => row.is_initialized === true),
+  };
 }
 
 function isDflowRouteNotFound(payload: unknown): boolean {
@@ -607,26 +655,35 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         ]);
         if (transaction) {
           try {
+            const sponsorshipMarketState =
+              await resolveDflowSponsorshipMarketState(
+                query.inputMint,
+                query.outputMint,
+              );
             const maxSystemCreateLamports =
               extractNonNegativeLamportsFromRecord(payloadRecord, [
                 "initPredictionMarketCost",
                 "init_prediction_market_cost",
                 "initPredictionMarketCostLamports",
               ]) ?? "0";
-            const intent = await createEmbeddedSolanaSponsorshipIntent({
-              flow: "dflow",
-              userId: user.id,
-              signer: userPublicKey,
-              transaction,
-              metadata: {
-                inputMint: query.inputMint,
-                outputMint: query.outputMint,
-                amount: query.amount,
-                maxSystemCreateLamports,
-              },
-            });
-            if (intent) {
-              payloadRecord.hunchSponsorshipIntentId = intent.id;
+            if (sponsorshipMarketState?.marketInitialized === true) {
+              const intent = await createEmbeddedSolanaSponsorshipIntent({
+                flow: "dflow",
+                userId: user.id,
+                signer: userPublicKey,
+                transaction,
+                metadata: {
+                  inputMint: query.inputMint,
+                  outputMint: query.outputMint,
+                  amount: query.amount,
+                  marketIds: sponsorshipMarketState.marketIds,
+                  marketInitialized: true,
+                  maxSystemCreateLamports,
+                },
+              });
+              if (intent) {
+                payloadRecord.hunchSponsorshipIntentId = intent.id;
+              }
             }
           } catch (error) {
             app.log.warn(

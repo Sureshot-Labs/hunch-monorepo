@@ -14,6 +14,7 @@ import type { User } from "../auth.js";
 import { env } from "../env.js";
 import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
 import {
+  isEmbeddedSolanaSponsorshipHardDenyReason,
   resolveEmbeddedSolanaSponsorshipEvaluation,
   writeEmbeddedSolanaSponsorshipAudit,
   type EmbeddedSolanaSponsorshipFlows,
@@ -771,6 +772,35 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
       mode: embeddedSolanaSponsorshipMode,
       flows: embeddedSolanaSponsorshipFlows,
     });
+    const hardDenyRequiresUserFunding =
+      embeddedSolanaSponsorshipEnabled &&
+      legacySponsor &&
+      !evaluation.actualSponsor &&
+      evaluation.reasons.some(isEmbeddedSolanaSponsorshipHardDenyReason);
+    if (hardDenyRequiresUserFunding) {
+      const requiredLamports = getEmbeddedSolanaSponsorshipRequirementLamports({
+        signer: inputs.context.signer,
+        transaction: transaction.transaction,
+      });
+      if (
+        sponsorBalanceLamports == null ||
+        sponsorBalanceLamports < requiredLamports
+      ) {
+        try {
+          await writeEmbeddedSolanaSponsorshipAudit({
+            event: {
+              ...evaluation,
+              userId: inputs.userId?.trim() || "unknown",
+              signer: inputs.context.signer,
+              transactionId: transaction.id,
+            },
+          });
+        } catch (error) {
+          inputs.onAuditLogError?.(error);
+        }
+        throw new Error(EMBEDDED_SOLANA_SOL_REQUIRED_ERROR);
+      }
+    }
 
     if (
       embeddedSolanaSponsorshipEnabled &&

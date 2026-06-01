@@ -520,6 +520,38 @@ function getBigIntMetadata(
   return null;
 }
 
+function getBooleanMetadata(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): boolean | null {
+  const value = metadata?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return null;
+}
+
+function isDflowTransaction(
+  analysis: EmbeddedSolanaTransactionAnalysis,
+): boolean {
+  return (
+    analysis.programIds.includes(DFLOW_PROGRAM_ID) ||
+    analysis.programIds.includes(DFLOW_PREDICTION_PROGRAM_ID)
+  );
+}
+
+export function isEmbeddedSolanaSponsorshipHardDenyReason(
+  reason: string,
+): boolean {
+  return (
+    reason === "dflow_sponsorship_intent_required" ||
+    reason === "dflow_market_not_initialized"
+  );
+}
+
 function validateIntent(inputs: {
   userId: string;
   signer: string;
@@ -599,6 +631,9 @@ function evaluateEnforceAllowed(inputs: {
   });
   reasons.push(...intentCheck.reasons);
   const flow = intentCheck.flow;
+  if (isDflowTransaction(inputs.analysis) && intentCheck.status !== "matched") {
+    reasons.push("dflow_sponsorship_intent_required");
+  }
   if (!flow) {
     return {
       allowed: false,
@@ -609,6 +644,12 @@ function evaluateEnforceAllowed(inputs: {
     };
   }
   if (!inputs.flows[flow]) reasons.push(`flow_${flow}_disabled`);
+  if (
+    flow === "dflow" &&
+    getBooleanMetadata(inputs.intent?.metadata, "marketInitialized") !== true
+  ) {
+    reasons.push("dflow_market_not_initialized");
+  }
 
   const allowedPrograms = FLOW_ALLOWED_PROGRAMS[flow];
   const unknownProgramIds = inputs.analysis.programIds.filter(
@@ -673,10 +714,15 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
 
   const enforceWouldSponsor =
     inputs.enabled && inputs.legacyWouldSponsor && enforce.allowed;
+  const hasHardDeny = enforce.reasons.some(
+    isEmbeddedSolanaSponsorshipHardDenyReason,
+  );
   const actualSponsor =
-    inputs.enabled && inputs.mode === "observe"
-      ? inputs.legacyWouldSponsor
-      : enforceWouldSponsor;
+    inputs.enabled && !hasHardDeny
+      ? inputs.mode === "observe"
+        ? inputs.legacyWouldSponsor
+        : enforceWouldSponsor
+      : false;
 
   return {
     mode: inputs.mode,
